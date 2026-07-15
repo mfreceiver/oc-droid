@@ -31,11 +31,6 @@ internal sealed interface RenderBlock {
         fun asFoldedToolRun(): ToolRenderItem.FoldedToolRun =
             ToolRenderItem.FoldedToolRun(items.map { it.item })
     }
-
-    data class Gap(
-        val marker: Entry.GapMarker,
-        override val id: String = "gap-${marker.gapId}"
-    ) : RenderBlock
 }
 
 /** A classified tool item plus the message context required by its card renderer. */
@@ -53,12 +48,16 @@ internal fun isCrossMessageFoldExpanded(
 ): Boolean = expandedParts[foldKey(firstPartId(fold))] == true
 
 /**
- * Flattens oldest-first message/gap entries into conversation and cross-message
- * fold blocks. Message boundaries do not end a tool run; user turns, assistant
- * prose/non-tool content, sub-agent tasks, streaming reasoning, and gaps do.
+ * Flattens oldest-first messages into conversation and cross-message fold
+ * blocks. Message boundaries do not end a tool run; user turns, assistant
+ * prose/non-tool content, sub-agent tasks, and streaming reasoning do.
+ *
+ * remove-message-persistence Task 4: the non-contiguous gap path (a sealed
+ * `Entry` ADT + an interleaved divider `RenderBlock` variant) was deleted —
+ * the builder now consumes a flat `List<Message>` directly.
  */
 internal fun buildRenderBlocks(
-    entries: List<Entry>,
+    messages: List<Message>,
     partsByMessage: Map<String, List<Part>>,
     streamingPartTexts: Map<String, String>,
     staleQuestionPartKeys: Set<String>,
@@ -99,125 +98,116 @@ internal fun buildRenderBlocks(
         classified.forEach { pendingFold += MessageToolRenderItem(message, it) }
     }
 
-    for (entry in entries) {
-        when (entry) {
-            is Entry.GapMarker -> {
-                flushFold()
-                blocks += RenderBlock.Gap(entry)
-            }
-            is Entry.Message -> {
-                val message = entry.message
-                val parts = partsByMessage[message.id].orEmpty()
+    for (message in messages) {
+        val parts = partsByMessage[message.id].orEmpty()
 
-                // Metadata markers are always hard seams.
-                if (message.role in cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES) {
-                    flushFold()
-                    blocks += RenderBlock.Conversation(
-                        message = message,
-                        parts = parts,
-                        id = "conversation|${message.id}|empty"
-                    )
-                    continue
-                }
+        // Metadata markers are always hard seams.
+        if (message.role in cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES) {
+            flushFold()
+            blocks += RenderBlock.Conversation(
+                message = message,
+                parts = parts,
+                id = "conversation|${message.id}|empty"
+            )
+            continue
+        }
 
-                // A running assistant shell may later resolve to a tool call.
-                // Keep its loading placeholder without severing an already
-                // pending cross-message tool run. Idle empty messages and user
-                // turns remain real seams.
-                if (parts.isEmpty()) {
-                    if (message.isUser || !sessionIsRunning) flushFold()
-                    blocks += RenderBlock.Conversation(
-                        message = message,
-                        parts = parts,
-                        id = "conversation|${message.id}|empty"
-                    )
-                    continue
-                }
+        // A running assistant shell may later resolve to a tool call.
+        // Keep its loading placeholder without severing an already
+        // pending cross-message tool run. Idle empty messages and user
+        // turns remain real seams.
+        if (parts.isEmpty()) {
+            if (message.isUser || !sessionIsRunning) flushFold()
+            blocks += RenderBlock.Conversation(
+                message = message,
+                parts = parts,
+                id = "conversation|${message.id}|empty"
+            )
+            continue
+        }
 
-                var conversationParts = mutableListOf<Part>()
-                fun flushConversation() {
-                    if (conversationParts.isEmpty()) return
-                    flushFold()
-                    val snapshot = conversationParts.toList()
-                    blocks += RenderBlock.Conversation(
-                        message = message,
-                        parts = snapshot,
-                        id = "conversation|${message.id}|${snapshot.first().id}"
-                    )
-                    conversationParts = mutableListOf()
-                }
+        var conversationParts = mutableListOf<Part>()
+        fun flushConversation() {
+            if (conversationParts.isEmpty()) return
+            flushFold()
+            val snapshot = conversationParts.toList()
+            blocks += RenderBlock.Conversation(
+                message = message,
+                parts = snapshot,
+                id = "conversation|${message.id}|${snapshot.first().id}"
+            )
+            conversationParts = mutableListOf()
+        }
 
-                if (message.isUser) {
-                    flushFold()
-                    blocks += RenderBlock.Conversation(
-                        message = message,
-                        parts = parts.filterNot { it.id == streamingReasoningPartId },
-                        id = "conversation|${message.id}|user"
-                    )
-                    continue
-                }
+        if (message.isUser) {
+            flushFold()
+            blocks += RenderBlock.Conversation(
+                message = message,
+                parts = parts.filterNot { it.id == streamingReasoningPartId },
+                id = "conversation|${message.id}|user"
+            )
+            continue
+        }
 
-                var index = 0
-                while (index < parts.size) {
-                    val part = parts[index]
-                    if (part.id == streamingReasoningPartId && part.isReasoning) {
-                        flushConversation()
-                        flushFold() // live-thinking is standalone and is a hard seam
-                        index++
-                    } else if (part.isSubAgentTask) {
-                        flushConversation()
-                        flushFold()
-                        blocks += RenderBlock.Conversation(
-                            message = message,
-                            parts = listOf(part),
-                            id = "conversation|${message.id}|${part.id}"
-                        )
-                        index++
-                    } else if (part.isTool || part.isPatch || part.isReasoning) {
-                        flushConversation()
-                        // Reuse the canonical collector, but cap it at the first
-                        // task because D3.1 promotes sub-agents from an item
-                        // inside a tool run to a conversation-level hard break.
-                        val taskBoundary = parts.indexOfFirstFrom(index) { it.isSubAgentTask }
-                        val collectionEnd = if (taskBoundary < 0) parts.size else taskBoundary
-                        val (run, relativeNextIndex) = collectToolRun(
-                            parts = parts.subList(0, collectionEnd),
-                            startIndex = index,
-                            streamingReasoningPartId = streamingReasoningPartId
-                        )
-                        appendToolRun(message, run)
-                        index = relativeNextIndex
-                    } else if (part.isStepStart || part.isStepFinish) {
-                        // §fold-fix: step markers are metadata, not conversation content.
-                        // Skipping them prevents flushConversation()->flushFold() from
-                        // severing the cross-message tool fold between consecutive tools.
-                        index++
-                    } else {
-                        conversationParts += part
-                        index++
-                    }
-                }
+        var index = 0
+        while (index < parts.size) {
+            val part = parts[index]
+            if (part.id == streamingReasoningPartId && part.isReasoning) {
                 flushConversation()
-
-                // A live reasoning part may be intentionally hidden because it
-                // is rendered by the standalone streaming card. Preserve a
-                // message-owned block so its footer/error still has an owner.
-                val represented = blocks.any { block -> block.containsMessage(message.id) } ||
-                    pendingFold.any { it.message.id == message.id }
-                if (!represented) {
-                    // A classified-empty tool message still owns visible
-                    // message-level decoration. Keep that owner in chronological
-                    // order and prevent tool runs on either side from folding
-                    // across the visual seam.
-                    flushFold()
-                    blocks += RenderBlock.Conversation(
-                        message = message,
-                        parts = emptyList(),
-                        isDecorationOnly = true,
-                        id = "conversation|${message.id}|decoration"
-                    )
-                }
+                flushFold() // live-thinking is standalone and is a hard seam
+                index++
+            } else if (part.isSubAgentTask) {
+                flushConversation()
+                flushFold()
+                blocks += RenderBlock.Conversation(
+                    message = message,
+                    parts = listOf(part),
+                    id = "conversation|${message.id}|${part.id}"
+                )
+                index++
+            } else if (part.isTool || part.isPatch || part.isReasoning) {
+                flushConversation()
+                // Reuse the canonical collector, but cap it at the first
+                // task because D3.1 promotes sub-agents from an item
+                // inside a tool run to a conversation-level hard break.
+                val taskBoundary = parts.indexOfFirstFrom(index) { it.isSubAgentTask }
+                val collectionEnd = if (taskBoundary < 0) parts.size else taskBoundary
+                val (run, relativeNextIndex) = collectToolRun(
+                    parts = parts.subList(0, collectionEnd),
+                    startIndex = index,
+                    streamingReasoningPartId = streamingReasoningPartId
+                )
+                appendToolRun(message, run)
+                index = relativeNextIndex
+            } else if (part.isStepStart || part.isStepFinish) {
+                // §fold-fix: step markers are metadata, not conversation content.
+                // Skipping them prevents flushConversation()->flushFold() from
+                // severing the cross-message tool fold between consecutive tools.
+                index++
+            } else {
+                conversationParts += part
+                index++
             }
+        }
+        flushConversation()
+
+        // A live reasoning part may be intentionally hidden because it
+        // is rendered by the standalone streaming card. Preserve a
+        // message-owned block so its footer/error still has an owner.
+        val represented = blocks.any { block -> block.containsMessage(message.id) } ||
+            pendingFold.any { it.message.id == message.id }
+        if (!represented) {
+            // A classified-empty tool message still owns visible
+            // message-level decoration. Keep that owner in chronological
+            // order and prevent tool runs on either side from folding
+            // across the visual seam.
+            flushFold()
+            blocks += RenderBlock.Conversation(
+                message = message,
+                parts = emptyList(),
+                isDecorationOnly = true,
+                id = "conversation|${message.id}|decoration"
+            )
         }
     }
     flushFold()
@@ -226,9 +216,9 @@ internal fun buildRenderBlocks(
     // represents each message, even when one message was split around tools or
     // when several tool-only messages share a cross-message fold.
     val decorationOwners = mutableMapOf<Int, MutableList<Message>>()
-    entries.filterIsInstance<Entry.Message>().forEach { entry ->
-        val owner = blocks.indexOfLast { it.containsMessage(entry.message.id) }
-        if (owner >= 0) decorationOwners.getOrPut(owner) { mutableListOf() } += entry.message
+    messages.forEach { message ->
+        val owner = blocks.indexOfLast { it.containsMessage(message.id) }
+        if (owner >= 0) decorationOwners.getOrPut(owner) { mutableListOf() } += message
     }
     return blocks.mapIndexed { index, block ->
         val decorations = decorationOwners[index].orEmpty()
@@ -238,7 +228,6 @@ internal fun buildRenderBlocks(
             )
             is RenderBlock.ToolRun -> block.copy(messageDecorations = decorations)
             is RenderBlock.Fold -> block.copy(messageDecorations = decorations)
-            is RenderBlock.Gap -> block
         }
     }
 }
@@ -253,7 +242,6 @@ private fun RenderBlock.containsMessage(messageId: String): Boolean = when (this
     is RenderBlock.Conversation -> message.id == messageId
     is RenderBlock.ToolRun -> items.any { it.message.id == messageId }
     is RenderBlock.Fold -> items.any { it.message.id == messageId }
-    is RenderBlock.Gap -> false
 }
 
 private inline fun <T> List<T>.indexOfFirstFrom(startIndex: Int, predicate: (T) -> Boolean): Int {

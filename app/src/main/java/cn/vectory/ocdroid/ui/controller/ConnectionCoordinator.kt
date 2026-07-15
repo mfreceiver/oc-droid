@@ -2,7 +2,6 @@ package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.CommandInfo
-import cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
@@ -106,15 +105,6 @@ class ConnectionCoordinator(
     // ③ ServerCompat: populated from the health probe so future shim migrations
     // can read version-derived capability flags instead of guessing a version.
     private val serverCompatProfile: ServerCompatProfile,
-    /**
-     * R-20 Phase 3 (plan §3): daily cache sweep coordinator. Null in tests
-     * that do not exercise the sweep path (legacy pre-Phase 3 construction).
-     * On a healthy connect, [testConnection] fires-and-forgets
-     * [CacheMaintenanceCoordinator.dailySweepIfNeeded] against the current
-     * host's serverGroupFp so the LRU/age/orphan sweep stays current without
-     * a separate background job.
-     */
-    private val cacheMaintenanceCoordinator: CacheMaintenanceCoordinator? = null,
     /**
      * R-20 Phase 3: provider for the current host's serverGroupFp. Same
      * `@Named("currentServerGroupFp")` provider every other controller uses
@@ -377,20 +367,10 @@ class ConnectionCoordinator(
                             )
                             loadInitialData()
                             startSSE()
-                            // R-20 Phase 3 (plan §3): fire-and-forget the daily
-                            // cache sweep on a healthy connect. The coordinator
-                            // does its own 24h dedup (SettingsManager.
-                            // lastSweepEpoch_<fp>), so a reconnect within the
-                            // same day short-circuits inside the coordinator
-                            // without re-enumerating. Null in tests that don't
-                            // wire it (pre-Phase 3 construction).
-                            cacheMaintenanceCoordinator?.let { coordinator ->
-                                val fp = currentServerGroupFp()
-                                scope.launch {
-                                    runCatching { coordinator.dailySweepIfNeeded(fp) }
-                                        .onFailure { DebugLog.w("ConnectionCoordinator", "daily sweep failed for fp=$fp: ${it.message}") }
-                                }
-                            }
+                            // remove-message-persistence Task 5: the daily
+                            // cache sweep that used to fire-and-forget here
+                            // was removed together with the maintenance
+                            // coordinator (SQLite persistence layer deletion).
                             settled = true
                             onSettled?.invoke(true)
                             return@launch
@@ -595,11 +575,10 @@ class ConnectionCoordinator(
                                         connectionPhase = ConnectionPhase.Connected,
                                     )
                                 }
-                                cacheMaintenanceCoordinator?.let { maintenance ->
-                                    scope.launch {
-                                        runCatching { maintenance.dailySweepIfNeeded(outcome.identity.serverGroupFp) }
-                                    }
-                                }
+                                // remove-message-persistence Task 5: the
+                                // daily cache sweep that used to fire-and-forget
+                                // here was removed together with the
+                                // maintenance coordinator.
                                 settled = true
                                 onSettled?.invoke(true)
                                 return@launch

@@ -70,8 +70,8 @@ package cn.vectory.ocdroid.ui.controller
  * @param sessionsEverColdSnapshotted R-20 Phase 2 (G6): sessions for which a
  *   catch-up cold snapshot has established the SSE-coverage baseline. A session
  *   is SSE-covered (no probe needed) iff the live SSE feed is attached to its
- *   workdir AND it appears in this set ([cn.vectory.ocdroid.ui.chat.BackfillAlgorithm.shouldProbe]
- *   is the negation). Populated by [cn.vectory.ocdroid.ui.launchCatchUp]'s
+ *   workdir AND it appears in this set (the inlined `shouldProbeCatchUp`
+ *   helper in CatchUpActions.kt is the negation). Populated by [cn.vectory.ocdroid.ui.launchCatchUp]'s
  *   onColdSnapshot callback (fired on every successful catch-up); reset to
  *   empty by [SseReconnectTrigger.HostReconfigured] so a host switch cannot
  *   carry a stale baseline across to an unrelated server (avoiding a false

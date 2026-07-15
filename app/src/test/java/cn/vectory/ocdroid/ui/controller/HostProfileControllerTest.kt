@@ -166,8 +166,6 @@ class HostProfileControllerTest {
             trafficTracker = trafficTracker,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            appContext = io.mockk.mockk<android.content.Context>(relaxed = true),
-            cacheRepository = io.mockk.mockk<cn.vectory.ocdroid.data.cache.CacheRepository>(relaxed = true),
         )
         // Default store seeding; tests re-stub as needed (last stub wins).
         seedStore(listOf(profileA, profileB), currentId = "p-A")
@@ -261,7 +259,6 @@ class HostProfileControllerTest {
                 olderMessagesCursor = s.olderMessagesCursor,
                 hasMoreMessages = s.hasMoreMessages,
                 isLoadingMessages = s.isLoadingMessages,
-                gapMarkers = s.gapMarkers,
                 staleNotice = s.staleNotice,
                 currentModel = s.currentModel
             )
@@ -936,12 +933,12 @@ class HostProfileControllerTest {
     @Test
     fun `resetLocalDataAndResync wipes persisted local data and fires the full reset callback chain in order`() {
         controller.resetLocalDataAndResync()
-        // §analysis-8b (Lane-D8b): RefreshCacheListing is emitted INSIDE
-        // scope.launch { } (the async cache-wipe block) via suspend emitEffect
-        // — the synchronous tryEmitEffect chain (Clear/CancelSse/ColdStart) is
-        // already in collectedEffects, but the async emit only lands once the
-        // controller's TestScope is drained. runPending flushes exactly that
-        // queued launch (clearAll → deleteDatabase → RefreshCacheListing).
+        // remove-message-persistence Task 5: the async cache-wipe launch
+        // block (clearAll → deleteDatabase → cache-listing refresh) was
+        // removed with the SQLite persistence layer. The synchronous tryEmitEffect
+        // chain (Clear/CancelSse/ColdStart) is still captured in
+        // collectedEffects immediately; runPending is kept for parity with
+        // the barrier-path test (no-op here now that there is no launch).
         runPending()
 
         verify { settingsManager.clearAllLocalData() }
@@ -950,44 +947,29 @@ class HostProfileControllerTest {
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().size)
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ColdStartReconnect>().size)
-        // §analysis-8b: RefreshCacheListing fired exactly once — the async
-        // cache-wipe launch block completed and emitted it after clearAll +
-        // deleteDatabase landed (those are the first two lines of the block;
-        // the emit is the last, so completion implies the DB ops ran first).
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.RefreshCacheListing>().size)
-
-        val resetTrafficIdx = collectedEffects.indexOfFirst { it is ControllerEffect.ClearSessionWindowCache }.let {
-            // resetTrafficTracker runs BEFORE any effect emission (inline, synchronous);
-            // we approximated it by the ClearSessionWindowCache position. Assert
-            // ordering among effects instead — ClearSessionWindowCache (step 3)
-            // before CancelSseForReconfigure (step 4) before ColdStartReconnect (step 8).
-            it
-        }
+        // Assert ordering among effects — ClearSessionWindowCache (step 3)
+        // before CancelSseForReconfigure (step 4) before ColdStartReconnect
+        // (step 8).
         val clearCacheIdx = collectedEffects.indexOfFirst { it is ControllerEffect.ClearSessionWindowCache }
         val cancelSseIdx = collectedEffects.indexOfFirst { it is ControllerEffect.CancelSseForReconfigure }
         val coldStartIdx = collectedEffects.indexOfFirst { it is ControllerEffect.ColdStartReconnect }
+        assertTrue(clearCacheIdx >= 0)
         assertTrue(clearCacheIdx < cancelSseIdx)
         assertTrue(cancelSseIdx < coldStartIdx)
-        // §analysis-8b: RefreshCacheListing (async, from scope.launch) lands
-        // AFTER the synchronous ColdStartReconnect tryEmit because the launch
-        // block is queued at call time but only drained by runPending. This
-        // index assertion proves the async emit happened (not just count==1 on
-        // a stale list) and that it followed the full synchronous reset chain.
-        val refreshIdx = collectedEffects.indexOfFirst { it is ControllerEffect.RefreshCacheListing }
-        assertTrue("RefreshCacheListing must land after ColdStartReconnect", coldStartIdx < refreshIdx)
-        // sanity reference to keep the unused local named above meaningful.
-        assertTrue(resetTrafficIdx >= 0)
     }
 
     @Test
-    fun `resetLocalDataAndResync barrier path emits RefreshCacheListing before ColdStartReconnect`() {
-        // §analysis-8b (Lane-D8b): the barrier path (reconfigureBarrier !=
-        // null) wraps the cache-wipe in reconfigure { } then emits
-        // RefreshCacheListing + ColdStartReconnect in that FIFO order. The
-        // default test controller has reconfigureBarrier = null (non-barrier
-        // path covered above), so construct a SEPARATE controller with a real
-        // barrier (identityStore + a no-op ReconfigureTeardown fake) to
-        // exercise the barrier branch — mirrors the wiring in
+    fun `resetLocalDataAndResync barrier path emits ColdStartReconnect`() {
+        // remove-message-persistence Task 5: the barrier path used to emit
+        // the cache-listing refresh effect before ColdStartReconnect (the
+        // cache-wipe + cache-listing refresh). With the SQLite persistence layer gone,
+        // only ColdStartReconnect remains on the barrier path. The barrier
+        // wiring itself (reconfigureBarrier != null wraps resetLocalStateCore
+        // in reconfigure { }) is still exercised here. The default test
+        // controller has reconfigureBarrier = null (non-barrier path covered
+        // above), so construct a SEPARATE controller with a real barrier
+        // (identityStore + a no-op ReconfigureTeardown fake) to exercise the
+        // barrier branch — mirrors the wiring in
         // ConnectionReconfigureBarrierTest.
         val identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         identityStore.bind("g-A", "/wd", "http://a:4096")
@@ -1009,8 +991,6 @@ class HostProfileControllerTest {
             trafficTracker = trafficTracker,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            appContext = io.mockk.mockk<android.content.Context>(relaxed = true),
-            cacheRepository = io.mockk.mockk<cn.vectory.ocdroid.data.cache.CacheRepository>(relaxed = true),
             identityStore = identityStore,
             reconfigureBarrier = barrier,
         )
@@ -1021,18 +1001,7 @@ class HostProfileControllerTest {
         // suspend) → nothing is captured until the TestScope is drained.
         runPending()
 
-        // §analysis-8b: barrier path emits RefreshCacheListing exactly once,
-        // BEFORE ColdStartReconnect (both are suspend emitEffect calls in the
-        // same launch block — FIFO ordering is the spec invariant that keeps
-        // the cache refresh ahead of the reconnect-triggered reload).
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.RefreshCacheListing>().size)
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ColdStartReconnect>().size)
-        val refreshIdx = collectedEffects.indexOfFirst { it is ControllerEffect.RefreshCacheListing }
-        val coldStartIdx = collectedEffects.indexOfFirst { it is ControllerEffect.ColdStartReconnect }
-        assertTrue(
-            "barrier path: RefreshCacheListing must precede ColdStartReconnect (FIFO)",
-            refreshIdx >= 0 && coldStartIdx >= 0 && refreshIdx < coldStartIdx,
-        )
     }
 
     @Test

@@ -9,7 +9,7 @@ package cn.vectory.ocdroid.ui
  */
 
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
+import cn.vectory.ocdroid.ui.controller.CachedSessionWindow
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
@@ -130,7 +130,7 @@ internal fun launchLoadMessages(
                         // the fetched page. `m.id !in fetchedIds` dedups the seam
                         // (loadMoreMessages has its own id-dedup at its seam too).
                         // resetLimit STILL controls the downstream metadata resets
-                        // below (olderMessagesCursor, hasMoreMessages, gapInfo,
+                        // below (olderMessagesCursor, hasMoreMessages,
                         // streaming overlay clearance) — only the merge changed.
                         //
                         // §R-17 batch2 step e final: capture current chat-domain
@@ -141,7 +141,6 @@ internal fun launchLoadMessages(
                         val srcStreamingReasoning = slices.chat.value.streamingReasoningPart
                         val srcCursor = slices.chat.value.olderMessagesCursor
                         val srcHasMore = slices.chat.value.hasMoreMessages
-                        val srcGapMarkers = slices.chat.value.gapMarkers
                         val srcSessionStatuses = slices.sessionList.value.sessionStatuses
 
                         val fetchedIds = page.items.map { m -> m.info.id }.toHashSet()
@@ -254,12 +253,6 @@ internal fun launchLoadMessages(
                         val historyAlreadyPaged = !cursorUnseeded && olderKept.isNotEmpty()
                         val newCursor = if ((resetLimit || cursorUnseeded) && !historyAlreadyPaged) page.nextCursor else srcCursor
                         val newHasMore = if ((resetLimit || cursorUnseeded) && !historyAlreadyPaged) (page.nextCursor != null) else srcHasMore
-                        // §Phase1C (gpt-2 S1): a resetLimit=true reload is an
-                        // authoritative snapshot replace — any open gap
-                        // belonged to the previous window and is now stale
-                        // (anchor/boundary may no longer be present). Clear it;
-                        // a fresh gap can only re-open via launchCatchUp.
-                        val newGapMarkers = if (resetLimit) emptyList() else srcGapMarkers
                         // §model-selection: track the model bound to the
                         // active session by inferring it from the latest
                         // assistant message's resolvedModel. Surfaces in
@@ -283,7 +276,6 @@ internal fun launchLoadMessages(
                                 streamingReasoningPart = newStreamingReasoning,
                                 olderMessagesCursor = newCursor,
                                 hasMoreMessages = newHasMore,
-                                gapMarkers = newGapMarkers,
                                 currentModel = newModel
                             )
                         }

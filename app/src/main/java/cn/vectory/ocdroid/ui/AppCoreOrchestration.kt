@@ -544,7 +544,6 @@ internal fun AppCore.performGlobalColdStartRefresh(currentId: String) {
         it.copy(
             streamingPartTexts = emptyMap(),
             streamingReasoningPart = null,
-            gapMarkers = emptyList(),
             staleNotice = false,
             messages = emptyList(),
             partsByMessage = emptyMap(),
@@ -560,10 +559,10 @@ internal fun AppCore.performGlobalColdStartRefresh(currentId: String) {
 }
 
 internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
-    // R-20 Phase 2: capture fp once (glm-3 🟡#1 single-read) for the cache hook
-    // + the coordinator's openGap compound key + the G6 current-workdir input.
+    // capture fp once (glm-3 🟡#1 single-read) for the cache hook + the G6
+    // current-workdir input.
     val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
-    // G6 inputs: SSE coverage baseline + the live SSE workdir (drives shouldProbe).
+    // G6 inputs: SSE coverage baseline + the live SSE workdir (drives shouldProbeCatchUp).
     val sseSnap = sessionSyncCoordinator.sseSyncStateSnapshot()
     val sseWorkdir = store.connectionFlow.value.isConnected.let { connected ->
         // The SSE feed is attached to the current workdir when connected; null
@@ -577,8 +576,6 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
         sessionId = sessionId,
         settingsManager = settingsManager,
         onCacheWindow = makeCacheHook(fp),
-        // R-20 Phase 2: delegate gap open + 50-step fill to the coordinator.
-        gapFillCoordinator = gapFillCoordinator,
         // §fix-#2 (gpter 复审 #2 — glm-3 前次 #3 修复的实现错误): pass the
         // LIVE fp provider (the injected @Named("currentServerGroupFp")
         // reference on AppCore), NOT `{ fp }`. The previous `{ fp }` captured
@@ -661,10 +658,10 @@ internal fun AppCore.loadSessionsForEffect() {
         onLoadSessionStatus = { launchLoadSessionStatus(appScope, repository, store.slices) },
         onLoadMessages = { sessionId -> loadMessagesForEffect(sessionId, resetLimit = true) },
         emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
-        // R-20 Phase 1 (C7): verify currentSessionId's cache fingerprint when
-        // the session list arrives. MismatchEvicted → drop currentSessionId
-        // (cold-start fallback). See launchLoadSessions doc.
-        cacheRepository = cacheRepository,
+        // remove-message-persistence Task 6: the prior
+        // `cacheRepository = cacheRepository` argument (R-20 Phase 1 C7
+        // currentSessionId fingerprint self-check) was deleted together
+        // with the CacheRepository surface.
         expectedServerGroupFp = currentServerGroupFp(),
         currentServerGroupFp = currentServerGroupFp,
         // §grouping-rewrite Round-2 #5: the hostProfileStore arg that R-20

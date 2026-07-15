@@ -72,13 +72,19 @@ internal object MainViewModelTimings {
      * Tuned for the post-LSP-diagnostics-cleanup payload: with `state.metadata.
      * diagnostics` stripped (server `lsp:false` + DB purge + client-side strip),
      * measured per-message sizes are p50=3.3KB / p90=17.8KB / p99=81KB /
-     * max=840KB. A page of 20 messages is therefore ~360KB typical (p90) and
-     * ~16.8MB even in the pathological all-outliers case — comfortably under
-     * the 32MB ResponseSizeGuard. 20 gives the user full recent context on
-     * open without paging for typical sessions; deeper history via
-     * loadMoreMessages.
+     * max=840KB. A page of 40 messages is therefore ~712KB typical (p90) and
+     * ~3.2MB at p99 — both well under the 32MB ResponseSizeGuard. The
+     * pathological all-outliers case (40 × 840KB = 33.6MB) would exceed the
+     * guard, but 40 messages all hitting the observed maximum is a low-
+     * probability scenario.
+     *
+     * Acceptance: this failure mode is explicitly accepted (product decision
+     * confirmed). If the guard ever rejects an initial response, the existing
+     * error/retry UI surfaces it to the user — the value is never silently
+     * reduced. 40 gives the user full recent context on open without paging
+     * for typical sessions; deeper history via loadMoreMessages.
      */
-    const val initialMessagePageSize = 20
+    const val initialMessagePageSize = 40
     /**
      * Tail page size for catch-up (reconnect / foreground return). Runs
      * frequently, so kept smaller than the initial page; 10 messages ≈ 180KB
@@ -87,32 +93,18 @@ internal object MainViewModelTimings {
      */
     const val catchUpMessagePageSize = 10
     /**
-     * Step size for gap closure (paging backward to fill a detected history
-     * gap). Larger step = fewer round-trips to close big gaps; 10 keeps each
-     * step small while speeding closure vs the old 3.
+     * Catch-up probe: 拉最新几条用于断线补齐. A dedicated 5-message probe is
+     * fetched and merged into the slice (resetLimit=false semantics) so the
+     * newest messages land without a full reload.
      */
-    const val gapCloseMessagePageSize = 10
-    /**
-     * R-20 Phase 2: probe page size for the catch-up gap detection. Replaces
-     * the legacy `catchUpMessagePageSize` tail fetch on the gap path — a
-     * dedicated 5-message probe feeds [cn.vectory.ocdroid.ui.chat.BackfillAlgorithm.detectGap].
-     * The sentinel off-by-one boundary now sits at exactly-4-new (anchor in
-     * the 5th slot → contiguous) vs exactly-5-new (anchor absent → gap).
-     */
-    const val gapProbeMessagePageSize = 5
-    /**
-     * R-20 Phase 2: backward-fill step size for [cn.vectory.ocdroid.ui.chat.GapFillCoordinator].
-     * Mirrors [historyMessagePageSize] (50) — large step = fewer round-trips
-     * to close a big gap, each step comfortably under the 32MB response guard.
-     */
-    const val gapFillMessagePageSize = 50
+    const val catchUpProbePageSize = 5
     /**
      * Page size for manual "load more history" paging. A typical page stays
-     * well under the 32MB guard (50 × p99(81KB) ≈ 4MB). If a pathological page
+     * well under the 32MB guard (30 × p99(81KB) ≈ 2.4MB). If a pathological page
      * ever trips the guard, loadMore surfaces the error and the user can retry
      * — it never blocks opening the session.
      */
-    const val historyMessagePageSize = 50
+    const val historyMessagePageSize = 30
     /** Delay before the one-shot title refresh after a new session's first
      *  message (see MainViewModel.scheduleTitleRefreshAfterFirstMessage). The
      *  server generates the title asynchronously in prompt-loop step 1; 5s is

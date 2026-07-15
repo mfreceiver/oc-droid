@@ -8,39 +8,31 @@ package cn.vectory.ocdroid.ui
  * Future cleanup (batch3e+): may be inlined into individual VM private methods.
  */
 
-import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
+import cn.vectory.ocdroid.ui.controller.CachedSessionWindow
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.ui.chat.BackfillAlgorithm
-import cn.vectory.ocdroid.ui.chat.GapDetection
-import cn.vectory.ocdroid.ui.chat.GapFillCoordinator
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 /**
- * R-20 Phase 2 (plan §3): catch-up after a reconnect (server.connected, not the
- * first connect) or a medium foreground return. Cheapest-first:
+ * Catch-up after a reconnect (server.connected, not the first connect) or a
+ * medium foreground return. Cheapest-first:
  *
- * 1. G6 gate ([BackfillAlgorithm.shouldProbe]): if the SSE feed is reliably
- *    covering this session's workdir AND the session was cold-snapshotted, skip
- *    the REST probe entirely (the live feed delivers updates). Defaults
+ * 1. G6 gate ([shouldProbeCatchUp]): if the SSE feed is reliably covering this
+ *    session's workdir AND the session was cold-snapshotted, skip the REST
+ *    probe entirely (the live feed delivers updates). Defaults
  *    (sseCurrentWorkdir=null, sessionsEverColdSnapshotted=emptySet) ⇒ not
  *    covered ⇒ always probe (preserves the legacy behaviour for callers that
  *    do not wire G6 inputs).
  * 2. Cheap probe: if the server's newest id == the local newest id, nothing
  *    arrived during the outage → skip the reload (the big traffic saving).
- * 3. Probe the newest [MainViewModelTimings.gapProbeMessagePageSize] (=5) and
- *    feed them to [BackfillAlgorithm.detectGap]. The sentinel off-by-one
- *    boundary now sits at exactly-4-new (anchor in the 5th slot → contiguous)
- *    vs exactly-5-new (anchor absent → gap) — the Phase-2 generalisation of the
- *    legacy "fetch 4 = 3 display + 1 sentinel" (preserved by the regression tests).
- * 4. [GapDetection.NoGap] → merge the fetched window (resetLimit=false semantics)
- *    + clear gapMarkers.
- * 5. [GapDetection.GapExists] → delegate to [GapFillCoordinator.openAndFill]
- *    (opens the marker, merges the fetched newest-5, runs the 50-step backward
- *    fill loop). With no coordinator wired (legacy/test path) the fetched
- *    window is still merged; the gap is not tracked.
+ * 3. Probe the newest [MainViewModelTimings.catchUpProbePageSize] (=5) and
+ *    merge the fetched window into the slice via [mergeProbeIntoSlice]
+ *    (resetLimit=false semantics). The non-contiguous gap mechanism was
+ *    removed in remove-message-persistence Task 4 — a probe page that misses
+ *    the local anchor simply merges (the bigger history is recoverable via
+ *    the manual "load more" pager, not via an automatic backfill).
  *
  * On any successful catch-up the [onColdSnapshot] callback fires so the caller
  * (SessionSyncCoordinator) can add the session to `sessionsEverColdSnapshotted`
@@ -48,11 +40,6 @@ import kotlinx.coroutines.launch
  *
  * Does NOT touch `olderMessagesCursor`/`hasMoreMessages` (resetLimit=false).
  * No-op when a load is already in flight (coalesced via `isLoadingMessages`).
- *
- * The legacy single-gap `launchCloseGap` is **removed** (plan §3 N5 / glmer B1);
- * the 50-step backward fill that used to live there is now owned by
- * [GapFillCoordinator] (session-level Mutex + per-gap cursor + cross-gap overlap
- * resolution — none of which the legacy free function could express).
  */
 internal fun launchCatchUp(
     scope: CoroutineScope,
@@ -62,16 +49,8 @@ internal fun launchCatchUp(
     settingsManager: SettingsManager? = null,
     onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> },
     /**
-     * R-20 Phase 2: the gap-fill coordinator. When non-null, a detected gap is
-     * delegated to [GapFillCoordinator.openAndFill] (open + 50-step fill). When
-     * null (legacy/test path), a detected gap degrades to a plain merge of the
-     * fetched window (no marker tracked). Default null preserves backward
-     * compat for callers that have not been wired to the coordinator yet.
-     */
-    gapFillCoordinator: GapFillCoordinator? = null,
-    /**
-     * R-20 Phase 2: provider for the current host's serverGroupFp. Used as the
-     * cache compound key when delegating to the coordinator. Default { "" }.
+     * §fix-#3 (gpter #3): provider for the current host's serverGroupFp. Used
+     * as the cache compound key. Default { "" }.
      */
     currentServerGroupFp: () -> String = { "" },
     /**
@@ -83,11 +62,11 @@ internal fun launchCatchUp(
      * that wire only the provider get fp-guard = no-op (both sides equal).
      */
     expectedServerGroupFp: String = currentServerGroupFp(),
-    /** R-20 Phase 2 (G6): the SSE job's current workdir, or null if no feed. */
+    /** G6: the SSE job's current workdir, or null if no feed. */
     sseCurrentWorkdir: String? = null,
-    /** R-20 Phase 2 (G6): sessions with an established cold-snapshot baseline. */
+    /** G6: sessions with an established cold-snapshot baseline. */
     sessionsEverColdSnapshotted: Set<String> = emptySet(),
-    /** R-20 Phase 2 (G6): fired on a successful catch-up to mark the baseline. */
+    /** G6: fired on a successful catch-up to mark the baseline. */
     onColdSnapshot: (String) -> Unit = {},
 ) {
 
@@ -96,9 +75,9 @@ internal fun launchCatchUp(
     // either sets the flag.
     if (slices.chat.value.isLoadingMessages) return
 
-    // ── R-20 Phase 2 (G6): SSE-coverage gate ───────────────────────────────
+    // ── G6: SSE-coverage gate ──────────────────────────────────────────────
     val currentWorkdir = settingsManager?.currentWorkdir ?: ""
-    if (!BackfillAlgorithm.shouldProbe(
+    if (!shouldProbeCatchUp(
             sessionId = sessionId,
             currentWorkdir = currentWorkdir,
             sessionsEverColdSnapshotted = sessionsEverColdSnapshotted,
@@ -123,7 +102,6 @@ internal fun launchCatchUp(
         val serverNewestId = repository.probeLatestMessageId(sessionId).getOrNull()
 
         // No newer message on the server → skip the probe-page reload entirely.
-        // Preserve any already-open gaps (still unresolved).
         if (anchor != null && serverNewestId != null && anchor.id == serverNewestId) {
             // §history-load-fix round-2 (gpter 🟠): flag clear deferred to the
             // session-guarded finally (return@launch runs it). probeLatestMessageId
@@ -135,7 +113,7 @@ internal fun launchCatchUp(
             return@launch
         }
 
-        repository.getMessagesPaged(sessionId, MainViewModelTimings.gapProbeMessagePageSize, before = null)
+        repository.getMessagesPaged(sessionId, MainViewModelTimings.catchUpProbePageSize, before = null)
             .onSuccess { page ->
                 // §history-load-fix: serialize the slice mutation per-session so a
                 // concurrent launchLoadMessages full-window replace or a
@@ -159,84 +137,30 @@ internal fun launchCatchUp(
                         // finally clears isLoadingMessages; clearing here would
                         // clobber a new session's flag.
                     } else {
+                        // remove-message-persistence Task 4: the non-contiguous
+                        // gap mechanism was deleted. The probe window is always
+                        // merged directly (resetLimit=false semantics) — manual
+                        // "load more" paging covers any older history.
                         val fetched = page.items.map { it.info }
                         val fetchedParts = page.items.associate { it.info.id to it.parts }
-                        val detection = BackfillAlgorithm.detectGap(anchor, fetched, page.nextCursor)
-
-                        when (detection) {
-                            is GapDetection.NoGap -> {
-                                // Contiguous (anchor in the probe window) OR the probe
-                                // short-paged (history exhausted within 5) → merge the
-                                // fetched window directly, clear any stale markers.
-                                val merged = mergeProbeIntoSlice(slices, fetched, fetchedParts)
-                                slices.mutateChat { c ->
-                                    c.copy(
-                                        messages = merged.first,
-                                        partsByMessage = merged.second,
-                                        isLoadingMessages = false,
-                                        gapMarkers = emptyList(),
-                                        staleNotice = false
-                                    )
-                                }
-                                // §chat-ux-batch T8 (B3): the legacy
-                                // syncAgentFromPage call was deleted here (T7
-                                // rewired agent selection to transient
-                                // pendingAgent; no global-reseed needed).
-                                onCacheWindow(
-                                    sessionId,
-                                    snapshotCurrentWindow(slices, sessionId)
-                                )
-                                onColdSnapshot(sessionId)
-                            }
-                            is GapDetection.GapExists -> {
-                                val coordinator = gapFillCoordinator
-                                if (coordinator != null) {
-                                    // Delegate open + 50-step fill. The coordinator
-                                    // merges the fetched newest-5 itself, so we only
-                                    // clear the catch-up loading flag here (the gap's
-                                    // own Filling state is the per-marker indicator).
-                                    slices.mutateChat { c -> c.copy(isLoadingMessages = false, staleNotice = false) }
-                                    // §chat-ux-batch T8 (B3): syncAgentFromPage removed (see above).
-                                    // openAndFill is suspend; launch it fire-and-forget
-                                    // so the catch-up coroutine returns immediately. The
-                                    // session-level Mutex inside the coordinator keeps
-                                    // this session's fills serial.
-                                    scope.launch {
-                                        runCatching {
-                                            coordinator.openAndFill(
-                                                slices = slices,
-                                                serverGroupFp = currentServerGroupFp(),
-                                                sessionId = sessionId,
-                                                detection = detection,
-                                                fetched5 = fetched,
-                                                fetched5Parts = fetchedParts,
-                                                onCacheWindow = onCacheWindow,
-                                                onColdSnapshot = onColdSnapshot,
-                                            )
-                                        }
-                                    }
-                                } else {
-                                    // No coordinator wired (legacy/test path): merge the
-                                    // fetched window; the gap is not tracked.
-                                    val merged = mergeProbeIntoSlice(slices, fetched, fetchedParts)
-                                    slices.mutateChat { c ->
-                                        c.copy(
-                                            messages = merged.first,
-                                            partsByMessage = merged.second,
-                                            isLoadingMessages = false,
-                                            gapMarkers = emptyList(),
-                                            staleNotice = false
-                                        )
-                                    }
-                                    // §chat-ux-batch T8 (B3): syncAgentFromPage removed (T7 rewired).
-                                    onCacheWindow(
-                                        sessionId,
-                                        snapshotCurrentWindow(slices, sessionId)
-                                    )
-                                    onColdSnapshot(sessionId)
-                                }
-                            }
+                        val merged = mergeProbeIntoSlice(slices, fetched, fetchedParts)
+                        slices.mutateChat { c ->
+                            c.copy(
+                                messages = merged.first,
+                                partsByMessage = merged.second,
+                                isLoadingMessages = false,
+                                staleNotice = false
+                            )
                         }
+                        // §chat-ux-batch T8 (B3): the legacy
+                        // syncAgentFromPage call was deleted here (T7
+                        // rewired agent selection to transient
+                        // pendingAgent; no global-reseed needed).
+                        onCacheWindow(
+                            sessionId,
+                            snapshotCurrentWindow(slices, sessionId)
+                        )
+                        onColdSnapshot(sessionId)
                     }
                 }
             }
@@ -266,6 +190,36 @@ internal fun launchCatchUp(
             }
         }
     }
+}
+
+/**
+ * G6 / SSE-coverage gate (was the `shouldProbe` member of a since-deleted
+ * gap-detection algorithm object; only this semaphore survived the
+ * remove-message-persistence Task 4 deletion of the non-contiguous gap
+ * mechanism because it gates REST probes, independent of gap state).
+ *
+ * A session is "covered" (no probe) iff BOTH hold:
+ *  - the current SSE job is attached to [currentWorkdir] (i.e.
+ *   [sseCurrentWorkdir] != null AND == [currentWorkdir] — the feed is live
+ *   for this session's workdir), AND
+ *  - [sessionId] ∈ [sessionsEverColdSnapshotted] — a cold snapshot has
+ *    already established the session's baseline (so SSE deltas since are
+ *    trusted; a never-snapshotted session may have pre-SSE history the
+ *    feed never delivered).
+ *
+ * Returns true (probe) when NOT covered.
+ */
+private fun shouldProbeCatchUp(
+    sessionId: String,
+    currentWorkdir: String,
+    sessionsEverColdSnapshotted: Set<String>,
+    sseCurrentWorkdir: String?
+): Boolean {
+    val sseCoversThisWorkdir =
+        sseCurrentWorkdir != null && sseCurrentWorkdir == currentWorkdir
+    val wasColdSnapshotted = sessionId in sessionsEverColdSnapshotted
+    val covered = sseCoversThisWorkdir && wasColdSnapshotted
+    return !covered
 }
 
 // ── catch-up merge helpers (extracted from the legacy inline merge) ─────────

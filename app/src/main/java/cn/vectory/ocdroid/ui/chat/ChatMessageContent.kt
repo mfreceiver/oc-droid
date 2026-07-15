@@ -47,8 +47,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.data.cache.contract.GapFillState
-import cn.vectory.ocdroid.data.cache.contract.GapMarker
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.isEffectivelyRenderableEmpty
@@ -226,17 +224,11 @@ internal fun ChatMessageList(
     // §F3-load-more: 同时取 cursor——渲染门加 cursor 守卫，任何 cursor 缺失/不一致
     // 都不显示"加载更多"按钮（避免按钮显示但点击因 cursor=null 无反应）。
     val olderMessagesCursor: String? = chatState.olderMessagesCursor
-    // R-20 Phase 2: gap markers drive the non-contiguous dividers (replaces the
-    // legacy single ChatState.gapInfo). Rendered via messages.withGaps below.
-    val gapMarkers: List<GapMarker> = chatState.gapMarkers
     val repository: OpenCodeRepository = chatVM.repository
     val workspaceDirectory: String? = currentSession?.directory
     val onLoadMore: () -> Unit = chatVM::loadMoreMessages
     val onOpenSubAgent: (String) -> Unit = sessionVM::openSubAgent
     val onToggleExpand: (String, Boolean) -> Unit = composerVM::togglePartExpand
-    // R-20 Phase 2: per-gap fill trigger (replaces the no-arg onCloseGap). The
-    // tapped marker's gapId is routed back to GapFillCoordinator.fillSingleGap.
-    val onFillGap: (String) -> Unit = chatVM::fillGap
 
     // §stale-question: compute the set of part ids that are stuck "running"
     // question parts WITHOUT a matching live QuestionRequest — these render
@@ -632,69 +624,63 @@ internal fun ChatMessageList(
     // page, and matches the product decision that most users rarely need deep
     // history. Messages are not persisted — re-fetched fresh on each open.
 
-    // 消息结构计算提到 LazyColumn body 之外（gap 分割需要 Entry 列表）。
+    // 消息结构计算提到 LazyColumn body 之外。
     //
     // remember 覆盖 messages/partsByMessage/streamingReasoningPart/sessionIsRunning
     // 不变的情况；但 streamingPartTexts 在 SSE 流式时每 ~100ms 变化（SessionSync
-    // 每次 emit 新 Map），仍会触发 reversedEntries 重建。这是预期的——重建是 O(n)
+    // 每次 emit 新 Map），仍会触发 reversedMessages 重建。这是预期的——重建是 O(n)
     // 单遍 filterNot，100 条消息下 ~10-20μs，远低于 LazyColumn item 渲染成本，可
     // 忽略（评审 maxer/gpter 实测确认）。
-    // R-20 Phase 2: build the non-contiguous Entry list (Message + GapMarker)
-    // from the filtered oldest-first [messages] + the session's open
-    // [gapMarkers], then reverse + filter for the reverseLayout display. A gap
-    // divider is interleaved at each marker's upperBoundary seam (≥1 gap). The
-    // same streaming/empty filter that applies to plain messages is applied to
-    // Message entries here; GapMarker entries are always kept (a divider whose
-    // boundary message got filtered is dropped by withGaps upstream).
-    val reversedEntries = remember(messages, gapMarkers, partsByMessage, streamingPartTexts, streamingReasoningPart, sessionIsRunning) {
-        val entries = messages.withGaps(gapMarkers)
-        entries.reversed().filterNot { entry ->
-            (entry is Entry.Message) && run {
-                val msg = entry.message
-                val msgParts = partsByMessage[msg.id].orEmpty()
-                // §streaming-flicker-diagnosis §3.1 confirm experiment: when the
-                // debug gate is on, ALSO treat a session-running message that
-                // carries a text Part as streaming — this covers the placeholder
-                // window (text=null Part in partsByMessage but partId not yet in
-                // streamingPartTexts). If flicker vanishes with this on, Top1 is
-                // confirmed. sessionIsRunning + isText are both in scope here.
-                // Disabled (no-op) when STREAMING_FLICKER_DEBUG=false.
-                val isStreamingMsg = msgParts.any { it.id in streamingPartTexts } ||
-                    streamingReasoningPart?.messageId == msg.id ||
-                    (!msg.isUser && msgParts.isEmpty() && sessionIsRunning) ||
-                    (STREAMING_FLICKER_DEBUG && sessionIsRunning && msgParts.any { it.isText })
-                // §empty-msg / §error-feedback: same filter as the legacy
-                // reversedMessages (kept verbatim so rendering is byte-identical
-                // for the non-gap path).
-                val renderableEmpty = isEffectivelyRenderableEmpty(msgParts)
-                val filteredOut = !msg.isUser && !isStreamingMsg &&
-                    msg.error?.message.isNullOrBlank() &&
-                    renderableEmpty
-                // §streaming-flicker-diagnosis (Top1): a non-user, non-streaming
-                // message dropped here is the exact blank-frame path — the
-                // placeholder intermediate state makes isStreamingMsg=false AND
-                // renderableEmpty=true. If this fires ~1Hz during streaming, the
-                // Top1 root cause is confirmed. filterOutCount is the cumulative
-                // tally (AtomicLong); pair with the SessionSyncCoordinator
-                // "placeholder created" / "first delta staged" logs to time the
-                // two-phase window.
-                if (filteredOut && STREAMING_FLICKER_DEBUG) {
-                    val count = flickerFilterOutCount.incrementAndGet()
-                    Log.w(
-                        FLICKER_TAG,
-                        "FILTERED OUT msgId=${msg.id} isStreamingMsg=$isStreamingMsg " +
-                            "renderableEmpty=$renderableEmpty " +
-                            "hasError=${!msg.error?.message.isNullOrBlank()} filterOutCount=$count"
-                    )
-                }
-                filteredOut
+    //
+    // remove-message-persistence Task 4: the non-contiguous gap path
+    // (a sealed Entry ADT with interleaved divider variants) was removed.
+    // The render list now iterates `messages` directly (reverse + filter
+    // for reverseLayout display).
+    val reversedMessages = remember(messages, partsByMessage, streamingPartTexts, streamingReasoningPart, sessionIsRunning) {
+        messages.reversed().filterNot { msg ->
+            val msgParts = partsByMessage[msg.id].orEmpty()
+            // §streaming-flicker-diagnosis §3.1 confirm experiment: when the
+            // debug gate is on, ALSO treat a session-running message that
+            // carries a text Part as streaming — this covers the placeholder
+            // window (text=null Part in partsByMessage but partId not yet in
+            // streamingPartTexts). If flicker vanishes with this on, Top1 is
+            // confirmed. sessionIsRunning + isText are both in scope here.
+            // Disabled (no-op) when STREAMING_FLICKER_DEBUG=false.
+            val isStreamingMsg = msgParts.any { it.id in streamingPartTexts } ||
+                streamingReasoningPart?.messageId == msg.id ||
+                (!msg.isUser && msgParts.isEmpty() && sessionIsRunning) ||
+                (STREAMING_FLICKER_DEBUG && sessionIsRunning && msgParts.any { it.isText })
+            // §empty-msg / §error-feedback: same filter as the legacy
+            // reversedMessages (kept verbatim so rendering is byte-identical
+            // for the non-gap path).
+            val renderableEmpty = isEffectivelyRenderableEmpty(msgParts)
+            val filteredOut = !msg.isUser && !isStreamingMsg &&
+                msg.error?.message.isNullOrBlank() &&
+                renderableEmpty
+            // §streaming-flicker-diagnosis (Top1): a non-user, non-streaming
+            // message dropped here is the exact blank-frame path — the
+            // placeholder intermediate state makes isStreamingMsg=false AND
+            // renderableEmpty=true. If this fires ~1Hz during streaming, the
+            // Top1 root cause is confirmed. filterOutCount is the cumulative
+            // tally (AtomicLong); pair with the SessionSyncCoordinator
+            // "placeholder created" / "first delta staged" logs to time the
+            // two-phase window.
+            if (filteredOut && STREAMING_FLICKER_DEBUG) {
+                val count = flickerFilterOutCount.incrementAndGet()
+                Log.w(
+                    FLICKER_TAG,
+                    "FILTERED OUT msgId=${msg.id} isStreamingMsg=$isStreamingMsg " +
+                        "renderableEmpty=$renderableEmpty " +
+                        "hasError=${!msg.error?.message.isNullOrBlank()} filterOutCount=$count"
+                )
             }
+            filteredOut
         }
     }
     // Build folds in chronological order so the anchor is always the earliest
     // part, then reverse the resulting blocks for reverseLayout's item order.
     val renderBlocks = remember(
-        reversedEntries,
+        reversedMessages,
         partsByMessage,
         streamingPartTexts,
         staleQuestionPartKeys,
@@ -702,7 +688,7 @@ internal fun ChatMessageList(
         sessionIsRunning
     ) {
         buildRenderBlocks(
-            entries = reversedEntries.asReversed(),
+            messages = reversedMessages.asReversed(),
             partsByMessage = partsByMessage,
             streamingPartTexts = streamingPartTexts,
             staleQuestionPartKeys = staleQuestionPartKeys,
@@ -720,7 +706,7 @@ internal fun ChatMessageList(
     // explicit `Modifier.padding(vertical = 8.dp)` HERE so the conversation
     // REGION as a whole carries the 8dp T/B margin (½ × the 16dp L/R row
     // padding). Result: T/B = 8dp (outer), L/R = 16dp (per-row horizontal
-    // padding in MessageRow / ToolRun / Fold / GapDivider / load-more /
+    // padding in MessageRow / ToolRun / Fold / load-more /
     // empty / loading rows — all carry `padding(horizontal = 16.dp, …)`).
     // first/last-item spacing is unchanged: previously (list-pad 8dp +
     // row-pad 4dp = 12dp) ↔ now (outer 8dp + row-pad 4dp = 12dp).
@@ -851,9 +837,9 @@ internal fun ChatMessageList(
         }
         // §Phase8-nav: renderBlocks 已提到 LazyColumn 外；每个跨消息 fold 是一个
         // LazyColumn item，key 由最早 part id 锚定。
-        // （供消息导航 FAB 复用）。R-20 Phase 2：gap divider 由 Entry.GapMarker 渲染，
-        // 一个 items() 块统一处理消息行 + 分割线（替代旧的 beforeGap/gap-divider/afterGap
-        // 三段式，支持 ≥1 gap）。
+        // （供消息导航 FAB 复用）。remove-message-persistence Task 4: the gap
+        // divider branch (RenderBlock.Gap) was deleted; the items() block now
+        // handles message rows only.
         itemsIndexed(renderBlocks, key = { _, block -> block.id }) { index, block ->
             Box(modifier = Modifier.fillMaxWidth().padding(top = renderBlockTopPaddingDp(block, index).dp)) {
             when (block) {
@@ -1038,18 +1024,6 @@ internal fun ChatMessageList(
                         }
                     }
                 }
-                is RenderBlock.Gap -> {
-                    // R-20 Phase 2: the gap divider. Tapping routes the gap's
-                    // id back to GapFillCoordinator.fillSingleGap (50-step
-                    // backward fill). Exhausted gaps render a non-tappable
-                    // "无法补齐" hint (Filling shows the spinner).
-                    GapDivider(
-                        isLoading = block.marker.fillState == GapFillState.Filling,
-                        exhausted = block.marker.fillState == GapFillState.Exhausted,
-                        onClick = { onFillGap(block.marker.gapId) },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
             }
             }
         }
@@ -1176,95 +1150,12 @@ private fun InFlightEmptyLoading(modifier: Modifier = Modifier) {
     }
 }
 
-/**
- * §Phase1C gap (断层) divider — a clickable divider rendered at the seam
- * between the local message history and the newly-fetched tail window when
- * messages may have arrived during a disconnect. Quiet Tech styling: thin
- * horizontal rule (borderBase) with centered text chip. Tap loads older
- * messages to close the gap; loading state disables interaction and shows
- * a spinner with "加载中…".
- */
-@Composable
-private fun GapDivider(
-    isLoading: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    /** R-20 Phase 2: when true the gap is Exhausted (history ended below it,
-     *  cannot be bridged). The chip renders a non-tappable "无法补齐"-style
-     *  hint instead of the tappable load hint. */
-    exhausted: Boolean = false,
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isPressed by interactionSource.collectIsPressedAsState()
-    val alpha by animateFloatAsState(
-        targetValue = if (isPressed) 0.6f else 1f,
-        label = "gap-divider-press"
-    )
-    // Tappable only when idle (not loading, not exhausted).
-    val tappable = !isLoading && !exhausted
-
-    Box(
-        modifier = modifier
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .then(
-                if (tappable) {
-                    Modifier.clickable(
-                        interactionSource = interactionSource,
-                        indication = null,
-                        onClick = onClick
-                    )
-                } else Modifier
-            ),
-        contentAlignment = Alignment.Center
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Left rule
-            Surface(
-                modifier = Modifier.weight(1f).height(1.dp),
-                color = MaterialTheme.colorScheme.outline
-            ) {}
-            // Center chip
-            Surface(
-                modifier = Modifier.padding(horizontal = 12.dp),
-                shape = MaterialTheme.shapes.small,
-                color = Color.Transparent,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    if (isLoading) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(12.dp),
-                            strokeWidth = 1.5.dp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                    }
-                    Text(
-                        text = when {
-                            isLoading -> stringResource(R.string.chat_loading)
-                            exhausted -> stringResource(R.string.chat_gap_divider_exhausted)
-                            else -> stringResource(R.string.chat_gap_divider_hint)
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)
-                    )
-                }
-            }
-            // Right rule
-            Surface(
-                modifier = Modifier.weight(1f).height(1.dp),
-                color = MaterialTheme.colorScheme.outline
-            ) {}
-        }
-    }
-}
+// remove-message-persistence Task 4: the `GapDivider` composable (the clickable
+// divider rendered at the seam between the local message history and the
+// newly-fetched tail) was deleted along with the non-contiguous gap mechanism.
+// `RenderBlock.Gap` no longer exists; the items() block iterates only
+// Conversation / ToolRun / Fold. The `chat_gap_divider_*` string resources were
+// pruned with the rest of the cache/gap UI (final-review M1).
 
 /**
  * 🟡 (glmer 🟡-6) Maximum number of per-session scroll positions retained in

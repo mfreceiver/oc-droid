@@ -106,7 +106,7 @@ class AppStateSlicesTest {
 
     @Test
     fun `CachedSessionWindow default constructor round-trips`() {
-        val w = cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
+        val w = cn.vectory.ocdroid.ui.controller.CachedSessionWindow(
             messages = emptyList(),
             partsByMessage = emptyMap(),
             olderMessagesCursor = null,
@@ -122,7 +122,7 @@ class AppStateSlicesTest {
     fun `CachedSessionWindow full constructor round-trips`() {
         val msg = Message(id = "m1", role = "user")
         val part = Part(id = "p1", type = "text")
-        val w = cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
+        val w = cn.vectory.ocdroid.ui.controller.CachedSessionWindow(
             messages = listOf(msg),
             partsByMessage = mapOf("m1" to listOf(part)),
             olderMessagesCursor = "cursor-1",
@@ -136,7 +136,7 @@ class AppStateSlicesTest {
 
     @Test
     fun `CachedSessionWindow equals hashCode copy`() {
-        val w1 = cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
+        val w1 = cn.vectory.ocdroid.ui.controller.CachedSessionWindow(
             messages = emptyList(),
             partsByMessage = emptyMap(),
             olderMessagesCursor = null,
@@ -179,10 +179,11 @@ class AppStateSlicesTest {
         assertEquals("boom", (error as TunnelActivationState.Error).message)
     }
 
-    // R-20 Phase 2: the legacy single-gap `GapInfo` class + its constructor
-    // round-trip test were removed (plan §3 N5). The multi-gap replacement
-    // (cn.vectory.ocdroid.data.cache.contract.GapMarker) is covered by GapAwareMessageListTest
-    // + BackfillAlgorithmTest.
+    // R-20 Phase 2 / remove-message-persistence Task 4: the legacy single-gap
+    // `GapInfo` class + its constructor round-trip test were removed, then the
+    // entire multi-gap replacement (the contract GapMarker + the GapFill
+    // coordinator + the gap-aware render pipeline) was deleted in Task 4 —
+    // catch-up now always merges the fetched window.
 
     @Test
     fun `NavState default lastNavPage is zero`() {

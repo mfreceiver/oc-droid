@@ -136,7 +136,6 @@
     <string name="cd_permission_marker">待授权</string>
     <string name="chat_empty_no_tab">在会话页面选择或新建对话</string>
     <string name="git_no_workdir">未选取工作目录</string>
-    <string name="cache_management_clear_session_cd">清除会话缓存</string>
     <string name="sessions_recent_section">最近</string>
     <string name="sessions_by_workdir_section">按工作目录</string>
     <string name="chat_add_menu_title">添加到消息</string>
@@ -443,10 +442,6 @@
     <string name="chat_phase_reconnecting_attempt">重新连接中（第 %1$d/%2$d 次）</string>
     <string name="chat_phase_disconnected">已断开</string>
     <string name="chat_jump_to_latest">跳到最新</string>
-    <string name="chat_gap_divider_hint">可能有未加载的消息 · 点击加载</string>
-    <!-- R-20 Phase 2: gap 已 Exhausted（服务端历史在 gap 下方结束，无法补齐）。
-         不可点击。Phase 2 fix-#5: 补 zh 翻译，消除 MissingTranslation lint error。 -->
-    <string name="chat_gap_divider_exhausted">部分消息无法加载</string>
 
     <!-- §R18 Phase 2-G: UiEvent.Error / UiEvent.Success 资源字符串。
          格式参数（%1$s 等）由 LocalContext.getString / appContext.getString
@@ -486,31 +481,6 @@
     <string name="error_sse_failed">SSE 错误：%1$s</string>
     <string name="error_respond_permission_failed">响应权限请求失败：%1$s</string>
 
-    <!-- R-20 Phase 4: 存储管理 UI（CacheManagementSection）— 持久化聊天缓存的
-         管理面板，挂在「调试」分组下。 -->
-    <string name="settings_section_cache">聊天缓存</string>
-    <string name="cache_management_title">已缓存的会话</string>
-    <string name="cache_management_empty">尚无缓存会话——打开过的会话会自动缓存到这里。</string>
-    <string name="cache_management_loading">正在读取缓存…</string>
-    <string name="cache_management_error">读取缓存失败：%1$s</string>
-    <string name="cache_management_degraded_warning">缓存已降级——加密存储无法打开，重启后缓存会丢失。</string>
-    <string name="cache_management_offline_hint">请先连接服务器再执行扫描——孤儿扫描需要服务器端的实时会话列表。</string>
-    <string name="cache_management_non_current_group_hint">请先连接到此服务器分组再执行扫描——孤儿扫描只使用当前已连接服务器。</string>
-    <string name="cache_management_group_header">服务器分组：%1$s</string>
-    <string name="cache_management_group_member_count">%1$d 个会话，%2$d 个接入点</string>
-    <string name="cache_management_row_workdir">项目目录：%1$s</string>
-    <string name="cache_management_row_workdir_unknown">（未知项目目录）</string>
-    <string name="cache_management_row_session_id">会话：%1$s</string>
-    <string name="cache_management_row_newest_at">最新消息：%1$s</string>
-    <string name="cache_management_row_verified_at">最近校验：%1$s</string>
-    <string name="cache_management_action_clear_session">清除</string>
-    <string name="cache_management_action_sweep">清除失联会话</string>
-    <string name="cache_management_clear_all_confirm">全部清除</string>
-    <string name="cache_management_sweep_result_complete">扫描完成：已校验 %1$d 个，已清除 %2$d 个。</string>
-    <string name="cache_management_sweep_result_incomplete">扫描降级（实时会话集不完整）：已校验 %1$d 个，未清除任何会话。</string>
-    <string name="cache_management_never_verified">（从未校验）</string>
-    <string name="cache_management_unknown_time">（未知）</string>
-
     <!-- §分组重写 2026-07-07：人工服务器分组（项1/2/3/4/5）。 -->
     <string name="host_group_label">服务器分组</string>
     <string name="host_group_none">独立</string>
@@ -518,9 +488,7 @@
     <string name="host_group_warning">同组 profile 共享：聊天历史、草稿、模型偏好、最近目录。选错组会导致这些数据串台或搁浅，仅可用「清除全部数据」恢复。</string>
     <string name="group_stats_named">%1$s · %2$d 个连接 · %3$d 条缓存会话</string>
     <string name="group_stats_solo">独立 · 1 个连接 · %1$d 条缓存会话</string>
-    <string name="cache_management_popup_title">缓存管理</string>
-    <string name="cache_management_sweep_all">清除失联会话</string>
-    <!-- §P5b-B (Q8)：清除数据 section + 缓存管理 3-level tree 字符串。 -->
+    <!-- §P5b-B (Q8)：清除数据 section 字符串。 -->
     <string name="cache_clear_cache">重置本地数据</string>
     <string name="cache_cached_data_size">消息缓存占用 %1$s</string>
     <string name="cache_unknown_project">未知项目</string>

@@ -72,10 +72,3 @@
 # (Note: the class lives in the .ui.chat package, not .ui.)
 -keep class cn.vectory.ocdroid.ui.chat.StatusSlotContent { *; }
 -keep class cn.vectory.ocdroid.ui.chat.StatusSlotContent$* { *; }
-
-# R-20 Phase 0: SQLCipher (net.zetetic:sqlcipher-android 4.16.0) — its AAR
-# ships a consumer-rules.pro that R8 auto-applies, keeping
-# net.zetetic.database.** (native loader + SQLiteDatabase descriptor). Do NOT
-# add a manual -keep here — it would duplicate/conflict with the consumer
-# rules. Intentionally no rule block; this comment exists only to leave a
-# paper trail for future readers expecting keep rules here.

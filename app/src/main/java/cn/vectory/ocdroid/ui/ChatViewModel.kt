@@ -155,28 +155,6 @@ class ChatViewModel @Inject constructor(
         )
     }
 
-    /**
-     * R-20 Phase 2: fill (or resume) a specific gap marker. Triggered by the
-     * UI tap on a [cn.vectory.ocdroid.ui.chat.Entry.GapMarker] divider. Routes
-     * to [cn.vectory.ocdroid.ui.chat.GapFillCoordinator.fillSingleGap] which
-     * runs the 50-step backward fill under the session-level Mutex.
-     *
-     * **Replaces** the legacy `closeGap()` → `launchCloseGap` path (plan §3 N5).
-     */
-    fun fillGap(gapId: String) {
-        val sessionId = core.store.chatFlow.value.currentSessionId ?: return
-        val fp = core.currentServerGroupFp()
-        core.appScope.launch {
-            core.gapFillCoordinator.fillSingleGap(
-                slices = core.store.slices,
-                serverGroupFp = fp,
-                sessionId = sessionId,
-                gapId = gapId,
-                onCacheWindow = core.makeCacheHook(fp),
-            )
-        }
-    }
-
     fun compactSession() {
         val chatFlow = core.store.chatFlow
         if (chatFlow.value.isCompacting) return

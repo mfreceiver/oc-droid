@@ -3,7 +3,6 @@ package cn.vectory.ocdroid.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.data.cache.CacheRepository
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.UiApplicationScope
@@ -55,10 +54,6 @@ class SessionViewModel @Inject constructor(
     private val repository: OpenCodeRepository,
     private val settingsManager: SettingsManager,
     private val effectBus: SharedEffectBus,
-    /** R-20 Phase 1: persistent cache mirror — needed so this VM's
-     *  loadSessions → onLoadMessages path persists newly-fetched windows
-     *  to the encrypted cache, parallel to AppCore.loadMessagesForEffect. */
-    private val cacheRepository: CacheRepository,
     /** R-20 Phase 1: serverGroupFp source for the cache mirror hook. */
     private val hostProfileStore: HostProfileStore,
     @UiApplicationScope private val appScope: CoroutineScope,
@@ -77,7 +72,6 @@ class SessionViewModel @Inject constructor(
         core.repository,
         core.settingsManager,
         core.effectBus,
-        core.cacheRepository,
         core.hostProfileStore,
         core.appScope,
     )

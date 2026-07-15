@@ -1,11 +1,12 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionCacheEntry
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
+import cn.vectory.ocdroid.ui.controller.CachedSessionWindow
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.ConnectionState
@@ -171,7 +172,6 @@ class SessionSwitcherTest {
                 olderMessagesCursor = s.olderMessagesCursor,
                 hasMoreMessages = s.hasMoreMessages,
                 isLoadingMessages = s.isLoadingMessages,
-                gapMarkers = s.gapMarkers,
                 staleNotice = s.staleNotice,
                 currentModel = s.currentModel
             )
@@ -390,12 +390,14 @@ class SessionSwitcherTest {
 
     // ── Step 3 (R-20 Phase 1): verify-before-hydrate effect ─────────────────
     // Phase 1: switchTo no longer synchronously seeds the chat slice from
-    // the LRU; it emits a VerifyAndHydrate effect. The handler in
-    // AppCore.dispatchSessionEffect runs cacheRepository.verifyAndLoad and
-    // ONLY on Verified copies the cached window into the slice. The tests
-    // below assert the effect is emitted with the right (fp, sid, createdAt);
-    // the chat slice stays empty until the handler runs (asserted for
-    // regression — the user must never see unverified cached content).
+    // the LRU; it emits a VerifyAndHydrate effect. remove-message-persistence
+    // Task 2 changed the handler in AppCore.dispatchSessionEffect to probe the
+    // in-memory sessionWindowCache via SessionSwitcher.peekSessionWindow
+    // (Task 6 deleted the prior cacheRepository.verifyAndLoad SQLite call);
+    // ONLY on a memory hit does it copy the cached window into the slice. The
+    // tests below assert the effect is emitted with the right (fp, sid,
+    // createdAt); the chat slice stays empty until the handler runs (asserted
+    // for regression — the user must never see unverified cached content).
 
     @Test
     fun `switchTo emits VerifyAndHydrate with createdAt from the target session`() {
@@ -828,6 +830,62 @@ class SessionSwitcherTest {
         assertNotNull("s13 present", switcher.peekSessionWindow("s13"))
     }
 
+    // ── peekSessionWindow production contract (R-20 Phase 2 / remove-message- ──
+    //    persistence Task 2): the VerifyAndHydrate handler in AppCore now uses
+    //    peekSessionWindow as a TRUE read-only memory probe (no SQLite
+    //    verifyAndLoad). These tests pin the contract it depends on:
+    //      (a) a written window is returned verbatim,
+    //      (b) an unwritten session returns null,
+    //      (c) peek does NOT promote the entry to MRU (so a verify probe
+    //          cannot evict a hotter window).
+
+    @Test
+    fun `peekSessionWindow returns a written window verbatim and null for an unwritten session`() {
+        val window = CachedSessionWindow(
+            messages = listOf(Message(id = "m1", role = "user")),
+            partsByMessage = mapOf("m1" to emptyList()),
+            olderMessagesCursor = "cursor-x",
+            hasMoreMessages = true,
+        )
+        switcher.writeSessionWindow("test-fp", "s1", window)
+
+        val hit = switcher.peekSessionWindow("s1")
+        assertNotNull("written window must be returned", hit)
+        assertEquals(listOf("m1"), hit!!.messages.map { it.id })
+        assertEquals("cursor-x", hit.olderMessagesCursor)
+        assertTrue(hit.hasMoreMessages)
+
+        assertNull(
+            "unwritten session must return null (VerifyAndHydrate cold-start path)",
+            switcher.peekSessionWindow("never-written"),
+        )
+    }
+
+    @Test
+    fun `peekSessionWindow does NOT promote the entry to most-recently-used`() {
+        // Fill the cache to capacity (12). Then peek the LRU (s1) — peek must
+        // NOT promote it, so inserting s13 evicts s1 (not s2). If peek
+        // accidentally promoted, s1 would survive and s2 would evict.
+        for (i in 1..12) {
+            switcher.writeSessionWindow("test-fp", "s$i", CachedSessionWindow(
+                messages = listOf(Message(id = "m$i", role = "user")),
+                partsByMessage = emptyMap(), olderMessagesCursor = null, hasMoreMessages = false
+            ))
+        }
+        assertEquals(12, switcher.sessionWindowCacheSize())
+
+        // Probe the LRU (s1) repeatedly — true read-only.
+        repeat(3) { assertNotNull(switcher.peekSessionWindow("s1")) }
+
+        // Overflow — evicts the TRUE LRU (s1), proving peek did not promote it.
+        switcher.writeSessionWindow("test-fp", "s13", CachedSessionWindow(
+            messages = emptyList(), partsByMessage = emptyMap(),
+            olderMessagesCursor = null, hasMoreMessages = false
+        ))
+        assertNull("peek must not promote s1 to MRU (s1 should still evict)", switcher.peekSessionWindow("s1"))
+        assertNotNull("s13 present after overflow", switcher.peekSessionWindow("s13"))
+    }
+
     @Test
     fun `clearSessionWindowCache drops all entries`() {
         switcher.writeSessionWindow("test-fp", "s1", CachedSessionWindow(
@@ -839,6 +897,155 @@ class SessionSwitcherTest {
         switcher.clearSessionWindowCache()
 
         assertEquals(0, switcher.sessionWindowCacheSize())
+    }
+
+    // ── remove-message-persistence Task 3: appendMessageIfCached ───────────
+    //    The SSE `message.updated` new-insert branch (SessionSyncCoordinator)
+    //    emits AppendMessageToCache → AppCore handler → this method. Pins the
+    //    contract: HIT appends message + merges parts under message.id;
+    //    MISS is a no-op (cold-start sessions do not proactively build a
+    //    cache). fp-scoped: an append under a foreign fp does NOT touch the
+    //    current group's window.
+
+    @Test
+    fun `appendMessageIfCached appends message and merges parts on a cached window`() {
+        // Seed a cached window for (test-fp, s1) with one existing message.
+        val existingMsg = Message(id = "m1", role = "user")
+        switcher.writeSessionWindow("test-fp", "s1", CachedSessionWindow(
+            messages = listOf(existingMsg),
+            partsByMessage = mapOf("m1" to emptyList()),
+            olderMessagesCursor = "cursor-keep",
+            hasMoreMessages = true,
+        ))
+
+        // Append a new message with parts.
+        val newPart = Part(id = "p-new", type = "text")
+        val newMsg = Message(id = "m2", role = "assistant")
+        switcher.appendMessageIfCached(
+            serverGroupFp = "test-fp",
+            sessionId = "s1",
+            message = newMsg,
+            parts = listOf(newPart),
+        )
+
+        val hit = switcher.peekSessionWindow("s1")
+        assertNotNull("window still resident after append", hit)
+        val window = hit!!
+        assertEquals(
+            "appended message must be the tail of messages",
+            listOf("m1", "m2"),
+            window.messages.map { it.id },
+        )
+        assertEquals(
+            "parts merged under the new message.id",
+            listOf("p-new"),
+            window.partsByMessage["m2"]?.map { it.id },
+        )
+        // Cursor / hasMoreMessages are preserved (append does NOT touch them).
+        assertEquals("cursor-keep", window.olderMessagesCursor)
+        assertTrue(window.hasMoreMessages)
+    }
+
+    @Test
+    fun `appendMessageIfCached is a no-op when the window is not cached`() {
+        // No writeSessionWindow call — (test-fp, s-cold) is not resident.
+        val beforeSize = switcher.sessionWindowCacheSize()
+        assertEquals(0, beforeSize)
+
+        switcher.appendMessageIfCached(
+            serverGroupFp = "test-fp",
+            sessionId = "s-cold",
+            message = Message(id = "m-x", role = "assistant"),
+            parts = emptyList(),
+        )
+
+        assertEquals(
+            "no-op on miss: cache size must not change (cold-start sessions do not proactively build a cache)",
+            beforeSize,
+            switcher.sessionWindowCacheSize(),
+        )
+        assertNull(
+            "no-op on miss: window must not be created",
+            switcher.peekSessionWindow("s-cold"),
+        )
+    }
+
+    @Test
+    fun `appendMessageIfCached is scoped by serverGroupFp - foreign fp does not touch this group's window`() {
+        // Seed (test-fp, s-shared) only.
+        switcher.writeSessionWindow("test-fp", "s-shared", CachedSessionWindow(
+            messages = listOf(Message(id = "m1", role = "user")),
+            partsByMessage = emptyMap(),
+            olderMessagesCursor = null,
+            hasMoreMessages = false,
+        ))
+
+        // Append under a FOREIGN fp — there is no (other-fp, s-shared) entry.
+        switcher.appendMessageIfCached(
+            serverGroupFp = "other-fp",
+            sessionId = "s-shared",
+            message = Message(id = "m-foreign", role = "assistant"),
+            parts = emptyList(),
+        )
+
+        val hit = switcher.peekSessionWindow("s-shared")
+        // peekSessionWindow reads under currentServerGroupFp() = "test-fp".
+        assertNotNull(hit)
+        assertEquals(
+            "test-fp window untouched by foreign-fp append",
+            listOf("m1"),
+            hit!!.messages.map { it.id },
+        )
+    }
+
+    // ── review-fix round 1: ID-aware upsert regression ─────────────────────
+    //    The effect is delivered asynchronously through a SharedFlow; another
+    //    writer (writeSessionWindow from a fetch completion OR
+    //    captureCurrentSessionWindow from a session switch) can land a window
+    //    already containing this message.id BEFORE the AppendMessageToCache
+    //    handler runs. The handler MUST stay idempotent under that reorder:
+    //    do not grow the list cardinality (replace in place) and do not
+    //    overwrite already-populated parts with the effect's empty list.
+
+    @Test
+    fun `appendMessageIfCached is idempotent by message id - replaces in place and preserves existing parts when incoming parts are empty`() {
+        // Seed a resident window for (test-fp, s1) that ALREADY contains the
+        // same message id the effect will deliver, with NON-EMPTY parts.
+        val existingMsg = Message(id = "m-dup", role = "user")
+        val existingPart = Part(id = "p-keep", type = "text")
+        switcher.writeSessionWindow("test-fp", "s1", CachedSessionWindow(
+            messages = listOf(existingMsg),
+            partsByMessage = mapOf("m-dup" to listOf(existingPart)),
+            olderMessagesCursor = "cursor-keep",
+            hasMoreMessages = true,
+        ))
+
+        // The effect handler fires LATE (a write-back or fetch completion
+        // landed first). It delivers the same message id with empty parts —
+        // the standard `message.updated` insert payload (parts arrive in a
+        // separate part event).
+        val replayedMsg = Message(id = "m-dup", role = "user")
+        switcher.appendMessageIfCached(
+            serverGroupFp = "test-fp",
+            sessionId = "s1",
+            message = replayedMsg,
+            parts = emptyList(),
+        )
+
+        val window = switcher.peekSessionWindow("s1")!!
+        assertEquals(
+            "duplicate-id append must NOT grow list cardinality (replace, not append)",
+            listOf("m-dup"),
+            window.messages.map { it.id },
+        )
+        assertEquals(
+            "existing parts must be preserved when incoming parts are empty (effect's empty list is not a clear instruction)",
+            listOf("p-keep"),
+            window.partsByMessage["m-dup"]?.map { it.id },
+        )
+        // Cursor / hasMoreMessages preserved (upsert does NOT touch them).
+        assertEquals("cursor-keep", window.olderMessagesCursor)
+        assertTrue(window.hasMoreMessages)
     }
 
     // ── R-20 Phase 1 review-fix #2: writeSessionWindow uses captured fp ────

@@ -141,7 +141,6 @@
     <string name="cd_permission_marker">Pending permission</string>
     <string name="chat_empty_no_tab">Pick or start a conversation from Sessions</string>
     <string name="git_no_workdir">No workdir selected</string>
-    <string name="cache_management_clear_session_cd">Clear session cache</string>
     <string name="sessions_recent_section">Recent</string>
     <string name="sessions_by_workdir_section">By workdir</string>
     <string name="chat_add_menu_title">Add to message</string>
@@ -471,10 +470,6 @@
     <string name="chat_phase_reconnecting_attempt">reconnecting (attempt %1$d/%2$d)</string>
     <string name="chat_phase_disconnected">disconnected</string>
     <string name="chat_jump_to_latest">Jump to latest</string>
-    <string name="chat_gap_divider_hint">Some messages may be unloaded · tap to load</string>
-    <!-- R-20 Phase 2: shown when a gap is Exhausted (server history ended below
-         the gap; cannot be bridged). Non-tappable. -->
-    <string name="chat_gap_divider_exhausted">Some messages could not be loaded</string>
 
     <!-- §R18 Phase 2-G: UiEvent.Error / UiEvent.Success resource strings.
          Format args (%1$s etc.) are filled at resolution time by
@@ -517,32 +512,6 @@
     <string name="error_sse_failed">SSE Error: %1$s</string>
     <string name="error_respond_permission_failed">Failed to respond to permission: %1$s</string>
 
-    <!-- R-20 Phase 4: CacheManagementSection — storage management UI for the
-         persistent chat cache. Listed here in display order; the section is
-         surfaced under the existing "Debug" group header in SettingsScreen. -->
-    <string name="settings_section_cache">Chat Cache</string>
-    <string name="cache_management_title">Cached chat sessions</string>
-    <string name="cache_management_empty">No cached sessions yet — chat sessions will be cached here automatically once you open them.</string>
-    <string name="cache_management_loading">Loading cached sessions…</string>
-    <string name="cache_management_error">Failed to read cache: %1$s</string>
-    <string name="cache_management_degraded_warning">Cache is degraded — the encrypted store could not be opened, so the cache will be lost on restart.</string>
-    <string name="cache_management_offline_hint">Connect to the server before running a sweep — the orphan scan needs the live session list.</string>
-    <string name="cache_management_non_current_group_hint">Connect to this server group before running a sweep — the orphan scan only uses the connected server.</string>
-    <string name="cache_management_group_header">Server group: %1$s</string>
-    <string name="cache_management_group_member_count">%1$d session(s), %2$d profile(s)</string>
-    <string name="cache_management_row_workdir">Workdir: %1$s</string>
-    <string name="cache_management_row_workdir_unknown">(unknown workdir)</string>
-    <string name="cache_management_row_session_id">Session: %1$s</string>
-    <string name="cache_management_row_newest_at">Latest message: %1$s</string>
-    <string name="cache_management_row_verified_at">Last verified: %1$s</string>
-    <string name="cache_management_action_clear_session">Clear</string>
-    <string name="cache_management_action_sweep">Clear lost sessions</string>
-    <string name="cache_management_clear_all_confirm">Clear all</string>
-    <string name="cache_management_sweep_result_complete">Sweep complete: verified %1$d, evicted %2$d.</string>
-    <string name="cache_management_sweep_result_incomplete">Sweep degraded (alive set incomplete): verified %1$d, nothing evicted.</string>
-    <string name="cache_management_never_verified">(never verified)</string>
-    <string name="cache_management_unknown_time">(unknown)</string>
-
     <!-- §Grouping rewrite 2026-07-07: manual server grouping (item 1/2/3/4/5). -->
     <string name="host_group_label">Server group</string>
     <string name="host_group_none">Standalone</string>
@@ -550,9 +519,7 @@
     <string name="host_group_warning">Profiles in the same group share cached chat history, drafts, model preferences, and recent directories. Choosing the wrong group will mix or strand this data; only \"Clear all local data\" can recover it.</string>
     <string name="group_stats_named">%1$s · %2$d connection(s) · %3$d cached session(s)</string>
     <string name="group_stats_solo">Standalone · 1 connection · %1$d cached session(s)</string>
-    <string name="cache_management_popup_title">Cache Management</string>
-    <string name="cache_management_sweep_all">Clear lost sessions</string>
-    <!-- §P5b-B (Q8): 清除数据 section + 缓存管理 3-level tree strings. -->
+    <!-- §P5b-B (Q8): 清除数据 section strings. -->
     <string name="cache_clear_cache">Reset local data</string>
     <string name="cache_cached_data_size">Message cache %1$s</string>
     <string name="cache_unknown_project">Unknown project</string>

@@ -82,12 +82,6 @@ class SessionSyncCoordinatorTest {
     /** CP1 (notify Phase-0): single connection-identity store. */
     private lateinit var identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
     /**
-     * R-20 Phase 1 (C4): persistent cache mock. Relaxed by default (returns
-     * Unit / null); individual tests re-stub to verify the
-     * appendMessageIfSessionCached call on message.updated new-insert.
-     */
-    private lateinit var cacheRepository: cn.vectory.ocdroid.data.cache.CacheRepository
-    /**
      * §R-17 batch2 step e final: in-test fixture carrying the prior snapshot
      * so successive `seed { ... }` calls compose against the prior state.
      * Production no longer has an AppState mirror; this fixture exists only
@@ -114,7 +108,6 @@ class SessionSyncCoordinatorTest {
         recordedUiEvents = mutableListOf()
         scope = TestScope(UnconfinedTestDispatcher())
         identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
-        cacheRepository = io.mockk.mockk(relaxed = true)
         // Drain every emitted effect into collectedEffects so the test bodies
         // can filter by type. Launched in scope so it auto-cancels at test end.
         scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { effects.effectsConsumed.toList(collectedEffects) }
@@ -122,7 +115,6 @@ class SessionSyncCoordinatorTest {
         coordinator = SessionSyncCoordinator(
             scope, slices, settingsManager, effects,
             currentServerGroupFp = { "test-fp" },
-            cacheRepository = cacheRepository,
             identityStore = identityStore,
         )
     }
@@ -198,7 +190,6 @@ class SessionSyncCoordinatorTest {
                 olderMessagesCursor = s.olderMessagesCursor,
                 hasMoreMessages = s.hasMoreMessages,
                 isLoadingMessages = s.isLoadingMessages,
-                gapMarkers = s.gapMarkers,
                 staleNotice = s.staleNotice,
                 currentModel = s.currentModel
             )
@@ -697,15 +688,20 @@ class SessionSyncCoordinatorTest {
         assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
     }
 
-    // ── R-20 Phase 1 (C4, maxer I11): message.updated new-insert writes DB ──
+    // ── remove-message-persistence Task 3: message.updated new-insert emits ──
+    //    AppendMessageToCache effect (replaces the old
+    //    cacheRepository.appendMessageIfSessionCached suspend call).
 
     @Test
-    fun `C4 message updated new insert appends to persistent cache`() {
+    fun `C4 message updated new insert emits AppendMessageToCache effect`() {
         // found=false (id absent from local list) → the message was just
-        // inserted into the slice. The persistent cache must mirror it via
-        // appendMessageIfSessionCached so a subsequent switch-back sees it.
-        // The coordinator's scope uses UnconfinedTestDispatcher, so the
-        // scope.launch append runs eagerly before the assertion below.
+        // inserted into the slice. Task 3: instead of calling
+        // cacheRepository.appendMessageIfSessionCached, the coordinator
+        // emits ControllerEffect.AppendMessageToCache so AppCore can
+        // delegate the in-memory LRU append to SessionSwitcher. The
+        // coordinator's scope uses UnconfinedTestDispatcher, so the
+        // synchronous tryEmitEffect lands in collectedEffects before the
+        // assertion below.
         setCurrentSession("session-1")
         seed { it.copy(messages = listOf(Message(id = "m1", role = "user"))) }
 
@@ -717,23 +713,27 @@ class SessionSyncCoordinatorTest {
             })
         })
 
-        // Verify appendMessageIfSessionCached was called once for the new id.
-        io.mockk.coVerify(exactly = 1) {
-            cacheRepository.appendMessageIfSessionCached(
-                "test-fp",
-                "session-1",
-                match { it.id == "m2" },
-                emptyList(),
-            )
-        }
+        // Verify exactly one AppendMessageToCache effect for the new id.
+        val appends = collectedEffects
+            .filterIsInstance<ControllerEffect.AppendMessageToCache>()
+        assertEquals("exactly one append effect emitted", 1, appends.size)
+        val append = appends.single()
+        assertEquals("test-fp", append.serverGroupFp)
+        assertEquals("session-1", append.sessionId)
+        assertEquals("m2", append.message.id)
+        assertTrue(
+            "parts must be empty (the new message has no parts yet)",
+            append.parts.isEmpty(),
+        )
     }
 
     @Test
-    fun `C4 message updated patch does NOT append to persistent cache`() {
+    fun `C4 message updated patch does NOT emit AppendMessageToCache`() {
         // found=true (id already in local list) → the message was patched in
-        // place. The cache must NOT be re-appended (the existing entry is
-        // already correct; appending would be a redundant write + would
-        // overwrite the cached parts with emptyList).
+        // place. The append effect must NOT be emitted: the existing entry is
+        // already correct, and re-emitting would route a redundant append +
+        // parts-empty overwrite into the in-memory LRU (see the ID-aware
+        // upsert in SessionSwitcher.appendMessageIfCached).
         setCurrentSession("session-1")
         seed {
             it.copy(
@@ -753,17 +753,21 @@ class SessionSyncCoordinatorTest {
             })
         })
 
-        // Patch path: appendMessageIfSessionCached MUST NOT fire.
-        io.mockk.coVerify(exactly = 0) {
-            cacheRepository.appendMessageIfSessionCached(any(), any(), any(), any())
-        }
+        // New-effect contract: NO AppendMessageToCache emitted from the
+        // patch-existing branch.
+        val appends = collectedEffects
+            .filterIsInstance<ControllerEffect.AppendMessageToCache>()
+        assertTrue(
+            "patch-existing branch must NOT emit AppendMessageToCache (got ${appends.size})",
+            appends.isEmpty(),
+        )
     }
 
     @Test
-    fun `C4 message updated non-current session does NOT append to cache`() {
+    fun `C4 message updated non-current session does NOT emit AppendMessageToCache`() {
         // Defensive session guard: append (like the slice insert) only fires
         // for the CURRENT session. A non-current session's insert is ignored
-        // entirely (no slice write, no cache write).
+        // entirely (no slice write, no effect emit, no cache write).
         setCurrentSession("session-1")
         seed { it.copy(messages = listOf(Message(id = "m1", role = "user"))) }
 
@@ -775,9 +779,14 @@ class SessionSyncCoordinatorTest {
             })
         })
 
-        io.mockk.coVerify(exactly = 0) {
-            cacheRepository.appendMessageIfSessionCached(any(), any(), any(), any())
-        }
+        // New-effect contract: NO AppendMessageToCache emitted from the
+        // non-current-session branch.
+        val appends = collectedEffects
+            .filterIsInstance<ControllerEffect.AppendMessageToCache>()
+        assertTrue(
+            "non-current-session branch must NOT emit AppendMessageToCache (got ${appends.size})",
+            appends.isEmpty(),
+        )
     }
 
     // ── §recent-sort-by-message: bump session.time.updated on message events ──

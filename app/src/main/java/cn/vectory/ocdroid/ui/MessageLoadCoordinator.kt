@@ -20,8 +20,9 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * Design:
  * - Per-session (keyed by sessionId), not global: different sessions never
- *   contend. Mirrors the per-session mutex pattern in
- *   [cn.vectory.ocdroid.ui.chat.GapFillCoordinator].
+ *   contend. (Originally mirrored the per-session mutex pattern of a
+ *   since-deleted gap-fill coordinator; retained as the catch-up / loadMore /
+ *   loadMessages serialization primitive.)
  * - Guards ONLY the slice mutation critical section, NEVER the network call —
  *   in-flight requests run concurrently; only the read-compute-write of the
  *   chat slice is serialized. So a background reload and a user loadMore fetch

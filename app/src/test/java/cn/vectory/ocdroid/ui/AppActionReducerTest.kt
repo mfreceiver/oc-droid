@@ -1,8 +1,6 @@
 package cn.vectory.ocdroid.ui
 
 import cn.vectory.ocdroid.data.api.CommandInfo
-import cn.vectory.ocdroid.data.cache.contract.GapFillState
-import cn.vectory.ocdroid.data.cache.contract.GapMarker
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.PermissionRequest
@@ -351,7 +349,6 @@ class AppActionReducerTest {
                 olderMessagesCursor = "cursor-old",
                 hasMoreMessages = true,
                 staleNotice = true,
-                gapMarkers = listOf(GapMarker("g1", "lo", "hi", null, GapFillState.Idle)),
                 revertCutoffs = mapOf("m1" to RevertCutoff("sess-old", "m1", RevertCutoffState.PendingFetch)),
                 deltaBuffer = mapOf("p1" to "buf"),
                 fullTextBuffer = mapOf("p2" to "full"),
@@ -378,7 +375,6 @@ class AppActionReducerTest {
         assertNull("olderMessagesCursor cleared cross-host", out.chat.olderMessagesCursor)
         assertFalse("hasMoreMessages cleared cross-host", out.chat.hasMoreMessages)
         assertFalse("staleNotice cleared cross-host", out.chat.staleNotice)
-        assertTrue("gapMarkers cleared cross-host", out.chat.gapMarkers.isEmpty())
         assertTrue("revertCutoffs cleared cross-host", out.chat.revertCutoffs.isEmpty())
         assertTrue("deltaBuffer cleared cross-host", out.chat.deltaBuffer.isEmpty())
         assertTrue("fullTextBuffer cleared cross-host", out.chat.fullTextBuffer.isEmpty())
@@ -546,8 +542,8 @@ class AppActionReducerTest {
         // §fix-draft-model-leak: currentModel MUST be cleared so the prior session's
         // model does not leak into the draft picker.
         // §fix-leak-window (fix B): the FULL per-session clear now also resets
-        // gapMarkers / cursor / hasMoreMessages / staleNotice / etc. — seeded
-        // non-default so the assertions prove the reducer clears them.
+        // cursor / hasMoreMessages / staleNotice / etc. — seeded non-default
+        // so the assertions prove the reducer clears them.
         val prior = StoreState.initial().copy(
             chat = ChatState(
                 currentSessionId = "old",
@@ -559,7 +555,6 @@ class AppActionReducerTest {
                 olderMessagesCursor = "cursor-old",
                 hasMoreMessages = true,
                 staleNotice = true,
-                gapMarkers = listOf(GapMarker("g1", "lo", "hi", null, GapFillState.Idle)),
                 revertCutoffs = mapOf("m1" to RevertCutoff("old", "m1", RevertCutoffState.PendingFetch)),
                 deltaBuffer = mapOf("p1" to "buf"),
                 fullTextBuffer = mapOf("p2" to "full"),
@@ -582,7 +577,6 @@ class AppActionReducerTest {
         assertNull("olderMessagesCursor cleared on draft-start", out.chat.olderMessagesCursor)
         assertFalse("hasMoreMessages cleared on draft-start", out.chat.hasMoreMessages)
         assertFalse("staleNotice cleared on draft-start", out.chat.staleNotice)
-        assertTrue("gapMarkers cleared on draft-start", out.chat.gapMarkers.isEmpty())
         assertTrue("revertCutoffs cleared on draft-start", out.chat.revertCutoffs.isEmpty())
         assertTrue("deltaBuffer cleared on draft-start", out.chat.deltaBuffer.isEmpty())
         assertTrue("fullTextBuffer cleared on draft-start", out.chat.fullTextBuffer.isEmpty())

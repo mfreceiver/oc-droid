@@ -585,78 +585,12 @@ class SettingsManagerTest {
         assertFalse(SettingsManager.LEGACY_BASIC_AUTH_PASSWORD_ID.isBlank())
     }
 
-    /**
-     * R-20 Phase 0: `cache_db_key`（SQLCipher DB 密钥，存 EncryptedSharedPreferences）
-     * 必须在 clearAllLocalData() 中保留 —— 否则一次"reset local data"会让缓存 DB
-     * 永久不可读（密钥永不轮换），下次打开触发 CacheModule 的 destructive reset。
-     * 该 key 与 basic_auth_password_* 同属"基础设施"白名单。
-     */
-    @Test
-    fun `clearAllLocalData preserves the cache DB key`() {
-        // 直接通过 encryptedPrefs API 写入（CacheKeyStore 也走同一个 encrypted
-        // prefs 文件）；这里只验证白名单机制，不重新构造 CacheKeyStore。
-        val espField = SettingsManager::class.java.getDeclaredField("encryptedPrefs")
-        espField.isAccessible = true
-        val esp = espField.get(settings) as android.content.SharedPreferences
-        esp.edit().putString(SettingsManager.CACHE_DB_KEY, "phase0-cache-key").apply()
-
-        // 顺带写一个应被擦除的普通键，验证擦除仍生效（不是"全保留"）。
-        settings.currentSessionId = "wipe-me"
-        settings.clearAllLocalData()
-
-        assertEquals("phase0-cache-key", esp.getString(SettingsManager.CACHE_DB_KEY, null))
-        assertNull(settings.currentSessionId)
-    }
-
-    @Test
-    fun `CACHE_DB_KEY constant is stable and nonblank`() {
-        // 防回归：CacheKeyStore 与 clearAllLocalData 共享此常量，改名或变 blank
-        // 会让两处失配（一处 wipe 一处保留）—— 缓存要么泄漏跨身份，要么不可读。
-        assertNotNull(SettingsManager.CACHE_DB_KEY)
-        assertFalse(SettingsManager.CACHE_DB_KEY.isBlank())
-    }
-
-    // ───────────── R-20 Phase 3: per-serverGroup daily-sweep dedup ─────────
-
-    @Test
-    fun `lastSweepEpochDay returns null when no sweep has been recorded`() {
-        assertNull("fresh install has no sweep recorded", settings.getLastSweepEpochDay("g1"))
-    }
-
-    @Test
-    fun `lastSweepEpochDay round-trips per serverGroupFp`() {
-        settings.setLastSweepEpochDay("g1", 19_000L)
-        settings.setLastSweepEpochDay("g2", 19_001L)
-        assertEquals(19_000L, settings.getLastSweepEpochDay("g1"))
-        assertEquals(19_001L, settings.getLastSweepEpochDay("g2"))
-        // Independent keys per fp.
-        settings.setLastSweepEpochDay("g1", 19_999L)
-        assertEquals(19_999L, settings.getLastSweepEpochDay("g1"))
-        assertEquals(19_001L, settings.getLastSweepEpochDay("g2"))
-    }
-
-    @Test
-    fun `lastSweepEpochDay is wiped by clearAllLocalData`() {
-        // The sweep-day marker is a per-process cache-management key, NOT a
-        // connection credential — it MUST be wiped on reset so the next
-        // connect re-sweeps. (If it survived, a post-reset cache would skip
-        // its first sweep and stale rows would linger.)
-        settings.setLastSweepEpochDay("g1", 19_000L)
-        settings.clearAllLocalData()
-        assertNull(
-            "sweep-day marker wiped by clearAllLocalData",
-            settings.getLastSweepEpochDay("g1"),
-        )
-    }
-
-    @Test
-    fun `lastSweepEpochDay blank-fp guard is a no-op`() {
-        // Defensive: a blank fp would corrupt the SettingsManager key
-        // namespace (collide with `last_sweep_epoch_` itself). The public
-        // methods blank-guard upstream.
-        settings.setLastSweepEpochDay("", 19_000L)
-        assertNull("blank-fp write is a no-op", settings.getLastSweepEpochDay(""))
-    }
+    // remove-message-persistence Task 6: the prior
+    // `clearAllLocalData preserves the cache DB key` +
+    // `CACHE_DB_KEY constant is stable and nonblank` tests were deleted
+    // together with the SettingsManager.CACHE_DB_KEY constant (the SQLCipher
+    // chat-cache passphrase + the encrypted chat-cache surface it gated are
+    // gone — see SettingsManager.clearAllLocalData's preserved-keys whitelist).
 
     // ───── §reactive-workdir: currentWorkdirFlow mirror (opuser🟠-5 / kimo 0.6.1 round-1) ─
     // The StateFlow mirror of currentWorkdir backs the Workspace → Changes

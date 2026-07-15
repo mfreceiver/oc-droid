@@ -432,7 +432,7 @@ class StreamingMarkdownHelpersTest {
         // size exceeds the cap, and (2) a recently-queried entry is promoted
         // (access-order) and survives an overflow that would otherwise evict it.
         // Mirrors the repo's existing eviction-test convention
-        // (DebugLogTest / SessionSwitcherTest / CacheRepositoryEvictionTest).
+        // (DebugLogTest / SessionSwitcherTest).
         //
         // §T2: keys are `(stableKey, width)` Pairs; width is pinned to 100 so
         // eviction semantics are unchanged from the bare-key era.

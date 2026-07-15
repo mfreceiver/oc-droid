@@ -1,13 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-   Exclude shared_prefs AND the cache database from auto-backup.
-   - shared_prefs: EncryptedSharedPreferences (server URL, credentials,
-     cache_db_key).
-   - database (R-20 Phase 0): chat_cache.db + -wal/-shm. SQLCipher's key
-     lives in EncryptedSharedPreferences (already excluded), so a copied DB
-     is unreadable on another device — but the exclude is defense-in-depth
-     per plan §0 N9 (allowBackup=true stays so users keep their preferences;
-     the DB specifically never leaves the device).
+   Exclude shared_prefs from auto-backup.
+   - shared_prefs: EncryptedSharedPreferences (server URL, credentials).
+   - database: kept excluded as defense-in-depth (no longer strictly required
+     since remove-message-persistence Task 6 deleted chat_cache.db, but
+     harmless and stable).
    See https://developer.android.com/guide/topics/data/autobackup
 -->
 <full-backup-content>

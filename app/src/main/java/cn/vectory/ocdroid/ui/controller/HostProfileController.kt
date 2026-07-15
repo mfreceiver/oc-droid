@@ -1,9 +1,7 @@
 package cn.vectory.ocdroid.ui.controller
 
-import android.content.Context
 import android.util.Log
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.data.cache.CacheRepository
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
@@ -83,20 +81,8 @@ class HostProfileController(
     private val trafficTracker: TrafficTracker,
     private val effects: SharedEffectBus,
     /** R-20 Phase 1: provider for the current host's serverGroupFp. Used by
-     *  [selectHostProfile] (4-step previous/target fp compare) and
-     *  [resetLocalDataAndResync] (deleteDatabase name scoping). */
+     *  [selectHostProfile] (4-step previous/target fp compare). */
     internal val currentServerGroupFp: () -> String,
-    /** R-20 Phase 1: app Context for deleteDatabase() in the reset path.
-     *  Injected (not derived from repository) so the cache reset does not
-     *  reach across layers. */
-    private val appContext: Context,
-    /** R-20 Phase 1: persistent cache for [resetLocalDataAndResync]'s
-     *  clearAll() + deleteDatabase path. The EvictGroup emission from
-     *  [selectHostProfile] routes through AppCore.dispatchHostEffect (which
-     *  holds its own CacheRepository); resetLocalDataAndResync is a fuller
-     *  nuke that bypasses the per-group effect and clears everything, so it
-     *  calls cacheRepository directly here. */
-    internal val cacheRepository: CacheRepository,
     /**
      * CP1 (notify Phase-0): the single connection-identity store. The
      * reconfigure barrier origin — [configureServer] /
@@ -868,45 +854,24 @@ class HostProfileController(
         if (reconfigureBarrier != null) {
             scope.launch {
                 reconfigureBarrier.reconfigure {
-                    runCatching { cacheRepository.clearAll() }
-                        .onFailure { DebugLog.e(TAG, "cacheRepository.clearAll failed during reset", it) }
-                    runCatching { appContext.deleteDatabase(CACHE_DB_NAME) }
-                        .onFailure { DebugLog.e(TAG, "deleteDatabase($CACHE_DB_NAME) failed during reset", it) }
                     resetLocalStateCore()
                 }
-                effects.emitEffect(ControllerEffect.RefreshCacheListing)
                 effects.emitEffect(ControllerEffect.ColdStartReconnect)
             }
             return
         }
         // CP1 (notify Phase-0) §2 step 1: SYNCHRONOUSLY bump the epoch AND
         // invalidate the old identity BEFORE any reset/reconnect runs. The
-        // full-data reset is a reconfigure (the SSE collector + all caches
-        // are torn down); the epoch bump ensures any in-flight collector /
-        // directory fetch from the pre-reset state is dropped.
+        // full-data reset is a reconfigure (the SSE collector + all in-memory
+        // caches are torn down); the epoch bump ensures any in-flight
+        // collector / directory fetch from the pre-reset state is dropped.
         identityStore?.beginReconfigure()
-        // R-20 Phase 1 (dser I-2, maxer B1): wipe the cache DB FIRST (before
-        // clearAllLocalData) so the cache_db_key preserved-key has nothing to
-        // unlock. deleteDatabase removes the .db + -wal + -shm sidecars;
-        // cacheRepository.clearAll() wipes any in-memory rows that the
-        // (possibly still-open) Room handle holds. Order: clearAll →
-        // deleteDatabase → clearAllLocalData (prefs). cacheRepository.clearAll
-        // is suspend → wrapped in scope.launch (fire-and-forget; the rest of
-        // reset runs synchronously and is the user-visible path).
-        scope.launch {
-            runCatching { cacheRepository.clearAll() }
-                .onFailure { DebugLog.e(TAG, "cacheRepository.clearAll failed during reset", it) }
-            runCatching { appContext.deleteDatabase(CACHE_DB_NAME) }
-                .onFailure { DebugLog.e(TAG, "deleteDatabase($CACHE_DB_NAME) failed during reset", it) }
-            // §analysis-8b: emit AFTER deleteDatabase lands so the SettingsVM
-            // refresh sees an empty cache (fire-and-forget launch; the rest of
-            // the reset path runs synchronously and does not touch cacheRepository).
-            effects.emitEffect(ControllerEffect.RefreshCacheListing)
-        }
-        // 1. Wipe persisted local data (preserves connection + tunnel creds +
-        //    cache_db_key — the key survives so the next app start can re-open
-        //    the freshly-created empty cache DB without triggering CacheModule's
-        //    destructive-reset fallback).
+        // remove-message-persistence Task 5: the cacheRepository.clearAll() +
+        // appContext.deleteDatabase(...) that used to wipe the SQLite cache DB
+        // here were removed together with the persistence layer. The in-memory
+        // session-window cache is still cleared via the
+        // [ControllerEffect.ClearSessionWindowCache] emission below (step 3).
+        // 1. Wipe persisted local data (preserves connection + tunnel creds).
         settingsManager.clearAllLocalData()
         // 2. Zero the in-memory traffic tracker (direct — same domain).
         trafficTracker.reset()
@@ -935,7 +900,6 @@ class HostProfileController(
                 // §history-load-fix: reset the loadMore flag alongside the
                 // background-reload flag (parallel reset point).
                 isLoadingMoreMessages = false,
-                gapMarkers = emptyList(),
                 staleNotice = false,
                 currentModel = null,
                 // §chat-ux-batch T7 (B2): clear the TRANSIENT pending picks on
@@ -988,7 +952,6 @@ class HostProfileController(
                 hasMoreMessages = false,
                 isLoadingMessages = false,
                 isLoadingMoreMessages = false,
-                gapMarkers = emptyList(),
                 staleNotice = false,
                 currentModel = null,
                 // §chat-ux-batch T7 (B2): clear the TRANSIENT pending picks on
@@ -1011,12 +974,5 @@ class HostProfileController(
 
     private companion object {
         private const val TAG = "HostProfileController"
-        /** R-20 Phase 1: matches [cn.vectory.ocdroid.di.CacheModule]'s DB name
-         *  so resetLocalDataAndResync's deleteDatabase targets the cache DB.
-         *  Kept here (not imported from CacheModule) to avoid coupling the
-         *  controller to the DI layer — drift risk is bounded (a rename in
-         *  CacheModule would be caught by androidTest's
-         *  CacheDatabaseInstrumentedTest which references the same name). */
-        private const val CACHE_DB_NAME = "chat_cache.db"
     }
 }

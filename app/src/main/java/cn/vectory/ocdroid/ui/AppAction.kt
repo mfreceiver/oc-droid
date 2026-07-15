@@ -250,9 +250,8 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
             // Cross-group (异组 switch / delete active host): full purge of
             // per-server + per-profile state.
             // §fix-leak-window (release-gate fix B): clearSessionData also
-            // resets currentModel / gapMarkers / olderMessagesCursor /
-            // hasMoreMessages / staleNotice / revertCutoffs / SSE-coalesce
-            // buffers, AND sessionList pendingPermissions/pendingQuestions are
+            // resets currentModel / olderMessagesCursor / hasMoreMessages /
+            // staleNotice / revertCutoffs / SSE-coalesce buffers, AND sessionList pendingPermissions/pendingQuestions are
             // cleared — pre-B2 left all of these stale (verified via
             // `git show e190cce^:.../HostProfileController.kt` purgePerHostState
             // + `git show e190cce^:.../AppCoreOrchestration.kt`
@@ -331,8 +330,8 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
     is AppAction.WorkdirDraftStarted -> state.copy(
         // §fix-leak-window (release-gate fix B): full per-session clear via
         // clearSessionData — closes the draft leak window consistently with
-        // the cross-host purge (currentModel / gapMarkers / cursor / etc. all
-        // reset; pre-B2 left them stale). The 3 chrome fields are preserved
+        // the cross-host purge (currentModel / cursor / etc. all reset;
+        // pre-B2 left them stale). The 3 chrome fields are preserved
         // via .copy() inside clearSessionData.
         chat = state.chat.clearSessionData(),
         sessionList = state.sessionList.copy(
@@ -424,7 +423,7 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
  *
  * Closes the cross-host / draft leak window: pre-B2
  * `purgePerHostState` (cross-group) + `createSessionInWorkdir*` left
- * `currentModel` / `gapMarkers` / `olderMessagesCursor` / `hasMoreMessages`
+ * `currentModel` / `olderMessagesCursor` / `hasMoreMessages`
  * / `staleNotice` / `revertCutoffs` / `deltaBuffer` / `fullTextBuffer` /
  * `pendingFlushPartIds` stale — verified via
  * `git show e190cce^:app/src/main/java/cn/vectory/ocdroid/ui/controller/HostProfileController.kt`
@@ -432,7 +431,7 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
  * `git show e190cce^:app/src/main/java/cn/vectory/ocdroid/ui/AppCoreOrchestration.kt`
  * (createSessionInWorkdirForEffect): NEITHER cleared these fields. Fix B is
  * therefore a deliberate IMPROVEMENT, not a missed regression — a stale
- * model / cursor / gap-set from the prior host or session no longer bleeds
+ * model / cursor from the prior host or session no longer bleeds
  * into the new view. Uses `.copy()` so the 3 chrome fields are preserved.
  */
 private fun ChatState.clearSessionData(): ChatState = copy(
@@ -446,7 +445,6 @@ private fun ChatState.clearSessionData(): ChatState = copy(
     hasMoreMessages = false,
     isLoadingMessages = false,
     isLoadingMoreMessages = false,
-    gapMarkers = emptyList(),
     staleNotice = false,
     currentModel = null,
     deltaBuffer = emptyMap(),

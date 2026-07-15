@@ -875,15 +875,6 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
             it.copy(
                 currentSessionId = "s1",
                 messages = listOf(Message(id = "stale", role = "user")),
-                gapMarkers = listOf(
-                    cn.vectory.ocdroid.data.cache.contract.GapMarker(
-                        gapId = "g1",
-                        lowerAnchorMessageId = "a",
-                        upperBoundaryMessageId = "b",
-                        nextBeforeCursor = "c",
-                        fillState = cn.vectory.ocdroid.data.cache.contract.GapFillState.Idle,
-                    )
-                ),
                 staleNotice = true,
                 streamingPartTexts = mapOf("p" to "x"),
             )
@@ -894,7 +885,6 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         assertEquals(nonceBefore + 1, core.chatFlow.value.refreshNonce)
-        assertTrue("cold-start refresh clears stale gap markers", core.chatFlow.value.gapMarkers.isEmpty())
         assertFalse(core.chatFlow.value.staleNotice)
         assertTrue(core.chatFlow.value.streamingPartTexts.isEmpty())
     }

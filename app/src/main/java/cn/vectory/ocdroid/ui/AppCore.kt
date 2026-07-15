@@ -2,9 +2,6 @@ package cn.vectory.ocdroid.ui
 
 import android.content.Context
 import cn.vectory.ocdroid.data.model.*
-import cn.vectory.ocdroid.data.cache.CacheRepository
-import cn.vectory.ocdroid.data.cache.HydrateResult
-import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
@@ -15,6 +12,7 @@ import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
+import cn.vectory.ocdroid.ui.controller.CachedSessionWindow
 import cn.vectory.ocdroid.ui.controller.ComposerController
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
@@ -122,28 +120,15 @@ class AppCore @Inject constructor(
      */
     internal val unreadSoakController: cn.vectory.ocdroid.ui.controller.UnreadSoakController,
     /**
-     * R-20 Phase 2: the gap-fill state machine (probe→detect→50-step fill).
-     * Owned here so [catchUpAfterDisconnectOrForeground] / ChatViewModel can
-     * delegate a detected gap to it; it is a @Singleton (plan §3 N3) so its
-     * session-level Mutex map persists across the calls.
-     */
-    internal val gapFillCoordinator: cn.vectory.ocdroid.ui.chat.GapFillCoordinator,
-    /**
-     * R-20 Phase 1: persistent encrypted chat cache. Injected here so the
-     * VerifyAndHydrate / EvictSession / EvictGroup effect handlers in
-     * [dispatchSessionEffect] / [dispatchHostEffect] can call into it
-     * directly (the controllers cannot inject it without churn).
-     */
-    internal val cacheRepository: CacheRepository,
-    /**
      * R-20 Phase 1 (review-fix #1): provider for the current host's
      * serverGroupFp. Injected via the SAME `@Named("currentServerGroupFp")`
      * @Provides that every controller uses (ControllerModule), so AppCore's
      * fp derivation never drifts from the controllers'. Used by the
-     * VerifyAndHydrate handler's post-verify 二次重检 (the suspend
-     * verifyAndLoad call can straddle a user-initiated host switch; without
-     * re-checking the fp after the suspend, the handler would inject the old
-     * group's window into the new group's chat slice).
+     * VerifyAndHydrate handler's post-peek 二次重检 (the in-memory
+     * peekSessionWindow read is synchronous and main-confined, so it cannot
+     * straddle a host switch; the re-check is retained as defence-in-depth
+     * to lock the composite-key (fp + sessionId) invariant at the handler
+     * boundary and stays robust if a dispatcher hop is ever reintroduced).
      */
     @Named("currentServerGroupFp") internal val currentServerGroupFp: () -> String,
     /** R-19 P2-5: the app-lifetime scope is now Hilt-provided
@@ -217,49 +202,28 @@ class AppCore @Inject constructor(
     /**
      * R-20 Phase 1: factory for the `onCacheWindow` hook threaded through the
      * 6 message-fetch callsites (MessageActions launchLoadMessages /
-     * launchLoadMoreMessages; CatchUpActions launchCatchUp / launchCloseGap;
+     * launchLoadMoreMessages; CatchUpActions launchCatchUp;
      * SessionViewModel.launchLoadMessagesForEffect; AppCoreOrchestration.
      * loadMessagesForEffect). Per plan §3 (v4 glmer I-3 + freegpt) the
      * closure captures [fp] AT FACTORY TIME so a profile switch mid-flight
-     * cannot re-key a write to the wrong group. The hook:
-     *  1. Synchronously writes the in-memory LRU ([SessionSwitcher.writeSessionWindow]).
-     *  2. Asynchronously persists via [cacheRepository.putSessionWindow],
-     *     fire-and-forget — IO failures only log via DebugLog.e; the user
-     *     is never blocked (plan §5 不崩).
+     * cannot re-key a write to the wrong group.
      *
-     * `createdAt` and `workdir` are looked up from the sessionList slice
-     * (main-thread-safe — the slice is Main.immediate-confined) so callers
-     * don't have to thread them through every fetch callsite.
+     * remove-message-persistence Task 3: the hook now performs ONLY the
+     * synchronous in-memory LRU write ([SessionSwitcher.writeSessionWindow]).
+     * The previous async `cacheRepository.putSessionWindow` fire-and-forget
+     * write was deleted — the process-in LRU is the sole cache layer now.
+     * `createdAt` / `workdir` lookup was deleted alongside the persistent
+     * write (it existed only to feed putSessionWindow's metadata columns).
      *
-     * §review-fix #2 (gpter #2): both the memory LRU write AND the persistent
-     * write use the CAPTURED [fp] (not a re-read of currentServerGroupFp).
-     * A host switch mid-flight would otherwise route the old fetch's data into
-     * the new group's LRU slot.
-     *
-     * §review-fix #3 (gpter #3): session metadata (createdAt/workdir) lookup
-     * includes `directorySessions` (not just `sessions`) — directory-only
-     * sessions (surfaced via a connected-project fetch but not yet in the
-     * main sessions list) would otherwise get createdAt=null → verifyAndLoad
-     * always UnknownColdStart, defeating the persistent cache for the
-     * "connected project sharing" feature.
+     * §review-fix #2 (gpter #2): the memory LRU write uses the CAPTURED
+     * [fp] (not a re-read of currentServerGroupFp). A host switch
+     * mid-flight would otherwise route the old fetch's data into the new
+     * group's LRU slot.
      */
     internal fun makeCacheHook(fp: String): (String, CachedSessionWindow) -> Unit = { sid, window ->
-        // 1. Synchronous in-memory write — uses CAPTURED fp (review #2).
         sessionSwitcher.writeSessionWindow(fp, sid, window)
-        // 2. Async persistent write — fire-and-forget; createdAt/workdir are
-        //    derived here (closure captured fp + sid) so the callsite signature
-        //    stays (sessionId, window) and 6 callsites don't need plumbing.
-        //    §review-fix #3: include directorySessions so directory-only
-        //    sessions get their real createdAt/workdir cached.
-        val sessionList = store.sessionListFlow.value
-        val session = (sessionList.sessions + sessionList.directorySessions.values.flatten())
-            .firstOrNull { it.id == sid }
-        val createdAt = session?.time?.created
-        val workdir = session?.directory ?: settingsManager.currentWorkdir ?: ""
-        appScope.launch {
-            runCatching { cacheRepository.putSessionWindow(fp, sid, createdAt, workdir, window) }
-                .onFailure { DebugLog.e(TAG, "cache write failed for fp=$fp sid=$sid", it) }
-        }
+        // Room 持久化已移除（remove-message-persistence Task 3）：进程内 LRU
+        // 是唯一缓存层，无 IO。
     }
 
     init {
@@ -345,41 +309,15 @@ class AppCore @Inject constructor(
             store.mutateChat { it.copy(currentSessionId = persistedSid) }
         }
 
-        // R-20 Phase 1 (C8, plan §3 矩阵 "applySavedSettings verify" 行):
-        // cache self-consistency check on cold start. applySavedSettings is
-        // non-suspend (called from this init block synchronously), so the
-        // verifyFingerprint (suspend) hoists HERE — inside appScope.launch —
-        // to avoid runBlocking the constructor. If the persisted currentSessionId
-        // has a fingerprint mismatch in the cache (DB corruption / fp drift /
-        // session recreated with a different createdAt), drop currentSessionId
-        // so the user lands on the empty state instead of seeing a stale cached
-        // window. This is NOT a cross-connection merge trigger (Phase 5 owns
-        // that) — it is purely a defensive cache self-check. The persisted
-        // SettingsManager value is left intact (the AppCore collector below
-        // persists non-null changes; a null clear here does not overwrite the
-        // stored id, so the next cold start re-tries the verify).
-        val seededSid = store.chatFlow.value.currentSessionId
-        if (seededSid != null) {
-            appScope.launch {
-                // §review-fix #1: use the injected currentServerGroupFp provider
-                // (same source as every controller) instead of inline derivation.
-                val fp = currentServerGroupFp()
-                val seededSession = store.sessionListFlow.value.sessions.firstOrNull { it.id == seededSid }
-                val createdAt = seededSession?.time?.created
-                val result = runCatching {
-                    cacheRepository.verifyFingerprint(fp, seededSid, createdAt)
-                }.getOrNull()
-                if (result is cn.vectory.ocdroid.data.cache.FingerprintResult.MismatchEvicted) {
-                    DebugLog.i(
-                        TAG,
-                        "applySavedSettings verify: seeded currentSessionId=$seededSid fingerprint mismatch → clearing (cold-start fallback)"
-                    )
-                    store.mutateChat {
-                        it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap())
-                    }
-                }
-            }
-        }
+        // remove-message-persistence Task 6: the prior cold-start
+        // `cacheRepository.verifyFingerprint(seededSid)` defensive self-check
+        // (R-20 Phase 1 C8) was deleted together with the CacheRepository
+        // surface. The seeded currentSessionId is now consumed directly;
+        // VerifyAndHydrate's in-memory peek handles the empty-cache cold
+        // start (memory miss → cold-start REST, server is the source of
+        // truth). MismatchEvicted's stale-window eviction is no longer
+        // performed — see the task brief's "MismatchEvicted 清理副作用" note
+        // for the accepted self-heal behaviour.
 
         // Persistence side-effect: every non-null change of chatFlow's
         // currentSessionId is written back to SettingsManager so the next cold
@@ -529,29 +467,34 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.VerifyAndHydrate -> {
-            // R-20 Phase 1 (plan §3 v4 round-3 handoff lines 122-140):
-            // verify-before-hydrate. Emitted by SessionSwitcher.switchTo in
-            // place of the old synchronous LRU seed + synchronous LoadMessages.
-            // The handler runs cacheRepository.verifyAndLoad in a single Room
-            // @Transaction (glmer I-2 TOCTOU) and dispatches the follow-up
-            // LoadMessages inside the same launch.
+            // remove-message-persistence Task 2: the handler no longer touches
+            // SQLite. It probes the in-memory sessionWindowCache via
+            // [SessionSwitcher.peekSessionWindow] (a TRUE read-only, non-LRU-
+            // promoting synchronous read) and hydrates the chat slice directly
+            // when the window is present, else cold-starts via loadMessages.
             //
-            // The handler guards on `currentSessionId` because the user may
+            // Why synchronous peek is safe here (no suspend, no dispatcher hop):
+            // appScope = Dispatchers.Main.immediate (UiApplicationScope), and
+            // sessionWindowCache is main-thread confined (SessionSwitcher.kt
+            // §sessionWindowCache docblock). Both ends run on the same thread,
+            // so the peek cannot race a concurrent write. Because there is no
+            // suspend between the entry guard and the post-peek re-check, the
+            // classic suspend TOCTOU window (review-fix #1 / gpter 复审
+            // #1: switch session or host DURING a suspend) collapses — a
+            // single entry + re-check pair suffices.
+            //
+            // The entry guard on `currentSessionId` is retained: the user may
             // have switched away between the synchronous effect emission and
             // this async dispatch (FIFO effects preserve order but not
-            // session-identity-still-current) — without the guard we'd hydrate
-            // a stale session's view.
+            // session-identity-still-current). The post-peek re-check of the
+            // composite key (fp + sessionId) is also retained as defence-in-
+            // depth: although peek itself does not suspend, keeping the
+            // re-check documents the invariant and stays robust if a hop is
+            // ever reintroduced upstream of the hydrate.
             //
-            // §review-fix #1 (gpter+glm-3 共识，头号): verifyAndLoad is suspend
-            // (tens of ms Room IO). During the suspend the user may switch
-            // sessions (same-group A→B → currentSessionId changes) OR switch
-            // host (cross-group → serverGroupFp changes). Without a SECOND
-            // guard after the suspend returns, the handler would:
-            //  - glm-3 scenario: inject A's verified window into B's chat slice.
-            //  - gpter scenario: cross-group same-sessionId collision (plan §0
-            //    N1: ses_xxxx is not UUID) → inject old group's stale content.
-            // The second guard re-checks BOTH the fp AND sessionId after
-            // verifyAndLoad returns, BEFORE any slice mutation or LoadMessages.
+            // remove-message-persistence Task 4: the gap_marker mechanism was
+            // deleted (non-contiguous layout + 50-step backfill removed). The
+            // hydrate path only restores messages + parts.
             appScope.launch {
                 // Entry guard: user may have switched away before this launch
                 // even starts.
@@ -559,75 +502,58 @@ class AppCore @Inject constructor(
                     DebugLog.d(TAG, "VerifyAndHydrate dropped: session switched away (entry)")
                     return@launch
                 }
-                val r = cacheRepository.verifyAndLoad(effect.serverGroupFp, effect.sessionId, effect.createdAt)
-                // 🔴 二次重检 (review-fix #1): verifyAndLoad suspend 期间用户
-                // 可能切会话/切组。重检复合键 (fp + sessionId) 都未变才注入。
-                // fp 用注入的 currentServerGroupFp provider（与 ControllerModule
-                // 同源），不重读 hostProfileStore（已在 DI 层统一 ifBlank 兜底）。
+                val cached = sessionSwitcher.peekSessionWindow(effect.sessionId)
+                // 二次重检 (review-fix #1, retained): peek 后复合键未变才注入。
+                // peek 本身同步不 suspend，但保留重检作为 defence-in-depth 并
+                // 固化不变量；fp 用注入的 currentServerGroupFp provider（与
+                // ControllerModule 同源），不重读 hostProfileStore（已在 DI 层
+                // 统一 ifBlank 兜底）。
                 if (effect.serverGroupFp != currentServerGroupFp() ||
                     effect.sessionId != store.chatFlow.value.currentSessionId
                 ) {
                     DebugLog.d(
                         TAG,
-                        "VerifyAndHydrate dropped: fp or session changed during verifyAndLoad " +
+                        "VerifyAndHydrate dropped: fp or session changed during peek " +
                             "(effect.fp=${effect.serverGroupFp} current.fp=${currentServerGroupFp()} " +
                             "effect.sid=${effect.sessionId} current.sid=${store.chatFlow.value.currentSessionId})"
                     )
                     return@launch
                 }
-                when (r) {
-                    is HydrateResult.Verified -> {
-                        // §fix-#1 (gpter 头号 / dser 共识): the verified
-                        // window (CachedSessionWindow) is FLAT — it carries
-                        // messages only, not gap markers. Before this fix the
-                        // handler injected messages but left `gapMarkers` empty,
-                        // so a session with open gaps in the persistent
-                        // gap_marker table rendered CONTIGUOUSLY (the fault
-                        // hidden — non-contiguous history flattened). Re-hydrate
-                        // the markers from the cache here so the UI's
-                        // `messages.withGaps(gapMarkers)` renders the dividers.
-                        // gapsOf is suspend; we're already in appScope.launch.
-                        // 二次 fp / sessionId guard above guarantees the gaps
-                        // belong to the CURRENT session/group.
-                        val gaps = cacheRepository.gapsOf(effect.serverGroupFp, effect.sessionId)
-                        // 🔴 三次重检 (gpter 复审 #1): gapsOf 是 suspend，返回
-                        // 后到 mutateChat 前没重检 fp/sessionId。用户可在 gapsOf
-                        // 期间切走（切 session 或切 host）。没有这第三次 guard，
-                        // 旧 session/group 的 gaps 会被注入到新 view。三次 guard
-                        // 与二次同语义：fp + sessionId 都未变才注入。
-                        if (effect.serverGroupFp != currentServerGroupFp() ||
-                            effect.sessionId != store.chatFlow.value.currentSessionId
-                        ) {
-                            DebugLog.d(
-                                TAG,
-                                "VerifyAndHydrate dropped: fp or session changed during gapsOf " +
-                                    "(effect.fp=${effect.serverGroupFp} current.fp=${currentServerGroupFp()} " +
-                                    "effect.sid=${effect.sessionId} current.sid=${store.chatFlow.value.currentSessionId})"
-                            )
-                            return@launch
-                        }
-                        store.mutateChat {
-                            it.copy(
-                                messages = r.window.messages,
-                                partsByMessage = r.window.partsByMessage,
-                                olderMessagesCursor = r.window.olderMessagesCursor,
-                                hasMoreMessages = r.window.hasMoreMessages,
-                                gapMarkers = gaps,
-                            )
-                        }
-                        // resetLimit=false: keep the verified-cached older
-                        // history; loadMessages merges the latest tail non-
-                        // destructively (§preserveUnfetched in MessageActions).
-                        loadMessagesForEffect(effect.sessionId, resetLimit = false)
+                if (cached != null) {
+                    store.mutateChat {
+                        it.copy(
+                            messages = cached.messages,
+                            partsByMessage = cached.partsByMessage,
+                            olderMessagesCursor = cached.olderMessagesCursor,
+                            hasMoreMessages = cached.hasMoreMessages,
+                        )
                     }
-                    HydrateResult.UnknownColdStart, HydrateResult.MismatchEvicted -> {
-                        // No verified cache → cold-start fetch (latest window).
-                        // resetLimit=true wipes any partial state and seeds a
-                        // fresh olderMessagesCursor.
-                        loadMessagesForEffect(effect.sessionId, resetLimit = true)
-                    }
+                    // resetLimit=false: keep the cached older history;
+                    // loadMessages merges the latest tail non-destructively
+                    // (§preserveUnfetched in MessageActions).
+                    loadMessagesForEffect(effect.sessionId, resetLimit = false)
+                } else {
+                    // No memory hit → cold-start fetch (latest window).
+                    // resetLimit=true wipes any partial state and seeds a
+                    // fresh olderMessagesCursor.
+                    loadMessagesForEffect(effect.sessionId, resetLimit = true)
                 }
             }
+            true
+        }
+        is ControllerEffect.AppendMessageToCache -> {
+            // remove-message-persistence Task 3: SSE `message.updated`
+            // new-insert branch (SessionSyncCoordinator) emits this in place
+            // of the old `cacheRepository.appendMessageIfSessionCached`
+            // suspend call. Delegates to the in-memory LRU append — no-op
+            // when the window is not resident (cold-start sessions do not
+            // proactively build a cache). Synchronous (no appScope.launch):
+            // appendMessageIfCached is a pure memory op and the SSE fold
+            // already runs on appScope = Dispatchers.Main.immediate, which
+            // is the same dispatcher sessionWindowCache is confined to.
+            sessionSwitcher.appendMessageIfCached(
+                effect.serverGroupFp, effect.sessionId, effect.message, effect.parts
+            )
             true
         }
         else -> false
@@ -659,35 +585,27 @@ class AppCore @Inject constructor(
             sessionSwitcher.clearSessionWindowCache()
             true
         }
-        is ControllerEffect.RefreshCacheListing -> {
-            // §analysis-8b: actual consumer is SettingsViewModel (owns the StateFlows);
-            // AppCore cannot reach the Hilt VM, so just claim to satisfy single-handler invariant.
-            true
-        }
         is ControllerEffect.EvictSession -> {
             // R-20 Phase 1 (plan §3 矩阵 "用户归档 / 删除 / SSE 归档" 行):
-            // synchronous memory clear + async persistent evict. Memory first
-            // so an immediate switchTo does not re-hydrate the just-evicted
-            // window from the LRU; persistent evict is fire-and-forget (the
-            // cache DB write cannot block the UI thread).
+            // synchronous memory clear. Memory first so an immediate switchTo
+            // does not re-hydrate the just-evicted window from the LRU.
+            // remove-message-persistence Task 6: the prior async
+            // `cacheRepository.evictSession` fire-and-forget persistent evict
+            // was deleted together with the CacheRepository surface — the
+            // process-in LRU is the sole cache layer now.
             sessionSwitcher.evictSession(effect.serverGroupFp, effect.sessionId)
-            appScope.launch {
-                runCatching { cacheRepository.evictSession(effect.serverGroupFp, effect.sessionId) }
-                    .onFailure { DebugLog.e(TAG, "evictSession failed fp=${effect.serverGroupFp} sid=${effect.sessionId}", it) }
-            }
             true
         }
         is ControllerEffect.EvictGroup -> {
             // R-20 Phase 1 (plan §3 矩阵 "异组切换" 行): synchronous group-
-            // scoped memory clear + async group-scoped persistent evict.
-            // NOT clearAll — only the previous group is wiped; the new group
-            // (current after selectHostProfile) keeps its cache. Naming
-            // explicitly EvictGroup (plan §3 N6 forbids ClearGroup).
+            // scoped memory clear. NOT clearAll — only the previous group is
+            // wiped; the new group (current after selectHostProfile) keeps
+            // its cache. Naming explicitly EvictGroup (plan §3 N6 forbids
+            // ClearGroup).
+            // remove-message-persistence Task 6: the prior async
+            // `cacheRepository.evictGroup` fire-and-forget persistent evict
+            // was deleted together with the CacheRepository surface.
             sessionSwitcher.clearMemoryForGroup(effect.serverGroupFp)
-            appScope.launch {
-                runCatching { cacheRepository.evictGroup(effect.serverGroupFp) }
-                    .onFailure { DebugLog.e(TAG, "evictGroup failed fp=${effect.serverGroupFp}", it) }
-            }
             true
         }
         else -> false

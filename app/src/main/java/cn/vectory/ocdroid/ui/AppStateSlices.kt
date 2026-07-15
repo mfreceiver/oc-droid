@@ -12,7 +12,6 @@ import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.TodoItem
-import cn.vectory.ocdroid.data.cache.contract.GapMarker
 import cn.vectory.ocdroid.util.LocaleMode
 import cn.vectory.ocdroid.util.MarkdownFontSizes
 import cn.vectory.ocdroid.util.ThemeMode
@@ -258,21 +257,6 @@ data class ChatState(
      * loadMore shows the spinner.
      */
     val isLoadingMoreMessages: Boolean = false,
-    /**
-     * R-20 Phase 2: the session's open gap markers (non-contiguous message
-     * model — plan §3 N5 / glmer B1). **Replaces** the legacy single
-     * `gapInfo: GapInfo?`; a session may now carry ≥1 independent gap, each
-     * rendered as a tappable [cn.vectory.ocdroid.ui.chat.Entry.GapMarker]
-     * divider via [cn.vectory.ocdroid.ui.chat.withGaps]. The UI layer composes
-     * `messages.withGaps(gapMarkers)` at render time (minimal-churn migration:
-     * `messages` stays a flat List<Message>; the dividers are interleaved only
-     * in the rendered Entry list, not in the authoritative slice).
-     *
-     * Mirrored from the cache by [cn.vectory.ocdroid.ui.chat.GapFillCoordinator]
-     * after each fill step (the encrypted Room DB is the source of truth for
-     * gap state across restarts; the slice is the live UI mirror).
-     */
-    val gapMarkers: List<GapMarker> = emptyList(),
     val staleNotice: Boolean = false,
     /**
      * §model-selection (V1-per-prompt): the model currently bound to the
@@ -467,20 +451,19 @@ data class HostState(
 )
 
 /**
- * §Per-session message cache: `CachedSessionWindow` moved to
- * `data.cache.contract` in Phase 4 (break the `ui → data.cache → ui`
- * dependency ring — the cache layer persisted/returned this type, so its
- * definition belongs with the data layer, not the UI). See
- * [cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow].
+ * §Per-session message cache: `CachedSessionWindow` lives in
+ * `ui.controller` (relocated back from `data.cache.contract` in
+ * remove-message-persistence Task 6 — the SQLite cache that owned the
+ * data-layer dependency ring is gone). See
+ * [cn.vectory.ocdroid.ui.controller.CachedSessionWindow].
  *
- * §Phase1C gap (断层) state — **REMOVED in R-20 Phase 2** (plan §3 N5 / glmer B1).
- * The single-gap `GapInfo` was replaced by the multi-gap
- * [cn.vectory.ocdroid.data.cache.contract.GapMarker] model on [ChatState.gapMarkers].
- * The class definition and its field were deleted; every prior reader/writer
- * now routes through [cn.vectory.ocdroid.ui.chat.GapFillCoordinator] /
- * [cn.vectory.ocdroid.ui.chat.BackfillAlgorithm] /
- * [cn.vectory.ocdroid.data.cache.CacheRepository] gap methods. See
- * `docs/features/persistent-chat-cache-plan.md` §3 Phase 2.
+ * remove-message-persistence Task 4: the non-contiguous gap mechanism
+ * (the chat-slice gap field, the gap-fill coordinator, the gap-detection
+ * algorithm, the gap-aware rendering pipeline) was deleted. Catch-up now
+ * always merges the fetched window (no divider / backfill); manual "load
+ * more" paging covers older history. See
+ * `docs/features/persistent-chat-cache-plan.md` for the original plan
+ * (now superseded by the persistence-removal sequence).
  */
 
 data class ConnectionFormSettings(

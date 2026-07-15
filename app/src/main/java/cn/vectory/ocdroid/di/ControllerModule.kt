@@ -158,7 +158,6 @@ object ControllerModule {
     @Provides
     @Singleton
     fun provideHostProfileController(
-        @ApplicationContext appContext: android.content.Context,
         @UiApplicationScope appScope: CoroutineScope,
         store: SharedStateStore,
         hostProfileStore: HostProfileStore,
@@ -166,7 +165,6 @@ object ControllerModule {
         settingsManager: SettingsManager,
         trafficTracker: TrafficTracker,
         effectBus: SharedEffectBus,
-        cacheRepository: cn.vectory.ocdroid.data.cache.CacheRepository,
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
         reconfigureBarrier: cn.vectory.ocdroid.service.ConnectionReconfigureBarrier,
@@ -180,8 +178,6 @@ object ControllerModule {
         trafficTracker = trafficTracker,
         effects = effectBus,
         currentServerGroupFp = currentServerGroupFp,
-        appContext = appContext,
-        cacheRepository = cacheRepository,
         identityStore = identityStore,
         reconfigureBarrier = reconfigureBarrier,
         effectiveConnectionConfigResolver = effectiveConnectionConfigResolver,
@@ -194,7 +190,6 @@ object ControllerModule {
         store: SharedStateStore,
         settingsManager: SettingsManager,
         effectBus: SharedEffectBus,
-        cacheRepository: cn.vectory.ocdroid.data.cache.CacheRepository,
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
         statusAggregatorInput: cn.vectory.ocdroid.service.status.StatusAggregatorInput,
@@ -204,9 +199,12 @@ object ControllerModule {
         settingsManager = settingsManager,
         effects = effectBus,
         currentServerGroupFp = currentServerGroupFp,
-        // R-20 Phase 1 (C4): persistent cache for the message.updated
-        // new-insert append path (maxer I11).
-        cacheRepository = cacheRepository,
+        // remove-message-persistence Task 6: the prior `cacheRepository`
+        // argument (R-20 Phase 1 C4, wired for the message.updated
+        // appendMessageIfSessionCached path) was deleted together with the
+        // CacheRepository surface. The new-insert append now reaches
+        // SessionSwitcher.appendMessageIfCached via the effect bus
+        // (ControllerEffect.AppendMessageToCache → AppCore).
         // CP1 (notify Phase-0): single connection-identity store.
         identityStore = identityStore,
         // CP4 (notify Phase-0): feed the authoritative status aggregator on
@@ -225,7 +223,6 @@ object ControllerModule {
         settingsManager: SettingsManager,
         effectBus: SharedEffectBus,
         serverCompatProfile: ServerCompatProfile,
-        cacheMaintenanceCoordinator: cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator,
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
         bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
@@ -242,7 +239,6 @@ object ControllerModule {
         settingsManager = settingsManager,
         effects = effectBus,
         serverCompatProfile = serverCompatProfile,
-        cacheMaintenanceCoordinator = cacheMaintenanceCoordinator,
         currentServerGroupFp = currentServerGroupFp,
         identityStore = identityStore,
         // CP2 (notify Phase-0): delegate TOFU state to the shared bootstrap

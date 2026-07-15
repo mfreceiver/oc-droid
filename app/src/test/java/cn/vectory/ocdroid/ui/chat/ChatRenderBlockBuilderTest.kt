@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.chat
 
-import cn.vectory.ocdroid.data.cache.contract.GapFillState
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.PartState
@@ -39,13 +38,13 @@ class ChatRenderBlockBuilderTest {
         Part(id = id, messageId = messageId, type = "step-finish")
 
     private fun build(
-        entries: List<Entry>,
+        messages: List<Message>,
         parts: Map<String, List<Part>>,
         streamingReasoningPartId: String? = null,
         staleQuestionPartKeys: Set<String> = emptySet(),
         sessionIsRunning: Boolean = false
     ) = buildRenderBlocks(
-        entries = entries,
+        messages = messages,
         partsByMessage = parts,
         streamingPartTexts = emptyMap(),
         staleQuestionPartKeys = staleQuestionPartKeys,
@@ -58,7 +57,7 @@ class ChatRenderBlockBuilderTest {
         val m1 = message("m1")
         val m2 = message("m2")
         val blocks = build(
-            listOf(Entry.Message(m1), Entry.Message(m2)),
+            listOf(m1, m2),
             mapOf("m1" to listOf(tool("a", "m1")), "m2" to listOf(tool("b", "m2")))
         )
 
@@ -73,7 +72,7 @@ class ChatRenderBlockBuilderTest {
     fun `single tool renders directly instead of as a fold`() {
         val m = erroredMessage("m")
 
-        val block = build(listOf(Entry.Message(m)), mapOf("m" to listOf(tool("a", "m")))).single()
+        val block = build(listOf(m), mapOf("m" to listOf(tool("a", "m")))).single()
 
         val direct = block as RenderBlock.ToolRun
         assertEquals(listOf("a"), direct.items.map { firstPartId(it.item) })
@@ -86,7 +85,7 @@ class ChatRenderBlockBuilderTest {
         val user = message("u", "user")
         val m2 = message("m2")
         val blocks = build(
-            listOf(Entry.Message(m1), Entry.Message(user), Entry.Message(m2)),
+            listOf(m1, user, m2),
             mapOf(
                 "m1" to listOf(tool("a", "m1")),
                 "u" to listOf(text("u-text", "u")),
@@ -103,7 +102,7 @@ class ChatRenderBlockBuilderTest {
     fun `assistant prose splits a mixed message at part level`() {
         val m = message("m")
         val blocks = build(
-            listOf(Entry.Message(m)),
+            listOf(m),
             mapOf("m" to listOf(tool("a", "m"), text("prose", "m"), tool("b", "m")))
         )
 
@@ -119,7 +118,7 @@ class ChatRenderBlockBuilderTest {
     fun `sub-agent is a conversation block and breaks folds`() {
         val m = message("m")
         val blocks = build(
-            listOf(Entry.Message(m)),
+            listOf(m),
             mapOf("m" to listOf(tool("a", "m"), task("task", "m"), tool("b", "m")))
         )
 
@@ -130,8 +129,8 @@ class ChatRenderBlockBuilderTest {
     @Test
     fun `direct tool run keeps top-level id when it becomes a fold`() {
         val m = message("m")
-        val before = build(listOf(Entry.Message(m)), mapOf("m" to listOf(tool("a", "m"))))
-        val after = build(listOf(Entry.Message(m)), mapOf("m" to listOf(tool("a", "m"), tool("b", "m"))))
+        val before = build(listOf(m), mapOf("m" to listOf(tool("a", "m"))))
+        val after = build(listOf(m), mapOf("m" to listOf(tool("a", "m"), tool("b", "m"))))
 
         assertEquals("run|a", before.single().id)
         assertEquals(before.single().id, after.single().id)
@@ -141,7 +140,7 @@ class ChatRenderBlockBuilderTest {
     fun `streaming reasoning is excluded without joining tools across it`() {
         val m = message("m")
         val blocks = build(
-            listOf(Entry.Message(m)),
+            listOf(m),
             mapOf("m" to listOf(tool("a", "m"), reasoning("live", "m"), tool("b", "m"))),
             streamingReasoningPartId = "live"
         )
@@ -155,7 +154,7 @@ class ChatRenderBlockBuilderTest {
     fun `fold is collapsed by default and running state spans all parts`() {
         val m = message("m")
         val blocks = build(
-            listOf(Entry.Message(m)),
+            listOf(m),
             mapOf("m" to listOf(tool("a", "m"), tool("b", "m", "running")))
         )
         val fold = (blocks.single() as RenderBlock.Fold).asFoldedToolRun()
@@ -166,27 +165,10 @@ class ChatRenderBlockBuilderTest {
     }
 
     @Test
-    fun `gap marker stays interleaved and breaks a fold`() {
-        val m1 = message("m1")
-        val m2 = message("m2")
-        val blocks = build(
-            listOf(
-                Entry.Message(m1),
-                Entry.GapMarker("g", GapFillState.Idle),
-                Entry.Message(m2)
-            ),
-            mapOf("m1" to listOf(tool("a", "m1")), "m2" to listOf(tool("b", "m2")))
-        )
-
-        assertEquals(listOf("run|a", "gap-g", "run|b"), blocks.map { it.id })
-        assertTrue(blocks[1] is RenderBlock.Gap)
-    }
-
-    @Test
     fun `mixed message assigns footer and error to exactly one final block`() {
         val m = message("m")
         val blocks = build(
-            listOf(Entry.Message(m)),
+            listOf(m),
             mapOf("m" to listOf(text("before", "m"), tool("a", "m"), text("after", "m")))
         )
 
@@ -199,7 +181,7 @@ class ChatRenderBlockBuilderTest {
     fun `hidden-only message still gets one decoration block`() {
         val m = erroredMessage("m")
         val blocks = build(
-            listOf(Entry.Message(m)),
+            listOf(m),
             mapOf("m" to listOf(reasoning("live", "m"))),
             streamingReasoningPartId = "live"
         )
@@ -213,7 +195,7 @@ class ChatRenderBlockBuilderTest {
     fun `hidden-only streaming reasoning decoration owner does not render in-flight loading`() {
         val m = message("m")
         val block = build(
-            listOf(Entry.Message(m)),
+            listOf(m),
             mapOf("m" to listOf(reasoning("live", "m"))),
             streamingReasoningPartId = "live"
         ).single() as RenderBlock.Conversation
@@ -229,7 +211,7 @@ class ChatRenderBlockBuilderTest {
         val after = message("after")
 
         val blocks = build(
-            entries = listOf(Entry.Message(before), Entry.Message(hidden), Entry.Message(after)),
+            messages = listOf(before, hidden, after),
             parts = mapOf(
                 "before" to listOf(tool("a", "before")),
                 "hidden" to listOf(todo("todo", "hidden")),
@@ -249,7 +231,7 @@ class ChatRenderBlockBuilderTest {
         val marker = message("marker", role = "agent-switched")
 
         val markerBlock = build(
-            entries = listOf(Entry.Message(marker)),
+            messages = listOf(marker),
             parts = emptyMap()
         ).single() as RenderBlock.Conversation
 
@@ -264,7 +246,7 @@ class ChatRenderBlockBuilderTest {
         val emptyAssistant = message("empty-assistant")
 
         val emptyAssistantBlock = build(
-            entries = listOf(Entry.Message(emptyAssistant)),
+            messages = listOf(emptyAssistant),
             parts = emptyMap()
         ).single() as RenderBlock.Conversation
 
@@ -281,7 +263,7 @@ class ChatRenderBlockBuilderTest {
         val after = message("after-marker")
 
         val blocks = build(
-            entries = listOf(Entry.Message(before), Entry.Message(marker), Entry.Message(after)),
+            messages = listOf(before, marker, after),
             parts = mapOf(
                 before.id to listOf(tool("before-tool", before.id)),
                 marker.id to listOf(text("marker-label", marker.id)),
@@ -300,11 +282,11 @@ class ChatRenderBlockBuilderTest {
 
     @Test
     fun `builder branch matrix preserves empty context patch and reasoning behavior`() {
-        assertTrue(build(entries = emptyList(), parts = emptyMap()).isEmpty())
+        assertTrue(build(messages = emptyList(), parts = emptyMap()).isEmpty())
 
         val contextMessage = message("context")
         val contextFold = build(
-            entries = listOf(Entry.Message(contextMessage)),
+            messages = listOf(contextMessage),
             parts = mapOf(contextMessage.id to listOf(
                 contextTool("read-a", contextMessage.id),
                 contextTool("read-b", contextMessage.id)
@@ -315,14 +297,14 @@ class ChatRenderBlockBuilderTest {
 
         val patchMessage = message("patch")
         val patchRun = build(
-            entries = listOf(Entry.Message(patchMessage)),
+            messages = listOf(patchMessage),
             parts = mapOf(patchMessage.id to listOf(patch("patch-a", patchMessage.id)))
         ).single() as RenderBlock.ToolRun
         assertTrue(patchRun.items.single().item is ToolRenderItem.WritePatch)
 
         val reasoningMessage = message("reasoning")
         val reasoningRun = build(
-            entries = listOf(Entry.Message(reasoningMessage)),
+            messages = listOf(reasoningMessage),
             parts = mapOf(reasoningMessage.id to listOf(reasoning("thought", reasoningMessage.id)))
         ).single() as RenderBlock.ToolRun
         assertTrue(reasoningRun.items.single().item is ToolRenderItem.ThinkingPart)
@@ -332,7 +314,7 @@ class ChatRenderBlockBuilderTest {
     fun `builder distinguishes live hidden and stale visible questions`() {
         val liveMessage = message("live-question")
         val liveBlock = build(
-            entries = listOf(Entry.Message(liveMessage)),
+            messages = listOf(liveMessage),
             parts = mapOf(liveMessage.id to listOf(question("question-live", liveMessage.id)))
         ).single() as RenderBlock.Conversation
         assertTrue(liveBlock.isDecorationOnly)
@@ -340,7 +322,7 @@ class ChatRenderBlockBuilderTest {
 
         val staleMessage = message("stale-question")
         val staleBlock = build(
-            entries = listOf(Entry.Message(staleMessage)),
+            messages = listOf(staleMessage),
             parts = mapOf(staleMessage.id to listOf(question("question-stale", staleMessage.id))),
             staleQuestionPartKeys = setOf("question-stale")
         ).single() as RenderBlock.ToolRun
@@ -373,12 +355,7 @@ class ChatRenderBlockBuilderTest {
         val after = message("after")
 
         val blocks = build(
-            entries = listOf(
-                Entry.Message(before),
-                Entry.Message(shell1),
-                Entry.Message(shell2),
-                Entry.Message(after)
-            ),
+            messages = listOf(before, shell1, shell2, after),
             parts = mapOf(
                 before.id to listOf(tool("a", before.id)),
                 after.id to listOf(tool("b", after.id))
@@ -410,13 +387,11 @@ class ChatRenderBlockBuilderTest {
             items = listOf(MessageToolRenderItem(message("tool-message"), ToolRenderItem.Basic(tool("tool", "tool-message")))),
             firstPartId = "tool"
         )
-        val gap = RenderBlock.Gap(Entry.GapMarker("gap", GapFillState.Idle))
 
         assertEquals(0, renderBlockTopPaddingDp(user, index = 0))
         assertEquals(16, renderBlockTopPaddingDp(user, index = 1))
         assertEquals(4, renderBlockTopPaddingDp(assistant, index = 1))
         assertEquals(4, renderBlockTopPaddingDp(toolRun, index = 1))
-        assertEquals(4, renderBlockTopPaddingDp(gap, index = 1))
     }
 
     @Test
@@ -426,7 +401,7 @@ class ChatRenderBlockBuilderTest {
             val empty = message("empty-$role-$running", role)
             val after = message("after-$role-$running")
             return build(
-                entries = listOf(Entry.Message(before), Entry.Message(empty), Entry.Message(after)),
+                messages = listOf(before, empty, after),
                 parts = mapOf(
                     before.id to listOf(tool("a-$role-$running", before.id)),
                     after.id to listOf(tool("b-$role-$running", after.id))
@@ -461,7 +436,7 @@ class ChatRenderBlockBuilderTest {
         // treated as a live-thinking seam (it falls through to prose/tools).
         val m = message("m")
         val blocks = build(
-            listOf(Entry.Message(m)),
+            listOf(m),
             mapOf("m" to listOf(tool("a", "m"), text("live", "m"), tool("b", "m"))),
             streamingReasoningPartId = "live"
         )
@@ -485,7 +460,7 @@ class ChatRenderBlockBuilderTest {
     fun `step markers do not sever a read tool and patch within one message`() {
         val m = message("m")
         val blocks = build(
-            listOf(Entry.Message(m)),
+            listOf(m),
             mapOf("m" to listOf(
                 stepStart("ss", "m"),
                 contextTool("read", "m"),
@@ -512,7 +487,7 @@ class ChatRenderBlockBuilderTest {
         val m1 = message("m1")
         val m2 = message("m2")
         val blocks = build(
-            listOf(Entry.Message(m1), Entry.Message(m2)),
+            listOf(m1, m2),
             mapOf(
                 "m1" to listOf(
                     stepStart("ss1", "m1"), reasoning("r1", "m1"), text("t1", "m1"),
@@ -545,7 +520,7 @@ class ChatRenderBlockBuilderTest {
         val m1 = message("m1")
         val m2 = message("m2")
         val blocks = build(
-            listOf(Entry.Message(m1), Entry.Message(m2)),
+            listOf(m1, m2),
             mapOf(
                 "m1" to listOf(stepStart("ss1", "m1"), tool("b1", "m1"), stepFinish("sf1", "m1")),
                 "m2" to listOf(stepStart("ss2", "m2"), tool("b2", "m2"), stepFinish("sf2", "m2"))
@@ -562,7 +537,7 @@ class ChatRenderBlockBuilderTest {
     fun `step start and finish parts are skipped and never become conversation content`() {
         val m = message("m")
         val blocks = build(
-            listOf(Entry.Message(m)),
+            listOf(m),
             mapOf("m" to listOf(
                 stepStart("ss", "m"), tool("b", "m"), stepFinish("sf", "m")
             ))
@@ -579,6 +554,5 @@ class ChatRenderBlockBuilderTest {
         is RenderBlock.Conversation -> message.id == messageId && showMessageDecoration
         is RenderBlock.ToolRun -> messageDecorations.any { it.id == messageId }
         is RenderBlock.Fold -> messageDecorations.any { it.id == messageId }
-        is RenderBlock.Gap -> false
     }
 }

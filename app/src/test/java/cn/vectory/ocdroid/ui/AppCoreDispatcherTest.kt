@@ -1,7 +1,7 @@
 package cn.vectory.ocdroid.ui
 
 import cn.vectory.ocdroid.MainViewModelTestBase
-import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
+import cn.vectory.ocdroid.ui.controller.CachedSessionWindow
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.data.repository.MessagesPage
@@ -14,6 +14,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -554,330 +555,271 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // R-20 Phase 1 (C8): applySavedSettings verify hoist in AppCore.init
+    // remove-message-persistence Task 6: the prior R-20 Phase 1 C8 tests
+    // (`C8 init verify drops currentSessionId on fingerprint mismatch` +
+    // `C8 init verify keeps currentSessionId when fingerprint matches`) were
+    // deleted together with the cold-start `cacheRepository.verifyFingerprint`
+    // self-check block in AppCore.init. The seeded currentSessionId is now
+    // consumed directly; VerifyAndHydrate's in-memory peek handles empty-
+    // cache cold start.
     // ═══════════════════════════════════════════════════════════════════════
+    // remove-message-persistence Task 2: VerifyAndHydrate → peek sessionWindowCache
+    // ═══════════════════════════════════════════════════════════════════════
+    // The handler no longer touches SQLite (no cacheRepository.verifyAndLoad).
+    // It synchronously probes the in-memory sessionWindowCache via
+    // AppCore.peekSessionWindow (→ SessionSwitcher.peekSessionWindow) and
+    // hydrates the chat slice directly on hit, else cold-starts via
+    // loadMessages(resetLimit=true). The prior TOCTOU tests (review-fix #1
+    // 1A/1B + 复审 #1 三次重检) pinned the suspend-time switch window of
+    // verifyAndLoad; with peek synchronous on Main.immediate (the same
+    // dispatcher that confines the cache) that window no longer exists, so
+    // those tests were replaced by the four below pinning the new contract
+    // (T2-C1..C4).
+
+    private fun pinnedTestProfile() = cn.vectory.ocdroid.data.model.HostProfile(
+        id = "test-host",
+        name = "Test",
+        serverUrl = "http://server.test",
+        serverGroupFp = "test-fp",
+    )
 
     @Test
-    fun `C8 init verify drops currentSessionId on fingerprint mismatch`() = runTest {
-        // The persisted currentSessionId is seeded by applySavedSettings
-        // (applySavedSettings reads SettingsManager.currentSessionId). The
-        // hoisted verify in AppCore.init runs cacheRepository.verifyFingerprint
-        // on the seeded id; MismatchEvicted → clear currentSessionId so the
-        // user lands on the empty state instead of seeing a stale cached
-        // window. This is a defensive cache self-check (DB corruption / fp
-        // drift), NOT a cross-connection merge (Phase 5 owns that).
-        io.mockk.every { settingsManager.currentSessionId } returns "sess-stale"
-
+    fun `VerifyAndHydrate injects cached window on memory hit and skips SQLite (Task2 C1+C2)`() = runTest {
+        // Memory hit: peekSessionWindow returns the cached window → the handler
+        // mutateChats messages/partsByMessage/olderMessagesCursor/hasMoreMessages
+        // from it and calls loadMessages(resetLimit=false). Crucially it does
+        // NOT call cacheRepository.verifyAndLoad anymore.
         val c = newCore()
-        // Re-stub the cache mock AFTER newCore() (the mock instance lives
-        // inside core; we override MainViewModelTestBase's default
-        // UnknownColdStart stub so the init-time verify returns MismatchEvicted).
-        // The init launch is queued on the test dispatcher and runs on the
-        // advanceUntilIdle() below, so re-stubbing now (before the advance)
-        // is in time.
-        io.mockk.coEvery {
-            c.cacheRepository.verifyFingerprint(any(), any(), any())
-        } returns cn.vectory.ocdroid.data.cache.FingerprintResult.MismatchEvicted
-        advanceUntilIdle()
-
-        assertNull(
-            "MismatchEvicted on cold-start verify must clear currentSessionId",
-            c.store.chatFlow.value.currentSessionId,
-        )
-    }
-
-    @Test
-    fun `C8 init verify keeps currentSessionId when fingerprint matches`() = runTest {
-        // Verified → cache is self-consistent → keep the seeded currentSessionId.
-        // No clear, no eviction.
-        io.mockk.every { settingsManager.currentSessionId } returns "sess-good"
-
-        val c = newCore()
-        io.mockk.coEvery {
-            c.cacheRepository.verifyFingerprint(any(), any(), any())
-        } returns cn.vectory.ocdroid.data.cache.FingerprintResult.Verified
-        advanceUntilIdle()
-
-        assertEquals(
-            "Verified fingerprint must keep the seeded currentSessionId",
-            "sess-good",
-            c.store.chatFlow.value.currentSessionId,
-        )
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // R-20 Phase 1 review-fix #1: VerifyAndHydrate handler TOCTOU guard
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Test
-    fun `review-fix 1A VerifyAndHydrate drops injection when session switched during verifyAndLoad`() = runTest {
-        // glm-3 scenario: user rapidly switches A→B during verifyAndLoad(A).
-        // The entry guard passes (sessionId==A==currentSessionId at launch
-        // start). verifyAndLoad(A) suspends (tens of ms Room IO). During the
-        // suspend, user switches to B → currentSessionId becomes B. Without
-        // the 二次重检, A's verified window would be injected into B's view.
-        val c = newCore()
+        io.mockk.every { hostProfileStore.currentProfile() } returns pinnedTestProfile()
         c.store.mutateChat { it.copy(currentSessionId = "sess-A") }
-        // Stub verifyAndLoad to simulate suspend: when it's called, flip
-        // currentSessionId to B (as if the user switched during the IO).
-        // Then return Verified(A's window). The post-suspend guard must
-        // drop the injection.
-        io.mockk.coEvery {
-            c.cacheRepository.verifyAndLoad(any(), any(), any())
-        } answers {
-            // Simulate the user switching to B during the suspend.
-            c.store.mutateChat { it.copy(currentSessionId = "sess-B") }
-            cn.vectory.ocdroid.data.cache.HydrateResult.Verified(
-                cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
-                    messages = listOf(io.mockk.mockk(relaxed = true)),
-                    partsByMessage = emptyMap(),
-                    olderMessagesCursor = null,
-                    hasMoreMessages = false,
-                )
-            )
-        }
-        // Dispatch the effect directly (entry guard passes: sid=A==currentSessionId).
-        c.dispatchSessionEffect(
-            ControllerEffect.VerifyAndHydrate("test-fp", "sess-A", createdAt = null)
+        // Seed the in-memory LRU with a recognizable window. The base mock
+        // returns an empty MessagesPage, so the cached window must survive the
+        // resetLimit=false selective merge.
+        val cachedMsg = cn.vectory.ocdroid.data.model.Message(id = "cached-m1", role = "user")
+        // Use a recognizable non-empty Part so the partsByMessage assertion
+        // below locks the C2 four-field copy at the handler boundary (an
+        // empty list would not distinguish a real copy from a slice default).
+        val cachedPart = cn.vectory.ocdroid.data.model.Part(
+            id = "cached-p1",
+            type = "text",
+            text = "peeked-body",
         )
-        advanceUntilIdle()
-
-        // The verified window must NOT be injected — messages should be empty
-        // (switchTo's Step 2 cleared them, and the handler dropped the injection).
-        // currentSessionId is "sess-B" (set by the simulated switch).
-        assertEquals("sess-B", c.store.chatFlow.value.currentSessionId)
-        assertTrue(
-            "VerifyAndHydrate must NOT inject A's window after session switched to B",
-            c.store.chatFlow.value.messages.isEmpty(),
+        c.writeSessionWindow(
+            "test-fp", "sess-A",
+            CachedSessionWindow(
+                messages = listOf(cachedMsg),
+                partsByMessage = mapOf("cached-m1" to listOf(cachedPart)),
+                olderMessagesCursor = "cached-cursor",
+                hasMoreMessages = true,
+            ),
         )
-    }
-
-    @Test
-    fun `review-fix 1B VerifyAndHydrate drops injection when host group switched during verifyAndLoad`() = runTest {
-        // gpter scenario: cross-group same-sessionId collision (plan §0 N1:
-        // ses_xxxx is not UUID). verifyAndLoad(A) suspends; during the suspend
-        // user switches host (different serverGroupFp). sessionId might stay
-        // the same (collision), but the fp changed. Without the fp 二次重检,
-        // old group's content would be injected into the new group's view.
-        val c = newCore()
-        c.store.mutateChat { it.copy(currentSessionId = "sess-X") }
-        // Track the fp the effect carries vs the "current" fp after the host switch.
-        // Simulate: during verifyAndLoad, switch the host so currentServerGroupFp() returns a different fp.
-        // The hostProfileStore mock returns defaultProfile (fp derived from id).
-        // We simulate the host switch by re-stubbing currentProfile mid-flight.
-        val switchedProfile = cn.vectory.ocdroid.data.model.HostProfile(
-            id = "new-host",
-            name = "New",
-            serverUrl = "http://new",
-            serverGroupFp = "new-fp",
-        )
-        io.mockk.coEvery {
-            c.cacheRepository.verifyAndLoad(any(), any(), any())
-        } answers {
-            // Simulate the user switching host during the suspend — the fp
-            // provider now returns the new host's fp.
-            io.mockk.every { hostProfileStore.currentProfile() } returns switchedProfile
-            cn.vectory.ocdroid.data.cache.HydrateResult.Verified(
-                cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
-                    messages = listOf(io.mockk.mockk(relaxed = true)),
-                    partsByMessage = emptyMap(),
-                    olderMessagesCursor = null,
-                    hasMoreMessages = false,
-                )
-            )
-        }
-        // Dispatch the effect with the OLD fp (from before the host switch).
-        c.dispatchSessionEffect(
-            ControllerEffect.VerifyAndHydrate("old-fp", "sess-X", createdAt = null)
-        )
-        advanceUntilIdle()
-
-        // The verified window must NOT be injected — fp changed.
-        assertTrue(
-            "VerifyAndHydrate must NOT inject old-group window after host switch (fp changed)",
-            c.store.chatFlow.value.messages.isEmpty(),
-        )
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // R-20 Phase 2 fix-#1: Verified hydrate restores gapMarkers
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Test
-    fun `fix-1 Verified hydrate injects gapMarkers from gapsOf so non-contiguous history renders`() = runTest {
-        // gpter #1 (头号): verifyAndLoad returns a FLAT CachedSessionWindow
-        // (messages only). Before the fix, the handler injected messages but
-        // left `gapMarkers` empty, so a session with open gaps in the
-        // persistent gap_marker table rendered CONTIGUOUSLY (fault hidden).
-        // After the fix, the handler ALSO calls cacheRepository.gapsOf and
-        // injects the markers so the UI's `messages.withGaps(gapMarkers)`
-        // renders the dividers.
-        val c = newCore()
-        // Pin the host profile's fp to a known value so the 二次重检 guard
-        // passes (effect.serverGroupFp == currentServerGroupFp()).
-        val pinnedProfile = cn.vectory.ocdroid.data.model.HostProfile(
-            id = "test-host",
-            name = "Test",
-            serverUrl = "http://server.test",
-            serverGroupFp = "test-fp",
-        )
-        io.mockk.every { hostProfileStore.currentProfile() } returns pinnedProfile
-        c.store.mutateChat { it.copy(currentSessionId = "sess-A") }
-        // Stub verifyAndLoad → Verified with two flat messages.
-        io.mockk.coEvery {
-            c.cacheRepository.verifyAndLoad(any(), any(), any())
-        } returns cn.vectory.ocdroid.data.cache.HydrateResult.Verified(
-            cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
-                messages = listOf(
-                    io.mockk.mockk(relaxed = true),
-                    io.mockk.mockk(relaxed = true),
-                ),
-                partsByMessage = emptyMap(),
-                olderMessagesCursor = null,
-                hasMoreMessages = false,
-            )
-        )
-        // Stub gapsOf → one open gap marker between the two messages.
-        val gapMarker = cn.vectory.ocdroid.data.cache.contract.GapMarker(
-            gapId = "gap-1",
-            lowerAnchorMessageId = "anchor",
-            upperBoundaryMessageId = "upper",
-            nextBeforeCursor = "c1",
-            fillState = cn.vectory.ocdroid.data.cache.contract.GapFillState.Idle,
-        )
-        io.mockk.coEvery { c.cacheRepository.gapsOf(any(), any()) } returns listOf(gapMarker)
 
         c.dispatchSessionEffect(
             ControllerEffect.VerifyAndHydrate("test-fp", "sess-A", createdAt = 1L)
         )
         advanceUntilIdle()
 
-        // gapsOf was queried for the verified session's (fp, sid).
-        io.mockk.coVerify { c.cacheRepository.gapsOf("test-fp", "sess-A") }
-        // gapMarkers injected — the UI's withGaps will render the divider.
+        // C2: cached fields injected (and preserved by resetLimit=false merge).
         assertEquals(
-            "Verified hydrate must inject gapMarkers from gapsOf",
-            listOf("gap-1"),
-            c.store.chatFlow.value.gapMarkers.map { it.gapId },
+            "cached window messages must be injected on hit",
+            listOf("cached-m1"),
+            c.store.chatFlow.value.messages.map { it.id },
         )
+        // C2 parts copy: partsByMessage["cached-m1"] must be the cached Part
+        // list (locks the four-field mutateChat copy at the handler boundary).
+        assertEquals(
+            "cached partsByMessage must be injected on hit",
+            listOf("cached-p1"),
+            c.store.chatFlow.value.partsByMessage["cached-m1"]?.map { it.id },
+        )
+        assertEquals(
+            "cached cursor must be preserved (resetLimit=false)",
+            "cached-cursor",
+            c.store.chatFlow.value.olderMessagesCursor,
+        )
+        assertTrue(
+            "cached hasMore must be preserved (resetLimit=false)",
+            c.store.chatFlow.value.hasMoreMessages,
+        )
+        // C2 tail: loadMessages fired after the hydrate.
+        io.mockk.coVerify(atLeast = 1) {
+            repository.getMessagesPaged(any(), any(), any())
+        }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // R-20 Phase 2 复审 #1: VerifyAndHydrate 三次重检 (after gapsOf suspend)
-    // ═══════════════════════════════════════════════════════════════════════
-
     @Test
-    fun `fix-1-third VerifyAndHydrate drops injection when session switched during gapsOf`() = runTest {
-        // gpter 复审 #1: 二次重检 gates verifyAndLoad, but gapsOf (suspend,
-        // used to re-hydrate gapMarkers for a Verified window) is the THIRD
-        // suspend point in the handler. A user can switch session during it
-        // — the 二次 guard already passed (it ran before gapsOf was even
-        // called). Without the 三次 guard, old session's gaps would be
-        // injected into the new session's view. After the fix, the third
-        // guard re-checks (fp + sessionId) between gapsOf-return and
-        // mutateChat, dropping the injection on mismatch.
+    fun `VerifyAndHydrate cold-starts via loadMessages resetLimit=true on memory miss (Task2 C3)`() = runTest {
+        // Memory miss: peekSessionWindow returns null → the handler injects
+        // nothing and calls loadMessages(resetLimit=true) so the slice is
+        // seeded fresh from the REST fetch.
         val c = newCore()
-        // Pin the host profile so currentServerGroupFp() == effect.serverGroupFp
-        // ("test-fp") — otherwise the 二次 guard (which checks fp too) would
-        // fire before gapsOf is reached and the test would not exercise the
-        // 三次 guard path. (Mirrors the existing fix-1 test's pinning.)
-        val pinnedProfile = cn.vectory.ocdroid.data.model.HostProfile(
-            id = "test-host",
-            name = "Test",
-            serverUrl = "http://server.test",
-            serverGroupFp = "test-fp",
-        )
-        io.mockk.every { hostProfileStore.currentProfile() } returns pinnedProfile
+        io.mockk.every { hostProfileStore.currentProfile() } returns pinnedTestProfile()
         c.store.mutateChat { it.copy(currentSessionId = "sess-A") }
-        // Stub verifyAndLoad → Verified (passes 二次 guard).
-        io.mockk.coEvery {
-            c.cacheRepository.verifyAndLoad(any(), any(), any())
-        } returns cn.vectory.ocdroid.data.cache.HydrateResult.Verified(
-            cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
-                messages = listOf(io.mockk.mockk(relaxed = true)),
-                partsByMessage = emptyMap(),
-                olderMessagesCursor = null,
-                hasMoreMessages = false,
-            )
-        )
-        // Stub gapsOf to simulate the suspend-time switch: when it's called,
-        // flip currentSessionId to B (as if the user switched during the IO).
-        // Then return a non-empty gap list (the stale A gaps).
-        val staleGap = cn.vectory.ocdroid.data.cache.contract.GapMarker(
-            gapId = "stale-gap-A",
-            lowerAnchorMessageId = "anchor-a",
-            upperBoundaryMessageId = "upper-a",
-            nextBeforeCursor = "c1",
-            fillState = cn.vectory.ocdroid.data.cache.contract.GapFillState.Idle,
-        )
-        io.mockk.coEvery {
-            c.cacheRepository.gapsOf(any(), any())
-        } answers {
-            // Simulate the user switching to B during the gapsOf suspend.
-            c.store.mutateChat { it.copy(currentSessionId = "sess-B") }
-            listOf(staleGap)
-        }
+        // No writeSessionWindow — cache miss for sess-A.
 
         c.dispatchSessionEffect(
             ControllerEffect.VerifyAndHydrate("test-fp", "sess-A", createdAt = null)
         )
         advanceUntilIdle()
 
-        // currentSessionId is B (set by the simulated switch during gapsOf).
-        assertEquals("sess-B", c.store.chatFlow.value.currentSessionId)
-        // The stale A gap MUST NOT be injected into B's view. The 三次 guard
-        // dropped the mutateChat; gapMarkers stays empty.
+        // C3: nothing injected; empty fetch → empty slice.
         assertTrue(
-            "VerifyAndHydrate must NOT inject sess-A's gaps after session switched to B during gapsOf",
-            c.store.chatFlow.value.gapMarkers.none { it.gapId == "stale-gap-A" },
+            "no messages injected on cache miss",
+            c.store.chatFlow.value.messages.isEmpty(),
         )
-        // The verified messages are also NOT injected (the third guard gates
-        // the whole mutateChat block, not just the gapMarkers field).
-        // The mockk message is opaque; we verify via gapMarkers above.
+        assertNull(
+            "cursor null on cold-start (resetLimit=true seeds nothing from cache)",
+            c.store.chatFlow.value.olderMessagesCursor,
+        )
+        // C3: loadMessages(resetLimit=true) fired.
+        io.mockk.coVerify(atLeast = 1) {
+            repository.getMessagesPaged(any(), any(), any())
+        }
+    }
+
+    @Test
+    fun `VerifyAndHydrate entry guard drops when session switched away before launch (Task2 C4)`() = runTest {
+        // Entry guard: the user switched to a different session before this
+        // launch started → the handler returns immediately, no peek, no inject,
+        // no loadMessages.
+        val c = newCore()
+        io.mockk.every { hostProfileStore.currentProfile() } returns pinnedTestProfile()
+        // Current session is B, but the stale effect still references A.
+        c.store.mutateChat { it.copy(currentSessionId = "sess-B") }
+        val cachedMsg = cn.vectory.ocdroid.data.model.Message(id = "cached-m1", role = "user")
+        c.writeSessionWindow(
+            "test-fp", "sess-A",
+            CachedSessionWindow(
+                messages = listOf(cachedMsg),
+                partsByMessage = emptyMap(),
+                olderMessagesCursor = null,
+                hasMoreMessages = false,
+            ),
+        )
+
+        c.dispatchSessionEffect(
+            ControllerEffect.VerifyAndHydrate("test-fp", "sess-A", createdAt = null)
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "entry guard must drop — no injection for a stale session",
+            c.store.chatFlow.value.messages.isEmpty(),
+        )
+        // loadMessages never ran (entry guard returned before it).
+        io.mockk.coVerify(exactly = 0) {
+            repository.getMessagesPaged(any(), any(), any())
+        }
+    }
+
+    @Test
+    fun `VerifyAndHydrate post-peek re-check drops when serverGroupFp mismatched (Task2 C4)`() = runTest {
+        // Defence-in-depth: the post-peek re-check of the composite key is
+        // retained. peek is synchronous (no TOCTOU window), but if the effect
+        // carries an fp that no longer equals currentServerGroupFp() the
+        // injection is still dropped. Here the cache is keyed by the CURRENT
+        // fp (test-fp) so peek hits, but the effect's fp is "mismatch-fp" →
+        // the re-check drops.
+        val c = newCore()
+        io.mockk.every { hostProfileStore.currentProfile() } returns pinnedTestProfile()
+        c.store.mutateChat { it.copy(currentSessionId = "sess-A") }
+        val cachedMsg = cn.vectory.ocdroid.data.model.Message(id = "cached-m1", role = "user")
+        c.writeSessionWindow(
+            "test-fp", "sess-A",
+            CachedSessionWindow(
+                messages = listOf(cachedMsg),
+                partsByMessage = emptyMap(),
+                olderMessagesCursor = null,
+                hasMoreMessages = false,
+            ),
+        )
+
+        c.dispatchSessionEffect(
+            ControllerEffect.VerifyAndHydrate("mismatch-fp", "sess-A", createdAt = null)
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "post-peek fp re-check must drop — no injection on fp mismatch",
+            c.store.chatFlow.value.messages.isEmpty(),
+        )
+        io.mockk.coVerify(exactly = 0) {
+            repository.getMessagesPaged(any(), any(), any())
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // R-20 Phase 1 review-fix #3: makeCacheHook looks up directorySessions
+    // remove-message-persistence Task 3: makeCacheHook no longer writes SQLite.
     // ═══════════════════════════════════════════════════════════════════════
 
     @Test
-    fun `review-fix 3 makeCacheHook resolves createdAt from directorySessions for directory-only sessions`() = runTest {
-        // §review-fix #3 (gpter #3): a session that exists ONLY in
-        // directorySessions (not yet in the main sessions list) must still
-        // get its real createdAt cached. The prior code looked up only
-        // `sessions` → directory-only sessions got createdAt=null →
-        // verifyAndLoad always UnknownColdStart, defeating the persistent
-        // cache for the "connected project sharing" feature.
+    fun `makeCacheHook writes only the in-memory LRU and skips putSessionWindow (Task3 C1)`() = runTest {
+        // Task 3: the hook body shrank to a single synchronous
+        // SessionSwitcher.writeSessionWindow call. The prior async
+        // cacheRepository.putSessionWindow fire-and-forget write was
+        // deleted (the process-in LRU is the sole cache layer now), so
+        // the previously-captured createdAt / directorySessions lookup is
+        // gone too.
         val c = newCore()
-        val dirSession = cn.vectory.ocdroid.data.model.Session(
-            id = "dir-sess-1",
-            directory = "/proj",
-            time = cn.vectory.ocdroid.data.model.Session.TimeInfo(created = 1_700_000L),
-        )
-        // Put in directorySessions ONLY (not in sessions).
-        c.store.mutateSessionList {
-            it.copy(directorySessions = mapOf("/proj" to listOf(dirSession)))
-        }
-        // Capture the createdAt that putSessionWindow receives.
-        var capturedCreatedAt: Long? = -999L
-        io.mockk.coEvery {
-            c.cacheRepository.putSessionWindow(any(), any(), any(), any(), any())
-        } answers {
-            capturedCreatedAt = thirdArg()
-            Unit
-        }
-        // Call makeCacheHook + invoke the hook for the directory-only session.
-        val hook = c.makeCacheHook("test-fp")
-        hook("dir-sess-1", cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow(
+        // Pin currentServerGroupFp() = "test-fp" so peekSessionWindow
+        // resolves the same key the captured-fp hook writes under.
+        io.mockk.every { hostProfileStore.currentProfile() } returns pinnedTestProfile()
+        val window = CachedSessionWindow(
             messages = emptyList(), partsByMessage = emptyMap(),
             olderMessagesCursor = null, hasMoreMessages = false,
-        ))
+        )
+
+        val hook = c.makeCacheHook("test-fp")
+        hook("dir-sess-1", window)
         advanceUntilIdle()
 
+        // The captured fp keyed the in-memory LRU write — peekSessionWindow
+        // must return the same window verbatim.
+        val hit = c.peekSessionWindow("dir-sess-1")
+        assertNotNull("in-memory write must land in sessionWindowCache", hit)
         assertEquals(
-            "makeCacheHook must resolve createdAt from directorySessions for directory-only sessions",
-            1_700_000L,
-            capturedCreatedAt,
+            "writeSessionWindow stored the window verbatim",
+            window,
+            hit,
+        )
+    }
+
+    @Test
+    fun `AppendMessageToCache handler delegates to SessionSwitcher appendMessageIfCached (Task3 C4)`() = runTest {
+        // Task 3: SessionSyncCoordinator's `message.updated` new-insert branch
+        // now emits AppendMessageToCache instead of calling
+        // cacheRepository.appendMessageIfSessionCached. The handler in
+        // dispatchSessionEffect routes to sessionSwitcher.appendMessageIfCached.
+        val c = newCore()
+        // Pin fp = "test-fp" so peekSessionWindow reads the same key the
+        // write + effect use.
+        io.mockk.every { hostProfileStore.currentProfile() } returns pinnedTestProfile()
+        // Seed a resident window so the append is observable (a MISS is a
+        // no-op and would leave nothing to assert beyond cache size).
+        val existing = CachedSessionWindow(
+            messages = listOf(cn.vectory.ocdroid.data.model.Message(id = "m1", role = "user")),
+            partsByMessage = mapOf("m1" to emptyList()),
+            olderMessagesCursor = "cur",
+            hasMoreMessages = false,
+        )
+        c.writeSessionWindow("test-fp", "s-emit", existing)
+
+        val handled = c.dispatchSessionEffect(
+            ControllerEffect.AppendMessageToCache(
+                serverGroupFp = "test-fp",
+                sessionId = "s-emit",
+                message = cn.vectory.ocdroid.data.model.Message(id = "m2", role = "assistant"),
+                parts = emptyList(),
+            )
+        )
+
+        assertTrue("AppendMessageToCache must be claimed by the session dispatcher", handled)
+        val hit = c.peekSessionWindow("s-emit")
+        assertNotNull(hit)
+        assertEquals(
+            "append lands on the resident window",
+            listOf("m1", "m2"),
+            hit!!.messages.map { it.id },
         )
     }
 }

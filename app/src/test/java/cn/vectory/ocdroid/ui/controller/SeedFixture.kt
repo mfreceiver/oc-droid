@@ -13,7 +13,6 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.ui.ConnectionPhase
-import cn.vectory.ocdroid.data.cache.contract.GapMarker
 import cn.vectory.ocdroid.ui.MainViewModelTimings
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.util.MarkdownFontSizes
@@ -70,7 +69,6 @@ data class SeedFixture(
     val olderMessagesCursor: String? = null,
     val hasMoreMessages: Boolean = true,
     val isLoadingMessages: Boolean = false,
-    val gapMarkers: List<GapMarker> = emptyList(),
     val staleNotice: Boolean = false,
     val currentModel: Message.ModelInfo? = null,
     // session-list-domain

@@ -4,7 +4,6 @@ import android.util.Log
 import cn.vectory.ocdroid.BuildConfig
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS
-import cn.vectory.ocdroid.data.cache.CacheRepository
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.SSEEvent
@@ -109,16 +108,6 @@ class SessionSyncCoordinator(
      *  key the [ControllerEffect.EvictSession] emission on the session.updated
      *  archived branch (plan §3 矩阵 "SSE 归档 session" 行). */
     internal val currentServerGroupFp: () -> String,
-    /**
-     * R-20 Phase 1 (C4, maxer I11): persistent cache for the message.updated
-     * new-insert append path. When a `message.updated` SSE event for the
-     * current session inserts a NEW message (found=false in
-     * [ChatState.applyMessageUpdated]), the cached window for that session
-     * (if any) must stay in sync without a full putSessionWindow round-trip.
-     * Fire-and-forget: failures only log via DebugLog.e; the user is never
-     * blocked (plan §5 不崩).
-     */
-    internal val cacheRepository: CacheRepository? = null,
     /**
      * CP1 (notify Phase-0): the single source of truth for the connection
      * epoch. Replaces the private [hostGeneration] AtomicLong — the epoch
@@ -236,7 +225,7 @@ class SessionSyncCoordinator(
      * R-20 Phase 2 (G6): mark [sessionId] as having an established cold-snapshot
      * baseline. Called by [cn.vectory.ocdroid.ui.launchCatchUp]'s onColdSnapshot
      * callback on every successful catch-up. Future probe gating
-     * ([cn.vectory.ocdroid.ui.chat.BackfillAlgorithm.shouldProbe]) treats a
+     * (the inlined `shouldProbeCatchUp` helper in CatchUpActions.kt) treats a
      * session in this set + a live SSE feed for its workdir as covered (skip
      * the REST probe). Idempotent (set-add). Reset to empty by HostReconfigured.
      *
@@ -807,41 +796,41 @@ class SessionSyncCoordinator(
                         DebugLog.d("Sync", "message.updated: patched")
                     } else {
                         DebugLog.i("Sync", "message.updated: inserted (new message, absent from local list)")
-                        // R-20 Phase 1 (C4, maxer I11): the new message
-                        // was appended to the slice. Mirror it into the
-                        // persistent cache so a subsequent switch-back
-                        // (VerifyAndHydrate → Verified) sees it without a
-                        // full putSessionWindow round-trip. Append is
-                        // scoped to the CURRENT session (eventSessionId
-                        // was already guarded above to equal
-                        // currentSessionId), and appendMessageIfSessionCached
-                        // is a no-op when no cached session row exists
-                        // (cold-start sessions don't proactively build a
-                        // cache — only already-cached sessions stay fresh).
-                        // Fire-and-forget on scope; failures only log.
-                        if (cacheRepository != null) {
-                            val fp = currentServerGroupFp()
-                            val sid = eventSessionId!!
-                            scope.launch {
-                                runCatching {
-                                    cacheRepository.appendMessageIfSessionCached(
-                                        fp,
-                                        sid,
-                                        updated,
-                                        // §parts-by-message: the new message
-                                        // has no parts yet (its first
-                                        // part.created / part.updated will
-                                        // arrive separately). Persist an
-                                        // empty list; the next part event +
-                                        // the post-turn idle reload fills
-                                        // them in.
-                                        emptyList(),
-                                    )
-                                }.onFailure {
-                                    DebugLog.e(tag, "appendMessageIfSessionCached failed fp=$fp sid=$sid", it)
-                                }
-                            }
-                        }
+                        // remove-message-persistence Task 3 (grilling 假设1
+                        // 修正): the new message was appended to the slice.
+                        // Mirror it into the IN-MEMORY sessionWindowCache so
+                        // a subsequent switch-back (VerifyAndHydrate → peek
+                        // hit) sees it without a re-fetch. The OLD path did
+                        // a fire-and-forget `cacheRepository
+                        // .appendMessageIfSessionCached` suspend write to
+                        // SQLite; that target is replaced by an effect bus
+                        // hop to AppCore → SessionSwitcher
+                        // .appendMessageIfCached (in-memory LRU only — no IO).
+                        // Why keep the append at all (vs deleting the SSE
+                        // cache write outright): if the user is away from
+                        // this session and >initialMessagePageSize (40) new
+                        // messages arrive, the切回 latest-40 fetch +
+                        // olderKept merge would drop the middle (olderKept
+                        // excludes messages newer than oldestFetched but
+                        // absent from the fetch). The pure-memory append
+                        // closes that loss window without re-introducing IO.
+                        // Append is scoped to the CURRENT session
+                        // (eventSessionId was guarded above to equal
+                        // currentSessionId); appendMessageIfCached is a
+                        // no-op when no cached window is resident.
+                        effects.tryEmitEffect(
+                            ControllerEffect.AppendMessageToCache(
+                                serverGroupFp = currentServerGroupFp(),
+                                sessionId = eventSessionId!!, // guarded non-null above
+                                message = updated,
+                                // §parts-by-message: the new message has no
+                                // parts yet (its first part.created /
+                                // part.updated will arrive separately).
+                                // Persist an empty list; the next part event
+                                // + the post-turn idle reload fills them in.
+                                parts = emptyList(),
+                            )
+                        )
                     }
                 }
             }

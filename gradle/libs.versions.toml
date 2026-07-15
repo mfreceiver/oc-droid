@@ -32,11 +32,6 @@ kotlinxCoroutinesTest = "1.7.3"
 turbine = "1.0.0"
 markdownRenderer = "0.39.0"
 material3WindowSizeClass = "1.2.0"
-# R-20 Phase 0 持久化缓存地基：SQLCipher 4.16.0（AAR fat 自带四架构 .so + consumer-rules）
-# + Room 2.8.4（KSP）+ androidx.sqlite 2.7.0（Room 2.8 强制要求的 framework 升级）。
-room = "2.8.4"
-sqlite = "2.7.0"
-sqlcipher = "4.16.0"
 # R-21 SettingsManager 单测需要真 EncryptedSharedPreferences（依赖 AndroidKeyStore +
 # Tink），Robolectric 提供可在 JVM 跑的 AndroidKeyStore shadow 与 framework 资源。
 robolectric = "4.13"
@@ -94,17 +89,6 @@ turbine = { group = "app.cash.turbine", name = "turbine", version.ref = "turbine
 robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
 # R-21: ApplicationProvider.getApplicationContext — Robolectric 测试取 Context 用
 androidx-test-core = { group = "androidx.test", name = "core", version.ref = "androidxTestCore" }
-
-# R-20 Phase 0：加密持久化缓存（SQLCipher via Room SupportFactory）
-androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
-androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
-androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
-androidx-room-testing = { group = "androidx.room", name = "room-testing", version.ref = "room" }
-androidx-sqlite-framework = { group = "androidx.sqlite", name = "sqlite-framework", version.ref = "sqlite" }
-# sqlcipher-android 4.16.0 AAR fat（自带四架构 .so + consumer-rules.pro，R8 自动应用）。
-# 4.x 仅发布 AAR（无 jar 替代），implementation(libs.sqlcipher.android) 直接拉 AAR。
-# 若需显式 @aar 强制，可在 build.gradle.kts 用 variantOf(...) — 当前版本无此需要。
-sqlcipher-android = { group = "net.zetetic", name = "sqlcipher-android", version.ref = "sqlcipher" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

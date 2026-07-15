@@ -662,33 +662,6 @@ class SettingsManager @Inject constructor(
             .apply()
     }
 
-    // ───────────── R-20 Phase 3: per-serverGroup daily-sweep dedup ─────────
-
-    /**
-     * R-20 Phase 3 (plan §3): the epoch-day (UTC) on which the daily sweep
-     * last ran for [serverGroupFp]. Used by
-     * [cn.vectory.ocdroid.data.cache.CacheMaintenanceCoordinator.dailySweepIfNeeded]
-     * to skip a sweep that already ran today (idempotent within a calendar
-     * day — a reconnect within 24h must not re-enumerate + re-evict).
-     *
-     * Returns null if no sweep has ever been recorded for this fp (first
-     * connect, or the row was wiped by [clearAllLocalData]).
-     *
-     * Key format: `last_sweep_epoch_<serverGroupFp>`. The fp is a stable host
-     * identifier (profile id or merged group id) so the key survives host
-     * list edits as long as the fp value itself does.
-     */
-    fun getLastSweepEpochDay(serverGroupFp: String): Long? {
-        if (serverGroupFp.isBlank()) return null
-        val key = lastSweepEpochKey(serverGroupFp)
-        return if (encryptedPrefs.contains(key)) encryptedPrefs.getLong(key, -1L) else null
-    }
-
-    fun setLastSweepEpochDay(serverGroupFp: String, epochDay: Long) {
-        if (serverGroupFp.isBlank()) return
-        encryptedPrefs.edit().putLong(lastSweepEpochKey(serverGroupFp), epochDay).apply()
-    }
-
     // ───────────── R-20 Phase 5: legacy → fp-keyed migration (once per fp) ─────
 
     /**
@@ -863,12 +836,10 @@ class SettingsManager @Inject constructor(
             KEY_CURRENT_HOST_PROFILE_ID,
             KEY_EFFECTIVE_CONNECTION_SOURCE,
         )
-        // R-20 Phase 0: cache DB key MUST survive a "reset local data" — if it
-        // is wiped, the SQLCipher DB becomes permanently unreadable (the key
-        // never rotates; losing it = losing the cache, which then has to be
-        // destructive-reset in CacheModule on the next open). Same category as
-        // the per-host password secrets — preserved across reset.
-        val preservedKeys = connectionKeys + CACHE_DB_KEY
+        // remove-message-persistence Task 6: the prior `+ CACHE_DB_KEY`
+        // (R-20 Phase 0 SQLCipher DB passphrase) was deleted together with
+        // the CacheRepository / CacheKeyStore / encrypted chat-cache surface.
+        val preservedKeys = connectionKeys
         val e = encryptedPrefs.edit()
         for (k in encryptedPrefs.all.keys) {
             val preserved = k in preservedKeys ||
@@ -895,16 +866,6 @@ class SettingsManager @Inject constructor(
         private const val TAG = "SettingsManager"
         const val DEFAULT_SERVER = "http://localhost:4096"
         const val LEGACY_BASIC_AUTH_PASSWORD_ID = "legacy_basic_auth_password"
-        /**
-         * R-20 Phase 0: EncryptedSharedPreferences key holding the SQLCipher DB
-         * passphrase (32 random bytes, Base64-encoded). Public so
-         * [cn.vectory.ocdroid.data.cache.CacheKeyStore] and the
-         * `clearAllLocalData` preserved-keys whitelist reference the SAME
-         * constant — drift between the two would either silently wipe the key
-         * on reset (cache unreadable) or leave it after a full wipe (cache
-         * leaks across identities).
-         */
-        const val CACHE_DB_KEY = "cache_db_key"
         private const val KEY_SERVER_URL = "server_url"
         private const val KEY_USERNAME = "username"
         private const val KEY_PASSWORD = "password"
@@ -987,14 +948,6 @@ class SettingsManager @Inject constructor(
         private fun clientCertP12Key(id: String): String = "client_cert_p12_$id"
         private fun clientCertPasswordKey(id: String): String = "client_cert_pw_$id"
         private fun clientCertCaKey(id: String): String = "client_cert_ca_$id"
-
-        /**
-         * R-20 Phase 3: storage key for [getLastSweepEpochDay] /
-         * [setLastSweepEpochDay]. Prefix `last_sweep_epoch_` + the
-         * serverGroupFp (a stable host identifier, never blank by the time
-         * it reaches here — the public methods blank-guard upstream).
-         */
-        private fun lastSweepEpochKey(serverGroupFp: String): String = "last_sweep_epoch_$serverGroupFp"
 
         /**
          * R-20 Phase 5: separator used in the composite `(serverGroupFp,

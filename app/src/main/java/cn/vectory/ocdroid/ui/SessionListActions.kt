@@ -9,8 +9,6 @@ package cn.vectory.ocdroid.ui
  */
 
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.data.cache.CacheRepository
-import cn.vectory.ocdroid.data.cache.FingerprintResult
 import cn.vectory.ocdroid.ui.controller.applySessionDiffIfAbsent
 import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.ui.controller.normalizeAuthoritativeStatusSnapshot
@@ -85,15 +83,13 @@ internal fun launchLoadSessions(
     onLoadMessages: (String) -> Unit,
     emit: EventEmitter = EventEmitter { },
     /**
-     * R-20 Phase 1 (C7): persistent cache for the currentSessionId fingerprint
-     * self-consistency check. Null = caller has not been migrated yet; the
-     * verify is skipped (preserves the legacy behavior for unmigrated callers).
+     * FIX-D (gpter #2): provider for the current host's serverGroupFp.
+     * Used to key the stale-host re-check after the REST suspend.
      */
-    cacheRepository: CacheRepository? = null,
     expectedServerGroupFp: String? = null,
     /**
-     * R-20 Phase 1 (C7): provider for the current host's serverGroupFp. Used
-     * to key the verifyFingerprint call. Null = caller has not been migrated.
+     * FIX-D (gpter #2): provider for the current host's serverGroupFp.
+     * Used to detect a host switch during the in-flight REST fetch.
      */
     currentServerGroupFp: (() -> String)? = null,
     // §grouping-rewrite Round-2 #5: hostProfileStore parameter removed — it
@@ -194,29 +190,12 @@ internal fun launchLoadSessions(
                 }
                 if (staleHostAfterSuspend()) return@onSuccess
                 val refreshedSessions = mergedSessions
-                var currentSessionVerifyResult: FingerprintResult? = null
-                if (currentSessionId != null && cacheRepository != null && currentServerGroupFp != null) {
-                    val targetSession = refreshedSessions.firstOrNull { it.id == currentSessionId }
-                    val createdAt = targetSession?.time?.created
-                    val fp = currentServerGroupFp()
-                    // Suspend before writing the refreshed slice; if the host
-                    // changes while this verify is in flight, the post-suspend
-                    // guard below drops the stale REST result entirely.
-                    currentSessionVerifyResult = runCatching {
-                        cacheRepository.verifyFingerprint(fp, currentSessionId, createdAt)
-                    }.getOrNull()
-                    if (staleHostAfterSuspend()) return@onSuccess
-                    // FIX-D (gpter #2): re-check epoch after the verifyFingerprint
-                    // suspend — a newer request may have been issued + completed
-                    // during the verify. The writes below (mutateSessionList /
-                    // persist / archive callback) must not run for a stale result.
-                    // §epoch-no-op (task 1): fully no-op (no loading/refreshing
-                    // clear — the newer request owns those flags).
-                    if (myEpoch != sessionListLoadEpoch.get()) {
-                        DebugLog.d("Sync", "launchLoadSessions: epoch $myEpoch superseded post-verify, discarding stale snapshot")
-                        return@onSuccess
-                    }
-                }
+                // remove-message-persistence Task 6: the prior
+                // `currentSessionVerifyResult = cacheRepository.verifyFingerprint`
+                // suspend + epoch/host re-check block was deleted together
+                // with the CacheRepository surface. The currentSessionId is
+                // consumed directly below (memory LRU is the sole cache; the
+                // server is the source of truth for cross-restart drift).
                 // ── FIX-A/C (review-blocker): atomic bulk-archive commit ─────
                 // Detect ALL archived sessions in the merged result that are
                 // currently OPEN (in openSessionIds) or are the current chat
@@ -320,45 +299,17 @@ internal fun launchLoadSessions(
                     // temporarily absent from the refreshed list (e.g. just
                     // created, or a directory session), tolerate it — reload
                     // its messages but do NOT silently reselect first(). #10.
+                    //
+                    // remove-message-persistence Task 6: the prior
+                    // `cacheRepository.verifyFingerprint` currentSessionId
+                    // self-consistency check (R-20 Phase 1 C7) was deleted
+                    // together with the CacheRepository surface — the
+                    // MismatchEvicted → clear + first-select branch is gone.
+                    // The currentSessionId is kept as-is; VerifyAndHydrate's
+                    // in-memory peek handles cold-start hydration.
                     currentSessionId != null -> {
-                        // R-20 Phase 1 (C7, plan §3 矩阵 "session list 到达"
-                        // 行): verify the currentSessionId's cache fingerprint
-                        // against the freshly-fetched server copy. This is a
-                        // CACHE SELF-CONSISTENCY check (defends against DB
-                        // corruption / fp drift / a stale cached window whose
-                        // session was recreated with a different createdAt).
-                        // The full cross-connection MERGE is Phase 5's job
-                        // (gap-aware); here we only reconcile the one
-                        // currentSessionId. MismatchEvicted → drop
-                        // currentSessionId (the cached window is stale; the
-                        // next switchTo / loadMessages will cold-start it).
-                        // Verified / UnknownColdStart → no-op.
-                        if (cacheRepository != null && currentServerGroupFp != null) {
-                            if (currentSessionVerifyResult is FingerprintResult.MismatchEvicted) {
-                                DebugLog.i(
-                                    "SessionListActions",
-                                    "loadSessions: currentSessionId=$currentSessionId fingerprint mismatch → clearing currentSessionId (cold-start fallback)"
-                                )
-                                slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
-                                // After clearing, fall through to the
-                                // first-select path so the user lands on a
-                                // valid session instead of the empty state
-                                // (mirrors the cold-start UX).
-                                //
-                                // gro-2 Blocker 2b: select the first NON-
-                                // archived session — never resurrect an
-                                // archived session via re-select.
-                                if (slices.composer.value.draftWorkdir == null) {
-                                    refreshedSessions.firstOrNull { !it.isArchived }?.let { onSelectSession(it.id) }
-                                }
-                            } else {
-                                onLoadSessionStatus()
-                                onLoadMessages(currentSessionId)
-                            }
-                        } else {
-                            onLoadSessionStatus()
-                            onLoadMessages(currentSessionId)
-                        }
+                        onLoadSessionStatus()
+                        onLoadMessages(currentSessionId)
                     }
                     else -> {
                         slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
@@ -490,10 +441,11 @@ private val statusLoadEpoch = java.util.concurrent.atomic.AtomicLong(0)
 // response already updated the state.
 //
 // Threading: all launchLoadSessions calls run on the same scope (Main.immediate,
-// serial). The epoch check at the top of onSuccess + after the verifyFingerprint
-// suspend is sufficient — the writes (mutateSessionList / persist / callback)
-// happen synchronously after the last check with no suspension in between, so
-// no TOCTOU is possible on this dispatcher.
+// serial). The epoch check at the top of onSuccess is sufficient — the writes
+// (mutateSessionList / persist / callback) happen synchronously after that
+// check with no suspension in between (remove-message-persistence Task 6
+// removed the prior post-verifyFingerprint re-check), so no TOCTOU is
+// possible on this dispatcher.
 private val sessionListLoadEpoch = java.util.concurrent.atomic.AtomicLong(0)
 
 internal fun launchLoadSessionStatus(

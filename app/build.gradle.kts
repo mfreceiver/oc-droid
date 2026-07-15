@@ -72,9 +72,11 @@ android {
         versionName = gitVersionName
 
         // §apk-size: 仅打包 arm64-v8a。minSdk=34（Android 14+）真机 100% arm64；
-        // SQLCipher .so 原全 4 ABI 打包占 7.3MB，收敛后 release APK 省 ~5.3MB。
         // x86/x86_64 仅模拟器用；模拟器测试用 debug 包（同样受此 filter 影响，但
         // arm64 模拟器即原生目标）。如需多 ABI，改发 .aab 让商店按设备下发。
+        // （历史：原 ABI 收敛的动机之一是 SQLCipher .so 全 4 ABI 占 7.3MB；该依赖
+        // 已随 remove-message-persistence 重构移除，但 arm64-only 收敛对 release
+        // 包体仍有意义，filter 保留。）
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -186,12 +188,6 @@ tasks.register<Copy>("archiveReleaseApk") {
     from(layout.buildDirectory.dir("outputs/apk/release/app-release.apk"))
     into(rootProject.layout.projectDirectory.dir("APK"))
     rename { "oc-droid-$gitVersionName.apk" }
-}
-
-// R-20 Phase 0：Room schema 导出目录（exportSchema=true 要求 KSP arg）。
-// schemas/ 入 git（后续稳定后正式 Migration 用）。
-ksp {
-    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 // R-22 / R18 Phase 5++ kover 覆盖率门槛（防回归 floor）。
@@ -450,14 +446,6 @@ dependencies {
     implementation(libs.markdown.renderer.code)
     implementation(libs.androidx.compose.material3.windowsizeclass)
 
-    // R-20 Phase 0：加密持久化缓存（SQLCipher via Room SupportFactory）。
-    // Room 用 KSP 处理器；SQLCipher 4.16.0 AAR 自带 consumer-rules（见 proguard-rules.pro）。
-    implementation(libs.androidx.room.runtime)
-    implementation(libs.androidx.room.ktx)
-    ksp(libs.androidx.room.compiler)
-    implementation(libs.androidx.sqlite.framework)
-    implementation(libs.sqlcipher.android)
-
     testImplementation(libs.junit)
     testImplementation(libs.mockk)
     testImplementation(libs.kotlinx.coroutines.test)
@@ -471,10 +459,7 @@ dependencies {
     testImplementation(libs.robolectric)
     // R-21: ApplicationProvider.getApplicationContext（Robolectric 测试取 Context）
     testImplementation(libs.androidx.test.core)
-    // R-20 Phase 0：CacheDatabaseTest 用 Room in-memory（不挂 SupportFactory，
-    // Robolectric 跑不了真 SQLCipher native lib）。
-    testImplementation(libs.androidx.room.testing)
-    
+
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

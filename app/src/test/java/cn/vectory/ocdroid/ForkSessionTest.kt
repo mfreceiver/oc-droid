@@ -135,21 +135,11 @@ class ForkSessionTest {
             effects = effectBus,
             currentServerGroupFp = { "test-fp" },
         )
-        val cacheRepository = io.mockk.mockk<cn.vectory.ocdroid.data.cache.CacheRepository>(relaxed = true)
         // CP1 (notify Phase-0): single connection-identity store.
         val identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         // CP3 (notify Phase-0): SSE event stream + bridge.
         val sseEventStream = cn.vectory.ocdroid.service.events.SseEventStream()
         val sseEventBridge = cn.vectory.ocdroid.service.bridge.SseEventBridge(appScope)
-        // R-20 Phase 1: stub verifyAndLoad to a non-null default — relaxed
-        // mockk returns null for sealed-interface return types, which crashes
-        // AppCore's VerifyAndHydrate handler `when`.
-        io.mockk.coEvery {
-            cacheRepository.verifyAndLoad(any(), any(), any())
-        } returns cn.vectory.ocdroid.data.cache.HydrateResult.UnknownColdStart
-        io.mockk.coEvery {
-            cacheRepository.verifyFingerprint(any(), any(), any())
-        } returns cn.vectory.ocdroid.data.cache.FingerprintResult.UnknownColdStart
         val hostProfileController = cn.vectory.ocdroid.ui.controller.HostProfileController(
             scope = appScope,
             slices = store.slices,
@@ -159,8 +149,6 @@ class ForkSessionTest {
             trafficTracker = trafficTracker,
             effects = effectBus,
             currentServerGroupFp = { "test-fp" },
-            appContext = appContext,
-            cacheRepository = cacheRepository,
             identityStore = identityStore,
         )
         val sessionSyncCoordinator = cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator(
@@ -192,10 +180,6 @@ class ForkSessionTest {
             store = store,
             autoStart = false,
         )
-        val gapFillCoordinator = cn.vectory.ocdroid.ui.chat.GapFillCoordinator(
-            repository = repository,
-            cacheRepository = cacheRepository,
-        )
         return AppCore(
             store,
             repository,
@@ -213,8 +197,6 @@ class ForkSessionTest {
             sessionSyncCoordinator,
             connectionCoordinator,
             unreadSoakController,
-            gapFillCoordinator,
-            cacheRepository,
             // §review-fix #1: fp provider (same as MainViewModelTestBase).
             { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
             appScope,

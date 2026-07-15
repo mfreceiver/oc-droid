@@ -29,10 +29,9 @@ internal fun applySavedSettings(
     // R-20 Phase 5 (plan §3, cold-start migration trigger): migrate the
     // legacy global / baseUrl-keyed / sessionId-keyed storage slots to the
     // current host's fp-keyed slots. Idempotent per fp via the
-    // `cache_migration_v1_done_<fp>` flag in EncryptedSharedPreferences
-    // (NOT Room — migration runs at AppCore.init, before the cache DB is
-    // necessarily open). Pure ESP synchronous read+write, no network.
-    // Repeated cold starts skip the rewrite. See SettingsManager.migrateLegacyKeysToFp.
+    // `cache_migration_v1_done_<fp>` flag in EncryptedSharedPreferences.
+    // Pure ESP synchronous read+write, no network. Repeated cold starts
+    // skip the rewrite. See SettingsManager.migrateLegacyKeysToFp.
     val currentFp = currentProfile.serverGroupFp.ifBlank { currentProfile.id }
     settingsManager.migrateLegacyKeysToFp(currentFp, currentProfile.serverUrl)
 

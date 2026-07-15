@@ -634,33 +634,6 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coVerify { repository.getMessagesPaged("s1", any(), any()) }
     }
 
-    @Test
-    fun `fillGap with no current session is a no-op`() = runTest {
-        val core = createCore()
-        val vm = ChatViewModel(core)
-
-        vm.fillGap("g1")
-        advanceUntilIdle()
-
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
-    }
-
-    @Test
-    fun `fillGap with a current session but no cached gap is a no-op`() = runTest {
-        // R-20 Phase 2: fillGap routes to GapFillCoordinator.fillSingleGap,
-        // which reads the gap from the cache. With no cached gap (the relaxed
-        // mock returns an empty list) the coordinator returns early — no fetch.
-        // (The full fill integration lives in GapFillCoordinatorTest.)
-        val core = createCore()
-        val vm = ChatViewModel(core)
-        core.writeChat { it.copy(currentSessionId = "s1") }
-
-        vm.fillGap("nonexistent-gap")
-        advanceUntilIdle()
-
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
-    }
-
     // ── sendMessage / loadMessages / accessors ──────────────────────────────
 
     @Test

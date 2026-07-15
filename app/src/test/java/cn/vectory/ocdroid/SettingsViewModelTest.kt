@@ -1,16 +1,9 @@
 package cn.vectory.ocdroid
 
-import cn.vectory.ocdroid.data.cache.CacheRepository
-import cn.vectory.ocdroid.data.model.HostProfile
-import cn.vectory.ocdroid.ui.CacheListingState
-import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.ui.SettingsViewModel
-import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.util.MarkdownFontSizes
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
-import io.mockk.coEvery
-import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.verify
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -18,9 +11,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -32,11 +22,11 @@ import org.junit.Test
  * the settings slice. The slice write flows through [SharedStateStore] which
  * is exercised by [createCore]; here we verify both side-effects land.
  *
- * R-20 Phase 4 (plan §3): extended to cover the cache-management action
- * surface — clearSession / clearProject / clearAll / sweepNow /
- * refreshCacheListing. Each test verifies the action reaches
- * the underlying Repository / Coordinator / HostProfileStore (the relaxed
- * mock on `core.cacheRepository` lets us coVerify the suspend calls).
+ * remove-message-persistence Task 5: the R-20 Phase 4 cache-management
+ * action surface (clearSession / clearProject / clearAll / sweepNow /
+ * sweepAllGroups / refreshCacheListing / isCacheDegraded / cache-listing
+ * refresh effect wiring) was removed together with the SQLite persistence layer; the
+ * tests that pinned it were removed with it.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SettingsViewModelTest : MainViewModelTestBase() {
@@ -148,224 +138,19 @@ class SettingsViewModelTest : MainViewModelTestBase() {
         assertEquals(core.settingsFlow, vm.settingsFlow)
     }
 
-    // ─────────── R-20 Phase 4: cache-management actions ───────────────────
-
-    @Test
-    fun `clearSession forwards to cacheRepository and refreshes listing`() = runTest {
-        val core = createCore()
-        val vm = SettingsViewModel(core)
-
-        vm.clearSession("fp-a", "ses_xyz")
-        advanceUntilIdle()
-
-        coVerify { core.cacheRepository.evictSession("fp-a", "ses_xyz") }
-        // refreshCacheListing fan-out — see CacheListingState assertions
-        // below for the post-clear state.
-        coVerify { core.cacheRepository.allServerGroupFps() }
-    }
-
-    @Test
-    fun `clearProject forwards to evictWorkdirInGroup (never clearAll)`() = runTest {
-        val core = createCore()
-        val vm = SettingsViewModel(core)
-
-        vm.clearProject("fp-a", "/home/me/proj")
-        advanceUntilIdle()
-
-        coVerify {
-            core.cacheRepository.evictWorkdirInGroup("fp-a", "/home/me/proj")
-        }
-        // Strictly NOT clearAll — clearProject is project-scoped.
-        coVerify(exactly = 0) { core.cacheRepository.clearAll() }
-    }
-
-    @Test
-    fun `clearAll forwards to cacheRepository clearAll`() = runTest {
-        val core = createCore()
-        val vm = SettingsViewModel(core)
-
-        vm.clearAll()
-        advanceUntilIdle()
-
-        coVerify(exactly = 1) { core.cacheRepository.clearAll() }
-    }
-
-    @Test
-    fun `sweepNow triggers refreshCacheListing afterwards`() = runTest {
-        val core = createCore()
-        val vm = SettingsViewModel(core)
-        // The maintenance coordinator is real (built from core.cacheRepository,
-        // a relaxed mock). Forcing applyEvictionPolicy + allServerGroupFps to
-        // be stubbed so the coordinator + the refresh path both complete
-        // cleanly under the test dispatcher.
-        coEvery { core.cacheRepository.allServerGroupFps() } returns emptyList()
-
-        vm.sweepNow("fp-a")
-        advanceUntilIdle()
-
-        // The sweep itself calls applyEvictionPolicy + cachedWorkdirsInGroup;
-        // the post-sweep refresh calls allServerGroupFps at least once.
-        coVerify(atLeast = 1) { core.cacheRepository.allServerGroupFps() }
-        // lastSweep was populated (the coordinator's DailySweepReport
-        // surfaces here even on the Incomplete / dedup-skipped path).
-        assertNotNull(vm.lastSweep.value)
-    }
-
-    @Test
-    fun `sweepAllGroups sweeps the UNION of profile-derived + cache-derived fps`() = runTest {
-        // §grouping-rewrite Round-3 #4: the popup listing is cache-derived
-        // (refreshCacheListing → allServerGroupFps), but sweepAllGroups used
-        // to sweep profile-derived fps only — so a group with cached sessions
-        // but no live profile (e.g. all profiles for that group were deleted)
-        // would show in the popup but be skipped by "Sweep all groups". The
-        // union closes that gap.
-        val core = createCore()
-        val vm = SettingsViewModel(core)
-
-        // Arrange: profile-derived fp = "fp-profile-only"; cache-derived fps
-        // include "fp-profile-only" (overlap, should not duplicate sweep) AND
-        // "fp-cache-only" (the gap case).
-        val profileFpProfile = HostProfile(
-            id = "p1",
-            name = "p1",
-            serverUrl = "http://x",
-            serverGroupFp = "fp-profile-only",
-        )
-        every { hostProfileStore.profiles() } returns listOf(profileFpProfile)
-        coEvery { core.cacheRepository.allServerGroupFps() } returns listOf("fp-profile-only", "fp-cache-only")
-        // Stub the per-fp coordinator deps so the sweep completes cleanly
-        // under the test dispatcher (applyEvictionPolicy + cachedWorkdirsInGroup
-        // are invoked by the real coordinator built in the test-only ctor).
-        io.mockk.coEvery { core.cacheRepository.cachedWorkdirsInGroup(any()) } returns emptyList()
-
-        vm.sweepAllGroups()
-        advanceUntilIdle()
-
-        // Both distinct fps were swept (the union, not just the profile set).
-        // applyEvictionPolicy is the first thing dailySweepIfNeeded runs per
-        // fp; verifying it ran for both proves both fps entered the pipeline.
-        io.mockk.coVerify(atLeast = 1) { core.cacheRepository.applyEvictionPolicy("fp-profile-only") }
-        io.mockk.coVerify(atLeast = 1) { core.cacheRepository.applyEvictionPolicy("fp-cache-only") }
-    }
-
-    @Test
-    fun `refreshCacheListing populates Loaded state when groups exist`() = runTest {
-        val core = createCore()
-        val vm = SettingsViewModel(core)
-        coEvery { core.cacheRepository.allServerGroupFps() } returns listOf("fp-a")
-        coEvery { core.cacheRepository.listGroupSessions("fp-a") } returns listOf(
-            CacheRepository.CachedSessionRow(
-                serverGroupFp = "fp-a",
-                sessionId = "ses_1",
-                workdir = "/p",
-                createdAt = 1L,
-                newestCachedAt = 2L,
-                lastVerifiedAt = 3L,
-                hasExhaustedGap = false
-            )
-        )
-        io.mockk.every { hostProfileStore.profilesInGroup("fp-a") } returns emptyList()
-
-        vm.refreshCacheListing()
-        advanceUntilIdle()
-
-        val state = vm.cacheListing.value
-        assertTrue("expected Loaded, got $state", state is CacheListingState.Loaded)
-        val loaded = state as CacheListingState.Loaded
-        assertEquals(1, loaded.groups.size)
-        assertEquals("fp-a", loaded.groups[0].serverGroupFp)
-        assertEquals(1, loaded.groups[0].sessions.size)
-    }
-
-    @Test
-    fun `refreshCacheListing surfaces Empty when no fps cached`() = runTest {
-        val core = createCore()
-        val vm = SettingsViewModel(core)
-        coEvery { core.cacheRepository.allServerGroupFps() } returns emptyList()
-
-        vm.refreshCacheListing()
-        advanceUntilIdle()
-
-        assertEquals(CacheListingState.Empty, vm.cacheListing.value)
-    }
-
-    @Test
-    fun `refreshCacheListing surfaces Error when repository throws`() = runTest {
-        val core = createCore()
-        val vm = SettingsViewModel(core)
-        coEvery { core.cacheRepository.allServerGroupFps() } throws RuntimeException("disk gone")
-
-        vm.refreshCacheListing()
-        advanceUntilIdle()
-
-        val state = vm.cacheListing.value
-        assertTrue("expected Error, got $state", state is CacheListingState.Error)
-        assertEquals("disk gone", (state as CacheListingState.Error).message)
-    }
-
-    @Test
-    fun `isOnline reflects connectionFlow isConnected`() = runTest {
-        val core = createCore()
-        val vm = SettingsViewModel(core)
-
-        // Default ConnectionState has isConnected = false.
-        assertFalse(vm.isOnline)
-
-        // Flip the connection slice + assert the VM picks it up.
-        core.store.mutateConnection { ConnectionState(isConnected = true) }
-        assertTrue(vm.isOnline)
-    }
-
-    @Test
-    fun `isCacheDegraded is false in the test-only constructor`() = runTest {
-        // The test-only ctor hardcodes cacheDegraded=false (the in-memory
-        // fallback never fires in tests). The production @Inject ctor would
-        // route the @Named("cacheDegraded") Boolean from the Hilt graph.
-        val vm = SettingsViewModel(createCore())
-        assertFalse(vm.isCacheDegraded)
-    }
-
-    // ─────────── §analysis-8b (Lane-D8b): RefreshCacheListing wiring ──────
-
-    @Test
-    fun `RefreshCacheListing effect triggers refreshCacheListing re-read of cacheRepository`() = runTest {
-        // §analysis-8b: HostProfileController.resetLocalDataAndResync emits
-        // ControllerEffect.RefreshCacheListing on the SharedEffectBus after
-        // wiping the cache DB. SettingsViewModel's init-block collector picks
-        // it up and calls refreshCacheListing() so the manual _cacheListing /
-        // _cachedDataBytes StateFlows drop stale rows. This test pins the
-        // end-to-end wiring: effect → collect → refreshCacheListing →
-        // cacheRepository re-read.
-        val core = createCore()
-        val vm = SettingsViewModel(core)
-        coEvery { core.cacheRepository.allServerGroupFps() } returns emptyList()
-        // SharedEffectBus has NO replay — the init block's viewModelScope.launch
-        // collector must be subscribed BEFORE we emit, or the effect is lost.
-        // advanceUntilIdle lets the init launch begin collecting.
-        advanceUntilIdle()
-        // Baseline: no refresh yet (the listing is still at its Loading
-        // initial value; refreshCacheListing has not run).
-        coVerify(exactly = 0) { core.cacheRepository.allServerGroupFps() }
-
-        core.effectBus.tryEmitEffect(ControllerEffect.RefreshCacheListing)
-        advanceUntilIdle()
-
-        // The init collector forwarded the effect → refreshCacheListing() ran
-        // → cacheRepository was re-read (allServerGroupFps is the first suspend
-        // call inside refreshCacheListing's appScope.launch block).
-        coVerify(atLeast = 1) { core.cacheRepository.allServerGroupFps() }
-        // The re-read transitioned the listing from Loading to Empty (fps == []).
-        assertEquals(CacheListingState.Empty, vm.cacheListing.value)
-    }
-
     // ─────────── §grouping-rewrite Round-2 C1: disconnect reactivity ──────
 
     @Test
     fun `disconnectWorkdir re-derives recentWorkdirs even when hostFlow + sessionListFlow are quiet`() = runTest {
-        // C1: disconnectWorkdir mutates SettingsManager + cacheRepository,
-        // neither of which pokes hostFlow / sessionListFlow. Without the
-        // explicit re-derivation trigger the disconnected workdir would stay
-        // in recentWorkdirs (regression of the old hiddenWorkdirs behaviour).
+        // C1: disconnectWorkdir mutates SettingsManager (removeRecentWorkdir),
+        // which does not poke hostFlow / sessionListFlow. Without the explicit
+        // re-derivation trigger the disconnected workdir would stay in
+        // recentWorkdirs (regression of the old hiddenWorkdirs behaviour).
+        //
+        // remove-message-persistence Task 5: the cacheRepository
+        // .evictWorkdirInGroup side-effect that used to be verified here was
+        // removed with the SQLite persistence layer; the test now pins only
+        // the workdir-registry mutation + tick-bumped re-derivation.
         val core = createCore()
         val vm = SettingsViewModel(core)
 
@@ -396,9 +181,8 @@ class SettingsViewModelTest : MainViewModelTestBase() {
         // settingsManager mutation is invisible to hostFlow/sessionListFlow).
         assertEquals(listOf("/b"), collected.last())
 
-        // Side-effect sanity: the removal + eviction both fired.
+        // Side-effect sanity: the removal fired.
         verify { settingsManager.removeRecentWorkdir(any(), "/a") }
-        coVerify { core.cacheRepository.evictWorkdirInGroup(any(), "/a") }
 
         job.cancel()
     }
@@ -441,9 +225,6 @@ class SettingsViewModelTest : MainViewModelTestBase() {
         assertEquals(listOf("/a", "/b"), collected.last())
         // Contract: currentWorkdir UNCHANGED (no session/draft hijack).
         assertEquals("/existing", currentWd)
-        // Contract: connectWorkdir is purely project-registry — it must NOT
-        // evict/attempt session creation (no cache eviction, unlike disconnect).
-        coVerify(exactly = 0) { core.cacheRepository.evictWorkdirInGroup(any(), any()) }
 
         job.cancel()
     }

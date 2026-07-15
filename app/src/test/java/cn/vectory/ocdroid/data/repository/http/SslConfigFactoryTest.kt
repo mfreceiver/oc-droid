@@ -52,7 +52,7 @@ class SslConfigFactoryTest {
 
     /** 自签名根 CA（带 keyPair，可签发子证）。 */
     private fun newRootCa(cn: String = "opencode-test-ca"): HeldCertificate =
-        HeldCertificate.Builder().commonName(cn).build()
+        HeldCertificate.Builder().commonName(cn).certificateAuthority(0).build()
 
     /** 由 [parent] 签发的叶子证书（客户端 / 服务端通用）。 */
     private fun newSigned(

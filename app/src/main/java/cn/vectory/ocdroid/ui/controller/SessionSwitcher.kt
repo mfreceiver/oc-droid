@@ -1,8 +1,10 @@
 package cn.vectory.ocdroid.ui.controller
 
+import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.data.cache.contract.CachedSessionWindow
+import cn.vectory.ocdroid.ui.controller.CachedSessionWindow
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.SliceFlows
@@ -47,10 +49,14 @@ internal data class CacheWindowKey(val serverGroupFp: String, val sessionId: Str
  *    (old Step 3) and no longer synchronously emits LoadMessages (old
  *    Step 7). Instead it emits a single [ControllerEffect.VerifyAndHydrate]
  *    with `(fp, sid, targetSession.time.created)`. The handler in
- *    AppCore.dispatchSessionEffect runs `cacheRepository.verifyAndLoad` and
- *    dispatches the right follow-up (cold-start LoadMessages vs verified
- *    hydrate). This is the verify-before-hydrate privacy contract (plan §0 N2)
- *    — the user NEVER sees unverified cached content.
+ *    AppCore.dispatchSessionEffect runs an IN-MEMORY peek via
+ *    [peekSessionWindow] (remove-message-persistence Task 2: the prior
+ *    suspend `cacheRepository.verifyAndLoad` fingerprint check was removed
+ *    — the cache is now process-local only, so verification collapses to a
+ *    synchronous resident-check) and dispatches the right follow-up
+ *    (cold-start LoadMessages vs in-memory hydrate). This preserves the
+ *    verify-before-hydrate privacy contract (plan §0 N2): the user NEVER
+ *    sees unverified cached content.
  */
 @Suppress("DEPRECATION")
 class SessionSwitcher(
@@ -94,9 +100,22 @@ class SessionSwitcher(
     internal fun sessionWindowCacheSize(): Int = sessionWindowCache.size
 
     /**
-     * Test-only visibility: returns the cached window for [sessionId] in the
-     * CURRENT server group if any. TRUE read-only — iterates entries instead
-     * of `get` so it does NOT promote the entry to most-recently-used.
+     * Returns the cached window for [sessionId] in the CURRENT server group
+     * if any, or null. TRUE read-only — iterates `entries` (firstOrNull) so
+     * it does NOT promote the entry to most-recently-used (a `get` would).
+     *
+     * Production use (remove-message-persistence Task 2): the
+     * VerifyAndHydrate handler in AppCore now calls this as a synchronous
+     * memory probe in place of the old suspend `cacheRepository.verifyAndLoad`.
+     * This is thread-safe because the handler runs on `appScope` =
+     * Dispatchers.Main.immediate, the SAME dispatcher that confines
+     * [sessionWindowCache] (every writer in this class runs on the main
+     * dispatcher) — so the peek cannot race a concurrent put.
+     *
+     * The non-promoting semantics (`entries.firstOrNull` rather than `get`)
+     * are exactly right for the verify probe: a hydration lookup must NOT
+     * disturb the LRU order, otherwise merely opening (and verifying) a
+     * rarely-used session would keep it resident and evict a hotter one.
      */
     internal fun peekSessionWindow(sessionId: String): CachedSessionWindow? {
         val fp = currentServerGroupFp()
@@ -147,20 +166,20 @@ class SessionSwitcher(
     }
 
     /**
-     * R-20 Phase 1: precise per-session eviction (内存). Used by EvictSession
-     * effect handler — removes the entry for `(fp, sid)` if it exists. The
-     * persistent counterpart runs in AppCore.dispatchHostEffect via
-     * cacheRepository.evictSession.
+     * R-20 Phase 1: precise per-session eviction (内存 only). Used by
+     * EvictSession effect handler — removes the entry for `(fp, sid)` if it
+     * exists. remove-message-persistence: there is no persistent counterpart;
+     * the in-memory LRU is the sole cache layer.
      */
     internal fun evictSession(serverGroupFp: String, sessionId: String) {
         sessionWindowCache.remove(CacheWindowKey(serverGroupFp, sessionId))
     }
 
     /**
-     * R-20 Phase 1: precise per-group eviction (内存). Used by EvictGroup
+     * R-20 Phase 1: precise per-group eviction (内存 only). Used by EvictGroup
      * effect handler — removes every entry whose key matches [serverGroupFp].
-     * The persistent counterpart runs in AppCore.dispatchHostEffect via
-     * cacheRepository.evictGroup.
+     * remove-message-persistence: there is no persistent counterpart; the
+     * in-memory LRU is the sole cache layer.
      */
     internal fun clearMemoryForGroup(serverGroupFp: String) {
         sessionWindowCache.entries.removeAll { it.key.serverGroupFp == serverGroupFp }
@@ -168,11 +187,70 @@ class SessionSwitcher(
 
     /**
      * R-20 Phase 1: clear every entry regardless of group. Used by
-     * performGlobalColdStartRefresh (cold-start刷新只清内存，不清持久 DB —
-     * plan §3 矩阵 "全局冷启动刷新" 行)。
+     * performGlobalColdStartRefresh (cold-start 刷新只清内存 — remove-
+     * message-persistence 后无持久 DB，内存 LRU 是唯一缓存层)。
      */
     internal fun clearAllCached() {
         sessionWindowCache.clear()
+    }
+
+    /**
+     * remove-message-persistence Task 3: append a single SSE-delivered new
+     * message (`message.updated` insert branch) to the IN-MEMORY window of
+     * `(serverGroupFp, sessionId)` if one is resident, so a later switch-back
+     * (VerifyAndHydrate → peek hit) sees it without a re-fetch. Pure memory
+     * op — no IO, no suspend, no Room. No-op when the window is not cached
+     * (cold-start sessions do not proactively build a cache — only already-
+     * cached sessions stay fresh; grilling 假设1: 删 SSE 缓存写会在 >40 条
+     * 新消息时丢中间消息，故保留 append 但目标从 SQLite 换成 sessionWindowCache).
+     *
+     * Thread-safety: same confinement as every other writer in this class —
+     * `appScope = Dispatchers.Main.immediate` (the handler in
+     * [cn.vectory.ocdroid.ui.AppCore.dispatchSessionEffect] that drives this
+     * runs on appScope too).
+     *
+     * **ID-aware upsert (review-fix round 1)**: the effect is delivered
+     * asynchronously through a SharedFlow, so another writer
+     * (writeSessionWindow from a fetch completion or captureCurrentSessionWindow
+     * from a session switch) can land a window already containing this
+     * `message.id` BEFORE this handler runs. To stay idempotent under that
+     * reorder:
+     *  - When [message.id] is already present in `existing.messages`, REPLACE
+     *    the matching entry in place (preserve list cardinality — do NOT
+     *    append a duplicate).
+     *  - When [parts] is empty, KEEP `existing.partsByMessage[message.id]`
+     *    unchanged (do NOT overwrite a non-empty parts list with emptyList —
+     *    the incoming effect's `parts = emptyList()` reflects only "no new
+     *    parts in this event", not "parts should be cleared"). When [parts]
+     *    is non-empty, merge under [message.id] as before.
+     */
+    internal fun appendMessageIfCached(
+        serverGroupFp: String,
+        sessionId: String,
+        message: Message,
+        parts: List<Part>,
+    ) {
+        val key = CacheWindowKey(serverGroupFp, sessionId)
+        val existing = sessionWindowCache[key] ?: return
+        val updatedMessages = if (existing.messages.any { it.id == message.id }) {
+            // ID already resident (a concurrent write-back / fetch completion
+            // landed first) → replace in place, do NOT grow cardinality.
+            existing.messages.map { if (it.id == message.id) message else it }
+        } else {
+            existing.messages + message
+        }
+        val updatedParts = if (parts.isEmpty()) {
+            // Incoming parts empty → preserve any existing parts for this id
+            // (a fetch / switch-back may already have populated them; the
+            // effect's empty list is not a "clear parts" instruction).
+            existing.partsByMessage
+        } else {
+            existing.partsByMessage + (message.id to parts)
+        }
+        sessionWindowCache[key] = existing.copy(
+            messages = updatedMessages,
+            partsByMessage = updatedParts,
+        )
     }
 
     /**
@@ -185,9 +263,11 @@ class SessionSwitcher(
      *     clear chat fields + streaming + gap + staleNotice).
      *  3. ~~Restore cached window from LRU~~ → **R-20 Phase 1**: emit
      *     [ControllerEffect.VerifyAndHydrate] (verify-before-hydrate, plan §0 N2).
-     *     The handler does fingerprint check + verified hydrate asynchronously;
-     *     the chat slice starts empty and is filled by either the verified
-     *     window or the cold-start REST fetch (whichever wins).
+     *     The handler does an in-memory peek of the resident window (Task 2:
+     *     the prior suspend fingerprint check was removed once the cache
+     *     became process-local) + verified hydrate asynchronously; the chat
+     *     slice starts empty and is filled by either the resident window
+     *     (peek hit) or the cold-start REST fetch (peek miss, whichever wins).
      *  4. Look up target session (sessions ∪ directorySessions) + upsert if needed.
      *  5. Reset collapsible-card expansion state.
      *  6. Sync repository's workdir context to the selected session's directory.
@@ -209,7 +289,8 @@ class SessionSwitcher(
      * (moving the lookup earlier would duplicate Step 4's union search); the
      * effect carries the resolved createdAt so the handler doesn't have to
      * re-derive it. If targetSession is null (rare: sessionId has no cached
-     * metadata yet), we emit createdAt=null → UnknownColdStart → cold load.
+     * metadata yet), we emit createdAt=null → peek miss (no resident window to
+     * hydrate from) → cold REST load.
      */
     fun switchTo(sessionId: String) {
         // item 3 deep guard (second layer): if the requested session is already
@@ -271,7 +352,6 @@ class SessionSwitcher(
                 partsByMessage = emptyMap(),
                 streamingPartTexts = emptyMap(),
                 streamingReasoningPart = null,
-                gapMarkers = emptyList(),
                 staleNotice = false,
                 // §F3-load-more: 切换会话时显式重置 cursor/hasMore，保证 chat slice
                 // 始终内部一致（cursor=null ∧ hasMore=false），由随后的
@@ -333,22 +413,24 @@ class SessionSwitcher(
         // ── Step 3 (R-20 Phase 1): verify-before-hydrate effect ─────────────
         // The OLD code synchronously seeded the chat slice from the LRU here.
         // Phase 1 replaces that with a VerifyAndHydrate effect: the handler
-        // in AppCore.dispatchSessionEffect runs cacheRepository.verifyAndLoad
-        // (single-transaction fingerprint check) and ONLY on Verified copies
-        // the cached window into the chat slice + dispatches a follow-up
-        // LoadMessages(resetLimit=false). On UnknownColdStart / MismatchEvicted
-        // the handler dispatches LoadMessages(resetLimit=true).
+        // in AppCore.dispatchSessionEffect does an IN-MEMORY peek via
+        // peekSessionWindow (remove-message-persistence Task 2: the prior
+        // suspend cacheRepository.verifyAndLoad fingerprint check was removed
+        // — the cache is process-local now, so verification collapses to a
+        // synchronous resident-check). On a peek hit it copies the resident
+        // window into the chat slice + dispatches LoadMessages(resetLimit=false);
+        // on a peek miss it dispatches LoadMessages(resetLimit=true).
         //
         // The chat slice stays empty (per Step 2 above) until either:
-        //   (a) the handler hydrates a Verified window (typically <10ms —
-        //       in-process Room read on a small table), or
+        //   (a) the handler hydrates the peek-hit window (synchronous memory
+        //       read, in-process), or
         //   (b) the cold-start REST fetch lands (the handler dispatches it).
         // Either way the user never sees UNVERIFIED cached content.
         //
         // We need targetSession.time.created here, which Step 4 also looks
         // up — resolve it once now and reuse in Step 4. If targetSession is
         // null (session not yet in any slice), pass createdAt=null which the
-        // handler treats as UnknownColdStart → cold REST load.
+        // handler treats as a peek miss (no resident window) → cold REST load.
         val targetSession = (slices.sessionList.value.sessions + slices.sessionList.value.directorySessions.values.flatten())
             .firstOrNull { it.id == sessionId }
         effects.tryEmitEffect(

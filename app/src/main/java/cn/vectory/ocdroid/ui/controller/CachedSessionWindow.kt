@@ -1,4 +1,4 @@
-package cn.vectory.ocdroid.data.cache.contract
+package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
@@ -6,15 +6,17 @@ import cn.vectory.ocdroid.data.model.Part
 /**
  * §Per-session message cache: a snapshot of the loaded window for a single
  * session — the four pieces of message-state that the session-switch flow
- * (inlined in `SessionSwitcher.switchTo()`) otherwise wipes to empty on every
+ * (inlined in [SessionSwitcher.switchTo]) otherwise wipes to empty on every
  * switch. Restoring from this snapshot on return avoids the visible flicker +
  * history re-fetch that previously hit users on every A→B→A hop.
  *
- * Moved here from `ui` (Phase 4 architecture: break the
- * `ui → data.cache → ui` dependency ring). Its field types ([Message] /
- * [Part]) are domain model types, so this data-carrier has no UI coupling —
- * the cache layer persists + returns these windows without reaching into the
- * UI layer.
+ * remove-message-persistence Task 6: relocated back to `ui.controller`
+ * alongside its sole runtime consumer ([SessionSwitcher]'s in-process LRU).
+ * The prior `data.cache.contract` home existed only to break a
+ * `ui → data.cache → ui` dependency ring that the SQLite cache owned; with
+ * the persistent cache deleted the ring is gone and the type belongs with
+ * its consumer. Field types ([Message] / [Part]) are domain model types —
+ * no UI coupling.
  */
 data class CachedSessionWindow(
     val messages: List<Message>,

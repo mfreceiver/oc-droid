@@ -36,8 +36,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -65,7 +63,6 @@ import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.SettingsViewModel
 import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.Dimens
-import cn.vectory.ocdroid.ui.util.formatBytes
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
 import dagger.hilt.EntryPoint
@@ -204,7 +201,7 @@ private fun SettingsSectionRow(section: SettingsSectionEntry, onClick: () -> Uni
 //
 // Each owns its own Scaffold + TopAppBar (always-back). The existing M3
 // section composables ([AppearanceSection], [ModelManagementSection],
-// [CacheManagementSection], [DangerZoneSection], [TrafficSection],
+// [DangerZoneSection], [TrafficSection],
 // [AboutSection], [DebugLogSection]) are reused verbatim — they were already
 // M3-canonical (SegmentedButton/Slider/Card/Switch). No control replacement.
 // ──────────────────────────────────────────────────────────────────────────
@@ -213,10 +210,6 @@ private fun SettingsSectionRow(section: SettingsSectionEntry, onClick: () -> Uni
  * Shared TopAppBar shell for every Settings sub-route. Always renders a back
  * arrow wired to [onBack] (Phase 3 / G.3 step 2: the Settings top bar carries
  * back unconditionally on every sub-page).
- *
- * §P5b-B (Q8): [snackbarHost] defaults to empty (no host); the storage route
- * passes a real [SnackbarHostState] so [CacheManagementSection] can surface
- * the 3s sweep-result snackbar.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -497,66 +490,50 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
 }
 
 /**
- * settings/storage — wraps [DangerZoneSection] (清除数据) + [CacheManagementSection]
- * (缓存管理). The previous modal-popup chrome (Dialog + Surface wrapper around
- * CacheManagementSection) is collapsed back to an inline section — the
- * sub-route's own Scaffold provides the framing.
+ * settings/storage — wraps [DangerZoneSection] (清除数据). The previous
+ * modal-popup chrome (Dialog + Surface wrapper around the cache-management
+ * tree) was collapsed back to an inline section in an earlier release; the
+ * cache-management tree itself (group → workdir → session + destructive
+ * sweeps) was removed together with the SQLite persistence layer
+ * (remove-message-persistence Task 5), so this route now only carries the
+ * full local-data wipe.
  *
  * §P5b-A / Q7: [TrafficSection] moved from here to 服务器管理
  * ([HostProfilesManagerScreen]) — traffic is conceptually per-server, so it
  * lives with the host list now.
- *
- * §P5b-B / Q8: the page now has TWO sections in this order:
- *  ① 清除数据 (was Danger Zone) — flat, single row "已缓存数据 XXX MB" + 清除缓存
- *     button (destructive: resetLocalDataAndResync, confirmation dialog).
- *  ② 缓存管理 (was 缓存与维护) — 3-level tree (group → workdir → session) with
- *     destructive 清除失联会话 sweeps whose results surface via a 3s snackbar.
- * The Scaffold carries a [SnackbarHost] for the sweep-result snackbar.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsStorageRoute(
     viewModel: HostViewModel,
     @Suppress("UNUSED_PARAMETER") connectionVM: ConnectionViewModel,
-    settingsVM: SettingsViewModel,
+    @Suppress("UNUSED_PARAMETER") settingsVM: SettingsViewModel,
     onBack: () -> Unit,
 ) {
     // §P5b-A / Q7: `connectionVM` is kept in the signature so the AppShell
     // call site is unchanged (traffic stats moved to 服务器管理).
-
-    // §P5b-B / Q8: SnackbarHost for the 缓存管理 sweep-result snackbar.
-    val snackbarHostState = remember { SnackbarHostState() }
-    // §P5b-B / Q8: cached-data payload size for the 清除数据 row.
-    val cachedBytes by settingsVM.cachedDataBytes.collectAsStateWithLifecycle()
-    val cachedDataSize = formatBytes(cachedBytes)
+    // remove-message-persistence Task 5: `settingsVM` is retained in the
+    // signature for the same call-site stability reason — the cache-management
+    // tree it used to feed was removed with the SQLite persistence layer.
 
     SettingsSubRouteScaffold(
         titleRes = R.string.settings_section_storage,
         onBack = onBack,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { mod ->
         // §review-AB: no parent horizontal padding — AppSectionHeader self-pads
-        // at 16dp; DangerZoneSection's bare Row + CacheManagementSection's
-        // bare Card (+ DegradedCacheWarning) each self-pad via
+        // at 16dp; DangerZoneSection's bare Row self-pads via
         // `Modifier.padding(horizontal = Dimens.spacing4)` so all content
         // shares one 16dp keyline with the header.
         Column(
             modifier = mod.verticalScroll(rememberScrollState()),
         ) {
-            // ① 清除数据 (first, flat).
+            // ① 清除数据 (first, flat). The cache-management tree (group →
+            // workdir → session + destructive sweeps) was removed together
+            // with the SQLite persistence layer (remove-message-persistence
+            // Task 5); this section now only carries the full local-data wipe.
             AppSectionHeader(text = stringResource(R.string.settings_danger_zone))
             DangerZoneSection(
-                cachedDataSize = cachedDataSize,
                 onClearLocalData = viewModel::resetLocalDataAndResync,
-                hideHeader = true,
-            )
-            Spacer(modifier = Modifier.height(Dimens.spacing6))
-
-            // ② 缓存管理 (3-level tree + destructive sweeps + 3s snackbar).
-            AppSectionHeader(text = stringResource(R.string.cache_management_popup_title))
-            CacheManagementSection(
-                vm = settingsVM,
-                snackbarHostState = snackbarHostState,
                 hideHeader = true,
             )
         }
@@ -567,7 +544,8 @@ fun SettingsStorageRoute(
  * settings/about — wraps [AboutSection] + [DebugLogSection]. The "Debug"
  * header (formerly a top-level Settings group) now lives here, with debug-log
  * as the only entry (the diagnostic panels moved to Connections in an earlier
- * release, and the cache-management popup moved to settings/storage above).
+ * release, and the cache-management popup was removed in remove-message-
+ * persistence Task 5 along with the SQLite persistence layer).
  *
  * Parameters `viewModel` + `settingsVM` document the Activity-scoped Hilt
  * graph callers must keep alive for [DebugLogSection]'s @EntryPoint

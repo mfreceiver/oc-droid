@@ -1,5 +1,7 @@
 package cn.vectory.ocdroid.ui.controller
 
+import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 
 /**
@@ -60,11 +62,17 @@ sealed class ControllerEffect {
      * of the synchronous LRU seed + synchronous LoadMessages (the old path
      * hydrated the cache without fingerprint-checking it first).
      *
-     * Handled by AppCore.dispatchSessionEffect (this domain) — the handler
-     * calls `cacheRepository.verifyAndLoad(...)` and dispatches a follow-up
-     * LoadMessages inside the same launch (plan §3 v4 round-3 code skeleton).
+     * Handled by AppCore.dispatchSessionEffect (this domain) — remove-message-
+     * persistence Task 2 collapsed the prior suspend
+     * `cacheRepository.verifyAndLoad(...)` fingerprint check into a
+     * synchronous IN-MEMORY peek via
+     * [cn.vectory.ocdroid.ui.controller.SessionSwitcher.peekSessionWindow]
+     * (the cache is process-local now, so verification collapses to a
+     * resident-check). On a peek hit the handler copies the window into the
+     * chat slice + dispatches LoadMessages(resetLimit=false); on a miss it
+     * dispatches LoadMessages(resetLimit=true).
      * [createdAt] is the server-side `Session.time.created`; null = cold
-     * start (no fingerprint eviction).
+     * start (no resident window to hydrate from).
      */
     data class VerifyAndHydrate(
         val serverGroupFp: String,
@@ -85,12 +93,27 @@ sealed class ControllerEffect {
     data object ResetLocalDataAndResync : ControllerEffect()
     /** Drop the per-session message-window cache (SessionSwitcher owns it). */
     data object ClearSessionWindowCache : ControllerEffect()
-    /** §analysis-8b: cache DB cleared by resetLocalDataAndResync → SettingsViewModel
-     *  re-reads cacheRepository so cacheListing StateFlow drops stale rows.
-     *  Consumed by SettingsViewModel (owns _cacheListing/_cachedDataBytes);
-     *  AppCore.dispatchHostEffect claims it (returns true) to satisfy the
-     *  single-handler invariant, since AppCore cannot reach the Hilt VM. */
-    data object RefreshCacheListing : ControllerEffect()
+    /**
+     * remove-message-persistence Task 3: append a single SSE-delivered new
+     * message to the in-memory sessionWindowCache (NOT SQLite — the
+     * persistent write path was deleted in this task). Emitted by
+     * [SessionSyncCoordinator]'s `message.updated` new-insert branch in
+     * place of the old `cacheRepository.appendMessageIfSessionCached`
+     * suspend call.
+     *
+     * Routed via the bus because `SessionSwitcher` is an `AppCore` member
+     * (non-Hilt) while `SessionSyncCoordinator` is Hilt-provided and does
+     * NOT hold a reference to it — same pattern as `ClearSessionWindowCache`
+     * / `EvictSession`. Handled by [cn.vectory.ocdroid.ui.AppCore.
+     * dispatchSessionEffect] → `SessionSwitcher.appendMessageIfCached`
+     * (no-op when the window is not resident).
+     */
+    data class AppendMessageToCache(
+        val serverGroupFp: String,
+        val sessionId: String,
+        val message: Message,
+        val parts: List<Part>,
+    ) : ControllerEffect()
     /**
      * R-20 Phase 1: evict one cached session + its messages, scoped to
      * `(serverGroupFp, sessionId)`. Emitted by:

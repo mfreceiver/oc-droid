@@ -280,9 +280,7 @@ internal fun TrafficSection(
 
 /**
  * §P5b-B (Q8): 清除数据 section (was Danger Zone). Renders FLAT (no tinted
- * Card) as a single row: left = "消息缓存占用 XXX MB" (the message-cache
- * payload size, computed by [SettingsViewModel.cachedDataBytes] →
- * [cn.vectory.ocdroid.ui.util.formatBytes]); right = the 清除缓存 button.
+ * Card) as a single row carrying the 清除缓存 button.
  *
  * The button keeps the existing destructive behavior
  * ([cn.vectory.ocdroid.ui.MainViewModel.resetLocalDataAndResync] — wipe +
@@ -290,14 +288,13 @@ internal fun TrafficSection(
  * the action is honestly labelled "重置本地数据" (the section title is
  * "清除数据" via [R.string.settings_danger_zone]).
  *
- * @param cachedDataSize pre-formatted human-readable size string (e.g.
- *   "12.3 MB") for the message-cache portion. Computed by the caller off
- *   [SettingsViewModel.cachedDataBytes]; passed as a String so this
- *   composable stays free of the formatBytes dependency.
+ * remove-message-persistence Task 5: the "已缓存数据 XXX MB" size indicator
+ * that used to sit to the left of the button was removed together with the
+ * SQLite persistence layer (the size was read off the now-deleted
+ * SettingsViewModel cache-bytes StateFlow).
  */
 @Composable
 internal fun DangerZoneSection(
-    cachedDataSize: String,
     onClearLocalData: () -> Unit,
     hideHeader: Boolean = false,
 ) {
@@ -307,23 +304,19 @@ internal fun DangerZoneSection(
         AppSectionHeader(text = stringResource(R.string.settings_danger_zone))
     }
 
-    // §P5b-B (Q8): flat single row — no tinted Card. The left text shows the
-    // total cached-data size; the right button triggers the destructive wipe
-    // (gated by the confirmation dialog below). Same Row so the user sees the
-    // cost + the action together.
+    // §P5b-B (Q8): flat single row — no tinted Card. The right button triggers
+    // the destructive wipe (gated by the confirmation dialog below).
     // §review-AB: Row self-pads horizontal 16dp (route Column no longer pads).
+    // remove-message-persistence Task 5: the cache-size indicator that sat to
+    // the left was removed with the SQLite persistence layer; the button now
+    // carries the row alone.
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = Dimens.spacing4),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.Start,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            stringResource(R.string.cache_cached_data_size, cachedDataSize),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
         OutlinedButton(
             onClick = { showConfirm = true },
             colors = ButtonDefaults.outlinedButtonColors(
@@ -405,4 +398,6 @@ internal fun AboutSection() {
 //  - SettingsScreen.kt (Notifications / Storage / About sub-routes)
 //  - HostProfilesManagerScreen.kt (S1 服务器配置 / S2 流量统计)
 //  - ModelManagementSection.kt (settings_model_management)
-//  - CacheManagementSection.kt / DebugLogSection.kt (same package — one-line callsite each).
+//  - the cache-management section composable (deleted, remove-message-
+//    persistence Task 5) / DebugLogSection.kt (same package — one-line
+//    callsite each).

@@ -1035,15 +1035,14 @@ class ChatViewModelTest : MainViewModelTestBase() {
             Result.success(MessagesPage(bMessages, null))
 
         val core = createCore()
-        // R-20 Phase 1: switchTo now emits VerifyAndHydrate instead of
-        // synchronously seeding from the memory LRU. The handler queries the
-        // persistent cache (cacheRepository.verifyAndLoad). The default
-        // relaxed mock returns UnknownColdStart → cold-start REST (which would
-        // re-fetch only m_a1 and lose m_a2). Install an in-memory persistent
-        // cache so putSessionWindow writes + verifyAndLoad reads round-trip
-        // the cached window — this is the Phase 1 equivalent of the old LRU
-        // memory cache that the test was originally asserting on.
-        installInMemoryPersistentCache(core)
+        // remove-message-persistence Task 2: switchTo now emits VerifyAndHydrate
+        // instead of synchronously seeding from the memory LRU. The handler
+        // probes the in-memory sessionWindowCache via peekSessionWindow
+        // (Task 6: the prior cacheRepository.verifyAndLoad SQLite call was
+        // deleted). The in-memory LRU captures each fetched window via
+        // AppCore.makeCacheHook, so the A→B→A round-trip survives without
+        // any explicit cache install — this is now the production-equivalent
+        // path the test was originally asserting on.
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
@@ -1120,10 +1119,10 @@ class ChatViewModelTest : MainViewModelTestBase() {
             Result.success(MessagesPage(emptyList(), null))
 
         val core = createCore()
-        // R-20 Phase 1: install an in-memory persistent cache so the
-        // VerifyAndHydrate handler round-trips cached windows (see the
-        // session-switch A→B→A test above for the rationale).
-        installInMemoryPersistentCache(core)
+        // remove-message-persistence Task 2: the in-memory sessionWindowCache
+        // (populated by AppCore.makeCacheHook and read by VerifyAndHydrate's
+        // peek) round-trips cached windows. See the session-switch A→B→A
+        // test above for the rationale.
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
@@ -1345,15 +1344,6 @@ class ChatViewModelTest : MainViewModelTestBase() {
                 messages = listOf(older),
                 olderMessagesCursor = "cursor-1",
                 hasMoreMessages = true,
-                gapMarkers = listOf(
-                    cn.vectory.ocdroid.data.cache.contract.GapMarker(
-                        gapId = "g1",
-                        lowerAnchorMessageId = "m_older",
-                        upperBoundaryMessageId = "m_older",
-                        nextBeforeCursor = "c",
-                        fillState = cn.vectory.ocdroid.data.cache.contract.GapFillState.Idle,
-                    )
-                )
             )
         }
 
@@ -1365,8 +1355,6 @@ class ChatViewModelTest : MainViewModelTestBase() {
         assertTrue("Fresh latest window is loaded (got $ids)", ids.contains("m_fresh"))
         // Cursor reseeded from the fresh fetch (nextCursor=null → no more).
         assertNull(chatVM.chatFlow.value.olderMessagesCursor)
-        // Gap wiped — a cold-start snapshot has no断层 reference.
-        assertTrue("cold-start refresh wipes gap markers", chatVM.chatFlow.value.gapMarkers.isEmpty())
         // §3 (glm-1 🔴 regression guard): refreshNonce MUST survive the
         // performGlobalColdStartRefresh → writeChat chain. Before the
         // wholesale ChatState rebuild fix, refreshNonce reset to 0, so
