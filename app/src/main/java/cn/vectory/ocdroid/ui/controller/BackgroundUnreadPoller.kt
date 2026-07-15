@@ -159,7 +159,24 @@ class BackgroundUnreadPoller internal constructor(
                 sessionList = nextSessionList,
                 unread = snapshot.unread.removeSessions(archivedTreeIds),
             )
-            val (nextUnread, _) = provisional.evaluateAndApplyUnread(now)
+            val (evaluatedUnread, result) = provisional.evaluateAndApplyUnread(now)
+            // Background polling already committed an authoritative REST status
+            // snapshot in this same aggregate CAS, so it has no foreground
+            // status gate. Apply the evaluator's marks directly before the
+            // aggregate commit (the SharedStateStore compatibility helper cannot
+            // be used here because we are already inside mutateState).
+            var nextUnread = evaluatedUnread
+            result.rootsToMarkUnread.forEach { rootId ->
+                nextUnread = nextUnread
+                    .applyMarkSessionUnread(rootId, snapshot.chat.currentSessionId)
+                    .first
+            }
+            if (result.rootsToStampViewed.isNotEmpty()) {
+                nextUnread = nextUnread.copy(
+                    lastViewedTime = nextUnread.lastViewedTime +
+                        result.rootsToStampViewed.associateWith { now }
+                )
+            }
             committedUnread = nextUnread
             committedSessionsById = sessionsById
             provisional.copy(unread = nextUnread)

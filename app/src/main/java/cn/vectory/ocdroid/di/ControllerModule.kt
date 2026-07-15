@@ -122,7 +122,9 @@ object ControllerModule {
         scope = appScope,
         store = store,
         requestTreeHydration = ForegroundSessionTreeHydrator(repository, store, appScope)::request,
-        requestStatusRefresh = { effectBus.tryEmitEffect(ControllerEffect.LoadSessionStatus) },
+        requestStatusRefresh = { completion ->
+            effectBus.tryEmitEffect(ControllerEffect.LoadSessionStatusWithCompletion(completion))
+        },
     )
 
     @Provides

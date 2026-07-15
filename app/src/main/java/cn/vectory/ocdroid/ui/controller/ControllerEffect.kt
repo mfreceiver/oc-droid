@@ -47,6 +47,9 @@ sealed class ControllerEffect {
     data class LoadMessages(val sessionId: String, val resetLimit: Boolean) : ControllerEffect()
     data class LoadChildSessions(val sessionId: String) : ControllerEffect()
     data object LoadSessionStatus : ControllerEffect()
+    class LoadSessionStatusWithCompletion(
+        val onComplete: (successfullyApplied: Boolean) -> Unit,
+    ) : ControllerEffect()
     data object LoadPendingQuestions : ControllerEffect()
     /** Drop all pending delta buffers in SessionSyncCoordinator. */
     data object ClearDeltaBuffers : ControllerEffect()

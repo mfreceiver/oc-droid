@@ -945,6 +945,70 @@ class SessionListActionsTest {
     }
 
     @Test
+    fun `launchLoadSessionStatus completion is true after equal map merge`() = runTest {
+        val statuses = mapOf("s1" to cn.vectory.ocdroid.data.model.SessionStatus("idle"))
+        store.mutateSessionList { it.copy(sessions = listOf(Session(id = "s1", directory = "/x")), sessionStatuses = statuses) }
+        coEvery { repository.getSessionStatus() } returns Result.success(statuses)
+        val completions = mutableListOf<Boolean>()
+
+        launchLoadSessionStatus(scope, repository, slices, completions::add)
+        advanceUntilIdle()
+
+        assertEquals(listOf(true), completions)
+        assertEquals(statuses, slices.sessionList.value.sessionStatuses)
+    }
+
+    @Test
+    fun `launchLoadSessionStatus completion runs after merge`() = runTest {
+        val status = cn.vectory.ocdroid.data.model.SessionStatus("busy")
+        coEvery { repository.getSessionStatus() } returns Result.success(mapOf("s1" to status))
+        var observed: Map<String, cn.vectory.ocdroid.data.model.SessionStatus>? = null
+
+        launchLoadSessionStatus(scope, repository, slices) {
+            observed = slices.sessionList.value.sessionStatuses
+        }
+        advanceUntilIdle()
+
+        assertEquals(mapOf("s1" to status), observed)
+    }
+
+    @Test
+    fun `launchLoadSessionStatus failure completes false exactly once`() = runTest {
+        coEvery { repository.getSessionStatus() } returns Result.failure(IllegalStateException("offline"))
+        val completions = mutableListOf<Boolean>()
+
+        launchLoadSessionStatus(scope, repository, slices, completions::add)
+        advanceUntilIdle()
+
+        assertEquals(listOf(false), completions)
+    }
+
+    @Test
+    fun `superseded launchLoadSessionStatus completes stale request false`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        var first = true
+        coEvery { repository.getSessionStatus() } coAnswers {
+            if (first) {
+                first = false
+                gate.await()
+                Result.success(emptyMap())
+            } else Result.success(emptyMap())
+        }
+        val firstCompletions = mutableListOf<Boolean>()
+        val secondCompletions = mutableListOf<Boolean>()
+
+        launchLoadSessionStatus(scope, repository, slices, firstCompletions::add)
+        advanceUntilIdle()
+        launchLoadSessionStatus(scope, repository, slices, secondCompletions::add)
+        advanceUntilIdle()
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(listOf(false), firstCompletions)
+        assertEquals(listOf(true), secondCompletions)
+    }
+
+    @Test
     fun `launchLoadSessionStatus normalizes omitted authoritative nodes to idle`() = runTest {
         // §item6: /session/status 是全局权威快照, 只含 active(busy/retry) — idle 已被
         // server delete (opencode session/status.ts: data.delete on idle). 整体替换清除

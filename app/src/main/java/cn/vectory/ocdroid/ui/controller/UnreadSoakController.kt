@@ -13,182 +13,205 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/**
- * §unread-soak (LOCKED design): foreground sweep that owns the NEW "unread"
- * population logic. Replaces the old instant busy→idle marker inside the
- * `session.status` SSE handler + the REST backstop (Path B). The sweep
- * periodically snapshots the current state, calls the PURE
- * [evaluateUnread] evaluator, and:
- *
- *  (1) writes the evaluator's [UnreadSoakResult.newIdleSince] to the unread
- *      slice (wholesale replace — the evaluator prunes reset/orphaned entries
- *      and retains completed-cycle edge memory until busy);
- *  (2) for each root in [UnreadSoakResult.rootsToMarkUnread], dispatches the
- *      existing [applyMarkSessionUnread] low-level marker (same path the old
- *      instant marker used, so every UI reader of `unreadSessions` sees the
- *      badge identically);
- *  (3) stamps `lastViewedTime[root] = now` when the currentSessionId's root
- *      is all-idle — the "watching-at-completion counts as viewed" rule, so
- *      switching away later does not re-badge a root the user saw settle.
- *
- * Lifecycle: a simple always-on-while-foreground sweep. The loop starts on
- * ON_START and cancels on ON_STOP (matching [ForegroundCatchUpController]'s
- * foreground gating). The background (killed-SSE) case is a SEPARATE lane
- * (T3b poller) — it is NOT implemented here, but [evaluateUnread] is pure and
- * reusable by it. While backgrounded, [idleSince] entries persist in the
- * unread slice (no sweep resets them); T3b will pick them up on its own tick.
- *
- * Concurrency: all state writes go through [SharedStateStore.mutateUnread]
- * (CAS, Main.immediate). The sweep loop runs on the injected [scope]
- * (UiApplicationScope — Main.immediate), so each tick's snapshot + writes are
- * serial w.r.t. the SSE fold and the SessionSwitcher. The injected [clock]
- * makes the soak threshold deterministic in tests.
- */
 @Singleton
 class UnreadSoakController @Inject constructor(
     private val appLifecycleMonitor: AppLifecycleMonitor,
     private val scope: CoroutineScope,
     private val store: SharedStateStore,
-    // Injectable clock so the soak threshold + lastViewedTime stamping are
-    // deterministically testable without wall-clock latency in the unit test
-    // harness. Defaults to System::currentTimeMillis in production.
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val autoStart: Boolean = true,
     private val requestTreeHydration: (Set<String>) -> Unit = {},
-    private val requestStatusRefresh: () -> Unit = {},
+    private val requestStatusRefresh: (onComplete: (Boolean) -> Unit) -> Boolean = { false },
 ) {
-    /** Current sweep loop job; null while backgrounded (or not yet started). */
-    @Volatile
-    private var sweepJob: Job? = null
+    private enum class RefreshState { WAITING, READY }
+    private data class PendingRefresh(
+        val requestId: Long,
+        val requestedAtMs: Long,
+        val rootsAtRequest: Set<String>,
+        var state: RefreshState,
+        val hostProfileId: String?,
+    )
+
+    @Volatile private var sweepJob: Job? = null
+    private var pendingRefresh: PendingRefresh? = null
+    private var nextRequestId = 0L
+    private var retryNotBeforeMs = 0L
+    private var unknownRefreshNotBeforeMs = 0L
 
     init {
-        // §unread-soak: subscribe to foreground transitions in init so the
-        // subscription lifecycle follows the controller (which follows the
-        // orchestrator / app process). onEach+launchIn (NOT a suspend collect)
-        // so init is synchronous.
-        if (autoStart) {
-            appLifecycleMonitor.isInForeground
-                .onEach { inForeground -> onForegroundChanged(inForeground) }
-                .launchIn(scope)
-        }
+        if (autoStart) appLifecycleMonitor.isInForeground
+            .onEach { if (it) startSweep() else stopSweep() }
+            .launchIn(scope)
     }
 
-    /**
-     * Starts the sweep on enter-foreground, cancels it on enter-background.
-     * Idempotent — re-foregrounding while the loop is alive is a no-op.
-     */
-    private fun onForegroundChanged(inForeground: Boolean) {
-        if (inForeground) startSweep() else stopSweep()
-    }
-
-    /**
-     * Launches the periodic sweep loop (if not already running). The loop
-     * ticks [SWEEP_INTERVAL_MS] while foregrounded; each tick runs [tick].
-     */
     private fun startSweep() {
         if (sweepJob?.isActive == true) return
         sweepJob = scope.launch {
             while (isActive) {
-                runCatching { tick() }.onFailure { t ->
-                    // Defensive: a single tick must never tear down the loop.
-                    DebugLog.w("UnreadSoak", "sweep tick failed: ${t.message}")
-                }
+                runCatching { tick() }.onFailure { DebugLog.w("UnreadSoak", "sweep tick failed: ${it.message}") }
                 delay(SWEEP_INTERVAL_MS)
             }
         }
     }
 
-    /** Cancels the sweep loop (enter-background). Safe to call repeatedly. */
     private fun stopSweep() {
         sweepJob?.cancel()
         sweepJob = null
+        pendingRefresh = null
     }
 
-    /**
-     * Manual tick entry point — exposed internal so [UnreadSoakControllerTest]
-     * can drive a single evaluation synchronously (without waiting for the
-     * [SWEEP_INTERVAL_MS] delay). Production callers SHOULD NOT invoke this;
-     * the loop in [startSweep] is the only production driver.
-     */
     internal fun tick() {
+        val now = clock()
+        val hostId = store.hostFlow.value.currentHostProfileId
+        expireOrInvalidatePending(now, hostId)
         val sl = store.sessionListFlow.value
         val incompleteIdleRoots = (sl.sessions + sl.directorySessions.values.flatten())
-            .asSequence()
-            .filter { it.parentId == null && !it.isArchived }
+            .asSequence().filter { it.parentId == null && !it.isArchived }
             .filter { sl.sessionStatuses[it.id]?.isIdle == true }
-            .map { it.id }
-            .filter { it !in sl.completeRootIds }
-            .toSet()
+            .map { it.id }.filter { it !in sl.completeRootIds }.toSet()
         if (incompleteIdleRoots.isNotEmpty()) requestTreeHydration(incompleteIdleRoots)
-        val hasUnknownCompleteDescendant = sl.completeRootIds.any { rootId ->
+
+        val unknown = sl.completeRootIds.any { rootId ->
             subtreeIds(rootId, sl.sessions, sl.directorySessions, sl.childSessions)
                 .any { it !in sl.sessionStatuses }
         }
-        if (hasUnknownCompleteDescendant) requestStatusRefresh()
-        evaluateAndApply(clock())
+        val readyRoots = pendingRefresh?.takeIf {
+            it.state == RefreshState.READY && it.hostProfileId == hostId
+        }?.rootsAtRequest ?: emptySet()
+        val applied = store.evaluateAndApplyUnreadForSweep(
+            now,
+            readyRoots.isNotEmpty(),
+            readyRoots,
+        )
+        val currentCandidates = applied.result.rootsToMarkUnread
+
+        val gate = pendingRefresh
+        if (gate?.state == RefreshState.READY && gate.hostProfileId == hostId) {
+            pendingRefresh = null
+            maybeStartRefresh(currentCandidates - gate.rootsAtRequest, now, hostId)
+        } else if (gate?.state == RefreshState.WAITING &&
+            gate.rootsAtRequest.intersect(currentCandidates).isEmpty() && gate.rootsAtRequest.isNotEmpty()
+        ) {
+            invalidatePending()
+            maybeStartRefresh(currentCandidates, now, hostId)
+        } else if (gate == null) {
+            maybeStartRefresh(currentCandidates, now, hostId)
+        }
+        if (unknown && pendingRefresh == null && now >= unknownRefreshNotBeforeMs) {
+            unknownRefreshNotBeforeMs = now + UNKNOWN_REFRESH_COOLDOWN_MS
+            maybeStartRefresh(currentCandidates, now, hostId, allowEmpty = true)
+        }
     }
 
-    /** Shared atomic evaluator path for foreground and background drivers. */
-    internal fun evaluateAndApply(now: Long): UnreadSoakResult {
-        return store.evaluateAndApplyUnread(now)
+    private fun expireOrInvalidatePending(now: Long, hostId: String?) {
+        val pending = pendingRefresh ?: return
+        if (pending.hostProfileId != hostId ||
+            (pending.state == RefreshState.WAITING && now - pending.requestedAtMs >= STATUS_REFRESH_TIMEOUT_MS)
+        ) {
+            invalidatePending()
+            retryNotBeforeMs = now + RETRY_BACKOFF_MS
+        }
     }
+
+    private fun invalidatePending() { pendingRefresh = null }
+
+    private fun maybeStartRefresh(
+        roots: Set<String>,
+        now: Long,
+        hostId: String?,
+        allowEmpty: Boolean = false,
+    ) {
+        if ((!allowEmpty && roots.isEmpty()) || pendingRefresh != null || now < retryNotBeforeMs) return
+        val id = ++nextRequestId
+        val request = PendingRefresh(id, now, roots.toSet(), RefreshState.WAITING, hostId)
+        pendingRefresh = request
+        val accepted = requestStatusRefresh { success ->
+            val current = pendingRefresh
+            if (current?.requestId == id && current.hostProfileId == store.hostFlow.value.currentHostProfileId) {
+                if (success) current.state = RefreshState.READY
+                else { invalidatePending(); retryNotBeforeMs = clock() + RETRY_BACKOFF_MS }
+            }
+        }
+        if (!accepted) {
+            invalidatePending()
+            retryNotBeforeMs = now + RETRY_BACKOFF_MS
+        } else {
+            scope.launch {
+                delay(STATUS_REFRESH_TIMEOUT_MS)
+                val current = pendingRefresh
+                if (current?.requestId == id && current.state == RefreshState.WAITING) {
+                    invalidatePending()
+                    retryNotBeforeMs = clock() + RETRY_BACKOFF_MS
+                }
+            }
+        }
+    }
+
+    internal fun evaluateAndApply(now: Long): UnreadSoakResult = evaluateAndApplyUnread(now, false, emptySet()).result
+
+    private fun evaluateAndApplyUnread(now: Long, commitMarks: Boolean, allowedMarkRoots: Set<String>): ApplyResult =
+        store.evaluateAndApplyUnreadForSweep(now, commitMarks, allowedMarkRoots)
 
     companion object {
-        /**
-         * §unread-soak: foreground sweep cadence. ~2s keeps the soak
-         * resolution tight (the 10s threshold lands within one tick of
-         * nominal) without hammering the slice on every frame. The injected
-         * [clock] (not this interval) is what makes tests deterministic.
-         */
-        const val SWEEP_INTERVAL_MS: Long = 2_000L
+        const val SWEEP_INTERVAL_MS = 2_000L
+        const val STATUS_REFRESH_TIMEOUT_MS = 15_000L
+        const val RETRY_BACKOFF_MS = 30_000L
+        const val UNKNOWN_REFRESH_COOLDOWN_MS = 30_000L
     }
 }
 
-/** Single authoritative store bridge shared by foreground and background. */
-internal fun SharedStateStore.evaluateAndApplyUnread(now: Long): UnreadSoakResult {
-    lateinit var committedResult: UnreadSoakResult
+private data class ApplyResult(val result: UnreadSoakResult, val committedRoots: Set<String>)
+
+private fun SharedStateStore.evaluateAndApplyUnreadForSweep(
+    now: Long,
+    commitMarks: Boolean,
+    allowedMarkRoots: Set<String>,
+): ApplyResult {
+    lateinit var applied: ApplyResult
     mutateUnreadFromState { snapshot ->
         val (nextUnread, result) = snapshot.evaluateAndApplyUnread(now)
-        committedResult = result
-        nextUnread
+        val marksToCommit = if (commitMarks) result.rootsToMarkUnread.intersect(allowedMarkRoots) else emptySet()
+        val viewedRootsToApply = (result.rootsToStampViewed - result.rootsToMarkUnread) + marksToCommit
+        var next = nextUnread
+        result.rootsToMarkUnread.filter { it in marksToCommit }.forEach { root ->
+            next = next.applyMarkSessionUnread(root, snapshot.chat.currentSessionId).first
+        }
+        if (viewedRootsToApply.isNotEmpty()) {
+            next = next.copy(lastViewedTime = next.lastViewedTime + viewedRootsToApply.associateWith { now })
+        }
+        applied = ApplyResult(result.copy(rootsToStampViewed = viewedRootsToApply), marksToCommit)
+        next
     }
-    return committedResult
+    return applied
+}
+
+/** Compatibility path for the background poller: it has no status gate. */
+internal fun SharedStateStore.evaluateAndApplyUnread(now: Long): UnreadSoakResult {
+    lateinit var committed: UnreadSoakResult
+    mutateUnreadFromState { snapshot ->
+        val (next, result) = snapshot.evaluateAndApplyUnread(now)
+        committed = result
+        var updated = next
+        result.rootsToMarkUnread.forEach { root ->
+            updated = updated.applyMarkSessionUnread(root, snapshot.chat.currentSessionId).first
+        }
+        updated.copy(lastViewedTime = updated.lastViewedTime + result.rootsToStampViewed.associateWith { now })
+    }
+    return committed
 }
 
 internal fun cn.vectory.ocdroid.ui.StoreState.evaluateAndApplyUnread(
     now: Long,
 ): Pair<cn.vectory.ocdroid.ui.UnreadState, UnreadSoakResult> {
     val sl = sessionList
-    val result = evaluateUnread(
-        sessions = sl.sessions,
-        sessionStatuses = sl.sessionStatuses,
-        childSessions = sl.childSessions,
-        directorySessions = sl.directorySessions,
-        currentSessionId = chat.currentSessionId,
-        lastViewedTime = unread.lastViewedTime,
-        idleSince = unread.idleSince,
-        now = now,
-        completeRootIds = sl.completeRootIds,
-    )
+    val result = evaluateUnread(sl.sessions, sl.sessionStatuses, sl.childSessions, sl.directorySessions,
+        chat.currentSessionId, unread.lastViewedTime, unread.idleSince, now, completeRootIds = sl.completeRootIds)
     var next = unread.copy(idleSince = result.newIdleSince)
-    result.rootsToMarkUnread.forEach { root ->
-        next = next.applyMarkSessionUnread(root, chat.currentSessionId).first
-    }
-    if (result.rootsToStampViewed.isNotEmpty()) {
-        next = next.copy(
-            lastViewedTime = next.lastViewedTime + result.rootsToStampViewed.associateWith { now }
-        )
-    }
     val sessionMap = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
     val currentRootId = chat.currentSessionId?.let { rootIdOf(it, sessionMap) }
-    if (currentRootId != null &&
-        (currentRootId in next.unreadSessions || currentRootId in next.idleSince)
-    ) {
-        next = next.copy(
-            unreadSessions = next.unreadSessions - currentRootId,
-            idleSince = next.idleSince - currentRootId,
-            lastViewedTime = next.lastViewedTime + (currentRootId to now),
-        )
+    if (currentRootId != null && (currentRootId in next.unreadSessions || currentRootId in next.idleSince)) {
+        next = next.copy(unreadSessions = next.unreadSessions - currentRootId, idleSince = next.idleSince - currentRootId,
+            lastViewedTime = next.lastViewedTime + (currentRootId to now))
     }
     return next to result
 }

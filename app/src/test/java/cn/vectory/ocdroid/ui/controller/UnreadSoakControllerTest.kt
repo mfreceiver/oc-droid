@@ -63,7 +63,7 @@ class UnreadSoakControllerTest {
 
     private fun makeController(
         requestTreeHydration: (Set<String>) -> Unit = {},
-        requestStatusRefresh: () -> Unit = {},
+        requestStatusRefresh: ((Boolean) -> Unit) -> Boolean = { completion -> completion(true); true },
     ): UnreadSoakController = UnreadSoakController(
         appLifecycleMonitor = stubMonitor(),
         scope = scope,
@@ -154,7 +154,7 @@ class UnreadSoakControllerTest {
         val hydratedAgain = mutableSetOf<String>()
         val controller = makeController(
             requestTreeHydration = { hydratedAgain += it },
-            requestStatusRefresh = { statusRefreshes += 1 },
+            requestStatusRefresh = { _ -> statusRefreshes += 1; true },
         )
         seedSessions(root("A"), child("C", "A"))
         seedStatuses("A" to idle)
@@ -200,6 +200,7 @@ class UnreadSoakControllerTest {
         // 10s+ later: soak crosses → marked + consumed.
         nowMs = 13_000L
         controller.tick()
+        controller.tick()
         assertTrue(
             "A must enter unreadSessions after 10s soak",
             store.unreadFlow.value.unreadSessions.contains("A"),
@@ -226,6 +227,7 @@ class UnreadSoakControllerTest {
 
         // Soak completes at 11s.
         nowMs = 11_000L
+        controller.tick()
         controller.tick()
         assertFalse(
             "viewed-since-idle must not mark A",
@@ -321,6 +323,7 @@ class UnreadSoakControllerTest {
 
         nowMs = 11_000L
         controller.tick()
+        controller.tick()
 
         assertFalse(store.unreadFlow.value.unreadSessions.contains("A"))
         assertEquals(11_000L, store.unreadFlow.value.lastViewedTime["A"])
@@ -401,6 +404,7 @@ class UnreadSoakControllerTest {
         // A's stamp is wiped (simulate A had already soaked once before and
         // the user dismissed it); both past threshold at t=11000.
         nowMs = 11_000L
+        controller.tick()
         controller.tick()
         assertTrue("A marked", store.unreadFlow.value.unreadSessions.contains("A"))
         assertTrue("B marked", store.unreadFlow.value.unreadSessions.contains("B"))

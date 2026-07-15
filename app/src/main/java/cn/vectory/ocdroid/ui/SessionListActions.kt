@@ -499,22 +499,35 @@ private val sessionListLoadEpoch = java.util.concurrent.atomic.AtomicLong(0)
 internal fun launchLoadSessionStatus(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
-    slices: SliceFlows
+    slices: SliceFlows,
+    onComplete: (Boolean) -> Unit = {},
 ) {
     val myEpoch = statusLoadEpoch.incrementAndGet()
     scope.launch {
-        // §sse-rest-race: REST 发起前快照本地 status, onSuccess 时识别"REST 在途期间
-        // 被 SSE 更新过的 session"——旧 REST 快照不得覆盖较新的 SSE 值。
-        val localBefore = slices.sessionList.value.sessionStatuses
-        repository.getSessionStatus()
-            .onSuccess { statuses ->
+        var completionCalled = false
+        fun complete(success: Boolean) {
+            if (!completionCalled) {
+                completionCalled = true
+                onComplete(success)
+            }
+        }
+        try {
+            // §sse-rest-race: REST 发起前快照本地 status, onSuccess 时识别"REST 在途期间
+            // 被 SSE 更新过的 session"——旧 REST 快照不得覆盖较新的 SSE 值。
+            val localBefore = slices.sessionList.value.sessionStatuses
+            repository.getSessionStatus()
+                .onSuccess { statuses ->
                 // §unread-soak: the REST status snapshot NO LONGER marks unread
                 // on the "busy→absent" edge. The [UnreadSoakController] sweep +
                 // pure [evaluateUnread] evaluator own the marking now — they
                 // consume the freshly-merged sessionStatuses (below) on the
                 // next foreground tick. The epoch-guarded merge still runs so
                 // the evaluator sees authoritative idle/busy state.
+                var applied = false
                 slices.mutateSessionList { sl ->
+                    // StateFlow.update may retry this transform after a CAS
+                    // collision. Report the result of the final attempt only.
+                    applied = false
                     // §epoch-toctou (groker🟡 v0.7.6): check+write 合并在同一 mutate 原子段,
                     // 关闭 onSuccess-check→mutate 间 TOCTOU(A check 过 → B 抬高 epoch 并 mutate
                     // → A 再 mutate 时把 B 的写入当 localAfter≠localBefore 误判 SSE 在途保留).
@@ -529,12 +542,21 @@ internal fun launchLoadSessionStatus(
                         sl.childSessions,
                     ).keys
                     val normalized = normalizeAuthoritativeStatusSnapshot(statuses, authoritativeIds)
+                    applied = true
                     sl.copy(sessionStatuses = mergeStatusSnapshot(localBefore, sl.sessionStatuses, normalized))
                 }
+                complete(applied)
             }
-            .onFailure { error ->
+                .onFailure { error ->
                 reportNonFatalIssue("MainViewModel", "Failed to load session status", error)
+                complete(false)
             }
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            complete(false)
+            throw cancellation
+        } catch (_: Throwable) {
+            complete(false)
+        }
     }
 }
 

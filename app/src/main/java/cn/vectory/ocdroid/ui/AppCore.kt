@@ -502,6 +502,15 @@ class AppCore @Inject constructor(
             launchLoadSessionStatus(appScope, repository, store.slices)
             true
         }
+        is ControllerEffect.LoadSessionStatusWithCompletion -> {
+            launchLoadSessionStatus(
+                appScope,
+                repository,
+                store.slices,
+                onComplete = effect.onComplete,
+            )
+            true
+        }
         is ControllerEffect.LoadPendingQuestions -> {
             // §R18 Phase 3 Wave 3 (P1-9 wire-up): production now uses the
             // multi-workdir fan-out added in Wave 1. The single-workdir
