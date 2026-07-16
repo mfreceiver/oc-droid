@@ -245,6 +245,13 @@
     <string name="files_tab_projects">Projects</string>
     <string name="files_project_browse">Browse files</string>
     <string name="files_add_project">Add project</string>
+    <!-- Home hub (session-home-hub): home sections, project-row actions, responsive chat nav. -->
+    <string name="home_section_recent">Recently</string>
+    <string name="home_section_projects">Attached projects</string>
+    <string name="project_action_git">Git</string>
+    <string name="project_action_new_session">New session</string>
+    <string name="chat_back_to_home">Back to home</string>
+    <string name="chat_open_sessions_drawer">Open sessions</string>
     <!-- §P5b-A / Q7: visible "Host" terminology renamed to "Server" for the
          strings surfaced by the 服务器管理 screen (host list, + button,
          editor dialog title, delete-confirm copy). -->
@@ -346,6 +353,7 @@
     <string name="server_dialog_title">Servers</string>
     <string name="server_dialog_no_hosts">No hosts configured</string>
     <string name="server_dialog_refresh">Refresh</string>
+    <string name="server_dialog_open_settings">Open settings</string>
     <string name="server_dialog_activate_tunnel">Activate Tunnel</string>
     <string name="chat_parent_session">Parent session</string>
     <string name="chat_back_to_parent_session">Back to parent session</string>
