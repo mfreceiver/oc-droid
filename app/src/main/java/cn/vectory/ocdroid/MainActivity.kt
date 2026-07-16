@@ -3,8 +3,6 @@ package cn.vectory.ocdroid
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.os.Bundle
-import android.app.Activity
-import android.view.ViewTreeObserver
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -18,14 +16,6 @@ import androidx.compose.runtime.remember
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.Dp
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.chat.LocalWindowSizeClass
@@ -157,7 +147,6 @@ class MainActivity : AppCompatActivity() {
                     // (see ui/shell/AppShell.kt).
                     AppShell(
                         orchestratorVM = viewModel,
-                        navBarBottomDp = rememberNavBarBottomDp(this@MainActivity),
                     )
                 }
             }
@@ -198,63 +187,4 @@ class MainActivity : AppCompatActivity() {
          */
         const val EXTRA_SESSION_ID = "opencode_session_id"
     }
-}
-
-/**
- * §bug-6.4: capture the navigation-bar bottom inset from the Android View
- * inset system (WindowInsetsCompat on the decorView root) — Compose's
- * [androidx.compose.foundation.layout.WindowInsets.navigationBars] resolves to
- * 0 under this AppCompat theme (the DecorView consumes the inset before Compose
- * receives it), so every Compose-inset-based fill attempt left a gap below the
- * bottom bar. The decorView root gets the unconsumed system inset; threading it
- * in as a plain [Dp] lets [cn.vectory.ocdroid.ui.shell.AppShell] size the bar's
- * bottom spacer to the real gesture-pill height. Reactive — updates on config
- * changes (e.g. the inset height changing).
- *
- * §review-final (Blocker-2 residual): this previously used
- * `ViewCompat.setOnApplyWindowInsetsListener(decorView) { ... }`. That call
- * *replaces* the DecorView's own insets dispatch (it sets a fresh
- * `OnApplyWindowInsetsListener` that overrides AppCompat's DecorView behavior —
- * the status-guard view, color-view frame offsets, IME handling, OEM
- * gesture-inset consumption, etc.). The override returned the insets unchanged
- * so visually 6.4 still filled the gesture area, but the side effect was that
- * AppCompat's per-DecorView inset handling was bypassed for the lifetime of
- * the listener — a latent regression surface for TopAppBar padding, IME
- * animation, and OEM-specific behavior. The new implementation uses an
- * observation-only path:
- *
- *  - [ViewTreeObserver.OnGlobalLayoutListener] fires on layout / inset
- *    changes (it is *additive* — never replaces existing dispatch).
- *  - [ViewCompat.getRootWindowInsets] is a *read-only* query of the latest
- *    root insets that have already been dispatched through the normal pipeline.
- *    It does not intercept, consume, or replace any inset; AppCompat's
- *    DecorView handler runs first as usual, and we merely observe the result.
- *
- * Together they give us the same `navigationBars().bottom` value as the
- * intercepting listener did, without any of the side effects. The
- * `requestApplyInsets()` call triggers one extra layout/inset pass so the
- * listener observes a real value on first composition (otherwise the first
- * callback would fire only on the next configuration change).
- */
-@Composable
-private fun rememberNavBarBottomDp(activity: Activity): Dp {
-    val density = LocalDensity.current
-    var bottomPx by remember { mutableIntStateOf(0) }
-    DisposableEffect(activity) {
-        val decorView = activity.window.decorView
-        // §review-final: observation-only — additive listener + read-only
-        // query. No setOnApplyWindowInsetsListener anywhere.
-        val listener = ViewTreeObserver.OnGlobalLayoutListener {
-            val root = ViewCompat.getRootWindowInsets(decorView)
-            bottomPx = root?.getInsets(WindowInsetsCompat.Type.navigationBars())?.bottom ?: 0
-        }
-        decorView.viewTreeObserver.addOnGlobalLayoutListener(listener)
-        // Trigger one inset/layout pass so the listener observes a real value
-        // immediately instead of waiting for the next configuration change.
-        decorView.requestApplyInsets()
-        onDispose {
-            decorView.viewTreeObserver.removeOnGlobalLayoutListener(listener)
-        }
-    }
-    return with(density) { bottomPx.toDp() }
 }

@@ -353,7 +353,6 @@
     <string name="server_dialog_title">Servers</string>
     <string name="server_dialog_no_hosts">No hosts configured</string>
     <string name="server_dialog_refresh">Refresh</string>
-    <string name="server_dialog_open_settings">Open settings</string>
     <string name="server_dialog_activate_tunnel">Activate Tunnel</string>
     <string name="chat_parent_session">Parent session</string>
     <string name="chat_back_to_parent_session">Back to parent session</string>
@@ -470,7 +469,6 @@
     <string name="chat_retrying">Retrying</string>
     <string name="chat_retry_in_seconds">%1$ds until retry</string>
     <string name="chat_retry_attempt">Attempt %1$d</string>
-    <string name="chat_exit_confirm">Swipe back again to exit</string>
     <string name="chat_error_occurred">Error occurred</string>
     <string name="chat_view">View</string>
     <string name="chat_stale_notice">You haven\'t viewed this for a while. Only the latest content is shown.</string>

@@ -190,7 +190,11 @@ internal fun ServerManagementDialog(
                     IconButton(onClick = onRefresh) {
                         Icon(
                             Icons.Default.Refresh,
-                            contentDescription = stringResource(R.string.chat_action_refresh_messages),
+                            // §final-review F1: this is the SERVER popup's
+                            // refresh (force reconnect), NOT the Chat
+                            // message-refresh. Use server_dialog_refresh
+                            // ("Refresh" / "刷新"), not chat_action_refresh_messages.
+                            contentDescription = stringResource(R.string.server_dialog_refresh),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }

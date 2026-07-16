@@ -46,11 +46,14 @@ import cn.vectory.ocdroid.ui.theme.Dimens
  * `SessionVM.selectSession`); the drawer is closed by the caller
  * ([ChatScaffold]) on selection so the user lands on the chosen conversation.
  *
- * The session list passed by [ChatScaffold] is already pre-filtered to
- * **root + non-archived** sessions (built from `topBarState.openSessions`
- * → `openSessionIds` resolved through the union store, filtered
- * `parentId == null && !isArchived`), matching the homepage §2a "recent
- * sessions" projection.
+ * The session list passed by [ChatScaffold] is the `recentSessionsForDrawer`
+ * projection: sourced from `sessionList.sessions` (the root-sessions slice
+ * only — NOT the root-plus-directory merge), filtered to
+ * `parentId == null && !isArchived`, sorted by `time.updated` desc, capped
+ * at 10. This matches the SessionPickerSheet projection (same source /
+ * filter / sort) but is a DIFFERENT, smaller set than the homepage §2a
+ * "recent sessions" list (which additionally merges directorySessions and
+ * deduplicates by id).
  *
  * @param sessions recent root non-archived sessions (pre-projected by caller).
  * @param onSelect row-tap callback; receives the tapped session id. The

@@ -318,7 +318,7 @@ class SessionSwitcher(
      *     调度，禁 switchTo 同步发"). Removing the synchronous LoadMessages
      *     avoids a double-load race with the handler's verify-and-then-load.
      *  8. Update unread state machine (clear target's unread badge +
-     *     record lastViewedTime) + discard draft + openSessionIds prepend +
+     *     record lastViewedTime) + discard draft + openSessionIds append +
      *     persistSessionCache.
      *
      * **Step 3 timing caveat**: VerifyAndHydrate needs targetSession.time.created,
@@ -563,6 +563,14 @@ class SessionSwitcher(
         // Browser-tab semantics: append only when NOT already in the list
         // (new tabs join from the RIGHT). Skip sub-agents (parentId != null)
         // — transient navigations.
+        // §final-review F5: the `sessionId !in openSessionIds` guard is an
+        // INTENTIONAL product decision — re-selecting an already-open session
+        // does NOT reorder it to the rightmost. The spec formula
+        // `(filterNot + append).takeLast(8)` implied a reorder-on-reselect,
+        // but the current behavior (no reorder) matches browser-tab intuition
+        // (clicking an open tab doesn't move it) and is covered by the
+        // `switchTo does NOT append already-open session` test. Do NOT
+        // "fix" this to reorder without an explicit product decision.
         if (targetSession?.parentId == null && sessionId !in slices.sessionList.value.openSessionIds) {
             val updated = (slices.sessionList.value.openSessionIds + sessionId).takeLast(8)
             settingsManager.openSessionIds = updated

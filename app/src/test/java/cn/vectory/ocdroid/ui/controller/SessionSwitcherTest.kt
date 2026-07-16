@@ -713,7 +713,7 @@ class SessionSwitcherTest {
     }
 
     @Test
-    fun `switchTo does NOT prepend already-open session`() {
+    fun `switchTo does NOT append already-open session`() {
         seed {
             it.copy(
             currentSessionId = null,
@@ -730,7 +730,7 @@ class SessionSwitcherTest {
     }
 
     @Test
-    fun `switchTo does NOT prepend sub-agent sessions`() {
+    fun `switchTo does NOT append sub-agent sessions`() {
         val childSession = Session(id = "child-1", directory = "/d", parentId = "parent-1")
         seed {
             it.copy(
@@ -743,7 +743,7 @@ class SessionSwitcherTest {
         switcher.switchTo("child-1")
 
         // Sub-agents (parentId != null) should not pollute openSessionIds
-        assertTrue("sub-agent not prepended", slices.sessionList.value.openSessionIds.isEmpty())
+        assertTrue("sub-agent not appended", slices.sessionList.value.openSessionIds.isEmpty())
     }
 
     @Test

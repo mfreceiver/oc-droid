@@ -54,11 +54,6 @@ class NavRouteTest {
     }
 
     @Test
-    fun `homeRoute returns each top-level destination`() {
-        NavRoute.topLevel.forEach { assertEquals(it.route, NavRoute.homeRoute(it)) }
-    }
-
-    @Test
     fun `filesRoute encodes optional workdir and path`() {
         assertEquals("files", NavRoute.filesRoute())
         assertEquals(
@@ -77,6 +72,22 @@ class NavRouteTest {
         assertEquals("session/with spaces", extractQueryParam(built, "session"))
         assertTrue(NavRoute.gitRoutePattern.contains("session={session}"))
         assertNull(extractQueryParam("git", "session"))
+    }
+
+    @Test
+    fun `gitRoute encodes optional workdir alongside session`() {
+        // §home-hub T7-C3: home hub's per-project Git IconButton navigates
+        // with workdir only; Chat's "open git changes" still passes session.
+        // Both flow through parameterizedRoute, which drops blank/null params.
+        assertEquals("git", NavRoute.gitRoute())
+        assertEquals("git?workdir=%2Frepo", NavRoute.gitRoute(workdir = "/repo"))
+        assertEquals("git?session=abc", NavRoute.gitRoute(sessionId = "abc"))
+        val both = NavRoute.gitRoute(sessionId = "abc", workdir = "/repo")
+        assertEquals("git?session=abc&workdir=%2Frepo", both)
+        assertEquals("abc", extractQueryParam(both, "session"))
+        assertEquals("/repo", extractQueryParam(both, "workdir"))
+        // single pattern, two nullable args (mirrors filesRoutePattern precedent).
+        assertTrue(NavRoute.gitRoutePattern.contains("session={session}&workdir={workdir}"))
     }
 
     @Test

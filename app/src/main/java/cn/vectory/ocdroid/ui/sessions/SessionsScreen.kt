@@ -315,10 +315,24 @@ fun SessionsScreen(
                             showTunnelAuth = (curHostProfile?.tunnelPasswordId != null),
                             serverVersion = connection.serverVersion,
                             onSelectHost = { id -> hostVM?.selectHostProfile(id) },
-                            // No active session on the home page → "refresh"
-                            // refreshes the traffic counters shown in the dialog
-                            // (the historical message-refresh is session-scoped).
-                            onRefresh = { connectionVM?.refreshTrafficStats() },
+                            // §final-review F1: home popup "force refresh" does
+                            // a REAL reconnect (coldStartReconnect →
+                            // testConnection(force=true, retries=3) +
+                            // re-establishes the SSE/stream + re-pulls host /
+                            // session data via the connection coordinator's
+                            // fan-out). refreshTrafficStats additionally
+                            // snapshots the cumulative byte counters for the
+                            // dialog's display. The previous wiring
+                            // (refreshTrafficStats alone) only copied the
+                            // existing traffic snapshot — no reconnect, no
+                            // data refresh, contradicting requirement 2's
+                            // "强制刷新". coldStartReconnect is the same path
+                            // the app uses on cold start and the Chat
+                            // force-refresh flow.
+                            onRefresh = {
+                                connectionVM?.coldStartReconnect()
+                                connectionVM?.refreshTrafficStats()
+                            },
                             onActivateTunnel = { hostVM?.activateTunnelForCurrentHost() },
                             onNavigateToSettings = onNavigateToSettings,
                         )
@@ -331,6 +345,10 @@ fun SessionsScreen(
                     .fillMaxSize()
                     .padding(padding),
                 contentPadding = PaddingValues(bottom = Dimens.spacing2),
+                // §ui-style-spec §2: 0.dp irreducible — flush arrangement so
+                // cards group by their surfaceContainerLow background (no
+                // inter-card gap); each card's internal padding provides the
+                // visual rhythm.
                 verticalArrangement = Arrangement.spacedBy(0.dp)
             ) {
                 // ── Section 1: Recently Session ───────────────────────────
@@ -876,6 +894,8 @@ internal fun SessionCard(
             // LazyColumn arrangement is flush (spacedBy(0.dp)); cards rely on
             // their surfaceContainerLow background for visual grouping. Card
             // internal layout untouched.
+            // §ui-style-spec §2: 0.dp irreducible (no inter-card vertical
+            // padding — grouping is by background, not gap).
             .padding(horizontal = Dimens.spacing2, vertical = 0.dp),
         shape = RectangleShape,
         color = MaterialTheme.colorScheme.surfaceContainerLow
@@ -954,7 +974,7 @@ internal fun SessionCard(
                         Box(
                             modifier = Modifier
                                 .padding(start = Dimens.spacing2)
-                                .size(8.dp)
+                                .size(Dimens.spacing2)
                                 .background(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     shape = CircleShape
@@ -988,6 +1008,8 @@ internal fun EmptyWorkdirPlaceholder(onClick: () -> Unit) {
     ListItem(
         modifier = Modifier
             .fillMaxWidth()
+            // §ui-style-spec §2: 2.dp irreducible (no 2dp token; tight inset
+            // so the placeholder reads as a dense hint row, not a full card).
             .padding(vertical = 2.dp)
             .clickable { onClick() },
         headlineContent = {
@@ -1025,7 +1047,7 @@ private fun SessionStatusDot(status: SessionStatus?) {
     Box(
         modifier = Modifier
             .padding(start = Dimens.spacing2)
-            .size(8.dp)
+            .size(Dimens.spacing2)
             .background(color = MaterialTheme.colorScheme.error, shape = CircleShape)
     )
 }

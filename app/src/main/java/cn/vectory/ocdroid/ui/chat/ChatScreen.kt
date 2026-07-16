@@ -66,6 +66,20 @@ fun ChatScreen(
      */
     onOpenChatFilePreview: (workdir: String?, path: String?) -> Unit = { _, _ -> },
     onOpenGitChanges: (String) -> Unit = {},
+    /**
+     * §home-hub T7: pop the Chat stack back to the Home hub. Plumbed through
+     * to [ChatScaffold] (which consumes it for phone ArrowBack, tablet drawer
+     * header Home affordance, and the root-session system-Back handler).
+     * Defaults to `{}` so older call sites keep compiling.
+     */
+    onBackToHome: () -> Unit = {},
+    /**
+     * §home-hub T7: external hook fired when the tablet hamburger (Menu)
+     * button opens the RecentSessionsDrawer. ChatScaffold ALSO opens its own
+     * owned `drawerState` (drawer is internal chrome); this param is purely
+     * an extension point for callers. Defaults to `{}`.
+     */
+    onOpenDrawer: () -> Unit = {},
 ) {
     ChatScaffold(
         chatVM = chatVM,
@@ -78,6 +92,8 @@ fun ChatScreen(
         onNavigateToSessions = onNavigateToSessions,
         onOpenChatFilePreview = onOpenChatFilePreview,
         onOpenGitChanges = onOpenGitChanges,
+        onBackToHome = onBackToHome,
+        onOpenDrawer = onOpenDrawer,
     )
 }
 

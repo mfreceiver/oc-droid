@@ -14,7 +14,10 @@ enum class NavRoute(val route: String, val legacyPage: Int) {
     companion object {
         const val chatPreviewRoutePattern: String = "chat/preview?workdir={workdir}&path={path}"
         const val filesRoutePattern: String = "files?workdir={workdir}&path={path}"
-        const val gitRoutePattern: String = "git?session={session}"
+        // §home-hub T7-C3: single pattern, two nullable args (mirrors
+        // [filesRoutePattern] precedent). Either/both may be absent; the
+        // composable block decodes them and forwards to GitScreen.
+        const val gitRoutePattern: String = "git?session={session}&workdir={workdir}"
 
         // Nested Settings routes belong to the Settings top-level destination.
         const val settingsHostsRoute: String = "settings/hosts"
@@ -22,8 +25,6 @@ enum class NavRoute(val route: String, val legacyPage: Int) {
         const val settingsModelsRoute: String = "settings/models"
         const val settingsNotificationsRoute: String = "settings/notifications"
         const val settingsAboutRoute: String = "settings/about"
-
-        val topLevel: List<NavRoute> = entries
 
         /** Builds a fullscreen file preview pushed onto the Chat back stack. */
         fun chatPreviewRoute(workdir: String? = null, path: String? = null): String =
@@ -41,9 +42,22 @@ enum class NavRoute(val route: String, val legacyPage: Int) {
                 "path" to path,
             )
 
-        /** Builds the Git destination with an optional session scope. */
-        fun gitRoute(sessionId: String?): String =
-            parameterizedRoute(base = Git.route, "session" to sessionId)
+        /**
+         * Builds the Git destination with an optional session scope and/or an
+         * explicit workdir.
+         *
+         * §home-hub T7-C3: the home hub's per-project Git IconButton navigates
+         * with `workdir` only (no session); Chat's "open git changes" still
+         * passes `sessionId`. Both flow through [parameterizedRoute], which
+         * drops blank/null params — so the bare base `"git"` is produced when
+         * neither is supplied.
+         */
+        fun gitRoute(sessionId: String? = null, workdir: String? = null): String =
+            parameterizedRoute(
+                base = Git.route,
+                "session" to sessionId,
+                "workdir" to workdir,
+            )
 
         /** Classifies top-level destinations and the nested Settings family. */
         fun fromRouteKey(route: String?): NavRoute {
@@ -52,9 +66,6 @@ enum class NavRoute(val route: String, val legacyPage: Int) {
             if (base.startsWith("settings/")) return Settings
             return Chat
         }
-
-        /** Top-level home destination used when a selected tab is reselected. */
-        fun homeRoute(route: NavRoute): String = route.route
 
         fun isNestedSettingsRoute(route: String?): Boolean =
             route != null && route != Settings.route && route.startsWith("settings/")

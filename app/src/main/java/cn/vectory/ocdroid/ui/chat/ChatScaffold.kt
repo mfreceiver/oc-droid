@@ -782,32 +782,37 @@ fun ChatScaffold(
     // edge-swipe-to-open gesture on phone so the drawer is unreachable there
     // (phone uses the ArrowBack → onBackToHome path instead). Always wrapping
     // (rather than conditionally composing the Column twice) keeps the body a
-    // single tree — the drawer content is cheap (a LazyColumn of ≤10 recent
-    // root sessions) and stays invisible/closed on phone.
+    // single tree — the drawer content is cheap (a LazyColumn of recent root
+    // sessions) and stays invisible/closed on phone.
     //
-    // §home-hub T4 (IMPORTANT-1 fix): the drawer session list is the RECENT-
-    // session projection, NOT the open-tab set. Derived the SAME way
-    // SessionPickerSheet.kt:105-110 does — root only (`parentId == null`),
-    // non-archived (`!isArchived`), sorted by `time.updated` desc, capped
-    // `take(10)`. Sourced from the already-collected `sessionList.sessions`
-    // (the same list SessionPickerSheet receives from this composable), NOT
-    // `topBarState.openSessions` (which is the browser-TAB projection over
-    // `openSessionIds` — a different, smaller, order-stable set that does
-    // not represent "recent sessions").
-    val recentSessionsForDrawer = remember(sessionList.sessions) {
-        sessionList.sessions
+    // §opuser IMPORTANT-2: the drawer's recent-session list MUST mirror the
+    // home page §2a "Recently Session" projection (req 5: tablet drawer =
+    // "近期session（session页面的第一个section）"). The previous derivation
+    // used `sessionList.sessions` only (matching SessionPickerSheet), which
+    // OMITTED directorySessions — a per-workdir session present only in
+    // directorySessions showed on home but NOT in the drawer. Now merged
+    // identically to SessionsScreen.recentSessions: sessions +
+    // directorySessions.values.flatten(), distinctBy id, filtered
+    // parentId==null && !isArchived, sorted by time.updated desc, no cap
+    // (home §2a applies none; the LazyColumn handles scrolling).
+    val recentSessionsForDrawer = remember(
+        sessionList.sessions,
+        sessionList.directorySessions,
+    ) {
+        (sessionList.sessions + sessionList.directorySessions.values.flatten())
+            .distinctBy { it.id }
             .filter { it.parentId == null && !it.isArchived }
             .sortedByDescending { it.time?.updated ?: 0L }
-            .take(10)
     }
     ModalNavigationDrawer(
         drawerState = drawerState,
         gesturesEnabled = isWide,
         drawerContent = {
             RecentSessionsDrawer(
-                // §T4-C2 / IMPORTANT-1: recent root non-archived sessions,
-                // sorted by time.updated desc, capped at 10 — same projection
-                // SessionPickerSheet uses. Tap = selectSession (stay in Chat).
+                // §opuser IMPORTANT-2: recent root non-archived sessions
+                // (sessions + directorySessions merged, distinctBy id,
+                // sorted by time.updated desc) — same projection as the home
+                // page §2a Recently section. Tap = selectSession (stay in Chat).
                 sessions = recentSessionsForDrawer,
                 onSelect = { sessionId ->
                     sessionVM.selectSession(sessionId)

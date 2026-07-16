@@ -641,8 +641,11 @@ class ConnectionCoordinator(
      * Cold-start entry point: force a connection check with up to 3 retries
      * (exponential backoff 1s/2s/4s) so a slow-to-wake server (common when
      * the OpenCode server itself is bootstrapping) still comes up instead of
-     * stranding the user on the disconnected empty state. Used exclusively
-     * from MainActivity's cold-start LaunchedEffect (and resetLocalDataAndResync).
+     * stranding the user on the disconnected empty state. Callers:
+     * MainActivity's cold-start LaunchedEffect, [resetLocalDataAndResync],
+     * and the home server-connection popup's force-refresh (T7 F1:
+     * `ConnectionViewModel.coldStartReconnect()` ←
+     * `SessionsScreen.onRefresh`).
      *
      * §tofu R2: FROZEN while a TOFU trust dialog is pending — a reconnect
      * race against the in-flight decision would either burn retries or fork

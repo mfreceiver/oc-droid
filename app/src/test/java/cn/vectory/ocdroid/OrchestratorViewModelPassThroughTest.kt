@@ -16,6 +16,7 @@ import io.mockk.mockk
 import io.mockk.runs
 import io.mockk.verify
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
@@ -60,7 +61,8 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
     fun `setLastNavPage clamps above two`() = runTest {
         val core = createCore()
         val vm = OrchestratorViewModel(core)
-        // Default lastNavPage=0; 99 → 2 differs so the guard does not short-circuit.
+        // §home-hub T7-C5: default lastNavPage=Sessions.legacyPage=1;
+        // 99 → 2 differs so the guard does not short-circuit.
         vm.setLastNavPage(99)
 
         assertEquals(2, core.navFlow.value.lastNavPage)
@@ -71,23 +73,93 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
     fun `setLastNavPage in range writes through`() = runTest {
         val core = createCore()
         val vm = OrchestratorViewModel(core)
+        // §home-hub T7-C5: default lastNavPage is now Sessions.legacyPage=1,
+        // so use 2 (still in [0,2] range, differs from default) to exercise
+        // the write-through path.
+        vm.setLastNavPage(2)
 
-        vm.setLastNavPage(1)
-
-        assertEquals(1, core.navFlow.value.lastNavPage)
-        verify { settingsManager.lastNavPage = 1 }
+        assertEquals(2, core.navFlow.value.lastNavPage)
+        verify { settingsManager.lastNavPage = 2 }
     }
 
     @Test
     fun `setLastNavPage same value is a no-op`() = runTest {
         val core = createCore()
         val vm = OrchestratorViewModel(core)
-        core.store.mutateNav { it.copy(lastNavPage = 1) }
-
+        // §home-hub T7-C5: default lastNavPage=Sessions.legacyPage=1; setting
+        // 1 again must short-circuit without calling the setter.
         vm.setLastNavPage(1)
 
         // No setter call when value already matches.
         verify(exactly = 0) { settingsManager.lastNavPage = any() }
+    }
+
+    // ── CRITICAL-1: hub-back-trap contract ─────────────────────────────────
+    // Proves the asymmetry that necessitates AppShell.backToHome()'s explicit
+    // popBackStack (not just setLastRoute). Files/Git are entered via direct
+    // navController.navigate(workdir-route) without touching navState, so on
+    // entry navState.lastRoute stays Sessions. On exit, setLastRoute(Sessions)
+    // SHORT-CIRCUITS → no navFlow emission → the LaunchedEffect(requestedRoute)
+    // synchronizer never fires → user trapped. Chat/Settings (entered via
+    // setLastRoute) DO update navState, so their setLastRoute(Sessions) exit
+    // emits and the synchronizer handles the return. backToHome() unifies both
+    // paths by always popping explicitly ( NavController.popBackStack is
+    // exercised only in instrumented/emulator tests; this unit test proves the
+    // navState-level contract the fix relies on).
+
+    @Test
+    fun `setLastRoute Sessions no-ops when state already Sessions (Files and Git exit trap)`() = runTest {
+        val core = createCore()
+        val vm = OrchestratorViewModel(core)
+        // Default NavState.lastRoute = Sessions (T7-C5). Simulates the state
+        // after a user entered Files/Git via direct navigate(workdir-route):
+        // navState was never touched, still Sessions.
+        val emitted = mutableListOf<String>()
+        val collectorJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            vm.navFlow.collect { emitted += it.lastRoute }
+        }
+        advanceUntilIdle()
+        emitted.clear() // Drop the initial replay.
+
+        // The exit action Files/Git used BEFORE the fix:
+        vm.setLastRoute(NavRoute.Sessions)
+
+        advanceUntilIdle()
+        // CRITICAL: no emission → the synchronizer has nothing to react to.
+        assertEquals(emptyList<String>(), emitted)
+        // And no persistence write either.
+        verify(exactly = 0) { settingsManager.lastRoute = any() }
+
+        collectorJob.cancel()
+    }
+
+    @Test
+    fun `setLastRoute Sessions emits when state diverged (Chat and Settings exit path)`() = runTest {
+        val core = createCore()
+        val vm = OrchestratorViewModel(core)
+        // Simulate entry via setLastRoute(Chat) (the Sessions→Chat hop or a
+        // deeplink). navState.lastRoute becomes "chat".
+        vm.setLastRoute(NavRoute.Chat)
+        val emitted = mutableListOf<String>()
+        val collectorJob = launch(UnconfinedTestDispatcher(testScheduler)) {
+            vm.navFlow.collect { emitted += it.lastRoute }
+        }
+        advanceUntilIdle()
+        emitted.clear() // Drop the replay of "chat".
+
+        // Exit to Sessions — Chat/Settings case where the synchronizer CAN
+        // handle the return because state diverges.
+        vm.setLastRoute(NavRoute.Sessions)
+
+        advanceUntilIdle()
+        // Emits "sessions" → the synchronizer's LaunchedEffect(requestedRoute)
+        // key changes → fires. This is why Chat/Settings back worked in the
+        // original T7 wiring but Files/Git (whose entry didn't touch
+        // navState) did not.
+        assertEquals(listOf(NavRoute.Sessions.route), emitted)
+        verify(exactly = 1) { settingsManager.lastRoute = NavRoute.Sessions.route }
+
+        collectorJob.cancel()
     }
 
     @Test
