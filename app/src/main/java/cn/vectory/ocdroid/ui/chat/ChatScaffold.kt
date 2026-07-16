@@ -31,12 +31,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
@@ -85,7 +88,6 @@ import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.visibleMessages
 import cn.vectory.ocdroid.ui.settings.TofuTrustDialog
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
@@ -131,6 +133,25 @@ fun ChatScaffold(
      */
     onOpenChatFilePreview: (workdir: String?, path: String?) -> Unit = { _, _ -> },
     onOpenGitChanges: (String) -> Unit = {},
+    /**
+     * §home-hub T4: pop the Chat stack back to the Home hub. Invoked by:
+     *   - phone (<600dp) top-left ArrowBack (ChatTopBar navigationIcon);
+     *   - tablet drawer header ArrowBack (RecentSessionsDrawer);
+     *   - the root-session system-Back handler (replaces the legacy
+     *     "press again to exit" double-tap-confirm snackbar — root-session
+     *     Back now goes Home directly);
+     *   - tablet drawer header Home affordance.
+     * Defaults to `{}` so the existing AppShell call site compiles; T7
+     * supplies the real `popBackStack` / route-to-Home navigation.
+     */
+    onBackToHome: () -> Unit = {},
+    /**
+     * §home-hub T4: external hook fired when the tablet hamburger (Menu)
+     * button opens the [RecentSessionsDrawer]. ChatScaffold ALSO opens its
+     * owned `drawerState` (the drawer is an internal chrome concern), so
+     * this param is purely an extension point for callers (default `{}`).
+     */
+    onOpenDrawer: () -> Unit = {},
 ) {
     // §PARITY (verbatim from ChatScreen): all six slice reads survive the
     // chrome swap. The streaming / settings / host / unread / traffic reads
@@ -163,7 +184,6 @@ fun ChatScaffold(
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
     var showSessionPicker by rememberSaveable { mutableStateOf(false) }
     var errorDetail by remember { mutableStateOf<String?>(null) }
-    var pendingExit by remember { mutableStateOf(false) }
     // §1B-FIX (I6): dialog-state for the parity overflow entries (Todo +
     // Context-usage). Owned here in ChatScaffold so the conversation
     // overflow menu can open them. The dialogs themselves render the
@@ -175,6 +195,40 @@ fun ChatScaffold(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // §home-hub T4: responsive top-left affordance + tablet drawer gating.
+    // Hoisted here (formerly computed deep inside the chat Surface at §B3
+    // card-wrap) so it gates BOTH the ModalNavigationDrawer wrapper below
+    // AND the wide-screen card wrap. Reads the M3 WindowSizeClass provided
+    // by [LocalWindowSizeClass] (ChatScreen.kt:26 — calculated once in
+    // MainActivity via calculateWindowSizeClass); falls back to a
+    // screenWidthDp ≥ 600 check when no provider is present (previews /
+    // unit tests). Phone (Compact) → ArrowBack top-left + system-Back to
+    // Home; tablet (Medium/Expanded) → hamburger drawer.
+    val isWide = LocalWindowSizeClass.current
+        ?.let { it.widthSizeClass != WindowWidthSizeClass.Compact }
+        ?: (LocalConfiguration.current.screenWidthDp >= 600)
+
+    // §home-hub T4: drawerState owned here. The Menu button (tablet,
+    // ChatTopBar navigationIcon) opens it via [openDrawerAction]; a
+    // dedicated BackHandler (below, higher priority than root/parent) closes
+    // it when open. `gesturesEnabled = isWide` on the ModalNavigationDrawer
+    // disables edge-swipe-to-open on phone (phone has no Menu button, so the
+    // drawer must NOT be reachable by gesture either).
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    // §home-hub T4 (IMPORTANT-3 fix): the hamburger (Menu) button TOGGLES the
+    // drawer — open when closed, close when open (C2: "tap Menu again closes").
+    // The previous implementation always called drawerState.open(), so a
+    // second tap on an already-open drawer was a no-op instead of closing.
+    val openDrawerAction: () -> Unit = {
+        scope.launch {
+            if (drawerState.isOpen) drawerState.close() else drawerState.open()
+        }
+        // Fire the external hook AFTER kickiing the toggle so a T7 caller's
+        // telemetry / focus logic does not block the drawer animation.
+        onOpenDrawer()
+    }
+    val closeDrawerAction: () -> Unit = { scope.launch { drawerState.close() } }
 
     // Image picker (Photos Add-menu entry). Phase 1B ships only Photos;
     // "Reference workspace file" and "Commands" are Phase 2/2b.
@@ -340,8 +394,9 @@ fun ChatScaffold(
     // old animateDpAsState(questionCardHeightDp) — used to push the
     // snackbar up over a bottom-anchored question card — is removed.
 
-    // §PARITY: parent-session BackHandler (#14) + root-session exit-confirm
-    // (Feature B) + UiEvent error/success snackbar collection (R-17 batch2) +
+    // §PARITY: parent-session BackHandler (#14) + root-session back-to-home
+    // (§home-hub T4 — replaces the legacy "press again to exit" double-tap
+    // confirm) + UiEvent error/success snackbar collection (R-17 batch2) +
     // stale-notice snackbar + compacting auto-clear (Phase 0) are all moved
     // verbatim — the chrome swap does not affect any of these.
     val parent = curSession?.parentId
@@ -356,26 +411,31 @@ fun ChatScaffold(
         sessionVM.returnToParent()
     }
 
-    val exitConfirmMessage = stringResource(R.string.chat_exit_confirm)
     val errorMessage = stringResource(R.string.chat_error_occurred)
     val errorActionLabel = stringResource(R.string.chat_view)
     val staleNoticeMessage = stringResource(R.string.chat_stale_notice)
     val staleNoticeActionLabel = stringResource(R.string.common_refresh)
 
-    BackHandler(enabled = parent == null && !pendingExit) {
-        pendingExit = true
-        scope.launch {
-            snackbarHostState.showTimed(
-                message = exitConfirmMessage,
-                durationMillis = 1_000L
-            )
-        }
+    // §home-hub T4 (C4): root-session Back now navigates Home instead of the
+    // legacy "再按退出" double-tap-confirm snackbar (pendingExit machinery
+    // removed). The `parent == null` gate preserves the parent-session
+    // handler above (子→父) — when the current session IS a sub-agent, Back
+    // still returns to the parent; only ROOT-session Back goes Home.
+    BackHandler(enabled = parent == null) {
+        onBackToHome()
     }
-    LaunchedEffect(pendingExit) {
-        if (pendingExit) {
-            delay(1_000L)
-            pendingExit = false
-        }
+
+    // §home-hub T4 (IMPORTANT-2 fix): drawer-open BackHandler MUST be composed
+    // AFTER the parent/root handlers. Compose dispatches back in REVERSE
+    // registration order (the most-recently-composed enabled BackHandler
+    // wins), so registering this LAST guarantees that an OPEN drawer's back
+    // closes the drawer FIRST and never propagates to the root handler above
+    // (which would call onBackToHome — the bug when this was composed before
+    // the root handler). `enabled = drawerState.isOpen` keeps it inert when
+    // the drawer is closed, so phone (drawer never opens) and tablet (drawer
+    // closed) back still flow to the root/parent handlers above.
+    BackHandler(enabled = drawerState.isOpen) {
+        closeDrawerAction()
     }
 
     // §PARITY: UiEvent error / success / info / debug collection. Slice-
@@ -715,6 +775,55 @@ fun ChatScaffold(
             }
     }
 
+    // §home-hub T4 (C2): wrap the chat body in ModalNavigationDrawer. The
+    // drawer is tablet-only by construction: the hamburger (Menu) button that
+    // opens it renders ONLY on `isWide` form factors (ChatTopBar
+    // navigationIcon branch), and `gesturesEnabled = isWide` disables the
+    // edge-swipe-to-open gesture on phone so the drawer is unreachable there
+    // (phone uses the ArrowBack → onBackToHome path instead). Always wrapping
+    // (rather than conditionally composing the Column twice) keeps the body a
+    // single tree — the drawer content is cheap (a LazyColumn of ≤10 recent
+    // root sessions) and stays invisible/closed on phone.
+    //
+    // §home-hub T4 (IMPORTANT-1 fix): the drawer session list is the RECENT-
+    // session projection, NOT the open-tab set. Derived the SAME way
+    // SessionPickerSheet.kt:105-110 does — root only (`parentId == null`),
+    // non-archived (`!isArchived`), sorted by `time.updated` desc, capped
+    // `take(10)`. Sourced from the already-collected `sessionList.sessions`
+    // (the same list SessionPickerSheet receives from this composable), NOT
+    // `topBarState.openSessions` (which is the browser-TAB projection over
+    // `openSessionIds` — a different, smaller, order-stable set that does
+    // not represent "recent sessions").
+    val recentSessionsForDrawer = remember(sessionList.sessions) {
+        sessionList.sessions
+            .filter { it.parentId == null && !it.isArchived }
+            .sortedByDescending { it.time?.updated ?: 0L }
+            .take(10)
+    }
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        gesturesEnabled = isWide,
+        drawerContent = {
+            RecentSessionsDrawer(
+                // §T4-C2 / IMPORTANT-1: recent root non-archived sessions,
+                // sorted by time.updated desc, capped at 10 — same projection
+                // SessionPickerSheet uses. Tap = selectSession (stay in Chat).
+                sessions = recentSessionsForDrawer,
+                onSelect = { sessionId ->
+                    sessionVM.selectSession(sessionId)
+                    // §T4-C2: close the drawer after selecting so the user
+                    // lands on the chosen conversation (stay in Chat, do NOT
+                    // navigate away). selectSession is synchronous on the
+                    // slice; the close animation runs concurrently.
+                    closeDrawerAction()
+                },
+                onBackToHome = {
+                    closeDrawerAction()
+                    onBackToHome()
+                },
+            )
+        },
+    ) {
     Column(modifier = Modifier.fillMaxSize()) {
         ChatTopBar(
             state = topBarState,
@@ -725,6 +834,10 @@ fun ChatScaffold(
             tabVisible = true,
             onTabVisibilityChange = { /* no second-row strip in 1B */ },
             onTitleClick = { showSessionPicker = true },
+            // §home-hub T4 (C1/C3): responsive top-left affordance. ChatTopBar
+            // branches on width internally (phone ArrowBack / tablet Menu).
+            onBackToHome = onBackToHome,
+            onOpenDrawer = openDrawerAction,
         )
 
         // §nav-redesign (2026-07-13): SessionTabStrip is restored as the
@@ -761,10 +874,9 @@ fun ChatScaffold(
 
         // §PARITY: wide-screen card wrap mirrors ChatScreen 10/§B3. Phase 1B
         // keeps the wrapping Surface so the chat area looks identical on
-        // Medium/Expanded.
-        val isWide = LocalWindowSizeClass.current
-            ?.let { it.widthSizeClass != WindowWidthSizeClass.Compact }
-            ?: (LocalConfiguration.current.screenWidthDp >= 600)
+        // Medium/Expanded. (§home-hub T4: `isWide` is now hoisted to the
+        // top of ChatScaffold so it also gates the ModalNavigationDrawer
+        // wrapper below — this branch just reuses the hoisted value.)
         val cardShape = if (isWide) MaterialTheme.shapes.large else RectangleShape
         androidx.compose.material3.Surface(
             modifier = Modifier
@@ -1044,6 +1156,7 @@ fun ChatScaffold(
         // message Surface above uses weight(1f), so it claims the full
         // vertical space and the Composer sits flush below).
     }
+    } // §home-hub T4: end ModalNavigationDrawer content lambda.
 
     // ── Phase 1B sheets / overflows / dialogs (new) ──────────────────────
 
