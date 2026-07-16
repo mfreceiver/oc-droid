@@ -46,6 +46,12 @@ fun GitScreen(
     orchestratorVM: OrchestratorViewModel,
     savedStateHandle: SavedStateHandle,
     initialSessionId: String? = null,
+    // Home-hub (T6): workdir route param. Priority = initialWorkdir >
+    // (activeSession→directory) > null. Backward-compatible (defaults null;
+    // the existing AppShell call passes initialSessionId, not workdir, so it
+    // keeps the old session-derived behaviour). T7 wires the `git?workdir=…`
+    // route to this param.
+    initialWorkdir: String? = null,
     // §files-git-readonly-workdir: retained for AppShell call-site stability.
     // The WorkdirControl is now read-only; this list is NOT consumed here.
     @Suppress("UNUSED_PARAMETER") recentWorkdirs: List<String> = emptyList(),
@@ -61,15 +67,15 @@ fun GitScreen(
     val sessions by sessionVM.sessionListFlow.collectAsStateWithLifecycle()
     val activeHost = host.currentHostProfileId
     val activeSession = initialSessionId ?: chat.currentSessionId
-    // §files-git-readonly-workdir: derive the workdir directly from the
-    // active session's directory. No local override, no last-browsed
-    // fallback — null when there is no active session (the WorkdirControl
-    // renders the muted "No workdir" placeholder in that case).
+    // Home-hub (T6): workdir resolution priority = initialWorkdir (route /
+    // programmatic nav) > active session's directory > null. No local
+    // override, no last-browsed fallback — null when neither is bound (the
+    // WorkdirControl renders the muted "No workdir" placeholder then).
     //
     // §Q14 (title union): resolve through the UNION store (root + directory
     // + child) so opening Git from a sub-agent / cross-workdir session still
     // yields that session's directory instead of falling back to null.
-    val effectiveWorkdir = activeSession?.let { id ->
+    val effectiveWorkdir = initialWorkdir ?: activeSession?.let { id ->
         allSessionsById(
             sessions.sessions,
             sessions.directorySessions,
