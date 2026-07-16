@@ -52,9 +52,9 @@ internal sealed interface AppAction {
      *  - [session]: the Session returned by `repository.createSession` (the
      *    reducer upserts it into sessionList.sessions).
      *  - [openSessionIds]: the NEW full open-tabs list (caller computes
-     *    `(listOf(session.id) + settingsManager.openSessionIds).distinct()
-     *    .take(8)`; the reducer just stores it — persistence is the caller's
-     *    job).
+     *    `(settingsManager.openSessionIds.filterNot { it == session.id }
+     *    + session.id).takeLast(8)` — the new tab joins from the RIGHT;
+     *    the reducer just stores it — persistence is the caller's job).
      *  - [viewedAt]: `System.currentTimeMillis()` captured at the call site
      *    (the reducer writes both `unread.lastViewedTime` and the independent
      *    pending-create registration timestamp from this same clock value).

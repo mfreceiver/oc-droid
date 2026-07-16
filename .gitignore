@@ -90,3 +90,10 @@ client-cert.b64
 # mTLS client cert paste files (contain private key — never commit)
 client-cert-b64*.txt
 client-cert*.b64
+# ocmar-lane: per-lane build isolation caches (auto-managed)
+.gradle_home/
+.m2/
+.npm/
+.npm-cache/
+.pytest_cache/
+.build-env.sh

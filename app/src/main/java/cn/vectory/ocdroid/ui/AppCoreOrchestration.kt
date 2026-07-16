@@ -301,7 +301,7 @@ internal fun AppCore.materializeDraftSession(onSessionReady: (String) -> Unit) {
     appScope.launch {
         repository.createSession(title = null, directory = draftWorkdir)   // §R18 Final 终审 fix (gpter): route to the draft workdir
             .onSuccess { session ->
-                val openIds = (listOf(session.id) + settingsManager.openSessionIds).distinct().take(8)
+                val openIds = (settingsManager.openSessionIds.filterNot { it == session.id } + session.id).takeLast(8)
                 settingsManager.openSessionIds = openIds
                 val now = System.currentTimeMillis()
                 // §A5-3 Phase B2: the success-path writeSessionList + writeChat

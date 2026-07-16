@@ -560,10 +560,11 @@ class SessionSwitcher(
         // Selecting a real session discards any in-progress draft.
         slices.mutateComposer { it.copy(draftWorkdir = null) }
 
-        // Browser-tab semantics: prepend only when NOT already in the list.
-        // Skip sub-agents (parentId != null) — transient navigations.
+        // Browser-tab semantics: append only when NOT already in the list
+        // (new tabs join from the RIGHT). Skip sub-agents (parentId != null)
+        // — transient navigations.
         if (targetSession?.parentId == null && sessionId !in slices.sessionList.value.openSessionIds) {
-            val updated = (listOf(sessionId) + slices.sessionList.value.openSessionIds).take(8)
+            val updated = (slices.sessionList.value.openSessionIds + sessionId).takeLast(8)
             settingsManager.openSessionIds = updated
             slices.mutateSessionList { it.copy(openSessionIds = updated) }
             // Fix #5: persist the newly-opened session's metadata into

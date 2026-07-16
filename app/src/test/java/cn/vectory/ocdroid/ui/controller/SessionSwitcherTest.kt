@@ -692,10 +692,10 @@ class SessionSwitcherTest {
         assertNull("draftWorkdir cleared in state mirror", slices.composer.value.draftWorkdir)
     }
 
-    // ── Step 8c: openSessionIds prepend ─────────────────────────────────────
+    // ── Step 8c: openSessionIds append (new tab joins from the RIGHT) ────────
 
     @Test
-    fun `switchTo prepends new session to openSessionIds`() {
+    fun `switchTo appends new session to the end of openSessionIds`() {
         seed {
             it.copy(
             currentSessionId = null,
@@ -706,9 +706,10 @@ class SessionSwitcherTest {
 
         switcher.switchTo("new-tab")
 
-        assertEquals(listOf("new-tab", "existing-1", "existing-2"), slices.sessionList.value.openSessionIds)
+        // 新 tab 在末尾（右侧），而非开头
+        assertEquals(listOf("existing-1", "existing-2", "new-tab"), slices.sessionList.value.openSessionIds)
         assertEquals(1, callbacks.setOpenSessionIdsCalls.size)
-        assertEquals(listOf("new-tab", "existing-1", "existing-2"), callbacks.setOpenSessionIdsCalls[0])
+        assertEquals(listOf("existing-1", "existing-2", "new-tab"), callbacks.setOpenSessionIdsCalls[0])
     }
 
     @Test
@@ -746,19 +747,23 @@ class SessionSwitcherTest {
     }
 
     @Test
-    fun `switchTo caps openSessionIds at 8`() {
+    fun `switchTo caps openSessionIds at 8 keeping newest on the right`() {
         seed {
             it.copy(
             currentSessionId = null,
-            openSessionIds = (1..8).map { "existing-$it" },
-            sessions = listOf(Session(id = "new-tab", directory = "/d"))
+            openSessionIds = listOf("s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"),
+            sessions = listOf(Session(id = "s9", directory = "/d"))
             )
         }
 
-        switcher.switchTo("new-tab")
+        switcher.switchTo("s9")
 
+        // 满 8 时丢最旧 s1，新 s9 在最右
         assertEquals(8, slices.sessionList.value.openSessionIds.size)
-        assertEquals("new-tab", slices.sessionList.value.openSessionIds[0])
+        assertEquals(
+            listOf("s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9"),
+            slices.sessionList.value.openSessionIds,
+        )
     }
 
     // ── Step 8d: persistSessionCache ────────────────────────────────────────

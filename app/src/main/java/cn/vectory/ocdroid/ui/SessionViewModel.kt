@@ -209,7 +209,7 @@ class SessionViewModel @Inject constructor(
         }
         val updated = settingsManager.openSessionIds.filter { it != sessionId }
         settingsManager.openSessionIds = updated
-        val nextId = updated.firstOrNull()
+        val nextId = updated.lastOrNull()
         store.mutateSessionList { it.copy(openSessionIds = updated) }
         store.mutateUnread { it.copy(unreadSessions = it.unreadSessions - sessionId) }
         if (isCurrent && nextId == null) {
