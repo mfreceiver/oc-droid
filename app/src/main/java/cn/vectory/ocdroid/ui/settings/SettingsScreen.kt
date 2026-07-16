@@ -165,8 +165,8 @@ private data class SettingsSectionEntry(
  * listed at the Settings root.
  */
 private fun settingsSections(): List<SettingsSectionEntry> = listOf(
-    // §setux #new4: 服务器入口用专用短文案 key（「服务器」/「Server」）。
-    // settings_section_hosts（「服务器管理」）仍由 hub TopAppBar 使用。
+    // §setux-unify: 服务器入口与 hub TopAppBar 共用同一短文案 key
+    // （「服务器」/「Server」），与其它三项（外观/通知/关于）「入口名 = 页面名」一致。
     SettingsSectionEntry(NavRoute.settingsHostsRoute, R.string.setux_settings_hosts_entry, R.string.settings_section_hosts_subtitle, Icons.Default.Dns),
     SettingsSectionEntry(NavRoute.settingsAppearanceRoute, R.string.settings_section_appearance, R.string.settings_section_appearance_subtitle, Icons.Default.Palette),
     SettingsSectionEntry(NavRoute.settingsNotificationsRoute, R.string.settings_section_notifications, R.string.settings_section_notifications_subtitle, Icons.Default.Notifications),

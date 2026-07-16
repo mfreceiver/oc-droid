@@ -31,6 +31,13 @@ class TrafficTracker @Inject constructor(
     var totalBytesReceived: Long = settingsManager.trafficBytesReceived
         private set
 
+    /** Epoch millis of the last reset; 0 = never reset. Seeded from prefs (same
+     *  as the byte counters) so it survives process death; stamped to `now`
+     *  by [reset]. Surfaced to the UI as the 「自 xx 累计」 window. */
+    @Volatile
+    var resetAt: Long = settingsManager.trafficResetAt
+        private set
+
     @Volatile
     private var dirty: Boolean = false
 
@@ -52,10 +59,11 @@ class TrafficTracker @Inject constructor(
         }
     }
 
-    /** Zeros both counters and persists the reset immediately. */
+    /** Zeros both counters, stamps [resetAt] to `now`, and persists immediately. */
     fun reset() {
         totalBytesSent = 0L
         totalBytesReceived = 0L
+        resetAt = System.currentTimeMillis()
         doPersist()
     }
 
@@ -69,6 +77,7 @@ class TrafficTracker @Inject constructor(
     private fun doPersist() {
         settingsManager.trafficBytesSent = totalBytesSent
         settingsManager.trafficBytesReceived = totalBytesReceived
+        settingsManager.trafficResetAt = resetAt
         lastPersistTime = System.currentTimeMillis()
         dirty = false
     }

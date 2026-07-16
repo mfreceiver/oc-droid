@@ -94,6 +94,11 @@
     <string name="settings_version">Version %1$s</string>
     <string name="settings_traffic">Traffic</string>
     <string name="settings_traffic_reset">Reset</string>
+    <!-- §traffic-since: accumulation-window annotation under the traffic row.
+         %1$s is the last-reset timestamp, or the literal "enabled"
+         (traffic_since_enabled_word) when the counters were never reset. -->
+    <string name="traffic_accumulated_since">Accumulated since %1$s</string>
+    <string name="traffic_since_enabled_word">enabled</string>
     <string name="host_profile_edit_icon">Edit</string>
     <string name="host_profile_test_icon">Test connection</string>
     <string name="host_profile_delete_confirm_title">Delete profile</string>
@@ -534,10 +539,11 @@
     <string name="chat_preview_no_path">No file path or working directory available.</string>
     <string name="chat_preview_load_failed">Failed to load file.</string>
 
-    <!-- §setux #new4: Settings slim-list entry for the 服务器管理 hub. The
-         hub's own TopAppBar keeps settings_section_hosts ("Server
-         Management"); this shorter label is the list-row affordance only
-         (key added because settings_section_hosts is reused). -->
+    <!-- §setux-unify: the Settings list entry AND the 服务器 hub TopAppBar now
+         share this single short label ("Server"), matching the other three
+         entries (Appearance / Notifications / About) so entry name = page name.
+         settings_section_hosts is retained as the legacy long-form label but
+         no longer drives the hub title. -->
     <string name="setux_settings_hosts_entry">Server</string>
 
     <!-- §FGS-notify CP5: ongoing session-status notification copy. Channel

@@ -249,12 +249,31 @@ internal fun AppearanceSection(
 internal fun TrafficSection(
     sent: Long,
     received: Long,
+    resetAt: Long,
     onReset: () -> Unit,
     hideHeader: Boolean = false
 ) {
     if (!hideHeader) {
         AppSectionHeader(text = stringResource(R.string.settings_traffic))
     }
+
+    // §traffic-since: show the accumulation window — "自 <上次重置时间> 累计",
+    // or "自启用累计" when the counters have never been reset (resetAt == 0).
+    // Fully-qualified java.* types match the TofuTrustDialog precedent (no new
+    // top-level imports). SimpleDateFormat is locale-aware via getDefault().
+    val enabledWord = stringResource(R.string.traffic_since_enabled_word)
+    val dateText = remember(resetAt) {
+        if (resetAt > 0L) {
+            java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+                .format(java.util.Date(resetAt))
+        } else {
+            null
+        }
+    }
+    val accumulatedSince = stringResource(
+        R.string.traffic_accumulated_since,
+        dateText ?: enabledWord
+    )
 
     ListItem(
         headlineContent = {
@@ -264,6 +283,13 @@ internal fun TrafficSection(
                 // to match S1 (HostProfileRow) and S3 (ModelManagementSection
                 // launcher row). The trailing Refresh IconButton stays.
                 style = MaterialTheme.typography.bodyLarge
+            )
+        },
+        supportingContent = {
+            Text(
+                accumulatedSince,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         },
         trailingContent = {

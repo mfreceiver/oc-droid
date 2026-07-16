@@ -185,6 +185,7 @@ class ConnectionViewModel @Inject constructor(
             it.copy(
                 trafficSent = trafficTracker.totalBytesSent,
                 trafficReceived = trafficTracker.totalBytesReceived,
+                resetAt = trafficTracker.resetAt,
             )
         }
     }

@@ -88,6 +88,11 @@
     <string name="settings_version">版本 %1$s</string>
     <string name="settings_traffic">流量统计</string>
     <string name="settings_traffic_reset">重置</string>
+    <!-- §traffic-since: 流量行下方的累计窗口标注。%1$s 为上次重置时间；
+         从未重置时为字面词「启用」(traffic_since_enabled_word)。模板无空格，
+         故「自启用累计」/「自2026-07-01 14:30累计」均无多余空格。 -->
+    <string name="traffic_accumulated_since">自%1$s累计</string>
+    <string name="traffic_since_enabled_word">启用</string>
     <string name="host_profile_edit_icon">编辑</string>
     <string name="host_profile_test_icon">测试连接</string>
     <string name="host_profile_delete_confirm_title">删除配置</string>
@@ -502,8 +507,9 @@
     <string name="chat_preview_no_path">缺少文件路径或工作目录。</string>
     <string name="chat_preview_load_failed">加载文件失败。</string>
 
-    <!-- §setux #new4: Settings 列表入口（服务器管理 hub）。hub 自身的 TopAppBar
-         仍用 settings_section_hosts（「服务器管理」）；此短文案仅用于列表行。 -->
+    <!-- §setux-unify: Settings 列表入口与 服务器 hub TopAppBar 现共用此短文案
+         （「服务器」），与外观/通知/关于三项「入口名 = 页面名」一致。
+         settings_section_hosts 保留为长文案，但不再用作 hub 标题。 -->
     <string name="setux_settings_hosts_entry">服务器</string>
 
     <!-- §FGS-notify CP5: ongoing 会话状态通知文案（channel=ocdroid.session_status,

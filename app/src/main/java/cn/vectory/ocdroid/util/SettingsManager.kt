@@ -591,6 +591,12 @@ class SettingsManager @Inject constructor(
         get() = encryptedPrefs.getLong(KEY_TRAFFIC_RECEIVED, 0L)
         set(value) = encryptedPrefs.edit().putLong(KEY_TRAFFIC_RECEIVED, value).apply()
 
+    /** Epoch millis of the last traffic reset (0 = never reset). Mirrors
+     *  [trafficBytesSent]/[trafficBytesReceived]; written by [TrafficTracker]. */
+    var trafficResetAt: Long
+        get() = encryptedPrefs.getLong(KEY_TRAFFIC_RESET_AT, 0L)
+        set(value) = encryptedPrefs.edit().putLong(KEY_TRAFFIC_RESET_AT, value).apply()
+
     // §chat-ux-batch T8 (B3): getAgentForSession / setAgentForSession /
     // clearAgentForSession / getModelForSession / setModelForSession were
     // deleted here (the per-session agent/model override maps). T7 rewired
@@ -940,6 +946,7 @@ class SettingsManager @Inject constructor(
         private const val KEY_SESSION_CACHE = "session_cache"
         private const val KEY_TRAFFIC_SENT = "traffic_sent"
         private const val KEY_TRAFFIC_RECEIVED = "traffic_received"
+        private const val KEY_TRAFFIC_RESET_AT = "traffic_reset_at"
 
         private fun basicAuthPasswordKey(passwordId: String): String = "basic_auth_password_$passwordId"
         private fun tunnelPasswordKey(id: String): String = "tunnel_password_$id"

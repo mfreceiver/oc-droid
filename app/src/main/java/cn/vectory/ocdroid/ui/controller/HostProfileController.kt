@@ -928,7 +928,7 @@ class HostProfileController(
                 connectionPhase = ConnectionPhase.Reconnecting
             )
         }
-        slices.mutateTraffic { TrafficState() }
+        slices.mutateTraffic { TrafficState(resetAt = trafficTracker.resetAt) }
         // 7. Reset the composer/file/settings slices to defaults.
         slices.mutateComposer { ComposerState() }
         slices.mutateFile { FileState() }
@@ -966,7 +966,7 @@ class HostProfileController(
         slices.mutateConnection {
             ConnectionState(isConnecting = true, connectionPhase = ConnectionPhase.Reconnecting)
         }
-        slices.mutateTraffic { TrafficState() }
+        slices.mutateTraffic { TrafficState(resetAt = trafficTracker.resetAt) }
         slices.mutateComposer { ComposerState() }
         slices.mutateFile { FileState() }
         slices.mutateSettings { SettingsState() }

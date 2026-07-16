@@ -123,7 +123,9 @@ internal fun HostProfilesManagerScreen(
     // Column+TopAppBar. The add-host IconButton is preserved via the scaffold's
     // `actions` slot. The list Column keeps its verticalScroll + testTag.
     SettingsSubRouteScaffold(
-        titleRes = R.string.settings_section_hosts,
+        // §setux-unify: hub 标题改用与一级入口相同的短文案（「服务器」），与
+        // 外观/通知/关于三项保持「入口名 = 页面名」一致。
+        titleRes = R.string.setux_settings_hosts_entry,
         onBack = onBack,
         actions = {
             IconButton(onClick = { editingProfile = newDirectProfile() }) {
@@ -178,6 +180,7 @@ internal fun HostProfilesManagerScreen(
             TrafficSection(
                 sent = traffic.trafficSent,
                 received = traffic.trafficReceived,
+                resetAt = traffic.resetAt,
                 onReset = connectionVM::resetTrafficStats,
                 hideHeader = true,
             )

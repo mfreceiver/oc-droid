@@ -114,7 +114,10 @@ data class ConnectionState(
  */
 data class TrafficState(
     val trafficSent: Long = 0L,
-    val trafficReceived: Long = 0L
+    val trafficReceived: Long = 0L,
+    /** Epoch millis of the last traffic reset; 0 = never reset (UI then shows
+     *  「自启用累计」). Stamped by [cn.vectory.ocdroid.util.TrafficTracker.reset]. */
+    val resetAt: Long = 0L
 ) {
     /** Combined sent + received traffic, derived so it never drifts. */
     val totalTrafficBytes: Long
