@@ -17,6 +17,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
@@ -33,6 +34,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.SnackbarHost
@@ -71,6 +73,7 @@ import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
+import cn.vectory.ocdroid.ui.SettingsViewModel
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.computeContextUsage
 import cn.vectory.ocdroid.ui.currentHostProfile
@@ -113,6 +116,7 @@ fun ChatScaffold(
     sessionVM: SessionViewModel,
     hostVM: HostViewModel,
     orchestratorVM: OrchestratorViewModel,
+    settingsVM: SettingsViewModel,
     onNavigateToSettings: () -> Unit = {},
     /**
      * §new2 (2026-07-13): forwarded to [ChatEmptyState] so the "all tabs
@@ -166,6 +170,7 @@ fun ChatScaffold(
     val sessionList by chatVM.sessionListFlow.collectAsStateWithLifecycle()
     val unread by chatVM.unreadFlow.collectAsStateWithLifecycle()
     val host by orchestratorVM.hostFlow.collectAsStateWithLifecycle()
+    val recentWorkdirs by settingsVM.recentWorkdirs.collectAsStateWithLifecycle()
 
     // ── Chrome-only state (new for Phase 1B) ─────────────────────────────
     // §0.8.2 P2: showContextSelector / showOverflow are
@@ -191,6 +196,14 @@ fun ChatScaffold(
     // from this package).
     var showTodoDialog by remember { mutableStateOf(false) }
     var showContextDialog by remember { mutableStateOf(false) }
+    // §drawer-new-session: workdir picker for the drawer header "new session"
+    // button when ≥2 workdirs are connected (mirrors SessionsScreen's flow).
+    var pendingWorkdirPick by rememberSaveable { mutableStateOf(false) }
+    // §drawer-new-session: briefly locks all drawer interaction (rows, back,
+    // new-session) while the drawer is closing before the workdir picker shows —
+    // prevents a selectSession-vs-picker race if the user taps again during the
+    // close animation. `remember` (not Saveable) so a config change resets it.
+    var drawerInteractionLocked by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -228,7 +241,9 @@ fun ChatScaffold(
         // telemetry / focus logic does not block the drawer animation.
         onOpenDrawer()
     }
-    val closeDrawerAction: () -> Unit = { scope.launch { drawerState.close() } }
+    val closeDrawerAction: () -> Unit = remember(scope, drawerState) {
+        { scope.launch { drawerState.close() } }
+    }
 
     // Image picker (Photos Add-menu entry). Phase 1B ships only Photos;
     // "Reference workspace file" and "Commands" are Phase 2/2b.
@@ -804,6 +819,67 @@ fun ChatScaffold(
             .filter { it.parentId == null && !it.isArchived }
             .sortedByDescending { it.time?.updated ?: 0L }
     }
+    // §drawer-new-session: reuses SessionsScreen's new-session flow. 0 workdirs
+    // → button explicitly disabled via isStartNewSessionEnabled (no-op guard
+    // kept defensively); 1 → lock + close drawer, then create the draft; ≥2 →
+    // lock + close drawer, THEN show the project-picker AppBottomSheet
+    // (awaited so the ModalBottomSheet does not overlap the closing
+    // ModalNavigationDrawer). BOTH close paths lock all drawer interaction
+    // during the close animation (prevents a selectSession-vs-picker / -create
+    // race); the lock releases in a finally so it survives a cancelled close.
+    // No onSwitchToChat() — already in Chat; createSessionInWorkdir clears chat
+    // + composer into draft mode for the workdir.
+    val onStartNewSessionInDrawer: () -> Unit = remember(
+        recentWorkdirs,
+        sessionVM,
+        scope,
+        drawerState,
+        closeDrawerAction,
+    ) {
+        {
+            when {
+                recentWorkdirs.isEmpty() -> Unit
+                recentWorkdirs.size == 1 -> {
+                    // Capture the single workdir synchronously at tap time.
+                    // recentWorkdirs is a state delegate re-read on each access,
+                    // so evaluating .single() AFTER the ~300ms drawer-close
+                    // animation could see a list that changed mid-flight (a
+                    // workdir disconnected meanwhile, or the list became empty /
+                    // multi → NoSuchElementException). The captured value is the
+                    // one the user actually acted on; createSessionInWorkdir is
+                    // idempotent-tolerant of a since-disconnected path (no crash).
+                    val workdir = recentWorkdirs.single()
+                    drawerInteractionLocked = true
+                    scope.launch {
+                        try {
+                            drawerState.close()
+                            sessionVM.createSessionInWorkdir(workdir)
+                        } finally {
+                            drawerInteractionLocked = false
+                        }
+                    }
+                }
+                else -> {
+                    // Lock drawer interaction immediately so the user cannot tap a
+                    // recent-session row / back button during the close animation
+                    // (prevents a selectSession-vs-picker race). The picker is shown
+                    // only after the drawer finishes closing (no modal-over-modal).
+                    // finally guarantees the lock releases even if close() is
+                    // cancelled mid-animation; on cancel the picker (inside try)
+                    // stays hidden.
+                    drawerInteractionLocked = true
+                    scope.launch {
+                        try {
+                            drawerState.close()
+                            pendingWorkdirPick = true
+                        } finally {
+                            drawerInteractionLocked = false
+                        }
+                    }
+                }
+            }
+        }
+    }
     ModalNavigationDrawer(
         drawerState = drawerState,
         gesturesEnabled = isWide,
@@ -826,6 +902,9 @@ fun ChatScaffold(
                     closeDrawerAction()
                     onBackToHome()
                 },
+                onStartNewSession = onStartNewSessionInDrawer,
+                isStartNewSessionEnabled = recentWorkdirs.isNotEmpty(),
+                interactionsEnabled = !drawerInteractionLocked,
             )
         },
     ) {
@@ -1272,6 +1351,37 @@ fun ChatScaffold(
                 chatVM.compactSession()
             },
         )
+    }
+
+    // §drawer-new-session: project picker when ≥2 workdirs connected (mirrors
+    // SessionsScreen's pendingWorkdirPick sheet). Selection starts a draft there.
+    // Wrapped in a scrollable, height-capped Column so up to ~30 workdirs stay
+    // reachable (mirrors the TodoListPanel heightIn(max) precedent).
+    if (pendingWorkdirPick) {
+        val pickerMaxHeight = (LocalConfiguration.current.screenHeightDp * 0.6f).dp
+        AppBottomSheet(
+            onDismissRequest = { pendingWorkdirPick = false },
+            title = stringResource(R.string.sessions_pick_workdir_title),
+        ) {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = pickerMaxHeight)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                recentWorkdirs.forEach { workdir ->
+                    val basename = workdir.split("/")
+                        .filter { it.isNotEmpty() }
+                        .lastOrNull() ?: workdir
+                    ListItem(
+                        headlineContent = { Text(basename) },
+                        modifier = Modifier.clickable {
+                            pendingWorkdirPick = false
+                            sessionVM.createSessionInWorkdir(workdir)
+                        },
+                    )
+                }
+            }
+        }
     }
 
     // (Snackbar host is rendered inside the chat Surface; UiEvent collection

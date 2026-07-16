@@ -11,6 +11,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
@@ -34,9 +35,12 @@ import cn.vectory.ocdroid.ui.theme.Dimens
  * (Menu) button in [ChatTopBar]'s `navigationIcon` slot (tablet form factor,
  * ≥600dp width). Provides:
  *
- *  - a **header row** with a Home affordance (`IconButton(ArrowBack)` →
- *    [onBackToHome]) — the tablet analogue of the phone top-left ArrowBack —
- *    so the user can leave Chat for the Home hub from inside the drawer;
+ *  - a **header row** whose `leadingContent` is a Home affordance
+ *    (`IconButton(ArrowBack)` → [onBackToHome] — the tablet analogue of the
+ *    phone top-left ArrowBack so the user can leave Chat for the Home hub
+ *    from inside the drawer) and whose `trailingContent` is a new-session
+ *    affordance (`IconButton(Add)` → [onStartNewSession] — mirrors the
+ *    SessionsScreen new-session FAB / header action);
  *  - a `LazyColumn` of recent sessions rendered via M3 [ListItem] +
  *    [Dimens] tokens (per `docs/ui-style-spec.md` §2 — rows MUST use the
  *    shared `ListItem` primitive, spacing MUST use `Dimens`, no scattered
@@ -47,20 +51,28 @@ import cn.vectory.ocdroid.ui.theme.Dimens
  * ([ChatScaffold]) on selection so the user lands on the chosen conversation.
  *
  * The session list passed by [ChatScaffold] is the `recentSessionsForDrawer`
- * projection: sourced from `sessionList.sessions` (the root-sessions slice
- * only — NOT the root-plus-directory merge), filtered to
- * `parentId == null && !isArchived`, sorted by `time.updated` desc, capped
- * at 10. This matches the SessionPickerSheet projection (same source /
- * filter / sort) but is a DIFFERENT, smaller set than the homepage §2a
- * "recent sessions" list (which additionally merges directorySessions and
- * deduplicates by id).
+ * projection: `sessionList.sessions` ∪ `sessionList.directorySessions`
+ * (flattened), `distinctBy { id }`, filtered to `parentId == null &&
+ * !isArchived`, sorted by `time.updated` desc, with NO cap. This is the
+ * SAME merged projection as the homepage §2a "Recently" section (sessions
+ * + directorySessions, distinctBy id), NOT the root-sessions-only set the
+ * SessionPickerSheet consumes.
  *
  * @param sessions recent root non-archived sessions (pre-projected by caller).
  * @param onSelect row-tap callback; receives the tapped session id. The
  *   caller is responsible for closing the drawer after a selection.
- * @param onBackToHome Home-affordance callback (header IconButton) — pop to
- *   the Home hub. Defaults to `{}`; ChatScaffold forwards the same
+ * @param onBackToHome Home-affordance callback (header `leadingContent`
+ *   IconButton) — pop to the Home hub. ChatScaffold forwards the same
  *   `onBackToHome` the phone ArrowBack uses.
+ * @param onStartNewSession new-session callback (header `trailingContent`
+ *   IconButton) — mirrors the SessionsScreen new-session flow. Defaults to
+ *   `{}`.
+ * @param isStartNewSessionEnabled gates the trailing Add button (disabled
+ *   when no workdirs are connected, e.g. 0 `recentWorkdirs`).
+ * @param interactionsEnabled gates ALL drawer interaction (header back +
+ *   Add buttons and recent-session rows). The caller briefly clears this
+ *   during the drawer-close transition before the workdir picker shows, to
+ *   prevent a selectSession-vs-picker race. Defaults to `true`.
  * @param modifier applied to the outer [ModalDrawerSheet].
  */
 @Composable
@@ -68,19 +80,37 @@ internal fun RecentSessionsDrawer(
     sessions: List<Session>,
     onSelect: (String) -> Unit,
     onBackToHome: () -> Unit,
+    onStartNewSession: () -> Unit = {},
+    isStartNewSessionEnabled: Boolean = true,
+    interactionsEnabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     ModalDrawerSheet(modifier = modifier) {
-        // ── Header: Home affordance ──────────────────────────────────────
-        // §home-hub T4: the drawer's own "back to home" entry. Uses ArrowBack
-        // (AutoMirrored for RTL) to mirror the phone top-left affordance's
-        // semantics — "leave chat" — consistent with the phone ArrowBack's
-        // contentDescription (chat_back_to_home). Per ui-style-spec.md §2 the
-        // row primitive is M3 `ListItem` (headline = app-name titleMedium,
-        // trailing = the Home/back IconButton); IconButton content uses
-        // Dimens.iconStd (24dp). This satisfies MINOR-1 (no hand-rolled Row
-        // for the header).
+        // ── Header: Home affordance (leading) + new session (trailing) ─────
+        // §home-hub T4: the drawer's own "back to home" entry moved to
+        // `leadingContent`. Uses ArrowBack (AutoMirrored for RTL) to mirror
+        // the phone top-left affordance's semantics — "leave chat" —
+        // consistent with the phone ArrowBack's contentDescription
+        // (chat_back_to_home). §drawer-new-session: `trailingContent` now
+        // hosts the new-session Add IconButton (mirrors SessionsScreen's
+        // new-session flow). Per ui-style-spec.md §2 the row primitive is M3
+        // `ListItem` (leading = Home/back IconButton, headline = app-name
+        // titleMedium, trailing = new-session IconButton); IconButton content
+        // uses Dimens.iconStd (24dp). This satisfies MINOR-1 (no hand-rolled
+        // Row for the header).
         ListItem(
+            leadingContent = {
+                IconButton(
+                    onClick = onBackToHome,
+                    enabled = interactionsEnabled,
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = stringResource(R.string.chat_back_to_home),
+                        modifier = Modifier.size(Dimens.iconStd),
+                    )
+                }
+            },
             headlineContent = {
                 Text(
                     text = stringResource(R.string.app_name),
@@ -91,10 +121,13 @@ internal fun RecentSessionsDrawer(
                 )
             },
             trailingContent = {
-                IconButton(onClick = onBackToHome) {
+                IconButton(
+                    onClick = onStartNewSession,
+                    enabled = isStartNewSessionEnabled && interactionsEnabled,
+                ) {
                     Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = stringResource(R.string.chat_back_to_home),
+                        imageVector = Icons.Filled.Add,
+                        contentDescription = stringResource(R.string.sessions_new_session_fab),
                         modifier = Modifier.size(Dimens.iconStd),
                     )
                 }
@@ -115,6 +148,7 @@ internal fun RecentSessionsDrawer(
                 RecentSessionRow(
                     session = session,
                     onClick = { onSelect(session.id) },
+                    enabled = interactionsEnabled,
                 )
             }
             // Trailing breathing room so the last row is not flush against
@@ -144,6 +178,7 @@ internal fun RecentSessionsDrawer(
 private fun RecentSessionRow(
     session: Session,
     onClick: () -> Unit,
+    enabled: Boolean = true,
 ) {
     val tone = remember(session.directory) { workdirTone(session.directory) }
     ListItem(
@@ -182,6 +217,6 @@ private fun RecentSessionRow(
                     .background(tone)
             )
         },
-        modifier = Modifier.clickable(onClick = onClick),
+        modifier = Modifier.clickable(enabled = enabled, onClick = onClick),
     )
 }

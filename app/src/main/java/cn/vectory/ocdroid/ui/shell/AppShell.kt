@@ -161,6 +161,7 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                     sessionVM = sessionVM,
                     hostVM = hostVM,
                     orchestratorVM = orchestratorVM,
+                    settingsVM = settingsVM,
                     onNavigateToSettings = { orchestratorVM.setLastRoute(NavRoute.Settings) },
                     // §CRITICAL-1: explicit pop-to-Sessions (not just
                     // setLastRoute) — see backToHome() doc above.

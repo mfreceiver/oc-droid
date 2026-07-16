@@ -10,6 +10,7 @@ import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
+import cn.vectory.ocdroid.ui.SettingsViewModel
 
 /**
  * §B3: provides a [WindowSizeClass] computed once in [cn.vectory.ocdroid.MainActivity]
@@ -40,11 +41,13 @@ val LocalWindowSizeClass = staticCompositionLocalOf<WindowSizeClass?> { null }
  *    + derived values are unchanged.
  *
  * [ChatScreen] is preserved as a thin wrapper so the legacy AppShell
- * wiring (see AppShell.kt:111-122) continues to compile and route the
- * Chat destination to the new internal scaffold. The signature is
- * unchanged — same 6 VMs + 2 navigation callbacks. The migration to a
- * standalone "new shell" entry point (without the wrapper) lands in
- * Phase 3.
+ * wiring continues to compile and route the Chat destination to the new
+ * internal scaffold. It forwards the chat VMs (chat / composer /
+ * connection / session / host / orchestrator + settings) and the
+ * navigation callbacks (settings / sessions / chat-file-preview / git-
+ * changes / back-to-home / open-drawer) verbatim to [ChatScaffold]. The
+ * migration to a standalone "new shell" entry point (without the wrapper)
+ * lands in Phase 3.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -55,6 +58,7 @@ fun ChatScreen(
     sessionVM: SessionViewModel,
     hostVM: HostViewModel,
     orchestratorVM: OrchestratorViewModel,
+    settingsVM: SettingsViewModel,
     onNavigateToSettings: () -> Unit = {},
     onNavigateToSessions: () -> Unit = {},
     /**
@@ -88,6 +92,7 @@ fun ChatScreen(
         sessionVM = sessionVM,
         hostVM = hostVM,
         orchestratorVM = orchestratorVM,
+        settingsVM = settingsVM,
         onNavigateToSettings = onNavigateToSettings,
         onNavigateToSessions = onNavigateToSessions,
         onOpenChatFilePreview = onOpenChatFilePreview,
