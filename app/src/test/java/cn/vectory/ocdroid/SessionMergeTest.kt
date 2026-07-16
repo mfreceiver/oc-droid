@@ -149,56 +149,36 @@ class SessionMergeTest {
     }
 
     @Test
-    fun `preserve appends local-only current session even when absent from refreshed`() {
-        // #10b: the currently-open session must survive a global refresh that
-        // does not return it (e.g. a freshly-created session not yet listed,
-        // or a directory session the user selected from a connected workdir).
+    fun `preserve appends local-only pending-create session even when absent from refreshed`() {
+        // §Q4-strict-sync: the preserve pass now keys on pendingCreateIds
+        // (not currentSessionId / openSessionIds). A freshly-created session
+        // whose id is pending-create survives a refresh that has not yet
+        // propagated it to the listing.
         val refreshed = listOf(
             Session(id = "s1", directory = "/tmp/project", title = "Refreshed")
         )
         val local = listOf(
-            Session(id = "s2", directory = "/tmp/project", title = "Current (local-only)")
+            Session(id = "s2", directory = "/tmp/project", title = "Pending-create (local-only)")
         )
 
         val merged = mergeRefreshedSessionsPreservingLocalActivity(
             refreshed, local,
             currentSessionId = "s2",
-            openSessionIds = emptySet()
+            openSessionIds = emptySet(),
+            pendingCreateIds = setOf("s2"),
         )
 
         val byId = merged.associateBy { it.id }
-        assertTrue("current session must be preserved", byId.containsKey("s2"))
-        assertEquals("Current (local-only)", byId["s2"]?.title)
+        assertTrue("pending-create session must be preserved", byId.containsKey("s2"))
+        assertEquals("Pending-create (local-only)", byId["s2"]?.title)
         assertTrue("refreshed session also retained", byId.containsKey("s1"))
     }
 
     @Test
-    fun `preserve appends local-only open-tab sessions`() {
-        // #10b: sessions in the open-tabs list (browser-tab style) are also
-        // preserved across refresh, not just the single current session.
-        val refreshed = listOf(
-            Session(id = "s1", directory = "/tmp/project", title = "Refreshed")
-        )
-        val local = listOf(
-            Session(id = "s2", directory = "/tmp/project", title = "Open tab 1"),
-            Session(id = "s3", directory = "/tmp/project", title = "Open tab 2")
-        )
-
-        val merged = mergeRefreshedSessionsPreservingLocalActivity(
-            refreshed, local,
-            currentSessionId = null,
-            openSessionIds = setOf("s2", "s3")
-        )
-
-        val ids = merged.map { it.id }.toSet()
-        assertTrue("s2 in openSessionIds preserved", "s2" in ids)
-        assertTrue("s3 in openSessionIds preserved", "s3" in ids)
-    }
-
-    @Test
     fun `preserve does NOT retain local sessions that are neither current nor open`() {
-        // Sessions the user is not actively using are allowed to drop on refresh,
-        // so stale / closed-tab sessions do not accumulate forever.
+        // §Q4-strict-sync: with pendingCreateIds empty (default), a local-only
+        // session that is neither in the refreshed set NOR pending-create is
+        // dropped on refresh (strict-sync: no ghost retention).
         val refreshed = listOf(
             Session(id = "s1", directory = "/tmp/project", title = "Refreshed")
         )
@@ -213,6 +193,54 @@ class SessionMergeTest {
         )
 
         assertEquals(listOf("s1"), merged.map { it.id })
+    }
+
+    @Test
+    fun `preserve drops a current-or-open session when it is NOT in pendingCreateIds`() {
+        // §Q4-strict-sync (strict ghost removal): the defining behavior change.
+        // A session that WAS current/open locally but is NOT in the server's
+        // refreshed list AND is NOT pending-create is now DROPPED. Pre-Q4 the
+        // currentSessionId / openSessionIds check kept it alive indefinitely
+        // (ghost). Now only pendingCreateIds can preserve it.
+        val refreshed = listOf(
+            Session(id = "s1", directory = "/tmp/project", title = "Refreshed")
+        )
+        val local = listOf(
+            Session(id = "s2", directory = "/tmp/project", title = "Current but not pending (should drop)")
+        )
+
+        val merged = mergeRefreshedSessionsPreservingLocalActivity(
+            refreshed, local,
+            currentSessionId = "s2",
+            openSessionIds = setOf("s2"),
+            pendingCreateIds = emptySet(),
+        )
+
+        // s2 is current AND open, but NOT pending-create → dropped (strict-sync).
+        assertEquals(listOf("s1"), merged.map { it.id })
+    }
+
+    @Test
+    fun `preserve appends multiple pending-create sessions`() {
+        // §Q4-strict-sync: multiple pending-create ids are all preserved.
+        val refreshed = listOf(
+            Session(id = "s1", directory = "/tmp/project", title = "Refreshed")
+        )
+        val local = listOf(
+            Session(id = "s2", directory = "/tmp/project", title = "Pending 1"),
+            Session(id = "s3", directory = "/tmp/project", title = "Pending 2")
+        )
+
+        val merged = mergeRefreshedSessionsPreservingLocalActivity(
+            refreshed, local,
+            currentSessionId = null,
+            openSessionIds = emptySet(),
+            pendingCreateIds = setOf("s2", "s3"),
+        )
+
+        val ids = merged.map { it.id }.toSet()
+        assertTrue("s2 in pendingCreateIds preserved", "s2" in ids)
+        assertTrue("s3 in pendingCreateIds preserved", "s3" in ids)
     }
 
     @Test

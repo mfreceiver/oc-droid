@@ -58,6 +58,10 @@ interface OpenCodeApi {
     suspend fun getSessionStatus(): Map<String, SessionStatus>
 
     @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("api/session/active")
+    suspend fun getActiveSessions(): ActiveSessionsResponse
+
+    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session/{id}/message")
     suspend fun getMessages(
         @Path("id") sessionId: String,
@@ -262,6 +266,16 @@ interface OpenCodeApi {
 data class CreateSessionRequest(
     val title: String? = null,
     @kotlinx.serialization.SerialName("parentID") val parentId: String? = null
+)
+
+@kotlinx.serialization.Serializable
+data class ActiveSessionsResponse(
+    val data: Map<String, ActiveSession> = emptyMap(),
+)
+
+@kotlinx.serialization.Serializable
+data class ActiveSession(
+    val type: String? = null,
 )
 
 @kotlinx.serialization.Serializable

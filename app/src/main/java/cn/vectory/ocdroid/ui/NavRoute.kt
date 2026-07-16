@@ -21,7 +21,6 @@ enum class NavRoute(val route: String, val legacyPage: Int) {
         const val settingsAppearanceRoute: String = "settings/appearance"
         const val settingsModelsRoute: String = "settings/models"
         const val settingsNotificationsRoute: String = "settings/notifications"
-        const val settingsStorageRoute: String = "settings/storage"
         const val settingsAboutRoute: String = "settings/about"
 
         val topLevel: List<NavRoute> = entries

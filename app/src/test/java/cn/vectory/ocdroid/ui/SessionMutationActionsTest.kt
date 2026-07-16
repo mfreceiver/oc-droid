@@ -89,6 +89,8 @@ class SessionMutationActionsTest {
         advanceUntilIdle()
 
         assertTrue(slices.sessionList.value.sessions.any { it.id == "new1" })
+        assertEquals(setOf("new1"), slices.sessionList.value.pendingCreateIds)
+        assertNotNull(slices.sessionList.value.pendingCreatedAt["new1"])
         assertEquals("new1", selected)
         assertTrue(emitted.isEmpty())
     }
@@ -235,6 +237,119 @@ class SessionMutationActionsTest {
         }
     }
 
+    // ── §Wave5b-Q13 blocker-2: launchSetSessionArchived cleans scroll state ──
+
+    @Test
+    fun `Wave5b-Q13 blocker-2 - launchSetSessionArchived wipes pendingScrollRequest targeting a non-current archived id`() = runTest {
+        // §Wave5b-Q13 blocker-2: archiving a NON-current session MUST still
+        // wipe a stale pendingScrollRequest that targets it. Chat CONTENT
+        // (currentSessionId / messages) MUST be preserved (current not
+        // archived). Pre-fix: only the clearCurrent branch (line 206) wiped
+        // scroll state, so non-current archived ids leaked.
+        val session = Session(id = "stale-target", directory = "/x")
+        val currentSession = Session(id = "cur", directory = "/x")
+        store.mutateSessionList {
+            it.copy(sessions = listOf(session, currentSession), openSessionIds = listOf("cur", "stale-target"))
+        }
+        every { settingsManager.openSessionIds } returns listOf("cur", "stale-target")
+        store.mutateChat {
+            it.copy(
+                currentSessionId = "cur",  // NOT the archived id
+                messages = listOf(Message(id = "m1", role = "user")),
+                pendingScrollRequest = cn.vectory.ocdroid.ui.PendingScrollRequest(
+                    requestId = 7L,
+                    targetSessionId = "stale-target",
+                    behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest,
+                ),
+            )
+        }
+        val archived = session.copy(time = Session.TimeInfo(archived = 1000L))
+        coEvery { repository.updateSessionArchived("stale-target", any()) } returns Result.success(archived)
+
+        launchSetSessionArchived(scope, repository, slices, settingsManager, sessionId = "stale-target", archived = true, emit = emit)
+        advanceUntilIdle()
+
+        // Chat content preserved.
+        assertEquals("cur", slices.chat.value.currentSessionId)
+        assertEquals(1, slices.chat.value.messages.size)
+        // Stale scroll intent wiped.
+        assertNull(
+            "non-current archived target's pendingScrollRequest MUST be wiped",
+            slices.chat.value.pendingScrollRequest,
+        )
+    }
+
+    @Test
+    fun `Wave5b-Q13 blocker-2 - launchSetSessionArchived wipes parentReturnCheckpoints entries keyed by the archived subtree`() = runTest {
+        // Archiving a subtree (parent + child) MUST wipe any checkpoint
+        // entries keyed by the archived ids. The current session's own
+        // checkpoint entry MUST survive.
+        val parent = Session(id = "stale-parent", directory = "/x")
+        val child = Session(id = "stale-child", directory = "/x", parentId = "stale-parent")
+        val currentSession = Session(id = "cur", directory = "/x")
+        store.mutateSessionList {
+            it.copy(sessions = listOf(parent, child, currentSession), openSessionIds = listOf("cur", "stale-parent"))
+        }
+        every { settingsManager.openSessionIds } returns listOf("cur", "stale-parent")
+        store.mutateChat {
+            it.copy(
+                currentSessionId = "cur",
+                parentReturnCheckpoints = mapOf(
+                    "stale-child" to cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = "k1", fallbackIndex = 1, offset = 1),
+                    "cur" to cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = "k2", fallbackIndex = 2, offset = 2),
+                ),
+            )
+        }
+        coEvery { repository.updateSessionArchived("stale-parent", any()) } returns Result.success(parent.copy(time = Session.TimeInfo(archived = 1L)))
+        coEvery { repository.updateSessionArchived("stale-child", any()) } returns Result.success(child.copy(time = Session.TimeInfo(archived = 1L)))
+
+        launchSetSessionArchived(scope, repository, slices, settingsManager, sessionId = "stale-parent", archived = true, emit = emit)
+        advanceUntilIdle()
+
+        // Subtree entries wiped; live entry preserved.
+        assertFalse(
+            "stale-child entry MUST be wiped",
+            slices.chat.value.parentReturnCheckpoints.containsKey("stale-child"),
+        )
+        assertEquals(
+            "cur entry MUST survive",
+            cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = "k2", fallbackIndex = 2, offset = 2),
+            slices.chat.value.parentReturnCheckpoints["cur"],
+        )
+    }
+
+    @Test
+    fun `Wave5b-Q13 blocker-2 - launchSetSessionArchived current-archive case still wipes scroll state (no regression)`() = runTest {
+        // Regression guard: the current-archive case (clearCurrent branch)
+        // still wipes scroll state. The new cleanScrollStateForSubtree call
+        // runs FIRST (unconditional), then the clearCurrent branch wipes
+        // currentSessionId/messages. Both must fire; the result is the same
+        // as pre-fix for this case.
+        val session = Session(id = "cur", directory = "/x")
+        store.mutateSessionList { it.copy(sessions = listOf(session)) }
+        store.mutateChat {
+            it.copy(
+                currentSessionId = "cur",
+                messages = listOf(Message(id = "m1", role = "user")),
+                pendingScrollRequest = cn.vectory.ocdroid.ui.PendingScrollRequest(
+                    requestId = 1L,
+                    targetSessionId = "cur",
+                    behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest,
+                ),
+                parentReturnCheckpoints = mapOf("cur" to cn.vectory.ocdroid.ui.ScrollCheckpoint(null, 0, 0)),
+            )
+        }
+        coEvery { repository.updateSessionArchived("cur", any()) } returns Result.success(session.copy(time = Session.TimeInfo(archived = 1000L)))
+
+        launchSetSessionArchived(scope, repository, slices, settingsManager, sessionId = "cur", archived = true, emit = emit)
+        advanceUntilIdle()
+
+        assertNull(slices.chat.value.currentSessionId)
+        assertTrue(slices.chat.value.messages.isEmpty())
+        assertNull(slices.chat.value.pendingScrollRequest)
+        assertTrue(slices.chat.value.parentReturnCheckpoints.isEmpty())
+    }
+
     @Test
     fun `launchSetSessionArchived archive failure emits archive error`() = runTest {
         val session = Session(id = "s1", directory = "/x")
@@ -280,6 +395,51 @@ class SessionMutationActionsTest {
             "child C pending question removed",
             slices.sessionList.value.pendingQuestions.none { it.sessionId == "C" },
         )
+    }
+
+    @Test
+    fun `archive parent success clears child active unread and question even if child REST fails`() = runTest {
+        val parent = Session(id = "A", directory = "/x")
+        val child = Session(id = "C", directory = "/x", parentId = "A")
+        store.mutateSessionList {
+            it.copy(
+                sessions = listOf(parent, child),
+                activeSessionIds = setOf("A", "C", "Z"),
+                pendingQuestions = listOf(
+                    QuestionRequest(
+                        id = "q-child",
+                        sessionId = "C",
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
+                    ),
+                    QuestionRequest(
+                        id = "q-other",
+                        sessionId = "Z",
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
+                    ),
+                ),
+            )
+        }
+        store.mutateUnread { it.copy(unreadSessions = setOf("A", "C", "Z")) }
+        every { settingsManager.openSessionIds } returns emptyList()
+        coEvery { repository.updateSessionArchived("A", any()) } returns
+            Result.success(parent.copy(time = Session.TimeInfo(archived = 1L)))
+        coEvery { repository.updateSessionArchived("C", any()) } returns
+            Result.failure(IllegalStateException("child archive failed"))
+
+        launchSetSessionArchived(
+            scope,
+            repository,
+            slices,
+            settingsManager,
+            sessionId = "A",
+            archived = true,
+            emit = emit,
+        )
+        advanceUntilIdle()
+
+        assertEquals(setOf("Z"), slices.sessionList.value.activeSessionIds)
+        assertEquals(setOf("Z"), slices.unread.value.unreadSessions)
+        assertEquals(listOf("Z"), slices.sessionList.value.pendingQuestions.map { it.sessionId })
     }
 
     @Test

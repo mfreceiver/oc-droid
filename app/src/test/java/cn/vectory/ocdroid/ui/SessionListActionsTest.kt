@@ -61,6 +61,7 @@ class SessionListActionsTest {
         store = SharedStateStore()
         slices = store.slices
         repository = mockk(relaxed = true)
+        coEvery { repository.getActiveSessionIds() } returns Result.success(emptySet())
         settingsManager = mockk(relaxed = true)
         every { settingsManager.currentWorkdir } returns null
         every { settingsManager.openSessionIds } returns emptyList()
@@ -78,16 +79,24 @@ class SessionListActionsTest {
     // ── persistSessionCache ───────────────────────────────────────────────────
 
     @Test
-    fun `persistSessionCache writes only open + current + workdir-root entries`() {
+    fun `persistSessionCache writes all non-archived root sessions`() {
+        // §Q4-strict-sync: the filter is now ALL non-archived root sessions
+        // (parentId == null && !isArchived), not just open/current/workdir.
         val open = Session(id = "open", directory = "/x", revert = Session.RevertInfo("revert"))
         val current = Session(id = "current", directory = "/y")
         val workdirRoot = Session(id = "root", directory = "/workdir")
         val unrelated = Session(id = "other", directory = "/elsewhere")
+        val child = Session(id = "child", directory = "/workdir", parentId = "root")
+        val archived = Session(
+            id = "archived",
+            directory = "/z",
+            time = Session.TimeInfo(archived = 1L),  // isArchived == true
+        )
         every { settingsManager.sessionCache = any() } returns Unit
 
         persistSessionCache(
             settingsManager = settingsManager,
-            sessions = listOf(open, current, workdirRoot, unrelated),
+            sessions = listOf(open, current, workdirRoot, unrelated, child, archived),
             openIds = listOf("open"),
             currentId = "current",
             currentWorkdir = "/workdir",
@@ -100,7 +109,8 @@ class SessionListActionsTest {
 
         verify {
             settingsManager.sessionCache = match { entries ->
-                entries.map { it.id }.toSet() == setOf("open", "current", "root")
+                // All root non-archived sessions cached; child + archived excluded.
+                entries.map { it.id }.toSet() == setOf("open", "current", "root", "other")
                     && entries.first { it.id == "open" }.revertMessageId == "revert"
                     && entries.first { it.id == "open" }.revertCreatedAtEpochMs == 42L
             }
@@ -109,11 +119,13 @@ class SessionListActionsTest {
 
     @Test
     fun `persistSessionCache writes nothing when no sessions match`() {
+        // §Q4-strict-sync: only root non-archived sessions match; a child-only
+        // list produces an empty cache.
         every { settingsManager.sessionCache = any() } returns Unit
 
         persistSessionCache(
             settingsManager = settingsManager,
-            sessions = listOf(Session(id = "x", directory = "/a")),
+            sessions = listOf(Session(id = "x", directory = "/a", parentId = "parent")),
             openIds = emptyList(),
             currentId = null,
             currentWorkdir = null,
@@ -242,6 +254,70 @@ class SessionListActionsTest {
         assertFalse(slices.sessionList.value.isRefreshingSessions)
         assertFalse(slices.sessionList.value.isLoadingMoreSessions)
         assertTrue(emitted.isEmpty())
+    }
+
+    @Test
+    fun `pending local session remains pending when server has not returned it`() = runTest {
+        val registeredAt = System.currentTimeMillis()
+        val serverSession = Session(id = "s1", directory = "/x")
+        val pendingSession = Session(id = "s2", directory = "/x")
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(serverSession))
+        store.mutateSessionList {
+            it.copy(
+                sessions = listOf(serverSession, pendingSession),
+                pendingCreateIds = setOf("s2"),
+                pendingCreatedAt = mapOf("s2" to registeredAt),
+            )
+        }
+
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
+        advanceUntilIdle()
+
+        assertEquals(setOf("s1", "s2"), slices.sessionList.value.sessions.map { it.id }.toSet())
+        assertEquals(setOf("s2"), slices.sessionList.value.pendingCreateIds)
+        assertEquals(mapOf("s2" to registeredAt), slices.sessionList.value.pendingCreatedAt)
+    }
+
+    @Test
+    fun `pending local session expires thirty seconds after registration when unconfirmed`() = runTest {
+        val serverSession = Session(id = "s1", directory = "/x")
+        val pendingSession = Session(id = "s2", directory = "/x")
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(serverSession))
+        store.mutateSessionList {
+            it.copy(
+                sessions = listOf(serverSession, pendingSession),
+                pendingCreateIds = setOf("s2"),
+                pendingCreatedAt = mapOf(
+                    "s2" to System.currentTimeMillis() - MainViewModelTimings.pendingCreateTimeoutMs - 1L,
+                ),
+            )
+        }
+
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
+        advanceUntilIdle()
+
+        assertTrue(slices.sessionList.value.pendingCreateIds.isEmpty())
+        assertTrue(slices.sessionList.value.pendingCreatedAt.isEmpty())
+    }
+
+    @Test
+    fun `server returned session confirms pending create and removes registration timestamp`() = runTest {
+        val serverSession = Session(id = "s2", directory = "/x")
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(serverSession))
+        store.mutateSessionList {
+            it.copy(
+                sessions = listOf(serverSession),
+                pendingCreateIds = setOf("s2"),
+                pendingCreatedAt = mapOf("s2" to System.currentTimeMillis()),
+            )
+        }
+
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
+        advanceUntilIdle()
+
+        assertEquals(listOf("s2"), slices.sessionList.value.sessions.map { it.id })
+        assertTrue(slices.sessionList.value.pendingCreateIds.isEmpty())
+        assertTrue(slices.sessionList.value.pendingCreatedAt.isEmpty())
     }
 
     @Test
@@ -382,7 +458,7 @@ class SessionListActionsTest {
             onLoadSessionStatus = { statusLoads += 1 },
             onLoadMessages = { msgLoads += 1 },
             emit = emit,
-            onArchivedSessionsDetected = { sessions, openIds, _ -> archivedSessions = sessions; archivedOpenIds = openIds },
+            onArchivedSessionsDetected = { sessions, openIds, _, _, _ -> archivedSessions = sessions; archivedOpenIds = openIds },
         )
         advanceUntilIdle()
 
@@ -414,7 +490,7 @@ class SessionListActionsTest {
             onLoadSessionStatus = {},
             onLoadMessages = { msgLoads += 1 },
             emit = emit,
-            onArchivedSessionsDetected = { _, _, _ -> archivedInvoked = true },
+            onArchivedSessionsDetected = { _, _, _, _, _ -> archivedInvoked = true },
         )
         advanceUntilIdle()
 
@@ -464,7 +540,7 @@ class SessionListActionsTest {
             onLoadSessionStatus = {},
             onLoadMessages = {},
             emit = emit,
-            onArchivedSessionsDetected = { _, openIds, _ -> capturedOpenIds = openIds },
+            onArchivedSessionsDetected = { _, openIds, _, _, _ -> capturedOpenIds = openIds },
         )
         advanceUntilIdle()
 
@@ -496,7 +572,7 @@ class SessionListActionsTest {
             onLoadSessionStatus = {},
             onLoadMessages = { msgLoads += 1 },
             emit = emit,
-            onArchivedSessionsDetected = { _, openIds, _ -> callbackFired = true; capturedOpenIds = openIds },
+            onArchivedSessionsDetected = { _, openIds, _, _, _ -> callbackFired = true; capturedOpenIds = openIds },
         )
         advanceUntilIdle()
 
@@ -614,13 +690,13 @@ class SessionListActionsTest {
 
         launchLoadSessions(
             scope, repository, slices, settingsManager, {}, {}, {}, emit,
-            onArchivedSessionsDetected = { _, _, _ -> archiveCallbackCount += 1 },
+            onArchivedSessionsDetected = { _, _, _, _, _ -> archiveCallbackCount += 1 },
         )
         advanceUntilIdle()
         // Second call (fresh, non-archived) supersedes the first
         launchLoadSessions(
             scope, repository, slices, settingsManager, {}, {}, {}, emit,
-            onArchivedSessionsDetected = { _, _, _ -> archiveCallbackCount += 1 },
+            onArchivedSessionsDetected = { _, _, _, _, _ -> archiveCallbackCount += 1 },
         )
         advanceUntilIdle()
 
@@ -771,6 +847,37 @@ class SessionListActionsTest {
         advanceUntilIdle()
 
         assertEquals(statuses, slices.sessionList.value.sessionStatuses)
+    }
+
+    @Test
+    fun `launchLoadSessionStatus writes and prunes active ids to current tree`() = runTest {
+        store.mutateSessionList {
+            it.copy(sessions = listOf(Session(id = "known", directory = "/x")))
+        }
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+        coEvery { repository.getActiveSessionIds() } returns Result.success(setOf("known", "stale"))
+
+        launchLoadSessionStatus(scope, repository, slices)
+        advanceUntilIdle()
+
+        assertEquals(setOf("known"), slices.sessionList.value.activeSessionIds)
+    }
+
+    @Test
+    fun `launchLoadSessionStatus active failure retains prior snapshot but prunes stale ids`() = runTest {
+        store.mutateSessionList {
+            it.copy(
+                sessions = listOf(Session(id = "known", directory = "/x")),
+                activeSessionIds = setOf("known", "deleted"),
+            )
+        }
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+        coEvery { repository.getActiveSessionIds() } returns Result.failure(IllegalStateException("offline"))
+
+        launchLoadSessionStatus(scope, repository, slices)
+        advanceUntilIdle()
+
+        assertEquals(setOf("known"), slices.sessionList.value.activeSessionIds)
     }
 
     @Test

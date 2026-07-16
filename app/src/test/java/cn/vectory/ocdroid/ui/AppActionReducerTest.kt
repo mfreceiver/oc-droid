@@ -80,6 +80,8 @@ class AppActionReducerTest {
         assertEquals(2, out.sessionList.sessions.size)
         assertTrue(out.sessionList.sessions.any { it.id == "old" })
         assertEquals(listOf("new", "old"), out.sessionList.openSessionIds)
+        assertEquals(setOf("new"), out.sessionList.pendingCreateIds)
+        assertEquals(mapOf("new" to 123L), out.sessionList.pendingCreatedAt)
     }
 
     @Test
@@ -240,6 +242,8 @@ class AppActionReducerTest {
                         questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
                     ),
                 ),
+                pendingCreateIds = setOf("s1"),
+                pendingCreatedAt = mapOf("s1" to 123L),
             ),
             unread = UnreadState(
                 unreadSessions = setOf("sess-1", "sess-other"),
@@ -323,6 +327,216 @@ class AppActionReducerTest {
         assertTrue(
             "unrelated question preserved",
             out.sessionList.pendingQuestions.any { it.sessionId == "unrelated" },
+        )
+    }
+
+    // ── §Wave5b-Q13 blocker-2: SessionArchived cleans scroll state for the
+    //     WHOLE archived subtree unconditionally (chat CONTENT remains
+    //     current-only-cleared). Pre-fix: only the current-archived branch
+    //     wiped pendingScrollRequest / parentReturnCheckpoints; a non-current
+    //     archived subtree leaked stale scroll state indefinitely.
+
+    @Test
+    fun `Wave5b-Q13 blocker-2 - SessionArchived clears pendingScrollRequest when target is in the archived subtree (non-current)`() {
+        // The archived session is NOT the current one — chat content
+        // (currentSessionId / messages) MUST be preserved. But the stale
+        // pendingScrollRequest targeting the archived id MUST be wiped
+        // (the consumer would never fire correctly on an archived session).
+        val archived = Session(id = "stale-target", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        val staleReq = PendingScrollRequest(
+            requestId = 7L,
+            targetSessionId = "stale-target",
+            behavior = ScrollBehavior.Latest,
+        )
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                currentSessionId = "cur",  // NOT the archived id
+                messages = listOf(Message(id = "m1", role = "user")),
+                partsByMessage = mapOf("m1" to emptyList()),
+                pendingScrollRequest = staleReq,
+            ),
+            sessionList = SessionListState(
+                sessions = listOf(
+                    Session(id = "cur", directory = "/p"),
+                    Session(id = "stale-target", directory = "/p"),
+                ),
+                openSessionIds = listOf("cur", "stale-target"),
+            ),
+        )
+
+        val out = reduce(prior, AppAction.SessionArchived(archived, openSessionIds = listOf("cur")))
+
+        // Chat CONTENT untouched (non-current archived).
+        assertEquals("cur", out.chat.currentSessionId)
+        assertEquals(1, out.chat.messages.size)
+        assertEquals(1, out.chat.partsByMessage.size)
+        // Stale scroll intent wiped.
+        assertNull(
+            "non-current archived target's pendingScrollRequest MUST be wiped",
+            out.chat.pendingScrollRequest,
+        )
+    }
+
+    @Test
+    fun `Wave5b-Q13 blocker-2 - SessionArchived clears parentReturnCheckpoints entries keyed by the archived subtree (non-current)`() {
+        // A child in the archived subtree had a checkpoint entry. The entry
+        // MUST be wiped (the user can never navigate "back" to a parent from
+        // an archived child). The current session is unrelated → its own
+        // entries MUST survive.
+        val archivedRoot = Session(id = "archived-root", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                currentSessionId = "live-cur",
+                parentReturnCheckpoints = mapOf(
+                    "archived-child" to ScrollCheckpoint(anchorKey = "k1", fallbackIndex = 1, offset = 1),
+                    "live-cur" to ScrollCheckpoint(anchorKey = "k2", fallbackIndex = 2, offset = 2),
+                ),
+            ),
+            sessionList = SessionListState(
+                sessions = listOf(
+                    Session(id = "live-cur", directory = "/p"),
+                    Session(id = "archived-root", directory = "/p"),
+                    Session(id = "archived-child", directory = "/p", parentId = "archived-root"),
+                ),
+                openSessionIds = listOf("live-cur", "archived-root"),
+            ),
+        )
+
+        val out = reduce(prior, AppAction.SessionArchived(archivedRoot, openSessionIds = listOf("live-cur")))
+
+        // Subtree-keyed entry removed; live entry preserved.
+        assertFalse(
+            "archived-child entry MUST be wiped",
+            out.chat.parentReturnCheckpoints.containsKey("archived-child"),
+        )
+        assertEquals(
+            "live-cur entry MUST survive (not in archived subtree)",
+            ScrollCheckpoint(anchorKey = "k2", fallbackIndex = 2, offset = 2),
+            out.chat.parentReturnCheckpoints["live-cur"],
+        )
+    }
+
+    @Test
+    fun `Wave5b-Q13 blocker-2 - SessionArchived preserves pendingScrollRequest targeting an UNRELATED session`() {
+        // Defensive: the cleanup MUST NOT over-reach. A pendingScrollRequest
+        // targeting a session NOT in the archived subtree survives.
+        val archived = Session(id = "archived", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        val liveReq = PendingScrollRequest(
+            requestId = 11L,
+            targetSessionId = "live-future-target",
+            behavior = ScrollBehavior.Latest,
+        )
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                currentSessionId = "cur",
+                pendingScrollRequest = liveReq,
+            ),
+            sessionList = SessionListState(
+                sessions = listOf(
+                    Session(id = "cur", directory = "/p"),
+                    Session(id = "archived", directory = "/p"),
+                    Session(id = "live-future-target", directory = "/p"),
+                ),
+                openSessionIds = listOf("cur", "archived", "live-future-target"),
+            ),
+        )
+
+        val out = reduce(prior, AppAction.SessionArchived(archived, openSessionIds = listOf("cur", "live-future-target")))
+
+        assertEquals(liveReq, out.chat.pendingScrollRequest)
+    }
+
+    @Test
+    fun `Wave5b-Q13 blocker-2 - SessionArchived current-archived case still wipes both fields (no regression)`() {
+        // Regression guard: the existing current-archive clear path
+        // (applyArchivedChatClear) is unchanged — both fields wiped, chat
+        // content also wiped. The new cleanScrollStateForSubtree call is a
+        // no-op on top (idempotent), so the assertion is the same as pre-fix.
+        val archived = Session(id = "cur", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                currentSessionId = "cur",
+                messages = listOf(Message(id = "m1", role = "user")),
+                partsByMessage = mapOf("m1" to emptyList()),
+                pendingScrollRequest = PendingScrollRequest(
+                    requestId = 1L,
+                    targetSessionId = "cur",
+                    behavior = ScrollBehavior.Latest,
+                ),
+                parentReturnCheckpoints = mapOf("cur" to ScrollCheckpoint(null, 0, 0)),
+            ),
+            sessionList = SessionListState(openSessionIds = listOf("cur")),
+        )
+
+        val out = reduce(prior, AppAction.SessionArchived(archived, openSessionIds = emptyList()))
+
+        assertNull("current-archived: currentSessionId cleared", out.chat.currentSessionId)
+        assertTrue("current-archived: messages cleared", out.chat.messages.isEmpty())
+        assertTrue("current-archived: partsByMessage cleared", out.chat.partsByMessage.isEmpty())
+        assertNull("current-archived: pendingScrollRequest cleared", out.chat.pendingScrollRequest)
+        assertTrue("current-archived: parentReturnCheckpoints cleared", out.chat.parentReturnCheckpoints.isEmpty())
+    }
+
+    @Test
+    fun `Wave5b-Q13 blocker-2 - BulkSessionsRefreshed cleans scroll state for non-current archived subtree`() {
+        // Same rule, BulkSessionsRefreshed path. A bulk refresh can archive
+        // multiple ids cross-device; each archived subtree's scroll state is
+        // cleaned even when the current session is NOT among the archived.
+        val archivedOther = Session(id = "other", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                currentSessionId = "cur",  // NOT archived
+                pendingScrollRequest = PendingScrollRequest(
+                    requestId = 5L,
+                    targetSessionId = "other",  // in archived subtree
+                    behavior = ScrollBehavior.Latest,
+                ),
+                parentReturnCheckpoints = mapOf(
+                    "other-child" to ScrollCheckpoint(null, 0, 0),
+                    "cur" to ScrollCheckpoint(anchorKey = "k", fallbackIndex = 0, offset = 0),
+                ),
+            ),
+            sessionList = SessionListState(
+                sessions = listOf(
+                    Session(id = "cur", directory = "/p"),
+                    archivedOther,
+                    Session(id = "other-child", directory = "/p", parentId = "other"),
+                ),
+                openSessionIds = listOf("cur", "other"),
+            ),
+        )
+
+        val out = reduce(
+            prior,
+            AppAction.BulkSessionsRefreshed(
+                sessions = listOf(
+                    Session(id = "cur", directory = "/p"),
+                    archivedOther,
+                    Session(id = "other-child", directory = "/p", parentId = "other"),
+                ),
+                openSessionIds = listOf("cur"),
+                hasMoreSessions = false,
+                confirmedServerIds = setOf("cur", "other", "other-child"),
+                sweepNow = 0L,
+            ),
+        )
+
+        // Chat content preserved (current not archived).
+        assertEquals("cur", out.chat.currentSessionId)
+        // Stale scroll state for the archived subtree wiped.
+        assertNull(
+            "BulkSessionsRefreshed: pendingScrollRequest targeting archived id wiped",
+            out.chat.pendingScrollRequest,
+        )
+        assertFalse(
+            "BulkSessionsRefreshed: archived subtree checkpoint entry wiped",
+            out.chat.parentReturnCheckpoints.containsKey("other-child"),
+        )
+        // Live entry preserved.
+        assertEquals(
+            "BulkSessionsRefreshed: live checkpoint entry preserved",
+            ScrollCheckpoint(anchorKey = "k", fallbackIndex = 0, offset = 0),
+            out.chat.parentReturnCheckpoints["cur"],
         )
     }
 
@@ -428,6 +642,8 @@ class AppActionReducerTest {
         // §fix-leak-window (fix B): pending requests cleared cross-group.
         assertTrue("pendingPermissions cleared cross-host", out.sessionList.pendingPermissions.isEmpty())
         assertTrue("pendingQuestions cleared cross-host", out.sessionList.pendingQuestions.isEmpty())
+        assertTrue("pendingCreateIds cleared cross-host", out.sessionList.pendingCreateIds.isEmpty())
+        assertTrue("pendingCreatedAt cleared cross-host", out.sessionList.pendingCreatedAt.isEmpty())
         // unread fully cleared.
         assertTrue(out.unread.unreadSessions.isEmpty())
         assertTrue(out.unread.lastViewedTime.isEmpty())
@@ -482,6 +698,8 @@ class AppActionReducerTest {
                 sessionStatuses = mapOf("s1" to cn.vectory.ocdroid.data.model.SessionStatus("idle")),
                 sessionTodos = mapOf("s1" to listOf(TodoItem(content = "t", status = "pending", priority = "normal", id = "t1"))),
                 sessionDiffs = mapOf("s1" to emptyList()),
+                pendingCreateIds = setOf("s1"),
+                pendingCreatedAt = mapOf("s1" to 123L),
             ),
             unread = UnreadState(
                 unreadSessions = setOf("s1"),
@@ -498,6 +716,8 @@ class AppActionReducerTest {
         assertEquals(1, out.sessionList.sessionStatuses.size)
         assertEquals(1, out.sessionList.sessionTodos.size)
         assertEquals(1, out.sessionList.sessionDiffs.size)
+        assertTrue("pendingCreateIds cleared on same-group host switch", out.sessionList.pendingCreateIds.isEmpty())
+        assertTrue("pendingCreatedAt cleared on same-group host switch", out.sessionList.pendingCreatedAt.isEmpty())
         assertEquals(setOf("s1"), out.unread.unreadSessions)
         assertEquals(mapOf("s1" to 1L), out.unread.lastViewedTime)
     }
@@ -851,87 +1071,287 @@ class AppActionReducerTest {
         reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
         reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
         reduce(prior, AppAction.WorkdirDraftStarted(workdir = "/w"))
-        reduce(prior, AppAction.PendingJumpToLatestSet(sessionId = "x"))
-        reduce(prior, AppAction.PendingJumpToLatestSet(sessionId = null))
-        reduce(prior, AppAction.BulkSessionsRefreshed(sessions = seed.sessions, openSessionIds = seed.openSessionIds, hasMoreSessions = false))
+        // §Wave5b-Q13: the four new actions replace the pre-Wave5b
+        // PendingJumpToLatestSet pair (set + clear). All four are exercised so
+        // the when-branches stay total.
+        reduce(prior, AppAction.ScrollRequested(requestId = 1L, targetSessionId = "x", behavior = ScrollBehavior.Latest))
+        reduce(
+            prior,
+            AppAction.ScrollRequested(
+                requestId = 2L,
+                targetSessionId = "x",
+                behavior = ScrollBehavior.Restore(ScrollCheckpoint(anchorKey = "k", fallbackIndex = 3, offset = 12)),
+            ),
+        )
+        reduce(prior, AppAction.ScrollConsumed(requestId = 1L))
+        reduce(prior, AppAction.ParentCheckpointStored("child", ScrollCheckpoint(anchorKey = null, fallbackIndex = 0, offset = 0)))
+        reduce(prior, AppAction.ParentCheckpointConsumed("child"))
+        reduce(
+            prior,
+            AppAction.BulkSessionsRefreshed(
+                sessions = seed.sessions,
+                openSessionIds = seed.openSessionIds,
+                hasMoreSessions = false,
+                confirmedServerIds = seed.sessions.mapTo(mutableSetOf()) { it.id },
+                sweepNow = 0L,
+            ),
+        )
         // No exception thrown == each when-branch is total. The concrete field-by-field
         // assertions live in the dedicated tests above.
     }
 
-    // ── PendingJumpToLatestSet (§WT2-taskB / Q6 locked) ────────────────────
+    // ── §Wave5b-Q13: PendingScrollRequest + ParentCheckpoint actions ────────
     //
-    // The "Sessions page entry → jump to latest" intent. Verifies the pure
-    // reducer writes/clears the field and that clearSessionData (used by
-    // HostStatePurged cross-group + WorkdirDraftStarted) also wipes it so a
-    // stale intent cannot survive a draft-create or host purge.
+    // The unified scroll-state machine: a single-slot [PendingScrollRequest]
+    // + a per-child [parentReturnCheckpoints] backstack. The reducer is the
+    // sole writer of these fields (besides the [clearSessionData] private
+    // helper used by HostStatePurged cross-group + WorkdirDraftStarted, and
+    // [applyArchivedChatClear] used by SessionArchived current-only).
 
     @Test
-    fun `reduce PendingJumpToLatestSet with non-null id sets chat pendingJumpToLatest`() {
+    fun `reduce ScrollRequested overwrites the pending slot unconditionally`() {
+        // §Wave5b-Q13 oracle test #6: switch to a different target replaces
+        // the prior intent. Single-slot semantics — newer always wins.
+        val priorReq = PendingScrollRequest(
+            requestId = 1L,
+            targetSessionId = "old-target",
+            behavior = ScrollBehavior.Latest,
+        )
         val prior = StoreState.initial().copy(
-            chat = ChatState(currentSessionId = "old", pendingJumpToLatest = null),
+            chat = ChatState(currentSessionId = "old", pendingScrollRequest = priorReq),
         )
 
-        val out = reduce(prior, AppAction.PendingJumpToLatestSet(sessionId = "target"))
+        val out = reduce(
+            prior,
+            AppAction.ScrollRequested(
+                requestId = 2L,
+                targetSessionId = "new-target",
+                behavior = ScrollBehavior.Restore(ScrollCheckpoint("k", 3, 12)),
+            ),
+        )
 
-        assertEquals("target", out.chat.pendingJumpToLatest)
+        assertEquals(2L, out.chat.pendingScrollRequest?.requestId)
+        assertEquals("new-target", out.chat.pendingScrollRequest?.targetSessionId)
+        val behavior = out.chat.pendingScrollRequest?.behavior
+        assertTrue("behavior is Restore", behavior is ScrollBehavior.Restore)
+        val cp = (behavior as ScrollBehavior.Restore).checkpoint
+        assertEquals("k", cp.anchorKey)
+        assertEquals(3, cp.fallbackIndex)
+        assertEquals(12, cp.offset)
         // No other chat field changes (single-field write).
         assertEquals("old", out.chat.currentSessionId)
     }
 
     @Test
-    fun `reduce PendingJumpToLatestSet with null id clears chat pendingJumpToLatest`() {
+    fun `reduce ScrollConsumed clears the slot only when requestId matches`() {
+        // §Wave5b-Q13 oracle test #5: compare-and-clear. A stale consumer's
+        // clear (older requestId) MUST NOT wipe a newer intent.
+        val liveReq = PendingScrollRequest(
+            requestId = 100L,
+            targetSessionId = "B",
+            behavior = ScrollBehavior.Latest,
+        )
         val prior = StoreState.initial().copy(
-            chat = ChatState(pendingJumpToLatest = "stale"),
+            chat = ChatState(pendingScrollRequest = liveReq),
         )
 
-        val out = reduce(prior, AppAction.PendingJumpToLatestSet(sessionId = null))
+        // Stale clear (requestId mismatch) → no-op.
+        val staleOut = reduce(prior, AppAction.ScrollConsumed(requestId = 99L))
+        assertEquals(
+            "stale clear MUST NOT wipe the live intent",
+            liveReq,
+            staleOut.chat.pendingScrollRequest,
+        )
 
-        assertNull(out.chat.pendingJumpToLatest)
+        // Matching clear → cleared.
+        val matchOut = reduce(prior, AppAction.ScrollConsumed(requestId = 100L))
+        assertNull("matching clear removes the intent", matchOut.chat.pendingScrollRequest)
     }
 
     @Test
-    fun `reduce WorkdirDraftStarted clears a stale pendingJumpToLatest via clearSessionData`() {
+    fun `reduce ScrollConsumed is a no-op when slot is already empty`() {
+        // Defensive: a late consumer firing after another path already
+        // cleared the slot (host purge, archive, draft, prior consume).
+        val prior = StoreState.initial().copy(chat = ChatState())
+
+        val out = reduce(prior, AppAction.ScrollConsumed(requestId = 1L))
+
+        assertNull(out.chat.pendingScrollRequest)
+    }
+
+    @Test
+    fun `reduce ParentCheckpointStored appends the (childId, checkpoint) entry preserving existing entries`() {
+        // §Wave5b-Q13 oracle test #9: nested root→child→grandchild chain.
+        // Each openSubAgent stores its own parent's checkpoint; entries are
+        // independent and additive.
+        val firstCp = ScrollCheckpoint(anchorKey = "msg-1", fallbackIndex = 5, offset = 10)
         val prior = StoreState.initial().copy(
-            chat = ChatState(pendingJumpToLatest = "abandoned-by-draft"),
+            chat = ChatState(
+                parentReturnCheckpoints = mapOf("child-A" to firstCp),
+            ),
+        )
+        val secondCp = ScrollCheckpoint(anchorKey = "msg-2", fallbackIndex = 2, offset = 20)
+
+        val out = reduce(prior, AppAction.ParentCheckpointStored("child-B", secondCp))
+
+        assertEquals(2, out.chat.parentReturnCheckpoints.size)
+        assertEquals(firstCp, out.chat.parentReturnCheckpoints["child-A"])
+        assertEquals(secondCp, out.chat.parentReturnCheckpoints["child-B"])
+    }
+
+    @Test
+    fun `reduce ParentCheckpointStored overwrites an existing entry for the same childId`() {
+        // Re-opening the same child (rare) replaces the prior checkpoint.
+        val old = ScrollCheckpoint(anchorKey = "old-key", fallbackIndex = 1, offset = 1)
+        val new = ScrollCheckpoint(anchorKey = "new-key", fallbackIndex = 9, offset = 9)
+        val prior = StoreState.initial().copy(
+            chat = ChatState(parentReturnCheckpoints = mapOf("child" to old)),
+        )
+
+        val out = reduce(prior, AppAction.ParentCheckpointStored("child", new))
+
+        assertEquals(1, out.chat.parentReturnCheckpoints.size)
+        assertEquals(new, out.chat.parentReturnCheckpoints["child"])
+    }
+
+    @Test
+    fun `reduce ParentCheckpointConsumed removes only the matching childId`() {
+        val cpA = ScrollCheckpoint(anchorKey = "a", fallbackIndex = 0, offset = 0)
+        val cpB = ScrollCheckpoint(anchorKey = "b", fallbackIndex = 0, offset = 0)
+        val prior = StoreState.initial().copy(
+            chat = ChatState(parentReturnCheckpoints = mapOf("child-A" to cpA, "child-B" to cpB)),
+        )
+
+        val out = reduce(prior, AppAction.ParentCheckpointConsumed("child-A"))
+
+        assertNull("child-A removed", out.chat.parentReturnCheckpoints["child-A"])
+        assertEquals("child-B preserved", cpB, out.chat.parentReturnCheckpoints["child-B"])
+    }
+
+    @Test
+    fun `reduce ParentCheckpointConsumed is a no-op when the childId is absent`() {
+        // Defensive: a double-consume (rare race) MUST NOT throw.
+        val prior = StoreState.initial().copy(chat = ChatState())
+
+        val out = reduce(prior, AppAction.ParentCheckpointConsumed("missing"))
+
+        assertTrue(out.chat.parentReturnCheckpoints.isEmpty())
+    }
+
+    @Test
+    fun `reduce WorkdirDraftStarted clears a stale pendingScrollRequest + parentReturnCheckpoints via clearSessionData`() {
+        val staleReq = PendingScrollRequest(
+            requestId = 7L,
+            targetSessionId = "abandoned-by-draft",
+            behavior = ScrollBehavior.Latest,
+        )
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                pendingScrollRequest = staleReq,
+                parentReturnCheckpoints = mapOf("orphan-child" to ScrollCheckpoint(null, 0, 0)),
+            ),
         )
 
         val out = reduce(prior, AppAction.WorkdirDraftStarted(workdir = "/w"))
 
         assertNull(
-            "draft-create must wipe a stale jump intent (references a session id that is being cleared)",
-            out.chat.pendingJumpToLatest,
+            "draft-create must wipe a stale scroll intent (references a session id being cleared)",
+            out.chat.pendingScrollRequest,
+        )
+        assertTrue(
+            "draft-create must wipe the parent-return backstack (navigation context lost)",
+            out.chat.parentReturnCheckpoints.isEmpty(),
         )
     }
 
     @Test
-    fun `reduce HostStatePurged cross-group clears a stale pendingJumpToLatest via clearSessionData`() {
+    fun `reduce HostStatePurged cross-group clears stale pendingScrollRequest + parentReturnCheckpoints via clearSessionData`() {
+        val staleReq = PendingScrollRequest(
+            requestId = 9L,
+            targetSessionId = "abandoned-by-host-switch",
+            behavior = ScrollBehavior.Latest,
+        )
         val prior = StoreState.initial().copy(
-            chat = ChatState(pendingJumpToLatest = "abandoned-by-host-switch"),
+            chat = ChatState(
+                pendingScrollRequest = staleReq,
+                parentReturnCheckpoints = mapOf("orphan" to ScrollCheckpoint(null, 0, 0)),
+            ),
         )
 
         val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
 
         assertNull(
-            "cross-group host purge must wipe a stale jump intent",
-            out.chat.pendingJumpToLatest,
+            "cross-group host purge must wipe a stale scroll intent",
+            out.chat.pendingScrollRequest,
+        )
+        assertTrue(
+            "cross-group host purge must wipe the parent-return backstack",
+            out.chat.parentReturnCheckpoints.isEmpty(),
         )
     }
 
     @Test
-    fun `reduce HostStatePurged same-group preserves pendingJumpToLatest`() {
-        // Same-group host switch keeps the chat slice (only streaming is
-        // cleared). The jump intent references a session id that still
-        // exists on the same server → preserved.
+    fun `reduce HostStatePurged same-group clears pendingScrollRequest + parentReturnCheckpoints`() {
+        // §Wave5b-Q13 oracle ruling: same-group host purge keeps chat content
+        // (messages / currentSessionId) but INVALIDATES the scroll slot +
+        // backstack — the scroll slot references a session the user is
+        // navigating away from; the backstack is per-session navigation
+        // context with no carry across profiles.
+        val liveReq = PendingScrollRequest(
+            requestId = 11L,
+            targetSessionId = "still-valid",
+            behavior = ScrollBehavior.Latest,
+        )
         val prior = StoreState.initial().copy(
-            chat = ChatState(pendingJumpToLatest = "still-valid"),
+            chat = ChatState(
+                currentSessionId = "still-valid",  // PRESERVED (same-group)
+                messages = listOf(Message(id = "m1", role = "user")),  // PRESERVED
+                pendingScrollRequest = liveReq,
+                parentReturnCheckpoints = mapOf("c" to ScrollCheckpoint(null, 0, 0)),
+            ),
         )
 
         val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
 
-        assertEquals("still-valid", out.chat.pendingJumpToLatest)
+        // Content preserved.
+        assertEquals("still-valid", out.chat.currentSessionId)
+        assertEquals(1, out.chat.messages.size)
+        // Slot + backstack cleared.
+        assertNull("same-group host purge wipes the scroll slot", out.chat.pendingScrollRequest)
+        assertTrue(
+            "same-group host purge wipes the parent-return backstack",
+            out.chat.parentReturnCheckpoints.isEmpty(),
+        )
     }
 
     // ── BulkSessionsRefreshed (FIX-A/C: atomic bulk-archive commit) ────────
+
+    @Test
+    fun `BulkSessionsRefreshed confirms pending only from raw server ids not merged sessions`() {
+        val serverSession = Session(id = "s1", directory = "/x")
+        val preservedPending = Session(id = "s2", directory = "/x")
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                sessions = listOf(serverSession, preservedPending),
+                pendingCreateIds = setOf("s2"),
+                pendingCreatedAt = mapOf("s2" to 1_000L),
+            ),
+        )
+
+        val out = reduce(
+            prior,
+            AppAction.BulkSessionsRefreshed(
+                sessions = listOf(serverSession, preservedPending),
+                openSessionIds = emptyList(),
+                hasMoreSessions = false,
+                confirmedServerIds = setOf("s1"),
+                sweepNow = 2_000L,
+            ),
+        )
+
+        assertEquals(setOf("s2"), out.sessionList.pendingCreateIds)
+        assertEquals(mapOf("s2" to 1_000L), out.sessionList.pendingCreatedAt)
+    }
 
     @Test
     fun `FIX-A reduce BulkSessionsRefreshed writes merged list and prunes ALL archived openIds`() {
@@ -954,6 +1374,8 @@ class AppActionReducerTest {
                 sessions = listOf(current, archivedB, archivedC),
                 openSessionIds = listOf("current"),  // caller pre-computed prune
                 hasMoreSessions = false,
+                confirmedServerIds = setOf("current", "B", "C"),
+                sweepNow = 0L,
             ),
         )
 
@@ -988,6 +1410,8 @@ class AppActionReducerTest {
                 sessions = listOf(current),
                 openSessionIds = listOf("current"),
                 hasMoreSessions = false,
+                confirmedServerIds = setOf("current"),
+                sweepNow = 0L,
             ),
         )
 
@@ -1013,7 +1437,15 @@ class AppActionReducerTest {
                 currentSessionId = "cur",
                 messages = listOf(Message(id = "m1", role = "user")),
                 partsByMessage = mapOf("m1" to emptyList()),
-                pendingJumpToLatest = "cur",  // FIX-B: must also be wiped
+                // §Wave5b-Q13: the unified scroll slot + backstack replace
+                // the pre-Wave5b pendingJumpToLatest field. Both must be
+                // wiped by applyArchivedChatClear (FIX-B lineage).
+                pendingScrollRequest = PendingScrollRequest(
+                    requestId = 1L,
+                    targetSessionId = "cur",
+                    behavior = ScrollBehavior.Latest,
+                ),
+                parentReturnCheckpoints = mapOf("cur" to ScrollCheckpoint(null, 0, 0)),
             ),
             sessionList = SessionListState(openSessionIds = listOf("cur")),
         )
@@ -1024,6 +1456,8 @@ class AppActionReducerTest {
                 sessions = listOf(archivedCurrent),
                 openSessionIds = emptyList(),
                 hasMoreSessions = false,
+                confirmedServerIds = setOf("cur"),
+                sweepNow = 0L,
             ),
         )
 
@@ -1031,7 +1465,8 @@ class AppActionReducerTest {
         assertNull("chat.currentSessionId cleared", out.chat.currentSessionId)
         assertTrue("messages cleared", out.chat.messages.isEmpty())
         assertTrue("partsByMessage cleared", out.chat.partsByMessage.isEmpty())
-        assertNull("FIX-B: pendingJumpToLatest cleared", out.chat.pendingJumpToLatest)
+        assertNull("FIX-B / §Wave5b-Q13: pendingScrollRequest cleared", out.chat.pendingScrollRequest)
+        assertTrue("FIX-B / §Wave5b-Q13: parentReturnCheckpoints cleared", out.chat.parentReturnCheckpoints.isEmpty())
         // List written in the SAME state.
         assertTrue("sessionList has the archived session", out.sessionList.sessions.any { it.id == "cur" && it.isArchived })
         assertTrue("openSessionIds pruned", out.sessionList.openSessionIds.isEmpty())
@@ -1055,6 +1490,8 @@ class AppActionReducerTest {
                 sessions = listOf(current, archivedOther),
                 openSessionIds = listOf("cur"),  // other pruned
                 hasMoreSessions = false,
+                confirmedServerIds = setOf("cur", "other"),
+                sweepNow = 0L,
             ),
         )
 
@@ -1093,6 +1530,8 @@ class AppActionReducerTest {
                 sessions = listOf(archivedCurrent),
                 openSessionIds = emptyList(),
                 hasMoreSessions = false,
+                confirmedServerIds = setOf("cur"),
+                sweepNow = 0L,
             ),
         )
         advanceUntilIdle()
@@ -1151,6 +1590,8 @@ class AppActionReducerTest {
                 sessions = listOf(liveCurrent, archivedRoot, archivedChild, archivedGrandchild),
                 openSessionIds = listOf("live-cur"),  // archived-root pruned
                 hasMoreSessions = false,
+                confirmedServerIds = setOf("live-cur", "archived-root", "archived-child", "archived-gc"),
+                sweepNow = 0L,
             ),
         )
 
@@ -1191,7 +1632,14 @@ class AppActionReducerTest {
             chat = ChatState(
                 currentSessionId = "cur",
                 messages = listOf(Message(id = "m1", role = "user")),
-                pendingJumpToLatest = "cur",
+                // §Wave5b-Q13: replaced pendingJumpToLatest with the unified
+                // slot + a checkpoint entry so the FIX-B clear still asserts.
+                pendingScrollRequest = PendingScrollRequest(
+                    requestId = 1L,
+                    targetSessionId = "cur",
+                    behavior = ScrollBehavior.Latest,
+                ),
+                parentReturnCheckpoints = mapOf("cur" to ScrollCheckpoint(null, 0, 0)),
             ),
             sessionList = SessionListState(
                 sessions = listOf(archivedCurrent, archivedChild),
@@ -1213,13 +1661,16 @@ class AppActionReducerTest {
                 sessions = listOf(archivedCurrent, archivedChild),
                 openSessionIds = emptyList(),
                 hasMoreSessions = false,
+                confirmedServerIds = setOf("cur", "child"),
+                sweepNow = 0L,
             ),
         )
 
         // Chat cleared (current IS archived).
         assertNull("chat cleared for archived current", out.chat.currentSessionId)
         assertTrue("messages cleared", out.chat.messages.isEmpty())
-        assertNull("pendingJumpToLatest cleared (FIX-B)", out.chat.pendingJumpToLatest)
+        assertNull("pendingScrollRequest cleared (FIX-B / §Wave5b-Q13)", out.chat.pendingScrollRequest)
+        assertTrue("parentReturnCheckpoints cleared (FIX-B / §Wave5b-Q13)", out.chat.parentReturnCheckpoints.isEmpty())
         // Full subtree cleaned.
         assertFalse("cur removed from unread", "cur" in out.unread.unreadSessions)
         assertFalse("child removed from unread", "child" in out.unread.unreadSessions)

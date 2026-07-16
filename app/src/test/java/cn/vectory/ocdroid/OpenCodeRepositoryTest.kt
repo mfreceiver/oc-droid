@@ -120,6 +120,16 @@ class OpenCodeRepositoryTest {
     }
 
     @Test
+    fun `getActiveSessionIds uses api active endpoint and returns response keys`() = runBlocking {
+        server.enqueue(jsonResponse("""{"data":{"ses-running":{"type":"running"}}}"""))
+
+        val result = repository.getActiveSessionIds()
+
+        assertEquals(setOf("ses-running"), result.getOrThrow())
+        assertEquals("/api/session/active", server.takeRequest().path)
+    }
+
+    @Test
     fun `getAgents returns list`() = runBlocking {
         val agents = listOf(
             AgentInfo(

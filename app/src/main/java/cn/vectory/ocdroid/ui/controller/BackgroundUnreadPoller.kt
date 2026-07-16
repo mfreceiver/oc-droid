@@ -122,6 +122,10 @@ class BackgroundUnreadPoller internal constructor(
         if (!identityValid()) return UnreadPollResult.Aborted
         val statuses = repository.getSessionStatus().getOrElse { return UnreadPollResult.Aborted }
         if (!identityValid()) return UnreadPollResult.Aborted
+        // Active has no SSE. Failure is deliberately fail-closed: continue the
+        // authoritative status poll while retaining the previous active set.
+        val activeIds = repository.getActiveSessionIds().getOrNull()
+        if (!identityValid()) return UnreadPollResult.Aborted
         val children = hydration.childrenByParent
         // OpenCode's authoritative status endpoint omits idle entries. A
         // successful snapshot therefore proves every fetched tree node absent
@@ -149,6 +153,9 @@ class BackgroundUnreadPoller internal constructor(
                 childSessions = children,
                 completeRootIds = hydration.completeRootIds,
                 sessionStatuses = normalizedStatuses,
+                activeSessionIds = activeIds
+                    ?.intersect(authoritativeNodeIds)
+                    ?: snapshot.sessionList.activeSessionIds.intersect(authoritativeNodeIds),
                 completenessEpoch = snapshot.sessionList.completenessEpoch + 1L,
             )
             val sessionsById = allSessionsById(sessions, nextSessionList.directorySessions, children)

@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.ui.effectiveBusySessionIds
 
 /**
  * §unread-soak: result of [evaluateUnread]. Pure value — the caller
@@ -71,6 +72,7 @@ const val UNREAD_SOAK_MS: Long = 10_000L
 fun evaluateUnread(
     sessions: List<Session>,
     sessionStatuses: Map<String, SessionStatus>,
+    activeSessionIds: Set<String>,
     childSessions: Map<String, List<Session>>,
     directorySessions: Map<String, List<Session>>,
     currentSessionId: String?,
@@ -107,7 +109,10 @@ fun evaluateUnread(
     for ((rootId, _) in roots) {
         val isCurrent = rootId == currentRootId
         val subtree = subtreeIds(rootId, sessions, directorySessions, childSessions)
+        val effectiveBusy = effectiveBusySessionIds(activeSessionIds, sessionStatuses)
+        val subtreeActive = subtree.any { it in effectiveBusy }
         val allIdle = rootId in completeRootIds &&
+            !subtreeActive &&
             subtree.all { sessionStatuses[it]?.isIdle == true }
 
         when {

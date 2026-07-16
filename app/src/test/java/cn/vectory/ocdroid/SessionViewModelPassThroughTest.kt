@@ -2,6 +2,7 @@ package cn.vectory.ocdroid
 
 import cn.vectory.ocdroid.data.model.HealthResponse
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.ui.ScrollCheckpoint
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.loadSessionsForEffect
 import io.mockk.coEvery
@@ -30,6 +31,12 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class SessionViewModelPassThroughTest : MainViewModelTestBase() {
 
+    // §Wave5b-Q13: helper — the parent checkpoint that openSubAgent now
+    // requires (captured synchronously by the Compose layer in production).
+    // Tests pass a neutral checkpoint; the assertions here do not exercise
+    // the Restore consumer, only the openSubAgent fetch + select path.
+    private val testCheckpoint = ScrollCheckpoint(anchorKey = null, fallbackIndex = 0, offset = 0)
+
     @Test
     fun `openSubAgent emits error when child cannot be resolved`() = runTest {
         coEvery { repository.getSession("missing") } returns Result.failure(java.io.IOException("404"))
@@ -38,7 +45,7 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
         val vm = SessionViewModel(core)
         advanceUntilIdle()  // pump so the test UiEvent collector subscribes
 
-        vm.openSubAgent("missing")
+        vm.openSubAgent("missing", testCheckpoint)
         advanceUntilIdle()
 
         assertNotNull(core.recentTestErrors.lastOrNull())
@@ -53,7 +60,7 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
         val vm = SessionViewModel(core)
         core.writeSessionList { it.copy(sessions = listOf(child)) }
 
-        vm.openSubAgent("child-1")
+        vm.openSubAgent("child-1", testCheckpoint)
         advanceUntilIdle()
 
         assertEquals("child-1", core.chatFlow.value.currentSessionId)
@@ -69,7 +76,7 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
         // Local list empty → falls through to repository.getSession.
         core.writeSessionList { it.copy(sessions = emptyList()) }
 
-        vm.openSubAgent("child-fetch")
+        vm.openSubAgent("child-fetch", testCheckpoint)
         advanceUntilIdle()
 
         assertEquals("child-fetch", core.chatFlow.value.currentSessionId)

@@ -147,17 +147,48 @@ internal fun launchLoadMessages(
                         val oldestFetchedCreated = page.items
                             .mapNotNull { m -> m.info.time?.created }
                             .minOrNull()
+                        val newestFetchedCreated = page.items
+                            .mapNotNull { m -> m.info.time?.created }
+                            .maxOrNull()
                         val fetchedMessages = page.items.map { m -> m.info }
                         val fetchedParts = page.items.associate { m -> m.info.id to m.parts }
+                        // §Q10 three-way merge: olderKept holds history OLDER than
+                        // the fetched window (loadMore continuity); newerKept holds
+                        // locally-injected messages NEWER than the fetched window
+                        // — the user msg + assistant shell the SSE stream inserts
+                        // WHILE the REST GET is in flight. Those live messages are
+                        // neither in fetchedIds nor satisfy `< oldestFetchedCreated`,
+                        // so the old `olderKept + fetchedMessages` two-way merge
+                        // silently dropped them → the just-sent message vanished
+                        // from the bottom (reverseLayout tail) until the next
+                        // reload. newerKept is its own bucket so it does NOT pollute
+                        // historyAlreadyPaged (which must stay older-only).
                         val olderKept = srcMessages.filter { m ->
-                            m.id !in fetchedIds && (oldestFetchedCreated == null ||
-                                m.time?.created == null ||
-                                m.time.created < oldestFetchedCreated)
+                            m.id !in fetchedIds && oldestFetchedCreated != null &&
+                                m.time?.created != null && m.time.created < oldestFetchedCreated
                         }
                         val olderKeptIds = olderKept.map { m -> m.id }.toHashSet()
-                        val mergedMessages = olderKept + fetchedMessages
-                        // keep parts for older-kept messages + add fetched parts
-                        var mergedParts = srcParts.filterKeys { id -> id in olderKeptIds } + fetchedParts
+                        // newerKept: not-fetched AND not-already-older (id check via
+                        // HashSet O(1), NOT `m !in olderKept` which is O(n²) data
+                        // equality) AND (null-created OR newest==null OR created>=newest).
+                        // null-created (optimistic/local insert with no timestamp yet) lands
+                        // at the newest end (reverseLayout bottom), matching the just-arrived
+                        // SSE message semantic — it must NOT be classed older (which would
+                        // shove it to the history front).
+                        val newerKept = srcMessages.filter { m ->
+                            m.id !in fetchedIds && m.id !in olderKeptIds &&
+                                (m.time?.created == null || newestFetchedCreated == null ||
+                                    m.time.created >= newestFetchedCreated)
+                        }
+                        val newerKeptIds = newerKept.map { m -> m.id }.toHashSet()
+                        val keptIds = olderKeptIds + newerKeptIds
+                        // olderKept (history tail) + fetchedMessages (server-authoritative
+                        // page order) + newerKept (newest = reverseLayout bottom).
+                        // distinctBy guards the seams against any id overlap.
+                        val mergedMessages = (olderKept + fetchedMessages + newerKept).distinctBy { it.id }
+                        // keep parts for ALL kept messages (older + newer) + add fetched
+                        // parts (fetchedParts authoritative, overrides same-id locals).
+                        var mergedParts = srcParts.filterKeys { id -> id in keptIds } + fetchedParts
                         // §flicker-fix (placeholder survival): during a turn the
                         // REST snapshot often LAGS the SSE stream — the in-flight
                         // part isn't persisted yet, so fetchedParts for the
@@ -226,8 +257,28 @@ internal fun launchLoadMessages(
                         // resetLimit reload finalizes as before (preserving the
                         // S1 finalization-boundary model). Unknown status →
                         // finalize/clear (legacy behaviour).
-                        val newStreamingTexts = if (resetLimit && streamingFinalized) emptyMap<String, String>() else srcStreamingTexts
-                        val newStreamingReasoning = if (resetLimit && streamingFinalized) null else srcStreamingReasoning
+                        // §Q10 overlay guard: the append-safe gate above only
+                        // checks session busy state. Add an id-based guard so a
+                        // resetLimit reload does NOT clear the live overlay while
+                        // its owning message is still only in newerKept (i.e. not
+                        // yet present in fetchedIds) — e.g. finalization landed
+                        // during the REST flight so the finalized message is
+                        // absent from the page. Only clear when EVERY overlay
+                        // owner is already fetched (or there is no overlay). This
+                        // keeps the streamed text/reasoning visible until a later
+                        // reload actually sees the owning message server-side.
+                        val overlayOwnerMsgIds = srcStreamingTexts.keys.mapNotNull { pid ->
+                            srcParts.values.flatten().firstOrNull { it.id == pid }?.messageId
+                        }.toSet()
+                        val overlayFinalized =
+                            overlayOwnerMsgIds.isEmpty() || overlayOwnerMsgIds.all { it in fetchedIds }
+                        val reasoningOwnerMsgId = srcStreamingReasoning?.let { r ->
+                            srcParts.values.flatten().firstOrNull { it.id == r.id }?.messageId
+                        }
+                        val reasoningFinalized =
+                            reasoningOwnerMsgId == null || reasoningOwnerMsgId in fetchedIds
+                        val newStreamingTexts = if (resetLimit && streamingFinalized && overlayFinalized) emptyMap<String, String>() else srcStreamingTexts
+                        val newStreamingReasoning = if (resetLimit && streamingFinalized && reasoningFinalized) null else srcStreamingReasoning
                         // Only (re)seed the history cursor on a fresh open; a
                         // periodic reload must NOT clobber an existing cursor
                         // (now safe because older history is preserved above).

@@ -18,6 +18,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -127,6 +128,19 @@ class SessionSyncPureFunctionsTest {
     }
 
     @Test
+    fun `session created confirmation removes pending id and registration timestamp`() {
+        val state = SessionListState(
+            pendingCreateIds = setOf("new", "other"),
+            pendingCreatedAt = mapOf("new" to 10L, "other" to 20L),
+        )
+
+        val (next, _) = state.applySessionCreated(Session(id = "new", directory = "/tmp"))
+
+        assertEquals(setOf("other"), next.pendingCreateIds)
+        assertEquals(mapOf("other" to 20L), next.pendingCreatedAt)
+    }
+
+    @Test
     fun `session created with unresolved parent invalidates every complete root`() {
         val state = SessionListState(
             sessions = listOf(Session(id = "A", directory = "/x")),
@@ -150,6 +164,19 @@ class SessionSyncPureFunctionsTest {
 
         assertEquals(1, next.sessions.size)
         assertEquals("new title", next.sessions[0].title)
+    }
+
+    @Test
+    fun `session updated confirmation removes pending id and registration timestamp`() {
+        val state = SessionListState(
+            pendingCreateIds = setOf("s1", "other"),
+            pendingCreatedAt = mapOf("s1" to 10L, "other" to 20L),
+        )
+
+        val (next, _) = state.applySessionUpsert(Session(id = "s1", directory = "/tmp"))
+
+        assertEquals(setOf("other"), next.pendingCreateIds)
+        assertEquals(mapOf("other" to 20L), next.pendingCreatedAt)
     }
 
     @Test
@@ -1233,39 +1260,54 @@ class SessionSyncPureFunctionsTest {
         assertTrue(next.pendingFlushPartIds.contains("p1"))
     }
 
-    // FIX-B (review-blocker, groker B3): applyArchivedChatClear must ALSO wipe
-    // pendingJumpToLatest so a one-shot jump intent does not survive an
-    // archive (the session id it references is being cleared). clearSessionData
-    // already clears it, but the archive-clear path was missed.
+    // FIX-B (review-blocker, groker B3) + §Wave5b-Q13: applyArchivedChatClear
+    // must ALSO wipe the unified scroll slot + parent-return backstack so a
+    // pending scroll / checkpoint for an archived session does not survive
+    // (the session id it references is being cleared). clearSessionData
+    // already clears them, but the archive-clear path was missed under the
+    // pre-Wave5b design.
 
     @Test
-    fun `FIX-B applyArchivedChatClear wipes pendingJumpToLatest intent`() {
+    fun `FIX-B applyArchivedChatClear wipes pendingScrollRequest + parentReturnCheckpoints`() {
         val state = ChatState(
             currentSessionId = "s1",
             messages = listOf(Message(id = "m1", role = "user")),
-            pendingJumpToLatest = "s1",
+            pendingScrollRequest = cn.vectory.ocdroid.ui.PendingScrollRequest(
+                requestId = 7L,
+                targetSessionId = "s1",
+                behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest,
+            ),
+            parentReturnCheckpoints = mapOf(
+                "s1" to cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = null, fallbackIndex = 0, offset = 0),
+            ),
         )
 
         val (next, _) = state.applyArchivedChatClear()
 
         assertNull(
-            "FIX-B: pendingJumpToLatest must be wiped so the intent does not survive archive",
-            next.pendingJumpToLatest,
+            "FIX-B / §Wave5b-Q13: pendingScrollRequest must be wiped so the intent does not survive archive",
+            next.pendingScrollRequest,
+        )
+        assertTrue(
+            "FIX-B / §Wave5b-Q13: parentReturnCheckpoints must be wiped",
+            next.parentReturnCheckpoints.isEmpty(),
         )
         assertNull(next.currentSessionId)
         assertTrue(next.messages.isEmpty())
     }
 
     @Test
-    fun `FIX-B applyArchivedChatClear wipes pendingJumpToLatest even when already null`() {
+    fun `FIX-B applyArchivedChatClear wipes pendingScrollRequest + parentReturnCheckpoints even when already empty`() {
         val state = ChatState(
             currentSessionId = "s1",
-            pendingJumpToLatest = null,
+            pendingScrollRequest = null,
+            parentReturnCheckpoints = emptyMap(),
         )
 
         val (next, _) = state.applyArchivedChatClear()
 
-        assertNull(next.pendingJumpToLatest)
+        assertNull(next.pendingScrollRequest)
+        assertTrue(next.parentReturnCheckpoints.isEmpty())
     }
 
     // === applySessionStatus: every status type branch ====================
@@ -2666,5 +2708,173 @@ class SessionSyncPureFunctionsTest {
 
         val unrelated = next.directorySessions["/d"]!!.first { it.id == "unrelated" }
         assertEquals(50L, unrelated.time?.updated)
+    }
+
+    // === §Wave5b-Q13 blocker-2: cleanScrollStateForSubtree ==================
+    //
+    // The UNCONDITIONAL scroll-state cleanup applied to an archived subtree
+    // (used by SessionArchived / BulkSessionsRefreshed reducers AND by
+    // launchSetSessionArchived onSuccess). Pure function — JVM-testable
+    // without the reducer harness.
+
+    @Test
+    fun `cleanScrollStateForSubtree wipes pendingScrollRequest when target is in subtree`() {
+        val state = ChatState(
+            currentSessionId = "cur",
+            messages = listOf(Message(id = "m1", role = "user")),
+            partsByMessage = mapOf("m1" to emptyList()),
+            pendingScrollRequest = cn.vectory.ocdroid.ui.PendingScrollRequest(
+                requestId = 1L,
+                targetSessionId = "stale-target",
+                behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest,
+            ),
+        )
+
+        val next = state.cleanScrollStateForSubtree(setOf("stale-target", "other"))
+
+        assertNull(
+            "pendingScrollRequest MUST be wiped when targetSessionId is in subtree",
+            next.pendingScrollRequest,
+        )
+        // Content untouched (the helper is scroll-state-only).
+        assertEquals("cur", next.currentSessionId)
+        assertEquals(1, next.messages.size)
+        assertEquals(1, next.partsByMessage.size)
+    }
+
+    @Test
+    fun `cleanScrollStateForSubtree PRESERVES pendingScrollRequest when target is NOT in subtree`() {
+        val liveReq = cn.vectory.ocdroid.ui.PendingScrollRequest(
+            requestId = 9L,
+            targetSessionId = "live",
+            behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest,
+        )
+        val state = ChatState(pendingScrollRequest = liveReq)
+
+        val next = state.cleanScrollStateForSubtree(setOf("archived-1", "archived-2"))
+
+        assertEquals(liveReq, next.pendingScrollRequest)
+    }
+
+    @Test
+    fun `cleanScrollStateForSubtree wipes only parentReturnCheckpoints entries keyed by the subtree`() {
+        val keep = cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = "k-live", fallbackIndex = 1, offset = 1)
+        val drop = cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = "k-stale", fallbackIndex = 2, offset = 2)
+        val state = ChatState(
+            parentReturnCheckpoints = mapOf(
+                "live-child" to keep,
+                "stale-child" to drop,
+                "stale-grandchild" to drop,
+            ),
+        )
+
+        val next = state.cleanScrollStateForSubtree(setOf("stale-child", "stale-grandchild"))
+
+        assertEquals(
+            "live entry preserved",
+            mapOf("live-child" to keep),
+            next.parentReturnCheckpoints,
+        )
+    }
+
+    @Test
+    fun `cleanScrollStateForSubtree empty subtree is a no-op (preserves reference)`() {
+        // Fast path: empty subtree returns the SAME ChatState instance (no
+        // .copy() allocation). The hot path is a bulk refresh archiving an
+        // unrelated subtree on a chat with no scroll state — the helper MUST
+        // be cheap.
+        val state = ChatState(
+            currentSessionId = "cur",
+            pendingScrollRequest = null,
+            parentReturnCheckpoints = emptyMap(),
+        )
+
+        val next = state.cleanScrollStateForSubtree(emptySet())
+
+        assertSame("empty subtree MUST return the same instance (no allocation)", state, next)
+    }
+
+    @Test
+    fun `cleanScrollStateForSubtree already-clean chat also returns the same instance`() {
+        // Subtree non-empty but no fields would change (slot already null +
+        // checkpoints already empty) → no allocation either.
+        val state = ChatState(
+            currentSessionId = "cur",
+            pendingScrollRequest = null,
+            parentReturnCheckpoints = emptyMap(),
+        )
+
+        val next = state.cleanScrollStateForSubtree(setOf("archived"))
+
+        assertSame(
+            "no-op cleanup MUST return the same instance (no allocation)",
+            state,
+            next,
+        )
+    }
+
+    @Test
+    fun `cleanScrollStateForSubtree is idempotent`() {
+        // Calling twice yields the same result. Important because BOTH the
+        // reducer's applyArchivedChatClear AND cleanScrollStateForSubtree can
+        // touch the same fields for the current-archived case.
+        val state = ChatState(
+            pendingScrollRequest = cn.vectory.ocdroid.ui.PendingScrollRequest(
+                requestId = 1L,
+                targetSessionId = "drop",
+                behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest,
+            ),
+            parentReturnCheckpoints = mapOf(
+                "drop" to cn.vectory.ocdroid.ui.ScrollCheckpoint(null, 0, 0),
+            ),
+        )
+        val subtree = setOf("drop")
+
+        val once = state.cleanScrollStateForSubtree(subtree)
+        val twice = once.cleanScrollStateForSubtree(subtree)
+
+        assertEquals(once, twice)
+        assertNull(twice.pendingScrollRequest)
+        assertTrue(twice.parentReturnCheckpoints.isEmpty())
+    }
+
+    @Test
+    fun `cleanScrollStateForSubtree preserves all chat content fields`() {
+        // The helper is SCROLL-STATE-ONLY. Chat content (messages / parts /
+        // streaming / cursor / currentModel / pendingAgent / pendingModel /
+        // currentSessionId) MUST survive intact.
+        val state = ChatState(
+            currentSessionId = "cur",
+            messages = listOf(Message(id = "m1", role = "user")),
+            partsByMessage = mapOf("m1" to emptyList()),
+            streamingPartTexts = mapOf("p1" to "delta"),
+            streamingReasoningPart = Part(id = "p1", type = "reasoning", text = "r"),
+            olderMessagesCursor = "cursor",
+            hasMoreMessages = true,
+            currentModel = Message.ModelInfo("openai", "gpt-5"),
+            pendingAgent = "agent-x",
+            pendingModel = Message.ModelInfo("anthropic", "claude"),
+            pendingScrollRequest = cn.vectory.ocdroid.ui.PendingScrollRequest(
+                requestId = 1L,
+                targetSessionId = "stale",
+                behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest,
+            ),
+        )
+
+        val next = state.cleanScrollStateForSubtree(setOf("stale"))
+
+        // Only the slot wiped.
+        assertNull(next.pendingScrollRequest)
+        // Everything else preserved.
+        assertEquals("cur", next.currentSessionId)
+        assertEquals(1, next.messages.size)
+        assertEquals(1, next.partsByMessage.size)
+        assertEquals("delta", next.streamingPartTexts["p1"])
+        assertEquals("r", next.streamingReasoningPart?.text)
+        assertEquals("cursor", next.olderMessagesCursor)
+        assertTrue(next.hasMoreMessages)
+        assertEquals(Message.ModelInfo("openai", "gpt-5"), next.currentModel)
+        assertEquals("agent-x", next.pendingAgent)
+        assertEquals(Message.ModelInfo("anthropic", "claude"), next.pendingModel)
     }
 }

@@ -860,6 +860,16 @@ class AppLifecycleMonitor @Inject constructor(
          */
         const val CHANNEL_SESSION_STATUS = "ocdroid.session_status"
 
+        /**
+         * Q5: silent counterpart of [CHANNEL_SESSION_STATUS] at
+         * IMPORTANCE_MIN. MIN is the only importance that reliably suppresses
+         * OEM-ROM heads-up banners (CN-ROMs often peek even LOW channels, and
+         * `setSilent(true)` is near no-op on LOW). New id → no runtime
+         * downgrade restriction applies. Route silent NotificationSpec
+         * variants (transient placeholder + persistent-min) here.
+         */
+        const val CHANNEL_SESSION_STATUS_MIN = "ocdroid.session_status_min"
+
         /** Background polling interval per §18.1 (R-A, D1). */
         private const val POLL_INTERVAL_MS = 30_000L
 
@@ -930,7 +940,19 @@ class AppLifecycleMonitor @Inject constructor(
                 ).apply {
                     description = CHANNEL_SESSION_STATUS_DESC
                 }
-                manager.createNotificationChannels(listOf(decisions, idle, errors, sessionStatus))
+                // Q5: IMPORTANCE_MIN channel for silent FGS notifications.
+                // MIN is what actually suppresses OEM-ROM heads-up banners;
+                // LOW does not on many CN-ROMs. Used by the transient
+                // placeholder + the persistent-min variant.
+                val sessionStatusMin = NotificationChannel(
+                    CHANNEL_SESSION_STATUS_MIN,
+                    CHANNEL_SESSION_STATUS_NAME,
+                    NotificationManager.IMPORTANCE_MIN
+                ).apply {
+                    description = "Silent ongoing FGS notification. Shows only when shade expanded."
+                    setShowBadge(false)
+                }
+                manager.createNotificationChannels(listOf(decisions, idle, errors, sessionStatus, sessionStatusMin))
             }.onFailure { Log.w(TAG, "Failed to create notification channels", it) }
         }
 

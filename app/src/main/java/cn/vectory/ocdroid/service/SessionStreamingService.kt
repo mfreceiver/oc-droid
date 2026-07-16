@@ -445,7 +445,11 @@ class SessionStreamingService : Service() {
             buildNotification(
                 SessionStatusNotifier.buildPlaceholder(
                     strings,
-                    silent = !settingsManager.persistentNotificationEnabled,
+                    // Q5: placeholder is a transient (<1s) "connecting" FGS
+                    // notification. Always silent — no user value in surfacing
+                    // it, and silencing here dodges OEM-ROM heads-up banners on
+                    // the cold-start promoteToForeground.
+                    silent = true,
                 ),
             ),
         )
@@ -662,7 +666,16 @@ class SessionStreamingService : Service() {
      *    so the user can resolve TOFU.
      */
     private fun buildNotification(spec: NotificationSpec): Notification =
-        NotificationCompat.Builder(this, AppLifecycleMonitor.CHANNEL_SESSION_STATUS)
+        // Q5: route the silent variant to CHANNEL_SESSION_STATUS_MIN
+        // (IMPORTANCE_MIN), which actually suppresses OEM-ROM heads-up
+        // banners; setSilent(true) on an IMPORTANCE_LOW channel is near no-op
+        // and CN-ROMs still peek LOW channels. New channel id has no runtime
+        // downgrade restriction.
+        NotificationCompat.Builder(
+            this,
+            if (spec.silent) AppLifecycleMonitor.CHANNEL_SESSION_STATUS_MIN
+            else AppLifecycleMonitor.CHANNEL_SESSION_STATUS
+        )
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(spec.title)
             .setContentText(spec.content)

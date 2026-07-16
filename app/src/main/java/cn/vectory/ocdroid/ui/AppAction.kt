@@ -3,6 +3,8 @@ package cn.vectory.ocdroid.ui
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.ui.controller.applyArchiveEviction
 import cn.vectory.ocdroid.ui.controller.applyArchivedChatClear
+import cn.vectory.ocdroid.ui.controller.cleanScrollStateForSubtree
+import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.ui.controller.removeSessions
 import cn.vectory.ocdroid.ui.controller.subtreeIds
 
@@ -54,7 +56,8 @@ internal sealed interface AppAction {
      *    .take(8)`; the reducer just stores it — persistence is the caller's
      *    job).
      *  - [viewedAt]: `System.currentTimeMillis()` captured at the call site
-     *    (the reducer writes `unread.lastViewedTime + (session.id to viewedAt)`).
+     *    (the reducer writes both `unread.lastViewedTime` and the independent
+     *    pending-create registration timestamp from this same clock value).
      */
     data class DraftSessionMaterialized(
         val session: Session,
@@ -122,27 +125,69 @@ internal sealed interface AppAction {
     ) : AppAction
 
     /**
-     * §WT2-taskB (Q6 locked): one-shot "Sessions page entry → jump to latest"
-     * intent on [ChatState.pendingJumpToLatest]. The reducer sets
-     * `chat.pendingJumpToLatest = action.sessionId`:
-     *  - non-null [sessionId] → SET the intent (the id the user tapped in the
-     *    Sessions list). Used by
-     *    [cn.vectory.ocdroid.ui.SessionViewModel.requestJumpToLatest], which
-     *    SessionsScreen.onSessionClick fires BEFORE selectSession so the
-     *    matching switchTo keeps it and ChatMessageList consumes it once the
-     *    session's messages have loaded.
-     *  - null [sessionId] → CLEAR the intent. Used by
-     *    [cn.vectory.ocdroid.ui.ChatViewModel.clearPendingJumpToLatest] after
-     *    ChatMessageList has performed the scrollToItem(0) jump, so the intent
-     *    fires exactly once per Sessions-page entry.
+     * §Wave5b-Q13: the unified replacement for the pre-Wave5b
+     * `PendingJumpToLatestSet`. Writes a fresh [PendingScrollRequest] to
+     * `chat.pendingScrollRequest` UNCONDITIONALLY (a newer request always
+     * supersedes any prior one — single-slot semantics, see
+     * [PendingScrollRequest] kdoc).
+     *
+     * Issued by [cn.vectory.ocdroid.ui.controller.SessionSwitcher.switchTo]
+     * inside the SAME mutateChat that flips currentSessionId (Latest for the
+     * default arg, Restore(checkpoint) for returnToParent), AND by
+     * [cn.vectory.ocdroid.ui.controller.SessionSwitcher.requestLatestScroll]
+     * for the same-session "snap to latest on send / Chat-tab reselect" path
+     * (which deliberately bypasses switchTo's same-session no-op guard).
      *
      * Single-slice / single-field write. Kept as a dispatched [AppAction]
-     * (rather than a raw `mutateChat`) per the WT2 plan ("reducer entries to
-     * set it and clear it") so the intent transition is observable on the
-     * aggregate stateFlow and unit-testable via [AppActionReducerTest].
+     * (rather than a raw `mutateChat`) per the WT2 plan lineage so the intent
+     * transition is observable on the aggregate stateFlow and unit-testable
+     * via [AppActionReducerTest].
      */
-    data class PendingJumpToLatestSet(
-        val sessionId: String?,
+    data class ScrollRequested(
+        val requestId: Long,
+        val targetSessionId: String,
+        val behavior: ScrollBehavior,
+    ) : AppAction
+
+    /**
+     * §Wave5b-Q13: COMPARE-AND-CLEAR of [PendingScrollRequest]. The reducer
+     * clears `chat.pendingScrollRequest` IFF the live slot's requestId matches
+     * [requestId]; otherwise it is a no-op.
+     *
+     * Why compare-and-clear (oracle ruling): in a fast A→B→C cascade, A's
+     * consumer might finish LAST (effect relaunch ordering, page-slot
+     * disposal timing). If A's `ScrollConsumed(A.requestId)` unconditionally
+     * cleared the slot, it would wipe C's newer intent and leave C at the
+     * default position. The id compare guarantees only the CURRENT intent is
+     * clearable — a stale consumer's clear is silently dropped.
+     */
+    data class ScrollConsumed(
+        val requestId: Long,
+    ) : AppAction
+
+    /**
+     * §Wave5b-Q13: store the parent's [ScrollCheckpoint] under the child id
+     * key. Issued by [cn.vectory.ocdroid.ui.SessionViewModel.openSubAgent]
+     * BEFORE the inner selectSession(childId) so the entry is on file by the
+     * time currentSessionId flips. Single-field write
+     * (`chat.parentReturnCheckpoints + (childId to checkpoint)`).
+     */
+    data class ParentCheckpointStored(
+        val childId: String,
+        val checkpoint: ScrollCheckpoint,
+    ) : AppAction
+
+    /**
+     * §Wave5b-Q13: remove the [childId] entry from
+     * `chat.parentReturnCheckpoints`. Issued by
+     * [cn.vectory.ocdroid.ui.SessionViewModel.returnToParent] in the SAME
+     * sequence as the inner `switchTo(parentId, Restore(checkpoint))` so the
+     * entry is cleaned even if the user re-opens the child later (no stale
+     * checkpoint leak). The reducer removes only the matching key (no-op if
+     * absent — defensive against a double-consume).
+     */
+    data class ParentCheckpointConsumed(
+        val childId: String,
     ) : AppAction
 
     /**
@@ -163,17 +208,25 @@ internal sealed interface AppAction {
      * there is defensive and the bulk path's prune closes the ghost-tab hole).
      *
      * Carries:
-     *  - [sessions]: the full merged refresh result (server-authoritative;
-     *    includes archived sessions with isArchived == true).
+     *  - [sessions]: the full merged refresh result (authoritative server
+     *    records plus any still-pending local-only records preserved by Q4).
      *  - [openSessionIds]: the NEW open-tabs list with ALL archived ids pruned
      *    (caller computes + persists; reducer just stores it).
      *  - [hasMoreSessions]: the pagination flag (mirrors the mutateSessionList
      *    field the non-archive path writes).
+     *  - [confirmedServerIds]: ids from the raw REST response before merge;
+     *    this is the only source allowed to confirm pending creates.
+     *  - [sweepNow]: caller-captured wall-clock time used with
+     *    [SessionListState.pendingCreatedAt] for the 30 s timeout.
      */
     data class BulkSessionsRefreshed(
         val sessions: List<Session>,
         val openSessionIds: List<String>,
         val hasMoreSessions: Boolean,
+        /** Ids from the raw REST response, before pending-local preservation. */
+        val confirmedServerIds: Set<String>,
+        /** Wall-clock time captured by the REST success path for timeout sweep. */
+        val sweepNow: Long,
     ) : AppAction
 }
 
@@ -196,6 +249,14 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
         sessionList = state.sessionList.copy(
             sessions = upsertSession(state.sessionList.sessions, action.session),
             openSessionIds = action.openSessionIds,
+            // §Q4-strict-sync: a freshly-created session is NOT yet in the
+            // server's authoritative listing. Track its id as pending-create
+            // so the next mergeRefreshedSessionsPreservingLocalActivity keeps
+            // it alive until a REST refresh or SSE session.created confirms it
+            // (or the 30 s sweep drops it). Added atomically in the SAME
+            // dispatch as the session upsert (no torn intermediate).
+            pendingCreateIds = state.sessionList.pendingCreateIds + action.session.id,
+            pendingCreatedAt = state.sessionList.pendingCreatedAt + (action.session.id to action.viewedAt),
         ),
         chat = state.chat.copy(
             currentSessionId = action.session.id,
@@ -211,10 +272,17 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
 
     is AppAction.SessionArchived -> {
         // Apply archive eviction unconditionally (upsert archived + new openIds).
-        // Apply the chat clear IFF the archived session IS the current one —
-        // derived from the snapshot, not carried on the action.
+        // Apply the chat CONTENT clear IFF the archived session IS the current
+        // one — derived from the snapshot, not carried on the action.
         val isCurrent = state.chat.currentSessionId == action.session.id
         val newSessionList = state.sessionList.applyArchiveEviction(action.session, action.openSessionIds).first
+        // §Wave5b-Q13 blocker-2 fix: SCROLL-STATE cleanup runs UNCONDITIONALLY
+        // for the archived subtree (chat content remains current-only). For
+        // the current-archived case applyArchivedChatClear already wipes both
+        // fields, so cleanScrollStateForSubtree is a no-op; for non-current
+        // archived ids it cleans a stale pendingScrollRequest (target in
+        // subtree) + parentReturnCheckpoints (key in subtree) without
+        // touching messages / parts / currentSessionId.
         val newChat = if (isCurrent) state.chat.applyArchivedChatClear().first else state.chat
         // §task5-lifecycle (final-review fix 1): the archived session's unread
         // badge + any pending question bound to it MUST NOT survive the archive.
@@ -233,9 +301,18 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
         )
         val cleanedQuestions = newSessionList.pendingQuestions.filter { it.sessionId !in subtree }
         val newUnread = state.unread.removeSessions(subtree)
+        // §Wave5b-Q13 blocker-2: apply UNCONDITIONAL scroll-state cleanup for
+        // the archived subtree (no-op for current-archived — applyArchivedChatClear
+        // above already wiped both fields; substantive for non-current archived
+        // ids that had a stale pendingScrollRequest targeting them or a
+        // parentReturnCheckpoints entry keyed by them).
+        val newChatCleaned = newChat.cleanScrollStateForSubtree(subtree)
         state.copy(
-            sessionList = newSessionList.copy(pendingQuestions = cleanedQuestions),
-            chat = newChat,
+            sessionList = newSessionList.copy(
+                pendingQuestions = cleanedQuestions,
+                activeSessionIds = newSessionList.activeSessionIds - subtree,
+            ),
+            chat = newChatCleaned,
             unread = newUnread,
         )
     }
@@ -264,6 +341,7 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
                     directorySessions = emptyMap(),
                     openSessionIds = emptyList(),
                     sessionStatuses = emptyMap(),
+                    activeSessionIds = emptySet(),
                     sessionTodos = emptyMap(),
                     sessionDiffs = emptyMap(),
                     // §gpter-residual: cross-group purge must also drop cached
@@ -280,6 +358,11 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
                     // survive a cross-group switch.
                     pendingPermissions = emptyList(),
                     pendingQuestions = emptyList(),
+                    // §Q4-strict-sync: cross-group purge must drop pending-
+                    // create ids — they reference the prior host's sessions
+                    // and would ghost into the new host's list.
+                    pendingCreateIds = emptySet(),
+                    pendingCreatedAt = emptyMap(),
                 ),
                 state.unread.copy(
                     unreadSessions = emptySet(),
@@ -311,8 +394,27 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
                     streamingReasoningPart = null,
                     pendingAgent = null,
                     pendingModel = null,
+                    // §Wave5b-Q13: a host/profile transition invalidates any
+                    // pending scroll intent + the parent-return backstack
+                    // even within the same server group. The scroll slot
+                    // references a session the user is navigating away from
+                    // (or that may be re-laid-out differently on the new
+                    // profile); the backstack is per-session navigation
+                    // context that has no carry across profiles. Mirrors the
+                    // cross-group branch's clearSessionData() reset.
+                    pendingScrollRequest = null,
+                    parentReturnCheckpoints = emptyMap(),
                 ),
-                state.sessionList,
+                // §Q4-strict-sync: clear pendingCreateIds even on same-group
+                // switch (the spec mandates "host switch → clear pending"). A
+                // pending id from profile A is meaningless on profile B even
+                // within the same server group; clearing is safer (no ghost)
+                // and the ids re-populate naturally from the next REST refresh.
+                state.sessionList.copy(
+                    pendingCreateIds = emptySet(),
+                    pendingCreatedAt = emptyMap(),
+                    activeSessionIds = emptySet(),
+                ),
                 state.unread,
             )
         }
@@ -348,9 +450,48 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
         ),
     )
 
-    is AppAction.PendingJumpToLatestSet -> state.copy(
-        // §WT2-taskB: single-field write. No cross-slice concerns.
-        chat = state.chat.copy(pendingJumpToLatest = action.sessionId),
+    is AppAction.ScrollRequested -> state.copy(
+        // §Wave5b-Q13: single-slot overwrite. A newer request ALWAYS supersedes
+        // any prior one — there is no priority / merge logic. The consumer
+        // observes the latest committed slot only (single dispatch = single
+        // emission).
+        chat = state.chat.copy(
+            pendingScrollRequest = PendingScrollRequest(
+                requestId = action.requestId,
+                targetSessionId = action.targetSessionId,
+                behavior = action.behavior,
+            ),
+        ),
+    )
+
+    is AppAction.ScrollConsumed -> {
+        // §Wave5b-Q13: COMPARE-AND-CLEAR. Only the CURRENT intent (matching
+        // requestId) is clearable. A stale consumer's clear (e.g. A's consumer
+        // finishing after B's intent is already live) is a silent no-op so it
+        // cannot wipe the newer intent.
+        val live = state.chat.pendingScrollRequest
+        if (live != null && live.requestId == action.requestId) {
+            state.copy(chat = state.chat.copy(pendingScrollRequest = null))
+        } else {
+            state
+        }
+    }
+
+    is AppAction.ParentCheckpointStored -> state.copy(
+        // §Wave5b-Q13: append the (childId → checkpoint) entry. Preserves any
+        // other entries (a user can be deep in child-of-child-of-child
+        // navigation; each openSubAgent stores its own parent's checkpoint).
+        chat = state.chat.copy(
+            parentReturnCheckpoints = state.chat.parentReturnCheckpoints + (action.childId to action.checkpoint),
+        ),
+    )
+
+    is AppAction.ParentCheckpointConsumed -> state.copy(
+        // §Wave5b-Q13: remove only the matching childId key. No-op if absent
+        // (double-consume / cleared by a host purge between store + consume).
+        chat = state.chat.copy(
+            parentReturnCheckpoints = state.chat.parentReturnCheckpoints - action.childId,
+        ),
     )
 
     is AppAction.BulkSessionsRefreshed -> {
@@ -372,18 +513,39 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
             .toSet()
         val currentId = state.chat.currentSessionId
         val isCurrentArchived = currentId != null && currentId in archivedIds
+        // §Q4-strict-sync: confirmation is based only on ids from the raw REST
+        // response, never action.sessions (which is the merged list and may
+        // contain preserved pending-local sessions). The caller also captures
+        // sweepNow so this pure reducer can apply the independent registration-
+        // timestamp timeout atomically with the merged sessions write.
+        val remainingPendingIds = state.sessionList.pendingCreateIds
+            .minus(action.confirmedServerIds)
+            .filterTo(mutableSetOf()) { pendingId ->
+                val registeredAt = state.sessionList.pendingCreatedAt[pendingId]
+                registeredAt != null &&
+                    action.sweepNow - registeredAt <= MainViewModelTimings.pendingCreateTimeoutMs
+            }
         val newSessionList = state.sessionList.copy(
             sessions = action.sessions,
             openSessionIds = action.openSessionIds,
             hasMoreSessions = action.hasMoreSessions,
             isLoadingMoreSessions = false,
             isRefreshingSessions = false,
+            pendingCreateIds = remainingPendingIds,
+            pendingCreatedAt = state.sessionList.pendingCreatedAt.filterKeys { it in remainingPendingIds },
             // A bulk refresh is authoritative for structure (archive-sync),
             // so any cached completeness proof may be stale if SSE dropped
             // events. Discard proofs and bump the epoch so in-flight hydration
             // is dropped fail-closed; the next tick re-hydrates fresh trees.
             completeRootIds = emptySet(),
             completenessEpoch = state.sessionList.completenessEpoch + 1L,
+            activeSessionIds = state.sessionList.activeSessionIds.intersect(
+                allSessionsById(
+                    action.sessions,
+                    state.sessionList.directorySessions,
+                    state.sessionList.childSessions,
+                ).keys
+            ),
         )
         // Compute the subtree UNION over ALL archived ids. Each archived root
         // may have descendants that did NOT get their own archive event —
@@ -400,16 +562,23 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
             .filter { it.sessionId !in allArchivedSubtree }
         val newUnread = state.unread.removeSessions(allArchivedSubtree)
         // Chat-clear is CURRENT-ONLY (non-current archived ids have no active
-        // chat window). applyArchivedChatClear also wipes pendingJumpToLatest
-        // (FIX-B).
+        // chat window). applyArchivedChatClear also wipes pendingScrollRequest
+        // + parentReturnCheckpoints (FIX-B / §Wave5b-Q13).
         val newChat = if (isCurrentArchived) {
             state.chat.applyArchivedChatClear().first
         } else {
             state.chat
         }
+        // §Wave5b-Q13 blocker-2: UNCONDITIONAL scroll-state cleanup for the
+        // archived subtree union. For current-archived the prior
+        // applyArchivedChatClear already wiped both fields (no-op here); for
+        // NON-current archived ids this drops a stale pendingScrollRequest
+        // (target in subtree) + parentReturnCheckpoints entries (key in
+        // subtree) without touching chat content.
+        val newChatCleaned = newChat.cleanScrollStateForSubtree(allArchivedSubtree)
         state.copy(
             sessionList = newSessionList.copy(pendingQuestions = cleanedQuestions),
-            chat = newChat,
+            chat = newChatCleaned,
             unread = newUnread,
         )
     }
@@ -456,9 +625,13 @@ private fun ChatState.clearSessionData(): ChatState = copy(
     // (or into a freshly-purged host view), defeating the pending contract.
     pendingAgent = null,
     pendingModel = null,
-    // §WT2-taskB: clear the one-shot jump-to-latest intent too — it
-    // references a session id that is being cleared (draft / host purge).
-    pendingJumpToLatest = null,
+    // §Wave5b-Q13: clear the unified scroll slot + the parent-return
+    // backstack (replaces the prior `pendingJumpToLatest = null` clear).
+    // The slot references a target session id that is being cleared; the
+    // backstack is per-session navigation context that has no meaning after
+    // a draft-create or cross-host purge.
+    pendingScrollRequest = null,
+    parentReturnCheckpoints = emptyMap(),
     // PRESERVED (chrome, NOT per-session — kept via .copy() above):
     // isCompacting, compactStartedAt, refreshNonce.
 )

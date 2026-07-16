@@ -6,6 +6,10 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.UiApplicationScope
+import cn.vectory.ocdroid.ui.AppAction
+import cn.vectory.ocdroid.ui.ScrollBehavior
+import cn.vectory.ocdroid.ui.ScrollCheckpoint
+import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.controller.ComposerController
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
@@ -88,21 +92,47 @@ class SessionViewModel @Inject constructor(
     }
 
     /**
-     * §WT2-taskB (Q6 locked): set the "enter from Sessions page → jump to
-     * latest" intent for [sessionId]. SessionsScreen.onSessionClick calls
-     * this BEFORE [selectSession] so the matching switchTo keeps the intent
-     * (SessionSwitcher clears it when the incoming id does not match),
-     * and ChatMessageList consumes it exactly once the session's messages
-     * have loaded (scrollToItem(0) + followBottom=true + clear). Swipe,
-     * tab-strip tap, and SessionPickerSheet paths do NOT call this — their
-     * saveable scroll-position restore is preserved unchanged.
+     * §Wave5b-Q13: same-session "snap to latest" intent for the send path +
+     * Chat-tab reselect path. Delegates to
+     * [cn.vectory.ocdroid.ui.controller.SessionSwitcher.requestLatestScroll],
+     * which deliberately bypasses [switchTo]'s same-session no-op guard.
+     *
+     * Replaces the pre-Wave5b `requestJumpToLatest` (which was an unrelated
+     * mechanism that only set a flag consumed by a separate LaunchedEffect;
+     * the new design unifies both into [PendingScrollRequest]).
      */
-    fun requestJumpToLatest(sessionId: String) {
-        store.dispatch(AppAction.PendingJumpToLatestSet(sessionId))
+    fun requestLatestScroll(sessionId: String) {
+        sessionSwitcher.requestLatestScroll(sessionId)
     }
 
-    fun openSubAgent(childSessionId: String) {
+    /**
+     * §Wave5b-Q13: open a sub-agent session. Captures the PARENT's scroll
+     * checkpoint (passed in synchronously by the Compose layer — see
+     * ChatMessageList's onOpenSubAgent wrapper) into
+     * [ChatState.parentReturnCheckpoints] under the child id key, then
+     * selects the child with the default Latest behavior.
+     *
+     * The checkpoint MUST be supplied by the caller (Compose layer), NOT
+     * derived inside the VM: the VM has no listState handle and the async
+     * savedPositions mirror cannot guarantee the last pre-navigation frame
+     * (oracle ruling). The synchronous capture at the click site is the
+     * authoritative source.
+     *
+     * Sequence:
+     *  1. dispatch [AppAction.ParentCheckpointStored] — adds the entry.
+     *  2. (existing sub-agent load + upsert + selectSession) — selectSession
+     *     → switchTo(childId, Latest) writes the child's pendingScrollRequest.
+     *
+     * If the child cannot be resolved (rare), the checkpoint is still stored
+     * (cheap; harmless if unused; cleared on host purge / archive).
+     */
+    fun openSubAgent(childSessionId: String, parentCheckpoint: ScrollCheckpoint) {
         val parentId = store.chatFlow.value.currentSessionId
+        // §Wave5b-Q13: store the parent checkpoint BEFORE the sub-agent load
+        // so it is on file by the time selectSession flips currentSessionId.
+        // Synchronous dispatch — no coroutine hop, the entry is committed
+        // before the launch below runs.
+        store.dispatch(AppAction.ParentCheckpointStored(childSessionId, parentCheckpoint))
         // §R18 Phase 3 Wave 2 (drift #6 / P1-7): user-triggered open-sub-agent
         // → viewModelScope. Closure captures `this@SessionViewModel` (via the
         // selectSession call below) — viewModelScope keeps it alive exactly as
@@ -128,6 +158,45 @@ class SessionViewModel @Inject constructor(
             } else {
                 effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_child_session_unavailable))
             }
+        }
+    }
+
+    /**
+     * §Wave5b-Q13: navigate from a child session back to its parent, restoring
+     * the parent's scroll position captured at the corresponding openSubAgent
+     * call.
+     *
+     * Sequence:
+     *  1. Read `parentReturnCheckpoints[currentSessionId]` (the child's id).
+     *  2. If an entry exists → dispatch [AppAction.ParentCheckpointConsumed]
+     *     (removes the entry) AND switchTo(parentId, Restore(checkpoint)).
+     *  3. If NO entry exists (e.g. cold-started into a child, or the entry
+     *     was cleared by a host purge) → fallback to switchTo(parentId,
+     *     Latest) so the user still gets back to the parent (just at the
+     *     newest message instead of a remembered position).
+     *  4. If there is no parent (parentId == null) → no-op (the user is on
+     *     a root session; returnToParent is not callable from the UI in that
+     *     case anyway — BackHandler is gated on `parent != null`).
+     *
+     * parentId resolution: looks up the current session in the union store
+     * (sessions + directorySessions + childSessions) so a sub-agent that
+     * lives only in childSessions is still resolved.
+     */
+    fun returnToParent() {
+        val currentId = store.chatFlow.value.currentSessionId ?: return
+        val sl = store.sessionListFlow.value
+        val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
+        val cur = sessionsById[currentId] ?: return
+        val parentId = cur.parentId ?: return
+        val stored = store.chatFlow.value.parentReturnCheckpoints[currentId]
+        if (stored != null) {
+            store.dispatch(AppAction.ParentCheckpointConsumed(currentId))
+            sessionSwitcher.switchTo(parentId, ScrollBehavior.Restore(stored))
+        } else {
+            // Fallback: no checkpoint on file (cold-start into child, host
+            // purge cleared the map, etc.). Still navigate to the parent —
+            // just at the latest position rather than a remembered one.
+            sessionSwitcher.switchTo(parentId, ScrollBehavior.Latest)
         }
     }
 

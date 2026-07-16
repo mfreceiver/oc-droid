@@ -6,6 +6,9 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionCacheEntry
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.PendingScrollRequest
+import cn.vectory.ocdroid.ui.ScrollBehavior
+import cn.vectory.ocdroid.ui.ScrollCheckpoint
 import cn.vectory.ocdroid.ui.controller.CachedSessionWindow
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
@@ -25,6 +28,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -1212,5 +1216,254 @@ class SessionSwitcherTest {
         val persistSessionCacheCalls = mutableListOf<PersistCall>()
 
         data class PersistCall(val cache: List<SessionCacheEntry>)
+    }
+
+    // ── §Wave5b-Q13: scroll-state machine routing tests ────────────────────
+    //
+    // Verifies switchTo's behavior parameter threads through to the slot, the
+    // same-session no-op guard, requestLatestScroll bypass, and the
+    // compare-and-clear semantics from the consumer side. The pure resolver
+    // (anchor / fallback / clamping) is tested separately in
+    // ChatMessageContentHelpersTest.
+
+    @Test
+    fun `Wave5b-Q13 switchTo default dispatches a Latest intent for the new session`() {
+        seed {
+            it.copy(
+                currentSessionId = "session-A",
+                sessions = listOf(
+                    Session(id = "session-A", directory = "/tmp/a"),
+                    Session(id = "session-B", directory = "/tmp/b"),
+                ),
+            )
+        }
+
+        switcher.switchTo("session-B")
+
+        val req = slices.chat.value.pendingScrollRequest
+        assertNotNull("switchTo must produce a PendingScrollRequest", req)
+        assertEquals("session-B", req!!.targetSessionId)
+        assertTrue("default behavior is Latest", req.behavior is ScrollBehavior.Latest)
+        assertEquals("session-B", slices.chat.value.currentSessionId)
+    }
+
+    @Test
+    fun `Wave5b-Q13 switchTo with Restore behavior threads the checkpoint through to the slot`() {
+        seed {
+            it.copy(
+                currentSessionId = "child",
+                sessions = listOf(
+                    Session(id = "parent", directory = "/p"),
+                    Session(id = "child", directory = "/p", parentId = "parent"),
+                ),
+            )
+        }
+        val checkpoint = ScrollCheckpoint(anchorKey = "msg-7", fallbackIndex = 5, offset = 42)
+
+        switcher.switchTo("parent", ScrollBehavior.Restore(checkpoint))
+
+        val req = slices.chat.value.pendingScrollRequest
+        assertNotNull(req)
+        assertEquals("parent", req!!.targetSessionId)
+        assertTrue("behavior is Restore", req.behavior is ScrollBehavior.Restore)
+        val actual = (req.behavior as ScrollBehavior.Restore).checkpoint
+        assertEquals(checkpoint, actual)
+    }
+
+    @Test
+    fun `Wave5b-Q13 switchTo same-session is a no-op for scroll intents`() {
+        // §Wave5b-Q13 oracle test #4: same-session select does NOT reload and
+        // does NOT produce a new scroll intent (the existing slot, if any,
+        // survives untouched; if the slot was already empty it stays empty).
+        seed {
+            it.copy(
+                currentSessionId = "only",
+                sessions = listOf(Session(id = "only", directory = "/x")),
+            )
+        }
+
+        switcher.switchTo("only")
+
+        assertNull(
+            "same-session switchTo must NOT generate a new PendingScrollRequest",
+            slices.chat.value.pendingScrollRequest,
+        )
+    }
+
+    @Test
+    fun `Wave5b-Q13 switchTo to a different target replaces the prior intent`() {
+        // §Wave5b-Q13 oracle test #6: switching A→B→C supersedes the prior
+        // intent. The single-slot overwrite means only the LATEST intent is
+        // observable.
+        seed {
+            it.copy(
+                currentSessionId = "A",
+                sessions = listOf(
+                    Session(id = "A", directory = "/a"),
+                    Session(id = "B", directory = "/b"),
+                    Session(id = "C", directory = "/c"),
+                ),
+            )
+        }
+
+        switcher.switchTo("B")
+        val firstReq = slices.chat.value.pendingScrollRequest
+        assertNotNull(firstReq)
+        assertEquals("B", firstReq!!.targetSessionId)
+
+        switcher.switchTo("C")
+        val secondReq = slices.chat.value.pendingScrollRequest
+        assertNotNull(secondReq)
+        assertEquals("C", secondReq!!.targetSessionId)
+        assertTrue(
+            "the new intent's requestId MUST differ from the prior (single-slot overwrite)",
+            secondReq.requestId != firstReq.requestId,
+        )
+    }
+
+    @Test
+    fun `Wave5b-Q13 requestLatestScroll bypasses the same-session no-op guard`() {
+        // The send / Chat-tab reselect paths need a fresh Latest intent on an
+        // ALREADY-current session. switchTo would early-return; requestLatestScroll
+        // must dispatch anyway.
+        seed {
+            it.copy(
+                currentSessionId = "current",
+                sessions = listOf(Session(id = "current", directory = "/x")),
+            )
+        }
+
+        switcher.requestLatestScroll("current")
+
+        val req = slices.chat.value.pendingScrollRequest
+        assertNotNull("requestLatestScroll must produce a PendingScrollRequest even on same session", req)
+        assertEquals("current", req!!.targetSessionId)
+        assertTrue(req.behavior is ScrollBehavior.Latest)
+    }
+
+    @Test
+    fun `Wave5b-Q13 requestLatestScroll with null sessionId is a no-op`() {
+        // Defensive: draft mode (currentSessionId == null) → no scroll target.
+        seed { it.copy(currentSessionId = null, sessions = emptyList()) }
+
+        switcher.requestLatestScroll(null)
+
+        assertNull(slices.chat.value.pendingScrollRequest)
+    }
+
+    @Test
+    fun `Wave5b-Q13 requestLatestScroll produces a fresh requestId each call`() {
+        // Two consecutive calls MUST produce different requestIds so the
+        // compare-and-clear token is unique (a stale consumer cannot
+        // accidentally clear a newer intent).
+        seed {
+            it.copy(
+                currentSessionId = "x",
+                sessions = listOf(Session(id = "x", directory = "/x")),
+            )
+        }
+
+        switcher.requestLatestScroll("x")
+        val first = slices.chat.value.pendingScrollRequest?.requestId
+        switcher.requestLatestScroll("x")
+        val second = slices.chat.value.pendingScrollRequest?.requestId
+
+        assertNotNull(first)
+        assertNotNull(second)
+        assertTrue("requestId must be unique per call", first != second)
+    }
+
+    @Test
+    fun `Wave5b-Q13 compare-and-clear - stale consumer cannot wipe newer intent`() {
+        // §Wave5b-Q13 oracle test #5: A→B→C, A's consumer finishes LAST and
+        // tries to clear with A's stale requestId. The clear MUST be a no-op
+        // so C's newer intent survives.
+        seed {
+            it.copy(
+                currentSessionId = "A",
+                sessions = listOf(
+                    Session(id = "A", directory = "/a"),
+                    Session(id = "B", directory = "/b"),
+                    Session(id = "C", directory = "/c"),
+                ),
+            )
+        }
+
+        switcher.switchTo("B")
+        val bReq = slices.chat.value.pendingScrollRequest?.requestId
+        switcher.switchTo("C")
+        val cReq = slices.chat.value.pendingScrollRequest
+        assertNotNull(bReq)
+        assertNotNull(cReq)
+        assertTrue("C's intent is newer than B's", cReq!!.requestId != bReq)
+
+        // B's stale consumer fires its clear (B's requestId).
+        store.dispatch(cn.vectory.ocdroid.ui.AppAction.ScrollConsumed(bReq!!))
+        assertEquals(
+            "stale clear MUST NOT wipe C's newer intent",
+            cReq,
+            slices.chat.value.pendingScrollRequest,
+        )
+
+        // C's matching consumer fires — clears correctly.
+        store.dispatch(cn.vectory.ocdroid.ui.AppAction.ScrollConsumed(cReq.requestId))
+        assertNull(slices.chat.value.pendingScrollRequest)
+    }
+
+    @Test
+    fun `Wave5b-Q13 blocker-1 - switchTo commits currentSessionId and pendingScrollRequest atomically`() {
+        // §Wave5b-Q13 blocker-1 (gpter 8.7 FAIL / groker 9.6 PASS): the
+        // pre-fix code dispatched ScrollRequested (one commit) THEN
+        // mutateChat (a second commit). The intermediate state —
+        // pendingScrollRequest set with targetSessionId = NEW but
+        // currentSessionId still = OLD — was observable to stateFlow
+        // collectors, violating the oracle's "在同一次 chat mutation 里原子
+        // 提交" contract. This test collects the aggregate stateFlow
+        // emission stream DURING a switchTo call and asserts NO intermediate
+        // emission has the slot set against a stale currentSessionId.
+        seed {
+            it.copy(
+                currentSessionId = "session-A",
+                sessions = listOf(
+                    Session(id = "session-A", directory = "/tmp/a"),
+                    Session(id = "session-B", directory = "/tmp/b"),
+                ),
+            )
+        }
+
+        val seen = mutableListOf<cn.vectory.ocdroid.ui.StoreState>()
+        val job = scope.launch {
+            store.stateFlow.collect { seen += it }
+        }
+        // Pump the collector's initial subscription.
+        scope.advanceUntilIdle()
+
+        switcher.switchTo("session-B")
+
+        scope.advanceUntilIdle()
+        job.cancel()
+
+        // Assert NO torn intermediate exists in the whole emission stream:
+        // every emission that has a pendingScrollRequest MUST have a
+        // currentSessionId that matches pendingScrollRequest.targetSessionId.
+        // (If the pre-fix two-commit bug were still here, there would be an
+        // emission where pendingScrollRequest.targetSessionId = "session-B"
+        // but currentSessionId = "session-A".)
+        seen.forEach { s ->
+            val req = s.chat.pendingScrollRequest
+            if (req != null) {
+                assertEquals(
+                    "atomicity violated: pendingScrollRequest set but currentSessionId is stale " +
+                        "(targetSessionId=${req.targetSessionId}, currentSessionId=${s.chat.currentSessionId})",
+                    req.targetSessionId,
+                    s.chat.currentSessionId,
+                )
+            }
+        }
+
+        // Final-state sanity: both fields aligned on the new session.
+        val final = slices.chat.value
+        assertEquals("session-B", final.currentSessionId)
+        assertEquals("session-B", final.pendingScrollRequest?.targetSessionId)
     }
 }

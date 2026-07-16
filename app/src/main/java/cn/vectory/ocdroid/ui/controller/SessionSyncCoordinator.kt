@@ -1206,6 +1206,15 @@ class SessionSyncCoordinator(
             // noise; explicit no-op cases are semantically correct).
             "file.watcher.updated", "file.edited" -> {
             }
+            "command.executed" -> {
+                // §command-executed-noop: slash command 执行完成的元事件
+                // (opencode-src packages/schema/src/v1/legacy-event.ts)。
+                // payload {name, sessionID, arguments, messageID}。命令的实际输出（文本/工具/推理）
+                // 由该 messageID 的 message.updated / message.part.* 通路独立投递，此处无需再派发。
+                // 服务端唯一消费者是 project.ts(name==="init" 时标记 project 已初始化，写服务端 DB，
+                // 与 app 无关)；web/TUI 亦不消费。显式识别以消除 unrecognized-event 告警——与
+                // sync / session.idle / file.* 同策略。
+            }
             else -> {
                 // §R18 Phase 3 Wave 1 (P0-7): surface unrecognized SSE event
                 // types instead of silently dropping them. NOISY_SSE_LOG_EVENTS
@@ -1429,16 +1438,33 @@ class SessionSyncCoordinator(
 /**
  * session.created → upsert the parsed [Session] into [SessionListState.sessions].
  * Pure; effects empty (the dispatcher handles parse-failure via ReportNonFatal).
+ *
+ * §Q4-strict-sync: also removes [session].id from [SessionListState.pendingCreateIds]
+ * — the server just confirmed the session exists, so it is no longer "pending".
+ * This is the SSE-side confirmation path; the REST refresh (launchLoadSessions)
+ * does the same removal idempotently. Idempotent with the 30 s sweep (which is
+ * a fallback for ids that never get confirmed).
  */
 internal fun SessionListState.applySessionCreated(session: Session): Pair<SessionListState, List<SseSideEffect>> =
-    upsertAndInvalidateTree(session) to emptyList()
+    upsertAndInvalidateTree(session).copy(
+        pendingCreateIds = pendingCreateIds - session.id,
+        pendingCreatedAt = pendingCreatedAt - session.id,
+    ) to emptyList()
 
 /**
  * session.updated (non-archived) → upsert the parsed [Session] into
  * [SessionListState.sessions]. Pure; effects empty.
+ *
+ * §Q4-strict-sync: also removes [updated].id from [SessionListState.pendingCreateIds]
+ * — a session.updated event proves the server knows about this session, so it
+ * is no longer "pending" (even if session.created was missed). Idempotent with
+ * applySessionCreated and the REST sweep.
  */
 internal fun SessionListState.applySessionUpsert(updated: Session): Pair<SessionListState, List<SseSideEffect>> =
-    upsertAndInvalidateTree(updated) to emptyList()
+    upsertAndInvalidateTree(updated).copy(
+        pendingCreateIds = pendingCreateIds - updated.id,
+        pendingCreatedAt = pendingCreatedAt - updated.id,
+    ) to emptyList()
 
 private fun SessionListState.upsertAndInvalidateTree(session: Session): SessionListState {
     val updatedSessions = upsertSession(sessions, session)
@@ -1509,20 +1535,76 @@ internal fun SessionListState.applyArchiveEviction(
  * one: drop currentSessionId + messages + partsByMessage so the chat view
  * falls back to the empty state. Pure; effects empty.
  *
- * FIX-B (review-blocker, groker B3): also clears [pendingJumpToLatest] (added
- * by WT2). The clearSessionData path already clears it, but this archive-clear
- * path was missed → a one-shot "jump to latest" intent could stick if the
- * session was archived between the intent being set and consumed. Now the
- * intent is wiped atomically with the rest of the chat clear (one committed
- * state, no torn "session archived but jump intent still references it").
+ * FIX-B (review-blocker, groker B3): also clears the unified scroll slot +
+ * parent-return backstack (added by WT2 / §Wave5b-Q13). The clearSessionData
+ * path already clears them, but this archive-clear path was missed → a
+ * pending scroll intent / checkpoint could stick if the session was archived
+ * between the intent being set and consumed. Now the slot + backstack are
+ * wiped atomically with the rest of the chat clear (one committed state, no
+ * torn "session archived but scroll intent still references it").
  */
 internal fun ChatState.applyArchivedChatClear(): Pair<ChatState, List<SseSideEffect>> = copy(
     currentSessionId = null,
     messages = emptyList(),
     partsByMessage = emptyMap(),
-    // FIX-B: clear the jump intent so it does not survive the archive.
-    pendingJumpToLatest = null,
+    // FIX-B / §Wave5b-Q13: clear the unified scroll slot + parent-return
+    // backstack — a pending scroll / checkpoint for an archived session is
+    // meaningless.
+    pendingScrollRequest = null,
+    parentReturnCheckpoints = emptyMap(),
 ) to emptyList()
+
+/**
+ * §Wave5b-Q13 blocker-2 fix (gpter 8.7 FAIL / groker 9.6 PASS): UNCONDITIONAL
+ * scroll-state cleanup for an archived subtree. Used by the THREE archive
+ * paths ([AppAction.SessionArchived] reducer, [AppAction.BulkSessionsRefreshed]
+ * reducer, [launchSetSessionArchived] onSuccess) so a non-current archived
+ * session/child can no longer leave stale scroll state behind.
+ *
+ * Cleans (preserving all chat CONTENT — messages/parts/streaming/etc. — which
+ * remains current-only-cleared by [applyArchivedChatClear]):
+ *  - [ChatState.pendingScrollRequest] → null IFF its targetSessionId is in
+ *    [subtree] (a pending Latest/Restore for an archived session will never
+ *    fire correctly; the consumer would skip it on the next switch anyway,
+ *    but leaving it risks a stale fire if the user re-opens the same id
+ *    later via a fresh create).
+ *  - [ChatState.parentReturnCheckpoints] → filter out every entry whose key
+ *    (childId) is in [subtree]. A returnToParent from an archived child is
+ *    unreachable (the user cannot navigate to an archived session), but the
+ *    stale entry would otherwise leak indefinitely in the map.
+ *
+ * Pure; effects empty. Callers MUST already have computed [subtree] via
+ * [subtreeIds] (the SAME three-source union used for unread/questions
+ * cleanup) — no second subtree walk here.
+ *
+ * Idempotent: safe to call when the slot is already null / the map already
+ * has no entries in [subtree] (the operations are no-ops in that case).
+ * Safe to compose with [applyArchivedChatClear] for the current-archived
+ * case: applyArchivedChatClear wipes BOTH fields unconditionally, so a
+ * subsequent call to this helper is a no-op.
+ */
+internal fun ChatState.cleanScrollStateForSubtree(
+    subtree: Set<String>,
+): ChatState {
+    if (subtree.isEmpty()) return this
+    val cleanSlot = pendingScrollRequest
+        ?.takeUnless { it.targetSessionId in subtree }
+    val cleanCheckpoints = if (parentReturnCheckpoints.isEmpty()) {
+        parentReturnCheckpoints
+    } else {
+        parentReturnCheckpoints.filterKeys { it !in subtree }
+    }
+    // Skip the .copy() allocation entirely if neither field would change
+    // (hot path: archive of an unrelated subtree on a chat with no scroll
+    // state — common during bulk refreshes).
+    if (cleanSlot === pendingScrollRequest && cleanCheckpoints === parentReturnCheckpoints) {
+        return this
+    }
+    return copy(
+        pendingScrollRequest = cleanSlot,
+        parentReturnCheckpoints = cleanCheckpoints,
+    )
+}
 
 /**
  * session.status → upsert the [sessionId] → [status] pair into

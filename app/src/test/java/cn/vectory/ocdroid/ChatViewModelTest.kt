@@ -268,7 +268,12 @@ class ChatViewModelTest : MainViewModelTestBase() {
             time = cn.vectory.ocdroid.data.model.Session.TimeInfo(updated = 2_000)
         )
         coEvery { repository.sendMessage(any(), any(), any(), any()) } returns Result.success(Unit)
-        coEvery { repository.getSessions(10) } returns Result.success(listOf(previousTop, current))
+        // §Q4-strict-sync semantic 2: override the base mock (getSessions(any())
+        // → emptyList) so launchLoadSessions' getSessions(500) returns the
+        // STALE server snapshot. The merge's per-id fresher-wins pass must
+        // preserve the locally-bumped session-1 (time.updated ~now > server's
+        // 1000) so it stays at the top after buildSessionTree's time-desc sort.
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(previousTop, current))
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)

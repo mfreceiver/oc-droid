@@ -37,6 +37,7 @@ class UnreadSoakController @Inject constructor(
     private var nextRequestId = 0L
     private var retryNotBeforeMs = 0L
     private var unknownRefreshNotBeforeMs = 0L
+    private var nextActiveRefreshAtMs = 0L
 
     init {
         if (autoStart) appLifecycleMonitor.isInForeground
@@ -96,6 +97,12 @@ class UnreadSoakController @Inject constructor(
             maybeStartRefresh(currentCandidates, now, hostId)
         } else if (gate == null) {
             maybeStartRefresh(currentCandidates, now, hostId)
+        }
+        // /api/session/active has no SSE. Poll it through the same guarded
+        // status-refresh lane often enough to cover the 10s unread soak.
+        if (pendingRefresh == null && now >= nextActiveRefreshAtMs) {
+            nextActiveRefreshAtMs = now + ACTIVE_REFRESH_INTERVAL_MS
+            maybeStartRefresh(currentCandidates, now, hostId, allowEmpty = true)
         }
         if (unknown && pendingRefresh == null && now >= unknownRefreshNotBeforeMs) {
             unknownRefreshNotBeforeMs = now + UNKNOWN_REFRESH_COOLDOWN_MS
@@ -157,6 +164,7 @@ class UnreadSoakController @Inject constructor(
         const val STATUS_REFRESH_TIMEOUT_MS = 15_000L
         const val RETRY_BACKOFF_MS = 30_000L
         const val UNKNOWN_REFRESH_COOLDOWN_MS = 30_000L
+        const val ACTIVE_REFRESH_INTERVAL_MS = 4_000L
     }
 }
 
@@ -204,7 +212,8 @@ internal fun cn.vectory.ocdroid.ui.StoreState.evaluateAndApplyUnread(
     now: Long,
 ): Pair<cn.vectory.ocdroid.ui.UnreadState, UnreadSoakResult> {
     val sl = sessionList
-    val result = evaluateUnread(sl.sessions, sl.sessionStatuses, sl.childSessions, sl.directorySessions,
+    val result = evaluateUnread(sl.sessions, sl.sessionStatuses, sl.activeSessionIds,
+        sl.childSessions, sl.directorySessions,
         chat.currentSessionId, unread.lastViewedTime, unread.idleSince, now, completeRootIds = sl.completeRootIds)
     var next = unread.copy(idleSince = result.newIdleSince)
     val sessionMap = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)

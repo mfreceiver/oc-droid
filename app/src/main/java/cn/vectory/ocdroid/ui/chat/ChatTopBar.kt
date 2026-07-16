@@ -134,6 +134,21 @@ internal data class ChatTopBarState(
 internal data class ChatTopBarActions(
     val onSelectSession: (String) -> Unit,
     val onCloseSession: (String) -> Unit = {},
+    /**
+     * §Wave5b-Q13: dedicated callback for the子→父 breadcrumb tap. The
+     * breadcrumb MUST NOT reuse [onSelectSession] — that always dispatches a
+     * `Latest` scroll intent (the default selectSession path), which would
+     * clobber the parent's Restore checkpoint captured at openSubAgent time.
+     * This callback routes through
+     * [cn.vectory.ocdroid.ui.SessionViewModel.returnToParent] which reads
+     * [cn.vectory.ocdroid.ui.ChatState.parentReturnCheckpoints] and dispatches
+     * `Restore(checkpoint)` to land the parent at its prior viewport.
+     *
+     * If no checkpoint is on file (cold-started into child, host purge
+     * cleared the map), returnToParent falls back to Latest — so the
+     * breadcrumb still navigates back, just at the newest position.
+     */
+    val onNavigateParent: () -> Unit = {},
     val onSelectAgent: (String?) -> Unit = {},
     val onNavigateToSettings: () -> Unit = {},
     val onSelectHost: (String) -> Unit = {},
@@ -302,7 +317,17 @@ internal fun ChatTopBar(
                             modifier = Modifier
                                 .weight(1f, fill = false)
                                 .clickable {
-                                    state.parentSessionId?.let(actions.onSelectSession)
+                                    // §Wave5b-Q13: route through the DEDICATED
+                                    // onNavigateParent callback, NOT
+                                    // onSelectSession. The latter always lands
+                                    // Latest (clobbering the parent's Restore
+                                    // checkpoint captured at openSubAgent);
+                                    // onNavigateParent routes through
+                                    // SessionViewModel.returnToParent which
+                                    // dispatches Restore(checkpoint) so the
+                                    // parent re-opens at the user's prior
+                                    // viewport.
+                                    actions.onNavigateParent()
                                 }
                         )
                         Text(
@@ -381,19 +406,25 @@ internal fun ChatTopBar(
             }
         },
         actions = {
-            // §new2 (2026-07-13): when there is no currentSession (and no
-            // parent / draft — same condition as the title branch above),
-            // hide the ContextUsageRing trigger + its overflow menu. The
-            // cluster is session-scoped (context usage / todos / agent /
-            // model are all per-session); rendering it without a session
-            // surfaces stale data and a non-functional menu. The slot stays
-            // empty — no placeholder — so the title can take the full width.
-            if (currentSession != null) {
+            // §new2 (2026-07-13): hide the ContextUsageRing trigger + its
+            // overflow menu only when there is NEITHER a currentSession NOR
+            // a draft (no parent either — same condition as the title branch
+            // above). The cluster is session-scoped (context usage / todos /
+            // agent / model), BUT §Q1 (2026-07-16): in DRAFT mode (no session
+            // yet, but composer.draftWorkdir != null) the Agent / Model
+            // pickers + force-refresh are still meaningful — pendingAgent /
+            // pendingModel are session-independent chat-slice transients and
+            // effectiveAgent / effectiveModel resolve correctly without a
+            // session (pickers hoisted in ChatScaffold). So show the cluster
+            // whenever a session OR a draft is active. The slot stays empty
+            // — no placeholder — so the title can take the full width.
+            if (currentSession != null || state.draftWorkdir != null) {
                 ContextMenuCluster(
                     usage = state.contextUsage,
                     todos = state.sessionTodos,
                     currentAgentName = state.currentAgentName,
                     currentModelName = currentModelName,
+                    enableSessionScopedItems = currentSession != null,
                     expanded = overflowExpanded,
                     onToggleExpand = { overflowExpanded = !overflowExpanded },
                     onDismiss = { overflowExpanded = false },
@@ -457,6 +488,18 @@ private fun ContextMenuCluster(
     todos: List<TodoItem>,
     currentAgentName: String?,
     currentModelName: String,
+    /**
+     * §Q1 (2026-07-16): when false (draft / new-session mode — no current
+     * session yet), the session-scoped items (Context / Todo / Force Refresh)
+     * render DISABLED (greyed, non-clickable) because they have no session to
+     * act on — and Force Refresh would otherwise fire a global cache-clear +
+     * cold-start reconnect with no sid (a meaningless global side effect).
+     * Agent / Model stay enabled regardless: they edit session-independent
+     * chat-slice transients (pendingAgent / pendingModel) and are exactly the
+     * controls Q1 restores for the new-session flow. Computed by the caller
+     * (`currentSession != null`) so no UI judgment is hard-coded here.
+     */
+    enableSessionScopedItems: Boolean,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onDismiss: () -> Unit,
@@ -515,6 +558,7 @@ private fun ContextMenuCluster(
                         modifier = Modifier.size(Dimens.iconSm),
                     )
                 },
+                enabled = enableSessionScopedItems,
                 onClick = onOpenContext,
             )
             // 2. Todo — "{completed}/{total}", always shown (including 0/0).
@@ -531,6 +575,7 @@ private fun ContextMenuCluster(
                         modifier = Modifier.size(Dimens.iconSm),
                     )
                 },
+                enabled = enableSessionScopedItems,
                 onClick = onOpenTodo,
             )
             // 3. Agent — selected agent name (or "Default").
@@ -579,6 +624,7 @@ private fun ContextMenuCluster(
                         modifier = Modifier.size(Dimens.iconSm),
                     )
                 },
+                enabled = enableSessionScopedItems,
                 onClick = onForceRefresh,
             )
         }

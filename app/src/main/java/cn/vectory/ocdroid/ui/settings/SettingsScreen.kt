@@ -29,7 +29,6 @@ import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Palette
-import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -92,7 +91,6 @@ import kotlinx.coroutines.flow.map
  *  - [NavRoute.settingsAppearanceRoute]  → [SettingsAppearanceRoute]
  *  - [NavRoute.settingsModelsRoute]      → [SettingsModelsRoute]
  *  - [NavRoute.settingsNotificationsRoute] → [SettingsNotificationsRoute]
- *  - [NavRoute.settingsStorageRoute]     → [SettingsStorageRoute]
  *  - [NavRoute.settingsAboutRoute]       → [SettingsAboutRoute]
  *
  * §phase3 red line: the Appearance sub-route REUSES the existing M3
@@ -172,7 +170,6 @@ private fun settingsSections(): List<SettingsSectionEntry> = listOf(
     SettingsSectionEntry(NavRoute.settingsHostsRoute, R.string.setux_settings_hosts_entry, R.string.settings_section_hosts_subtitle, Icons.Default.Dns),
     SettingsSectionEntry(NavRoute.settingsAppearanceRoute, R.string.settings_section_appearance, R.string.settings_section_appearance_subtitle, Icons.Default.Palette),
     SettingsSectionEntry(NavRoute.settingsNotificationsRoute, R.string.settings_section_notifications, R.string.settings_section_notifications_subtitle, Icons.Default.Notifications),
-    SettingsSectionEntry(NavRoute.settingsStorageRoute, R.string.settings_section_storage, R.string.settings_section_storage_subtitle, Icons.Default.Storage),
     SettingsSectionEntry(NavRoute.settingsAboutRoute, R.string.settings_section_about, R.string.settings_section_about_subtitle, Icons.Default.Info),
 )
 
@@ -485,57 +482,6 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
                     }
                 }
             }
-        }
-    }
-}
-
-/**
- * settings/storage — wraps [DangerZoneSection] (清除数据). The previous
- * modal-popup chrome (Dialog + Surface wrapper around the cache-management
- * tree) was collapsed back to an inline section in an earlier release; the
- * cache-management tree itself (group → workdir → session + destructive
- * sweeps) was removed together with the SQLite persistence layer
- * (remove-message-persistence Task 5), so this route now only carries the
- * full local-data wipe.
- *
- * §P5b-A / Q7: [TrafficSection] moved from here to 服务器管理
- * ([HostProfilesManagerScreen]) — traffic is conceptually per-server, so it
- * lives with the host list now.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun SettingsStorageRoute(
-    viewModel: HostViewModel,
-    @Suppress("UNUSED_PARAMETER") connectionVM: ConnectionViewModel,
-    @Suppress("UNUSED_PARAMETER") settingsVM: SettingsViewModel,
-    onBack: () -> Unit,
-) {
-    // §P5b-A / Q7: `connectionVM` is kept in the signature so the AppShell
-    // call site is unchanged (traffic stats moved to 服务器管理).
-    // remove-message-persistence Task 5: `settingsVM` is retained in the
-    // signature for the same call-site stability reason — the cache-management
-    // tree it used to feed was removed with the SQLite persistence layer.
-
-    SettingsSubRouteScaffold(
-        titleRes = R.string.settings_section_storage,
-        onBack = onBack,
-    ) { mod ->
-        // §review-AB: no parent horizontal padding — AppSectionHeader self-pads
-        // at 16dp; DangerZoneSection's bare Row self-pads via
-        // `Modifier.padding(horizontal = Dimens.spacing4)` so all content
-        // shares one 16dp keyline with the header.
-        Column(
-            modifier = mod.verticalScroll(rememberScrollState()),
-        ) {
-            // ① 清除数据 (first, flat). The cache-management tree (group →
-            // workdir → session + destructive sweeps) was removed together
-            // with the SQLite persistence layer (remove-message-persistence
-            // Task 5); this section now only carries the full local-data wipe.
-            AppSectionHeader(text = stringResource(R.string.settings_danger_zone))
-            DangerZoneSection(
-                onClearLocalData = viewModel::resetLocalDataAndResync,
-                hideHeader = true,
-            )
         }
     }
 }

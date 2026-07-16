@@ -57,6 +57,7 @@ import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES
+import cn.vectory.ocdroid.ui.ScrollBehavior
 import cn.vectory.ocdroid.ui.currentSessionStatus
 import cn.vectory.ocdroid.ui.filterBeforeRevert
 import cn.vectory.ocdroid.ui.injectMetadataMarkers
@@ -106,7 +107,7 @@ internal fun ChatMessageList(
     // The ACTUAL scroll-preservation guarantees today are carried by
     // `rememberSaveable(sessionId, LazyListState.Saver)` + saveable
     // followBottom below, which reliably preserve scroll for:
-    //   (a) Sessions-page entry → pendingJumpToLatest forces a jump-to-latest
+    //   (a) Sessions-page entry → pendingScrollRequest forces a jump-to-latest
     //       (NOT a restore — see the LaunchedEffect below).
     //   (b) HorizontalPager swipe + SessionTabStrip tap for ROOT sessions in
     //       the pager page set (stable pager `key = session.id` keeps each
@@ -227,7 +228,10 @@ internal fun ChatMessageList(
     val repository: OpenCodeRepository = chatVM.repository
     val workspaceDirectory: String? = currentSession?.directory
     val onLoadMore: () -> Unit = chatVM::loadMoreMessages
-    val onOpenSubAgent: (String) -> Unit = sessionVM::openSubAgent
+    // §Wave5b-Q13: onOpenSubAgent is declared AFTER [listState] below — it
+    // captures listState synchronously to build the parent's ScrollCheckpoint
+    // at click time. The forward-reference is illegal in Kotlin, so the val
+    // moved (see declaration ~30 lines down).
     val onToggleExpand: (String, Boolean) -> Unit = composerVM::togglePartExpand
 
     // §stale-question: compute the set of part ids that are stuck "running"
@@ -270,6 +274,27 @@ internal fun ChatMessageList(
     // WRITE-ONLY today (its restore consumer was removed); it is retained
     // for a future cross-session restore and does not affect this line.
     val listState = rememberSaveable(sessionId, saver = LazyListState.Saver) { LazyListState() }
+    // §Wave5b-Q13: capture the PARENT's scroll checkpoint SYNCHRONOUSLY at the
+    // click site, before delegating to sessionVM.openSubAgent. The checkpoint
+    // is built from the LIVE listState (first visible item's key + index +
+    // offset) so the parent's exact viewport is recoverable when the user
+    // later returns via returnToParent. Oracle explicitly forbade reading
+    // from the async savedPositions mirror — it cannot guarantee the last
+    // pre-navigation frame.
+    //
+    // The lambda is allocated per-composition; `listState` is a stable
+    // rememberSaveable reference so the capture always reads CURRENT values
+    // at click time. No `remember` wrapper: every recomposition would rebuild
+    // it anyway (Compose-friendly allocation; no effect-key churn).
+    val onOpenSubAgent: (String) -> Unit = { childSessionId ->
+        val firstVisibleKey = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key?.toString()
+        val checkpoint = cn.vectory.ocdroid.ui.ScrollCheckpoint(
+            anchorKey = firstVisibleKey,
+            fallbackIndex = listState.firstVisibleItemIndex,
+            offset = listState.firstVisibleItemScrollOffset,
+        )
+        sessionVM.openSubAgent(childSessionId, checkpoint)
+    }
     // §B1: followBottom is per-session saveable so it survives Chat→preview→back.
     // A REAL sessionId change re-runs the initializer (default true); a re-entry
     // with the SAME sessionId (e.g. returning from a file preview) restores the
@@ -300,7 +325,7 @@ internal fun ChatMessageList(
     // consumer gone, the ACTUAL scroll-preservation guarantees are carried
     // by the saveable LazyListState + saveable followBottom above. Those
     // reliably preserve scroll for: (a) Sessions-page entry → forced jump
-    // to latest via pendingJumpToLatest (NOT a restore); (b) HorizontalPager
+    // to latest via pendingScrollRequest (NOT a restore); (b) HorizontalPager
     // swipe + SessionTabStrip tap for ROOT sessions in the pager page set
     // (stable `key = session.id` keeps each page's saveable slot alive);
     // (c) Chat→file-preview→back re-entry with the SAME sessionId. They do
@@ -525,47 +550,10 @@ internal fun ChatMessageList(
         navJumping = false
     }
 
-    // §WT2-taskB (Q6 locked): Sessions-page entry → jump to latest. When the
-    // user taps a session in the Sessions list, SessionsScreen sets
-    // chatState.pendingJumpToLatest = sessionId BEFORE selectSession (and
-    // SessionSwitcher.switchTo keeps the intent only when the incoming id
-    // matches). This composable consumes that intent exactly once: after the
-    // session's messages are loaded, it OVERRIDES the saveable
-    // LazyListState.Saver restore (which would have replayed the last
-    // viewport) by jumping to item 0 (reverseLayout ⇒ index 0 is the newest /
-    // visual bottom), arms followBottom so subsequent streaming sticks to the
-    // bottom, hides the NavFab (already at bottom → no target), then CLEARS
-    // the intent via chatVM so it does not fire again on a recompose / preview
-    // return for the same session.
-    //
-    // Why `messages.isEmpty()` is a key: it flips true→false exactly once per
-    // session load. The effect re-launches at that flip (the "messages just
-    // landed" moment) and performs the jump. Subsequent message arrivals
-    // (streaming deltas / new turns) leave isEmpty() at false → no re-launch.
-    // The other keys (sessionId, pendingJumpToLatest) cover the "intent set"
-    // and "session changed" restarts. The horizontal-swipe path + tab-strip
-    // tap (for ROOT sessions in the pager page set) + SessionPickerSheet +
-    // Chat reselect do NOT set pendingJumpToLatest → this effect returns
-    // early. Of those, ONLY the pager swipe / tab-strip tap for root sessions
-    // reliably preserves scroll (stable pager `key = session.id` keeps each
-    // page's saveable LazyListState alive — §review-D / gpter #3). Chat
-    // reselect scrolls to latest via its own orchestrator effect below.
-    // SessionPickerSheet selecting a non-paged session, root↔sub-agent
-    // switches, and post-fork re-entry fall back to the saveable initializer
-    // (no cross-session restore consumer exists yet — savedPositions /
-    // accessOrder are WRITE-ONLY).
-    val pendingJumpToLatest = chatState.pendingJumpToLatest
-    LaunchedEffect(sessionId, pendingJumpToLatest, messages.isEmpty()) {
-        if (sessionId == null || pendingJumpToLatest == null) return@LaunchedEffect
-        if (sessionId != pendingJumpToLatest) return@LaunchedEffect
-        if (messages.isEmpty()) return@LaunchedEffect  // wait for the load
-        // Override saveable scroll restore: jump to newest (reverseLayout ⇒ 0).
-        listState.scrollToItem(0)
-        followBottom = true
-        navFabVisible = false
-        // Clear the intent so it fires exactly once per Sessions-page entry.
-        chatVM.clearPendingJumpToLatest()
-    }
+    // §Wave5b-Q13: the unified scroll consumer is declared AFTER
+    // [renderBlocks] below — it needs [lazyColumnKeys] which derives from
+    // renderBlocks. See the LaunchedEffect keyed on
+    // `pendingScrollRequest?.requestId` further down.
 
     // §0.8.2 P2.6: Chat reselect → scroll to latest. The bottom nav's Chat
     // tab emits NavRoute.Chat on `orchestratorVM.reselectFlow` when the user
@@ -598,6 +586,25 @@ internal fun ChatMessageList(
     // bottom-anchored; requesting another scroll for every height change is both
     // unnecessary and the source of the previous flicker.
     LaunchedEffect(sessionId, messages.size, isStreaming, streamingPartTexts.keys, streamingReasoningPart?.id) {
+        // §Wave5b-Q13: skip auto-follow while a Restore is pending or in
+        // flight — otherwise the programmatic scroll to the restored history
+        // position would be immediately yanked back to the bottom by this
+        // effect's animateScrollToItem(0). Two guards:
+        //   (1) restore-in-flight (pendingRestoreSession == sessionId) — set
+        //       synchronously by the Restore consumer while it scrolls.
+        //   (2) restore-pending — a Restore PendingScrollRequest targeting
+        //       this session that has not yet been consumed (waiting for the
+        //       message load). The content-version effect would otherwise
+        //       fire FIRST (it has fewer keys) and snap to bottom before the
+        //       Restore consumer even runs. Read inline from chatState (the
+        //       val pendingScrollRequest is declared later in the body —
+        //       inline read avoids a forward reference).
+        val liveReq = chatState.pendingScrollRequest
+        val restoreInFlight = pendingRestoreSession == sessionId
+        val restorePending = liveReq != null &&
+            liveReq.targetSessionId == sessionId &&
+            liveReq.behavior is ScrollBehavior.Restore
+        if (restoreInFlight || restorePending) return@LaunchedEffect
         val streamingReasoningExpanded = streamingReasoningPart?.let { sr ->
             val key = sr.messageId?.let { "$it|${sr.id}" } ?: "streaming|${sr.id}"
             expandedParts[key] == true
@@ -639,17 +646,21 @@ internal fun ChatMessageList(
     val reversedMessages = remember(messages, partsByMessage, streamingPartTexts, streamingReasoningPart, sessionIsRunning) {
         messages.reversed().filterNot { msg ->
             val msgParts = partsByMessage[msg.id].orEmpty()
-            // §streaming-flicker-diagnosis §3.1 confirm experiment: when the
-            // debug gate is on, ALSO treat a session-running message that
-            // carries a text Part as streaming — this covers the placeholder
-            // window (text=null Part in partsByMessage but partId not yet in
-            // streamingPartTexts). If flicker vanishes with this on, Top1 is
-            // confirmed. sessionIsRunning + isText are both in scope here.
-            // Disabled (no-op) when STREAMING_FLICKER_DEBUG=false.
+            // §streaming-flicker-diagnosis §3.1 (locked, always-on): a
+            // session-running non-user message is treated as streaming
+            // whenever it has no parts yet OR carries a text/reasoning Part.
+            // This covers the placeholder window (text=null Part already in
+            // partsByMessage but partId not yet in streamingPartTexts) so the
+            // assistant message is never filterNot-ed out for one Compose
+            // snapshot — the Top1 blank-frame root cause of the ~1Hz flicker.
+            // Reasoning parts are swept in as well because they mutate through
+            // the same two-phase pattern. Previously gated by
+            // STREAMING_FLICKER_DEBUG; now unconditional — that gate survives
+            // only for the diagnostic log/counter block below.
             val isStreamingMsg = msgParts.any { it.id in streamingPartTexts } ||
                 streamingReasoningPart?.messageId == msg.id ||
-                (!msg.isUser && msgParts.isEmpty() && sessionIsRunning) ||
-                (STREAMING_FLICKER_DEBUG && sessionIsRunning && msgParts.any { it.isText })
+                (!msg.isUser && sessionIsRunning &&
+                    (msgParts.isEmpty() || msgParts.any { it.isText || it.isReasoning }))
             // §empty-msg / §error-feedback: same filter as the legacy
             // reversedMessages (kept verbatim so rendering is byte-identical
             // for the non-gap path).
@@ -695,6 +706,102 @@ internal fun ChatMessageList(
             streamingReasoningPartId = streamingReasoningPart?.id,
             sessionIsRunning = sessionIsRunning
         ).asReversed()
+    }
+
+    // §Wave5b-Q13: the FULL key list of the LazyColumn body, in declaration
+    // order. Used by the Restore consumer below to resolve an anchor key →
+    // LazyColumn index. Mirrors the body's branches exactly (any reordering
+    // of items() above MUST be mirrored here or Restore's index resolution
+    // will drift). Keys: "streaming-reasoning" → "session-diff" →
+    // renderBlocks[*].id → "load-more".
+    val lazyColumnKeys: List<String> = remember(
+        renderBlocks,
+        streamingReasoningPart,
+        sessionDiff,
+        messages,
+        hasMoreMessages,
+        olderMessagesCursor,
+    ) {
+        lazyColumnKeyList(
+            streamingReasoningPart = streamingReasoningPart,
+            sessionDiff = sessionDiff,
+            renderBlocks = renderBlocks,
+            messages = messages,
+            hasMoreMessages = hasMoreMessages,
+            olderMessagesCursor = olderMessagesCursor,
+        )
+    }
+
+    // §Wave5b-Q13: unified scroll consumer. Observes
+    // [ChatState.pendingScrollRequest]; when its targetSessionId matches the
+    // active sessionId, fires exactly once:
+    //  - **Latest** → scrollToItem(0) (reverseLayout ⇒ 0 = newest) +
+    //    followBottom=true + hide NavFab.
+    //  - **Restore(checkpoint)** → resolve the anchor against
+    //    [lazyColumnKeys] (or clamp the fallback index), scrollToItem(idx,
+    //    offset), set followBottom based on whether the resolved position is
+    //    at the bottom.
+    // After completion → dispatch [chatVM.consumeScrollRequest] for compare-
+    // and-clear by requestId (a stale consumer's clear is a no-op against a
+    // newer id).
+    //
+    // `messages.isEmpty()` key: waits for the session's first message load
+    // before firing (otherwise scrollToItem(0) on an empty list is a no-op
+    // AND the consumer would clear the intent prematurely). For an EMPTY new
+    // session (legitimately no messages), the consumer never fires — that is
+    // correct (no scroll to perform).
+    //
+    // **Same-session reselect contract**: switchTo is a no-op when
+    // currentSessionId == incoming id, so no NEW PendingScrollRequest is
+    // generated for a same-session tap. The pre-existing slot (if any) is
+    // preserved; if it was already consumed, it stays cleared. This is the
+    // oracle's "同 session 普通 select = no-op (不 reload、不产生新 intent)".
+    val pendingScrollRequest = chatState.pendingScrollRequest
+    LaunchedEffect(sessionId, pendingScrollRequest?.requestId, messages.isEmpty()) {
+        val req = pendingScrollRequest ?: return@LaunchedEffect
+        if (sessionId == null) return@LaunchedEffect
+        if (req.targetSessionId != sessionId) return@LaunchedEffect
+        if (messages.isEmpty()) return@LaunchedEffect  // wait for the load
+        when (val b = req.behavior) {
+            is ScrollBehavior.Latest -> {
+                // Override saveable scroll restore: jump to newest (reverseLayout ⇒ 0).
+                listState.scrollToItem(0)
+                followBottom = true
+                navFabVisible = false
+            }
+            is ScrollBehavior.Restore -> {
+                val cp = b.checkpoint
+                // Restore-in-flight guard: skip the savedPositions mirror +
+                // direction detector + content-version auto-follow while we
+                // programmatic-scroll to the restored position.
+                pendingRestoreSession = sessionId
+                followBottom = false
+                val keys = lazyColumnKeys
+                val itemCount = keys.size
+                if (itemCount > 0) {
+                    // itemCount > 0 ⇒ resolveRestoreIndex returns non-null
+                    // (the null branch only fires when keys is empty).
+                    val resolved = resolveRestoreIndex(
+                        checkpoint = cp,
+                        currentKeys = keys,
+                    )
+                    if (resolved != null) {
+                        listState.scrollToItem(resolved.index, resolved.offset)
+                        // If the restored position happens to land at the visual
+                        // bottom (reverseLayout index 0 + small offset), arm
+                        // followBottom so subsequent streaming sticks; otherwise
+                        // stay disarmed (user is reading history).
+                        if (resolved.index == 0 && resolved.offset <= 24) {
+                            followBottom = true
+                        }
+                    }
+                }
+                pendingRestoreSession = null
+            }
+        }
+        // Compare-and-clear by requestId (a newer request supersedes this
+        // one → clear is a no-op; this consumer's intent survives).
+        chatVM.consumeScrollRequest(req.requestId)
     }
 
     // §Phase8-nav: Box 包裹 LazyColumn + 导航 FAB overlay（右侧中下）。
@@ -1175,6 +1282,72 @@ private fun InFlightEmptyLoading(modifier: Modifier = Modifier) {
  * + LRU are retained so the future restore consumer lands on a bounded cache.
  */
 private const val MAX_SAVED_SESSIONS = 30
+
+// ── §Wave5b-Q13: pure helpers for the Restore consumer (lifted out of the
+//     @Composable body so they are JVM-testable without Robolectric). ──────
+
+/**
+ * §Wave5b-Q13: builds the LazyColumn body's key list IN ORDER, mirroring the
+ * branches of the LazyColumn above. The Restore consumer uses this to resolve
+ * a captured [ScrollCheckpoint.anchorKey] → LazyColumn index (so
+ * `scrollToItem(idx, offset)` lands on the same logical message the user was
+ * viewing when they opened the sub-agent).
+ *
+ * The order MUST match the LazyColumn body's declaration order exactly:
+ *  1. "streaming-reasoning" (if streamingReasoningPart != null)
+ *  2. "session-diff" (if sessionDiff non-empty)
+ *  3. renderBlocks.map { it.id } (in itemsIndexed order)
+ *  4. "load-more" (if messages non-empty + hasMoreMessages + cursor present)
+ *
+ * Any future reordering of the LazyColumn body MUST be mirrored here.
+ */
+internal fun lazyColumnKeyList(
+    streamingReasoningPart: Part?,
+    sessionDiff: List<cn.vectory.ocdroid.data.model.FileDiff>?,
+    renderBlocks: List<RenderBlock>,
+    messages: List<Message>,
+    hasMoreMessages: Boolean,
+    olderMessagesCursor: String?,
+): List<String> = buildList {
+    if (streamingReasoningPart != null) add("streaming-reasoning")
+    if (!sessionDiff.isNullOrEmpty()) add("session-diff")
+    addAll(renderBlocks.map { it.id })
+    if (messages.isNotEmpty() && hasMoreMessages && olderMessagesCursor != null) add("load-more")
+}
+
+/**
+ * §Wave5b-Q13: the index + offset to pass to `listState.scrollToItem(idx,
+ * offset)` for a Restore. Pure function — JVM-testable without a real
+ * LazyListState.
+ *
+ * Resolution order:
+ *  1. If [checkpoint.anchorKey] is non-null AND present in [currentKeys] →
+ *     use that key's index, paired with [checkpoint.offset]. (Anchor wins
+ *     because it survives message prepends / SSE appends / metadata-marker
+ *     injection that shift indices without moving the user's logical
+ *     position.)
+ *  2. Otherwise → clamp [checkpoint.fallbackIndex] to
+ *     `[0, currentKeys.size - 1]`, paired with [checkpoint.offset].
+ *  3. If [currentKeys] is empty → returns `null` (the caller skips the
+ *     scroll; the session has no renderable items yet).
+ *
+ * The offset is ALWAYS [checkpoint.offset] — the per-pixel offset within the
+ * resolved item is independent of which item is resolved (it is the
+ * pixel offset of the item's top edge from the viewport's top edge at
+ * capture time, and the same pixel offset applies at restore).
+ */
+internal data class ResolvedRestore(val index: Int, val offset: Int)
+
+internal fun resolveRestoreIndex(
+    checkpoint: cn.vectory.ocdroid.ui.ScrollCheckpoint,
+    currentKeys: List<String>,
+): ResolvedRestore? {
+    if (currentKeys.isEmpty()) return null
+    val anchorIdx = checkpoint.anchorKey?.let { key -> currentKeys.indexOf(key).takeIf { it >= 0 } }
+    val resolvedIndex = (anchorIdx ?: checkpoint.fallbackIndex)
+        .coerceIn(0, currentKeys.size - 1)
+    return ResolvedRestore(index = resolvedIndex, offset = checkpoint.offset)
+}
 
 // §R-19 Sprint 2 #7(b): markerLabelFor was lifted verbatim into the top-level
 // pure-functions file ChatFormatHelpers.kt (same package) so it can be covered

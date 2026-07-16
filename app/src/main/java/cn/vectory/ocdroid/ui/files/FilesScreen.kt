@@ -65,6 +65,7 @@ import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.SettingsViewModel
+import cn.vectory.ocdroid.ui.effectiveBusySessionIds
 import cn.vectory.ocdroid.ui.sessions.DirectoryPickerSheet
 import cn.vectory.ocdroid.ui.sessions.EmptyWorkdirPlaceholder
 import cn.vectory.ocdroid.ui.sessions.SessionCard
@@ -134,6 +135,15 @@ fun FilesScreen(
     val unreadSessions by remember {
         sessionVM.unreadFlow.map { it.unreadSessions }.distinctUntilChanged()
     }.collectAsStateWithLifecycle(initialValue = emptySet())
+    val effectiveBusy = remember(
+        sessionListState.activeSessionIds,
+        sessionListState.sessionStatuses,
+    ) {
+        effectiveBusySessionIds(
+            sessionListState.activeSessionIds,
+            sessionListState.sessionStatuses,
+        )
+    }
 
     // ── Two-level internal state ──────────────────────────────────────────
     // null (default) → project-list first screen. non-null → file browser for
@@ -303,6 +313,7 @@ fun FilesScreen(
                 },
                 sessionStatuses = sessionListState.sessionStatuses,
                 unreadSessions = unreadSessions,
+                effectiveBusy = effectiveBusy,
                 onAddProject = { showAddProjectSheet = true },
             )
         } else {
@@ -483,6 +494,7 @@ private fun ProjectListPane(
     onSelectSession: (String) -> Unit,
     sessionStatuses: Map<String, cn.vectory.ocdroid.data.model.SessionStatus>,
     unreadSessions: Set<String>,
+    effectiveBusy: Set<String>,
     onAddProject: () -> Unit,
 ) {
     Scaffold(
@@ -540,6 +552,7 @@ private fun ProjectListPane(
                         onSelectSession = onSelectSession,
                         sessionStatuses = sessionStatuses,
                         unreadSessions = unreadSessions,
+                        effectiveBusy = effectiveBusy,
                     )
                 }
             }
@@ -565,6 +578,7 @@ private fun WorkdirRow(
     onSelectSession: (String) -> Unit,
     sessionStatuses: Map<String, cn.vectory.ocdroid.data.model.SessionStatus>,
     unreadSessions: Set<String>,
+    effectiveBusy: Set<String>,
 ) {
     val displayName = workdir.split("/").filter { it.isNotEmpty() }.lastOrNull() ?: workdir
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -640,7 +654,7 @@ private fun WorkdirRow(
                 sessionsInWorkdir.forEach { session ->
                     SessionCard(
                         session = session,
-                        isUnread = session.id in unreadSessions,
+                        isUnread = session.id in unreadSessions && session.id !in effectiveBusy,
                         status = sessionStatuses[session.id],
                         onClick = { onSelectSession(session.id) },
                         onLongClick = {},

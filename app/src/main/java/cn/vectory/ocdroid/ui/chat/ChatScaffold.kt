@@ -71,8 +71,8 @@ import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.computeContextUsage
 import cn.vectory.ocdroid.ui.currentHostProfile
-import cn.vectory.ocdroid.ui.currentSession
 import cn.vectory.ocdroid.ui.currentSessionStatus
+import cn.vectory.ocdroid.ui.effectiveBusySessionIds
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.ui.controller.questionRootIds
@@ -195,7 +195,38 @@ fun ChatScaffold(
     // re-implemented; they read the same slices and the same pure helpers
     // (`currentSession` / `currentSessionStatus` / `computeContextUsage` /
     // `visibleMessages` / `currentSessionActivity`).
-    val curSession = currentSession(sessionList.sessions, chat.currentSessionId)
+    //
+    // §Q14 (title union): resolve curSession through the UNION store
+    // (root + directorySessions + childSessions) so a sub-agent / cross-
+    // workdir current session is found for the file-preview workdir, the
+    // effective agent/model fallback (§Q2) and the matching-questions /
+    // revert derivations below. The previous `currentSession(sessionList.
+    // sessions, …)` only inspected root sessions, returning null for any
+    // child id — which then degraded the top-bar title to the app name and
+    // broke the file-preview workdir. `sessionsById` is hoisted here so the
+    // downstream matchingQuestions / questionRootIds reuses it instead of
+    // recomputing the map.
+    val sessionsById = remember(
+        sessionList.sessions,
+        sessionList.directorySessions,
+        sessionList.childSessions,
+    ) {
+        allSessionsById(
+            sessionList.sessions,
+            sessionList.directorySessions,
+            sessionList.childSessions,
+        )
+    }
+    val curSession = chat.currentSessionId?.let { sessionsById[it] }
+    val effectiveBusy = remember(
+        sessionList.activeSessionIds,
+        sessionList.sessionStatuses,
+    ) {
+        effectiveBusySessionIds(
+            sessionList.activeSessionIds,
+            sessionList.sessionStatuses,
+        )
+    }
     // A file-path tap passes the actual tapped path through to the Chat-stack
     // preview. The prior route dropped that path, so the preview could not
     // locate the selected file. AppShell receives both route fields.
@@ -209,18 +240,43 @@ fun ChatScaffold(
     var cachedContextUsage by remember { mutableStateOf(computedContextUsage) }
     computedContextUsage?.let { cachedContextUsage = it }
     // §chat-ux-batch T7 (B2): per-session sticky display + selection source.
-    // The pickers and the top-bar BOTH read `pending ?: infer ?: null` so the
-    // UI shows what the NEXT send will actually use. `visibleAgents` filters
-    // out hidden internal agents (compaction / title) — see T6 contract. The
-    // effective values live HERE (single source for both consumers below) so
-    // the top-bar overflow label and the picker highlight never drift apart.
-    val effectiveAgent: String? = remember(chat.pendingAgent, chat.messages, settings.agents) {
-        val visible = settings.agents.filter { it.isVisible }.map { it.name }.toSet()
-        chat.pendingAgent ?: inferCurrentAgent(chat.messages, visible)
+    // The pickers and the top-bar BOTH read `pending ?: session ?: infer` so
+    // the UI shows what the NEXT send will actually use. `visibleAgents`
+    // filters out hidden internal agents (compaction / title) — see T6
+    // contract. The effective values live HERE (single source for both
+    // consumers below) so the top-bar overflow label and the picker highlight
+    // never drift apart.
+    //
+    // §Q2: the chain now consults the server-provided session fields first
+    // (after pending, before transcript inference) so the top-bar reflects
+    // the authoritative server view of which agent/model the session is
+    // bound to — useful before any assistant message has streamed. The
+    // session.agent is visible-filtered (same rule as inference); a blank
+    // session agent is treated as absent. session.model is bridged to
+    // Message.ModelInfo (the type the top-bar / picker consume) — only when
+    // both id + providerId are non-blank, else falls back to inference.
+    val visibleAgents = remember(settings.agents) {
+        settings.agents.filter { it.isVisible }.map { it.name }.toSet()
     }
-    val effectiveModel: cn.vectory.ocdroid.data.model.Message.ModelInfo? = remember(chat.pendingModel, chat.messages, settings.agents) {
-        val visible = settings.agents.filter { it.isVisible }.map { it.name }.toSet()
-        chat.pendingModel ?: inferCurrentModel(chat.messages, visible)
+    val effectiveAgent: String? = remember(chat.pendingAgent, curSession, chat.messages, visibleAgents) {
+        val sessionAgent = curSession?.agent?.takeIf { it.isNotBlank() && it in visibleAgents }
+        chat.pendingAgent ?: sessionAgent ?: inferCurrentAgent(chat.messages, visibleAgents)
+    }
+    val effectiveModel: cn.vectory.ocdroid.data.model.Message.ModelInfo? = remember(chat.pendingModel, curSession, chat.messages, visibleAgents) {
+        // §Q2: bridge Session.ModelInfo → Message.ModelInfo (the type the
+        // top-bar / ContextMenuCluster.currentModel consume). Extract to
+        // local vals so Kotlin smart-casts the nullable members to non-null
+        // for the Message.ModelInfo constructor (both params are non-null
+        // String); only convert when BOTH are non-blank, else fall through
+        // to transcript inference.
+        val m = curSession?.model
+        val mid = m?.id
+        val mpid = m?.providerId
+        val converted =
+            if (mid != null && mid.isNotBlank() && mpid != null && mpid.isNotBlank())
+                cn.vectory.ocdroid.data.model.Message.ModelInfo(modelId = mid, providerId = mpid)
+            else null
+        chat.pendingModel ?: converted ?: inferCurrentModel(chat.messages, visibleAgents)
     }
     val currentSessionIsRunning = curSessionStatus?.let { it.isBusy || it.isRetry } == true ||
         chat.currentSessionId?.let { it in composer.sendingSessionIds } == true
@@ -260,17 +316,6 @@ fun ChatScaffold(
             streamingPartTexts = chat.streamingPartTexts,
         )
     }
-    val sessionsById = remember(
-        sessionList.sessions,
-        sessionList.directorySessions,
-        sessionList.childSessions,
-    ) {
-        allSessionsById(
-            sessionList.sessions,
-            sessionList.directorySessions,
-            sessionList.childSessions,
-        )
-    }
     val matchingQuestions = remember(
         sessionList.pendingQuestions,
         chat.currentSessionId,
@@ -303,7 +348,12 @@ fun ChatScaffold(
     var lastParent by remember { mutableStateOf<String?>(null) }
     if (parent != null) lastParent = parent
     BackHandler(enabled = parent != null) {
-        lastParent?.let { sessionVM.selectSession(it) }
+        // §Wave5b-Q13: 子→父 via Android Back. Routes through the dedicated
+        // returnToParent() — NOT selectSession(parentId) — so the parent's
+        // Restore checkpoint is consumed and the parent re-opens at the
+        // user's prior viewport. selectSession(parentId) would dispatch
+        // Latest and clobber the captured checkpoint.
+        sessionVM.returnToParent()
     }
 
     val exitConfirmMessage = stringResource(R.string.chat_exit_confirm)
@@ -388,7 +438,7 @@ fun ChatScaffold(
     // scroll-preservation guarantees today are carried by
     // `rememberSaveable(sessionId, LazyListState.Saver)` + saveable
     // followBottom inside ChatMessageList, which reliably preserve scroll
-    // for: (a) Sessions-page entry → pendingJumpToLatest jump-to-latest;
+    // for: (a) Sessions-page entry → pendingScrollRequest jump-to-latest;
     // (b) HorizontalPager swipe + SessionTabStrip tap for ROOT sessions in
     // the pager page set (stable `key = session.id` keeps each page's
     // saveable slot alive); (c) Chat→file-preview→back re-entry with the
@@ -430,23 +480,39 @@ fun ChatScaffold(
     val topBarState by remember(noHostFallback) {
         derivedStateOf {
             val curHostProfile = currentHostProfile(host.hostProfiles, host.currentHostProfileId)
-            val curSession = currentSession(sessionList.sessions, chat.currentSessionId)
             // §nav-redesign (2026-07-13): populate openSessions for the restored
             // SessionTabStrip (second row under ChatTopBar). openSessionIds is
             // root-only + capped at 8 by the session domain, but we defend at
             // the consumer too: a stale/legacy child id persisted in
             // openSessionIds must never render as a top-level tab. Associate-by
             // once for O(1) resolution (8 ids × ~500 sessions otherwise O(n×m)).
+            //
+            // §Q14 (title union): resolve curSession through the UNION store
+            // (root + directorySessions + childSessions) so a sub-agent /
+            // cross-workdir current session produces its real title instead of
+            // degrading to the app name. The same map backs parentSessionTitle
+            // (parent may itself be a non-root directory/child session) and
+            // openSessions. topBarSessions appends curSession when it is not
+            // already in the root list so ChatTopBar's `state.sessions.find
+            // { it.id == currentSessionId }` (ChatTopBar.kt) hits for child
+            // sessions too — the SessionTabStrip still filters parentId==null
+            // below, so a child is never rendered as a top-level tab.
             val sessionsById = allSessionsById(
                 sessionList.sessions,
                 sessionList.directorySessions,
                 sessionList.childSessions,
             )
+            val curSession = chat.currentSessionId?.let { sessionsById[it] }
+            val topBarSessions = if (curSession != null && sessionList.sessions.none { it.id == curSession.id }) {
+                sessionList.sessions + curSession
+            } else {
+                sessionList.sessions
+            }
             val openSessions = sessionList.openSessionIds
                 .mapNotNull { sessionsById[it] }
                 .filter { it.parentId == null && !it.isArchived }
             ChatTopBarState(
-                sessions = sessionList.sessions,
+                sessions = topBarSessions,
                 currentSessionId = chat.currentSessionId,
                 sessionStatuses = sessionList.sessionStatuses,
                 hasMoreSessions = sessionList.hasMoreSessions,
@@ -475,7 +541,7 @@ fun ChatScaffold(
                 draftWorkdir = composer.draftWorkdir,
                 parentSessionId = curSession?.parentId,
                 parentSessionTitle = curSession?.parentId?.let { pid ->
-                    sessionList.sessions.firstOrNull { it.id == pid }?.displayName
+                    sessionsById[pid]?.displayName
                 },
                 trafficSent = traffic.trafficSent,
                 trafficReceived = traffic.trafficReceived,
@@ -496,9 +562,13 @@ fun ChatScaffold(
             )
         }
     }
+    // §Q11 (2026-07-16): chat.currentSessionId is a remember key because the
+    // onForceRefresh lambda below captures it to emit LoadMessages(sid) —
+    // without it the lambda would hold a stale id across a session switch.
     val topBarActions = remember(
         sessionVM,
         chatVM,
+        chat.currentSessionId,
     ) {
         // §0.8.2 P2.3: the new overflow menu (Context / Todo / Agent / Model)
         // lives inside ChatTopBar; its open-callbacks fire the local
@@ -520,6 +590,12 @@ fun ChatScaffold(
         ChatTopBarActions(
             onSelectSession = sessionVM::selectSession,
             onCloseSession = sessionVM::closeSession,
+            // §Wave5b-Q13: dedicated子→父 callback for the breadcrumb —
+            // routes through SessionViewModel.returnToParent (which consumes
+            // the parent's Restore checkpoint) instead of the default-
+            // Latest selectSession path. Wired here so ChatTopBar's
+            // breadcrumb Text.clickable can call actions.onNavigateParent().
+            onNavigateParent = { sessionVM.returnToParent() },
             onOpenContextDialog = { showContextDialog = true },
             onOpenTodoDialog = { showTodoDialog = true },
             onOpenAgentPicker = { showAgentPicker = true },
@@ -539,9 +615,24 @@ fun ChatScaffold(
             // the reconnect probe does not re-hydrate a stale window).
             // tryEmitEffect (non-suspend) mirrors the §R18 Phase 3 Wave 1 C类
             // multi-emit pattern (HostProfileController:915/973).
+            //
+            // §Q11 (2026-07-16): the OLD emit pair cleared the cache but did
+            // NOT reload the current session's message window, so the screen
+            // showed no visible change → the button felt dead. SharedEffectBus
+            // is FIFO, so insert LoadMessages(currentSessionId,
+            // resetLimit=true) BETWEEN clear + reconnect: the cache is already
+            // dropped (LoadMessages can't hit the stale LRU) and it forces a
+            // full server re-fetch of the window (dispatchSessionEffect →
+            // loadMessagesForEffect). The captured chat.currentSessionId is
+            // kept fresh via the remember key above. Draft mode (sid == null)
+            // only clears + reconnects (no window to reload yet).
             onForceRefresh = {
                 val bus = chatVM.core.effectBus
+                val sid = chat.currentSessionId
                 bus.tryEmitEffect(ControllerEffect.ClearSessionWindowCache)
+                if (sid != null) {
+                    bus.tryEmitEffect(ControllerEffect.LoadMessages(sid, resetLimit = true))
+                }
                 bus.tryEmitEffect(ControllerEffect.ColdStartReconnect)
             },
         )
@@ -663,6 +754,7 @@ fun ChatScaffold(
             parentSessionId = currentRootId,
             currentWorkdir = curSession?.directory ?: composer.draftWorkdir,
             unreadSessions = topBarState.unreadSessions,
+            effectiveBusy = effectiveBusy,
             questionSessionIds = topBarState.questionSessionIds,
             actions = topBarActions,
         )
@@ -1012,6 +1104,7 @@ fun ChatScaffold(
         SessionPickerSheet(
             sessions = sessionList.sessions,
             sessionStatuses = sessionList.sessionStatuses,
+            activeSessionIds = sessionList.activeSessionIds,
             currentSessionId = chat.currentSessionId,
             unreadSessions = unread.unreadSessions,
             questionSessionIds = questionRootIds(sessionList.pendingQuestions, sessionsById),

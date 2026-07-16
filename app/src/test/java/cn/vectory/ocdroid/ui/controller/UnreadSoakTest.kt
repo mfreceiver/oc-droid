@@ -48,6 +48,7 @@ class UnreadSoakTest {
     private fun eval(
         sessions: List<Session>,
         sessionStatuses: Map<String, SessionStatus>,
+        activeSessionIds: Set<String> = emptySet(),
         currentSessionId: String? = null,
         lastViewedTime: Map<String, Long> = emptyMap(),
         idleSince: Map<String, Long> = emptyMap(),
@@ -61,6 +62,7 @@ class UnreadSoakTest {
     ) = evaluateUnread(
         sessions = sessions,
         sessionStatuses = sessionStatuses,
+        activeSessionIds = activeSessionIds,
         childSessions = childSessions,
         directorySessions = directorySessions,
         currentSessionId = currentSessionId,
@@ -204,6 +206,34 @@ class UnreadSoakTest {
     }
 
     // ── busy resets ────────────────────────────────────────────────────────
+
+    @Test
+    fun `active endpoint running id blocks soak despite transient idle status`() {
+        val r = eval(
+            sessions = listOf(root("A", updated = 2_000L)),
+            sessionStatuses = mapOf("A" to idle),
+            activeSessionIds = setOf("A"),
+            idleSince = mapOf("A" to 1_000L),
+            now = 11_000L,
+        )
+
+        assertFalse("active drain must block unread", "A" in r.rootsToMarkUnread)
+        assertNull("active drain resets the soak", r.newIdleSince["A"])
+    }
+
+    @Test
+    fun `retry status blocks soak even when status also reports idle semantics`() {
+        val retry = SessionStatus(type = "retry")
+        val r = eval(
+            sessions = listOf(root("A", updated = 2_000L)),
+            sessionStatuses = mapOf("A" to retry),
+            idleSince = mapOf("A" to 1_000L),
+            now = 11_000L,
+        )
+
+        assertFalse("retry must block unread", "A" in r.rootsToMarkUnread)
+        assertNull(r.newIdleSince["A"])
+    }
 
     @Test
     fun `root busy resets the soak stamp`() {

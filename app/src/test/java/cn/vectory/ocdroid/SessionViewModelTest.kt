@@ -812,7 +812,12 @@ class SessionViewModelTest : MainViewModelTestBase() {
         core.writeChat { it.copy(currentSessionId = "parent-1") }
         val beforeId = chatVM.chatFlow.value.currentSessionId
 
-        sessionVM.openSubAgent("child-missing")
+        sessionVM.openSubAgent(
+            "child-missing",
+            // §Wave5b-Q13: openSubAgent now requires a parent checkpoint
+            // (captured synchronously by the Compose layer in production).
+            cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = null, fallbackIndex = 0, offset = 0),
+        )
         advanceUntilIdle()
 
         assertEquals(beforeId, chatVM.chatFlow.value.currentSessionId)

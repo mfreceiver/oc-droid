@@ -225,6 +225,90 @@ data class SettingsState(
     val uiContentScale: Float = 1f
 )
 
+// ── §Wave5b-Q13: scroll-position state machine ─────────────────────────
+//
+// (a) Switching into a session usually means "show the latest". The exceptions
+//     are父→子 openSubAgent (records the parent's last viewport) and 子→父
+//     returnToParent (restores that viewport). Every other switch path
+//     (swipe / tab-strip / picker / Files / Sessions / create / fork / close-
+//     delete-next / cold-start) lands at Latest.
+// (b) The state machine is a SINGLE-SLOT ADT ([pendingScrollRequest]) instead
+//     of the pre-Wave5b `pendingJumpToLatest: String?` + scattered bookkeeping.
+//     A single slot means there is exactly ONE in-flight scroll intent at a
+//     time, which makes priority / clearing-order races impossible (oracle
+//     ruling: the prior boolean + ADT pair was mutually exclusive anyway).
+// (c) The consumer (ChatMessageContent) clears via compare-and-clear on
+//     [PendingScrollRequest.requestId] — a fast A→B→C cascade where A's
+//     consumer finishes last cannot accidentally clear C's newer intent.
+
+/**
+ * §Wave5b-Q13: behavior to apply when consuming [PendingScrollRequest].
+ *
+ *  - [Latest]: scroll to item 0 (reverseLayout ⇒ 0 = newest) + arm
+ *    `followBottom`. Used by every "explicit switch into a session" path
+ *    (swipe, tab-strip, picker, Files, Sessions, create/fork, close-delete-
+ *    next, cold-start, Chat-tab reselect, send).
+ *  - [Restore]: scroll to the captured [ScrollCheckpoint] and DISarm
+ *    `followBottom` unless the resolved anchor happens to land at the bottom.
+ *    Used by 子→父 returnToParent (Android Back + breadcrumb). The checkpoint
+ *    is captured synchronously by the Compose layer at the openSubAgent call
+ *    site (NOT via the async savedPositions mirror — that cannot guarantee
+ *    the last frame before navigation, per oracle).
+ */
+sealed interface ScrollBehavior {
+    data object Latest : ScrollBehavior
+    data class Restore(val checkpoint: ScrollCheckpoint) : ScrollBehavior
+}
+
+/**
+ * §Wave5b-Q13: snapshot of the parent session's LazyListState at the moment
+ * the user opened a sub-agent. Captured SYNCHRONOUSLY by the Compose layer
+ * (ChatMessageContent's onOpenSubAgent wrapper) — never derived from the
+ * async savedPositions mirror, which oracle ruled cannot be trusted to hold
+ * the last pre-navigation frame.
+ *
+ *  - [anchorKey]: the stable key (message id / "streaming-reasoning" /
+ *    "session-diff" / "load-more") of the FIRST VISIBLE item at capture time.
+ *    Preferred over the raw index because message prepends / SSE appends /
+ *    metadata-marker injection can shift indices without moving the user's
+ *    real position. `null` if the LazyListState had no layout info at the
+ *    capture moment (list still measuring) — the resolver then falls back to
+ *    [fallbackIndex].
+ *  - [fallbackIndex]: listState.firstVisibleItemIndex at capture time. Used
+ *    only when [anchorKey] is null OR not present in the current LazyColumn
+ *    body (clamped to [0, itemCount)).
+ *  - [offset]: listState.firstVisibleItemScrollOffset at capture time. Paired
+ *    with the resolved index for scrollToItem(index, offset).
+ */
+data class ScrollCheckpoint(
+    val anchorKey: String?,
+    val fallbackIndex: Int,
+    val offset: Int,
+)
+
+/**
+ * §Wave5b-Q13: the single-slot "next scroll intent to consume" intent.
+ * Written by [SessionSwitcher.switchTo] in the SAME mutateChat that flips
+ * currentSessionId (so the consumer always sees a consistent pair). Read and
+ * compare-and-cleared by [cn.vectory.ocdroid.ui.chat.ChatMessageList]'s
+ * LaunchedEffect.
+ *
+ *  - [requestId]: a monotonic id (System.nanoTime). The consumer compares
+ *    this against the live slot's id when clearing; a mismatch means a newer
+ *    request has superseded this one (fast A→B→C cascade where A's consumer
+ *    finishes last) and the clear is a no-op.
+ *  - [targetSessionId]: the session the consumer must be on to fire. When
+ *    chatState.currentSessionId != targetSessionId, the consumer skips
+ *    (e.g. a Restore intent for parent fired while still on child during a
+ *    brief race — wait until the session switch lands).
+ *  - [behavior]: Latest or Restore(checkpoint).
+ */
+data class PendingScrollRequest(
+    val requestId: Long,
+    val targetSessionId: String,
+    val behavior: ScrollBehavior,
+)
+
 /**
  * §R-17 batch2: chat-domain state slice (RFC §2.2). Authoritative storage via
  * _chatFlow.update. The highest-frequency domain (SSE streaming deltas mutate
@@ -316,23 +400,57 @@ data class ChatState(
      val deltaBuffer: Map<String, String> = emptyMap(),
      val fullTextBuffer: Map<String, String> = emptyMap(),
      val pendingFlushPartIds: Set<String> = emptySet(),
-     /**
-      * §WT2-taskB (Q6 locked): one-shot "enter from Sessions page → jump to
-      * latest" intent. Set by [cn.vectory.ocdroid.ui.SessionViewModel.requestJumpToLatest]
-      * (SessionsScreen.onSessionClick → requestJumpToLatest → selectSession),
-      * consumed ONCE by [cn.vectory.ocdroid.ui.chat.ChatMessageList]'s
-      * LaunchedEffect, and cleared immediately after the jump so it does not
-      * fire again. NOT set by the horizontal-swipe path, the chat tab-strip
-      * tap, the SessionPickerSheet, or the Chat reselect path — those preserve
-      * each session's saveable scroll position (see ChatMessageList's
-      * `rememberSaveable(sessionId, LazyListState.Saver)`). The intent is
-      * also cleared inside [cn.vectory.ocdroid.ui.controller.SessionSwitcher.switchTo]
-      * whenever the incoming session id does NOT match it (so a swipe away
-      * from a still-pending session — rare — does not later force a jump when
-      * the user swipes back). Lives on ChatState (not SessionListState)
-      * because it is a chat-surface intent, not a session-list attribute.
-      */
-     val pendingJumpToLatest: String? = null,
+      /**
+       * §Wave5b-Q13: single-slot "next scroll intent to consume" — the unified
+       * replacement for the pre-Wave5b `pendingJumpToLatest: String?`. Written
+       * by [cn.vectory.ocdroid.ui.controller.SessionSwitcher.switchTo] inside
+       * the SAME mutateChat that flips currentSessionId (so the consumer always
+       * observes a consistent pair). Consumed ONCE by
+       * [cn.vectory.ocdroid.ui.chat.ChatMessageList]'s LaunchedEffect, which
+       * then compare-and-clears by [PendingScrollRequest.requestId] (a fast
+       * A→B→C cascade where A's consumer finishes last cannot wipe C's newer
+       * intent — see [AppAction.ScrollConsumed] reducer guard).
+       *
+       * Behavior matrix (oracle-validated):
+       *  - swipe / tab-strip / picker / Sessions page / Files page / create /
+       *    fork / close-delete-next / cold-start / Chat-tab reselect / send →
+       *    `Latest`. All these go through `switchTo(id)` default arg + the
+       *    `requestLatestScroll(id)` helper on the send / Chat-reselect paths
+       *    (same-session switchTo is a deliberate no-op).
+       *  - 父→子 openSubAgent → child gets `Latest` AND the parent's checkpoint
+       *    is stored in [parentReturnCheckpoints] for the eventual return.
+       *  - 子→父 returnToParent → `Restore(checkpoint)` from the stored entry.
+       *
+       * Cleared alongside [parentReturnCheckpoints] on host purge (both same-
+       * group and cross-group), draft materialize, and current-session archive
+       * (see [cn.vectory.ocdroid.ui.clearSessionData] +
+       * [cn.vectory.ocdroid.ui.controller.applyArchivedChatClear] + the same-
+       * group host-purge branch in [cn.vectory.ocdroid.ui.reduce]).
+       */
+      val pendingScrollRequest: PendingScrollRequest? = null,
+      /**
+       * §Wave5b-Q13: navigation-return map for 子→父 restore. Keyed by the
+       * CHILD session id (the current session id at the moment of
+       * openSubAgent). When the user navigates back from child to parent
+       * (Android Back or breadcrumb), [cn.vectory.ocdroid.ui.SessionViewModel.returnToParent]
+       * reads `parentReturnCheckpoints[currentSessionId]` and dispatches
+       * `Restore(checkpoint)` to the parent's consumer.
+       *
+       * Stored in the SAME dispatch as the parent-checkpoint capture
+       * ([AppAction.ParentCheckpointStored]) so there is no torn intermediate
+       * where the child is current but the parent's checkpoint is not yet on
+       * file. Consumed (entry removed) by [AppAction.ParentCheckpointConsumed]
+       * when returnToParent fires. Cleared entirely on host purge / draft
+       * materialize / current-session archive.
+       *
+       * Why a separate map (not embedded in PendingScrollRequest): the
+       * pending-scroll slot is the NEXT intent to consume on the active
+       * session, whereas this map is a navigation backstack that survives
+       * across multiple in-flight sessions. Folding them would force a single
+       * child-deep navigation, breaking the "swipe between roots while inside
+       * a sub-agent" case.
+       */
+      val parentReturnCheckpoints: Map<String /*childId*/, ScrollCheckpoint> = emptyMap(),
      /**
       * §chat-ux-batch T7 (B2): the user's just-picked agent for the active
       * session — TRANSIENT, consumed and cleared by [cn.vectory.ocdroid.ui.AppCoreOrchestration.dispatchSendMessage]
@@ -379,6 +497,12 @@ data class ChatState(
 data class SessionListState(
     val sessions: List<Session> = emptyList(),
     val sessionStatuses: Map<String, SessionStatus> = emptyMap(),
+    /**
+     * Process-wide sessions whose server drain fiber is currently running.
+     * Maintained by the status poller. Fetch failures retain the last snapshot
+     * (fail-closed); host transitions clear it explicitly.
+     */
+    val activeSessionIds: Set<String> = emptySet(),
     val expandedSessionIds: Set<String> = emptySet(),
     val loadedSessionLimit: Int = MainViewModelTimings.sessionPageSize,
     val hasMoreSessions: Boolean = true,
@@ -407,7 +531,33 @@ data class SessionListState(
     /** §issue-1(1): per-session 文件变更快照（session.diff SSE / GET /session/{id}/diff）。
      *  key = sessionId，value = 该会话累计的 FileDiff 列表。仅在打开会话时拉取 +
      *  SSE 增量更新；驱动聊天内 SessionDiffCard。 */
-    val sessionDiffs: Map<String, List<cn.vectory.ocdroid.data.model.FileDiff>> = emptyMap()
+    val sessionDiffs: Map<String, List<cn.vectory.ocdroid.data.model.FileDiff>> = emptyMap(),
+    /**
+     * §Q4-strict-sync: ids of sessions freshly created locally (via
+     * [cn.vectory.ocdroid.ui.AppCore.materializeDraftSession] /
+     * [cn.vectory.ocdroid.ui.launchCreateSession]) that have NOT yet been
+     * confirmed by an authoritative server refresh or a matching
+     * session.created / session.updated SSE.
+     *
+     * Drives [cn.vectory.ocdroid.ui.mergeRefreshedSessionsPreservingLocalActivity]:
+     * the final sessions list is `authoritative ∪ local.filter { id in
+     * pendingCreateIds }`. This replaces the legacy open/current-id ghost
+     * retention (which kept locally-opened sessions alive indefinitely even
+     * after the server deleted them). A pending id is removed the moment it
+     * surfaces in a REST refresh or an SSE event, or after a 30 s sweep
+     * (trust the server).
+     *
+     * Cleared on host switch / reset (see [AppAction.HostStatePurged]) so
+     * pending ids from host A cannot ghost into host B's list.
+     */
+    val pendingCreateIds: Set<String> = emptySet(),
+    /**
+     * Wall-clock registration time for every id in [pendingCreateIds]. This is
+     * deliberately independent of [Session.time]: locally-created sessions may
+     * have no server creation timestamp yet. Entries are added and removed in
+     * lockstep with [pendingCreateIds].
+     */
+    val pendingCreatedAt: Map<String, Long> = emptyMap(),
 )
 
 /**

@@ -32,14 +32,17 @@ class BackgroundUnreadPollerTest {
     private fun poller(
         isBackground: () -> Boolean = { true },
         lifecycleGeneration: () -> Long = { 0L },
-    ) = BackgroundUnreadPoller(
+    ): BackgroundUnreadPoller {
+        coEvery { repository.getActiveSessionIds() } returns Result.success(emptySet())
+        return BackgroundUnreadPoller(
         repository = repository,
         settingsManager = settings,
         store = store,
         clock = { now },
         isBackground = isBackground,
         lifecycleGeneration = lifecycleGeneration,
-    )
+        )
+    }
 
     /**
      * T5-round-5 I1-A: extracts the alert list from an [UnreadPollResult],
@@ -143,6 +146,24 @@ class BackgroundUnreadPollerTest {
 
         assertTrue(alerts.isEmpty())
         assertFalse("A" in store.unreadFlow.value.unreadSessions)
+    }
+
+    @Test
+    fun `active drain suppresses background unread despite idle status snapshot`() = runTest {
+        stubSnapshot(
+            sessions = listOf(root("A", updated = 2_000L)),
+            statuses = mapOf("A" to SessionStatus("idle")),
+        )
+        store.mutateUnread { it.copy(idleSince = mapOf("A" to 1_000L)) }
+        now = 31_000L
+        val poller = poller()
+        coEvery { repository.getActiveSessionIds() } returns Result.success(setOf("A"))
+
+        val alerts = authoritativeAlerts(poller.poll())
+
+        assertTrue(alerts.isEmpty())
+        assertEquals(setOf("A"), store.sessionListFlow.value.activeSessionIds)
+        assertFalse("running drain must not become unread", "A" in store.unreadFlow.value.unreadSessions)
     }
 
     @Test

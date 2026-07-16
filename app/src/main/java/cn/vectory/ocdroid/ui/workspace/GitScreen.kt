@@ -29,6 +29,7 @@ import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.files.FilesViewModel
 import cn.vectory.ocdroid.ui.files.WorkdirControl
+import cn.vectory.ocdroid.ui.controller.allSessionsById
 import kotlinx.coroutines.flow.filter
 
 private const val STATE_HOST = "git.host"
@@ -64,7 +65,17 @@ fun GitScreen(
     // active session's directory. No local override, no last-browsed
     // fallback — null when there is no active session (the WorkdirControl
     // renders the muted "No workdir" placeholder in that case).
-    val effectiveWorkdir = sessions.sessions.firstOrNull { it.id == activeSession }?.directory
+    //
+    // §Q14 (title union): resolve through the UNION store (root + directory
+    // + child) so opening Git from a sub-agent / cross-workdir session still
+    // yields that session's directory instead of falling back to null.
+    val effectiveWorkdir = activeSession?.let { id ->
+        allSessionsById(
+            sessions.sessions,
+            sessions.directorySessions,
+            sessions.childSessions,
+        )[id]?.directory
+    }
 
     // §Q2: scope the diff to the active session (the WorkdirControl is now
     // read-only, so this is just the active session id). Kept as an explicit

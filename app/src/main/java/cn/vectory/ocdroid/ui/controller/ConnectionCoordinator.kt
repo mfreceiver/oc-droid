@@ -20,6 +20,7 @@ import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
+import cn.vectory.ocdroid.ui.MainViewModelTimings
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.UiEvent
@@ -717,35 +718,98 @@ class ConnectionCoordinator(
         // the right list for the active host. Same-group switches share the
         // list (correct — two entry points to the same server share project
         // memory); 异组 switches get their own list.
+        val currentFp = currentServerGroupFp()
         val restoreWorkdirs = (
-            settingsManager.getRecentWorkdirs(currentServerGroupFp()) + listOfNotNull(settingsManager.currentWorkdir)
+            settingsManager.getRecentWorkdirs(currentFp) + listOfNotNull(settingsManager.currentWorkdir)
         ).distinct().filter { it.isNotBlank() }
-        restoreWorkdirs.forEach { workdir ->
-            scope.launch {
-                repository.getSessionsForDirectory(workdir)
-                    .onSuccess { sessions ->
-                        // Drop stale-host results: a host/profile switch between
-                        // dispatch and return would otherwise write the previous
-                        // host's sessions into the new host's directorySessions.
-                        // CP1: identityStore.isCurrent checks epoch + fp fields.
-                        if (fetchIdentity != null && identityStore != null &&
-                            !identityStore.isCurrent(fetchIdentity)
-                        ) return@launch
-                        appendDirectorySessions(workdir, sessions)
-                    }
-                    .onFailure { error ->
-                        // Best-effort restore (mirrors createSessionInWorkdir):
-                        // a failed workdir simply stays absent from
-                        // directorySessions; the global getSessions list and a
-                        // user-initiated refreshDirectorySessions are the
-                        // fallbacks. Log for diagnosability without surfacing
-                        // a user-facing error.
-                        if (fetchIdentity == null || identityStore == null ||
-                            identityStore.isCurrent(fetchIdentity)
-                        ) {
-                            reportNonFatalIssue(TAG, "directory restore failed for $workdir", error)
+        if (restoreWorkdirs.isNotEmpty()) {
+            restoreWorkdirs.forEach { workdir ->
+                scope.launch {
+                    repository.getSessionsForDirectory(workdir)
+                        .onSuccess { sessions ->
+                            // Drop stale-host results: a host/profile switch between
+                            // dispatch and return would otherwise write the previous
+                            // host's sessions into the new host's directorySessions.
+                            // CP1: identityStore.isCurrent checks epoch + fp fields.
+                            if (fetchIdentity != null && identityStore != null &&
+                                !identityStore.isCurrent(fetchIdentity)
+                            ) return@launch
+                            appendDirectorySessions(workdir, sessions)
                         }
-                    }
+                        .onFailure { error ->
+                            // Best-effort restore (mirrors createSessionInWorkdir):
+                            // a failed workdir simply stays absent from
+                            // directorySessions; the global getSessions list and a
+                            // user-initiated refreshDirectorySessions are the
+                            // fallbacks. Log for diagnosability without surfacing
+                            // a user-facing error.
+                            if (fetchIdentity == null || identityStore == null ||
+                                identityStore.isCurrent(fetchIdentity)
+                            ) {
+                                reportNonFatalIssue(TAG, "directory restore failed for $workdir", error)
+                            }
+                        }
+                }
+            }
+        } else {
+            // §Q4-strict-sync (#10 self-heal): when recentWorkdirs is empty
+            // (e.g. right after clearAllLocalData / a fresh install), the
+            // fan-out above has nothing to iterate. Fall back to a global
+            // getSessions probe whose response carries each session's
+            // `directory` field — infer the workdir set from it, register
+            // each via addRecentWorkdir (so subsequent loads restore them),
+            // and fan-out getSessionsForDirectory per workdir. This lets the
+            // client self-heal back to the full session set purely from
+            // server data after a local-data wipe. Best-effort: failures are
+            // swallowed (the global LoadSessions effect above still seeds the
+            // top-level sessions list).
+            //
+            // The entire body is wrapped in try-catch because this scope is
+            // NOT a SupervisorJob — an uncaught exception would cancel sibling
+            // coroutines (e.g. startSSE's collector). The getSessions relaxed-
+            // mock fallback in some test cores throws (see
+            // ConnectionCoordinatorTest setUp comment); the try-catch ensures
+            // the self-heal is truly best-effort and never tears down the scope.
+            scope.launch {
+                try {
+                    repository.getSessions(MainViewModelTimings.sessionFullLoadLimit)
+                        .onSuccess { sessions ->
+                            if (fetchIdentity != null && identityStore != null &&
+                                !identityStore.isCurrent(fetchIdentity)
+                            ) return@launch
+                            val fp = currentServerGroupFp()
+                            if (fp.isBlank()) return@launch
+                            val knownNorm = settingsManager
+                                .getRecentWorkdirs(fp)
+                                .map { cn.vectory.ocdroid.util.WorkdirPaths.normalize(it) }
+                                .toSet()
+                            sessions
+                                .mapNotNull { it.directory.takeIf { d -> d.isNotBlank() } }
+                                .map { cn.vectory.ocdroid.util.WorkdirPaths.normalize(it) to it }
+                                .distinctBy { it.first }
+                                .filter { (norm, _) -> norm.isNotEmpty() && norm !in knownNorm }
+                                .forEach { (_, rawWorkdir) ->
+                                    settingsManager.addRecentWorkdir(fp, rawWorkdir)
+                                    scope.launch {
+                                        try {
+                                            repository.getSessionsForDirectory(rawWorkdir)
+                                                .onSuccess { dirSessions ->
+                                                    if (fetchIdentity != null && identityStore != null &&
+                                                        !identityStore.isCurrent(fetchIdentity)
+                                                    ) return@launch
+                                                    appendDirectorySessions(rawWorkdir, dirSessions)
+                                                }
+                                                .onFailure { /* best-effort self-heal */ }
+                                        } catch (e: Exception) {
+                                            // best-effort self-heal — swallow
+                                        }
+                                    }
+                                }
+                        }
+                        .onFailure { /* best-effort — LoadSessions effect handles the error path */ }
+                } catch (e: Exception) {
+                    // best-effort self-heal — swallow (scope is non-supervisor)
+                }
             }
         }
     }

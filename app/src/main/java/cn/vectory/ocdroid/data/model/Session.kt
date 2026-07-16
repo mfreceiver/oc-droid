@@ -16,13 +16,35 @@ data class Session(
     val time: TimeInfo? = null,
     val share: ShareInfo? = null,
     val summary: SummaryInfo? = null,
-    val revert: RevertInfo? = null
+    val revert: RevertInfo? = null,
+    // §Q2: server `/session` carries `agent` + nested `model` (id /
+    // providerID / variant) used by the chat top-bar to surface the
+    // session's effective agent/model ahead of any transcript inference.
+    // Both nullable with defaults so the cache round-trip
+    // (SessionCacheEntry→Session via toSession()) compiles unchanged —
+    // cached entries omit these (server refresh backfills, matching
+    // slug/projectId/share/version).
+    val agent: String? = null,
+    val model: ModelInfo? = null,
 ) {
     /** Display name for UI: title, or last path segment of directory, or id */
     val displayName: String
         get() = title ?: directory.split("/").filter { it.isNotEmpty() }.lastOrNull() ?: id
 
     val isArchived: Boolean get() = (time?.archived ?: 0L) > 0L
+
+    /**
+     * §Q2: server-side model descriptor on a session. Field names mirror the
+     * server JSON exactly (note `providerID` capitalisation). All nullable +
+     * defaulted so a partial server payload or a cache-reinflated Session
+     * (which leaves this null) deserialises without MissingFieldException.
+     */
+    @Serializable
+    data class ModelInfo(
+        val id: String? = null,
+        @SerialName("providerID") val providerId: String? = null,
+        val variant: String? = null,
+    )
 
     @Serializable
     data class TimeInfo(

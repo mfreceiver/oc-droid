@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui.shell
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -68,6 +69,7 @@ import cn.vectory.ocdroid.ui.SettingsViewModel
 import cn.vectory.ocdroid.ui.chat.ChatScreen
 import cn.vectory.ocdroid.ui.chat.ChatFilePreviewScreen
 import cn.vectory.ocdroid.ui.crossSessionPendingCount
+import cn.vectory.ocdroid.ui.effectiveBusySessionIds
 import cn.vectory.ocdroid.ui.files.FilesScreen
 import cn.vectory.ocdroid.ui.files.FilesViewModel
 import cn.vectory.ocdroid.ui.sessions.SessionsScreen
@@ -77,7 +79,6 @@ import cn.vectory.ocdroid.ui.settings.SettingsHostsRoute
 import cn.vectory.ocdroid.ui.settings.SettingsModelsRoute
 import cn.vectory.ocdroid.ui.settings.SettingsNotificationsRoute
 import cn.vectory.ocdroid.ui.settings.SettingsScreen
-import cn.vectory.ocdroid.ui.settings.SettingsStorageRoute
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.workspace.GitScreen
 
@@ -107,6 +108,10 @@ fun AppShell(orchestratorVM: OrchestratorViewModel, navBarBottomDp: Dp = 0.dp) {
     val unreadState by sessionVM.unreadFlow.collectAsStateWithLifecycle()
     val crossSessionPendingCount =
         crossSessionPendingCount(sessionListState, chatState.currentSessionId)
+    val effectiveBusy = effectiveBusySessionIds(
+        sessionListState.activeSessionIds,
+        sessionListState.sessionStatuses,
+    )
     // §sessux-badge: the Sessions nav dot signals "attention needed elsewhere".
     // It lights when ANY session other than the current one has a pending
     // permission/question OR unread out-of-band activity. Pending and unread in
@@ -116,7 +121,9 @@ fun AppShell(orchestratorVM: OrchestratorViewModel, navBarBottomDp: Dp = 0.dp) {
     // still on?"). The dot is binary (no count); count is visible on the cards.
     val sessionsBadgeVisible =
         crossSessionPendingCount > 0 ||
-            unreadState.unreadSessions.any { it != chatState.currentSessionId }
+            unreadState.unreadSessions.any {
+                it != chatState.currentSessionId && it !in effectiveBusy
+            }
 
     fun navigateTopLevel(route: NavRoute) {
         navController.navigate(route.route) {
@@ -298,22 +305,39 @@ fun AppShell(orchestratorVM: OrchestratorViewModel, navBarBottomDp: Dp = 0.dp) {
                     onNavigateSection = navController::navigate,
                 )
             }
-            composable(NavRoute.settingsHostsRoute) {
+            composable(
+                NavRoute.settingsHostsRoute,
+                exitTransition = { ExitTransition.None },
+                popExitTransition = { ExitTransition.None },
+            ) {
                 SettingsHostsRoute(hostVM, connectionVM) { navController.popBackStack() }
             }
-            composable(NavRoute.settingsAppearanceRoute) {
+            composable(
+                NavRoute.settingsAppearanceRoute,
+                exitTransition = { ExitTransition.None },
+                popExitTransition = { ExitTransition.None },
+            ) {
                 SettingsAppearanceRoute(settingsVM) { navController.popBackStack() }
             }
-            composable(NavRoute.settingsModelsRoute) {
+            composable(
+                NavRoute.settingsModelsRoute,
+                exitTransition = { ExitTransition.None },
+                popExitTransition = { ExitTransition.None },
+            ) {
                 SettingsModelsRoute(composerVM, settingsVM) { navController.popBackStack() }
             }
-            composable(NavRoute.settingsNotificationsRoute) {
+            composable(
+                NavRoute.settingsNotificationsRoute,
+                exitTransition = { ExitTransition.None },
+                popExitTransition = { ExitTransition.None },
+            ) {
                 SettingsNotificationsRoute { navController.popBackStack() }
             }
-            composable(NavRoute.settingsStorageRoute) {
-                SettingsStorageRoute(hostVM, connectionVM, settingsVM) { navController.popBackStack() }
-            }
-            composable(NavRoute.settingsAboutRoute) {
+            composable(
+                NavRoute.settingsAboutRoute,
+                exitTransition = { ExitTransition.None },
+                popExitTransition = { ExitTransition.None },
+            ) {
                 SettingsAboutRoute(hostVM, settingsVM) { navController.popBackStack() }
             }
         }

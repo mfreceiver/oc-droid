@@ -41,8 +41,6 @@
     <string name="settings_section_models">Models</string>
     <string name="settings_section_notifications">Notifications</string>
     <string name="settings_section_notifications_subtitle">Alerts for completions and errors</string>
-    <string name="settings_section_storage">Storage</string>
-    <string name="settings_section_storage_subtitle">Cache, traffic, danger zone</string>
     <string name="settings_section_about">About</string>
     <string name="settings_section_about_subtitle">Version, diagnostics</string>
     <!-- §phase3: placeholder body for the Notifications sub-route. The
@@ -126,6 +124,8 @@
     <string name="sessions_archive">Archive</string>
     <!-- T4: session row long-press menu (Tier A DropdownMenu) + rename dialog (Tier C AppFormDialog). -->
     <string name="sessions_rename">Rename</string>
+    <!-- Q15: long-press menu item to copy the ses_xxx id to the clipboard. -->
+    <string name="sessions_copy_id">Copy session ID</string>
     <string name="sessions_rename_title">Rename session</string>
     <string name="sessions_restore">Restore</string>
     <string name="sessions_no_active">No active sessions</string>
@@ -375,7 +375,7 @@
     <string name="settings_clear_local_data_title">Clear all local data?</string>
     <string name="settings_clear_local_data_warning">Wipes local data and re-fetches from the server. Connection info and tunnel passwords are preserved.</string>
     <string name="settings_clear_local_data_keeps">Kept: server connection info, host profiles, tunnel passwords.</string>
-    <string name="settings_clear_local_data_clears">Clears all local data and re-syncs: drafts, model/agent preferences, current session and working directory, navigation and UI state, theme, language, traffic counters, and cached messages.</string>
+    <string name="settings_clear_local_data_clears">Clears all local data and re-syncs: drafts, model/agent preferences, current session and working directory, navigation and UI state, theme, language, traffic counters, and cached messages. Affects all servers.</string>
     <string name="settings_clear_local_data_irreversible">This action cannot be undone.</string>
     <string name="chat_model_picker_title">Select model</string>
     <string name="chat_model_picker_empty">No models available</string>

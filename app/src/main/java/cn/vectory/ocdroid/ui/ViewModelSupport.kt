@@ -110,6 +110,27 @@ internal object MainViewModelTimings {
      *  server generates the title asynchronously in prompt-loop step 1; 5s is
      *  enough for the small/cheap title model to finish in practice. */
     const val titleRefreshDelayMs = 5000L
+    /**
+     * §Q4-strict-sync: how long a freshly-created session's id stays in
+     * [SessionListState.pendingCreateIds] before the next successful REST
+     * refresh sweeps it (trust the server — if the id has not propagated to
+     * the listing within this window, it likely never will). The sweep runs
+     * inline inside launchLoadSessions/launchLoadMoreSessions onSuccess
+     * (no dedicated coroutine) by comparing `now - session.time.created`
+     * against this threshold. 30 s matches the server's typical propagation
+     * latency.
+     */
+    const val pendingCreateTimeoutMs = 30_000L
+    /**
+     * §Q4-strict-sync: cap on the number of root-session metadata entries
+     * [persistSessionCache] writes to SharedPreferences (was: open + current +
+     * currentWorkdir roots only; now: ALL non-archived root sessions). 200 is
+     * a pragmatic ESP-inflation guard — beyond this, entries are trimmed by
+     * time.updated desc (keep the most recently active). Product-accepted for
+     * users with >500 sessions (the cap drops oldest metadata; sessions are
+     * always re-fetchable from the server).
+     */
+    const val sessionCacheCap = 200
 }
 
 internal data class SessionCreatedEvent(
@@ -184,20 +205,25 @@ internal fun bumpSessionUpdated(sessions: List<Session>, sessionId: String, upda
  * title), prefer the local title and lift the remote time so a concurrent
  * full refresh does not clobber it.
  *
- * The [preserve] pass (#10) appends local-only sessions that the full refresh
- * did not return, but ONLY when they are the currently-open session
- * ([currentSessionId]) or appear in the browser-tab-style open list
- * ([openSessionIds]). This prevents a loadSessions/loadMore refresh from
- * silently evicting the session the user is currently viewing (e.g. a freshly
- * created session that has not yet propagated into the global listing, or a
- * directory-session the user selected from a connected workdir). Sessions
- * outside this allow-list are allowed to drop naturally on refresh.
+ * §Q4-strict-sync: the [preserve] pass now keeps a local-only session IFF its
+ * id is in [pendingCreateIds] (the "just created, not yet confirmed by the
+ * server" set). This is STRICTER than the legacy `currentSessionId ||
+ * openSessionIds` rule: a session that was opened locally but is NOT in the
+ * server's authoritative listing AND is NOT pending-create will now drop
+ * naturally on refresh (the "ghost after server-side cleanup" fix). The final
+ * list is `authoritative ∪ local.filter { id in pendingCreateIds }`.
+ *
+ * [currentSessionId] and [openSessionIds] are retained in the signature for
+ * call-site compatibility but are NO LONGER used in the preserve filter —
+ * pendingCreateIds is the sole authority. (They were kept to minimise the
+ * call-site diff; a future cleanup can drop them.)
  */
 internal fun mergeRefreshedSessionsPreservingLocalActivity(
     refreshed: List<Session>,
     local: List<Session>,
     currentSessionId: String?,
-    openSessionIds: Set<String>
+    openSessionIds: Set<String>,
+    pendingCreateIds: Set<String> = emptySet(),
 ): List<Session> {
     val localById = local.associateBy { it.id }
     val refreshedIds = refreshed.map { it.id }.toSet()
@@ -205,31 +231,36 @@ internal fun mergeRefreshedSessionsPreservingLocalActivity(
         val localSession = localById[remote.id]
         val localUpdated = localSession?.time?.updated
         val remoteUpdated = remote.time?.updated
-        if (localUpdated != null && (remoteUpdated == null || localUpdated > remoteUpdated)) {
-            // The local copy is strictly newer than this refresh response (e.g. it was just
-            // upserted from a session.updated SSE event that carries the server-authoritative
-            // title). A concurrently-issued full refresh can return a stale snapshot that
-            // predates the title generation, so prefer the local title here to avoid clobbering
-            // it. The full refresh remains authoritative whenever it is at least as fresh.
+        if (localSession != null && localUpdated != null && (remoteUpdated == null || localUpdated > remoteUpdated)) {
+            // §Q4-strict-sync semantic 2 (per-id fresher-wins): the local copy
+            // carries a strictly-newer time.updated (e.g. it was just bumped by
+            // a send-message that elevated it above the server's stale listing
+            // snapshot). Keep the LOCAL session entirely — its time.updated is
+            // already the freshest, and using the local object preserves any
+            // local-side state (title from SSE, revert cutoff, etc.) that a
+            // stale server response would null out.
             //
-            // §revert-cutoff (A3-1): when the local copy is newer, also preserve the local
-            // revert instead of letting a stale refresh null it out. A stale list response may
-            // omit `revert` even while a revert is still active; honoring that stale null would
-            // make the chat selector release the full post-revert window (the A3-1 data leak).
-            // Conservative direction: keep whichever side carries a revert, preferring the
-            // fresher local copy — this can only over-filter (fail-closed), never leak.
-            remote.copy(
-                title = localSession.title ?: remote.title,
-                time = remote.time.withUpdatedAtLeast(localUpdated),
-                revert = if (localSession.revert != null) localSession.revert else remote.revert
-            )
+            // This does NOT re-introduce ghosts: ghosts are sessions the server
+            // DELETED (absent from the refreshed list entirely). Those are
+            // governed by the preserve pass below (pendingCreateIds only).
+            // Semantic 2 only applies to ids the server DID return (in-refreshed);
+            // it just picks the fresher OBJECT for each such id.
+            //
+            // §revert-cutoff (A3-1): using localSession preserves the local
+            // revert field too — a stale refresh that omits `revert` cannot
+            // null it out (fail-closed: keep whichever side carries a revert,
+            // and since the local copy is fresher, it wins outright).
+            localSession
         } else {
             remote
         }
     }
+    // §Q4-strict-sync semantic 1 (strict ghost removal): preserve ONLY
+    // pending-create ids not in the refreshed (authoritative) set. This is
+    // the formula:
+    //   final = authoritative ∪ local.filter { id in pendingCreateIds }
     val preserve = local.filter {
-        it.id !in refreshedIds &&
-            (it.id == currentSessionId || it.id in openSessionIds)
+        it.id !in refreshedIds && it.id in pendingCreateIds
     }
     return base + preserve
 }

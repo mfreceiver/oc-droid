@@ -424,15 +424,17 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
     // that go on the wire, so this is safe to clear immediately.
     writeComposer { it.copy(inputText = "", imageAttachments = emptyList(), fileReferences = emptyList()) }
 
-    // §chat-ux-batch T3: snap the message list to the newest message when the
-    // user sends — mirrors SessionViewModel.requestJumpToLatest (same store
-    // dispatch + same AppAction.PendingJumpToLatestSet). Placed here (after the
-    // early-return guards + composer clear, BEFORE the archived/direct branches
-    // reach launchSendMessage) so it fires exactly once on the common send
-    // path. The consumer at ChatMessageContent.kt:565-576 then performs
-    // scrollToItem(0) + followBottom=true and clears the intent. sessionId is a
-    // non-null String parameter, no guard needed.
-    store.dispatch(AppAction.PendingJumpToLatestSet(sessionId))
+    // §Wave5b-Q13: snap the message list to the newest message when the user
+    // sends. Replaces the pre-Wave5b `PendingJumpToLatestSet(sessionId)`
+    // dispatch with the unified ScrollRequested(Latest) — same intent, same
+    // single consumer, same compare-and-clear semantics. Uses the
+    // SessionSwitcher.requestLatestScroll helper which BYPASSES switchTo's
+    // same-session no-op guard (the user is sending from the CURRENT session;
+    // switchTo would early-return and NOT generate a fresh Latest intent).
+    // Placed here (after the early-return guards + composer clear, BEFORE
+    // the archived/direct branches reach launchSendMessage) so it fires
+    // exactly once on the common send path.
+    sessionSwitcher.requestLatestScroll(sessionId)
 
     val currentSession = currentSession(store.sessionListFlow.value.sessions, store.chatFlow.value.currentSessionId)
 
@@ -676,8 +678,8 @@ internal fun AppCore.loadSessionsForEffect() {
         // current) AND (if current is archived) clears chat + unread/questions
         // subtree cleanup + emits [ControllerEffect.EvictSession]. One
         // committed aggregate state — no torn intermediate.
-        onArchivedSessionsDetected = { merged, newOpenIds, hasMore ->
-            dispatchBulkArchivedSessions(merged, newOpenIds, hasMore)
+        onArchivedSessionsDetected = { merged, newOpenIds, hasMore, confirmedServerIds, sweepNow ->
+            dispatchBulkArchivedSessions(merged, newOpenIds, hasMore, confirmedServerIds, sweepNow)
         },
     )
 }
@@ -693,7 +695,11 @@ internal fun AppCore.loadSessionsForEffect() {
  *     not just the current session; the SSE path does this per-session).
  *  3. IFF the current session is among the archived, clears chat
  *     ([applyArchivedChatClear] → currentSessionId/messages/partsByMessage/
- *     pendingJumpToLatest per FIX-B) + unread/questions subtree cleanup.
+ *     pendingScrollRequest + parentReturnCheckpoints per FIX-B / §Wave5b-Q13)
+ *     + scroll-state cleanup for the WHOLE archived subtree (§Wave5b-Q13
+ *     blocker-2 — non-current archived ids also get pendingScrollRequest /
+ *     parentReturnCheckpoints entries swept via cleanScrollStateForSubtree)
+ *     + unread/questions subtree cleanup.
  *
  * The reducer derives the "clear chat" decision from the snapshot
  * (chat.currentSessionId in archivedIds), so the action carries pure data
@@ -712,6 +718,8 @@ private fun AppCore.dispatchBulkArchivedSessions(
     mergedSessions: List<Session>,
     newOpenIds: List<String>,
     hasMoreSessions: Boolean,
+    confirmedServerIds: Set<String>,
+    sweepNow: Long,
 ) {
     val currentOpenIds = store.sessionListFlow.value.openSessionIds
     // Capture the PREVIOUS currentSessionId before the dispatch clears it
@@ -737,6 +745,8 @@ private fun AppCore.dispatchBulkArchivedSessions(
             sessions = mergedSessions,
             openSessionIds = newOpenIds,
             hasMoreSessions = hasMoreSessions,
+            confirmedServerIds = confirmedServerIds,
+            sweepNow = sweepNow,
         )
     )
     // R-20 Phase 1 cache hygiene (mirrors the SSE archive path's EvictSession

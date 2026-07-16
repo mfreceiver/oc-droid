@@ -56,6 +56,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.ui.effectiveBusySessionIds
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.Dimens
 
@@ -88,6 +89,7 @@ import cn.vectory.ocdroid.ui.theme.Dimens
 fun SessionPickerSheet(
     sessions: List<Session>,
     sessionStatuses: Map<String, SessionStatus>,
+    activeSessionIds: Set<String>,
     currentSessionId: String?,
     unreadSessions: Set<String>,
     questionSessionIds: Set<String> = emptySet(),
@@ -105,6 +107,9 @@ fun SessionPickerSheet(
             .filter { it.parentId == null && !it.isArchived }
             .sortedByDescending { it.time?.updated ?: 0L }
             .take(10)
+    }
+    val effectiveBusy = remember(activeSessionIds, sessionStatuses) {
+        effectiveBusySessionIds(activeSessionIds, sessionStatuses)
     }
 
     // Resolved "selected" id: current root session when present, otherwise
@@ -142,7 +147,7 @@ fun SessionPickerSheet(
                         session = s,
                         isSelected = s.id == effectiveSelectedId,
                         status = sessionStatuses[s.id],
-                        isUnread = s.id in unreadSessions,
+                        isUnread = s.id in unreadSessions && s.id !in effectiveBusy,
                         hasQuestion = s.id in questionSessionIds,
                         onClick = { onSelect(s.id) },
                     )

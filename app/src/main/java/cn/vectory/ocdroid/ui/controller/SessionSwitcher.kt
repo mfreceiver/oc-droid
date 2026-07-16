@@ -4,6 +4,10 @@ import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.AppAction
+import cn.vectory.ocdroid.ui.PendingScrollRequest
+import cn.vectory.ocdroid.ui.ScrollBehavior
+import cn.vectory.ocdroid.ui.ScrollCheckpoint
 import cn.vectory.ocdroid.ui.controller.CachedSessionWindow
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
@@ -72,6 +76,39 @@ class SessionSwitcher(
 ) {
     /** §R18 Phase 4 (P0-9): the 9-slice bundle is derived from [store]. */
     private val slices: SliceFlows get() = store.slices
+
+    /**
+     * §Wave5b-Q13: monotonic id source for [PendingScrollRequest]s. Uses
+     * `System.nanoTime()` (monotonic where available; collisions only if two
+     * requests land in the same nanosecond, which the single main-dispatch
+     * thread of every writer here makes impossible). The id is the
+     * compare-and-clear token in [AppAction.ScrollConsumed]; uniqueness is
+     * required so a stale consumer cannot accidentally clear a newer intent.
+     */
+    private fun nextScrollRequestId(): Long = System.nanoTime()
+
+    /**
+     * §Wave5b-Q13: same-session "snap to latest" intent for the send path +
+     * Chat-tab reselect path. Deliberately bypasses [switchTo]'s same-session
+     * no-op guard (a `switchTo(currentId)` returns early at Step 0, so it
+     * would NOT generate a fresh Latest intent for an already-current
+     * session).
+     *
+     * Issues [AppAction.ScrollRequested] with behavior=[ScrollBehavior.Latest].
+     * The consumer (ChatMessageList) scrolls to item 0 + arms followBottom +
+     * compare-and-clears the slot. No-op if [sessionId] is null (draft /
+     * cleared).
+     */
+    fun requestLatestScroll(sessionId: String?) {
+        if (sessionId == null) return
+        store.dispatch(
+            AppAction.ScrollRequested(
+                requestId = nextScrollRequestId(),
+                targetSessionId = sessionId,
+                behavior = ScrollBehavior.Latest,
+            )
+        )
+    }
     /**
      * §Per-session message cache (LRU): maps (serverGroupFp, sessionId) →
      * the loaded message window ([CachedSessionWindow]) so switching A→B→A
@@ -292,12 +329,17 @@ class SessionSwitcher(
      * metadata yet), we emit createdAt=null → peek miss (no resident window to
      * hydrate from) → cold REST load.
      */
-    fun switchTo(sessionId: String) {
+    fun switchTo(sessionId: String, behavior: ScrollBehavior = ScrollBehavior.Latest) {
         // item 3 deep guard (second layer): if the requested session is already
         // current, do nothing. This is the defensive backstop behind the UI-layer
         // guard (SessionTab's onClick no-op) — it catches other call paths
         // (pager swipe, programmatic select) that bypass the tab tap and would
         // otherwise trigger a full reload of an already-loaded session.
+        //
+        // §Wave5b-Q13: this SAME-SESSION NO-OP is also why the send / Chat-tab
+        // reselect paths use [requestLatestScroll] (which BYPASSES this guard)
+        // instead of switchTo — those paths need a fresh Latest intent on an
+        // already-current session.
         if (slices.chat.value.currentSessionId == sessionId) return
         // ── Step 1: Capture outgoing session state ──────────────────────────
         // Capture the previously-selected session BEFORE overwriting
@@ -334,20 +376,34 @@ class SessionSwitcher(
         // below) is the sole runtime source; the AppCore collector persists
         // the new non-null id back to SettingsManager. No manual write here.
         val restoredDraft = settingsManager.getDraftText(fp, sessionId)
+        // §Wave5b-Q13 blocker-1 fix (gpter 8.7 FAIL / groker 9.6 PASS): write
+        // `currentSessionId` AND `pendingScrollRequest` in the SAME mutateChat
+        // commit. The pre-fix code dispatched `ScrollRequested` first (one
+        // commit) then mutateChat (a second commit); the intermediate state
+        // (pendingScrollRequest set with targetSessionId = NEW but
+        // currentSessionId still = OLD) was observable to stateFlow collectors,
+        // violating the oracle's "在同一次 chat mutation 里原子提交
+        // currentSessionId 与 pendingScrollRequest" contract.
+        //
+        // The `ScrollRequested` action/reducer is RETAINED for the
+        // `requestLatestScroll` path (same-session send / Chat-tab reselect —
+        // currentSessionId does NOT flip there, so a single-field dispatch is
+        // correct). Only switchTo (which DOES flip currentSessionId) writes
+        // the slot inline here. `scrollRequestId` is captured ONCE outside the
+        // lambda so the value is stable (a recompute inside the CAS loop of
+        // state.update would yield a different id on retry).
+        val scrollRequestId = nextScrollRequestId()
         slices.mutateChat {
-            // §WT2-taskB (Q6 locked): keep pendingJumpToLatest ONLY when the
-            // incoming sessionId matches it (the Sessions-page entry path —
-            // SessionsScreen.onSessionClick calls requestJumpToLatest(id)
-            // BEFORE selectSession, so the id is already set on the slice by
-            // the time switchTo runs here). Any OTHER selection path (swipe,
-            // tab-strip, SessionPickerSheet, programmatic) lands on an id that
-            // does NOT match the intent → clear it. This also guards the edge
-            // case where the user swipes AWAY from a still-pending session
-            // before its messages load: the intent is dropped here so a later
-            // swipe back to that session preserves scroll instead of jumping.
-            val retainedJump = it.pendingJumpToLatest?.takeIf { it == sessionId }
             it.copy(
                 currentSessionId = sessionId,
+                // §Wave5b-Q13: the slot + the current-session flip share ONE
+                // commit so the consumer's first emission observes a
+                // consistent pair (currentSessionId == targetSessionId).
+                pendingScrollRequest = PendingScrollRequest(
+                    requestId = scrollRequestId,
+                    targetSessionId = sessionId,
+                    behavior = behavior,
+                ),
                 messages = emptyList(),
                 partsByMessage = emptyMap(),
                 streamingPartTexts = emptyMap(),
@@ -387,8 +443,6 @@ class SessionSwitcher(
                 // its own ChatState snapshot (pending defaults null).
                 pendingAgent = null,
                 pendingModel = null,
-                // §WT2-taskB: retained-or-cleared jump intent (see above).
-                pendingJumpToLatest = retainedJump,
             )
         }
         // Restore the selected session's draft into the composer slice.

@@ -38,8 +38,6 @@
     <string name="settings_section_models">模型</string>
     <string name="settings_section_notifications">通知</string>
     <string name="settings_section_notifications_subtitle">完成与错误提醒</string>
-    <string name="settings_section_storage">存储</string>
-    <string name="settings_section_storage_subtitle">缓存、流量、危险操作</string>
     <string name="settings_section_about">关于</string>
     <string name="settings_section_about_subtitle">版本与诊断</string>
     <!-- §phase3: 通知子路由占位内容。运行时权限提示仍由 §18 通道 + Settings 开关驱动。 -->
@@ -121,6 +119,8 @@
     <string name="sessions_archive">归档</string>
     <!-- T4：会话行长按菜单（A 层 DropdownMenu）+ 重命名对话框（C 层 AppFormDialog）。 -->
     <string name="sessions_rename">重命名</string>
+    <!-- Q15：长按菜单项，将 ses_xxx 会话 ID 复制到剪贴板。 -->
+    <string name="sessions_copy_id">复制会话 ID</string>
     <string name="sessions_rename_title">重命名会话</string>
     <string name="sessions_restore">恢复</string>
     <string name="sessions_no_active">没有当前会话</string>
@@ -356,7 +356,7 @@
     <string name="settings_clear_local_data_title">清除全部本地数据？</string>
     <string name="settings_clear_local_data_warning">将清除本地数据并从服务器重新拉取。仅保留服务器连接信息和隧道口令。</string>
     <string name="settings_clear_local_data_keeps">保留：服务器连接信息、主机配置、隧道口令。</string>
-    <string name="settings_clear_local_data_clears">将清除本地全部数据并重新同步：草稿、模型/Agent 偏好、当前会话与工作目录、导航与界面状态、主题、语言、流量统计，以及已缓存的消息。</string>
+    <string name="settings_clear_local_data_clears">将清除本地全部数据并重新同步：草稿、模型/Agent 偏好、当前会话与工作目录、导航与界面状态、主题、语言、流量统计，以及已缓存的消息。所有服务器均受影响。</string>
     <string name="settings_clear_local_data_irreversible">操作不可撤销。</string>
     <string name="chat_model_picker_title">选择模型</string>
     <string name="chat_model_picker_empty">当前服务器没有可用的模型</string>

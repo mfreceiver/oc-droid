@@ -13,6 +13,7 @@ import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
+import cn.vectory.ocdroid.ui.controller.cleanScrollStateForSubtree
 import cn.vectory.ocdroid.ui.controller.removeSessions
 import cn.vectory.ocdroid.ui.controller.subtreeIds
 import cn.vectory.ocdroid.util.DebugLog
@@ -33,7 +34,18 @@ internal fun launchCreateSession(
     scope.launch {
         repository.createSession(title, directory)
             .onSuccess { session ->
-                slices.mutateSessionList { sl -> sl.copy(sessions = upsertSession(sl.sessions, session)) }
+                val registeredAt = System.currentTimeMillis()
+                // §Q4-strict-sync: track the freshly-created session's id as
+                // pending-create so the next REST refresh does not evict it
+                // before the server's listing propagates. Removed atomically
+                // by the refresh's sweep or by SSE session.created.
+                slices.mutateSessionList { sl ->
+                    sl.copy(
+                        sessions = upsertSession(sl.sessions, session),
+                        pendingCreateIds = sl.pendingCreateIds + session.id,
+                        pendingCreatedAt = sl.pendingCreatedAt + (session.id to registeredAt),
+                    )
+                }
                 onSelectSession(session.id)
             }
             .onFailure { error ->
@@ -125,7 +137,8 @@ internal fun launchSetSessionArchived(
         // §task5-lifecycle: three-source subtree so descendants that only
         // live in directorySessions / childSessions are still visited.
         val sl = slices.sessionList.value
-        val ids = subtreeIds(sessionId, sl.sessions, sl.directorySessions, sl.childSessions).toList()
+        val subtree = subtreeIds(sessionId, sl.sessions, sl.directorySessions, sl.childSessions)
+        val ids = subtree.toList()
         for (id in ids) {
             repository.updateSessionArchived(id, archivedValue)
                 .onSuccess { updated ->
@@ -173,25 +186,49 @@ internal fun launchSetSessionArchived(
                     slices.mutateSessionList {
                         // §task5-lifecycle: per-id question filter (presentation domain).
                         val cleanedQuestions = if (isArchive) {
-                            it.pendingQuestions.filter { q -> q.sessionId != id }
+                            it.pendingQuestions.filter { q -> q.sessionId !in subtree }
                         } else {
                             it.pendingQuestions
                         }
+                        val activeIdsToRemove = if (isArchive) subtree else setOf(id)
                         it.copy(
                             sessions = newSessions,
                             directorySessions = newDirSessions,
                             childSessions = newChildSessions,
                             openSessionIds = newOpenIds,
                             pendingQuestions = cleanedQuestions,
+                            activeSessionIds = it.activeSessionIds - activeIdsToRemove,
                         )
                     }
                     if (isArchive) {
-                        // §task5-lifecycle: per-id unread drop.
-                        slices.mutateUnread { it.removeSessions(setOf(id)) }
+                        // §task5-lifecycle: archive clears the full known subtree.
+                        slices.mutateUnread { it.removeSessions(subtree) }
+                        // §Wave5b-Q13 blocker-2: UNCONDITIONAL scroll-state
+                        // cleanup for the archived subtree. Drops a stale
+                        // pendingScrollRequest (target in subtree) +
+                        // parentReturnCheckpoints entries (key in subtree)
+                        // WITHOUT touching chat content. The current-archive
+                        // chat-content clear below uses mutateChat which only
+                        // wipes currentSessionId/messages/partsByMessage —
+                        // cleanScrollStateForSubtree is the SOLE path that
+                        // catches scroll-state leakage for NON-current
+                        // archived ids (which the clearCurrent branch skips).
+                        slices.mutateChat { it.cleanScrollStateForSubtree(subtree) }
                     }
                     if (clearCurrent) {
                         // Cross-slice: currentSessionId/messages/partsByMessage are
                         // chat-slice fields; the rest above are sessionList.
+                        //
+                        // §Wave5b-Q13: applyArchivedChatClear-equivalent content
+                        // clear for the CURRENT archived id. The
+                        // cleanScrollStateForSubtree call above already wiped
+                        // the slot + the currentId's checkpoint entry; this
+                        // branch additionally wipes messages / partsByMessage /
+                        // currentSessionId so the chat view falls back to the
+                        // empty state. (Does NOT call applyArchivedChatClear
+                        // directly to preserve the pre-existing field set —
+                        // streaming overlays / cursor / model are reset by the
+                        // next switchTo's clearSessionData, not here.)
                         slices.mutateChat {
                             it.copy(
                                 currentSessionId = null,
@@ -272,6 +309,7 @@ internal fun launchDeleteSession(
                         directorySessions = newDirSessions,
                         // §task5-lifecycle: question filter for removed subtree.
                         pendingQuestions = sl.pendingQuestions.filter { it.sessionId !in removedIds },
+                        activeSessionIds = sl.activeSessionIds - removedIds,
                     )
                 }
                 // §task5-lifecycle: unread drop for the whole removed subtree.

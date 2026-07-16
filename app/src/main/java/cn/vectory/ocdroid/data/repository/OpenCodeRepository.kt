@@ -501,6 +501,10 @@ class OpenCodeRepository @Inject constructor(
         api.getSessionStatus()
     }
 
+    suspend fun getActiveSessionIds(): Result<Set<String>> = runSuspendCatching {
+        api.getActiveSessions().data.keys
+    }
+
     /**
      * Fetches the child (sub-agent) sessions spawned by [sessionId], typically
      * via the `task` tool.

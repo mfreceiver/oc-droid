@@ -4,6 +4,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -19,9 +21,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
@@ -32,6 +39,8 @@ import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.SettingsViewModel
+import cn.vectory.ocdroid.ui.effectiveBusySessionIds
+import cn.vectory.ocdroid.ui.chat.copyToSystemClipboard
 import cn.vectory.ocdroid.ui.chat.workdirTone
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.AppFormDialog
@@ -123,6 +132,10 @@ fun SessionsScreen(
     // `menuSession` is the row whose menu is expanded; selecting an item clears
     // it (and routes to `renameSession` or `pendingArchiveSession`).
     var menuSession by remember { mutableStateOf<Session?>(null) }
+    // Q15: application context for copy-to-clipboard (ses_xxx id) from the
+    // long-press menu. Hoisted once; copyToSystemClipboard derives the
+    // application context itself.
+    val context = LocalContext.current
     // T4: rename form (Tier-C AppFormDialog). Null = hidden; set by the
     // DropdownMenu's rename item.
     var renameSession by remember { mutableStateOf<Session?>(null) }
@@ -172,6 +185,15 @@ fun SessionsScreen(
     val pendingPermissionSessionIds = remember(sessionListState.pendingPermissions) {
         sessionListState.pendingPermissions.map { it.sessionId }.toSet()
     }
+    val effectiveBusy = remember(
+        sessionListState.activeSessionIds,
+        sessionListState.sessionStatuses,
+    ) {
+        effectiveBusySessionIds(
+            sessionListState.activeSessionIds,
+            sessionListState.sessionStatuses,
+        )
+    }
 
     // Nav redesign: the "Connected projects" workdir-groups section moved to
     // the Files tab (project-centric workspace). buildWorkdirGroups (the pure
@@ -185,15 +207,15 @@ fun SessionsScreen(
 
     // Navigate to Chat tab after selecting a session.
     //
-    // §WT2-taskB (Q6 locked): Sessions-page tap sets the "jump to latest"
-    // intent BEFORE selectSession. The matching SessionSwitcher.switchTo
-    // keeps the intent (currentSessionId becomes the tapped id and matches
-    // pendingJumpToLatest); ChatMessageList then consumes it once messages
-    // have loaded (scrollToItem(0) + followBottom=true + clear). Swipe,
-    // tab-strip, and SessionPickerSheet paths do NOT set the intent, so
-    // each session's saveable scroll position is preserved there.
+    // §Wave5b-Q13: the pre-Wave5b `requestJumpToLatest(sessionId)` call is
+    // GONE — the default selectSession path now lands Latest via the unified
+    // PendingScrollRequest slot (set inside SessionSwitcher.switchTo). The
+    // prior two-step (request intent → selectSession keep-if-match) collapsed
+    // into one: every switchTo call dispatches its own fresh Latest intent
+    // in the same mutateChat that flips currentSessionId. Same-session
+    // reselect remains a no-op (switchTo guard), so a duplicate tap does not
+    // produce a redundant scroll.
     fun onSessionClick(sessionId: String) {
-        viewModel.requestJumpToLatest(sessionId)
         viewModel.selectSession(sessionId)
         onSwitchToChat()
     }
@@ -311,20 +333,35 @@ fun SessionsScreen(
                         // single screen-level `menuSession` holder drives all
                         // rows; only the matching row's menu expands).
                         Box {
+                            // Q7: capture the long-press position so the menu
+                            // can anchor near the touch point instead of the
+                            // parent Box's top-left corner (which previously
+                            // made it always pop at the screen's left edge).
+                            var pressOffset by remember { mutableStateOf(DpOffset.Zero) }
+                            // Hoist density out of the (non-composable)
+                            // onLongClick lambda so px→dp conversion can use it.
+                            val density = LocalDensity.current
                             SessionCard(
                                 session = session,
-                                isUnread = session.id in unreadSessions,
+                                isUnread = session.id in unreadSessions && session.id !in effectiveBusy,
                                 status = sessionListState.sessionStatuses[session.id],
                                 hasPendingQuestion = hasPendingQuestion,
                                 hasPendingPermission = hasPendingPermission,
                                 onClick = { onSessionClick(session.id) },
-                                onLongClick = { menuSession = session }
+                                onLongClick = { offset ->
+                                    // px → dp via density (never literal .dp).
+                                    pressOffset = with(density) {
+                                        DpOffset(offset.x.toDp(), offset.y.toDp())
+                                    }
+                                    menuSession = session
+                                }
                             )
                             DropdownMenu(
                                 expanded = menuSession?.id == session.id,
                                 onDismissRequest = {
                                     if (menuSession?.id == session.id) menuSession = null
                                 },
+                                offset = pressOffset,
                             ) {
                                 DropdownMenuItem(
                                     text = { Text(stringResource(R.string.sessions_rename)) },
@@ -337,6 +374,15 @@ fun SessionsScreen(
                                     text = { Text(stringResource(R.string.sessions_archive)) },
                                     onClick = {
                                         pendingArchiveSession = session
+                                        menuSession = null
+                                    },
+                                )
+                                // Q15: copy the session id (ses_xxx) to the
+                                // system clipboard for sharing / debugging.
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.sessions_copy_id)) },
+                                    onClick = {
+                                        copyToSystemClipboard(context, session.id)
                                         menuSession = null
                                     },
                                 )
@@ -567,7 +613,9 @@ internal fun SessionCard(
     hasPendingQuestion: Boolean = false,
     hasPendingPermission: Boolean = false,
     onClick: () -> Unit,
-    onLongClick: () -> Unit = {},
+    // Q7: carries the long-press Offset (relative to the SessionCard node) so
+    // the caller can anchor the DropdownMenu near the touch point.
+    onLongClick: (Offset) -> Unit = {},
     onArchive: (() -> Unit)? = null,
     // When true (default), the session's workdir basename is shown in the
     // subtitle. The connected-projects expanded list passes false because the
@@ -575,6 +623,11 @@ internal fun SessionCard(
     // "recent sessions" list keeps it (its items can come from any project).
     showWorkdir: Boolean = true
 ) {
+    // Q7 (gating fix): non-consuming press-position observer. Captures the
+    // touch point (px) for DropdownMenu anchoring while leaving combinedClickable
+    // fully in charge of tap/long-press (ripple + role/a11y semantics).
+    var pressPositionPx by remember { mutableStateOf(Offset.Zero) }
+
     // Prefer the latest message time (time.updated); fall back to time.created.
     val updatedText = (session.time?.updated?.takeIf { it > 0L } ?: session.time?.created?.takeIf { it > 0L })
         ?.let { formatTime(it) }
@@ -595,24 +648,41 @@ internal fun SessionCard(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
+            // Q7 (gating fix): a NON-CONSUMING pointerInput observer records
+            // the last DOWN position (px) WITHOUT calling down.consume() and
+            // WITHOUT waitForUpOrCancellation — so the event stays available
+            // for combinedClickable below, which then drives tap / long-press
+            // WITH ripple indication + role/semantics + a11y click behavior.
+            // Order matters: observer BEFORE combinedClickable (both before
+            // padding) so the gesture nodes share an origin aligned with the
+            // parent Box, matching DropdownMenu's parent-relative offset.
+            // awaitFirstDown(requireUnconsumed = false) receives the down
+            // even if an upstream modifier already observed it.
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    pressPositionPx = down.position
+                    // Deliberately do NOT consume; do NOT wait for up/cancel.
+                }
+            }
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = { onLongClick(pressPositionPx) }
+            )
             // §0.8.2 P3.3: vertical padding 2.dp → 0.dp (horizontal kept).
             // LazyColumn arrangement is flush (spacedBy(0.dp)); cards rely on
             // their surfaceContainerLow background for visual grouping. Card
             // internal layout untouched.
-            .padding(horizontal = Dimens.spacing2, vertical = 0.dp)
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongClick
-            ),
+            .padding(horizontal = Dimens.spacing2, vertical = 0.dp),
         shape = RectangleShape,
         color = MaterialTheme.colorScheme.surfaceContainerLow
     ) {
         // A1: converged the custom title/subtitle Row onto the M3 ListItem.
         // leadingContent = agent icon, headlineContent = title, supportingContent
         // = metadata (workdir • time), trailingContent = archive action + status
-        // / unread indicators. combinedClickable stays on the outer ElevatedCard
-        // so the whole card remains the click/long-click target (archive button
-        // consumes its own taps).
+        // / unread indicators. combinedClickable stays on the outer Surface so
+        // the whole card remains the click/long-click target (ripple + a11y
+        // semantics intact; archive button consumes its own taps).
         ListItem(
             modifier = Modifier.heightIn(min = Dimens.touchTargetMin),
             headlineContent = {

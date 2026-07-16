@@ -200,6 +200,18 @@ internal fun HostProfilesManagerScreen(
                     viewModel.setProviderModelsEnabled(providerId, enabled)
                 },
             )
+
+            // ── §Q3 Section 4: 清除数据 (moved from the removed settings/storage) ──
+            // 清除是全局动作（SettingsManager.clearAllLocalData via
+            // resetLocalDataAndResync），与具体服务器无关，因此从原 storage
+            // 入口搬到服务器管理页末段。复用现有 DangerZoneSection（hideHeader，
+            // 由本段自带的 AppSectionHeader 承担标题）。
+            Spacer(modifier = Modifier.height(Dimens.spacing4))
+            AppSectionHeader(text = stringResource(R.string.settings_danger_zone))
+            DangerZoneSection(
+                onClearLocalData = viewModel::resetLocalDataAndResync,
+                hideHeader = true,
+            )
         }
     }
 

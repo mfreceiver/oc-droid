@@ -212,6 +212,12 @@ class ConnectionCoordinatorTest {
     fun `testConnection on healthy sets connected phase and fans out initial data plus SSE`() {
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "9.9"))
         coEvery { repository.getCommands() } returns Result.success(emptyList())
+        // §Q4-strict-sync (#10 self-heal): loadInitialData's self-heal branch
+        // probes getSessions when recentWorkdirs is empty (the default here:
+        // currentWorkdir=null + getRecentWorkdirs→empty). Explicitly stub it
+        // so the relaxed mock does not throw and cancel the non-supervisor
+        // scope (which would prevent startSSE / launcher.ensureStarted).
+        coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
 
         coordinator.testConnection()
         runPending()
@@ -432,6 +438,11 @@ class ConnectionCoordinatorTest {
         every { settingsManager.currentWorkdir } returns null
         every { settingsManager.getRecentWorkdirs(any()) } returns emptyList()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
+        // §Q4-strict-sync (#10 self-heal): when recentWorkdirs is empty, the
+        // self-heal path probes getSessions to infer workdirs. Explicitly return
+        // empty so no directories are inferred → getSessionsForDirectory is
+        // never called (the test's core assertion).
+        coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
 
         coordinator.loadInitialData()
         runPending()

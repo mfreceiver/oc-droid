@@ -132,6 +132,7 @@ internal fun SessionTabStrip(
     parentSessionId: String?,
     currentWorkdir: String?,
     unreadSessions: Set<String>,
+    effectiveBusy: Set<String>,
     questionSessionIds: Set<String> = emptySet(),
     actions: ChatTopBarActions,
     modifier: Modifier = Modifier
@@ -209,6 +210,7 @@ internal fun SessionTabStrip(
                             currentSessionId = currentSessionId,
                             accentColor = accentColor,
                             unreadSessions = unreadSessions,
+                            effectiveBusy = effectiveBusy,
                             questionSessionIds = questionSessionIds,
                             actions = actions,
                             modifier = Modifier.width(TAB_MIN_WIDTH)
@@ -230,6 +232,7 @@ internal fun SessionTabStrip(
                             currentSessionId = currentSessionId,
                             accentColor = accentColor,
                             unreadSessions = unreadSessions,
+                            effectiveBusy = effectiveBusy,
                             questionSessionIds = questionSessionIds,
                             actions = actions,
                             modifier = Modifier.weight(1f)
@@ -253,6 +256,7 @@ private fun SessionTab(
     currentSessionId: String?,
     accentColor: Color,
     unreadSessions: Set<String>,
+    effectiveBusy: Set<String>,
     questionSessionIds: Set<String>,
     actions: ChatTopBarActions,
     modifier: Modifier = Modifier
@@ -316,7 +320,7 @@ private fun SessionTab(
                             modifier = Modifier.padding(end = 4.dp)
                         )
                     }
-                    session.id in unreadSessions -> {
+                    session.id in unreadSessions && session.id !in effectiveBusy -> {
                         val dotColor = workdirTone(session.directory)
                         Box(
                             modifier = Modifier

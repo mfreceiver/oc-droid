@@ -283,7 +283,7 @@ internal fun TrafficSection(
  * Card) as a single row carrying the 清除缓存 button.
  *
  * The button keeps the existing destructive behavior
- * ([cn.vectory.ocdroid.ui.MainViewModel.resetLocalDataAndResync] — wipe +
+ * ([cn.vectory.ocdroid.ui.HostViewModel.resetLocalDataAndResync] — wipe +
  * re-fetch) and its confirmation [AlertDialog] (irreversible warning). Only
  * the action is honestly labelled "重置本地数据" (the section title is
  * "清除数据" via [R.string.settings_danger_zone]).

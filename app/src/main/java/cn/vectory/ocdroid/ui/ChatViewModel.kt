@@ -376,14 +376,21 @@ class ChatViewModel @Inject constructor(
     }
 
     /**
-     * §WT2-taskB (Q6 locked): clear the "Sessions page entry → jump to latest"
-     * intent. Called by [cn.vectory.ocdroid.ui.chat.ChatMessageList]'s
-     * LaunchedEffect AFTER it has performed the scrollToItem(0) jump for the
-     * pending session, so the intent fires exactly once per entry (does not
-     * re-fire on recomposition / preview return for the same session).
+     * §Wave5b-Q13: clear the active scroll intent (compare-and-clear by
+     * requestId). Called by [cn.vectory.ocdroid.ui.chat.ChatMessageList]'s
+     * LaunchedEffect AFTER it has performed the scroll (Latest or Restore) for
+     * the pending request, so the intent fires exactly once per switch.
+     *
+     * If a newer request has superseded [requestId] between the consumer's
+     * observe and clear (fast A→B→C cascade), the reducer's compare guard
+     * drops this clear silently — the newer intent survives for its own
+     * consumer.
+     *
+     * Replaces the pre-Wave5b `clearPendingJumpToLatest` (which was an
+     * unconditional clear of the `pendingJumpToLatest: String?` slot).
      */
-    fun clearPendingJumpToLatest() {
-        core.store.dispatch(AppAction.PendingJumpToLatestSet(null))
+    fun consumeScrollRequest(requestId: Long) {
+        core.store.dispatch(AppAction.ScrollConsumed(requestId))
     }
 
     /** Cross-domain: composer→chat→session creation lives in [AppCore]. */
