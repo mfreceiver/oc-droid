@@ -250,7 +250,19 @@ internal fun mergeRefreshedSessionsPreservingLocalActivity(
             // revert field too — a stale refresh that omits `revert` cannot
             // null it out (fail-closed: keep whichever side carries a revert,
             // and since the local copy is fresher, it wins outright).
-            localSession
+            // §Q2-cold-start: agent/model are server-authoritative and never
+            // mutated locally; if the fresher local copy is missing them (e.g.
+            // it came from a pre-fix cache entry), backfill from the remote
+            // snapshot so the context menu isn't left blank after the refresh.
+            if ((localSession.agent == null && remote.agent != null) ||
+                (localSession.model == null && remote.model != null)) {
+                localSession.copy(
+                    agent = localSession.agent ?: remote.agent,
+                    model = localSession.model ?: remote.model,
+                )
+            } else {
+                localSession
+            }
         } else {
             remote
         }

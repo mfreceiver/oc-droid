@@ -20,10 +20,9 @@ data class Session(
     // §Q2: server `/session` carries `agent` + nested `model` (id /
     // providerID / variant) used by the chat top-bar to surface the
     // session's effective agent/model ahead of any transcript inference.
-    // Both nullable with defaults so the cache round-trip
-    // (SessionCacheEntry→Session via toSession()) compiles unchanged —
-    // cached entries omit these (server refresh backfills, matching
-    // slug/projectId/share/version).
+    // §Q2-cold-start: both are now round-tripped through SessionCacheEntry
+    // (see toCacheEntry/toSession) so the context menu can show them on cold
+    // start before the post-start server refresh lands.
     val agent: String? = null,
     val model: ModelInfo? = null,
 ) {
@@ -107,8 +106,8 @@ data class SessionStatus(
  * target and its resolved timestamp are retained because the transcript gate
  * must remain fail-closed before a server refresh completes.
  *
- * See [toCacheEntry]/[toSession] for the lossy mapping (non-cached Session
- * fields default to null).
+ * See [toCacheEntry]/[toSession] for the mapping (lossless for agent/model
+ * since §Q2-cold-start; other non-cached Session fields default to null).
  */
 @Serializable
 data class SessionCacheEntry(
@@ -123,7 +122,13 @@ data class SessionCacheEntry(
     val deletions: Int? = null,
     val files: Int? = null,
     val revertMessageId: String? = null,
-    val revertCreatedAtEpochMs: Long? = null
+    val revertCreatedAtEpochMs: Long? = null,
+    // §Q2-cold-start: persisted so the context menu shows the current
+    // session's agent/model before the post-cold-start server refresh lands.
+    // Both nullable + defaulted so old cache JSON (without these keys)
+    // deserialises to null cleanly (kotlinx.serialization missing-key → default).
+    val agent: String? = null,
+    val model: Session.ModelInfo? = null,
 )
 
 /** Project a [Session] down to its cached metadata. */
@@ -138,7 +143,9 @@ internal fun Session.toCacheEntry(): SessionCacheEntry = SessionCacheEntry(
     additions = summary?.additions,
     deletions = summary?.deletions,
     files = summary?.files,
-    revertMessageId = revert?.messageId
+    revertMessageId = revert?.messageId,
+    agent = agent,
+    model = model,
 )
 
 /**
@@ -162,5 +169,7 @@ internal fun SessionCacheEntry.toSession(): Session = Session(
     } else {
         null
     },
-    revert = revertMessageId?.let { Session.RevertInfo(messageId = it) }
+    revert = revertMessageId?.let { Session.RevertInfo(messageId = it) },
+    agent = agent,
+    model = model,
 )
