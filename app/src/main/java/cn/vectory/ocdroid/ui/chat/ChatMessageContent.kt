@@ -70,6 +70,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 
 // ── Chat message list container ──────────────────────────────────────────
 // The top-level scrollable list of chat turns. Owns the per-session scroll
@@ -764,7 +765,16 @@ internal fun ChatMessageList(
         if (messages.isEmpty()) return@LaunchedEffect  // wait for the load
         when (val b = req.behavior) {
             is ScrollBehavior.Latest -> {
-                // Override saveable scroll restore: jump to newest (reverseLayout ⇒ 0).
+                // §Q13-swipe-fix: wait for the list to actually lay out content
+                // before forcing item 0. On horizontal swipe the page's
+                // ChatMessageList is freshly (re)composed and its
+                // rememberSaveable LazyListState restores the PRIOR viewport
+                // (mid-history) + followBottom=false; a bare scrollToItem(0)
+                // fired around the first measure races that restore and loses.
+                // Gating on totalItemsCount > 0 guarantees we scroll AFTER the
+                // list has measured, so item 0 (newest) reliably wins.
+                snapshotFlow { listState.layoutInfo.totalItemsCount }
+                    .first { it > 0 }
                 listState.scrollToItem(0)
                 followBottom = true
                 navFabVisible = false
