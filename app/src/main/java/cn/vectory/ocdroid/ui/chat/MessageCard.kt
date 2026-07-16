@@ -65,6 +65,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -87,12 +89,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
@@ -168,6 +174,15 @@ internal fun MessageCard(
     onFork: (String) -> Unit,
 ) {
     var overflowOpen by remember { mutableStateOf(false) }
+    // §press-anchor (Bug4 fix): capture the long-press touch point so the
+    // DropdownMenu opens AT the finger instead of a hard-coded corner.
+    // combinedClickable's onLongClick has no Offset parameter, so a NON-
+    // CONSUMING pointerInput on the outer Box records the last DOWN in this
+    // card's local px; onLongClick snapshots it into menuAnchorPx, which feeds
+    // DropdownMenu's `offset`. Mirrors the SessionsScreen Q7 gating-fix pattern.
+    var pressPositionPx by remember { mutableStateOf(Offset.Zero) }
+    var menuAnchorPx by remember { mutableStateOf(Offset.Zero) }
+    val density = LocalDensity.current
     // §1C-FIX-③/④: the destructive-gate state machine. Owned by
     // Compose's `remember` (per-message scope; resets when the
     // message id changes). The pure transitions live in
@@ -196,12 +211,29 @@ internal fun MessageCard(
     Box(
         modifier = Modifier
             .fillMaxWidth()
+            // §press-anchor (Q7 gating-fix pattern): a NON-CONSUMING pointerInput
+            // records the last DOWN position (px) WITHOUT consuming it and WITHOUT
+            // waitForUpOrCancellation — so combinedClickable below still owns
+            // tap/long-press + ripple/a11y semantics. Order: observer BEFORE
+            // combinedClickable so the gesture origin matches the DropdownMenu's
+            // parent-relative offset (both anchored to this outer Box).
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    pressPositionPx = down.position
+                    // Deliberately do NOT consume; do NOT wait for up/cancel.
+                }
+            }
             .combinedClickable(
                 interactionSource = longPressInteraction,
                 indication = null,
                 onClick = { /* tap = select (no-op), per E.5 */ },
                 onLongClick = {
                     hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                    // §press-anchor: snapshot the press point so the menu opens
+                    // at the finger; the snapshot stays stable while the menu is
+                    // open even if a later DOWN updates pressPositionPx.
+                    menuAnchorPx = pressPositionPx
                     overflowOpen = true
                 },
             )
@@ -231,31 +263,23 @@ internal fun MessageCard(
             )
         }
 
-        // §0.8.2 P2.4 / §B5-P4: anchor-fix for the long-press-triggered
-        // DropdownMenu. The popup MUST be a sibling of a tight anchor
-        // inside a dedicated Box (aligned TopEnd) so it attaches below the
-        // top-end corner of the message card. The prior layout (before
-        // P2.4) composed the DropdownMenu OUTSIDE the parent Box (a remote
-        // menu with no tight anchor), which caused the popup to attach to
-        // the window's top-left corner — the bug P2.4 fixed. Mirrors the
-        // same anchor pattern used by the top-bar ContextMenuCluster (P2.3).
-        //
-        // §B5-P4: the MoreVert IconButton that used to live inside this Box
-        // is removed (long-press already opened the same menu; the button
-        // was visually noisy). The Box itself is RETAINED as a 0-size
-        // anchor at the same TopEnd + 4dp position so the DropdownMenu's
-        // popup coordinate does NOT regress to the window's top-left. The
-        // empty Box costs nothing in measure/layout (wrap-content = 0 when
-        // the menu is collapsed) and preserves the well-defined anchor
-        // coordinate — the load-bearing property per the P2.4 anchor-fix.
-        Box(
-            modifier = Modifier
-                .align(androidx.compose.ui.Alignment.TopEnd)
-                .padding(top = 4.dp, end = 4.dp),
-        ) {
+        // §press-anchor (Bug4 fix): the DropdownMenu now opens AT the long-press
+        // touch point instead of a hard-coded corner. The previous TopEnd anchor
+        // Box (0.8.2 P2.4 / B5-P4) parked the popup at the card's top-right
+        // regardless of where the finger landed — for short messages near the
+        // top that read as "fixed at screen top-right". The wrapper Box is now
+        // origin-anchored (default TopStart, no padding) so its top-left
+        // coincides with the outer Box's origin; the NON-CONSUMING pointerInput
+        // above records the press in that same outer-Box-local px space, and we
+        // feed it to DropdownMenu's `offset` (converted px→dp). The popup thus
+        // lands at the finger (DropdownMenu still clamps to stay on-screen).
+        Box(modifier = Modifier) {
             DropdownMenu(
                 expanded = overflowOpen,
                 onDismissRequest = { overflowOpen = false },
+                offset = with(density) {
+                    DpOffset(menuAnchorPx.x.toDp(), menuAnchorPx.y.toDp())
+                },
             ) {
                 if (canCopy) {
                     DropdownMenuItem(
