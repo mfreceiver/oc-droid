@@ -20,10 +20,12 @@ import kotlinx.coroutines.launch
  * **Migration (batch 3b)**: the [ForegroundCatchUpCallbacks] interface was
  * eliminated. The 4 cross-domain signals (forceReconnect /
  * globalColdStartRefresh / cancelSse / catchUpAfterDisconnect) now emit
- * [ControllerEffect]s on [effects] (rule B). The 3 same-domain operations
- * (setStaleNotice / clearDraft / currentSessionId) now run inline against the
- * injected [chatFlow] / [composerFlow] / [settingsManager] (rule A — they
- * only touch state the controller can reach directly).
+ * [ControllerEffect]s on [effects] (rule B). The same-domain operations
+ * (setStaleNotice / currentSessionId) now run inline against the injected
+ * [chatFlow] / [composerFlow] / [settingsManager] (rule A — they only touch
+ * state the controller can reach directly). The former `clearDraft` inline
+ * helper was removed (§fix-draft-bg-preserve) — the ON_STOP branch no longer
+ * discards an in-progress draft; see [onForegroundChanged].
  *
  * Tiers (bucketed by how long the app was backgrounded, [backgroundedAtMs]):
  *  - `<15s`   → throttle (suppress SSE reconnect catch-up; rely on the live feed)
@@ -114,9 +116,10 @@ class ForegroundCatchUpController(
      * most once per [FOREGROUND_RELOAD_MIN_INTERVAL_MS] — wipe stale streaming
      * buffers and reload the current session (the wipe+reload are coupled).
      *
-     * On **enter background** (ON_STOP): clear the in-progress draft +
-     * stamp [backgroundedAtMs] so the foreground-return tier bucketing
-     * works. CP9 §E23-E25: NO LONGER emits `ControllerEffect.CancelSse`
+     * On **enter background** (ON_STOP): stamp [backgroundedAtMs] so the
+     * foreground-return tier bucketing works. The in-progress draft is
+     * PRESERVED (§fix-draft-bg-preserve) — it is cleared only on explicit
+     * exit (navigate away from Chat / switch session / first send). CP9 §E23-E25: NO LONGER emits `ControllerEffect.CancelSse`
      * (the coordinator decides whether SSE stays alive — busy/unknown from
      * L1 → L2Active retains the live feed; idle fg→bg → L3 teardown;
      * L2-active idle after debounce → L2-idle). The gap-dirty signal on
@@ -162,11 +165,19 @@ class ForegroundCatchUpController(
                 }
             }
         } else {
-            // Discard any in-progress draft so a backgrounded draft does not
-            // leak into the next foreground cycle. CP9 §E24: keep
+            // §fix-draft-bg-preserve: ON_STOP no longer clears the in-progress
+            // draft. The previous clearDraft() here discarded draftWorkdir +
+            // inputText + attachments on every background transition, so a
+            // user who typed into a new-session draft and briefly switched
+            // apps lost their text on return. The draft is in-memory and is
+            // already cleared on the user's EXPLICIT exit paths — navigating
+            // away from Chat (AppShell clearDraftIfActive), switching session
+            // (SessionSwitcher clears draftWorkdir), or the first send
+            // (materializeDraftSession consumes it) — so leaving it in memory
+            // across a bg/fg cycle matches the user's mental model ("keep it
+            // until I actively leave the draft"). CP9 §E24: keep
             // [backgroundedAtMs] stamping (the foreground-return tier
             // bucketing still needs it).
-            clearDraft()
             backgroundedAtMs = clock()
             // CP9 §E23: DELETE the `DebugLog.i("SSE", "cancelSse (background)")`
             // + `effects.tryEmitEffect(ControllerEffect.CancelSse)` pair. The
@@ -214,26 +225,6 @@ class ForegroundCatchUpController(
      */
     private fun setStaleNotice() {
         store.mutateChat { it.copy(staleNotice = true) }
-    }
-
-    /**
-     * Inline (rule A) — drops an in-progress draft before tearing down SSE so
-     * a backgrounded draft does not leak into the next foreground cycle.
-     * Mirrors [ComposerController.clearDraftIfActive]. Eliminated in batch 3b.
-     */
-    private fun clearDraft() {
-        if (store.composerFlow.value.draftWorkdir == null || store.chatFlow.value.currentSessionId != null) return
-        settingsManager.currentWorkdir = null
-        // §1B-FIX (I4): also clear fileReferences — chips must not leak
-        // to the next session.
-        store.mutateComposer {
-            it.copy(
-                draftWorkdir = null,
-                inputText = "",
-                imageAttachments = emptyList(),
-                fileReferences = emptyList(),
-            )
-        }
     }
 
     /**

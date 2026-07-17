@@ -129,25 +129,36 @@ class ForegroundCatchUpControllerTest {
     // ── background tier ────────────────────────────────────────────────────
 
     @Test
-    fun `background transition clears draft and stamps backgroundedAtMs but does NOT emit CancelSse`() = withCollectedEffects { controllerScope, collected ->
-        // CP9 §E23-E25 + §F30: the background branch NO LONGER emits
-        // ControllerEffect.CancelSse — the lifecycle coordinator decides
-        // whether SSE survives the bg transition (busy/unknown → keep;
-        // idle → teardown via the Service's own disconnect()). The test
-        // asserts ONLY: draft cleared + backgroundedAtMs stamped (the
+    fun `background transition preserves in-progress draft and stamps backgroundedAtMs but does NOT emit CancelSse`() = withCollectedEffects { controllerScope, collected ->
+        // §fix-draft-bg-preserve: ON_STOP no longer clears the in-progress
+        // draft — a user who typed into a new-session draft and briefly
+        // switched apps must NOT lose their text on return. The draft is
+        // cleared only on explicit exit (navigate away from Chat / switch
+        // session / first send). CP9 §E23-E25 + §F30: the background branch
+        // NO LONGER emits ControllerEffect.CancelSse — the lifecycle
+        // coordinator decides whether SSE survives the bg transition. The
+        // test asserts: draft PRESERVED + backgroundedAtMs stamped (the
         // foreground-return tier bucketing still needs it) + NO CancelSse.
         val controller = makeController(controllerScope)
         controller.onForegroundChanged(true) // consume the baseline emission
         nowMs = 1_000
-        // Set up an in-progress draft so clearDraft actually does work.
-        store.mutateComposer { it.copy(draftWorkdir = "/tmp/proj") }
+        // Set up an in-progress draft (new-session draft: draftWorkdir set,
+        // no currentSessionId yet) with typed text + an attachment.
+        store.mutateComposer {
+            it.copy(
+                draftWorkdir = "/tmp/proj",
+                inputText = "half-typed draft",
+                imageAttachments = emptyList(),
+                fileReferences = emptyList(),
+            )
+        }
         store.mutateChat { it.copy(currentSessionId = null) }
 
         controller.onForegroundChanged(false)
 
-        // clearDraft inline path ran: workdir cleared, input text emptied.
-        assertEquals(null, composerFlow.value.draftWorkdir)
-        assertEquals("", composerFlow.value.inputText)
+        // Draft PRESERVED across the bg transition (the fix).
+        assertEquals("/tmp/proj", composerFlow.value.draftWorkdir)
+        assertEquals("half-typed draft", composerFlow.value.inputText)
         // backgroundedAtMs stamped (the foreground-return tier bucketing
         // still needs it — verified indirectly by the <15s / 15s–5min / >5min
         // tier tests below which all read backgroundedAtMs via nowMs deltas).
