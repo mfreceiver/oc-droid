@@ -1,0 +1,15 @@
+{
+  "agent": "opuser",
+  "scope": "fix-session-menu",
+  "date": "2026-07-17",
+  "reviewed_commit": "493d41f",
+  "version_target": "0.10.5",
+  "verdict": "pass-with-fixes",
+  "score": 8.7,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "Decision 1b (harden): identityStore.isCurrent guard added to the shared refresh path (refreshDirectorySessions delegated to ConnectionCoordinator), also covering the project-row expand path.",
+    "Confirm Message.ModelInfo is a data class for the #4 remember-key equality (confirmed)."
+  ],
+  "notes": "Plan-level review. #1 and #4 root causes confirmed precise and complete; no other stale read paths for effective* (only the two derivedStateOf capture sites). Original plan below 9.5 on three unpinned details: Fix #1 stale-host guard asymmetry vs Fix #3, SettingsViewModel placement, and the extracted refreshAllDirectorySessions seam. Resolved per reviewer recommendations + user decisions: 1b -> added isCurrent guard to the shared refreshDirectorySessions path (now used by both connect-prefetch and expand); placement pinned to SessionsScreen call-site; #3 collapsed to reuse loadInitialData(); #4 -> one-line remember-key fix + data-class invariant comment. A manual emulator repro checklist was executed (model-menu live update on switch, refresh fan-out, post-clear recovery). check.sh green."
+}

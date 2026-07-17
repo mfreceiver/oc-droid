@@ -1,0 +1,15 @@
+{
+  "agent": "groker",
+  "scope": "fix-session-menu",
+  "date": "2026-07-17",
+  "reviewed_commit": "493d41f",
+  "version_target": "0.10.5",
+  "verdict": "pass-with-fixes",
+  "score": 8.6,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "#4 remember-key fix is symptom-correct; compute-effective-inside-derivedStateOf would be more durable (deferred).",
+    "#3 refresh button contentDescription should stay distinct from force-reconnect (reused common_refresh)."
+  ],
+  "notes": "Plan-level review of the session/model UX fixes targeting v0.10.5. Original plan scored below the 9.5 gate due to placement/architecture gaps (Fix #1 inside SettingsVM infeasible; Fix #3 over-engineered extraction). All MAJOR items resolved by adopting reviewer-recommended revisions: #1 -> call-site refreshDirectorySessions after connectWorkdir (SessionsScreen), NOT inside SettingsViewModel; #3 -> reuse the already-public, already-guarded connectionVM.loadInitialData() instead of extracting a parallel method; #4 -> one-line remember(noHostFallback, effectiveAgent, effectiveModel). Verified: ./scripts/check.sh green; emulator behavioral pass (model menu updates live on switch without tab reopen; refresh button fires full session+directory fan-out; post-clear-data self-heal repopulates)."
+}

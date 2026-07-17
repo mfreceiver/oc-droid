@@ -1,0 +1,14 @@
+{
+  "agent": "glmer",
+  "scope": "fix-session-menu",
+  "date": "2026-07-17",
+  "reviewed_commit": "493d41f",
+  "version_target": "0.10.5",
+  "verdict": "pass-with-fixes",
+  "score": 8.6,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "Add a stability comment for the #4 remember key (Message.ModelInfo must stay a data class)."
+  ],
+  "notes": "Plan-level review. Verified line-by-line: #1 and #4 root causes confirmed and complete; Message.ModelInfo is a clean data class (valid as remember key); effective* referenced at exactly 4 sites (only 603/631 inside the derivedStateOf are stale captures). Original plan scored below 9.5 because Fix #1's stated location breached SettingsViewModel's dependency boundary and Fix #3 duplicated an existing public method. Resolved per reviewer recommendations: #1 -> call-site viewModel.refreshDirectorySessions(path) after settingsVM.connectWorkdir(path); #3 -> wire refresh button to connectionVM?.loadInitialData() (already guarded with identityStore.isCurrent); #4 -> one-line remember-key fix + data-class invariant comment. disabled-model safety for #3 confirmed (launchLoadProviders inherits persisted disabled set via intersect). check.sh green + emulator behavioral verification passed."
+}
