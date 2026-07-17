@@ -62,6 +62,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -472,7 +473,13 @@ internal fun AgentPickerSheet(
         onDismissRequest = onDismiss,
         title = stringResource(R.string.chat_switch_agent),
     ) {
-        LazyColumn(modifier = Modifier.fillMaxWidth()) {
+        // §fix-sheet-remeasure-jump: same height cap as ModelPickerSheet —
+        // structurally identical LazyColumn picker; bound it so a long agent
+        // list cannot trigger the same remeasure-driven sheet jump.
+        val pickerMaxHeight = (LocalConfiguration.current.screenHeightDp * 0.8f).dp
+        LazyColumn(modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = pickerMaxHeight)) {
             // 默认 agent（选中 = null）。
             item(key = "__default__") {
                 val isSelected = currentAgentName == null
@@ -528,6 +535,17 @@ internal fun ModelPickerSheet(
     // 底 4dp（与 Agent 标题节奏对称）；trailing 槽统一 Filled Check（替代
     // Outlined Memory）。
     val catalog = visiblePickerProviders(providers, disabledModels)
+    // §fix-sheet-remeasure-jump: cap the picker list at ~80% of the screen
+    // height. Instrumented repro (contentHeight 1975↔2103px on a 2400px screen
+    // ≈ 82-88%) confirmed the LazyColumn's intrinsic height rides close to the
+    // sheet's fully-expanded anchor and fluctuates as items scroll/recycle,
+    // which couples back into ModalBottomSheet's layout and produces the
+    // visible "height反复跳动" during a real-finger drag. Bounding the list
+    // height breaks that feedback loop — the LazyColumn scrolls internally
+    // against a stable bounded constraint instead of remeasuring the sheet.
+    // Local to the picker per SheetRecipe's "调用方封顶" contract (the recipe
+    // itself deliberately does NOT impose a fixed cap).
+    val pickerMaxHeight = (LocalConfiguration.current.screenHeightDp * 0.8f).dp
     AppBottomSheet(
         onDismissRequest = onDismiss,
         title = stringResource(R.string.chat_model_picker_title),
@@ -542,7 +560,9 @@ internal fun ModelPickerSheet(
         // (non-empty) branch, so an empty catalog rendered ONLY the empty
         // message — T7-C4 requires 默认 to always be available + highlighted
         // when the effective model is null.
-        LazyColumn(modifier = Modifier.fillMaxWidth()) {
+        LazyColumn(modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = pickerMaxHeight)) {
             // §chat-ux-batch T7 (B2): top "默认" item — selected when the
             // effective model (pending ?: infer ?: null) is null. Routes
             // to onClear (ComposerViewModel.clearSessionModel), which

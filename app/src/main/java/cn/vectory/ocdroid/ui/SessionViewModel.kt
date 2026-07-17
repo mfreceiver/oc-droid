@@ -15,6 +15,7 @@ import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
 import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.ui.controller.removeSessions
+import cn.vectory.ocdroid.ui.controller.rootIdOf
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.WorkdirPaths
 import cn.vectory.ocdroid.util.runSuspendCatching
@@ -201,30 +202,58 @@ class SessionViewModel @Inject constructor(
     }
 
     fun closeSession(sessionId: String) {
-        val isCurrent = store.chatFlow.value.currentSessionId == sessionId
-        if (isCurrent) {
+        // §fix-close-subagent: the close-X only renders on the selected tab,
+        // and the tab strip's effectiveSelectedId falls back to the ROOT when
+        // the current session is a sub-agent (child). So the user CAN close a
+        // root tab while currentSessionId points at one of its descendants.
+        // The pre-fix `isCurrent = currentSessionId == sessionId` check missed
+        // that case (childId != rootId → isCurrent=false) and left
+        // currentSessionId pointing at a now-orphaned child, so the chat body
+        // kept rendering after every tab was closed. `closingCurrentTree`
+        // treats "closing the root of the current session's tree" the same as
+        // "closing the current session itself".
+        //
+        // rootIdOf fails closed (returns null on unknown id / parentId cycle /
+        // cold-start where the child isn't in childSessions yet): in that case
+        // isDescendant=false and we fall back to the strict isCurrent check
+        // (preserving the original behaviour for the unresolvable edge).
+        val curId = store.chatFlow.value.currentSessionId
+        val isCurrent = curId == sessionId
+        val isDescendant = if (curId != null && !isCurrent) {
+            val sl = store.sessionListFlow.value
+            val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
+            rootIdOf(curId, sessionsById) == sessionId
+        } else {
+            false
+        }
+        val closingCurrentTree = isCurrent || isDescendant
+        if (closingCurrentTree && curId != null) {
             // glm-3 🟡#1: single-read fp.
             val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
-            settingsManager.setDraftText(fp, sessionId, store.composerFlow.value.inputText)
+            // §fix-close-subagent: persist the draft under the ACTUAL current
+            // session id (curId), not the closed tab's root id. The user was
+            // editing in the child's context, so the draft belongs to curId;
+            // keying it on the root would lose / mis-restore it.
+            settingsManager.setDraftText(fp, curId, store.composerFlow.value.inputText)
         }
         val updated = settingsManager.openSessionIds.filter { it != sessionId }
         settingsManager.openSessionIds = updated
         val nextId = updated.lastOrNull()
         store.mutateSessionList { it.copy(openSessionIds = updated) }
         store.mutateUnread { it.copy(unreadSessions = it.unreadSessions - sessionId) }
-        if (isCurrent && nextId == null) {
+        if (closingCurrentTree && nextId == null) {
             // §R18 Phase 2-F: chatFlow is the sole runtime source; the
             // chat.update below clears currentSessionId. The AppCore collector
             // drops null, so no manual SettingsManager write.
             store.mutateChat { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
         }
-        if (isCurrent && nextId == null) {
+        if (closingCurrentTree && nextId == null) {
             // §1B-FIX (I4): closing the last session must also clear
             // fileReferences + imageAttachments — the chips must not leak
             // to the empty state.
             store.mutateComposer { it.copy(inputText = "", imageAttachments = emptyList(), fileReferences = emptyList()) }
         }
-        if (isCurrent && nextId != null) {
+        if (closingCurrentTree && nextId != null) {
             selectSession(nextId)
         }
     }

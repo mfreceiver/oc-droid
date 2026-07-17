@@ -893,7 +893,10 @@ fun ChatScaffold(
     }
     ModalNavigationDrawer(
         drawerState = drawerState,
-        gesturesEnabled = isWide,
+        // §fix-edge-swipe-conflict: disabled to prevent edge-swipe from
+        // conflicting with HorizontalPager tab-switching gestures. The
+        // drawer is now opened ONLY via the hamburger (Menu) button.
+        gesturesEnabled = false,
         drawerContent = {
             RecentSessionsDrawer(
                 // §opuser IMPORTANT-2: recent root non-archived sessions

@@ -146,6 +146,80 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
         verify { settingsManager.setDraftText(any(), "s1", "draft text") }
     }
 
+    // §fix-close-subagent regression coverage: the close-X only renders on the
+    // selected tab, and the tab strip's effectiveSelectedId falls back to the
+    // root when current is a sub-agent. So the user can close a root tab while
+    // currentSessionId points at one of its descendants. Pre-fix, isCurrent
+    // (curId == sessionId) was false in that case → currentSessionId was never
+    // cleared → the chat body kept rendering after every tab was closed (the
+    // "关光 tab 仍显示 chat" residual bug).
+
+    @Test
+    fun `closeSession sub-agent current closes root tree and clears chat`() = runTest {
+        val root = Session(id = "root-1", directory = "/proj")
+        val child = Session(id = "child-1", directory = "/proj", parentId = "root-1")
+        every { settingsManager.openSessionIds } returns listOf("root-1")
+        val core = createCore()
+        val vm = SessionViewModel(core)
+        core.writeChat {
+            it.copy(
+                currentSessionId = "child-1",
+                messages = listOf(cn.vectory.ocdroid.data.model.Message(id = "m", role = "user")),
+            )
+        }
+        core.writeSessionList { it.copy(sessions = listOf(root, child), openSessionIds = listOf("root-1")) }
+
+        vm.closeSession("root-1")
+        advanceUntilIdle()
+
+        // Closing the only root while viewing its child must clear the chat
+        // (pre-fix: child stayed current with no open tab → residual chat).
+        assertNull(core.chatFlow.value.currentSessionId)
+        assertTrue(core.chatFlow.value.messages.isEmpty())
+        assertEquals("", core.composerFlow.value.inputText)
+        assertTrue(core.sessionListFlow.value.openSessionIds.isEmpty())
+    }
+
+    @Test
+    fun `closeSession sub-agent current with another root open selects next`() = runTest {
+        val root1 = Session(id = "root-1", directory = "/proj")
+        val root2 = Session(id = "root-2", directory = "/proj")
+        val child = Session(id = "child-1", directory = "/proj", parentId = "root-1")
+        every { settingsManager.openSessionIds } returns listOf("root-1", "root-2")
+        val core = createCore()
+        val vm = SessionViewModel(core)
+        core.writeChat { it.copy(currentSessionId = "child-1") }
+        core.writeSessionList {
+            it.copy(sessions = listOf(root1, root2, child), openSessionIds = listOf("root-1", "root-2"))
+        }
+
+        vm.closeSession("root-1")
+        advanceUntilIdle()
+
+        // root-1 (child's tree) closed, root-2 remains → switch to root-2.
+        assertEquals(listOf("root-2"), core.sessionListFlow.value.openSessionIds)
+        assertEquals("root-2", core.chatFlow.value.currentSessionId)
+    }
+
+    @Test
+    fun `closeSession sub-agent current saves draft under child id not root`() = runTest {
+        val root = Session(id = "root-1", directory = "/proj")
+        val child = Session(id = "child-1", directory = "/proj", parentId = "root-1")
+        every { settingsManager.openSessionIds } returns listOf("root-1")
+        val core = createCore()
+        val vm = SessionViewModel(core)
+        core.writeChat { it.copy(currentSessionId = "child-1") }
+        core.writeComposer { it.copy(inputText = "draft in child") }
+        core.writeSessionList { it.copy(sessions = listOf(root, child), openSessionIds = listOf("root-1")) }
+
+        vm.closeSession("root-1")
+        advanceUntilIdle()
+
+        // Draft is keyed on curId (child-1 — the actual editing context), NOT
+        // the closed root id. Keying on root would mis-restore / lose the draft.
+        verify { settingsManager.setDraftText(any(), "child-1", "draft in child") }
+    }
+
     @Test
     fun `toggleSessionExpanded adds id when absent`() = runTest {
         val core = createCore()
