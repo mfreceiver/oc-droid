@@ -552,7 +552,18 @@ fun ChatScaffold(
     // derivedStateOf lambda (Compose forbids @Composable invocations
     // inside non-composable lambdas like derivedStateOf).
     val noHostFallback = stringResource(R.string.chat_no_host_fallback)
-    val topBarState by remember(noHostFallback) {
+    // §fix-menu-stale (9.5 review gate): effectiveAgent/effectiveModel are
+    // plain `remember` vals recomputed when pending/session/messages change.
+    // This derivedStateOf is memoized by `remember(noHostFallback)`, so WITHOUT
+    // these keys its lambda would capture their FIRST-composition values — the
+    // overflow menu's Agent/Model items would freeze while the picker sheets
+    // (which read effective* directly) stay fresh ("menu shows mimo, picker
+    // checks glm"). Adding them as keys recreates the derivedStateOf when they
+    // change, so the menu reflects "what the next send will be".
+    // INVARIANT: relies on Message.ModelInfo staying a `data class` (value
+    // equality keeps this key stable across recompositions that leave the model
+    // unchanged — without it the top bar would thrash on every streamed token).
+    val topBarState by remember(noHostFallback, effectiveAgent, effectiveModel) {
         derivedStateOf {
             val curHostProfile = currentHostProfile(host.hostProfiles, host.currentHostProfileId)
             // §nav-redesign (2026-07-13): populate openSessions for the restored
