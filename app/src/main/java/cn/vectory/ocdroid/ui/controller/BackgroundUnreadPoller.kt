@@ -54,12 +54,24 @@ sealed interface UnreadPollResult {
     object Aborted : UnreadPollResult
 }
 
+/**
+ * Bug-1 (notification regeneration): STABLE dedup key for an idle unread root.
+ *
+ * The key intentionally DROPS the volatile `idleSince` timestamp — that value
+ * is re-stamped by the unread evaluator on every fresh idle transition and is
+ * NOT preserved across process death, so a key that embedded it could never
+ * match a persisted dedup entry after restart. With a stable
+ * `(serverId, workdir, rootId)` triple the persisted set survives process
+ * death and correctly suppresses re-notification for the same logical root.
+ *
+ * `IdleUnreadAlert.idleSince` is retained on the data class (it carries UI
+ * timing context); only the KEY is stable.
+ */
 internal fun idleNotificationKey(
     serverId: String,
     workdir: String?,
     rootId: String,
-    idleSince: Long,
-): String = "idle:$serverId:${workdir.orEmpty()}:$rootId:$idleSince"
+): String = "idle:$serverId:${workdir.orEmpty()}:$rootId"
 
 /**
  * Fetches an authoritative background snapshot, writes it to the shared store,
@@ -202,7 +214,7 @@ class BackgroundUnreadPoller internal constructor(
                 rootId = rootId,
                 title = root?.title?.takeIf { it.isNotBlank() } ?: rootId,
                 idleSince = idleSince,
-                key = idleNotificationKey(serverId, workdir, rootId, idleSince),
+                key = idleNotificationKey(serverId, workdir, rootId),
             )
             }
         // Genuine authoritative snapshot (which may be a real empty list).

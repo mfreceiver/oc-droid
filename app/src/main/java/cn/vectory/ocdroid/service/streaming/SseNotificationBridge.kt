@@ -13,6 +13,8 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
@@ -89,6 +91,14 @@ import kotlin.coroutines.cancellation.CancellationException
  *  (T5-C4a) — the SAME set the 30s poller consults for permission/question.
  * @param idleDedup ALM-shared idle dedup set (T5-C4a) — the SAME set the
  *  30s poller consults for idle alerts.
+ * @param idleMutex ALM-shared [Mutex] that serializes the IDLE publish
+ *  critical section (this bridge's idle branch + the poller's
+ *  [cn.vectory.ocdroid.di.AppLifecycleMonitor.handleIdleAlert]) with the
+ *  poller's IDLE prune + side-effect critical section. Closes the
+ *  deferred-stale-snapshot race (a stale post-prune `cancel +
+ *  removePostedIdle` loop clobbering a fresh completion+`addPostedIdle`).
+ *  NOT used on the decision (`question.asked`) path — decision dedup is
+ *  in-memory only and has no deferred side-effects.
  * @param isInForeground foreground truth-source (ALM.isInForeground.value).
  *  Polled per event — TWICE on the publish path (top-of-handle eligibility
  *  + final publish boundary) so a lifecycle flip between the two cannot
@@ -102,6 +112,14 @@ import kotlin.coroutines.cancellation.CancellationException
  *  SharedStateStore the [cn.vectory.ocdroid.ui.controller.BackgroundUnreadPoller]
  *  uses, so the key shape + idleSince align end-to-end with the poller).
  * @param scope the Service's MainScope (L2-bounded).
+ * @param onIdlePosted invoked with the alert key AFTER a successful idle
+ *  notify + dedup completion. The production wiring routes this to
+ *  [cn.vectory.ocdroid.di.AppLifecycleMonitor.persistIdlePosted] so an
+ *  idle key completed via the SSE bridge is mirrored into the durable
+ *  dedup store — without it the key would be lost on process death (only
+ *  self-healing ≤30s later via the poller's post-prune save). Default
+ *  no-op so pure-JVM tests don't need to supply it. NOT invoked on the
+ *  decision (`question.asked`) path — decision dedup is in-memory only.
  * @param questionTitle hard-coded title for `question.asked` notifications
  *  (mirrors [cn.vectory.ocdroid.di.AppLifecycleMonitor.NOTIF_QUESTION_TITLE];
  *  duplicated as a literal here so this class is pure-JVM testable without
@@ -114,9 +132,11 @@ internal class SseNotificationBridge internal constructor(
     private val notifier: SessionNotifier,
     private val decisionDedup: NotificationDedup,
     private val idleDedup: NotificationDedup,
+    private val idleMutex: Mutex,
     private val isInForeground: () -> Boolean,
     private val rootIdleResolver: (sessionId: String) -> IdleUnreadAlert?,
     private val scope: CoroutineScope,
+    private val onIdlePosted: (String) -> Unit = {},
     private val questionTitle: String = "Question from agent",
     private val questionFallbackBody: String = "Open the session to review",
     private val tag: String = TAG,
@@ -181,8 +201,14 @@ internal class SseNotificationBridge internal constructor(
     /**
      * Per-event dispatch. Public-visible as `internal` so the test can
      * drive single events synchronously without a Flow.
+     *
+     * `suspend` because the idle branch ([handleSessionStatus]) acquires
+     * the shared [idleMutex] (a suspend [Mutex.withLock]); the collector
+     * already runs in a coroutine on [scope] so the suspending call chain
+     * is natural. The decision branch ([handleQuestionAsked]) does not
+     * acquire the Mutex — it stays a regular function.
      */
-    internal fun handle(event: SSEEvent) {
+    internal suspend fun handle(event: SSEEvent) {
         // Foreground suppression: checked ONCE per event before any
         // dedup mutation so a foreground transition mid-event does not
         // leave a stale claim.
@@ -241,7 +267,7 @@ internal class SseNotificationBridge internal constructor(
         }
     }
 
-    private fun handleSessionStatus(event: SSEEvent) {
+    private suspend fun handleSessionStatus(event: SSEEvent) {
         // Reuses the production parser + SessionStatus model.
         val parsed = parseSessionStatusEvent(event) ?: return
         // Only idle roots with unread fire a notification. busy/retry are
@@ -254,22 +280,43 @@ internal class SseNotificationBridge internal constructor(
         // for non-root, no-unread, or unknown — the 30s poller will catch
         // those if they genuinely warrant a notification.
         val alert = rootIdleResolver(parsed.sessionId) ?: return
-        // T5-C4a + T5-review I1: same atomic-claim contract as the question
-        // branch. The poller's idleSnapshot shares this set; the key
-        // includes idleSince so a new idle cycle on the same root
-        // re-notifies (matches the poller's behavior).
-        val token = idleDedup.claim(alert.key) ?: return
-        try {
-            // T5-review I2: FINAL foreground boundary — see [handleQuestionAsked].
-            if (isInForeground()) return
-            val posted = notifier.notifyIdle(
-                rootId = alert.rootId,
-                title = alert.title,
-                key = alert.key,
-            )
-            if (posted) idleDedup.complete(alert.key, token)
-        } finally {
-            idleDedup.release(alert.key, token)
+        // Race-closure: the entire publish critical section
+        // (claim → [foreground gate] → notifyIdle → complete →
+        // onIdlePosted → release) runs under the shared [idleMutex] so it
+        // cannot interleave with the poller's prune + side-effect region
+        // (which acquires the SAME mutex) NOR with the poller's own
+        // [handleIdleAlert] publish. Closes the deferred-stale-snapshot
+        // race documented on [idleMutex]. The decision
+        // (`question.asked`) path is intentionally NOT under this lock —
+        // decision dedup is in-memory only and has no deferred
+        // side-effects.
+        idleMutex.withLock {
+            // T5-C4a + T5-review I1: same atomic-claim contract as the question
+            // branch. The poller's idleSnapshot shares this set; the key
+            // includes idleSince so a new idle cycle on the same root
+            // re-notifies (matches the poller's behavior).
+            val token = idleDedup.claim(alert.key) ?: return@withLock
+            try {
+                // T5-review I2: FINAL foreground boundary — see [handleQuestionAsked].
+                if (isInForeground()) return@withLock
+                val posted = notifier.notifyIdle(
+                    rootId = alert.rootId,
+                    title = alert.title,
+                    key = alert.key,
+                )
+                if (posted) {
+                    idleDedup.complete(alert.key, token)
+                    // Bug-1-fix-B: persist the completed idle key via the ALM
+                    // seam so it survives process death. Without this the key
+                    // would be lost on restart (only self-healing ≤30s later
+                    // via the poller's post-prune save). Best-effort; the ALM
+                    // wrapper swallows any persistence failure. NOT invoked on
+                    // the decision path — decision dedup is in-memory only.
+                    onIdlePosted(alert.key)
+                }
+            } finally {
+                idleDedup.release(alert.key, token)
+            }
         }
     }
 

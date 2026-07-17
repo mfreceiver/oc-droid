@@ -37,6 +37,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Qualifier
@@ -65,6 +67,22 @@ internal class SessionNotifier internal constructor(
     private val notificationManagerCompat: NotificationManagerCompat,
 ) {
     /**
+     * Bug-1 (notification regeneration): belt-and-suspenders guard on top of
+     * the persisted dedup. Even if the dedup state is somehow lost or
+     * inconsistent (e.g. the persisted SharedPreferences was cleared by the
+     * user, or process death happened between claim and seed), re-posting a
+     * notification whose shade entry already exists would replay
+     * `SOUND|VIBRATE` and confuse the user. Before posting we check whether a
+     * shade entry with `id = key.hashCode()` already exists; if so, we treat
+     * it as already-posted (return `true`) and skip the rebuild.
+     *
+     * `getActiveNotifications()` is API 23+; [AppLifecycleMonitor] targets
+     * minSdk=34 so no API guard is required.
+     */
+    private val notificationManager: NotificationManager =
+        application.getSystemService(NotificationManager::class.java)
+
+    /**
      * Returns `true` when a notification was actually posted (permission
      * granted + [NotificationManagerCompat.notify] invoked); `false` when
      * suppressed by a missing/denied permission. Callers use the result to
@@ -76,6 +94,18 @@ internal class SessionNotifier internal constructor(
     fun notifyDecision(sessionId: String, title: String, body: String, key: String): Boolean {
         if (!hasNotificationPermission()) return false
         val notificationId = key.hashCode()
+        // Bug-1: a shade entry with this id already exists — treat as posted.
+        // Bug-1-fix-A (channel-scoped guard): ALSO match channelId so a
+        // theoretical hashCode collision with the FGS ongoing notification
+        // (id 4241) or the error notification (id 4242) cannot suppress a
+        // genuine new decision. Restricted to CHANNEL_DECISIONS only.
+        if (notificationManager.activeNotifications.any {
+                it.id == notificationId &&
+                    it.notification.channelId == AppLifecycleMonitor.CHANNEL_DECISIONS
+            }) {
+            Log.d(TAG, "notifyDecision suppressed (activeNotifications hit) key=$key")
+            return true
+        }
         val notification = NotificationCompat.Builder(application, AppLifecycleMonitor.CHANNEL_DECISIONS)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(title)
@@ -98,6 +128,18 @@ internal class SessionNotifier internal constructor(
     fun notifyIdle(rootId: String, title: String, key: String): Boolean {
         if (!hasNotificationPermission()) return false
         val notificationId = key.hashCode()
+        // Bug-1: a shade entry with this id already exists — treat as posted.
+        // Bug-1-fix-A (channel-scoped guard): ALSO match channelId so a
+        // theoretical hashCode collision with the FGS ongoing notification
+        // (id 4241) or the error notification (id 4242) cannot suppress a
+        // genuine new idle. Restricted to CHANNEL_IDLE only.
+        if (notificationManager.activeNotifications.any {
+                it.id == notificationId &&
+                    it.notification.channelId == AppLifecycleMonitor.CHANNEL_IDLE
+            }) {
+            Log.d(TAG, "notifyIdle suppressed (activeNotifications hit) key=$key")
+            return true
+        }
         val notification = NotificationCompat.Builder(application, AppLifecycleMonitor.CHANNEL_IDLE)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(AppLifecycleMonitor.NOTIF_IDLE_TITLE)
@@ -135,6 +177,10 @@ internal class SessionNotifier internal constructor(
     private fun hasNotificationPermission(): Boolean {
         // POST_NOTIFICATIONS is runtime on API 33+; granted-bypass on older.
         return NotificationManagerCompat.from(application).areNotificationsEnabled()
+    }
+
+    private companion object {
+        const val TAG = "SessionNotifier"
     }
 }
 
@@ -216,6 +262,49 @@ internal class NotificationDedup {
     }
 
     private val keys: MutableMap<String, State> = ConcurrentHashMap()
+
+    /**
+     * Bug-1 (notification regeneration): seeds persisted "already-notified"
+     * keys directly into the [State.Posted] slot so a freshly-booted process
+     * suppresses re-notification for items already posted before process
+     * death. Without this seed, the in-memory map starts empty after every
+     * restart and the next background poll re-notifies every idle unread root
+     * (≈ weekly regeneration). The persisted keys come from
+     * [NotificationDedupStore] (snapshotPosted → save*Keys round-trip).
+     *
+     * Init-only: MUST run before any [claim] (the [AppLifecycleMonitor] init
+     * block calls it once before polling starts). All seeded entries are
+     * installed as [State.Posted] (not [State.Claimed]) so the existing prune
+     * path treats them identically to a runtime-completed notification — they
+     * ARE eligible for idle pruning when the root leaves the active set, which
+     * is the correct semantics (a root that's no longer idle should be
+     * prunable the same way regardless of whether it was notified in this
+     * process or a prior one).
+     *
+     * Each key is installed via `putIfAbsent`, so a key already present (e.g.
+     * an in-flight [State.Claimed] from a concurrent path) is NOT overwritten
+     * — the live claim wins. This is the only [NotificationDedup] mutation
+     * that touches [keys] outside the ABA-correct claim/complete/release/
+     * prune family; it is structurally safe because it only ever installs
+     * terminal [State.Posted] entries and never transitions existing ones.
+     */
+    internal fun seedPosted(keys: Set<String>) {
+        keys.forEach { k -> this.keys.putIfAbsent(k, State.Posted(SEED_TOKEN)) }
+    }
+
+    private companion object {
+        /**
+         * Bug-1: token carried by seed-installed [State.Posted] entries so a
+         * debugger / log can distinguish "seeded from persistence" from
+         * "completed by a real claim→notify". The token participates in
+         * data-class equality for [State.Posted], so a pruner that captured
+         * `Posted(SEED_TOKEN)` matches the current value `Posted(SEED_TOKEN)`
+         * exactly (idempotent prune), and a fresh runtime `complete` installs
+         * a different token (`Posted(<uuid>)`) so the existing ABA guards are
+         * unaffected.
+         */
+        const val SEED_TOKEN = "seed"
+    }
 
     /**
      * Atomically claims [key]. Returns a fresh owner token iff the key was
@@ -522,7 +611,58 @@ class AppLifecycleMonitor @Inject constructor(
     internal val notificationSnapshot: NotificationDedup = NotificationDedup()
     internal val idleNotificationSnapshot: NotificationDedup = NotificationDedup()
 
+    /**
+     * Race-closure mutex: serializes the IDLE publish critical section
+     * ([handleIdleAlert] + the SSE bridge's idle branch) with the IDLE
+     * prune + side-effect critical section ([pollPendingItems] post-prune
+     * loop) so no deferred-stale side-effect (cancel + removePostedIdle)
+     * can interleave with a fresh completion (claim → notifyIdle →
+     * complete → addPostedIdle).
+     *
+     * Background (the closed race): pre-fix the poller (Dispatchers.Default)
+     * computed `pruned = candidates.keys - afterPrune.keys` and then ran the
+     * DEFERRED `notificationManager.cancel(key.hashCode())` +
+     * `dedupStore.removePostedIdle(key)` loop OUTSIDE any lock. In the window
+     * between the `afterPrune` snapshot and that loop, the SSE bridge (Main)
+     * could re-claim + complete + `addPostedIdle` the same key; the poller's
+     * stale deferred remove/cancel then clobbered the fresh completion
+     * (deletes the mirror entry → regeneration on process death; cancels the
+     * fresh shade → missed notification).
+     *
+     * Both critical sections (publish + prune+side-effects) now run under
+     * THIS mutex. `Mutex.withLock` suspends (it yields the dispatcher); the
+     * poller holds it across `withContext(Dispatchers.Main.immediate)` for
+     * the notify — if the bridge (on Main) then tries to acquire it
+     * suspends and yields Main, letting the poller's Main block run and
+     * release. No deadlock (do NOT swap for `synchronized`/`runBlocking`).
+     *
+     * Module-internal so the SSE bridge (sister package, same module) can
+     * receive the SAME instance at construction (see
+     * [cn.vectory.ocdroid.service.SessionStreamingService]).
+     */
+    internal val idleMutex: Mutex = Mutex()
+
     private val notificationManagerCompat = NotificationManagerCompat.from(application)
+
+    /**
+     * Bug-1 (notification regeneration): the framework NotificationManager —
+     * used for the [NotificationManager.getActiveNotifications] belt-and-
+     * suspenders guard in [SessionNotifier] AND for the
+     * [onEnterForeground] shade-hygiene cancellation (decisions + idle only;
+     * the ongoing FGS notification and the error notification are NOT
+     * cancelled).
+     */
+    private val notificationManager: NotificationManager =
+        application.getSystemService(NotificationManager::class.java)
+
+    /**
+     * Bug-1 (notification regeneration): durable dedup store. The in-memory
+     * [NotificationDedup] state is wiped on process death; this persists the
+     * "posted keys" snapshot to a plain SharedPreferences file so a freshly-
+     * booted process can [NotificationDedup.seedPosted] before any claim and
+     * suppress re-notification of roots already posted in a prior session.
+     */
+    private val dedupStore = NotificationDedupStore(application)
 
     /**
      * T5-C4b: the shared publish point. Held by ALM so the SSE bridge can
@@ -611,9 +751,44 @@ class AppLifecycleMonitor @Inject constructor(
             override fun onActivitySaveInstanceState(activity: Activity, outState: android.os.Bundle) {}
             override fun onActivityDestroyed(activity: Activity) {}
         })
+        // Bug-1 (notification regeneration): seed the in-memory IDLE dedup
+        // set from durable storage BEFORE any claim can fire. Without this,
+        // a freshly-booted process re-notifies every idle unread root it
+        // had already posted before process death.
+        //
+        // Bug-1-fix-C (scope reduction): the DECISION dedup set is
+        // intentionally NOT seeded — the original "process death = only GC,
+        // so still-pending blocking items correctly re-remind" contract is
+        // preserved. Only the idle dedup was the reported bug; persisting
+        // decisions would grow unbounded (a permission id is never reused)
+        // and break the re-remind semantics. Safe to run last in init:
+        // [startBackgroundPolling] is invoked only on the first
+        // onEnterBackground, well after init completes, so the seed always
+        // wins the race against the first claim.
+        val seededIdle = dedupStore.snapshotIdle()
+        idleNotificationSnapshot.seedPosted(seededIdle)
+        Log.d(
+            TAG,
+            "seeded dedup: idle=${seededIdle.size}",
+        )
     }
 
     internal fun currentLifecycleGeneration(): Long = lifecycleGeneration.get()
+
+    /**
+     * Bug-1-fix-B (SSE bridge persistence seam): the SSE-side bridge
+     * completes an idle dedup claim on a successful idle notify, but
+     * without persisting the completed key it would be lost on process
+     * death (only self-healing ≤30s later via the poller's post-prune
+     * save). The bridge calls this to mirror the completion into the
+     * durable store via the SAME additive API the poller's notify path
+     * uses, so a restart re-seeds the bridge-completed key. Best-effort:
+     * swallows any persistence failure so the bridge path never throws.
+     */
+    internal fun persistIdlePosted(key: String) {
+        runCatching { dedupStore.addPostedIdle(key) }
+            .onFailure { Log.w(TAG, "Failed to persist idle dedup (bridge) key=$key", it) }
+    }
 
     /**
      * Hook for [cn.vectory.ocdroid.ui.MainViewModel] to push its
@@ -645,6 +820,25 @@ class AppLifecycleMonitor @Inject constructor(
         // against double-emissions (inverse of [onEnterBackground]).
         pollJob?.cancel()
         pollJob = null
+        // Bug-1 (shade hygiene): cancel DECISION + IDLE notifications that
+        // are still in the shade when the app returns to foreground — the
+        // user is now in-app and the in-app surfaces are the source of truth,
+        // so leaving shade entries would be redundant. This does NOT clear
+        // the dedup state, so when the user backgrounds again already-
+        // notified roots still won't re-notify (correct). The ongoing FGS
+        // notification (CHANNEL_SESSION_STATUS / CHANNEL_SESSION_STATUS_MIN,
+        // id 4241) and the error notification (id 4242) are deliberately
+        // left alone — they are owned by the FGS / error path, not by the
+        // decision/idle notify path. minSdk=34 so getActiveNotifications()
+        // (API 23+) needs no version guard.
+        runCatching {
+            notificationManager.activeNotifications.forEach { n ->
+                val channel = n.notification.channelId
+                if (channel == CHANNEL_DECISIONS || channel == CHANNEL_IDLE) {
+                    notificationManager.cancel(n.id)
+                }
+            }
+        }.onFailure { Log.w(TAG, "Failed to cancel shade entries on foreground", it) }
     }
 
     /**
@@ -727,7 +921,57 @@ class AppLifecycleMonitor @Inject constructor(
                 // cancellation (viewModelScope / appScope cancel propagates).
                 val alerts = (result as? UnreadPollResult.Authoritative)?.alerts ?: return@onSuccess
                 val active = alerts.mapTo(mutableSetOf()) { it.key }
-                idleNotificationSnapshot.pruneStaleCandidates(candidates, active)
+                // Race-closure: the prune + side-effect region runs under
+                // the shared [idleMutex] so it cannot interleave with a
+                // concurrent publish (handleIdleAlert here, or the SSE
+                // bridge's idle branch). Pre-fix the side-effect loop
+                // (`pruned.forEach { cancel + removePostedIdle }`) ran
+                // unlocked; in the window between `afterPrune` and that
+                // loop the bridge could re-claim+complete+addPostedIdle the
+                // same key, and this poller's stale deferred remove/cancel
+                // clobbered the fresh completion. Under the lock: if
+                // publish ran first the prune's afterPrune (taken inside
+                // this locked region, after publish released) sees the key
+                // PRESENT → it's excluded from `pruned` → not cancelled/
+                // removed. If prune ran first the publish re-claims and
+                // re-adds fresh. Both orderings leave B's final state
+                // correct. handleIdleAlert (called below, OUTSIDE this
+                // withLock) acquires the lock itself — sequential, no
+                // nesting.
+                idleMutex.withLock {
+                    idleNotificationSnapshot.pruneStaleCandidates(candidates, active)
+                    // Bug-1-fix-A (missed-notification regression): when a key
+                    // is pruned from the dedup set, ALSO cancel its lingering
+                    // shade entry. Pre-fix the only cancel site was
+                    // [onEnterForeground], so a root that went idle→notified
+                    // (user ignored the shade entry) → busy (key pruned via
+                    // pruneStaleCandidates, but the shade entry NEVER cancelled)
+                    // → idle again (real new completion) would hit the lingering
+                    // shade entry (same id = key.hashCode()) and be silently
+                    // suppressed by the activeNotifications guard. Cancelling
+                    // here re-arms the guard for a future genuine new idle on
+                    // the same root.
+                    //
+                    // Bug-1-fix-C/race (additive persistence): keep the
+                    // persisted mirror in sync via additive removePostedIdle
+                    // (never a full-snapshot rewrite — the prior
+                    // `saveIdleKeys(snapshotPosted().keys)` was called from two
+                    // dispatchers (Main.immediate notify + Default prune) and
+                    // could transiently drop a key). The diff
+                    // `candidates.keys - afterPrune.keys` is the set of keys
+                    // that were Posted before the poll but are no longer Posted
+                    // — i.e. removed by THIS prune cycle. (Posted is terminal;
+                    // only prune removes it between the two snapshots, so the
+                    // diff is exactly the pruned set.)
+                    val afterPrune = idleNotificationSnapshot.snapshotPosted()
+                    val pruned = candidates.keys - afterPrune.keys
+                    pruned.forEach { key ->
+                        runCatching { notificationManager.cancel(key.hashCode()) }
+                            .onFailure { Log.w(TAG, "Failed to cancel shade entry for pruned key=$key", it) }
+                        runCatching { dedupStore.removePostedIdle(key) }
+                            .onFailure { Log.w(TAG, "Failed to remove persisted idle dedup key=$key", it) }
+                    }
+                }
                 if (!_isInForeground.value) alerts.forEach { handleIdleAlert(it) }
             }
             .onFailure { Log.w(TAG, "Background unread poll failed", it) }
@@ -753,15 +997,52 @@ class AppLifecycleMonitor @Inject constructor(
         // Suppression / failure releases the claim (the finally below) so a
         // later background attempt can fire.
         if (_isInForeground.value) return
-        val token = idleNotificationSnapshot.claim(alert.key) ?: return
-        try {
-            withContext(Dispatchers.Main.immediate) {
-                if (_isInForeground.value) return@withContext
-                val notified = notifier.notifyIdle(alert.rootId, alert.title, alert.key)
-                if (notified) idleNotificationSnapshot.complete(alert.key, token)
+        // Race-closure: the entire publish critical section (claim →
+        // foreground gate → notifyIdle → complete → addPostedIdle → release)
+        // runs under the shared [idleMutex] so it cannot interleave with the
+        // poller's prune + side-effect critical section ([pollPendingItems]
+        // post-prune loop) NOR with the SSE bridge's idle publish branch
+        // (which acquires the SAME mutex). The fast-path foreground early-out
+        // above stays OUTSIDE the lock — no claim has been taken yet, so a
+        // stale observation cannot clobber anything. See [idleMutex] for the
+        // full deadlock / ordering analysis.
+        idleMutex.withLock {
+            val token = idleNotificationSnapshot.claim(alert.key) ?: run {
+                Log.d(TAG, "idle claim LOST key=${alert.key} (already in dedup)")
+                return@withLock
             }
-        } finally {
-            idleNotificationSnapshot.release(alert.key, token)
+            try {
+                withContext(Dispatchers.Main.immediate) {
+                    if (_isInForeground.value) {
+                        Log.d(TAG, "idle notify SUPPRESSED (foreground) key=${alert.key}")
+                        return@withContext
+                    }
+                    val notified = notifier.notifyIdle(alert.rootId, alert.title, alert.key)
+                    if (notified) {
+                        val completed = idleNotificationSnapshot.complete(alert.key, token)
+                        Log.d(
+                            TAG,
+                            "idle notify POSTED key=${alert.key} complete=$completed fg=${_isInForeground.value}",
+                        )
+                        // Bug-1-fix-C/race: persist the new Posted entry via the
+                        // additive mirror API (never a full-snapshot rewrite).
+                        // The prior `saveIdleKeys(snapshotPosted().keys)` was
+                        // called from BOTH this Main.immediate path AND the
+                        // Default post-prune path; two racing full-snapshot
+                        // writes could transiently drop a key, and each save
+                        // allocated + serialized the full set. addPostedIdle
+                        // mutates a single shared mirror under a lock — the
+                        // disk write is the exact delta. Best-effort; never
+                        // throws into the publish boundary.
+                        runCatching { dedupStore.addPostedIdle(alert.key) }
+                            .onFailure { Log.w(TAG, "Failed to persist idle dedup after notify key=${alert.key}", it) }
+                    } else {
+                        Log.d(TAG, "idle notify FAILED (permission denied) key=${alert.key}")
+                    }
+                }
+            } finally {
+                idleNotificationSnapshot.release(alert.key, token)
+            }
         }
     }
 
@@ -773,17 +1054,37 @@ class AppLifecycleMonitor @Inject constructor(
         // notify + complete run on Dispatchers.Main.immediate, serialized
         // with lifecycle callbacks (see [handleIdleAlert]).
         if (_isInForeground.value) return
-        val token = notificationSnapshot.claim(key) ?: return
+        val token = notificationSnapshot.claim(key) ?: run {
+            Log.d(TAG, "perm claim LOST key=$key (already in dedup)")
+            return
+        }
         try {
             withContext(Dispatchers.Main.immediate) {
-                if (_isInForeground.value) return@withContext
+                if (_isInForeground.value) {
+                    Log.d(TAG, "perm notify SUPPRESSED (foreground) key=$key")
+                    return@withContext
+                }
                 val notified = notifier.notifyDecision(
                     sessionId = permission.sessionId,
                     title = NOTIF_PERMISSION_TITLE,
                     body = permission.permission ?: NOTIF_DECISION_BODY,
                     key = key,
                 )
-                if (notified) notificationSnapshot.complete(key, token)
+                if (notified) {
+                    val completed = notificationSnapshot.complete(key, token)
+                    Log.d(
+                        TAG,
+                        "perm notify POSTED key=$key complete=$completed fg=${_isInForeground.value}",
+                    )
+                    // Bug-1-fix-C: decision dedup is intentionally NOT
+                    // persisted. The original "process death = only GC, so
+                    // still-pending blocking items correctly re-remind"
+                    // contract is preserved; only idle re-notification was
+                    // the reported bug, and persisting decisions would grow
+                    // unbounded (a permission id is never reused).
+                } else {
+                    Log.d(TAG, "perm notify FAILED (permission denied) key=$key")
+                }
             }
         } finally {
             notificationSnapshot.release(key, token)
@@ -797,10 +1098,16 @@ class AppLifecycleMonitor @Inject constructor(
         // T5-review I2 + T5-re-review I2-R: Main.immediate publish gate
         // (see [handleIdleAlert]).
         if (_isForeground()) return
-        val token = notificationSnapshot.claim(key) ?: return
+        val token = notificationSnapshot.claim(key) ?: run {
+            Log.d(TAG, "question claim LOST key=$key (already in dedup)")
+            return
+        }
         try {
             withContext(Dispatchers.Main.immediate) {
-                if (_isForeground()) return@withContext
+                if (_isForeground()) {
+                    Log.d(TAG, "question notify SUPPRESSED (foreground) key=$key")
+                    return@withContext
+                }
                 val headline = question.questions.firstOrNull()?.header ?: NOTIF_DECISION_BODY
                 val notified = notifier.notifyDecision(
                     sessionId = question.sessionId,
@@ -808,7 +1115,17 @@ class AppLifecycleMonitor @Inject constructor(
                     body = headline,
                     key = key,
                 )
-                if (notified) notificationSnapshot.complete(key, token)
+                if (notified) {
+                    val completed = notificationSnapshot.complete(key, token)
+                    Log.d(
+                        TAG,
+                        "question notify POSTED key=$key complete=$completed fg=${_isInForeground.value}",
+                    )
+                    // Bug-1-fix-C: decision dedup is intentionally NOT
+                    // persisted (see [handlePendingPermission]).
+                } else {
+                    Log.d(TAG, "question notify FAILED (permission denied) key=$key")
+                }
             }
         } finally {
             notificationSnapshot.release(key, token)

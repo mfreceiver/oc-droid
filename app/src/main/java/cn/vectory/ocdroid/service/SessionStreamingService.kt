@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
@@ -355,8 +356,19 @@ class SessionStreamingService : Service() {
             notifier = appLifecycleMonitor.notifier,
             decisionDedup = appLifecycleMonitor.notificationSnapshot,
             idleDedup = appLifecycleMonitor.idleNotificationSnapshot,
+            // Race-closure: the SAME shared Mutex the poller's
+            // handleIdleAlert + post-prune side-effect loop hold. Wraps the
+            // bridge's idle publish critical section so a deferred-stale
+            // post-prune `cancel + removePostedIdle` cannot clobber a fresh
+            // bridge completion + `addPostedIdle`.
+            idleMutex = appLifecycleMonitor.idleMutex,
             isInForeground = { appLifecycleMonitor.isInForeground.value },
             rootIdleResolver = ::resolveRootIdleAlert,
+            // Bug-1-fix-B: an idle key completed via the SSE bridge is
+            // mirrored into the durable dedup store so it survives process
+            // death (otherwise lost until the poller's ≤30s post-prune
+            // self-heal).
+            onIdlePosted = { appLifecycleMonitor.persistIdlePosted(it) },
             scope = scope,
         ).also { it.start() }
     }
@@ -394,6 +406,11 @@ class SessionStreamingService : Service() {
      * survive force-stop).
      */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // DIAGNOSTIC TIMING: anchor every subsequent measurement in this call.
+        // MUST be the very first statement. Purely additive — cheap (SystemClock
+        // only), no behavior change.
+        val onStartEntryNs = SystemClock.elapsedRealtimeNanos()
+        DebugLog.i(TAG, "onStartCommand: entered (startId=$startId, action=${intent?.action}, flags=$flags, realtimeMs=${SystemClock.elapsedRealtime()})")
         // §16-U1: branch on the close-background action BEFORE the §5 bootstrap
         // path. The close action is delivered by the ongoing-notification
         // Action PendingIntent (CP8 §16-U1 wiring) — never via sticky rebuild.
@@ -468,8 +485,21 @@ class SessionStreamingService : Service() {
         bootstrapJob = installedJob
         if (requestedOwnership != null) {
             scope.launch {
+                // DIAGNOSTIC TIMING (KEY MEASUREMENT): how long did the main
+                // Looper sit on this coroutine before running it? If this
+                // queueDelayMs is ~5000ms+, the launcher's Stage-1 ack times
+                // out purely due to main-thread dispatch starvation — the
+                // Service's Late onStartCommand then sees outcome=Expired.
+                val dispatchNs = SystemClock.elapsedRealtimeNanos()
+                DebugLog.i(TAG, "onStartCommand: bootstrap coroutine dispatched (queueDelayMs=${(dispatchNs - onStartEntryNs) / 1_000_000L})")
                 if (identityStore.isCurrent(requestedOwnership)) {
+                    // DIAGNOSTIC TIMING: measure the registerStarting call
+                    // (synchronized gate + OwnershipState allocation) and
+                    // total elapsed since onStartCommand entry.
+                    val preRegNs = SystemClock.elapsedRealtimeNanos()
+                    DebugLog.i(TAG, "onStartCommand: registerStarting pre (attemptId=$requestedAttemptId, sinceEntryMs=${(preRegNs - onStartEntryNs) / 1_000_000L})")
                     val outcome = registerStartingOwnership(requestedOwnership, requestedAttemptId)
+                    DebugLog.i(TAG, "onStartCommand: registerStarting outcome=$outcome (elapsedSinceEntryMs=${(SystemClock.elapsedRealtimeNanos() - onStartEntryNs) / 1_000_000L})")
                     if (outcome is RegisterStartingOutcome.Accepted) {
                         // Stage 1 ownership recorded — proceed with the §5 bootstrap.
                         installedJob.start()
@@ -481,7 +511,7 @@ class SessionStreamingService : Service() {
                         // owner. The bootstrap job is cancelled; the shell
                         // teardown (stopForeground + stopSelf + cancel SSE)
                         // runs via the BootstrapFailure teardown path.
-                        DebugLog.w(TAG, "onStartCommand: registerStarting outcome=$outcome → abort bootstrap")
+                        DebugLog.w(TAG, "onStartCommand: registerStarting outcome=$outcome → abort bootstrap (elapsedSinceEntryMs=${(SystemClock.elapsedRealtimeNanos() - onStartEntryNs) / 1_000_000L})")
                         abortExpiredStartup()
                     }
                 } else {
@@ -819,7 +849,7 @@ class SessionStreamingService : Service() {
             rootId = sessionId,
             title = session.title?.takeIf { it.isNotBlank() } ?: sessionId,
             idleSince = idleSince,
-            key = cn.vectory.ocdroid.ui.controller.idleNotificationKey(serverId, workdir, sessionId, idleSince),
+            key = cn.vectory.ocdroid.ui.controller.idleNotificationKey(serverId, workdir, sessionId),
         )
     }
 

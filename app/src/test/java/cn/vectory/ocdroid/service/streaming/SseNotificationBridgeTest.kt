@@ -12,6 +12,7 @@ import io.mockk.mockk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
@@ -963,6 +964,146 @@ class SseNotificationBridgeTest {
         bridge.stop()
     }
 
+    // ── Bug-1-fix-B — SSE bridge persists the idle key via onIdlePosted ──────
+
+    /**
+     * Bug-1-fix-B: a successful idle notify MUST invoke [onIdlePosted]
+     * with the alert key so the ALM can mirror the completion into the
+     * durable dedup store (otherwise the key is lost on process death and
+     * only self-heals ≤30s later via the poller's post-prune save). The
+     * callback is invoked EXACTLY ONCE per successful idle notify.
+     */
+    @Test
+    fun `Bug-1-fix-B - successful idle notify invokes onIdlePosted with the alert key`() = runTest {
+        val publisher = RecordingPublisher(returns = true)
+        val alert = IdleUnreadAlert("ses-root", "Project A", 100L, "idle:fp:/wd:ses-root:100")
+        val posted = mutableListOf<String>()
+        val bridge = newBridge(
+            publisher = publisher.notifier,
+            events = source,
+            isInForeground = { false },
+            rootIdleResolver = { id -> if (id == "ses-root") alert else null },
+            onIdlePosted = { posted += it },
+            scope = backgroundScope,
+        )
+        bridge.start()
+        runCurrent()
+
+        source.emitIdle(sessionId = "ses-root")
+        runCurrent()
+
+        assertEquals(
+            "a successful idle notify MUST invoke onIdlePosted exactly once",
+            listOf(alert.key),
+            posted,
+        )
+        bridge.stop()
+    }
+
+    /**
+     * Bug-1-fix-B companion: the second arrival of the SAME idle key is
+     * deduped (no notify), so [onIdlePosted] is NOT invoked a second time
+     * (the dedup claim already lost). Guards against a regression that
+     * would persist the key on every event regardless of dedup outcome.
+     */
+    @Test
+    fun `Bug-1-fix-B - deduped second idle does not invoke onIdlePosted again`() = runTest {
+        val publisher = RecordingPublisher(returns = true)
+        val alert = IdleUnreadAlert("ses-root", "title", 100L, "idle:fp:/wd:ses-root:100")
+        val posted = mutableListOf<String>()
+        val bridge = newBridge(
+            publisher = publisher.notifier,
+            events = source,
+            isInForeground = { false },
+            rootIdleResolver = { id -> if (id == "ses-root") alert else null },
+            onIdlePosted = { posted += it },
+            scope = backgroundScope,
+        )
+        bridge.start()
+        runCurrent()
+
+        source.emitIdle(sessionId = "ses-root")
+        runCurrent()
+        source.emitIdle(sessionId = "ses-root") // deduped
+        runCurrent()
+
+        assertEquals(
+            "deduped second idle must NOT invoke onIdlePosted again",
+            listOf(alert.key),
+            posted,
+        )
+        bridge.stop()
+    }
+
+    /**
+     * Bug-1-fix-B/C: the decision (`question.asked`) path MUST NOT invoke
+     * [onIdlePosted] — decision dedup is intentionally in-memory only now
+     * (the original "process death = only GC, so still-pending blocking
+     * items correctly re-remind" contract is preserved). Guards against a
+     * regression that would persist decisions via the bridge.
+     */
+    @Test
+    fun `Bug-1-fix-B - question_asked does NOT invoke onIdlePosted (decision is in-memory only)`() = runTest {
+        val publisher = RecordingPublisher(returns = true)
+        val posted = mutableListOf<String>()
+        val bridge = newBridge(
+            publisher = publisher.notifier,
+            events = source,
+            isInForeground = { false },
+            onIdlePosted = { posted += it },
+            scope = backgroundScope,
+        )
+        bridge.start()
+        runCurrent()
+
+        source.emitQuestion(questionId = "q-1", sessionId = "ses-1", header = "Pick a color")
+        runCurrent()
+
+        assertEquals(
+            "question.asked must NOT invoke onIdlePosted (decision dedup is in-memory only)",
+            0,
+            publisher.idleCalls.size,
+        )
+        assertTrue(
+            "question.asked must NOT invoke onIdlePosted",
+            posted.isEmpty(),
+        )
+        bridge.stop()
+    }
+
+    /**
+     * Bug-1-fix-B: a failed idle notify (e.g. permission denied) MUST NOT
+     * invoke [onIdlePosted] — the dedup claim is released, no completion
+     * is recorded, and nothing should be persisted (otherwise a denied
+     * permission would permanently swallow the event across restarts).
+     */
+    @Test
+    fun `Bug-1-fix-B - failed idle notify does NOT invoke onIdlePosted`() = runTest {
+        val publisher = RecordingPublisher(returns = false)
+        val alert = IdleUnreadAlert("ses-root", "title", 100L, "idle:fp:/wd:ses-root:100")
+        val posted = mutableListOf<String>()
+        val bridge = newBridge(
+            publisher = publisher.notifier,
+            events = source,
+            isInForeground = { false },
+            rootIdleResolver = { id -> if (id == "ses-root") alert else null },
+            onIdlePosted = { posted += it },
+            scope = backgroundScope,
+        )
+        bridge.start()
+        runCurrent()
+
+        source.emitIdle(sessionId = "ses-root")
+        runCurrent()
+
+        assertEquals("notify was attempted", 1, publisher.idleCalls.size)
+        assertTrue(
+            "failed idle notify must NOT invoke onIdlePosted (no completion, no persist)",
+            posted.isEmpty(),
+        )
+        bridge.stop()
+    }
+
     // ── Fixtures ───────────────────────────────────────────────────────
 
     /**
@@ -978,16 +1119,20 @@ class SseNotificationBridgeTest {
         isInForeground: () -> Boolean,
         decisionDedup: NotificationDedup = NotificationDedup(),
         idleDedup: NotificationDedup = NotificationDedup(),
+        idleMutex: Mutex = Mutex(),
         rootIdleResolver: (String) -> IdleUnreadAlert? = { null },
+        onIdlePosted: (String) -> Unit = {},
         scope: CoroutineScope,
     ): SseNotificationBridge = SseNotificationBridge(
         events = events,
         notifier = publisher,
         decisionDedup = decisionDedup,
         idleDedup = idleDedup,
+        idleMutex = idleMutex,
         isInForeground = isInForeground,
         rootIdleResolver = rootIdleResolver,
         scope = scope,
+        onIdlePosted = onIdlePosted,
     )
 
     /**

@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.service
 
 import android.content.Context
 import android.content.Intent
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
@@ -115,6 +116,10 @@ class AndroidStreamingServiceLauncher @Inject constructor(
         // handles the four cases (Ready same / Starting same / no owner /
         // different owner). Only the "no owner" case sets launchRequired=true.
         val attempt = ownershipGate.prepareAttempt(identity)
+        // DIAGNOSTIC TIMING: t0 anchors every subsequent measurement in this
+        // call. Purely additive — cheap (SystemClock only), no behavior change.
+        val t0 = SystemClock.elapsedRealtimeNanos()
+        DebugLog.i(TAG, "ensureStarted: launch begin (attemptId=${attempt.attemptId}, identity=$identity)")
         if (attempt.launchRequired) {
             // §C15 step 3: foreground + L3 → start the Service with the §5
             // bootstrap action. The Service runs its §5 sequence (placeholder
@@ -131,7 +136,7 @@ class AndroidStreamingServiceLauncher @Inject constructor(
                     putExtra(OwnershipRequestParser.EXTRA_ATTEMPT_ID, attempt.attemptId)
                 }
                 ContextCompat.startForegroundService(context, intent)
-                DebugLog.i(TAG, "ensureStarted: startForegroundService issued (ACTION_BOOTSTRAP, attemptId=${attempt.attemptId})")
+                DebugLog.i(TAG, "ensureStarted: startForegroundService dispatched (ACTION_BOOTSTRAP, attemptId=${attempt.attemptId}, dispatchElapsedMs=${(SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000L})")
             } catch (t: Throwable) {
                 // §C15 step 4: platform start rejection (ForegroundServiceStart-
                 // NotAllowedException, SecurityException on quota exhaustion,
@@ -149,6 +154,13 @@ class AndroidStreamingServiceLauncher @Inject constructor(
         // wall-clock timeout — the 30s transport timeout runs ONLY inside
         // ServiceSseConnectionOwner.setupConnectLocked (already true from D4-B).
         val startingAck = withTimeoutOrNull(ackPolicy.timeoutMs) { attempt.starting.await() }
+        // DIAGNOSTIC TIMING: did the 5s Stage-1 ack arrive in time?
+        val ackProbeMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000L
+        if (startingAck != null) {
+            DebugLog.i(TAG, "ensureStarted: Stage-1 ack received (attemptId=${attempt.attemptId}, elapsedMs=$ackProbeMs)")
+        } else {
+            DebugLog.i(TAG, "ensureStarted: Stage-1 ack NOT received within ${ackPolicy.timeoutMs}ms (attemptId=${attempt.attemptId}, elapsedMs=$ackProbeMs)")
+        }
         // Race safety: withTimeoutOrNull may return null at the exact boundary
         // even though `starting` was just completed. If so, use the completed
         // value — the Service has already recorded Stage 1 ownership.
@@ -168,7 +180,7 @@ class AndroidStreamingServiceLauncher @Inject constructor(
                 // the gate so any LATE Service registerStarting for this
                 // attemptId returns Expired and the Service aborts (no orphan
                 // owner). Settles the attempt's deferreds with AckTimeout.
-                DebugLog.w(TAG, "ensureStarted: Stage 1 AckTimeout (attemptId=${attempt.attemptId}) → expireAttempt")
+                DebugLog.w(TAG, "ensureStarted: Stage 1 AckTimeout (attemptId=${attempt.attemptId}, elapsedMs=${(SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000L}) → expireAttempt")
                 ownershipGate.expireAttempt(attempt.attemptId, OwnershipRefusal.AckTimeout)
                 OwnershipStartResult.Refused(OwnershipRefusal.AckTimeout)
             }

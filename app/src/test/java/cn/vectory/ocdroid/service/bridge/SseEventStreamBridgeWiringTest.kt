@@ -444,6 +444,7 @@ class SseEventStreamBridgeWiringTest {
             notifier = notifier,
             decisionDedup = NotificationDedup(),
             idleDedup = NotificationDedup(),
+            idleMutex = kotlinx.coroutines.sync.Mutex(),
             isInForeground = { false },
             rootIdleResolver = { null },
             scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),

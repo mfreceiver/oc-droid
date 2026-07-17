@@ -179,10 +179,22 @@ class BackgroundUnreadPollerTest {
     }
 
     @Test
-    fun `notification key includes server workdir root and idle cycle`() {
+    fun `notification key is stable across idle-cycle re-stamps`() {
+        // Bug-1: the key MUST NOT embed the volatile `idleSince` timestamp —
+        // the evaluator re-stamps it on every fresh idle transition, and it
+        // is not preserved across process death. A stable (serverId, workdir,
+        // rootId) triple survives restart so a persisted dedup entry matches.
+        // The OLD format appended ":$idleSince" (e.g. "...:A:1000"); the new
+        // format drops that suffix entirely so a persisted set seeded by a
+        // prior process always matches.
         assertEquals(
-            "idle:server-1:/repo:A:1000",
-            idleNotificationKey("server-1", "/repo", "A", 1_000L),
+            "idle:server-1:/repo:A",
+            idleNotificationKey("server-1", "/repo", "A"),
+        )
+        // null workdir is normalized to empty (matches the persistable key).
+        assertEquals(
+            "idle:server-1::A",
+            idleNotificationKey("server-1", null, "A"),
         )
     }
 
