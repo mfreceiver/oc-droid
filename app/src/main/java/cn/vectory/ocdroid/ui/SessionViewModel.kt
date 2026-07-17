@@ -355,16 +355,13 @@ class SessionViewModel @Inject constructor(
     }
 
     fun refreshDirectorySessions(workdir: String) {
-        val workdir = workdir.trim()
-        if (workdir.isBlank()) return
-        // §R18 Phase 3 Wave 2 (drift #6): user-triggered refresh →
-        // viewModelScope (ephemeral; cancel on VM clear, re-fetchable on return).
-        viewModelScope.launch {
-            repository.getSessionsForDirectory(workdir)
-                .onSuccess { sessions ->
-                    store.mutateSessionList { it.copy(directorySessions = it.directorySessions + (workdir to sessions)) }
-                }
-        }
+        // §fix-connect-prefetch (9.5 gate, decision 1b): delegate to the
+        // connectionCoordinator's GUARDED refresh so both the connect path
+        // (SessionsScreen directory-picker onSelect) and the expand path
+        // (HomeWorkdirRow onToggleExpand) drop stale-host results on a mid-flight
+        // host/profile switch — previously this wrote directorySessions
+        // unconditionally (a pre-existing race the connect prefetch would widen).
+        connectionCoordinator.refreshDirectorySessions(workdir)
     }
 
     /**

@@ -818,6 +818,44 @@ class ConnectionCoordinator(
     }
 
     /**
+     * Guarded single-workdir refresh: fetches directory-scoped sessions for
+     * [workdir] and writes them via [appendDirectorySessions]. Mirrors
+     * [loadInitialData]'s host-identity guard verbatim — the current identity
+     * is captured before the launch, and on return the result is dropped (or
+     * the failure logged) unless [ConnectionIdentityStore.isCurrent] still
+     * matches, so a mid-flight host/profile switch cannot write the previous
+     * host's sessions into the new host's directorySessions.
+     *
+     * §fix-connect-prefetch (9.5 gate, decision 1b): used by SessionViewModel
+     * for both the connect-prefetch path (SessionsScreen directory-picker
+     * `onSelect`, immediately after `settingsVM.connectWorkdir`) and the
+     * project-row expand path (HomeWorkdirRow onToggleExpand). Pre-fix the
+     * SessionViewModel version wrote directorySessions unconditionally — a
+     * pre-existing race the connect prefetch would widen.
+     */
+    fun refreshDirectorySessions(workdir: String) {
+        val wd = workdir.trim()
+        if (wd.isBlank()) return
+        val fetchIdentity = identityStore?.currentIdentity?.value
+        scope.launch {
+            repository.getSessionsForDirectory(wd)
+                .onSuccess { sessions ->
+                    if (fetchIdentity != null && identityStore != null &&
+                        !identityStore.isCurrent(fetchIdentity)
+                    ) return@launch
+                    appendDirectorySessions(wd, sessions)
+                }
+                .onFailure { error ->
+                    if (fetchIdentity == null || identityStore == null ||
+                        identityStore.isCurrent(fetchIdentity)
+                    ) {
+                        reportNonFatalIssue(TAG, "refreshDirectorySessions failed for $wd", error)
+                    }
+                }
+        }
+    }
+
+    /**
      * Appends a workdir's directory-scoped sessions using a REAL compare-and-set
      * ([MutableStateFlow.update]) on the sessionList slice, so the concurrent
      * fan-out in [loadInitialData] cannot lose entries. This deliberately does

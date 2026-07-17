@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -300,6 +301,26 @@ fun SessionsScreen(
                     // is the root. showBackNavigation is ignored (treated
                     // false); no navigationIcon slot is populated.
                     actions = {
+                        // §fix-home-refresh (9.5 gate, decision 2a): soft-refresh
+                        // button — re-runs the connection coordinator's full
+                        // fan-out (global getSessions + per-workdir
+                        // directorySessions restore WITH the host-identity guard)
+                        // without forcing a reconnect (contrast the
+                        // ServerStatusIconButton "force refresh" popup, which
+                        // does coldStartReconnect). Disabled while a sessions
+                        // refresh is already in flight to prevent double-fire.
+                        // Reuses the generic common_refresh label
+                        // ("Refresh"/"刷新"); chat_force_refresh stays distinct
+                        // (that's the force-reconnect affordance).
+                        IconButton(
+                            onClick = { connectionVM?.loadInitialData() },
+                            enabled = !sessionListState.isRefreshingSessions,
+                        ) {
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = stringResource(R.string.common_refresh),
+                            )
+                        }
                         // Top-right server-status affordance (T2). Wired to
                         // the connection / traffic / host slices; degrades to
                         // Idle / empty host list when the VMs are not wired.
@@ -571,6 +592,16 @@ fun SessionsScreen(
             onSelect = { path ->
                 showAddProjectSheet = false
                 settingsVM.connectWorkdir(path)
+                // §fix-connect-prefetch (9.5 gate, decision 1b): connectWorkdir
+                // only registers the workdir (no fetch) — pre-fix the new
+                // project's sessions didn't appear until the user manually
+                // expanded the row. Prefetch here via the GUARDED
+                // connectionCoordinator path so a mid-flight host/profile
+                // switch drops stale-host results. Pass the EXACT same `path`
+                // (connectWorkdir stores path.trim(); the coordinator trims
+                // internally; the directorySessions key then matches the
+                // recentWorkdirs stored form that buildWorkdirGroups looks up).
+                viewModel.refreshDirectorySessions(path)
             }
         )
     }
