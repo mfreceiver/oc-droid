@@ -363,6 +363,10 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
                     // and would ghost into the new host's list.
                     pendingCreateIds = emptySet(),
                     pendingCreatedAt = emptyMap(),
+                    // §fix-close-all-residual: re-arm the cold-start
+                    // auto-select for the new host — its first load should
+                    // land the user on a session just like a fresh launch.
+                    hasCompletedInitialLoad = false,
                 ),
                 state.unread.copy(
                     unreadSessions = emptySet(),

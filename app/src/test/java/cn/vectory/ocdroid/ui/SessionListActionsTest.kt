@@ -409,6 +409,45 @@ class SessionListActionsTest {
         assertNull(selected)
     }
 
+    // ── §fix-close-all-residual: cold-start auto-select must NOT refire ──────
+    // The auto-select lands the user on a session during TRUE cold start only.
+    // Once the first load has completed, a null currentSessionId means the user
+    // closed every tab — a refresh must keep the empty state instead of
+    // resurrecting the first server session (which produced the stable
+    // "StreamingSvcLauncher AckTimeout bootstrap abort" residual).
+
+    @Test
+    fun `fix-close-all-residual - second load after close-all does not auto-select`() = runTest {
+        val sessions = listOf(Session(id = "first", directory = "/x"))
+        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+        // Simulate "initial load already happened" (the normal pre-condition
+        // before the user can close tabs): the flag is true, currentSessionId
+        // is null (user just closed the last tab), no draft.
+        store.mutateSessionList { it.copy(hasCompletedInitialLoad = true) }
+        var selected: String? = null
+
+        launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
+        advanceUntilIdle()
+
+        assertNull("must NOT auto-select after close-all-tabs", selected)
+        assertNull("chat stays cleared (empty state)", slices.chat.value.currentSessionId)
+    }
+
+    @Test
+    fun `fix-close-all-residual - first load with null current still auto-selects`() = runTest {
+        // Regression guard: the cold-start auto-select itself must still work
+        // on the FIRST load (hasCompletedInitialLoad = false). This is the
+        // legitimate "land the user on a session" path the gate preserves.
+        val sessions = listOf(Session(id = "first", directory = "/x"))
+        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+        var selected: String? = null
+
+        launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
+        advanceUntilIdle()
+
+        assertEquals("cold start still auto-selects first", "first", selected)
+    }
+
     @Test
     fun `launchLoadSessions with current session calls onLoadMessages and onLoadSessionStatus`() = runTest {
         val sessions = listOf(Session(id = "s1", directory = "/x"))

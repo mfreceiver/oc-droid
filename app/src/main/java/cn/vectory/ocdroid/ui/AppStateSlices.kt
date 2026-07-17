@@ -561,6 +561,22 @@ data class SessionListState(
      * lockstep with [pendingCreateIds].
      */
     val pendingCreatedAt: Map<String, Long> = emptyMap(),
+    /**
+     * §fix-close-all-residual: gates the cold-start auto-select in
+     * [launchLoadSessions] (the `currentSessionId == null → select first
+     * session` branch). The auto-select is meant to land the user on a
+     * session when the app cold-starts with no restored currentSessionId —
+     * NOT to override a deliberate "user closed every tab" empty state.
+     * Pre-fix, every session-list refresh (SSE reconnect / foreground
+     * catch-up / pull-to-refresh) re-fired the auto-select when
+     * currentSessionId was null, so closing all tabs → currentSessionId
+     * cleared → next refresh deterministically re-selected the first server
+     * session (e.g. a stale "StreamingSvcLauncher AckTimeout bootstrap
+     * abort" error session sitting at the head of the list), producing the
+     * residual chat with no tab. Flipped to true on the first successful
+     * [launchLoadSessions] commit; reset on cross-group host purge.
+     */
+    val hasCompletedInitialLoad: Boolean = false,
 )
 
 /**

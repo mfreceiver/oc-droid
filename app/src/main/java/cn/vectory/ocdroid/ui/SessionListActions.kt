@@ -177,6 +177,13 @@ internal fun launchLoadSessions(
                 val currentSessionList = slices.sessionList.value
                 val currentSessions = currentSessionList.sessions
                 val currentOpenIds = currentSessionList.openSessionIds
+                // §fix-close-all-residual: capture the pre-load cold-start flag.
+                // The auto-select below must fire ONLY on the first load (true
+                // cold start), not on every refresh — otherwise closing all
+                // tabs (currentSessionId → null) gets overridden on the next
+                // refresh and the first server session (often a stale error
+                // session) is resurrected as a tab-less residual chat.
+                val isInitialColdStart = !currentSessionList.hasCompletedInitialLoad
                 // §Q4-strict-sync: capture pendingCreateIds for the merge
                 // (preserve local-only ids that are still pending-create).
                 val currentPendingCreateIds = currentSessionList.pendingCreateIds
@@ -286,6 +293,10 @@ internal fun launchLoadSessions(
                         // epoch so in-flight hydrations drop (fail-closed).
                         completeRootIds = emptySet(),
                         completenessEpoch = it.completenessEpoch + 1L,
+                        // §fix-close-all-residual: this load has completed —
+                        // subsequent refreshes must NOT re-fire the cold-start
+                        // auto-select (see isInitialColdStart capture above).
+                        hasCompletedInitialLoad = true,
                     )
                 }
                 // Persist a BOUNDED session-metadata cache so the next cold
@@ -363,13 +374,32 @@ internal fun launchLoadSessions(
                     // NOT resurrect it as current. If ALL candidates are
                     // archived (or the list is empty), fall through to the
                     // chat-clear — never select an archived session.
-                    currentSessionId == null && slices.composer.value.draftWorkdir == null -> {
+                    //
+                    // §fix-close-all-residual: the auto-select is ALSO gated on
+                    // [isInitialColdStart] — it must only land the user on a
+                    // session during true cold start. Once the first load has
+                    // completed, a null currentSessionId means the user
+                    // deliberately closed every tab (or otherwise emptied the
+                    // chat), and the empty state is the correct outcome —
+                    // silently re-selecting the first server session would
+                    // resurrect a tab-less residual chat.
+                    currentSessionId == null &&
+                        slices.composer.value.draftWorkdir == null &&
+                        isInitialColdStart -> {
                         val candidate = refreshedSessions.firstOrNull { !it.isArchived }
                         if (candidate != null) {
                             onSelectSession(candidate.id)
                         } else {
                             slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
                         }
+                    }
+                    // §fix-close-all-residual: null currentSessionId on a NON-
+                    // initial refresh (user closed all tabs) — keep the empty
+                    // state instead of auto-selecting. currentSessionId stays
+                    // null; ChatScaffold renders the empty-state hint.
+                    currentSessionId == null &&
+                        slices.composer.value.draftWorkdir == null -> {
+                        slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
                     }
                     // currentId is set: keep it. Even when the session is
                     // temporarily absent from the refreshed list (e.g. just
@@ -454,6 +484,13 @@ internal fun launchLoadMoreSessions(
                 val currentSessionList = slices.sessionList.value
                 val currentSessions = currentSessionList.sessions
                 val currentOpenIds = currentSessionList.openSessionIds
+                // §fix-close-all-residual: mirror the launchLoadSessions cold-
+                // start gate (see there). loadMore is user-scroll-triggered so
+                // this auto-select is effectively dead post-fix (initial load
+                // already completed before the user can scroll), but gate it
+                // symmetrically so a future trigger change can't resurrect the
+                // close-all-tabs residual via this path.
+                val isInitialColdStart = !currentSessionList.hasCompletedInitialLoad
                 // §Q4-strict-sync: capture pendingCreateIds for the merge + sweep.
                 val currentPendingCreateIds = currentSessionList.pendingCreateIds
                 val currentPendingCreatedAt = currentSessionList.pendingCreatedAt
@@ -506,7 +543,14 @@ internal fun launchLoadMoreSessions(
                     // branch is currently dead (loadMore is only triggered by
                     // user scroll, not initial load), but the guard keeps the
                     // two paths symmetric if the trigger ever changes.
-                    currentId == null && slices.composer.value.draftWorkdir == null && refreshedSessions.isNotEmpty() -> onSelectSession(refreshedSessions.first().id)
+                    //
+                    // §fix-close-all-residual: also gated on isInitialColdStart
+                    // — a non-initial load must not resurrect a session after
+                    // the user closed every tab.
+                    currentId == null &&
+                        slices.composer.value.draftWorkdir == null &&
+                        refreshedSessions.isNotEmpty() &&
+                        isInitialColdStart -> onSelectSession(refreshedSessions.first().id)
                     // A non-null currentId is never silently replaced by
                     // refreshedSessions.first(): tolerate the session even when
                     // it is temporarily absent from the refreshed list. #10.
