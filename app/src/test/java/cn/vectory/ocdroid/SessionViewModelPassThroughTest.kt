@@ -132,6 +132,26 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
     }
 
     @Test
+    fun `closeSession last tab clears the persisted currentSessionId`() = runTest {
+        // §fix-close-all-residual: the AppCore persistence collector uses
+        // filterNotNull(), so the chat.currentSessionId → null transition is
+        // NOT auto-persisted. closeSession must explicitly clear
+        // settingsManager.currentSessionId, otherwise applySavedSettings
+        // re-seeds chatFlow with the stale id on the next cold start and
+        // resurrects a session the user closed all tabs on.
+        every { settingsManager.openSessionIds } returns listOf("s1")
+        val core = createCore()
+        val vm = SessionViewModel(core)
+        core.writeChat { it.copy(currentSessionId = "s1") }
+        core.writeSessionList { it.copy(openSessionIds = listOf("s1")) }
+
+        vm.closeSession("s1")
+        advanceUntilIdle()
+
+        verify { settingsManager.currentSessionId = null }
+    }
+
+    @Test
     fun `closeSession current session saves current draft text first`() = runTest {
         every { settingsManager.openSessionIds } returns listOf("s1")
         val core = createCore()

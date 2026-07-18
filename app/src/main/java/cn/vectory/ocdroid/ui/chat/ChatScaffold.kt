@@ -92,6 +92,8 @@ import cn.vectory.ocdroid.ui.visibleMessages
 import cn.vectory.ocdroid.ui.settings.TofuTrustDialog
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 
 /**
@@ -734,6 +736,24 @@ fun ChatScaffold(
     // ChatEmptyState branch (with the new Sessions deep-link, §new2) handles
     // the surface.
     val openSessions = topBarState.openSessions
+    // §fix-close-all-to-home: when the user closes the last open tab
+    // (openSessions transitions to empty) AND there is no in-progress draft,
+    // navigate to the home hub (Sessions) instead of lingering on an empty
+    // Chat body. Paired with closeSession's persisted-currentSessionId clear
+    // (SessionViewModel) so neither the runtime nor the persisted id can
+    // resurrect a residual chat.
+    //
+    // drop(1) skips the initial emission so entering Chat with no tabs (rare
+    // — cold start lands on Sessions) does not spuriously fire. The draft
+    // guard keeps a user mid-composition (draftWorkdir set) on Chat even if
+    // they closed every existing tab — their draft is the active work.
+    LaunchedEffect(onBackToHome) {
+        snapshotFlow { openSessions.size to (composer.draftWorkdir != null) }
+            .distinctUntilChanged()
+            .drop(1)
+            .filter { (size, hasDraft) -> size == 0 && !hasDraft }
+            .collect { onBackToHome() }
+    }
     val pagerEngaged = openSessions.size >= 2 &&
         topBarState.parentSessionId == null &&
         chat.currentSessionId != null

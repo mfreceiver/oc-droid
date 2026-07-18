@@ -244,8 +244,16 @@ class SessionViewModel @Inject constructor(
         if (closingCurrentTree && nextId == null) {
             // §R18 Phase 2-F: chatFlow is the sole runtime source; the
             // chat.update below clears currentSessionId. The AppCore collector
-            // drops null, so no manual SettingsManager write.
+            // drops null, so no manual SettingsManager write here.
             store.mutateChat { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+            // §fix-close-all-residual: ALSO clear the PERSISTED
+            // currentSessionId. The AppCore persistence collector uses
+            // filterNotNull(), so the null transition above is NOT auto-
+            // persisted — without this explicit clear, the old id stays in
+            // SettingsManager and applySavedSettings re-seeds chatFlow with
+            // it on the next cold start, resurrecting a session the user
+            // closed all tabs on (the "OpenCode 项目自动关联…" residual).
+            settingsManager.currentSessionId = null
         }
         if (closingCurrentTree && nextId == null) {
             // §1B-FIX (I4): closing the last session must also clear
