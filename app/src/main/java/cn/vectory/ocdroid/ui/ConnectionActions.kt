@@ -88,16 +88,41 @@ internal fun applySavedSettings(
         settingsManager.openSessionIds = restoredOpenSessionIds
     }
     val persistedCurrentSessionId = settingsManager.currentSessionId
-    val restoredCurrentSessionId = persistedCurrentSessionId?.let { cid ->
+    val restoredCurrentSessionIdRaw = persistedCurrentSessionId?.let { cid ->
         if (cid in archivedIds) null else cid
     }
-    // §R18 Phase 2-F: SettingsManager is no longer written here — the AppCore
-    // init collector persists non-null chatFlow.currentSessionId changes, and
-    // an archived-id filter (restoredCurrentSessionId == null when persisted
-    // pointed at an archived session) is re-applied on every cold start via
-    // this same read path, so leaving the stale archived id in SettingsManager
-    // is self-healing across restarts. The chat.update below is the runtime
-    // source of truth.
+    // §fix-orphan-upgrade (cold-start invariant): a non-null currentSessionId
+    // is only valid when openSessionIds is non-empty. Pre-fix builds could
+    // leave `currentSessionId=<stale>` with `openSessionIds=[]` on disk after
+    // close-all (open cleared, persisted current not always wiped). Restoring
+    // both raw values produced orphan-current: chat body rendered messages
+    // while SessionTabStrip early-returned on empty open ids (no tab bar).
+    // Cold-start has no reliable session tree for descendancy checks, so the
+    // minimal safe guard is: empty open tabs → force current null. (Live
+    // sub-agent navigation is unaffected — that path never goes through
+    // applySavedSettings mid-session.)
+    val restoredCurrentSessionId = if (restoredOpenSessionIds.isEmpty()) {
+        null
+    } else {
+        restoredCurrentSessionIdRaw
+    }
+    // §fix-orphan-upgrade self-heal: one-shot write of cleaned current when
+    // we null out a stale non-null persisted id. Without this, the next cold
+    // start re-reads the stale id from SettingsManager even though the in-
+    // memory slice is correct. (Normally §R18 Phase 2-F leaves SettingsManager
+    // writes to the AppCore collector; that collector only sees DISTINCT
+    // transitions and may miss a "already-null-in-memory after we force null
+    // here while disk still has stale" case if chat never held the stale id.)
+    if (restoredCurrentSessionId == null && persistedCurrentSessionId != null) {
+        settingsManager.currentSessionId = null
+    }
+    // §R18 Phase 2-F: SettingsManager is no longer written here for the
+    // normal non-null path — the AppCore init collector persists chatFlow
+    // currentSessionId changes. The empty-open self-heal write above is the
+    // sole exception (upgrade-data orphan). The archived-id filter
+    // (restoredCurrentSessionIdRaw == null when persisted pointed at an
+    // archived session) is re-applied on every cold start via this same read
+    // path. The chat.update below is the runtime source of truth.
     // §R-17 batch2 step d → step e final: each domain written directly to its
     // own slice via thread-safe MutableStateFlow.update. The AppState mirror
     // is no longer written from here — slices are the sole authoritative

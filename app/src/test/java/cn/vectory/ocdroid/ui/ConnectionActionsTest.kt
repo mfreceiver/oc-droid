@@ -158,6 +158,49 @@ class ConnectionActionsTest {
         assertNull(slices.chat.value.currentSessionId)
     }
 
+    // ── §fix-orphan-upgrade: empty open tabs ⇒ null current on cold start ─
+
+    @Test
+    fun `applySavedSettings nulls stale current when openSessionIds empty (upgrade orphan)`() {
+        // Confirmed upgrade-data orphan: pre-fix disk had currentSessionId
+        // set and openSessionIds cleared (close-all wiped tabs, not always
+        // current). Restoring both raw produced chat-with-no-tab-bar.
+        val profile = HostProfile.defaultDirect(serverUrl = "http://x")
+        every { hostProfileStore.currentProfile() } returns profile
+        every { hostProfileStore.profiles() } returns listOf(profile)
+        every { settingsManager.sessionCache } returns listOf(
+            SessionCacheEntry(id = "stale_ses", directory = "/w", title = "Stale"),
+        )
+        every { settingsManager.openSessionIds } returns emptyList()
+        every { settingsManager.currentSessionId } returns "stale_ses"
+
+        applySavedSettings(repository, settingsManager, hostProfileStore, slices)
+
+        assertNull("empty open tabs → no orphan current", slices.chat.value.currentSessionId)
+        assertTrue(slices.sessionList.value.openSessionIds.isEmpty())
+        // Self-heal disk so the next cold start cannot re-read the stale id.
+        verify { settingsManager.currentSessionId = null }
+    }
+
+    @Test
+    fun `applySavedSettings restores current when it is among openSessionIds`() {
+        val profile = HostProfile.defaultDirect(serverUrl = "http://x")
+        every { hostProfileStore.currentProfile() } returns profile
+        every { hostProfileStore.profiles() } returns listOf(profile)
+        every { settingsManager.sessionCache } returns listOf(
+            SessionCacheEntry(id = "ses_x", directory = "/w", title = "Live"),
+        )
+        every { settingsManager.openSessionIds } returns listOf("ses_x")
+        every { settingsManager.currentSessionId } returns "ses_x"
+
+        applySavedSettings(repository, settingsManager, hostProfileStore, slices)
+
+        assertEquals("ses_x", slices.chat.value.currentSessionId)
+        assertEquals(listOf("ses_x"), slices.sessionList.value.openSessionIds)
+        // Legit restore must NOT wipe the persisted current.
+        verify(exactly = 0) { settingsManager.currentSessionId = null }
+    }
+
     @Test
     fun `applySavedSettings seeds settings slice from persisted prefs`() {
         val profile = HostProfile.defaultDirect(serverUrl = "http://x")

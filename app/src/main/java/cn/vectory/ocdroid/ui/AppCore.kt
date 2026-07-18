@@ -318,7 +318,16 @@ class AppCore @Inject constructor(
         // sees the seeded value as the starting point (not the pre-seed null).
         val persistedSid = settingsManager.currentSessionId
         if (persistedSid != null && store.chatFlow.value.currentSessionId == null) {
-            store.mutateChat { it.copy(currentSessionId = persistedSid) }
+            // §fix-orphan-upgrade: same cold-start invariant as
+            // applySavedSettings — never seed a currentSessionId when open
+            // tabs are empty (stale upgrade data). Also self-heal disk so the
+            // fallback path cannot reintroduce the orphan on the next launch.
+            val openAtSeed = store.sessionListFlow.value.openSessionIds
+            if (openAtSeed.isEmpty()) {
+                settingsManager.currentSessionId = null
+            } else {
+                store.mutateChat { it.copy(currentSessionId = persistedSid) }
+            }
         }
 
         // remove-message-persistence Task 6: the prior cold-start
