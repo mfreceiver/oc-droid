@@ -206,7 +206,7 @@ data class Part(
     val mime: String? = null,
     val filename: String? = null,
     val url: String? = null,
-    val source: String? = null
+    @Serializable(with = PartSourceSerializer::class) val source: String? = null
 ) {
     val isText: Boolean get() = type == "text"
     val isReasoning: Boolean get() = type == "reasoning"
@@ -316,6 +316,30 @@ private object PartFilesSerializer : KSerializer<List<Part.FileChange>?> {
                 }
                 else -> null
             }
+        }
+    }
+}
+
+/**
+ * Handles API returning `source` as either a plain string (`"attachment"`) or
+ * a structured object (`{"text":{"value":"@docs/..."}}`). Objects are coerced
+ * to `null` because no consumer reads this field as anything other than a
+ * simple label.
+ */
+private object PartSourceSerializer : KSerializer<String?> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("PartSource", PrimitiveKind.STRING)
+
+    override fun serialize(encoder: Encoder, value: String?) {
+        if (value != null) encoder.encodeString(value) else encoder.encodeNull()
+    }
+
+    override fun deserialize(decoder: Decoder): String? {
+        val element = decoder.decodeSerializableValue(JsonElement.serializer())
+        return when (element) {
+            is JsonNull -> null
+            is JsonPrimitive -> element.content
+            else -> null  // Object/array forms (e.g. {"text":{"value":"..."}}) → null
         }
     }
 }

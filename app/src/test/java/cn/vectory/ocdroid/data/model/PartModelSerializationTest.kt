@@ -80,6 +80,50 @@ class PartModelSerializationTest {
         assertEquals("c", decoded.callId)
     }
 
+    // ── Part source serializer (string vs object) ─────────────────────────
+
+    @Test
+    fun `Part source decodes string value`() {
+        val part = json.decodeFromString<Part>(
+            """{"id":"p","type":"file","source":"attachment"}"""
+        )
+        assertEquals("attachment", part.source)
+    }
+
+    @Test
+    fun `Part source decodes null JSON to null`() {
+        val part = json.decodeFromString<Part>(
+            """{"id":"p","type":"file","source":null}"""
+        )
+        assertNull(part.source)
+    }
+
+    @Test
+    fun `Part source decodes missing field to null`() {
+        val part = json.decodeFromString<Part>(
+            """{"id":"p","type":"file"}"""
+        )
+        assertNull(part.source)
+    }
+
+    @Test
+    fun `Part source decodes object form to null without crashing`() {
+        // Reproduces the slimapi v1 context-part shape:
+        // {"text":{"value":"@docs/v1-impl-spec.md"}}
+        val part = json.decodeFromString<Part>(
+            """{"id":"p","type":"context","source":{"text":{"value":"@docs/v1-impl-spec.md"}}}"""
+        )
+        assertNull(part.source)
+    }
+
+    @Test
+    fun `Part source round trip preserves string value`() {
+        val part = Part(id = "p", type = "file", source = "attachment")
+        val encoded = json.encodeToString(part)
+        val decoded = json.decodeFromString<Part>(encoded)
+        assertEquals("attachment", decoded.source)
+    }
+
     // ── Part state-derived accessors ──────────────────────────────────────
 
     @Test
