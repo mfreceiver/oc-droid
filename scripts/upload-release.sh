@@ -40,20 +40,70 @@ fi
 API="$GITEA_URL/api/v1/repos/$REPO/releases"
 AUTH="Authorization: token $GITEA_TOKEN"
 
-# --- 1. 按 tag 精确查找 release ---
 # §fix(release-target): Gitea 的 GET /releases 列表端点不支持 ?name= 过滤，
 #   旧行为会忽略该参数并取 d[0]，把 APK 挂到错误的 release（如把 0.5.1 挂到 0.5.0）。
 #   改用 /releases/tags/{tag} 端点精确按 tag 查；找不到则创建（tag 必须已 push）。
+#
+# 辅助：按 tag 查 release id（GET by-tag 端点可靠；找不到返回空）。
+release_id_by_tag() {
+  curl -sf -H "$AUTH" "$GITEA_URL/api/v1/repos/$REPO/releases/tags/$TAG" 2>/dev/null \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' 2>/dev/null || true
+}
+# 辅助：取 release 的【真实存储】created_at 年份。
+# §fix(gitea-epoch-created_at): POST 响应里的 created_at 恒为 epoch（Gitea 序列化
+#   bug，不可信）；必须用 GET by-tag 读 DB 真实值。
+release_created_year() {
+  curl -sf -H "$AUTH" "$GITEA_URL/api/v1/repos/$REPO/releases/tags/$TAG" 2>/dev/null \
+    | python3 -c 'import sys,json;print((json.load(sys.stdin).get("created_at") or "")[:4])' 2>/dev/null || true
+}
+# 辅助：POST 创建 release，输出新 id。
+create_release() {
+  curl -sf -X POST "$API" -H "$AUTH" -H "Content-Type: application/json" \
+    -d "{\"tag_name\":\"$TAG\",\"name\":\"$TAG\",\"draft\":false,\"prerelease\":false}" \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])'
+}
+
+# --- 1. 按 tag 精确查找 release ---
 echo "==> 查找 Gitea release by tag $TAG ..."
-RID=$(curl -sf -H "$AUTH" "$GITEA_URL/api/v1/repos/$REPO/releases/tags/$TAG" 2>/dev/null \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' 2>/dev/null || true)
+RID=$(release_id_by_tag)
 if [[ -z "$RID" ]]; then
   echo "==> 未找到 $TAG 对应的 release，创建中（tag 必须已 push）..."
-  RID=$(curl -sf -X POST "$API" -H "$AUTH" -H "Content-Type: application/json" \
-    -d "{\"tag_name\":\"$TAG\",\"name\":\"$TAG\",\"draft\":false,\"prerelease\":false}" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+  RID=$(create_release)
 fi
 echo "   release id: $RID"
+
+# §fix(gitea-epoch-created_at): Gitea 有个 bug —— tag 刚 push、还没被索引时建
+#   release，created_at 会被写成 1970-01-01（epoch），release 在页面上按
+#   created_at 倒序时沉到最底（v0.11.1 曾因此排到 v0.11.0 下方）。POST/PATCH 都
+#   无法改 created_at（字段被服务端忽略）。唯一可靠修法：删 release + 删远端
+#   tag + 重新 push（强制 Gitea 重新索引 tag 的 tagger date）+ 重建 release，
+#   新 release 的 created_at 会取 tagger date。best-effort：失败只告警不中断。
+YEAR=$(release_created_year)
+if [[ "$YEAR" == "1970" ]]; then
+  echo "⚠️  release created_at 卡在 epoch（Gitea 未及时索引 tag），执行自愈（删 release + 重新索引 tag + 重建）..."
+  if curl -sf -X DELETE "$API/$RID" -H "$AUTH" >/dev/null; then
+    TAG_SHA=$(git rev-parse "$TAG" 2>/dev/null || true)
+    if [[ -n "$TAG_SHA" ]] && git push origin --delete "$TAG" >/dev/null 2>&1; then
+      sleep 2
+      git push origin "$TAG" >/dev/null 2>&1 || true
+      # 轮询直到 Gitea 能解析该 tag 的 tagger date（索引完成）
+      for _ in $(seq 1 10); do
+        TD=$(curl -sf -H "$AUTH" "$GITEA_URL/api/v1/repos/$REPO/git/tags/$TAG_SHA" 2>/dev/null \
+          | python3 -c 'import sys,json;print(json.load(sys.stdin)["tagger"]["date"])' 2>/dev/null || true)
+        [[ -n "$TD" ]] && break
+        sleep 2
+      done
+      RID=$(create_release)
+      NEW_YEAR=$(release_created_year)
+      echo "   自愈完成：新 release id=$RID created_at 年份=$NEW_YEAR（tagger date=$TD）"
+    else
+      echo "   ⚠️ 删/重 push tag 失败，跳过自愈（手动处理：Gitea UI 重建 release）"
+      RID=$(release_id_by_tag || true)
+    fi
+  else
+    echo "   ⚠️ 删旧 release 失败，跳过自愈"
+  fi
+fi
 
 # --- 2. 上传 APK 附件 ---
 echo "==> 上传 APK $APK_FILE ..."
