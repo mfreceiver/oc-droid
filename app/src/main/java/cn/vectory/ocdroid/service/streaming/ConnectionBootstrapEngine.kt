@@ -110,12 +110,19 @@ class ConnectionBootstrapEngine internal constructor(
         val matchingIdentity = expected?.serverGroupFp == key.serverGroupFp &&
             expected.normalizedWorkdir == key.workdir && expected.endpointFp == key.url
         if (configuredKey != key || !matchingIdentity) {
+            // R8 slim-mode foundation / Cluster B: 透传 key.slim 到 repository.configure，
+            // 后者写入 hostConfig.slim 供 SlimapiVersionInterceptor（注入版本头）+
+            // SSEClient（A1，路由到 /slimapi/events）+ health 探针（C3 fix，路由到
+            // /slimapi/health）读取。configuredKey != key 的整体相等性判断保证切换
+            // slim 状态（legacy↔slim）必然触发重 configure（hostConfig.slim 是路由
+            // 开关，遗漏会让 SSE/REST/health 走错端点）。
             repository.configure(
                 key.url,
                 key.username,
                 key.password,
                 hostPort = hostPortFromUrl(key.url),
                 clientCert = clientCert,
+                slim = key.slim,
             )
             configuredKey = key
         }

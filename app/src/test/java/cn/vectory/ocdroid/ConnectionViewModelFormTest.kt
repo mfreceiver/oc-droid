@@ -1,7 +1,9 @@
 package cn.vectory.ocdroid
 
 import cn.vectory.ocdroid.data.model.HealthResponse
+import cn.vectory.ocdroid.data.repository.SlimapiHealthPayload
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
+import cn.vectory.ocdroid.data.repository.http.SlimapiContract
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -11,6 +13,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import okhttp3.tls.HeldCertificate
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -249,6 +252,209 @@ class ConnectionViewModelFormTest : MainViewModelTestBase() {
         assertEquals(false, result!!.first)
         assertTrue(result!!.second.contains("mTLS"))
         coVerify(exactly = 0) { repository.checkHealthFor(any(), any(), any(), any(), any()) }
+    }
+
+    // ── §Phase 3a (Lane-B3-Dialog): slim version-incompatibility UX loop ──────
+
+    /**
+     * §slim-reconcile-lane-repo (Phase 3a / Lane-B3-Dialog): the test-
+     * connection path MUST (a) forward [slim] to [OpenCodeRepository.checkHealthFor]
+     * so the slim branch lands the sidecar's `accepted_client_versions` in
+     * [ServerCompatProfile], and (b) read those bounds back AFTER the probe
+     * and feed [ConnectionState.slimapiVersionIncompatible] when incompatible.
+     *
+     * Closes the M2 UX loop: transport fail-close already worked (the probe
+     * throws on incompatible), but the blocking dialog never fired because
+     * the flag was never written from this path. The flag is what
+     * [HostProfilesManagerScreen] observes to render the incompatibility
+     * AlertDialog.
+     */
+    @Test
+    fun `testConnectionForm slim incompatible sets slimapiVersionIncompatible flag and fails`() = runTest {
+        // Simulate the sidecar responding with an incompatible range: the
+        // mocked checkHealthFor mirrors production by writing the bounds into
+        // the shared [ServerCompatProfile] (same instance the VM reads from
+        // post-probe).
+        val core = createCore()
+        val vm = ConnectionViewModel(core)
+        val scp = core.serverCompatProfile
+        // Stub the 6-arg slim call (relaxed=true would also match, but using
+        // an explicit stub with coAnswer lets us land the side-effect the way
+        // production does.
+        coEvery {
+            repository.checkHealthFor(any(), any(), any(), any(), any(), eq(true))
+        } answers {
+            scp.updateSlimapi(
+                SlimapiHealthPayload(
+                    sidecarOk = true,
+                    schemaDegraded = false,
+                    serverApiVersion = 5,
+                    acceptedClientVersions = 5 to 9,
+                )
+            )
+            Result.success(HealthResponse(healthy = true, version = "slimapi/api_version=5"))
+        }
+
+        var result: Pair<Boolean, String>? = null
+        vm.testConnectionForm(
+            baseUrl = "http://x", username = null, password = null,
+            profileId = null, passwordEdited = false, slim = true,
+        ) { ok, msg -> result = ok to msg }
+        advanceUntilIdle()
+
+        assertNotNull(result)
+        assertEquals(false, result!!.first)
+        assertTrue(
+            "message must mention incompatibility: ${result!!.second}",
+            result!!.second.contains("不兼容"),
+        )
+        // The SCP bounds landed via the mocked probe.
+        assertEquals(5, scp.slimapiAcceptedMin)
+        assertEquals(9, scp.slimapiAcceptedMax)
+        assertFalse(scp.isSlimapiClientAccepted())
+        // The flag is fed into ConnectionState so HostProfilesManagerScreen
+        // can render the blocking AlertDialog (the UX loop closure).
+        val incompat = core.connectionFlow.value.slimapiVersionIncompatible
+        assertNotNull("slimapiVersionIncompatible must be non-null to fire the dialog", incompat)
+        assertEquals(SlimapiContract.SLIMAPI_CLIENT_VERSION, incompat!!.first)
+        assertEquals(5, incompat.second)
+        assertEquals(9, incompat.third)
+        // checkHealthFor MUST have been called with slim=true (transport
+        // routing closure).
+        coVerify(atLeast = 1) { repository.checkHealthFor(any(), any(), any(), any(), any(), eq(true)) }
+    }
+
+    @Test
+    fun `testConnectionForm slim compatible clears slimapiVersionIncompatible and succeeds`() = runTest {
+        // When the sidecar accepts the client version, the SCP bounds land
+        // AND the VM clears any stale flag AND surfaces success.
+        val core = createCore()
+        val vm = ConnectionViewModel(core)
+        val scp = core.serverCompatProfile
+        // Seed a stale incompatible flag to prove the success path clears it
+        // (avoids residual flag confusing the UI after a re-test that succeeds).
+        core.writeConnection {
+            it.copy(slimapiVersionIncompatible = Triple(SlimapiContract.SLIMAPI_CLIENT_VERSION, 99, 99))
+        }
+        assertNotNull("pre-test stale flag is set", core.connectionFlow.value.slimapiVersionIncompatible)
+
+        coEvery {
+            repository.checkHealthFor(any(), any(), any(), any(), any(), eq(true))
+        } answers {
+            scp.updateSlimapi(
+                SlimapiHealthPayload(
+                    sidecarOk = true,
+                    schemaDegraded = false,
+                    serverApiVersion = 1,
+                    acceptedClientVersions = 1 to 5,
+                )
+            )
+            Result.success(HealthResponse(healthy = true, version = "slimapi/api_version=1"))
+        }
+
+        var result: Pair<Boolean, String>? = null
+        vm.testConnectionForm(
+            baseUrl = "http://x", username = null, password = null,
+            profileId = null, passwordEdited = false, slim = true,
+        ) { ok, msg -> result = ok to msg }
+        advanceUntilIdle()
+
+        assertEquals(true, result!!.first)
+        assertTrue(scp.isSlimapiClientAccepted())
+        // Stale flag MUST be cleared on the success/compatible path.
+        assertNull(
+            "stale slimapiVersionIncompatible cleared on compatible probe",
+            core.connectionFlow.value.slimapiVersionIncompatible,
+        )
+    }
+
+    @Test
+    fun `testConnectionForm slim false preserves existing behavior`() = runTest {
+        // §Phase 3a regression: slim=false MUST NOT consult the SCP incompat
+        // gate. Even if the SCP holds an incompatible range from a previous
+        // slim probe, the legacy test path bypasses the gate and reports
+        // success/failure purely from the legacy probe result.
+        val core = createCore()
+        val vm = ConnectionViewModel(core)
+        val scp = core.serverCompatProfile
+        // SCP holds incompatible bounds from a prior slim probe (simulated):
+        scp.updateSlimapi(
+            SlimapiHealthPayload(
+                sidecarOk = true,
+                schemaDegraded = false,
+                serverApiVersion = 5,
+                acceptedClientVersions = 5 to 9,
+            )
+        )
+        assertFalse(scp.isSlimapiClientAccepted())
+
+        coEvery {
+            repository.checkHealthFor(any(), any(), any(), any(), any(), eq(false))
+        } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
+
+        var result: Pair<Boolean, String>? = null
+        vm.testConnectionForm(
+            baseUrl = "http://x", username = null, password = null,
+            profileId = null, passwordEdited = false, slim = false,
+        ) { ok, msg -> result = ok to msg }
+        advanceUntilIdle()
+
+        // Legacy path: succeeds (the SCP gate is bypassed) AND clears the flag
+        // (per spec "否则" branch — legacy clears stale state too).
+        assertEquals(true, result!!.first)
+        assertNull(
+            "slim=false clears slimapiVersionIncompatible (legacy bypasses gate)",
+            core.connectionFlow.value.slimapiVersionIncompatible,
+        )
+    }
+
+    @Test
+    fun `testConnectionForm slim true with sidecar missing accepted_client_versions clears flag`() = runTest {
+        // §Phase 3a fail-closed nuance: slim=true but the sidecar response
+        // carries NO accepted_client_versions (server older / partial deploy).
+        // The bounds stay null → isSlimapiClientAccepted() returns false
+        // (fail-closed at the SCP layer), but the VM gate explicitly requires
+        // min != null && max != null before flagging — so it falls into the
+        // "否则" branch (clear flag) and surfaces the probe result. This is
+        // deliberate: the probe's own unhealthy/throw already fails-close at
+        // the transport layer; we do not double-flag with a Triple that has
+        // no meaningful min/max to show the user.
+        val core = createCore()
+        val vm = ConnectionViewModel(core)
+        val scp = core.serverCompatProfile
+        // Seed a stale flag to verify it gets cleared.
+        core.writeConnection {
+            it.copy(slimapiVersionIncompatible = Triple(SlimapiContract.SLIMAPI_CLIENT_VERSION, 5, 9))
+        }
+
+        coEvery {
+            repository.checkHealthFor(any(), any(), any(), any(), any(), eq(true))
+        } answers {
+            // Sidecar responded with NO accepted_client_versions field.
+            scp.updateSlimapi(
+                SlimapiHealthPayload(
+                    sidecarOk = true,
+                    schemaDegraded = false,
+                    serverApiVersion = 1,
+                    acceptedClientVersions = null,
+                )
+            )
+            Result.success(HealthResponse(healthy = true, version = "slimapi/api_version=1"))
+        }
+
+        var result: Pair<Boolean, String>? = null
+        vm.testConnectionForm(
+            baseUrl = "http://x", username = null, password = null,
+            profileId = null, passwordEdited = false, slim = true,
+        ) { ok, msg -> result = ok to msg }
+        advanceUntilIdle()
+
+        // No bounds → fall to "否则" branch → clear flag, surface probe result.
+        assertEquals(true, result!!.first)
+        assertNull(
+            "no accepted_client_versions → flag cleared (not triple-null'd)",
+            core.connectionFlow.value.slimapiVersionIncompatible,
+        )
     }
 
     // ── Traffic helpers ──────────────────────────────────────────────────────

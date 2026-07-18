@@ -193,6 +193,7 @@ object ControllerModule {
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
         statusAggregatorInput: cn.vectory.ocdroid.service.status.StatusAggregatorInput,
+        repository: OpenCodeRepository,
     ): SessionSyncCoordinator = SessionSyncCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -212,6 +213,12 @@ object ControllerModule {
         // sessionId→workdir via SessionTree.allSessionsById, builds the
         // composite key, and calls applySseStatus with clock()).
         statusAggregatorInput = statusAggregatorInput,
+        // Cluster A / Phase 2: runtime slim provider + repository for
+        // session.digest / slim questions / cold-start snapshot fold.
+        // isSlimMode is a thunk so host-profile switches that flip
+        // repository.isSlimMode are observed without reconstructing SSC.
+        isSlimMode = { repository.isSlimMode },
+        repository = repository,
     )
 
     @Provides

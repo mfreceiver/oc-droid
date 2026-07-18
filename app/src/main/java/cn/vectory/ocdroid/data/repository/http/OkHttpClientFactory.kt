@@ -34,17 +34,24 @@ import javax.inject.Singleton
  * The base chain (see [baseBuilder]) composes, in order:
  *  1. SSL + cache (per [hostPort]).
  *  2. R-07 log gate: `BASIC` in DEBUG builds, `NONE` in release.
- *  3. [DirectoryHeaderInterceptor] → [AuthInterceptor] → [CacheControlInterceptor].
+ *  3. [DirectoryHeaderInterceptor] → [SlimapiVersionInterceptor] → [AuthInterceptor] → [CacheControlInterceptor].
  *  4. [TrafficCountingInterceptor].
  *  5. `connectTimeout(10 s)`.
  *
  * R-04: `readTimeout` and the size guard are NOT in the base chain (REST and
  * SSE differ); they are layered by each variant.
+ *
+ * R8 slim-mode foundation / M1: [SlimapiVersionInterceptor] is on the shared
+ * base chain so REST / SSE / command clients uniformly inject
+ * `X-Slimapi-Version` when `HostConfig.slim == true` and the path is under
+ * `/slimapi/`. SSE coverage is critical (`/slimapi/events`); a separate
+ * SSE-only wiring would be a leak hazard.
  */
 @Singleton
 class OkHttpClientFactory @Inject constructor(
     private val sslConfigFactory: SslConfigFactory,
     private val directoryHeaderInterceptor: DirectoryHeaderInterceptor,
+    private val slimapiVersionInterceptor: SlimapiVersionInterceptor,
     private val authInterceptor: AuthInterceptor,
     private val cacheControlInterceptor: CacheControlInterceptor,
     private val trafficCountingInterceptor: TrafficCountingInterceptor,
@@ -113,6 +120,10 @@ class OkHttpClientFactory @Inject constructor(
                     else HttpLoggingInterceptor.Level.NONE
             })
             .addInterceptor(directoryHeaderInterceptor)
+            // R8 slim-mode foundation / M1: slimapi 版本头注入。在 directory 之后、
+            // auth 之前——版本头是路由门闩，逻辑上先于 auth/cache-control；同时
+            // directory interceptor 不会触碰 /slimapi/ 路径，无顺序耦合。
+            .addInterceptor(slimapiVersionInterceptor)
             .addInterceptor(authInterceptor)
             .addInterceptor(cacheControlInterceptor)
             .addInterceptor(trafficCountingInterceptor)

@@ -95,13 +95,28 @@ class OrchestratorViewModel @Inject constructor(
 
     // ── Permission / Question responses (orchestrator-domain) ───────────────
 
-    fun respondPermission(sessionId: String, permissionId: String, response: PermissionResponse) {
+    fun respondPermission(
+        sessionId: String,
+        permissionId: String,
+        response: PermissionResponse,
+        // §Phase3b slim-branch: when the permission arrived via slim SSE /
+        // /slimapi/permissions the sidecar re-injects the directory from
+        // this HMAC token; legacy respondPermission relies on a global
+        // currentDirectory header which has no correct value on the slim
+        // cross-directory aggregation surface. Null = legacy single-dir path.
+        routeToken: String? = null,
+    ) {
         // §R18 Phase 3 Wave 3 (drift #6 / P1-7): user-triggered ephemeral
         // permission response → viewModelScope. Closure captures the repo
         // call + a slice transform (never a VM `::ref`), so viewModelScope
         // cancels cleanly on navigation-away.
         viewModelScope.launch {
-            core.repository.respondPermission(sessionId, permissionId, response)
+            val result = if (routeToken != null) {
+                core.repository.respondSlimapiPermission(sessionId, permissionId, response, routeToken)
+            } else {
+                core.repository.respondPermission(sessionId, permissionId, response)
+            }
+            result
                 .onSuccess {
                     core.writeSessionList { it.copy(pendingPermissions = it.pendingPermissions.filter { p -> p.id != permissionId }) }
                 }
@@ -111,19 +126,34 @@ class OrchestratorViewModel @Inject constructor(
         }
     }
 
-    fun replyQuestion(requestId: String, answers: List<List<String>>, onError: () -> Unit = {}) {
+    fun replyQuestion(
+        requestId: String,
+        answers: List<List<String>>,
+        // §Phase3b slim-branch: see [respondPermission]'s routeToken doc.
+        // Slim path skips resolveQuestionDirectory — the sidecar derives
+        // the directory from the token, so the legacy directory resolution
+        // is both unnecessary and (on the aggregation surface) wrong.
+        routeToken: String? = null,
+        onError: () -> Unit = {},
+    ) {
         // §R18 Phase 3 Wave 3 (drift #6 / P1-7): same viewModelScope rationale
         // as respondPermission.
         viewModelScope.launch {
-            // §R18 Phase 2-E step 1: explicit directory now required by the
-            // API. Resolve from the question's parent session if possible
-            // (handles cross-workdir routing); fall back to the persisted
-            // workdir. Was the global currentDirectory before — currentWorkdir
-            // was always its source on the main path.
-            val directory = core.resolveQuestionDirectory(requestId)
-            // §Phase1a instrumentation (Issue 1): the directory actually sent on the reply.
-            DebugLog.d("Question", "replyQuestion req=$requestId dir=${directory ?: "null"}")
-            core.repository.replyQuestion(requestId, answers, directory)
+            val result = if (routeToken != null) {
+                DebugLog.d("Question", "replyQuestion slim req=$requestId token=$routeToken")
+                core.repository.replySlimapiQuestion(requestId, answers, routeToken)
+            } else {
+                // §R18 Phase 2-E step 1: explicit directory now required by the
+                // API. Resolve from the question's parent session if possible
+                // (handles cross-workdir routing); fall back to the persisted
+                // workdir. Was the global currentDirectory before — currentWorkdir
+                // was always its source on the main path.
+                val directory = core.resolveQuestionDirectory(requestId)
+                // §Phase1a instrumentation (Issue 1): the directory actually sent on the reply.
+                DebugLog.d("Question", "replyQuestion req=$requestId dir=${directory ?: "null"}")
+                core.repository.replyQuestion(requestId, answers, directory)
+            }
+            result
                 .onSuccess {
                     DebugLog.d("Question", "replyQuestion OK req=$requestId")
                     core.writeSessionList { currentState ->
@@ -131,21 +161,32 @@ class OrchestratorViewModel @Inject constructor(
                     }
                 }
                 .onFailure { error ->
-                    DebugLog.w("Question", "replyQuestion FAIL req=$requestId dir=${directory ?: "null"} err=${error.message}")
+                    DebugLog.w("Question", "replyQuestion FAIL req=$requestId err=${error.message}")
                     android.util.Log.w(TAG, "Failed to reply question: ${error.message}")
                     onError()
                 }
         }
     }
 
-    fun rejectQuestion(requestId: String, onError: () -> Unit = {}) {
+    fun rejectQuestion(
+        requestId: String,
+        // §Phase3b slim-branch: see [respondPermission]'s routeToken doc.
+        routeToken: String? = null,
+        onError: () -> Unit = {},
+    ) {
         // §R18 Phase 3 Wave 3 (drift #6 / P1-7): same viewModelScope rationale
         // as respondPermission.
         viewModelScope.launch {
-            val directory = core.resolveQuestionDirectory(requestId)
-            // §Phase1a instrumentation (Issue 1): the directory actually sent on the reject.
-            DebugLog.d("Question", "rejectQuestion req=$requestId dir=${directory ?: "null"}")
-            core.repository.rejectQuestion(requestId, directory)
+            val result = if (routeToken != null) {
+                DebugLog.d("Question", "rejectQuestion slim req=$requestId token=$routeToken")
+                core.repository.rejectSlimapiQuestion(requestId, routeToken)
+            } else {
+                val directory = core.resolveQuestionDirectory(requestId)
+                // §Phase1a instrumentation (Issue 1): the directory actually sent on the reject.
+                DebugLog.d("Question", "rejectQuestion req=$requestId dir=${directory ?: "null"}")
+                core.repository.rejectQuestion(requestId, directory)
+            }
+            result
                 .onSuccess {
                     DebugLog.d("Question", "rejectQuestion OK req=$requestId")
                     core.writeSessionList { currentState ->
@@ -153,7 +194,7 @@ class OrchestratorViewModel @Inject constructor(
                     }
                 }
                 .onFailure { error ->
-                    DebugLog.w("Question", "rejectQuestion FAIL req=$requestId dir=${directory ?: "null"} err=${error.message}")
+                    DebugLog.w("Question", "rejectQuestion FAIL req=$requestId err=${error.message}")
                     android.util.Log.w(TAG, "Failed to reject question: ${error.message}")
                     // §issue-1 Fix C / Phase 2 gate 🔴1: reject failure surfaces via the
                     // card's onError callback → in-card errorText, symmetric with

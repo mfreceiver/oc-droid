@@ -40,6 +40,15 @@ object HttpHeaders {
      * user/workdir-scoped data, AND the deployment never authenticates via
      * Basic Auth (the [CacheControlInterceptor] forces `no-store` whenever
      * credentials are configured).
+     *
+     * R8 slim-mode foundation: `/slimapi/health` is INTENTIONALLY NOT here.
+     * Slimapi health carries version-contract fields (api_version /
+     * accepted_client_versions / schema_degraded) that must be fresh on
+     * every probe — caching would mask a sidecar that just degraded. The
+     * version header (`X-Slimapi-Version`) is injected unconditionally for
+     * `/slimapi/` paths (including health) by [SlimapiVersionInterceptor];
+     * this list governs OkHttp byte-cache eligibility only, not header
+     * gating.
      */
     val CACHEABLE_PATHS: Set<String> = setOf(
         "/global/health",

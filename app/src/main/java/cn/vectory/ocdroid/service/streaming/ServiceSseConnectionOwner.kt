@@ -120,6 +120,38 @@ class ServiceSseConnectionOwner(
         kotlin.random.Random.nextFloat() * 0.4f - 0.2f
     },
     private val onTerminalExhaustion: () -> Unit,
+    /**
+     * Cluster A (slim SSE): cold-start / resync path. Two SEPARATE triggers
+     * (B2 fix — rev-grok 🔴2):
+     *
+     *  1. **First-frame cold-start (P2.5)**: invoked AT MOST ONCE per
+     *     transport generation on the FIRST successful current-identity
+     *     frame. Gated by [resyncHandledForGen] (once-per-gen latch).
+     *
+     *  2. **Explicit `type=="resync"` frame (v1 §3/§4)**: invoked EVERY
+     *     TIME a `resync` frame arrives mid-stream — NOT gated by the
+     *     once-per-gen latch. The sidecar can emit `resync` on upstream
+     *     reconnect / `resync_all` WITHOUT dropping the client SSE
+     *     (hub.py ~:367-370 puts a frame onto the existing subscriber);
+     *     each such frame MUST trigger a fresh cold-start pull (resync =
+     *     reuse cold-start). The old Phase-2 wiring fed both triggers
+     *     through ONE once-per-gen gate, which silently dropped mid-stream
+     *     resyncs after the first-frame cold-start had armed the latch.
+     *
+     * The upper layer wires this to
+     * [cn.vectory.ocdroid.data.repository.OpenCodeRepository.coldStartSlimSync]
+     * — which is NOT reentrant-safe (network I/O + bookmark bump on shared
+     * [slimSseState]). Concurrent calls are therefore SERIALIZED via
+     * [resyncMutex] (see [scheduleResync]); multiple rapid resyncs run
+     * back-to-back, never in parallel. Legacy mode (slim=false) no-ops
+     * inside the callback; default `{}` keeps existing constructions
+     * (including the locked test setup) byte-identical.
+     *
+     * Failures inside the callback are logged + swallowed — a cold-start
+     * fetch failure must NOT tear down the SSE transport. The next digest /
+     * q-p frame will re-drive incremental state.
+     */
+    private val onResync: suspend () -> Unit = {},
 ) {
     /**
      * The live SSE collector job, or null when no collector is running.
@@ -201,6 +233,29 @@ class ServiceSseConnectionOwner(
      * generation + re-arms the budget).
      */
     private var exhaustedReportedForGen: Long = -1L
+
+    /**
+     * Cluster A (slim SSE): the transport generation for which the
+     * FIRST-FRAME cold-start ([onResync] via P2.5) has already been
+     * invoked. B2 fix (rev-grok 🔴2): this latch now gates ONLY the
+     * first-frame path — it is no longer shared with the explicit
+     * `resync` path (which fires every time, see [scheduleResync]).
+     * A new [connect] (new generation) re-arms the flag.
+     */
+    private var resyncHandledForGen: Long = -1L
+
+    /**
+     * Cluster A (slim SSE, B2 fix): serializes [onResync] invocations
+     * across generations + frames. [coldStartSlimSync] is NOT reentrant-
+     * safe (shared bookmark state + network I/O), so concurrent triggers
+     * — e.g. a stale collector's in-flight cold-start racing a newer
+     * generation's first-frame cold-start, OR multiple mid-stream resync
+     * frames queued while a cold-start is in flight — MUST be serialized
+     * rather than dropped (rev-grok: "可加 in-flight 合并/串行，但不得
+     * 静默丢"). [scheduleResync] launches each trigger on [scope] and
+     * funnels them through this Mutex.
+     */
+    private val resyncMutex = Mutex()
 
     /**
      * D2 gate #7: guards [connect] (serializes the readiness deferred +
@@ -293,6 +348,8 @@ class ServiceSseConnectionOwner(
         val generation = ++transportGenerationCounter
         gapEmittedForGen = -1L
         exhaustedReportedForGen = -1L
+        // Cluster A: re-arm the per-generation resync flag.
+        resyncHandledForGen = -1L
         // §A3.5 — launch one new job + the M3 transport-readiness timeout.
         sseJob = scope.launchSseCollector(identity, generation, readiness)
         transportTimeoutJob = scope.launchTransportTimeout(generation, readiness)
@@ -510,6 +567,35 @@ class ServiceSseConnectionOwner(
         // publication + activation readiness + gap reset; it does NOT
         // publish terminal Connected (only committed ownership / CC may).
         sseEventStream.emit(Result.success(IdentifiedSseEvent(identity, event)))
+        // Cluster A (slim SSE) P2.4 + P2.5 + B2 fix (rev-grok 🔴2): two
+        // SEPARATE triggers, NOT one shared once-per-gen gate.
+        //  - First successful frame of the generation → cold-start ONCE
+        //    per generation (gated by resyncHandledForGen — gives the UI
+        //    an initial snapshot before any digest lands).
+        //  - Explicit `type=="resync"` frame → cold-start EVERY TIME,
+        //    independent of the once-per-gen latch. The sidecar emits
+        //    `resync` mid-stream on upstream reconnect / `resync_all`
+        //    WITHOUT dropping the client SSE (v1 §3/§4: resync = reuse
+        //    cold-start); the old Phase-2 code fed both triggers through
+        //    ONE gate, so the first-frame cold-start armed the latch and
+        //    every subsequent resync was silently dropped (incremental /
+        //    snapshot recovery path broken). Branches are mutually
+        //    exclusive so a first-frame that IS `type=="resync"` fires
+        //    exactly once (via the first-frame gate).
+        // The callback is launched off-frame via [scheduleResync] so SSE
+        // delivery is NOT blocked on the cold-start fetch, and concurrent
+        // triggers are serialized via [resyncMutex].
+        val type = event.payload.type
+        val isFirstFrameOfGen = !readiness.isCompleted
+        val isResync = type == "resync"
+        if (isFirstFrameOfGen && resyncHandledForGen != generation) {
+            resyncHandledForGen = generation
+            scheduleResync("first-frame type=$type", generation)
+        } else if (isResync) {
+            // Mid-stream (or skipped-first-frame) explicit resync: NOT
+            // gated. rev-grok 🔴2 — this is the core regression fix.
+            scheduleResync("explicit-resync", generation)
+        }
         // D4-B M3: transport readiness completes on the first frame — NO
         // status refresh, NO baseline gating. Cancel the transport timeout
         // (the transport proved itself). D5 (#1): post-Ready recovered
@@ -574,6 +660,80 @@ class ServiceSseConnectionOwner(
         if (gapEmittedForGen == generation) return
         gapEmittedForGen = generation
         sharedEffectBus.emitEffect(ControllerEffect.CancelSse)
+    }
+
+    /**
+     * Cluster A (slim SSE, B2 fix — rev-grok 🔴2): launches ONE [onResync]
+     * cold-start invocation on [scope], SERIALIZED via [resyncMutex].
+     *
+     * Off-frame execution: SSE delivery does NOT block on the cold-start
+     * fetch (the old inline `onResync()` call inside the collector's frame
+     * handler stalled SSE while the snapshot was being pulled). The
+     * callback now runs in a child of [scope] (Service-lifetime), so the
+     * collector returns to consuming frames immediately.
+     *
+     * Serialization: [coldStartSlimSync] is not reentrant-safe (shared
+     * bookmark state + network I/O), so concurrent triggers — a stale
+     * collector's in-flight cold-start racing a newer generation's first-
+     * frame cold-start, OR multiple mid-stream `resync` frames queued
+     * behind an in-flight one — are FUNNELED through [resyncMutex]. The
+     * second waits for the first to complete, then runs. This satisfies
+     * rev-grok's "可加 in-flight 合并/串行，但不得静默丢": no trigger is
+     * ever dropped (every resync fires its own cold-start), and no two
+     * cold-starts ever overlap.
+     *
+     * Stale-generation guard (🟠2 fix — rev-grok 9.5): the Mutex prevents
+     * CONCURRENT execution but NOT stale execution. On a fast reconnect /
+     * host switch, a queued resync cold-start (gen N) can win the Mutex
+     * AFTER [setupConnectLocked] has bumped [transportGenerationCounter]
+     * to N+1 + established a new live slice. Running gen N's cold-start
+     * in that window would fold gen N's snapshot into gen N+1's live
+     * slice (stale apply). The [isCurrentTransport] guard INSIDE the
+     * Mutex (after acquiring — TOCTOU-safe) drops the stale trigger
+     * silently: the new generation has already armed its own first-frame
+     * cold-start, so dropping gen N's queued trigger loses nothing.
+     *
+     * Failures inside the callback are logged + swallowed (a cold-start
+     * fetch failure must NOT tear down the SSE transport — the next
+     * digest / q-p frame re-drives incremental state). Cancellation is
+     * propagated so a scope shutdown cleans up in-flight cold-starts.
+     */
+    private fun scheduleResync(reason: String, generation: Long) {
+        scope.launch {
+            resyncMutex.withLock {
+                // 🟠2 fix (rev-grok 9.5): re-check generation AFTER acquiring
+                // the Mutex, not before scheduling. Without this guard, a
+                // queued gen-N trigger that wins the Mutex after a fast
+                // reconnect to gen-N+1 would apply gen N's stale snapshot
+                // to the live slice. The guard must live INSIDE the locked
+                // region to be TOCTOU-safe (transportGenerationCounter is
+                // bumped under connectMutex in setupConnectLocked, so a
+                // pre-lock check could race with the bump).
+                if (!isCurrentTransport(generation)) {
+                    DebugLog.i(
+                        TAG,
+                        "skip stale cold-start/resync $reason " +
+                            "gen=$generation (current=$transportGenerationCounter) — " +
+                            "superseded by newer generation",
+                    )
+                    return@withLock
+                }
+                DebugLog.i(
+                    TAG,
+                    "slim cold-start/resync fire $reason gen=$generation",
+                )
+                try {
+                    onResync()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    DebugLog.w(
+                        TAG,
+                        "slim cold-start/resync refetch failed: ${e.message}",
+                    )
+                }
+            }
+        }
     }
 
     /**

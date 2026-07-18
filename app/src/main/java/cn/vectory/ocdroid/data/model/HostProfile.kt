@@ -50,17 +50,45 @@ data class HostProfile(
     @SerialName("serverGroupFp")
     val serverGroupFp: String = "",
     /**
-     * §2.2: 开启后所有客户端 TLS 握手出示 [clientCertId] 对应的 PKCS12。
+     * §2.2 / R8 slim-mode foundation: 是否启用 mTLS（stunnel）。
      *
      * §tofu R2: 与原 `allowInsecureConnections`（已删——TOFU 替代 trust-all 降级）
      * 不再互斥——self-signed / unknown-issuer 证书现在由首次连接时的 TOFU 信任
      * 对话框处理，无需 profile 字段。本字段仅控制是否出示客户端证书（mTLS）。
+     *
+     * R8 model: 这是「4 服务器配置 = 2 正交布尔」中的 `mtls` 维度——与 [slim]
+     * 正交组合形成四连接形态：直连opencode(false,false) / stunnel→opencode(true,false)
+     * / 直连slim(false,true) / stunnel→slim(true,true)。
      *
      * 向后兼容：旧 JSON 无此字段 → false（默认值）。`ignoreUnknownKeys=true` 让
      * 旧 JSON 里的 `allowInsecureConnections` 字段在反序列化时静默丢弃。
      */
     @SerialName("mtlsEnabled")
     val mtlsEnabled: Boolean = false,
+    /**
+     * R8 slim-mode foundation: 是否启用省流模式（指向 oc-slimapi sidecar）。
+     *
+     * 这是「4 服务器配置 = 2 正交布尔」中的 `slim` 维度——与 [mtlsEnabled] 正交。
+     * base URL 仍是用户配置的 host:port（直连 sidecar 或经 stunnel）；本字段描述
+     * 该 server 的语义：true=sidecar 入口（所有 `/slimapi/` 下路径有效，须带
+     * `X-Slimapi-Version` 版本头，health 探针走 `/slimapi/health`）；false=legacy
+     * opencode 直连入口（行为完全不变）。
+     *
+     * **写域边界（R8 地基）**：本字段是数据模型 + 网络层 + repository 层的可切换
+     * 属性。`HostConfig.slim` 透传给 `SlimapiVersionInterceptor`（注入版本头）、
+     * `OpenCodeRepository.checkHealth/checkHealthFor/captureServerCert`（路由到
+     * `/slimapi/health`）、`ServerCompatProfile`（M2 自检）。UI 编辑页（host profile
+     * editor）由 designer 后续接入；本字段默认 false 保持 legacy 行为不变。
+     *
+     * 向后兼容：旧 JSON 无此字段 → false（kotlinx.serialization 默认值 +
+     * `HostProfileStore` 的 `ignoreUnknownKeys=true`，缺字段时自动回填默认）。
+     *
+     * 注：避免在 KDoc 中写 `/slimapi/` + 紧跟 `**`（Kotlin lexer 把 `/**` 解析
+     * 为嵌套 KDoc 起始 → 后续 `*/` 提前闭合外层 → "Unclosed comment"）。下文用
+     * `/slimapi/<wildcard>` 或 `/slimapi/` 单独写。
+     */
+    @SerialName("slim")
+    val slim: Boolean = false,
     /**
      * §2.2: 客户端 PKCS12（+密码+可选 CA）在 EncryptedSharedPreferences 的
      * key 后缀（`client_cert_p12_<id>` / `client_cert_pw_<id>` /

@@ -135,6 +135,14 @@ class SessionStreamingService : Service() {
     @Inject lateinit var bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
     @Inject lateinit var sharedStateStore: SharedStateStore
     @Inject lateinit var sharedEffectBus: SharedEffectBus
+    /**
+     * Cluster A / Phase 2: folds [OpenCodeRepository.coldStartSlimSync] /
+     * resync snapshots into UI slices. Service-owned SSE path cannot reach
+     * SSC via the effect bus alone (no typed SlimColdStart effect yet), so
+     * the Service injects SSC and calls [SessionSyncCoordinator.applySlimColdStartSnapshot]
+     * from the onResync callback.
+     */
+    @Inject lateinit var sessionSyncCoordinator: cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
 
     // ── D2 (gate #4 / #7): process-level poller + SSE recovery policy. ──
 
@@ -322,6 +330,45 @@ class SessionStreamingService : Service() {
             sharedEffectBus = sharedEffectBus,
             recoveryPolicy = sseRecoveryPolicy,
             onTerminalExhaustion = { coordinator.onDisconnect() },
+            // Cluster A / Phase 2 (P2.4 + P2.5): resync AND first-transport-ready
+            // share the same cold-start path (v1 contract §4: resync = reuse
+            // cold-start). directories from directorySessions keys + current
+            // workdir; openSessionId from the open chat slice so the message
+            // tail is filled without waiting for the first digest.
+            onResync = {
+                if (!repository.isSlimMode) return@ServiceSseConnectionOwner
+                val openSessionId = sharedStateStore.slices.chat.value.currentSessionId
+                val directories = buildList {
+                    sharedStateStore.slices.sessionList.value.directorySessions.keys
+                        .forEach { add(it) }
+                    settingsManager.currentWorkdir?.let { add(it) }
+                }.distinct().ifEmpty { null }
+                DebugLog.i(
+                    "SessionStreamingService",
+                    "slim coldStartSlimSync openSessionId=$openSessionId directories=$directories",
+                )
+                repository.coldStartSlimSync(
+                    openSessionId = openSessionId,
+                    directories = directories,
+                ).onSuccess { snapshot ->
+                    // Fold into UI slices via the shared effect bus is NOT
+                    // available as a typed effect yet (Phase 3); apply through
+                    // the injected SessionSyncCoordinator when present. The
+                    // Service holds no SSC reference (architecture: Service →
+                    // stream → bridge → AppCore → SSC). Snapshot is folded by
+                    // emitting a synthetic path: store the result on the
+                    // repository is already done (bookmark bump inside
+                    // coldStartSlimSync); session/q/p/messages fold happens
+                    // via SharedStateStore + a best-effort direct apply when
+                    // sessionSyncCoordinator is injected.
+                    sessionSyncCoordinator.applySlimColdStartSnapshot(snapshot)
+                }.onFailure { error ->
+                    DebugLog.w(
+                        "SessionStreamingService",
+                        "slim coldStartSlimSync failed: ${error.message}",
+                    )
+                }
+            },
         )
         controller = SessionStreamingController(
             coordinator = coordinator,

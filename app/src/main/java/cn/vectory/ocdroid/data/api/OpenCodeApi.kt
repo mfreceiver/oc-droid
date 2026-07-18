@@ -260,6 +260,145 @@ interface OpenCodeApi {
         @Query("limit") limit: Int = 50,
         @Query("directory") directory: String? = null
     ): List<String>
+
+    // ── Cluster A: oc-slimapi sidecar endpoints (v1 contract §2) ────────────
+    //
+    // All paths live under `/slimapi/`. The `X-Slimapi-Version` header is
+    // injected by [cn.vectory.ocdroid.data.repository.http.SlimapiVersionInterceptor]
+    // on the shared OkHttp chain (the same chain [api] uses), so each method
+    // does NOT set it manually. `X-Opencode-Skip-Dir: 1` is set on every
+    // slimapi method to make explicit these are NOT scoped by the
+    // directory-header interceptor (slimapi scopes via ?directory where
+    // relevant, never via X-Opencode-Directory).
+
+    /**
+     * Cluster A: cold-start session list (v1 contract §2). Skeleton rows —
+     * each carries its own `directory` field so the client can filter
+     * client-side. Defaults to excluding archived.
+     *
+     * `?directory` (repeated 0-32) optionally filters server-side; pass a
+     * [List] of workdirs and Retrofit expands each entry to a separate
+     * `?directory=...` query (contract: repeated params, NOT comma-joined).
+     * null = all directories the sidecar is aggregating for this client.
+     * `?roots` restricts to top-level sessions; `?limit` / `?search` mirror
+     * legacy semantics.
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/sessions")
+    suspend fun getSlimapiSessions(
+        @Query("directory") directories: List<String>? = null,
+        @Query("roots") roots: Boolean? = null,
+        @Query("limit") limit: Int? = null,
+        @Query("search") search: String? = null
+    ): List<Session>
+
+    /**
+     * Cluster A: anchor-paginated message fetch (v1 contract §5, A2=A).
+     * Returns skeletons whose `time.updated >= {ts}`. The boundary message
+     * IS included so the caller can dedup by messageID. `?limit` + `?before`
+     * cursor paginate older pages.
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/messages/{sid}/since/{ts}")
+    suspend fun getSlimapiMessagesSince(
+        @Path("sid") sessionId: String,
+        @Path("ts") sinceTimestamp: Long,
+        @Query("limit") limit: Int? = null,
+        @Query("before") before: String? = null
+    ): retrofit2.Response<List<MessageWithParts>>
+
+    /**
+     * Cluster A: cursor-paginated skeleton messages (v1 contract §2). Used
+     * for the initial tail fetch when no anchor ts is known yet (mirrors
+     * the legacy `session/{id}/message` pattern).
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/messages/{sid}")
+    suspend fun getSlimapiMessages(
+        @Path("sid") sessionId: String,
+        @Query("limit") limit: Int? = null,
+        @Query("before") before: String? = null
+    ): retrofit2.Response<List<MessageWithParts>>
+
+    /**
+     * Cluster A: single-message full expansion (v1 contract §2). Loads one
+     * message by id with `mode=full` semantics (server-side expand of the
+     * skeleton).
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/messages/{sid}/full/{mid}")
+    suspend fun getSlimapiMessageFull(
+        @Path("sid") sessionId: String,
+        @Path("mid") messageId: String
+    ): MessageWithParts
+
+    /**
+     * Cluster A: cross-directory pending-questions aggregate (v1 contract §2).
+     * Each entry carries its originating `directory` + `routeToken` for the
+     * reply/reject response.
+     *
+     * `?directory` (repeated 1-32) optionally filters server-side; null =
+     * all directories the sidecar is aggregating for this client.
+     *
+     * **Envelope**: the sidecar wraps the list as
+     * `{"items": [...], "errors": [...]}` (oc-slimapi `_aggregate`), so the
+     * Retrofit return type is [SlimapiQuestionAggregation], not a bare List.
+     * The repository flattens `.items` before handing up.
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/questions")
+    suspend fun getSlimapiQuestions(
+        @Query("directory") directories: List<String>? = null
+    ): SlimapiQuestionAggregation
+
+    /**
+     * Cluster A: cross-directory pending-permissions aggregate (v1 contract §2).
+     * Same shape / behaviour as [getSlimapiQuestions].
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/permissions")
+    suspend fun getSlimapiPermissions(
+        @Query("directory") directories: List<String>? = null
+    ): SlimapiPermissionAggregation
+
+    /**
+     * Cluster A: question reply (v1 contract §2 / B2). Body carries the
+     * chosen answers PLUS the routeToken (the sidecar re-injects the
+     * originating directory from the token, then forwards to opencode).
+     *
+     * **Contract assumption**: routeToken transport is BODY (not header) —
+     * the v1 contract specifies the sidecar validates the token but does not
+     * pin its wire location. Body transport was chosen as it co-locates with
+     * the answer payload; flagged as a contract question in the task output.
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @POST("slimapi/questions/{qid}/reply")
+    suspend fun replySlimapiQuestion(
+        @Path("qid") questionId: String,
+        @Body body: SlimapiQuestionReplyRequest
+    ): Response<Unit>
+
+    /** Cluster A: question reject — see [replySlimapiQuestion]. */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @POST("slimapi/questions/{qid}/reject")
+    suspend fun rejectSlimapiQuestion(
+        @Path("qid") questionId: String,
+        @Body body: SlimapiQuestionRejectRequest
+    ): Response<Unit>
+
+    /**
+     * Cluster A: permission response (v1 contract §2). Body carries the
+     * `response: once|always|reject` PLUS routeToken; the sessionID is in
+     * the URL path (the sidecar uses the path + token to route to the
+     * owning opencode instance).
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @POST("slimapi/sessions/{sid}/permissions/{pid}")
+    suspend fun respondSlimapiPermission(
+        @Path("sid") sessionId: String,
+        @Path("pid") permissionId: String,
+        @Body body: SlimapiPermissionResponseRequest
+    ): Response<Unit>
 }
 
 @kotlinx.serialization.Serializable
@@ -419,4 +558,32 @@ data class CommandRequest(
     // "Expected string, got {}". The empty default is valid (no arguments).
     val arguments: String = "",
     val agent: String? = null
+)
+
+// ── Cluster A: oc-slimapi request bodies (v1 contract §2) ────────────────
+//
+// Slimapi-side reply/response bodies. Each carries the legacy fields PLUS
+// a `routeToken` so the sidecar can validate the request and re-inject the
+// originating directory before forwarding to opencode.
+//
+// **Contract assumption**: routeToken is sent in the BODY (not as a header).
+// The v1 contract specifies the sidecar validates the token but does not
+// pin its wire location; this client chose body transport to co-locate with
+// the answer payload. Flagged as a contract question in the task output.
+
+@kotlinx.serialization.Serializable
+data class SlimapiQuestionReplyRequest(
+    val answers: List<List<String>>,
+    @kotlinx.serialization.SerialName("routeToken") val routeToken: String? = null,
+)
+
+@kotlinx.serialization.Serializable
+data class SlimapiQuestionRejectRequest(
+    @kotlinx.serialization.SerialName("routeToken") val routeToken: String? = null,
+)
+
+@kotlinx.serialization.Serializable
+data class SlimapiPermissionResponseRequest(
+    val response: String,
+    @kotlinx.serialization.SerialName("routeToken") val routeToken: String? = null,
 )

@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.data.api
 
 import cn.vectory.ocdroid.data.model.SSEEvent
+import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.data.repository.http.HttpHeaders
 import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.channels.awaitClose
@@ -20,6 +21,8 @@ import java.util.Base64
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * Raised after the SSE reconnection budget ([SSEClient.MAX_RETRY_ATTEMPTS]) is
@@ -41,6 +44,16 @@ class SSEClient(
         // §15.3: stop reconnecting after this many attempts and surface the
         // failure via [SSEConnectionExhausted] so the UI can warn the user.
         private const val MAX_RETRY_ATTEMPTS = 10L
+
+        // Cluster A (slim SSE): the oc-slimapi sidecar's instance-level SSE
+        // endpoint (v1 contract §2/§3). Subscribed to upstream /global/event,
+        // emits curated frames (session.digest / q-p.* / server.* / resync)
+        // with NO per-directory param — every event carries its own directory
+        // field. See [SSEClient.connect] slimMode.
+        internal const val SLIM_EVENTS_PATH = "/slimapi/events"
+
+        // Cluster A: legacy opencode global event stream path (unchanged).
+        internal const val LEGACY_EVENTS_PATH = "/global/event"
 
         // §Phase1A heartbeat watchdog: server (1.17.11) emits `server.heartbeat`
         // as a DATA event every ~10s. OkHttp's onEvent fires for it, so a
@@ -68,8 +81,27 @@ class SSEClient(
         // feed is plain OkHttp (no Retrofit), so we set the header directly
         // here. Null leaves the request unscoped (the interceptor's workdir
         // fallback still applies in step 1; step 2 makes null a true no-op).
-        directory: String? = null
-    ): Flow<Result<SSEEvent>> = connectOnce(baseUrl, username, password, directory)
+        directory: String? = null,
+        /**
+         * Cluster A (slim SSE + data layer): when true, connect to the
+         * oc-slimapi sidecar's instance-level `/slimapi/events` endpoint
+         * (v1 contract §3) instead of the legacy `/global/event`.
+         *
+         * - URL: `{baseUrl}/slimapi/events` (no `?directory=`).
+         * - Headers: NO `X-Opencode-Directory` (slimapi SSE is instance-level;
+         *   every event carries its own `directory` field). The directory
+         *   parameter, if non-null, is IGNORED in slim mode.
+         * - Version header `X-Slimapi-Version` is injected by
+         *   [cn.vectory.ocdroid.data.repository.http.SlimapiVersionInterceptor]
+         *   on the shared OkHttp chain (the SSE client uses that chain); no
+         *   explicit injection here.
+         * - Retry / heartbeat-watchdog / sanitization identical to legacy.
+         *
+         * Default false — legacy callers (and `connectSSE(directory=null)`
+         * tests) observe byte-for-byte identical behaviour.
+         */
+        slimMode: Boolean = false
+    ): Flow<Result<SSEEvent>> = connectOnce(baseUrl, username, password, directory, slimMode)
         .retryWhen { _, attempt ->
             if (attempt >= MAX_RETRY_ATTEMPTS) {
                 // §15.3: budget exhausted — give up and let the custom
@@ -95,11 +127,16 @@ class SSEClient(
         baseUrl: String,
         username: String? = null,
         password: String? = null,
-        directory: String? = null
+        directory: String? = null,
+        slimMode: Boolean = false
     ): Flow<Result<SSEEvent>> = callbackFlow {
         val url = if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl"
+        // Cluster A: pick the SSE endpoint by mode. Slim mode subscribes to
+        // the sidecar's instance-level `/slimapi/events` (no directory
+        // routing); legacy mode keeps `/global/event` byte-for-byte unchanged.
+        val eventsPath = if (slimMode) SLIM_EVENTS_PATH else LEGACY_EVENTS_PATH
         val request = Request.Builder()
-            .url("$url/global/event")
+            .url("$url$eventsPath")
             .header("Accept", "text/event-stream")
             .header("Cache-Control", "no-cache")
             .apply {
@@ -111,7 +148,11 @@ class SSEClient(
                 // §R18 Phase 2-E step 1: explicit directory header for SSE.
                 // The OkHttp interceptor also mirrors it into `?directory` for
                 // proxy-safe routing (server reads query before header).
-                if (directory != null) {
+                //
+                // Cluster A: slimapi SSE is instance-level — directory is
+                // carried per-event in the frame body, NOT in a request
+                // header. Ignore the caller-supplied directory in slim mode.
+                if (!slimMode && directory != null) {
                     header(HttpHeaders.DIRECTORY_HEADER, directory)
                 }
             }
@@ -156,7 +197,14 @@ class SSEClient(
                 eventCount.incrementAndGet()
                 if (data.isNotBlank() && data != "[DONE]") {
                     try {
-                        val event = json.decodeFromString<SSEEvent>(data)
+                        // B1 fix: thread OkHttp's `type` (the SSE `event:` field
+                        // value) into [parseSseEvent]. The oc-slimapi sidecar
+                        // emits digest/resync/server.* as `event:`-typed frames
+                        // whose `data:` carries ONLY field values (no `type`
+                        // key inside JSON). Without this argument the parser
+                        // cannot recover the type and skips every such frame,
+                        // breaking transport readiness + digest + resync.
+                        val event = parseSseEvent(data, type)
                         // Throttle per-token / periodic noise: message.part.delta
                         // fires dozens-100s/sec during AI streaming and
                         // server.heartbeat fires ~every 10s. Logging every one
@@ -211,11 +259,15 @@ class SSEClient(
         // query, and fragment so credentials never leak into the in-app log
         // or Logcat. The actual connection still uses the real `$url` (the
         // Request above was already built with it).
+        //
+        // Cluster A: preserve the SSE path in the sanitized log so slim vs
+        // legacy mode is observable from the in-app debug viewer without
+        // leaking credentials.
         val sanitizedLogUrl = runCatching {
             val uri = android.net.Uri.parse(url)
-            "${uri.scheme}://${uri.host}${if (uri.port != -1) ":${uri.port}" else ""}/global/event"
-        }.getOrNull() ?: "<redacted>/global/event"
-        DebugLog.i("SSE", "connecting to $sanitizedLogUrl")
+            "${uri.scheme}://${uri.host}${if (uri.port != -1) ":${uri.port}" else ""}$eventsPath"
+        }.getOrNull() ?: "<redacted>$eventsPath"
+        DebugLog.i("SSE", "connecting to $sanitizedLogUrl${if (slimMode) " (slim)" else ""}")
         val eventSource = EventSources.createFactory(okHttpClient)
             .newEventSource(request, listener)
 
@@ -247,5 +299,77 @@ class SSEClient(
             watchdog.cancel()
             eventSource.cancel()
         }
+    }
+
+    /**
+     * Cluster A: parse an SSE `data:` payload into [SSEEvent]. Tolerant of
+     * THREE envelope shapes that may appear on the wire:
+     *
+     *  1. Legacy opencode `/global/event` — `{directory?, payload:{type,
+     *     properties?}}`. Decoded by kotlinx.serialization directly.
+     *  2. Flat slim-sidecar q/p pass-through — `{directory?, type,
+     *     properties?}` (no wrapping `payload` key, but `type` IS present
+     *     inside JSON). Synthesizes the [SSEPayload] from the top-level
+     *     `type` + `properties`. Used for `question.asked` /
+     *     `permission.asked` / `permission.resolved` / `v2.*` frames that
+     *     the sidecar forwards as data-only (no `event:` field).
+     *  3. **B1 fix**: sidecar-native `event:`-typed frames — `data:` carries
+     *     ONLY field values (NO `type` key inside JSON), and the type lives
+     *     in the SSE `event:` field (passed as [eventType] from OkHttp's
+     *     `onEvent(type=...)`). Covers `session.digest` / `resync` /
+     *     `server.connected` / `server.heartbeat`. Synthesizes
+     *     `SSEPayload(type = eventType, properties = root)` — the WHOLE data
+     *     object becomes properties so consumers (e.g. the digest reducer
+     *     reading SlimSessionDigest) find sessionID/updatedAt/etc directly.
+     *
+     * The v1 contract §3 describes per-frame `properties` content but the
+     * transport split between `event:` + `data:` vs flat JSON was unspecified;
+     * the sidecar (hub.py) uses BOTH depending on frame origin
+     * (transformed upstream → event-typed; synthesised q-p pass-through →
+     * flat). This parser handles all three; throws ONLY on truly malformed
+     * JSON (no `type` source at all) so the caller logs+skips.
+     *
+     * @param data the raw `data:` payload (already concatenated by OkHttp
+     *   if multi-line).
+     * @param eventType the SSE `event:` field value as delivered by OkHttp's
+     *   `onEvent(type=...)`. Null when the frame had no `event:` line (legacy
+     *   opencode `/global/event` + sidecar q/p flat pass-through).
+     */
+    private fun parseSseEvent(data: String, eventType: String? = null): SSEEvent {
+        val root = json.parseToJsonElement(data) as? JsonObject
+            ?: error("SSE event root is not a JSON object")
+
+        // Fast path (1): legacy `{payload:{type, properties}}` envelope.
+        val payloadObj = root["payload"] as? JsonObject
+        if (payloadObj != null) {
+            // Delegates to kotlinx.serialization; honours ignoreUnknownKeys
+            // + isLenient + coerceInputValues from the companion Json.
+            return json.decodeFromString<SSEEvent>(data)
+        }
+
+        // Flat path (2): sidecar q/p — `{directory?, type, properties?}`.
+        val directory = (root["directory"] as? JsonPrimitive)?.content
+        val typeInData = (root["type"] as? JsonPrimitive)?.content
+        if (typeInData != null) {
+            val properties = root["properties"] as? JsonObject
+            return SSEEvent(
+                directory = directory,
+                payload = SSEPayload(type = typeInData, properties = properties),
+            )
+        }
+
+        // B1 fix path (3): sidecar-native `event:`-typed frame — no `type`
+        // inside JSON; the type came from the SSE `event:` field via OkHttp.
+        // Synthesize properties = root so digest/resync fields (sessionID,
+        // updatedAt, reason, ...) are reachable via payload.properties.
+        if (eventType != null) {
+            return SSEEvent(
+                directory = directory,
+                payload = SSEPayload(type = eventType, properties = root),
+            )
+        }
+
+        // Truly malformed: no `payload`, no `type` key, no `event:` field.
+        error("SSE event missing 'type' field (no payload, no type key, no event: line)")
     }
 }

@@ -1245,14 +1245,23 @@ fun ChatScaffold(
                         ),
                         onRespondPermission = { response ->
                             pendingPermission?.let { p ->
-                                orchestratorVM.respondPermission(p.sessionId, p.id, response)
+                                // §Phase3b slim: thread the slimapi HMAC the
+                                // sidecar re-injects directory from. Null on
+                                // legacy single-dir path.
+                                orchestratorVM.respondPermission(p.sessionId, p.id, response, p.routeToken)
                             }
                         },
                         onReplyQuestion = { questionId, answers, onError ->
-                            orchestratorVM.replyQuestion(questionId, answers, onError)
+                            // §Phase3b slim: matchingQuestions holds the same
+                            // QuestionRequest models StatusSlot renders
+                            // (pendingQuestion = matchingQuestions.firstOrNull());
+                            // lookup by id is exact, no implicit slice read.
+                            val routeToken = matchingQuestions.firstOrNull { it.id == questionId }?.routeToken
+                            orchestratorVM.replyQuestion(questionId, answers, routeToken, onError)
                         },
                         onRejectQuestion = { questionId, onError ->
-                            orchestratorVM.rejectQuestion(questionId, onError)
+                            val routeToken = matchingQuestions.firstOrNull { it.id == questionId }?.routeToken
+                            orchestratorVM.rejectQuestion(questionId, routeToken, onError)
                         },
                         questionQueuePosition = pendingQuestion?.let { q ->
                             matchingQuestions.indexOfFirst { it.id == q.id } + 1

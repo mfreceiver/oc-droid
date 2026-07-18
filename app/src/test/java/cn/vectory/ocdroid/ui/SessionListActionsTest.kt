@@ -1461,6 +1461,216 @@ class SessionListActionsTest {
         assertTrue(slices.sessionList.value.pendingPermissions.isEmpty())
     }
 
+    // ── §rev-grok fix1 + 9.5 🟠1: authoritative reconcile + slim token ──────
+    //
+    // Fix1 (token protection): the race that broke slim — SSE
+    // `permission.asked` folds an entry with a non-null routeToken → REST
+    // `getPendingPermissions` returns the same id with routeToken=null →
+    // full-replace wiped the token → ChatScaffold took the legacy respond
+    // path (contract §2/B2 violation). Token preservation is on the
+    // intersection only (REST entry AND existing entry, REST null + existing
+    // non-null → keep existing token).
+    //
+    // 9.5 🟠1 (ghost cleanup): membership is REST-authoritative. REST is a
+    // full sweep (no workdir param), so an id REST doesn't return is dropped
+    // — the server resolved / expired it without the client receiving the
+    // resolve event. Only race-window arrivals (SSE during the poll, not in
+    // startIds) are preserved. Mirrors the authoritative reconcile shape of
+    // [SessionSyncCoordinator.loadPendingQuestionsAllWorkdirs].
+
+    @Test
+    fun `rev-grok fix1 - REST with routeToken overrides existing null token`() = runTest {
+        // REST authoritative: provides a token where SSE hadn't yet → take it.
+        val existing = PermissionRequest(id = "p1", sessionId = "s1", permission = "edit", routeToken = null)
+        val fetched = PermissionRequest(id = "p1", sessionId = "s1", permission = "edit", routeToken = "tok-rest")
+        store.mutateSessionList { it.copy(pendingPermissions = listOf(existing)) }
+        coEvery { repository.getPendingPermissions() } returns Result.success(listOf(fetched))
+
+        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        advanceUntilIdle()
+
+        val merged = slices.sessionList.value.pendingPermissions
+        assertEquals(1, merged.size)
+        assertEquals("tok-rest", merged.single().routeToken)
+    }
+
+    @Test
+    fun `rev-grok fix1 - SSE-folded routeToken survives REST refresh that returns null token`() = runTest {
+        // The core race: SSE delivered `tok-sse`, REST returns the same id
+        // with routeToken=null. The merged entry MUST keep `tok-sse` —
+        // otherwise the slim respond path falls back to the legacy endpoint.
+        val existing = PermissionRequest(id = "p1", sessionId = "s1", permission = "edit", routeToken = "tok-sse")
+        val fetched = PermissionRequest(id = "p1", sessionId = "s1", permission = "edit", routeToken = null)
+        store.mutateSessionList { it.copy(pendingPermissions = listOf(existing)) }
+        coEvery { repository.getPendingPermissions() } returns Result.success(listOf(fetched))
+
+        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        advanceUntilIdle()
+
+        val merged = slices.sessionList.value.pendingPermissions.single()
+        assertEquals("p1", merged.id)
+        assertEquals(
+            "SSE-folded routeToken MUST NOT be wiped by a null-token REST refresh",
+            "tok-sse",
+            merged.routeToken,
+        )
+    }
+
+    @Test
+    fun `rev-grok fix1 - REST updates other fields while preserving existing routeToken`() = runTest {
+        // REST is the authority for non-token fields (permission mutated
+        // server-side) — those MUST land; only the token is preserved when
+        // REST would null it out.
+        val existing = PermissionRequest(
+            id = "p1", sessionId = "s1", permission = "once", routeToken = "tok-sse"
+        )
+        val fetched = PermissionRequest(
+            id = "p1", sessionId = "s1", permission = "always", routeToken = null
+        )
+        store.mutateSessionList { it.copy(pendingPermissions = listOf(existing)) }
+        coEvery { repository.getPendingPermissions() } returns Result.success(listOf(fetched))
+
+        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        advanceUntilIdle()
+
+        val merged = slices.sessionList.value.pendingPermissions.single()
+        assertEquals("REST authoritative for non-token fields", "always", merged.permission)
+        assertEquals("token preserved from existing", "tok-sse", merged.routeToken)
+    }
+
+    @Test
+    fun `rev-grok 9-5 O1 - REST-only id added and pre-existing id not returned is dropped`() = runTest {
+        // §rev-grok 9.5 🟠1: authoritative reconcile. REST returns p-rest
+        // (added). p-local was in pendingPermissions at poll-start, REST did
+        // NOT return it → server resolved / expired it → DROPPED (ghost
+        // cleanup). The previous Fix1 union ("existing fills gaps") would
+        // have kept p-local as a ghost forever.
+        val existing = PermissionRequest(id = "p-local", sessionId = "s1", permission = "edit", routeToken = "tok-local")
+        val fetched = PermissionRequest(id = "p-rest", sessionId = "s1", permission = "edit", routeToken = "tok-rest")
+        store.mutateSessionList { it.copy(pendingPermissions = listOf(existing)) }
+        coEvery { repository.getPendingPermissions() } returns Result.success(listOf(fetched))
+
+        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        advanceUntilIdle()
+
+        val merged = slices.sessionList.value.pendingPermissions.associateBy { it.id }
+        assertEquals("only REST-returned id survives (ghost cleanup)", setOf("p-rest"), merged.keys)
+        assertEquals("tok-rest", merged["p-rest"]?.routeToken)
+    }
+
+    @Test
+    fun `rev-grok 9-5 O1 - server-stale permission dropped on empty REST result`() = runTest {
+        // §rev-grok 9.5 🟠1: ghost cleanup. REST returns empty → every
+        // permission in pendingPermissions at poll-start is dropped (server
+        // resolved / expired all of them without the client receiving the
+        // resolve events). This is the test that previously pinned the
+        // opposite ("preserved") under a misleading "removes" name — now
+        // re-pinned to the correct authoritative-reconcile behavior.
+        val existing = PermissionRequest(id = "p-stale", sessionId = "s1", permission = "edit", routeToken = "tok")
+        store.mutateSessionList { it.copy(pendingPermissions = listOf(existing)) }
+        coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
+
+        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        advanceUntilIdle()
+
+        val merged = slices.sessionList.value.pendingPermissions
+        assertTrue(
+            "REST authoritative: server-stale permission dropped (ghost cleanup), was: ${merged.map { it.id }}",
+            merged.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `rev-grok 9-5 O1 - SSE arrival during in-flight REST poll is preserved (race window)`() = runTest {
+        // §rev-grok 9.5 🟠1 race-window: a `permission.asked` that lands
+        // DURING the poll (after the startIds snapshot, before the merge)
+        // MUST survive — REST hasn't observed it yet; dropping it would
+        // lose a fresh permission. Mirrors the questions-path startIds
+        // pattern in [SessionSyncCoordinator.loadPendingQuestionsAllWorkdirs].
+        //
+        // Setup: pendingPermissions is empty at poll-start (startIds = {}).
+        // During the in-flight REST fetch, an SSE event writes p-fresh into
+        // the slice. REST returns empty. The race arrival (p-fresh) must be
+        // preserved because p-fresh.id is NOT in startIds.
+        val sseArrival = PermissionRequest(
+            id = "p-fresh", sessionId = "s1", permission = "edit", routeToken = "tok-fresh"
+        )
+        store.mutateSessionList { it.copy(pendingPermissions = emptyList()) }
+        coEvery { repository.getPendingPermissions() } coAnswers {
+            // Simulate SSE mid-poll delivery: write into the slice DURING
+            // the fetch (after startIds was snapshotted, before the merge).
+            slices.mutateSessionList { it.copy(pendingPermissions = listOf(sseArrival)) }
+            Result.success(emptyList())
+        }
+
+        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        advanceUntilIdle()
+
+        val merged = slices.sessionList.value.pendingPermissions
+        assertEquals(
+            "race-window: SSE arrival during in-flight poll preserved",
+            listOf("p-fresh"),
+            merged.map { it.id },
+        )
+        assertEquals("tok-fresh", merged.single().routeToken)
+    }
+
+    @Test
+    fun `rev-grok 9-5 O1 - id known at start is dropped despite mid-poll SSE refresh (boundary pin)`() = runTest {
+        // §rev-grok 9.5 🟠1 boundary pin: an id that was in pendingPermissions
+        // AT POLL START, is absent from REST, and is re-delivered by SSE
+        // during the poll MUST be dropped — race-window keep applies ONLY
+        // to ids NOT in startIds. Otherwise resolved-and-redelivered events
+        // would resurrect ghosts. This pins where the boundary sits so
+        // future refactors don't accidentally widen the race window.
+        //
+        // Setup: pendingPermissions = [p1: tok-old] at poll-start
+        //        (startIds = {p1}). During the fetch, SSE upgrades p1's
+        //        token to tok-sse-fresh. REST returns empty. Expected:
+        //        p1 dropped (authoritative reconcile wins over the
+        //        mid-poll SSE refresh because p1 was known at start).
+        val startEntry = PermissionRequest(
+            id = "p1", sessionId = "s1", permission = "edit", routeToken = "tok-old"
+        )
+        val sseFresh = PermissionRequest(
+            id = "p1", sessionId = "s1", permission = "edit", routeToken = "tok-sse-fresh"
+        )
+        store.mutateSessionList { it.copy(pendingPermissions = listOf(startEntry)) }
+        coEvery { repository.getPendingPermissions() } coAnswers {
+            // SSE mid-poll upgrades p1's token (startEntry → sseFresh).
+            slices.mutateSessionList { it.copy(pendingPermissions = listOf(sseFresh)) }
+            Result.success(emptyList())  // REST no longer lists p1
+        }
+
+        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        advanceUntilIdle()
+
+        assertTrue(
+            "id known at start + absent from REST → dropped, even if SSE re-delivered during poll",
+            slices.sessionList.value.pendingPermissions.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `rev-grok fix1 - slim mode warns on final permission with null routeToken`() = runTest {
+        // §rev-grok fix1 defensive: in slim mode, a final pending permission
+        // with a null routeToken means the slim respond path cannot route
+        // correctly — surface via Log.w (no silent legacy fallback).
+        every { repository.isSlimMode } returns true
+        val fetched = PermissionRequest(id = "p1", sessionId = "s1", permission = "edit", routeToken = null)
+        coEvery { repository.getPendingPermissions() } returns Result.success(listOf(fetched))
+
+        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        advanceUntilIdle()
+
+        // The permission is still written (no silent fallback / no drop).
+        assertEquals(1, slices.sessionList.value.pendingPermissions.size)
+        // Log.w captured by the mockkStatic(Log::class) in setUp.
+        verify(atLeast = 1) {
+            Log.w(any<String>(), match<String> { it.contains("null routeToken") && it.contains("p1") })
+        }
+    }
+
     // ── launchLoadAgents ──────────────────────────────────────────────────────
 
     // §chat-ux-batch T8 (B3): the three former tests

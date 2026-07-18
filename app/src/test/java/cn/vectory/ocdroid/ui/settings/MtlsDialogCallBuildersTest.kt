@@ -59,6 +59,7 @@ class MtlsDialogCallBuildersTest {
         serverUrl: String = initial.serverUrl,
         selectedGroup: String? = null,
         initialGroup: String? = null,
+        slimEnabled: Boolean = false,
         clientCleared: Boolean = false,
         stagedP12: ByteArray? = null,
         caStage: CaStage = CaStage.Unchanged,
@@ -76,6 +77,7 @@ class MtlsDialogCallBuildersTest {
         tunnelPassword = "",
         tunnelEdited = false,
         mtlsEnabled = false,
+        slimEnabled = slimEnabled,
         clientCleared = clientCleared,
         stagedP12 = stagedP12,
         caStage = caStage,
@@ -148,6 +150,7 @@ class MtlsDialogCallBuildersTest {
             tunnelPassword = "tp",
             tunnelEdited = true,
             mtlsEnabled = true,
+            slimEnabled = false,
             clientCleared = false,
             stagedP12 = null,
             caStage = CaStage.Unchanged,
@@ -199,6 +202,7 @@ class MtlsDialogCallBuildersTest {
             tunnelPassword = "",
             tunnelEdited = false,
             mtlsEnabled = false,
+            slimEnabled = false,
             clientCleared = false,
             stagedP12 = null,
             caStage = CaStage.Unchanged,
@@ -237,6 +241,7 @@ class MtlsDialogCallBuildersTest {
             tunnelPassword = "",
             tunnelEdited = true,
             mtlsEnabled = false,
+            slimEnabled = false,
             clientCleared = false,
             stagedP12 = null,
             caStage = CaStage.Unchanged,
@@ -265,6 +270,7 @@ class MtlsDialogCallBuildersTest {
             tunnelPassword = "",
             tunnelEdited = false,
             mtlsEnabled = false,
+            slimEnabled = false,
             clientCleared = false,
             stagedP12 = null,
             caStage = CaStage.Unchanged,
@@ -294,6 +300,7 @@ class MtlsDialogCallBuildersTest {
             tunnelPassword = "",
             tunnelEdited = false,
             mtlsEnabled = true,
+            slimEnabled = false,
             clientCleared = true,
             stagedP12 = null,
             caStage = CaStage.Unchanged,
@@ -331,6 +338,7 @@ class MtlsDialogCallBuildersTest {
             tunnelPassword = "",
             tunnelEdited = false,
             mtlsEnabled = true,
+            slimEnabled = false,
             clientCleared = false,
             stagedP12 = byteArrayOf(1, 2, 3),
             caStage = CaStage.Unchanged,
@@ -367,6 +375,7 @@ class MtlsDialogCallBuildersTest {
             tunnelPassword = "",
             tunnelEdited = false,
             mtlsEnabled = false,
+            slimEnabled = false,
             clientCleared = false,
             stagedP12 = null,
             caStage = CaStage.Unchanged,
@@ -394,6 +403,7 @@ class MtlsDialogCallBuildersTest {
             tunnelPassword = "",
             tunnelEdited = false,
             mtlsEnabled = false,
+            slimEnabled = false,
             clientCleared = false,
             stagedP12 = null,
             caStage = CaStage.Unchanged,
@@ -421,6 +431,7 @@ class MtlsDialogCallBuildersTest {
             tunnelPassword = "",
             tunnelEdited = false,
             mtlsEnabled = false,
+            slimEnabled = false,
             clientCleared = false,
             stagedP12 = null,
             caStage = CaStage.Unchanged,
@@ -448,6 +459,7 @@ class MtlsDialogCallBuildersTest {
             tunnelPassword = "",
             tunnelEdited = false,
             mtlsEnabled = false,
+            slimEnabled = false,
             clientCleared = false,
             stagedP12 = null,
             caStage = CaStage.Replace(replaceBytes),
@@ -473,6 +485,19 @@ class MtlsDialogCallBuildersTest {
         val initial = profile()
         val r = saveAllOff(initial, serverUrl = "https://override.example.com:8443/path")
         assertEquals("https://override.example.com:8443/path", r.saved.serverUrl)
+    }
+
+    @Test
+    fun `buildSaveCall slimEnabled true sets slim on saved profile`() {
+        val initial = profile()
+        // Default: slimEnabled=false
+        val rOff = saveAllOff(initial)
+        assertFalse(rOff.saved.slim)
+        assertFalse(rOff.slimOn)
+        // Explicit: slimEnabled=true
+        val rOn = saveAllOff(initial, slimEnabled = true)
+        assertTrue(rOn.saved.slim)
+        assertTrue(rOn.slimOn)
     }
 
     // ====================== buildTestCall ===================================

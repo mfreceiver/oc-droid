@@ -274,6 +274,150 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
         assertTrue(true)
     }
 
+    // ── §Phase3b slim routeToken dispatch ─────────────────────────────────
+    //
+    // When routeToken != null (slim SSE / slimapi surface), the VM must
+    // dispatch through the slimapi repository methods; legacy
+    // /question/{id}/reply + /permission/.../respond rely on a global
+    // currentDirectory header that has no correct value on the slim
+    // cross-directory aggregation surface. These tests pin the seam.
+    //
+    // The legacy (routeToken == null) regression guard lives here too so
+    // both branches are next to each other; the legacy regression is also
+    // implicitly covered by the four tests above (they never pass a
+    // routeToken), but the explicit `coVerify(exactly = 0) { slimapi }`
+    // assertion below is what catches a future bug that wires slimapi
+    // unconditionally.
+
+    @Test
+    fun `replyQuestion with routeToken dispatches through replySlimapiQuestion`() = runTest {
+        coEvery { repository.replySlimapiQuestion(any(), any(), any()) } returns Result.success(Unit)
+        val core = createCore()
+        val vm = OrchestratorViewModel(core)
+        val q = QuestionRequest(
+            id = "q-slim", sessionId = "s1", routeToken = "tok-reply",
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
+        )
+        core.writeSessionList { it.copy(pendingQuestions = listOf(q)) }
+
+        val answers = listOf(listOf("yes"))
+        vm.replyQuestion("q-slim", answers, routeToken = "tok-reply")
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.replySlimapiQuestion("q-slim", answers, "tok-reply") }
+        // Legacy MUST NOT fire when routeToken present.
+        coVerify(exactly = 0) { repository.replyQuestion(any(), any(), any()) }
+        // Slim path skips directory resolution entirely.
+        coVerify(exactly = 0) { repository.getSession(any()) }
+        assertTrue(core.sessionListFlow.value.pendingQuestions.isEmpty())
+    }
+
+    @Test
+    fun `replyQuestion failure on slim path still invokes onError`() = runTest {
+        coEvery { repository.replySlimapiQuestion(any(), any(), any()) } returns Result.failure(
+            java.io.IOException("slim 403"),
+        )
+        val core = createCore()
+        val vm = OrchestratorViewModel(core)
+        var onErrorCalled = false
+
+        vm.replyQuestion("q-slim", listOf(listOf("yes")), routeToken = "tok", onError = { onErrorCalled = true })
+        advanceUntilIdle()
+
+        assertTrue(onErrorCalled)
+    }
+
+    @Test
+    fun `replyQuestion without routeToken dispatches through legacy replyQuestion (regression guard)`() = runTest {
+        coEvery { repository.replyQuestion(any(), any(), any()) } returns Result.success(Unit)
+        val core = createCore()
+        val vm = OrchestratorViewModel(core)
+        val q = QuestionRequest(
+            id = "q-legacy", sessionId = "s1", // routeToken defaults null
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
+        )
+        core.writeSessionList { it.copy(pendingQuestions = listOf(q)) }
+
+        vm.replyQuestion("q-legacy", listOf(listOf("yes")))
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.replyQuestion(any(), any(), any()) }
+        coVerify(exactly = 0) { repository.replySlimapiQuestion(any(), any(), any()) }
+    }
+
+    @Test
+    fun `rejectQuestion with routeToken dispatches through rejectSlimapiQuestion`() = runTest {
+        coEvery { repository.rejectSlimapiQuestion(any(), any()) } returns Result.success(Unit)
+        val core = createCore()
+        val vm = OrchestratorViewModel(core)
+        val q = QuestionRequest(
+            id = "q-slim", sessionId = "s1", routeToken = "tok-reject",
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
+        )
+        core.writeSessionList { it.copy(pendingQuestions = listOf(q)) }
+
+        vm.rejectQuestion("q-slim", routeToken = "tok-reject")
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.rejectSlimapiQuestion("q-slim", "tok-reject") }
+        coVerify(exactly = 0) { repository.rejectQuestion(any(), any()) }
+        coVerify(exactly = 0) { repository.getSession(any()) }
+        assertTrue(core.sessionListFlow.value.pendingQuestions.isEmpty())
+    }
+
+    @Test
+    fun `rejectQuestion without routeToken dispatches through legacy rejectQuestion (regression guard)`() = runTest {
+        coEvery { repository.rejectQuestion(any(), any()) } returns Result.success(Unit)
+        val core = createCore()
+        val vm = OrchestratorViewModel(core)
+        val q = QuestionRequest(
+            id = "q-legacy", sessionId = "s1",
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
+        )
+        core.writeSessionList { it.copy(pendingQuestions = listOf(q)) }
+
+        vm.rejectQuestion("q-legacy")
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { repository.rejectQuestion(any(), any()) }
+        coVerify(exactly = 0) { repository.rejectSlimapiQuestion(any(), any()) }
+    }
+
+    @Test
+    fun `respondPermission with routeToken dispatches through respondSlimapiPermission`() = runTest {
+        coEvery { repository.respondSlimapiPermission(any(), any(), any(), any()) } returns Result.success(Unit)
+        val core = createCore()
+        val vm = OrchestratorViewModel(core)
+        val req = PermissionRequest(id = "p-slim", sessionId = "s-slim", routeToken = "tok-perm")
+        core.writeSessionList { it.copy(pendingPermissions = listOf(req)) }
+
+        vm.respondPermission("s-slim", "p-slim", PermissionResponse.ONCE, routeToken = "tok-perm")
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) {
+            repository.respondSlimapiPermission("s-slim", "p-slim", PermissionResponse.ONCE, "tok-perm")
+        }
+        coVerify(exactly = 0) { repository.respondPermission(any(), any(), any()) }
+        assertTrue(core.sessionListFlow.value.pendingPermissions.isEmpty())
+    }
+
+    @Test
+    fun `respondPermission without routeToken dispatches through legacy respondPermission (regression guard)`() = runTest {
+        coEvery { repository.respondPermission(any(), any(), any()) } returns Result.success(Unit)
+        val core = createCore()
+        val vm = OrchestratorViewModel(core)
+        val req = PermissionRequest(id = "p-legacy", sessionId = "s-legacy")
+        core.writeSessionList { it.copy(pendingPermissions = listOf(req)) }
+
+        vm.respondPermission("s-legacy", "p-legacy", PermissionResponse.ALWAYS)
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) {
+            repository.respondPermission("s-legacy", "p-legacy", PermissionResponse.ALWAYS)
+        }
+        coVerify(exactly = 0) { repository.respondSlimapiPermission(any(), any(), any(), any()) }
+    }
+
     // ── File browser ────────────────────────────────────────────────────────
 
     @Test

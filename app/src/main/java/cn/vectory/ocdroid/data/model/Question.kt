@@ -29,7 +29,14 @@ data class QuestionRequest(
     val id: String,
     @SerialName("sessionID") val sessionId: String,
     val questions: List<QuestionInfo>,
-    val tool: ToolRef? = null
+    val tool: ToolRef? = null,
+    /**
+     * Slimapi HMAC the sidecar validates on reply/reject (~1h TTL). Present
+     * only when the question arrived via slim SSE / `/slimapi/questions`;
+     * legacy paths leave this null. Phase 3 reply path returns it on the
+     * slim write endpoints.
+     */
+    @SerialName("routeToken") val routeToken: String? = null,
 ) {
     @Serializable
     data class ToolRef(

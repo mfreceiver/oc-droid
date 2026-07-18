@@ -102,7 +102,14 @@ data class ConnectionState(
      * capture; cleared by [ConnectionCoordinator.resolveTofuTrust] once the
      * decision is applied (then the loop re-probes with the new pin).
      */
-    val pendingTofuCapture: cn.vectory.ocdroid.data.repository.OpenCodeRepository.TofuCaptureResult? = null
+    val pendingTofuCapture: cn.vectory.ocdroid.data.repository.OpenCodeRepository.TofuCaptureResult? = null,
+    /**
+     * §R8 slim-mode M2 自检：非 null = slimapi 版本不兼容（客户端版本不在
+     * sidecar 公告的 accepted_client_versions 闭区间内）。值为三元组
+     * (clientVersion, acceptedMin, acceptedMax)，供 UI 展示。fail-closed——
+     * 不兼容时标记连接不可用，不静默报健康。
+     */
+    val slimapiVersionIncompatible: Triple<Int, Int, Int>? = null,
 )
 
 /**

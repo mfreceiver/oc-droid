@@ -264,7 +264,7 @@ internal fun HostProfilesManagerScreen(
             // 据此试构建 + 原子写 ESP；失败（无 p12 / 试构建失败）抛异常 → 保留
             // 对话框并回显错误，不关闭。Dialog 据 mTLS 开关构造 Update / Disable intent。
             onSave = { saved, basicAuthPassword, basicAuthEdited, tunnelPassword, tunnelEdited,
-                       mtlsEnabled, stagedP12, caStage, p12Password, p12PasswordEdited, hasImportedP12 ->
+                       mtlsEnabled, slimEnabled, stagedP12, caStage, p12Password, p12PasswordEdited, hasImportedP12 ->
                 val clientCertEdit = if (mtlsEnabled) {
                     ClientCertEditIntent.Update(stagedP12, caStage, p12Password, p12PasswordEdited, hasImportedP12)
                 } else {
@@ -300,9 +300,13 @@ internal fun HostProfilesManagerScreen(
                 connectionVM.testConnectionForm(
                     url, user, pass, profileId, passwordEdited,
                     mtlsEnabled, stagedP12, hasImportedP12, caStage, p12Password, p12PasswordEdited,
-                    clientCertId, callback
+                    clientCertId, slim = profile.slim, onResult = callback,
                 )
-            }
+            },
+            // §reconcile: 从函数级 connectionState 注入 slimapi 版本自检三元组
+            // （dialog 不再持有 connectionVM，参数化保 fix-12 的 UX 意图——
+            // 版本不兼容时阻塞对话框）。
+            slimapiVersionIncompatible = connectionState.slimapiVersionIncompatible,
         )
     }
 
@@ -414,6 +418,7 @@ internal fun HostProfileEditorDialog(
         tunnelEdited: Boolean,
         // §2.7 mTLS 编辑意图（VM 据此写 ESP，原子提交；Dialog 不碰 ESP）：
         mtlsEnabled: Boolean,
+        slimEnabled: Boolean,
         stagedP12: ByteArray?,
         caStage: CaStage,
         p12Password: String?,
@@ -456,6 +461,12 @@ internal fun HostProfileEditorDialog(
     // 由调用方从 ConnectionState.mtlsDegradedError 注入；非 null 时在 mTLS 区块顶部
     // 显示红色 banner，让用户看到「证书加载失败」而非泛化连接失败。
     mtlsErrorHint: String? = null,
+    // §R8 slim-mode M2 自检（fix-12 UX）：版本不兼容时阻塞对话框。fail-closed：
+    // 当 ServerCompatProfile.isSlimapiClientAccepted() == false 时，由调用方从
+    // ConnectionState.slimapiVersionIncompatible 注入 (clientVer, minVer, maxVer)
+    // 三元组；非 null 时弹 AlertDialog 提示用户升级。dialog 内部不再持有
+    // ConnectionViewModel 引用（保持纯 UI 可测）。
+    slimapiVersionIncompatible: Triple<Int, Int, Int>? = null,
 ) {
     val groupLabels = NamedGroupLabels // §grouping-rewrite Round-2 #4: was a local listOf("A","B","C","D") — centralised in SettingsSections.kt so the editor + ConnectionProfileSection stats line stay in lockstep.
     var name by remember(initial.id) { mutableStateOf(initial.name) }
@@ -483,6 +494,8 @@ internal fun HostProfileEditorDialog(
     var basicAuthEnabled by remember(initial.id) { mutableStateOf(initial.basicAuth != null) }
     var tunnelEnabled by remember(initial.id) { mutableStateOf(initial.tunnelPasswordId != null) }
     var mtlsEnabled by remember(initial.id) { mutableStateOf(initial.mtlsEnabled) }
+    // §R8 slim-mode UI: 省流模式开关——与 mTLS 正交，形成四配置组合。
+    var slimEnabled by remember(initial.id) { mutableStateOf(initial.slim) }
     // §mtls-clipboard: 客户端 p12 直接以已校验 ByteArray 暂存（剪贴板粘贴→
     // decodeBase64OrNull→loadClientP12OrNull 验证后写入）。null=未重导（沿用已存）。
     var stagedP12: ByteArray? by remember(initial.id) { mutableStateOf<ByteArray?>(null) }
@@ -786,6 +799,7 @@ internal fun HostProfileEditorDialog(
                                 tunnelPassword = tunnelPassword,
                                 tunnelEdited = tunnelEdited,
                                 mtlsEnabled = mtlsEnabled,
+                                slimEnabled = slimEnabled,
                                 clientCleared = clientCleared,
                                 stagedP12 = stagedP12,
                                 caStage = caStage,
@@ -799,6 +813,7 @@ internal fun HostProfileEditorDialog(
                                 saveResult.tunnelPw,
                                 saveResult.tunnelEd,
                                 saveResult.mtlsOn,
+                                saveResult.slimOn,
                                 saveResult.stagedP12,
                                 saveResult.caStage,
                                 saveResult.p12Password,
@@ -1096,6 +1111,38 @@ internal fun HostProfileEditorDialog(
                 enabled = !isConverting,
             )
         }
+        Spacer(modifier = Modifier.height(Dimens.spacing2))
+        // §R8 slim-mode UI: 省流模式折叠区——与 mTLS 正交，形成四配置组合。
+        // 用户可通过 toggles 直观区分四种连接形态。
+        CollapsibleSection(
+            title = stringResource(R.string.host_slim_title),
+            subtitle = stringResource(R.string.host_slim_summary),
+            checked = slimEnabled,
+            onCheckedChange = { slimEnabled = it },
+        ) {
+            // §R8: 连接模式摘要——根据 mtls × slim 两布尔显示当前四配置之一。
+            val modeLabel = when {
+                mtlsEnabled && slimEnabled -> stringResource(R.string.host_slim_mode_stunnel_slim)
+                mtlsEnabled && !slimEnabled -> stringResource(R.string.host_slim_mode_stunnel_opencode)
+                !mtlsEnabled && slimEnabled -> stringResource(R.string.host_slim_mode_direct_slim)
+                else -> stringResource(R.string.host_slim_mode_direct_opencode)
+            }
+            ListItem(
+                headlineContent = {
+                    Text(
+                        stringResource(R.string.host_slim_mode_label),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                },
+                supportingContent = {
+                    Text(
+                        modeLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            )
+        }
         // §issue-5: 全宽"测试连接"按钮已移除——触发器移入底部 action 行的
         // test icon（见 confirmButton）。此处仅保留结果回显（成功/失败小字），
         // 测试进行中由 icon 内的进度圈表达。
@@ -1142,6 +1189,29 @@ internal fun HostProfileEditorDialog(
                     Text(stringResource(R.string.common_ok))
                 }
             }
+        )
+    }
+
+    // §R8 slim-mode M2 自检：版本不兼容阻塞对话框（Tier C — AlertDialog family）。
+    // fail-closed：当 ServerCompatProfile.isSlimapiClientAccepted() == false 时，
+    // slimapiVersionIncompatible 被设为非 null，UI 必须阻塞并提示用户升级。
+    // §reconcile: 此值由调用方 HostProfilesManagerScreen 从
+    // connectionState.slimapiVersionIncompatible 注入（参数），dialog 本身不持有
+    // ConnectionViewModel 引用，避免 Unresolved reference 编译错误 + 保持纯 UI 可测。
+    val versionIncompat = slimapiVersionIncompatible
+    if (versionIncompat != null) {
+        val (clientVer, minVer, maxVer) = versionIncompat
+        AppConfirmDialog(
+            title = stringResource(R.string.slimapi_version_incompatible_title),
+            body = stringResource(
+                R.string.slimapi_version_incompatible_message,
+                clientVer, minVer, maxVer
+            ),
+            confirmText = stringResource(R.string.slimapi_version_incompatible_dismiss),
+            onConfirm = { /* dismiss only — user must upgrade externally */ },
+            dismissText = stringResource(R.string.slimapi_version_incompatible_dismiss),
+            onDismiss = { /* dismiss only */ },
+            destructive = false,
         )
     }
 }

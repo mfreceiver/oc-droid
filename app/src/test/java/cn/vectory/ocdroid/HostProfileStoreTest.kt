@@ -247,6 +247,99 @@ class HostProfileStoreTest {
         assertEquals(p.id, p.serverGroupFp)
     }
 
+    // ───────────── R8 slim-mode foundation: serialization migration ─────
+    // Legacy JSON predates the `slim` field. After decode the field MUST
+    // default to false (= legacy opencode direct connection) — neither crashes
+    // nor silently enables slim mode. Same backward-compat contract as the
+    // existing `mtlsEnabled` field.
+
+    @Test
+    fun `legacy json without slim field decodes to slim=false`() {
+        hostProfilesJson = """
+            [
+              {"id":"p-1","name":"A","serverURL":"https://a.example.com","serverGroupFp":"p-1"}
+            ]
+        """.trimIndent()
+        currentHostProfileId = "p-1"
+
+        val profiles = store.profiles()
+
+        assertEquals(1, profiles.size)
+        assertFalse(
+            "missing slim field must default to false (legacy opencode)",
+            profiles.first().slim
+        )
+    }
+
+    @Test
+    fun `legacy json without mtlsEnabled field decodes to mtlsEnabled=false`() {
+        // The existing mtlsEnabled field has the same backward-compat contract
+        // as slim — pinned here so the migration symmetry is explicit.
+        hostProfilesJson = """
+            [
+              {"id":"p-1","name":"A","serverURL":"https://a.example.com","serverGroupFp":"p-1"}
+            ]
+        """.trimIndent()
+        currentHostProfileId = "p-1"
+
+        val profiles = store.profiles()
+
+        assertEquals(1, profiles.size)
+        assertFalse(profiles.first().mtlsEnabled)
+    }
+
+    @Test
+    fun `json with slim=true round-trips through save and reload`() {
+        val slim = HostProfile(
+            id = "slim-1",
+            name = "Slim",
+            serverUrl = "http://localhost:4097",
+            serverGroupFp = "slim-1",
+            slim = true,
+            mtlsEnabled = true
+        )
+        store.save(slim)
+
+        // Drop and re-read from disk-backed JSON.
+        hostProfilesJson = hostProfilesJson // (no-op; trigger mockk store)
+        val reloaded = store.profiles().first { it.id == "slim-1" }
+        assertTrue(reloaded.slim)
+        assertTrue(reloaded.mtlsEnabled)
+    }
+
+    @Test
+    fun `defaultDirect constructs a legacy direct profile (slim=false)`() {
+        val p = HostProfile.defaultDirect()
+        assertFalse(
+            "defaultDirect must NOT silently enable slim mode — legacy opencode direct",
+            p.slim
+        )
+        assertFalse(p.mtlsEnabled)
+    }
+
+    @Test
+    fun `legacy and slim profiles can coexist in the same JSON list`() {
+        hostProfilesJson = """
+            [
+              {"id":"leg-1","name":"Legacy","serverURL":"https://a.example.com","serverGroupFp":"leg-1"},
+              {"id":"slim-1","name":"Slim","serverURL":"http://localhost:4097","serverGroupFp":"slim-1","slim":true},
+              {"id":"mtls-1","name":"mTLS","serverURL":"https://b.example.com","serverGroupFp":"mtls-1","mtlsEnabled":true,"slim":true}
+            ]
+        """.trimIndent()
+        currentHostProfileId = "leg-1"
+
+        val profiles = store.profiles()
+
+        assertEquals(3, profiles.size)
+        val byId = profiles.associateBy { it.id }
+        assertFalse(byId["leg-1"]!!.slim)
+        assertFalse(byId["leg-1"]!!.mtlsEnabled)
+        assertTrue(byId["slim-1"]!!.slim)
+        assertFalse(byId["slim-1"]!!.mtlsEnabled)
+        assertTrue(byId["mtls-1"]!!.slim)
+        assertTrue(byId["mtls-1"]!!.mtlsEnabled)
+    }
+
     // ───────────── R-20 grouping: manual A-D slots / profilesInGroup ─
 
     @Test

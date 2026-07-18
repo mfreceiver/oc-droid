@@ -55,7 +55,19 @@ data class Message(
     @Serializable
     data class TimeInfo(
         val created: Long? = null,
-        val completed: Long? = null
+        val completed: Long? = null,
+        /**
+         * Cluster A (slim SSE + data layer): last-update epoch-ms. Populated
+         * by the oc-slimapi sidecar's skeleton responses
+         * (`GET /slimapi/messages/{sid}/since/{ts}` filters on
+         * `time.updated >= ts`, v1 contract §5). The legacy opencode
+         * `/session/{id}/message` endpoint does NOT emit this field — it
+         * stays null for legacy callers, preserving byte-for-byte behaviour.
+         *
+         * Nullable + defaulted so existing JSON without the key deserialises
+         * cleanly (kotlinx.serialization missing-key → default null).
+         */
+        val updated: Long? = null
     )
 
     @Serializable

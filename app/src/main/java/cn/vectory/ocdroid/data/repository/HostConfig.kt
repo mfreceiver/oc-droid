@@ -50,11 +50,27 @@ class HostConfig @Inject constructor() {
      */
     @Volatile private var _hostPort: String? = null
 
+    /**
+     * R8 slim-mode foundation: 当前所选 server 是否为 oc-slimapi sidecar 入口。
+     * 与 [mtlsEnabled] 路径正交（mTLS 由 [OpenCodeRepository.configure] 的
+     * `clientCert` 参数注入，不存于 HostConfig——因为 client cert 的存在性本
+     * 身就是 mTLS 信号；slim 则是路由属性，必须由拦截器/health 探针读取，故
+     * 留在 HostConfig 上）。`SlimapiVersionInterceptor` 读本字段决定是否注入
+     * `X-Slimapi-Version` 头；`checkHealth` / `checkHealthFor` /
+     * `captureServerCert` 读本字段决定探 `/slimapi/health` 还是 `/global/health`。
+     *
+     * 默认 false（legacy opencode 直连）。
+     */
+    @Volatile private var _slim: Boolean = false
+
     val baseUrl: String get() = _baseUrl
     val username: String? get() = _username
     val password: String? get() = _password
 
     val hostPort: String? get() = _hostPort
+
+    /** R8 slim-mode foundation: 当前 server 的 slimapi 路由属性。 */
+    val slim: Boolean get() = _slim
 
     /** True iff a complete Basic Auth credential pair is configured. */
     val hasBasicAuth: Boolean get() = _username != null && _password != null
@@ -65,18 +81,24 @@ class HostConfig @Inject constructor() {
      * §tofu R2: takes [hostPort] (derived by the caller via [hostPortFromUrl])
      * instead of the legacy `allowInsecure` boolean — TLS trust is now
      * TOFU-pinned per host:port, not blanket-allowed per profile.
+     *
+     * R8 slim-mode foundation: [slim] 由所选 HostProfile 透传——true 时
+     * `SlimapiVersionInterceptor` 注入版本头、health 探针改走 `/slimapi/health`。
+     * 默认 false 保持 legacy 行为不变。
      */
     @Synchronized
     fun configure(
         baseUrl: String,
         username: String?,
         password: String?,
-        hostPort: String?
+        hostPort: String?,
+        slim: Boolean = false
     ) {
         _baseUrl = baseUrl
         _username = username
         _password = password
         _hostPort = hostPort ?: hostPortFromUrl(baseUrl)
+        _slim = slim
     }
 
     companion object {

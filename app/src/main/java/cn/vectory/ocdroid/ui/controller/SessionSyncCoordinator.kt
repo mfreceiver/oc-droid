@@ -5,13 +5,18 @@ import cn.vectory.ocdroid.BuildConfig
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS
 import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
+import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.data.model.SlimSessionDigest
+import cn.vectory.ocdroid.data.model.SlimapiQuestionEntry
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SlimColdStartSnapshot
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.status.SessionBusyStatus
@@ -140,6 +145,30 @@ class SessionSyncCoordinator(
      * arrival times; the default is fine).
      */
     internal val clock: () -> Long = { System.currentTimeMillis() },
+    /**
+     * Cluster A / Phase 2 (slim SSE): runtime slim-mode provider. Read on
+     * every use (do NOT cache) so a host-profile switch that flips
+     * [OpenCodeRepository.isSlimMode] is observed without reconstructing
+     * this coordinator. Default `false` keeps legacy/test constructions
+     * byte-identical.
+     */
+    private val isSlimMode: () -> Boolean = { false },
+    /**
+     * Cluster A / Phase 2 (slim SSE): repository used by the `session.digest`
+     * branch ([applySlimDigest] + [OpenCodeRepository.getSlimapiMessagesSince])
+     * and by [applySlimColdStartSnapshot] when the Service wires cold-start
+     * folding through this coordinator. Optional so legacy/test constructions
+     * that only drive pure folds keep working — when null, the digest branch
+     * is a no-op (malformed / unparsed frames still count as handled so they
+     * do not fall through to the unknown-event counter).
+     *
+     * **M1 choice**: inject the repository (rather than a ControllerEffect
+     * hop) because [applySlimDigest] is a pure in-memory reducer on the
+     * repository's [cn.vectory.ocdroid.data.repository.SlimSseState] and the
+     * subsequent `/since` fetch must follow immediately. An effect hop would
+     * race the next digest frame against an unadvanced bookmark.
+     */
+    private val repository: OpenCodeRepository? = null,
 ) {
     /** Tag for [reportNonFatalIssue]; mirrors the original MainViewModel TAG. */
     private val tag: String = "SessionSyncCoordinator"
@@ -1075,6 +1104,14 @@ class SessionSyncCoordinator(
             }
             "permission.asked" -> {
                 // §R-19 Sprint 3 P2-4: routed through applySseSideEffects.
+                // Cluster A / Phase 2: when the slim SSE frame carries a
+                // routeToken, fold it into pendingPermissions immediately so
+                // Phase 3 reply can return it; still also refresh via the
+                // aggregate REST path (authoritative reconcile).
+                val slimPermission = parsePermissionAskedEvent(event)
+                if (slimPermission != null && !slimPermission.routeToken.isNullOrBlank()) {
+                    slices.mutateSessionList { s -> s.applyPermissionAsked(slimPermission).first }
+                }
                 applySseSideEffects(listOf(SseSideEffect.LoadPendingPermissions))
             }
             "question.asked" -> {
@@ -1087,11 +1124,23 @@ class SessionSyncCoordinator(
                     // §Phase1a→1c instrumentation: DebugLog moved here from inside
                     // applyQuestionAsked to keep that transform pure (see L1187 note).
                     val duplicate = slices.sessionList.value.pendingQuestions.any { it.id == question.id }
-                    DebugLog.d("Question", "applyQuestionAsked id=${question.id} sid=${question.sessionId} duplicate=$duplicate")
+                    DebugLog.d(
+                        "Question",
+                        "applyQuestionAsked id=${question.id} sid=${question.sessionId} " +
+                            "routeToken=${!question.routeToken.isNullOrBlank()} duplicate=$duplicate",
+                    )
                     slices.mutateSessionList { currentState -> currentState.applyQuestionAsked(question).first }
                 } else {
                     applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid question.asked payload")))
                 }
+            }
+            // Cluster A / Phase 2: slim-only curated frame. Debounced 250ms /
+            // session; properties ARE the SlimSessionDigest body (B1 unwrap).
+            // applySlimDigest advances the per-session bookmark; a non-null
+            // SlimFetchMessages decision triggers /since merge into the open
+            // chat slice (messageID-dedup, mirrors message.updated).
+            "session.digest" -> {
+                handleSessionDigest(event)
             }
             "question.replied", "question.rejected" -> {
                 val requestId = event.payload.getString("requestID")
@@ -1342,6 +1391,13 @@ class SessionSyncCoordinator(
      * [SessionSyncCoordinatorTest].
      */
     fun loadPendingQuestionsAllWorkdirs(repository: OpenCodeRepository) {
+        // Cluster A / Phase 2 (P2.3): slim mode aggregates cross-directory
+        // pending questions in ONE `/slimapi/questions` call (routeToken
+        // preserved). Legacy keeps the multi-workdir fan-out below.
+        if (isSlimMode()) {
+            loadPendingQuestionsSlim(repository)
+            return
+        }
         // §issue-1 Phase 2a Fix B: shared workdir-set computation (with per-fp
         // recent_workdirs) — identical to AppCore's catchUpWorkdirs site, via
         // the [computeQuestionFanOutWorkdirs] helper, so the two sites cannot drift.
@@ -1405,6 +1461,237 @@ class SessionSyncCoordinator(
             }.let { filterArchivedSessionQuestions(it, sessionsById) }
             slices.mutateSessionList { it.copy(pendingQuestions = authoritative) }
             DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs authoritative reconcile total=${authoritative.size} (had ${startIds.size} before)")
+        }
+    }
+
+    /**
+     * Cluster A / Phase 2 (P2.3): slim single-shot pending-questions load via
+     * [OpenCodeRepository.getSlimapiQuestions]. Maps each entry to legacy
+     * [QuestionRequest] **preserving [QuestionRequest.routeToken]**. Same
+     * authoritative reconcile + archived-session filter as the legacy fan-out.
+     */
+    private fun loadPendingQuestionsSlim(repository: OpenCodeRepository) {
+        DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs slim single-shot")
+        scope.launch {
+            val startIds = slices.sessionList.value.pendingQuestions
+                .mapTo(mutableSetOf()) { it.id }
+            val workdirs = computeQuestionFanOutWorkdirs(
+                directorySessionKeys = slices.sessionList.value.directorySessions.keys,
+                currentWorkdir = settingsManager.currentWorkdir,
+                recentWorkdirs = settingsManager.getRecentWorkdirs(currentServerGroupFp()),
+            )
+            val directories = workdirs.takeIf { it.isNotEmpty() }?.toList()
+            val fetched = repository.getSlimapiQuestions(directories)
+                .onSuccess { items ->
+                    DebugLog.d("Question", "loadPendingQuestionsSlim count=${items.size}")
+                }
+                .onFailure { error ->
+                    DebugLog.w(tag, "slim getSlimapiQuestions failed: ${error.message}")
+                }
+                .getOrDefault(emptyList())
+                .map { it.toQuestionRequest() }
+            val fetchedIds = mutableSetOf<String>()
+            val slSnap = slices.sessionList.value
+            val sessionsById = allSessionsById(
+                slSnap.sessions,
+                slSnap.directorySessions,
+                slSnap.childSessions,
+            )
+            val authoritative = buildList {
+                fetched.forEach { if (fetchedIds.add(it.id)) add(it) }
+                slSnap.pendingQuestions.forEach { q ->
+                    if (q.id !in fetchedIds && q.id !in startIds) add(q)
+                }
+            }.let { filterArchivedSessionQuestions(it, sessionsById) }
+            slices.mutateSessionList { it.copy(pendingQuestions = authoritative) }
+            DebugLog.d(
+                "Question",
+                "loadPendingQuestionsSlim authoritative reconcile total=${authoritative.size} (had ${startIds.size} before)",
+            )
+        }
+    }
+
+    /**
+     * Cluster A / Phase 2 (P2.2): `session.digest` → applySlimDigest → optional
+     * `/since` message merge into the current open session's chat slice.
+     * Also folds status / archived / deleted onto the session list when those
+     * fields are present (digest is the slim stand-in for session.status /
+     * session.updated).
+     */
+    private fun handleSessionDigest(event: SSEEvent) {
+        val props = event.payload.properties
+        if (props == null) {
+            applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring session.digest with null properties")))
+            return
+        }
+        val digest = runCatching {
+            lenientJson.decodeFromJsonElement<SlimSessionDigest>(props)
+        }.getOrNull()
+        if (digest == null || digest.sessionId.isBlank()) {
+            applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid session.digest payload")))
+            return
+        }
+        DebugLog.d(
+            "Sync",
+            "session.digest sid=${digest.sessionId} status=${digest.status} " +
+                "updatedAt=${digest.updatedAt} messageId=${digest.messageId} " +
+                "archived=${digest.archived} deleted=${digest.deleted}",
+        )
+        // Status badge (slim stand-in for session.status).
+        digest.status?.takeIf { it.isNotBlank() }?.let { statusType ->
+            slices.mutateSessionList {
+                it.applySessionStatus(digest.sessionId, SessionStatus(type = statusType)).first
+            }
+        }
+        // Archived / deleted eviction (slim stand-in for session.updated archived).
+        if (digest.deleted == true || (digest.archived != null && digest.archived > 0L)) {
+            val newOpenIds = slices.sessionList.value.openSessionIds.filter { id -> id != digest.sessionId }
+            if (newOpenIds != slices.sessionList.value.openSessionIds) {
+                settingsManager.openSessionIds = newOpenIds
+            }
+            val archivedSession = Session(
+                id = digest.sessionId,
+                directory = digest.directory
+                    ?: slices.sessionList.value.sessions.firstOrNull { it.id == digest.sessionId }?.directory
+                    ?: event.directory
+                    ?: "",
+                time = Session.TimeInfo(
+                    archived = digest.archived?.takeIf { it > 0L } ?: if (digest.deleted == true) 1L else null,
+                ),
+            )
+            slices.store.dispatch(
+                cn.vectory.ocdroid.ui.AppAction.SessionArchived(
+                    session = archivedSession,
+                    openSessionIds = newOpenIds,
+                )
+            )
+            effects.tryEmitEffect(
+                ControllerEffect.EvictSession(currentServerGroupFp(), digest.sessionId)
+            )
+        } else if (digest.directory != null || digest.updatedAt != null) {
+            // Lightweight session list touch so recent-sort reflects activity.
+            val bumpAt = digest.updatedAt ?: 0L
+            if (bumpAt > 0L) {
+                slices.mutateSessionList { s ->
+                    s.applyMessageTimestampBump(digest.sessionId, bumpAt).first
+                }
+            }
+        }
+        val repo = repository
+        if (repo == null) {
+            DebugLog.d("Sync", "session.digest: no repository wired — skip fetch decision")
+            return
+        }
+        val fetch = repo.applySlimDigest(digest) ?: return
+        // Only merge messages into the currently-open session's chat view
+        // (mirrors message.updated defensive session guard). Non-current
+        // sessions still advance the repository bookmark via applySlimDigest;
+        // a later switch reloads via LoadMessages.
+        val openSessionId = slices.chat.value.currentSessionId
+        if (fetch.sessionId != openSessionId) {
+            DebugLog.d(
+                "Sync",
+                "session.digest fetch deferred (not current) sid=${fetch.sessionId} since=${fetch.since}",
+            )
+            return
+        }
+        scope.launch {
+            repo.getSlimapiMessagesSince(fetch.sessionId, fetch.since)
+                .onSuccess { items ->
+                    if (slices.chat.value.currentSessionId != fetch.sessionId) return@onSuccess
+                    mergeSlimMessagesIntoChat(items)
+                    DebugLog.d(
+                        "Sync",
+                        "session.digest merged ${items.size} messages into open session ${fetch.sessionId}",
+                    )
+                }
+                .onFailure { error ->
+                    DebugLog.w(tag, "session.digest getSlimapiMessagesSince failed: ${error.message}")
+                }
+        }
+    }
+
+    /**
+     * Cluster A / Phase 2: merge [MessageWithParts] skeletons into the open
+     * chat slice by messageID (patch-if-found + insert-if-absent for messages;
+     * parts map overwritten per fetched id). Mirrors message.updated fold.
+     */
+    private fun mergeSlimMessagesIntoChat(items: List<MessageWithParts>) {
+        if (items.isEmpty()) return
+        slices.mutateChat { chat ->
+            var messages = chat.messages
+            var partsByMessage = chat.partsByMessage
+            for (item in items) {
+                val updated = item.info
+                if (updated.id.isEmpty()) continue
+                var found = false
+                messages = messages.map {
+                    if (it.id == updated.id) {
+                        found = true
+                        updated
+                    } else it
+                }
+                if (!found) messages = messages + updated
+                if (item.parts.isNotEmpty()) {
+                    partsByMessage = partsByMessage + (updated.id to item.parts)
+                }
+            }
+            chat.copy(messages = messages, partsByMessage = partsByMessage)
+        }
+    }
+
+    /**
+     * Cluster A / Phase 2 (P2.4 / P2.5): fold a [SlimColdStartSnapshot] (from
+     * [OpenCodeRepository.coldStartSlimSync] — also the resync path) into the
+     * UI slices. Called by [cn.vectory.ocdroid.service.SessionStreamingService]
+     * after a successful cold-start / resync fetch. Failures are partial
+     * (empty lists); null messages means no open-session fetch was requested.
+     */
+    fun applySlimColdStartSnapshot(snapshot: SlimColdStartSnapshot) {
+        DebugLog.i(
+            "Sync",
+            "applySlimColdStartSnapshot sessions=${snapshot.sessions.size} " +
+                "questions=${snapshot.questions.size} permissions=${snapshot.permissions.size} " +
+                "messages=${snapshot.messages?.size ?: "null"}",
+        )
+        // Sessions: replace top-level list with the slim skeleton snapshot
+        // (excludes archived by default). Preserve directorySessions buckets
+        // that still match; rebuild from the flat list when possible.
+        if (snapshot.sessions.isNotEmpty()) {
+            val byDirectory = snapshot.sessions.groupBy { it.directory }
+            slices.mutateSessionList { s ->
+                s.copy(
+                    sessions = snapshot.sessions,
+                    directorySessions = byDirectory,
+                )
+            }
+        }
+        // Questions: authoritative replace preserving routeToken.
+        val questions = snapshot.questions.map { it.toQuestionRequest() }
+        val permissions = snapshot.permissions.map {
+            PermissionRequest(
+                id = it.id,
+                sessionId = it.sessionId,
+                permission = it.permission,
+                patterns = it.patterns,
+                metadata = it.metadata,
+                always = it.always,
+                tool = it.tool,
+                routeToken = it.routeToken,
+            )
+        }
+        slices.mutateSessionList { s ->
+            val sessionsById = allSessionsById(s.sessions, s.directorySessions, s.childSessions)
+            s.copy(
+                pendingQuestions = filterArchivedSessionQuestions(questions, sessionsById),
+                pendingPermissions = permissions,
+            )
+        }
+        // Open-session messages: merge by id when the snapshot targeted the
+        // currently open session.
+        val msgs = snapshot.messages
+        if (msgs != null) {
+            mergeSlimMessagesIntoChat(msgs)
         }
     }
 
@@ -1850,10 +2137,66 @@ internal fun ChatState.clearAllCoalesceBuffers(): Pair<ChatState, List<SseSideEf
 /**
  * question.asked → append [question] to [SessionListState.pendingQuestions]
  * iff its id is not already present (idempotent). Pure.
+ *
+ * Cluster A / Phase 2: when a duplicate id arrives WITH a non-null
+ * [QuestionRequest.routeToken] and the existing entry has null, upgrade the
+ * stored entry (slim SSE may re-deliver with the token after a REST-only
+ * insert).
  */
 internal fun SessionListState.applyQuestionAsked(question: QuestionRequest): Pair<SessionListState, List<SseSideEffect>> {
-    val existing = pendingQuestions.any { it.id == question.id }
-    return (if (existing) this else copy(pendingQuestions = pendingQuestions + question)) to emptyList()
+    val existingIdx = pendingQuestions.indexOfFirst { it.id == question.id }
+    if (existingIdx < 0) {
+        return copy(pendingQuestions = pendingQuestions + question) to emptyList()
+    }
+    val existing = pendingQuestions[existingIdx]
+    if (existing.routeToken.isNullOrBlank() && !question.routeToken.isNullOrBlank()) {
+        val upgraded = pendingQuestions.toMutableList().also { it[existingIdx] = question }
+        return copy(pendingQuestions = upgraded) to emptyList()
+    }
+    return this to emptyList()
+}
+
+/**
+ * permission.asked (slim SSE with routeToken) → append/upgrade
+ * [SessionListState.pendingPermissions] by id. Pure. Legacy path still
+ * relies on [SseSideEffect.LoadPendingPermissions] REST refresh.
+ */
+internal fun SessionListState.applyPermissionAsked(permission: PermissionRequest): Pair<SessionListState, List<SseSideEffect>> {
+    val existingIdx = pendingPermissions.indexOfFirst { it.id == permission.id }
+    if (existingIdx < 0) {
+        return copy(pendingPermissions = pendingPermissions + permission) to emptyList()
+    }
+    val existing = pendingPermissions[existingIdx]
+    if (existing.routeToken.isNullOrBlank() && !permission.routeToken.isNullOrBlank()) {
+        val upgraded = pendingPermissions.toMutableList().also { it[existingIdx] = permission }
+        return copy(pendingPermissions = upgraded) to emptyList()
+    }
+    return this to emptyList()
+}
+
+/**
+ * Cluster A / Phase 2: map a slimapi aggregate question entry onto the legacy
+ * [QuestionRequest] UI model, **preserving [SlimapiQuestionEntry.routeToken]**.
+ */
+internal fun SlimapiQuestionEntry.toQuestionRequest(): QuestionRequest =
+    QuestionRequest(
+        id = id,
+        sessionId = sessionId,
+        questions = questions,
+        tool = tool,
+        routeToken = routeToken,
+    )
+
+/**
+ * Cluster A / Phase 2: parse a `permission.asked` SSE frame into a
+ * [PermissionRequest], including optional [PermissionRequest.routeToken]
+ * from slim properties. Returns null on malformed payload.
+ */
+internal fun parsePermissionAskedEvent(event: SSEEvent): PermissionRequest? {
+    val properties = event.payload.properties ?: return null
+    return runCatching {
+        lenientJson.decodeFromJsonElement<PermissionRequest>(properties)
+    }.getOrNull()
 }
 
 /**

@@ -3,7 +3,9 @@ package cn.vectory.ocdroid.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.ServerCompatProfile
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
+import cn.vectory.ocdroid.data.repository.http.SlimapiContract
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
@@ -48,6 +50,17 @@ class ConnectionViewModel @Inject constructor(
     private val settingsManager: SettingsManager,
     private val repository: OpenCodeRepository,
     private val trafficTracker: TrafficTracker,
+    /**
+     * §slim-reconcile-lane-repo (Phase 3a / Lane-B3-Dialog): the shared
+     * [ServerCompatProfile] (Hilt @Singleton — same instance
+     * [OpenCodeRepository] writes to from [OpenCodeRepository.checkHealthFor]'s
+     * slim branch). Read AFTER [repository.checkHealthFor] returns so the
+     * test-connection path can detect slimapi version mismatch (M2 self-check)
+     * and feed [ConnectionState.slimapiVersionIncompatible] — closing the
+     * fail-closed UX loop (transport fail-close worked but the blocking dialog
+     * never fired because the flag was never written from this path).
+     */
+    private val serverCompatProfile: ServerCompatProfile,
 ) : ViewModel() {
 
     /**
@@ -61,6 +74,7 @@ class ConnectionViewModel @Inject constructor(
         core.settingsManager,
         core.repository,
         core.trafficTracker,
+        core.serverCompatProfile,
     )
 
     val connectionFlow get() = store.connectionFlow
@@ -83,13 +97,14 @@ class ConnectionViewModel @Inject constructor(
         password: String?,
         profileId: String?,
         passwordEdited: Boolean,
+        slim: Boolean = false,
         onResult: (success: Boolean, message: String) -> Unit,
     ) = testConnectionForm(
         baseUrl, username, password, profileId, passwordEdited,
         // §2.7 默认无 mTLS（兼容既有 6-arg 调用方 / 旧测试）：
         mtlsEnabled = false, stagedP12 = null, hasImportedP12 = false,
         caStage = CaStage.Unchanged, p12Password = null, p12PasswordEdited = false,
-        clientCertId = null, onResult = onResult,
+        clientCertId = null, slim = slim, onResult = onResult,
     )
 
     /**
@@ -122,6 +137,7 @@ class ConnectionViewModel @Inject constructor(
         p12Password: String?,
         p12PasswordEdited: Boolean,
         clientCertId: String?,
+        slim: Boolean = false,
         onResult: (success: Boolean, message: String) -> Unit,
     ) {
         viewModelScope.launch {
@@ -158,8 +174,40 @@ class ConnectionViewModel @Inject constructor(
             val result = repository.checkHealthFor(
                 baseUrl, username, effectivePassword,
                 hostPort = hostPortFromUrl(baseUrl),
-                clientCert = clientCert
+                clientCert = clientCert,
+                slim = slim,
             )
+            // §slim-reconcile-lane-repo (Phase 3a / Lane-B3-Dialog): M2 自检
+            // 闭环——checkHealthFor 的 slim 分支已把 sidecar 公告的版本契约喂
+            // [serverCompatProfile]（镜像 probeSlimapiHealth T5）。这里读回来：
+            // slim 模式 + 服务端给出了 accepted_client_versions + 客户端版本
+            // 不在闭区间内 → 写 [ConnectionState.slimapiVersionIncompatible]
+            // 让 HostProfilesManagerScreen 弹阻塞 dialog（fail-closed UX）。
+            // 否则（兼容 / legacy / 服务端未给出该字段）→ 清 stale flag，避免
+            // 上一次不兼容测试残留干扰。
+            val scpMin = serverCompatProfile.slimapiAcceptedMin
+            val scpMax = serverCompatProfile.slimapiAcceptedMax
+            if (slim && scpMin != null && scpMax != null &&
+                !serverCompatProfile.isSlimapiClientAccepted()
+            ) {
+                store.mutateConnection {
+                    it.copy(
+                        slimapiVersionIncompatible = Triple(
+                            SlimapiContract.SLIMAPI_CLIENT_VERSION,
+                            scpMin,
+                            scpMax,
+                        )
+                    )
+                }
+                onResult(
+                    false,
+                    "slimapi 版本不兼容（客户端=${SlimapiContract.SLIMAPI_CLIENT_VERSION}, " +
+                        "服务端接受=[$scpMin,$scpMax]）"
+                )
+                return@launch
+            }
+            // 清 stale：兼容 / legacy / 服务端未公告 accepted_client_versions。
+            store.mutateConnection { it.copy(slimapiVersionIncompatible = null) }
             result
                 .onSuccess { health ->
                     if (health.healthy) {

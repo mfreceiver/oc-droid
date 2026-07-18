@@ -11,7 +11,14 @@ data class PermissionRequest(
     val patterns: List<String>? = null,
     val metadata: Metadata? = null,
     val always: List<String>? = null,
-    val tool: ToolRef? = null
+    val tool: ToolRef? = null,
+    /**
+     * Slimapi HMAC the sidecar validates on the permission response POST
+     * (~1h TTL). Present only when the permission arrived via slim SSE /
+     * `/slimapi/permissions`; legacy paths leave this null. Phase 3 respond
+     * path returns it on the slim write endpoints.
+     */
+    @SerialName("routeToken") val routeToken: String? = null,
 ) {
     @Serializable
     data class Metadata(

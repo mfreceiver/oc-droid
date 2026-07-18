@@ -317,6 +317,18 @@
          removed). Mirrors the mtlsBanner/mtlsImportError style; keeps the disabled Save button
          from looking like a no-op. -->
     <string name="host_mtls_missing_client_cert">Import a client certificate first to enable mTLS</string>
+    <!-- §R8 slim-mode UI: host profile editor slim toggle + connection mode summary -->
+    <string name="host_slim_title">Slim mode</string>
+    <string name="host_slim_summary">Use oc-slimapi sidecar for reduced data usage.</string>
+    <string name="host_slim_mode_label">Connection mode</string>
+    <string name="host_slim_mode_direct_opencode">Direct to OpenCode</string>
+    <string name="host_slim_mode_stunnel_opencode">Stunnel + OpenCode</string>
+    <string name="host_slim_mode_direct_slim">Direct to SlimAPI</string>
+    <string name="host_slim_mode_stunnel_slim">Stunnel + SlimAPI</string>
+    <!-- §R8 slimapi version incompatible: blocking dialog (Tier C) when client version outside accepted range -->
+    <string name="slimapi_version_incompatible_title">Version Incompatible</string>
+    <string name="slimapi_version_incompatible_message">The SlimAPI server does not accept this client version.\n\nClient version: %1$d\nAccepted range: %2$d – %3$d\n\nPlease upgrade the client or server to continue using slim mode.</string>
+    <string name="slimapi_version_incompatible_dismiss">OK</string>
     <string name="host_profile_untitled">Untitled</string>
     <string name="question_title">Question</string>
     <string name="question_multi_hint">Select one or more options</string>

@@ -67,6 +67,7 @@ data class SaveCallResult(
     val tunnelPw: String,
     val tunnelEd: Boolean,
     val mtlsOn: Boolean,
+    val slimOn: Boolean,
     val stagedP12: ByteArray?,
     val caStage: CaStage,
     val p12Password: String?,
@@ -129,6 +130,7 @@ internal fun buildSaveCall(
     tunnelPassword: String,
     tunnelEdited: Boolean,
     mtlsEnabled: Boolean,
+    slimEnabled: Boolean,
     clientCleared: Boolean,
     stagedP12: ByteArray?,
     caStage: CaStage,
@@ -166,6 +168,7 @@ internal fun buildSaveCall(
         serverUrl = serverUrl,
         basicAuth = basicAuth,
         tunnelPasswordId = tunnelId,
+        slim = slimEnabled,
         serverGroupFp = if (selectedGroup != initialGroup) {
             selectedGroup ?: initial.id
         } else {
@@ -185,6 +188,7 @@ internal fun buildSaveCall(
         tunnelPw = effectiveTunnelPw,
         tunnelEd = effectiveTunnelEd,
         mtlsOn = mtlsEnabled,
+        slimOn = slimEnabled,
         stagedP12 = stagedP12,
         caStage = caStage,
         p12Password = null,

@@ -129,6 +129,15 @@ class QuestionSerializationTest {
         assertEquals("s1", decoded.sessionId)
         assertEquals(0, decoded.questions.size)
         assertNull(decoded.tool)
+        assertNull("routeToken defaults null for legacy payloads", decoded.routeToken)
+    }
+
+    @Test
+    fun `QuestionRequest decodes routeToken from slim payload`() {
+        val decoded = json.decodeFromString<QuestionRequest>(
+            """{"id":"q1","sessionID":"s1","questions":[],"routeToken":"rt-1"}"""
+        )
+        assertEquals("rt-1", decoded.routeToken)
     }
 
     @Test

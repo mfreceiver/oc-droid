@@ -84,7 +84,19 @@ class AppCore @Inject constructor(
     internal val hostProfileStore: HostProfileStore,
     internal val trafficTracker: TrafficTracker,
     private val appLifecycleMonitor: AppLifecycleMonitor,
-    private val serverCompatProfile: cn.vectory.ocdroid.data.repository.ServerCompatProfile,
+    /**
+     * §slim-reconcile-lane-repo (Phase 3a / Lane-B3-Dialog): exposed `internal`
+     * so [ConnectionViewModel]'s test-connection path can read
+     * [ServerCompatProfile.isSlimapiClientAccepted] / [ServerCompatProfile.slimapiAcceptedMin]
+     * / [ServerCompatProfile.slimapiAcceptedMax] AFTER [OpenCodeRepository.checkHealthFor]
+     * wrote them (slim branch mirrors `probeSlimapiHealth`'s T5 updateSlimapi call) —
+     * this closes the M2 version-incompatibility UX loop (fail-closed transport
+     * worked but the dialog never fired because the flag was never written from
+     * the test-connection path). Visibility bumped from `private` to `internal`
+     * for the secondary constructor forwarding; production never reads this
+     * directly outside ConnectionViewModel.
+     */
+    internal val serverCompatProfile: cn.vectory.ocdroid.data.repository.ServerCompatProfile,
     /** R-17 batch3: shared bus for cross-VM effect dispatch. Controllers emit
      *  [ControllerEffect]s on [SharedEffectBus.effects]; this class collects
      *  them in its [init] block and dispatches. UiEvents ride

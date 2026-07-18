@@ -216,6 +216,9 @@ class HostProfileController(
         val mtlsChanged = previous?.mtlsEnabled != normalized.mtlsEnabled ||
             previous?.clientCertId != normalized.clientCertId ||
             mtlsMaterialEdited
+        // §R8 slim-mode UI: 省流模式切换也是重连触发器——slim 字段影响路由
+        // （/slimapi/ vs legacy）和版本头注入，必须重建 client。
+        val slimChanged = previous?.slim != normalized.slim
         if (isActiveHost && urlChanged) {
             // §bug5 / R-20 Phase 5: URL changed → drop model data so stale
             // disable config does not leak / orphan. Was clearModelDataForUrl
@@ -225,7 +228,7 @@ class HostProfileController(
             // (now-empty) set.
             settingsManager.clearModelDataForGroup(normalized.serverGroupFp.ifBlank { normalized.id })
         }
-        if (isActiveHost && (urlChanged || mtlsChanged)) {
+        if (isActiveHost && (urlChanged || mtlsChanged || slimChanged)) {
             if (reconfigureBarrier != null) {
                 scope.launch {
                     configureRepositoryForProfileAwait(normalized)
