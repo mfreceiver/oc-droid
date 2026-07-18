@@ -316,15 +316,24 @@ internal fun launchDeleteSession(
                 slices.mutateUnread { it.removeSessions(removedIds) }
                 val currentId = slices.chat.value.currentSessionId
                 if (currentId != null && currentId in removedIds) {
-                    val newCurrent = newSessions.firstOrNull()?.id
-                    if (newCurrent != null) {
-                        onSelectSession(newCurrent)
+                    // §fix-delete-no-resurrect (oracle+grok review): align with
+                    // closeSession — switch to the last remaining OPEN tab if
+                    // any, else clear currentSessionId (the centralized AppCore
+                    // collector persists the null). Pre-fix this unconditionally
+                    // picked newSessions.first() and opened it as a tab,
+                    // bypassing the user's tab set and resurrecting a session
+                    // the same way the close-all bug did. newSessions.first()
+                    // also ignored openSessionIds entirely, so a non-open
+                    // session could become a tab-less current.
+                    val remainingOpenIds = slices.sessionList.value.openSessionIds
+                        .filter { it !in removedIds }
+                    val nextId = remainingOpenIds.lastOrNull()
+                    if (nextId != null) {
+                        onSelectSession(nextId)
                     } else {
-                        // #10: no remaining session — clear currentSessionId on
-                        // the chat slice too, otherwise a stale id survives in
+                        // #10: no remaining OPEN session — clear currentSessionId
+                        // on the chat slice too, otherwise a stale id survives in
                         // the runtime state pointing at a deleted session.
-                        // §R18 Phase 2-F: chatFlow is the sole runtime source;
-                        // the AppCore collector drops null so no manual write.
                         slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
                     }
                 }

@@ -319,20 +319,26 @@ class AppCore @Inject constructor(
         // performed — see the task brief's "MismatchEvicted 清理副作用" note
         // for the accepted self-heal behaviour.
 
-        // Persistence side-effect: every non-null change of chatFlow's
-        // currentSessionId is written back to SettingsManager so the next cold
-        // start can re-seed. `filterNotNull()` prevents the collector from
-        // reading the initial null (before the seed lands) and overwriting the
-        // seed; it also means null-clearing transitions (host switch / close /
-        // delete / archive of the current session) are NOT persisted here —
-        // those are handled by the explicit chatFlow.clear + applySavedSettings
-        // archived-id filter on the next cold start. `distinctUntilChanged`
-        // avoids redundant writes. UNDISPATCHED so the collector is registered
-        // before the constructor returns (same rationale as the two collectors
-        // above).
+        // Persistence side-effect: every DISTINCT change of chatFlow's
+        // currentSessionId (including null) is written back to
+        // SettingsManager so the next cold start can re-seed — AND so a
+        // null-clearing transition (close-all-tabs / archive / delete /
+        // SSE-archive / host-purge) is persisted, preventing applySavedSettings
+        // from resurrecting a stale id on the next cold start.
+        //
+        // §fix-null-persistence (oracle+grok review): the prior
+        // `filterNotNull()` here meant null transitions were NOT persisted,
+        // so every "clear current" path left the stale id in SettingsManager
+        // and the next cold start re-seeded it — the recurring "residual
+        // session after close-all" theme. Centralizing null persistence here
+        // closes close/archive/delete/SSE-archive in ONE place; the seed
+        // block above runs synchronously BEFORE this collector subscribes
+        // (UNDISPATCHED launch), so the collector's first emission is always
+        // the already-seeded value (never a pre-seed null that would wrongly
+        // wipe a valid persisted id). `distinctUntilChanged` avoids
+        // redundant writes.
         appScope.launch(start = CoroutineStart.UNDISPATCHED) {
             store.chatFlow.map { it.currentSessionId }
-                .filterNotNull()
                 .distinctUntilChanged()
                 .collect { id -> settingsManager.currentSessionId = id }
         }

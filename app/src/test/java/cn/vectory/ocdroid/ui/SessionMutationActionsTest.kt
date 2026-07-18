@@ -662,7 +662,9 @@ class SessionMutationActionsTest {
     fun `launchDeleteSession selects fallback when current session is deleted`() = runTest {
         val s1 = Session(id = "s1", directory = "/x")
         val s2 = Session(id = "s2", directory = "/x")
-        store.mutateSessionList { it.copy(sessions = listOf(s1, s2)) }
+        store.mutateSessionList {
+            it.copy(sessions = listOf(s1, s2), openSessionIds = listOf("s1", "s2"))
+        }
         store.mutateChat { it.copy(currentSessionId = "s1") }
         coEvery { repository.deleteSession(any()) } returns Result.success(Unit)
         var selected: String? = null
@@ -670,8 +672,34 @@ class SessionMutationActionsTest {
         launchDeleteSession(scope, repository, slices, settingsManager, sessionId = "s1", onSelectSession = { selected = it }, emit = emit)
         advanceUntilIdle()
 
-        // Remaining first session selected.
+        // §fix-delete-no-resurrect: the last remaining OPEN tab is selected.
         assertEquals("s2", selected)
+    }
+
+    @Test
+    fun `launchDeleteSession clears current when no remaining OPEN tab even if other sessions exist`() = runTest {
+        // §fix-delete-no-resurrect (oracle+grok review): pre-fix this
+        // unconditionally selected newSessions.first() and opened it as a
+        // tab — bypassing the user's tab set and resurrecting a session the
+        // way the close-all bug did. Now delete mirrors closeSession: only
+        // an already-OPEN tab is selected; otherwise currentSessionId is
+        // cleared. Here s2 exists in the session list but is NOT an open tab,
+        // so deleting the current (and only open) session s1 must clear, not
+        // auto-open s2.
+        val s1 = Session(id = "s1", directory = "/x")
+        val s2 = Session(id = "s2", directory = "/x")
+        store.mutateSessionList {
+            it.copy(sessions = listOf(s1, s2), openSessionIds = listOf("s1"))
+        }
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+        coEvery { repository.deleteSession(any()) } returns Result.success(Unit)
+        var selected: String? = null
+
+        launchDeleteSession(scope, repository, slices, settingsManager, sessionId = "s1", onSelectSession = { selected = it }, emit = emit)
+        advanceUntilIdle()
+
+        assertNull("must NOT auto-open a non-tab session", selected)
+        assertNull("currentSessionId cleared (no open tab to fall back to)", slices.chat.value.currentSessionId)
     }
 
     @Test

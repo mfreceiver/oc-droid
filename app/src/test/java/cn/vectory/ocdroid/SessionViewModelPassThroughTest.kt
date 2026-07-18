@@ -152,6 +152,27 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
     }
 
     @Test
+    fun `deleteSession current clears persisted currentSessionId via the collector`() = runTest {
+        // §fix-null-persistence (oracle+grok review): the AppCore collector no
+        // longer filters null — a null currentSessionId transition from ANY
+        // path (here: launchDeleteSession clearing chat after deleting the
+        // current session, which has NO explicit settingsManager write) must
+        // be persisted so the next cold start cannot re-seed the deleted id.
+        every { settingsManager.openSessionIds } returns listOf("s1")
+        coEvery { repository.deleteSession(any()) } returns Result.success(Unit)
+        val core = createCore()
+        val vm = SessionViewModel(core)
+        core.writeChat { it.copy(currentSessionId = "s1") }
+        core.writeSessionList { it.copy(sessions = listOf(Session(id = "s1", directory = "/x")), openSessionIds = listOf("s1")) }
+
+        vm.deleteSession("s1")
+        advanceUntilIdle()
+
+        assertNull("runtime currentSessionId cleared", core.chatFlow.value.currentSessionId)
+        verify { settingsManager.currentSessionId = null }
+    }
+
+    @Test
     fun `closeSession current session saves current draft text first`() = runTest {
         every { settingsManager.openSessionIds } returns listOf("s1")
         val core = createCore()
