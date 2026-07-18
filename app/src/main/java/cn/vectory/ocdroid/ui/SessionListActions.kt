@@ -379,35 +379,44 @@ internal fun launchLoadSessions(
                     // session would discard the draft's repository workdir and
                     // hijack the empty chat page the user is composing into.
                     //
-                    // gro-2 Blocker 2b: select the first NON-archived session.
-                    // If the server returns an archived session first (e.g.
-                    // after a bulk-archive nulled currentSessionId), we must
-                    // NOT resurrect it as current. If ALL candidates are
-                    // archived (or the list is empty), fall through to the
-                    // chat-clear — never select an archived session.
-                    //
-                    // §fix-close-all-residual: the auto-select is ALSO gated on
-                    // [isInitialColdStart] — it must only land the user on a
-                    // session during true cold start. Once the first load has
-                    // completed, a null currentSessionId means the user
-                    // deliberately closed every tab (or otherwise emptied the
-                    // chat), and the empty state is the correct outcome —
-                    // silently re-selecting the first server session would
-                    // resurrect a tab-less residual chat.
+                    // §fix-close-all-no-first (home-hub): NEVER invent a
+                    // current session from `sessions.first()`. Auto-select is
+                    // restore-only:
+                    //   - if openSessionIds is empty AND current is null →
+                    //     user closed every tab (or cold-started with no
+                    //     open tabs) → stay empty / Sessions hub.
+                    //   - if openSessionIds still has roots AND current is
+                    //     null (e.g. persisted current wiped but open tabs
+                    //     restored from cache) → restore the last open tab
+                    //     that is still non-archived in the refresh.
+                    //   - isInitialColdStart is retained only for the
+                    //     open-tabs restore path so a post-close refresh
+                    //     cannot re-open a residual tab.
+                    // HostStatePurged re-arms hasCompletedInitialLoad=false,
+                    // but empty openSessionIds still wins (no first()).
                     currentSessionId == null &&
                         slices.composer.value.draftWorkdir == null &&
-                        isInitialColdStart -> {
-                        val candidate = refreshedSessions.firstOrNull { !it.isArchived }
-                        if (candidate != null) {
-                            onSelectSession(candidate.id)
+                        currentOpenIds.isEmpty() -> {
+                        slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                    }
+                    currentSessionId == null &&
+                        slices.composer.value.draftWorkdir == null &&
+                        isInitialColdStart &&
+                        currentOpenIds.isNotEmpty() -> {
+                        val liveById = refreshedSessions
+                            .filter { !it.isArchived }
+                            .associateBy { it.id }
+                        val candidateId = currentOpenIds.asReversed()
+                            .firstOrNull { it in liveById }
+                        if (candidateId != null) {
+                            onSelectSession(candidateId)
                         } else {
                             slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
                         }
                     }
                     // §fix-close-all-residual: null currentSessionId on a NON-
-                    // initial refresh (user closed all tabs) — keep the empty
-                    // state instead of auto-selecting. currentSessionId stays
-                    // null; ChatScaffold renders the empty-state hint.
+                    // initial refresh with leftover open ids (rare) — keep
+                    // empty rather than inventing a session.
                     currentSessionId == null &&
                         slices.composer.value.draftWorkdir == null -> {
                         slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
@@ -549,19 +558,29 @@ internal fun launchLoadMoreSessions(
                 val currentId = currentSessionId
                 val refreshedSessions = mergedSessions
                 when {
-                    // Mirror loadSessions' draft guard for consistency: never
-                    // auto-select first() while the user is mid-draft. This
-                    // branch is currently dead (loadMore is only triggered by
-                    // user scroll, not initial load), but the guard keeps the
-                    // two paths symmetric if the trigger ever changes.
-                    //
-                    // §fix-close-all-residual: also gated on isInitialColdStart
-                    // — a non-initial load must not resurrect a session after
-                    // the user closed every tab.
+                    // §fix-close-all-no-first: mirror launchLoadSessions —
+                    // never invent a current from sessions.first(). Restore
+                    // only from remaining open tabs on true cold start.
                     currentId == null &&
                         slices.composer.value.draftWorkdir == null &&
-                        refreshedSessions.isNotEmpty() &&
-                        isInitialColdStart -> onSelectSession(refreshedSessions.first().id)
+                        currentOpenIds.isEmpty() -> {
+                        slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                    }
+                    currentId == null &&
+                        slices.composer.value.draftWorkdir == null &&
+                        isInitialColdStart &&
+                        currentOpenIds.isNotEmpty() -> {
+                        val liveById = refreshedSessions
+                            .filter { !it.isArchived }
+                            .associateBy { it.id }
+                        val candidateId = currentOpenIds.asReversed()
+                            .firstOrNull { it in liveById }
+                        if (candidateId != null) {
+                            onSelectSession(candidateId)
+                        } else {
+                            slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                        }
+                    }
                     // A non-null currentId is never silently replaced by
                     // refreshedSessions.first(): tolerate the session even when
                     // it is temporarily absent from the refreshed list. #10.

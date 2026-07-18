@@ -236,34 +236,64 @@ class SessionViewModel @Inject constructor(
             // keying it on the root would lose / mis-restore it.
             settingsManager.setDraftText(fp, curId, store.composerFlow.value.inputText)
         }
-        val updated = settingsManager.openSessionIds.filter { it != sessionId }
+        // §fix-close-all-slice-source: openSessionIds AUTHORITATIVE source is
+        // the session-list slice (same as SessionSwitcher.append). Pre-fix
+        // this filtered settingsManager.openSessionIds (disk), which could
+        // diverge from the runtime tab strip and leave a ghost nextId (or
+        // skip clearing) after the last visible tab was closed.
+        val updated = store.sessionListFlow.value.openSessionIds.filter { it != sessionId }
         settingsManager.openSessionIds = updated
         val nextId = updated.lastOrNull()
         store.mutateSessionList { it.copy(openSessionIds = updated) }
         store.mutateUnread { it.copy(unreadSessions = it.unreadSessions - sessionId) }
-        if (closingCurrentTree && nextId == null) {
-            // §R18 Phase 2-F: chatFlow is the sole runtime source; the
-            // chat.update below clears currentSessionId.
-            store.mutateChat { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
-            // §fix-close-all-residual: ALSO clear the PERSISTED
-            // currentSessionId synchronously. The AppCore collector now
-            // persists null too (§fix-null-persistence), so this is strictly
-            // belt-and-suspenders — but it makes close-all's intent explicit
-            // AND deterministic for tests (the collector write is async via
-            // appScope). Without EITHER clear, the old id would stay in
-            // SettingsManager and applySavedSettings would re-seed chatFlow
-            // with it on the next cold start, resurrecting a session the user
-            // closed all tabs on (the "OpenCode 项目自动关联…" residual).
-            settingsManager.currentSessionId = null
-        }
-        if (closingCurrentTree && nextId == null) {
-            // §1B-FIX (I4): closing the last session must also clear
-            // fileReferences + imageAttachments — the chips must not leak
-            // to the empty state.
-            store.mutateComposer { it.copy(inputText = "", imageAttachments = emptyList(), fileReferences = emptyList()) }
-        }
-        if (closingCurrentTree && nextId != null) {
-            selectSession(nextId)
+        if (updated.isEmpty()) {
+            // §fix-close-all-empty-tabs-home: ANY path that empties open tabs
+            // (close last current, close last non-current while current was
+            // already null, close last residual open id) must honor empty-tabs
+            // intent — not only `closingCurrentTree`. Matches ChatScaffold's
+            // empty openSessionIds → home rule (draftWorkdir is the sole
+            // stay-on-Chat exception for mid-composition).
+            val hasDraft = store.composerFlow.value.draftWorkdir != null
+            // Defensive: no open tab may leave a residual currentSessionId
+            // (orphan current after non-current last-close, or race residue).
+            if (store.chatFlow.value.currentSessionId != null) {
+                store.mutateChat {
+                    it.copy(
+                        currentSessionId = null,
+                        messages = emptyList(),
+                        partsByMessage = emptyMap(),
+                    )
+                }
+                // §fix-close-all-residual: ALSO clear the PERSISTED
+                // currentSessionId synchronously (belt-and-suspenders with the
+                // AppCore null-persistence collector).
+                settingsManager.currentSessionId = null
+            }
+            if (!hasDraft) {
+                // §1B-FIX (I4): chips must not leak onto the empty / home
+                // surface when leaving Chat entirely.
+                store.mutateComposer {
+                    it.copy(
+                        inputText = "",
+                        imageAttachments = emptyList(),
+                        fileReferences = emptyList(),
+                    )
+                }
+                // Domain half of leave-Chat: AppShell's
+                // LaunchedEffect(requestedRoute) hops to Sessions. Compose
+                // ChatScaffold snapshotFlow empty-tabs → onBackToHome remains
+                // belt-and-suspenders (also handles popBackStack).
+                val sessionsRoute = NavRoute.Sessions
+                settingsManager.lastRoute = sessionsRoute.route
+                store.mutateNav {
+                    it.copy(
+                        lastRoute = sessionsRoute.route,
+                        lastNavPage = sessionsRoute.legacyPage,
+                    )
+                }
+            }
+        } else if (closingCurrentTree) {
+            selectSession(nextId!!)
         }
     }
 

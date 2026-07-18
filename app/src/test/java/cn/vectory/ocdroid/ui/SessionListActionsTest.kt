@@ -351,7 +351,9 @@ class SessionListActionsTest {
     }
 
     @Test
-    fun `launchLoadSessions auto-selects first when no current session and not drafting`() = runTest {
+    fun `launchLoadSessions does not invent first session when no current and no open tabs`() = runTest {
+        // §fix-close-all-no-first: empty open tabs + null current must stay
+        // empty even on cold start — never pick sessions.first().
         val sessions = listOf(Session(id = "first", directory = "/x"))
         coEvery { repository.getSessions(any()) } returns Result.success(sessions)
         var selected: String? = null
@@ -359,40 +361,66 @@ class SessionListActionsTest {
         launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
         advanceUntilIdle()
 
-        assertEquals("first", selected)
+        assertNull("must NOT invent a session from first()", selected)
+        assertNull(slices.chat.value.currentSessionId)
     }
 
-    // ── gro-2 Blocker 2b: auto-select must skip archived sessions ────────────
+    // ── §fix-close-all-no-first: restore-only auto-select from open tabs ────
 
     @Test
-    fun `gro-2 Blocker 2b - auto-select skips archived session and selects first live one`() = runTest {
-        // If the server returns an archived session first (e.g. after a bulk-
-        // archive nulled currentSessionId), the auto-select must NOT resurrect
-        // it — select the first NON-archived session instead.
-        val archivedA = Session(id = "archived-A", directory = "/x", time = Session.TimeInfo(archived = 1L))
-        val liveB = Session(id = "live-B", directory = "/x")
-        coEvery { repository.getSessions(any()) } returns Result.success(listOf(archivedA, liveB))
+    fun `fix-close-all-no-first - cold start restores last open tab not server first`() = runTest {
+        // Open tabs restored from cache with null current (persisted current
+        // wiped). First load may restore the last OPEN tab — never the
+        // earliest server session that is not open.
+        val earliest = Session(id = "earliest", directory = "/x")
+        val openA = Session(id = "open-A", directory = "/x")
+        val openB = Session(id = "open-B", directory = "/x")
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(earliest, openA, openB))
+        store.mutateSessionList {
+            it.copy(openSessionIds = listOf("open-A", "open-B"), hasCompletedInitialLoad = false)
+        }
         var selected: String? = null
 
         launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
         advanceUntilIdle()
 
-        assertEquals("must select live-B, NOT archived-A", "live-B", selected)
+        assertEquals("restore last open tab, not earliest", "open-B", selected)
     }
 
     @Test
-    fun `gro-2 Blocker 2b - auto-select clears chat when ALL candidates are archived`() = runTest {
-        // If every session in the refresh result is archived, do NOT select
-        // any — fall through to the chat-clear (empty state).
+    fun `fix-close-all-no-first - open-tab restore skips archived open ids`() = runTest {
+        val archivedOpen = Session(id = "archived-open", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        val liveOpen = Session(id = "live-open", directory = "/x")
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(archivedOpen, liveOpen))
+        store.mutateSessionList {
+            it.copy(
+                openSessionIds = listOf("live-open", "archived-open"),
+                hasCompletedInitialLoad = false,
+            )
+        }
+        var selected: String? = null
+
+        launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
+        advanceUntilIdle()
+
+        assertEquals("must select live open tab, not archived", "live-open", selected)
+    }
+
+    @Test
+    fun `fix-close-all-no-first - all open tabs archived clears without inventing`() = runTest {
         val archivedA = Session(id = "archived-A", directory = "/x", time = Session.TimeInfo(archived = 1L))
         val archivedC = Session(id = "archived-C", directory = "/x", time = Session.TimeInfo(archived = 2L))
-        coEvery { repository.getSessions(any()) } returns Result.success(listOf(archivedA, archivedC))
+        val liveElsewhere = Session(id = "live-elsewhere", directory = "/x")
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(archivedA, archivedC, liveElsewhere))
+        store.mutateSessionList {
+            it.copy(openSessionIds = listOf("archived-A", "archived-C"), hasCompletedInitialLoad = false)
+        }
         var selected: String? = null
 
         launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
         advanceUntilIdle()
 
-        assertNull("no archived session selected", selected)
+        assertNull("no archived open tab selected; do not invent live-elsewhere", selected)
         assertNull("chat cleared (empty state)", slices.chat.value.currentSessionId)
     }
 
@@ -401,6 +429,7 @@ class SessionListActionsTest {
         val sessions = listOf(Session(id = "first", directory = "/x"))
         coEvery { repository.getSessions(any()) } returns Result.success(sessions)
         store.mutateComposer { it.copy(draftWorkdir = "/somewhere") }
+        store.mutateSessionList { it.copy(openSessionIds = listOf("first")) }
         var selected: String? = null
 
         launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
@@ -409,12 +438,7 @@ class SessionListActionsTest {
         assertNull(selected)
     }
 
-    // ── §fix-close-all-residual: cold-start auto-select must NOT refire ──────
-    // The auto-select lands the user on a session during TRUE cold start only.
-    // Once the first load has completed, a null currentSessionId means the user
-    // closed every tab — a refresh must keep the empty state instead of
-    // resurrecting the first server session (which produced the stable
-    // "StreamingSvcLauncher AckTimeout bootstrap abort" residual).
+    // ── §fix-close-all-residual / no-first: empty tabs never re-select ────────
 
     @Test
     fun `fix-close-all-residual - second load after close-all does not auto-select`() = runTest {
@@ -423,7 +447,7 @@ class SessionListActionsTest {
         // Simulate "initial load already happened" (the normal pre-condition
         // before the user can close tabs): the flag is true, currentSessionId
         // is null (user just closed the last tab), no draft.
-        store.mutateSessionList { it.copy(hasCompletedInitialLoad = true) }
+        store.mutateSessionList { it.copy(hasCompletedInitialLoad = true, openSessionIds = emptyList()) }
         var selected: String? = null
 
         launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
@@ -434,18 +458,94 @@ class SessionListActionsTest {
     }
 
     @Test
-    fun `fix-close-all-residual - first load with null current still auto-selects`() = runTest {
-        // Regression guard: the cold-start auto-select itself must still work
-        // on the FIRST load (hasCompletedInitialLoad = false). This is the
-        // legitimate "land the user on a session" path the gate preserves.
-        val sessions = listOf(Session(id = "first", directory = "/x"))
+    fun `fix-close-all-no-first - first load with empty tabs does not auto-select`() = runTest {
+        // Pre-cleared empty open tabs + cold-start flag still false (static
+        // post-close snapshot). Prefer the deferred in-flight race test below
+        // for the real suspend window; this keeps the empty-list gate pinned.
+        val sessions = listOf(
+            Session(id = "earliest", directory = "/x"),
+            Session(id = "later", directory = "/x"),
+        )
         coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+        store.mutateSessionList {
+            it.copy(hasCompletedInitialLoad = false, openSessionIds = emptyList())
+        }
+        store.mutateChat { it.copy(currentSessionId = null) }
         var selected: String? = null
 
         launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
         advanceUntilIdle()
 
-        assertEquals("cold start still auto-selects first", "first", selected)
+        assertNull("close-all during cold start must NOT select earliest", selected)
+        assertNull(slices.chat.value.currentSessionId)
+        assertTrue(slices.sessionList.value.openSessionIds.isEmpty())
+    }
+
+    @Test
+    fun `fix-close-all-no-first - close-all during in-flight load does not resurrect first`() = runTest {
+        // Real race (gate 9.5): REST hangs, user empties tabs mid-flight the
+        // same way closeSession leaves state, then REST completes with a
+        // non-empty list headed by "earliest". Post-suspend capture of
+        // openSessionIds/currentSessionId must see empty/null and MUST NOT
+        // onSelectSession(earliest).
+        val gate = CompletableDeferred<Unit>()
+        val sessions = listOf(
+            Session(id = "earliest", directory = "/x"),
+            Session(id = "later", directory = "/x"),
+        )
+        coEvery { repository.getSessions(any()) } coAnswers {
+            gate.await()
+            Result.success(sessions)
+        }
+        // Pre-flight state: tabs open, current set, initial load not done
+        // (same as cold start with cached tabs while first REST is out).
+        store.mutateSessionList {
+            it.copy(
+                hasCompletedInitialLoad = false,
+                openSessionIds = listOf("earliest", "later"),
+            )
+        }
+        store.mutateChat { it.copy(currentSessionId = "later") }
+        var selected: String? = null
+
+        launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
+        // Let the launch start and hit the suspended getSessions.
+        advanceUntilIdle()
+
+        // Simulate closeSession emptying all tabs while REST is still in flight.
+        store.mutateSessionList { it.copy(openSessionIds = emptyList()) }
+        store.mutateChat {
+            it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap())
+        }
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertNull("in-flight close-all must NOT select earliest", selected)
+        assertNull(slices.chat.value.currentSessionId)
+        assertTrue(slices.sessionList.value.openSessionIds.isEmpty())
+        assertTrue(
+            "load still completes (flag set)",
+            slices.sessionList.value.hasCompletedInitialLoad,
+        )
+    }
+
+    @Test
+    fun `fix-close-all-no-first - host purge re-arm with empty tabs still no first`() = runTest {
+        // HostStatePurged sets hasCompletedInitialLoad=false; empty open
+        // tabs must still win (no invent-from-first).
+        val sessions = listOf(Session(id = "first", directory = "/x"))
+        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+        store.mutateSessionList {
+            it.copy(hasCompletedInitialLoad = false, openSessionIds = emptyList())
+        }
+        var selected: String? = null
+
+        launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
+        advanceUntilIdle()
+
+        assertNull(selected)
+        assertNull(slices.chat.value.currentSessionId)
     }
 
     @Test

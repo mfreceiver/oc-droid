@@ -2,6 +2,7 @@ package cn.vectory.ocdroid
 
 import cn.vectory.ocdroid.data.model.HealthResponse
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.ScrollCheckpoint
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.loadSessionsForEffect
@@ -149,6 +150,94 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         verify { settingsManager.currentSessionId = null }
+    }
+
+    @Test
+    fun `closeSession last tab uses slice openSessionIds not stale settings`() = runTest {
+        // §fix-close-all-slice-source: disk openSessionIds may still list a
+        // ghost id the runtime strip already dropped. closeSession must filter
+        // the SLICE list so last-tab close clears current instead of switchTo
+        // on a disk-only ghost.
+        every { settingsManager.openSessionIds } returns listOf("s1", "ghost-from-disk")
+        val core = createCore()
+        val vm = SessionViewModel(core)
+        core.writeChat {
+            it.copy(
+                currentSessionId = "s1",
+                messages = listOf(cn.vectory.ocdroid.data.model.Message(id = "m", role = "user")),
+            )
+        }
+        core.writeSessionList { it.copy(openSessionIds = listOf("s1")) }
+
+        vm.closeSession("s1")
+        advanceUntilIdle()
+
+        assertTrue(core.sessionListFlow.value.openSessionIds.isEmpty())
+        assertNull(core.chatFlow.value.currentSessionId)
+        assertTrue(core.chatFlow.value.messages.isEmpty())
+        // Navigates home via nav slice (domain half of leave-Chat).
+        assertEquals(NavRoute.Sessions.route, core.navFlow.value.lastRoute)
+        verify { settingsManager.openSessionIds = emptyList() }
+        verify { settingsManager.currentSessionId = null }
+    }
+
+    @Test
+    fun `closeSession last tab sets nav lastRoute to Sessions`() = runTest {
+        every { settingsManager.openSessionIds } returns listOf("s1")
+        val core = createCore()
+        val vm = SessionViewModel(core)
+        core.writeChat { it.copy(currentSessionId = "s1") }
+        core.writeSessionList { it.copy(openSessionIds = listOf("s1")) }
+        // Simulate being on Chat.
+        core.store.mutateNav { it.copy(lastRoute = NavRoute.Chat.route, lastNavPage = NavRoute.Chat.legacyPage) }
+
+        vm.closeSession("s1")
+        advanceUntilIdle()
+
+        assertEquals(NavRoute.Sessions.route, core.navFlow.value.lastRoute)
+        assertEquals(NavRoute.Sessions.legacyPage, core.navFlow.value.lastNavPage)
+        verify { settingsManager.lastRoute = NavRoute.Sessions.route }
+    }
+
+    @Test
+    fun `closeSession last non-current tab with null current still navigates home`() = runTest {
+        // §fix-close-all-empty-tabs-home: remaining open tabs empty must go
+        // home even when closingCurrentTree is false (current already null).
+        every { settingsManager.openSessionIds } returns listOf("orphan-open")
+        val core = createCore()
+        val vm = SessionViewModel(core)
+        core.writeChat { it.copy(currentSessionId = null) }
+        core.writeSessionList { it.copy(openSessionIds = listOf("orphan-open")) }
+        core.store.mutateNav { it.copy(lastRoute = NavRoute.Chat.route, lastNavPage = NavRoute.Chat.legacyPage) }
+
+        vm.closeSession("orphan-open")
+        advanceUntilIdle()
+
+        assertTrue(core.sessionListFlow.value.openSessionIds.isEmpty())
+        assertNull(core.chatFlow.value.currentSessionId)
+        assertEquals(NavRoute.Sessions.route, core.navFlow.value.lastRoute)
+        verify { settingsManager.lastRoute = NavRoute.Sessions.route }
+    }
+
+    @Test
+    fun `closeSession last tab with active draft does not navigate home`() = runTest {
+        // Match ChatScaffold draft guard: mid-composition stays on Chat.
+        every { settingsManager.openSessionIds } returns listOf("s1")
+        val core = createCore()
+        val vm = SessionViewModel(core)
+        core.writeChat { it.copy(currentSessionId = "s1") }
+        core.writeComposer { it.copy(draftWorkdir = "/proj", inputText = "typing") }
+        core.writeSessionList { it.copy(openSessionIds = listOf("s1")) }
+        core.store.mutateNav { it.copy(lastRoute = NavRoute.Chat.route, lastNavPage = NavRoute.Chat.legacyPage) }
+
+        vm.closeSession("s1")
+        advanceUntilIdle()
+
+        assertTrue(core.sessionListFlow.value.openSessionIds.isEmpty())
+        assertNull(core.chatFlow.value.currentSessionId)
+        assertEquals("/proj", core.composerFlow.value.draftWorkdir)
+        assertEquals(NavRoute.Chat.route, core.navFlow.value.lastRoute)
+        verify(exactly = 0) { settingsManager.lastRoute = NavRoute.Sessions.route }
     }
 
     @Test
