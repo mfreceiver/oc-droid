@@ -227,9 +227,10 @@ fun ChatScaffold(
     // §home-hub T4: drawerState owned here. The Menu button (tablet,
     // ChatTopBar navigationIcon) opens it via [openDrawerAction]; a
     // dedicated BackHandler (below, higher priority than root/parent) closes
-    // it when open. `gesturesEnabled = isWide` on the ModalNavigationDrawer
-    // disables edge-swipe-to-open on phone (phone has no Menu button, so the
-    // drawer must NOT be reachable by gesture either).
+    // it when open. Edge-swipe-to-open is disabled via
+    // `gesturesEnabled = drawerState.isOpen` (false when closed) so the
+    // HorizontalPager tab-switcher never fights the drawer open gesture;
+    // when open, gestures re-enable so M3 Scrim tap-to-dismiss works.
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     // §home-hub T4 (IMPORTANT-3 fix): the hamburger (Menu) button TOGGLES the
     // drawer — open when closed, close when open (C2: "tap Menu again closes").
@@ -844,12 +845,12 @@ fun ChatScaffold(
     // §home-hub T4 (C2): wrap the chat body in ModalNavigationDrawer. The
     // drawer is tablet-only by construction: the hamburger (Menu) button that
     // opens it renders ONLY on `isWide` form factors (ChatTopBar
-    // navigationIcon branch), and `gesturesEnabled = isWide` disables the
-    // edge-swipe-to-open gesture on phone so the drawer is unreachable there
-    // (phone uses the ArrowBack → onBackToHome path instead). Always wrapping
-    // (rather than conditionally composing the Column twice) keeps the body a
-    // single tree — the drawer content is cheap (a LazyColumn of recent root
-    // sessions) and stays invisible/closed on phone.
+    // navigationIcon branch). Phone has no Menu and no open gesture (see
+    // gesturesEnabled below), so the drawer stays unreachable there (phone
+    // uses ArrowBack → onBackToHome). Always wrapping (rather than
+    // conditionally composing the Column twice) keeps the body a single tree —
+    // the drawer content is cheap (a LazyColumn of recent root sessions) and
+    // stays invisible/closed on phone.
     //
     // §opuser IMPORTANT-2: the drawer's recent-session list MUST mirror the
     // home page §2a "Recently Session" projection (req 5: tablet drawer =
@@ -933,10 +934,20 @@ fun ChatScaffold(
     }
     ModalNavigationDrawer(
         drawerState = drawerState,
-        // §fix-edge-swipe-conflict: disabled to prevent edge-swipe from
-        // conflicting with HorizontalPager tab-switching gestures. The
-        // drawer is now opened ONLY via the hamburger (Menu) button.
-        gesturesEnabled = false,
+        // §fix-drawer-scrim-dismiss + §fix-edge-swipe-conflict:
+        // M3 ModalNavigationDrawer (material3 1.4.0 / composeBom 2025.12.00)
+        // wires Scrim tap-to-dismiss as:
+        //   onClose = { if (gesturesEnabled && confirmStateChange(Closed)) close() }
+        // and Scrim always installs pointerInput+detectTapGestures when open
+        // (NavigationDrawer.kt Scrim), so a content-level tap overlay CANNOT
+        // receive scrim taps (Scrim is drawn ABOVE content). Constant
+        // gesturesEnabled=false therefore both killed edge-open AND made
+        // blank-area taps no-ops. Gate gestures on isOpen instead:
+        //   - closed → false: no edge-swipe-to-open (HorizontalPager safe);
+        //     drawer opens ONLY via hamburger (Menu).
+        //   - open → true: Scrim tap + a11y dismiss + drag-to-close work.
+        // BackHandler / row-select / new-session close paths are unchanged.
+        gesturesEnabled = drawerState.isOpen,
         drawerContent = {
             RecentSessionsDrawer(
                 // §opuser IMPORTANT-2: recent root non-archived sessions
