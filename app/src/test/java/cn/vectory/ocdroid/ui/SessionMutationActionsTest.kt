@@ -187,6 +187,12 @@ class SessionMutationActionsTest {
 
         assertNull(slices.chat.value.currentSessionId)
         assertTrue(slices.chat.value.messages.isEmpty())
+        // §fix-archive-persisted-null (opus review): archiving the current
+        // session must also clear the PERSISTED currentSessionId synchronously
+        // (not just rely on the async AppCore collector) so a process-death in
+        // the ms window cannot leave the archived id for applySavedSettings to
+        // re-seed on cold start.
+        verify { settingsManager.currentSessionId = null }
     }
 
     @Test

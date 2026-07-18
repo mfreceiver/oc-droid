@@ -236,6 +236,17 @@ internal fun launchSetSessionArchived(
                                 partsByMessage = emptyMap()
                             )
                         }
+                        // §fix-archive-persisted-null (opus review): also clear
+                        // the PERSISTED currentSessionId synchronously. The
+                        // AppCore collector now persists null too, but it is
+                        // async — if the process dies in the ms window between
+                        // the chat mutation above and the collector's write,
+                        // applySavedSettings would re-seed the archived id on
+                        // the next cold start. Belt-and-suspenders, mirroring
+                        // closeSession's explicit clear. (Archive also self-
+                        // heals via applySavedSettings' archived-id filter, but
+                        // the explicit write removes even the transient seed.)
+                        settingsManager.currentSessionId = null
                     }
                     // R-20 Phase 1 (C3, plan §3 矩阵 "用户归档" 行): emit
                     // EvictSession for each successfully-archived subtree id
@@ -335,6 +346,16 @@ internal fun launchDeleteSession(
                         // on the chat slice too, otherwise a stale id survives in
                         // the runtime state pointing at a deleted session.
                         slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                        // §fix-delete-persisted-null (opus review): clear the
+                        // PERSISTED currentSessionId synchronously too (mirrors
+                        // closeSession / archive). The async AppCore collector
+                        // would persist null eventually, but a process-death in
+                        // the ms window would leave the deleted id in
+                        // SettingsManager — applySavedSettings would then re-seed
+                        // it on cold start, pointing chat at a ghost. Deleted
+                        // sessions have NO archived filter to self-heal, so this
+                        // explicit clear matters more here than on the archive path.
+                        settingsManager.currentSessionId = null
                     }
                 }
                 // R-20 Phase 1 (C3, plan §3 矩阵 "用户删除" 行): emit EvictSession

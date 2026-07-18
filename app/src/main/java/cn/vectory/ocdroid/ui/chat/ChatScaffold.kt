@@ -757,12 +757,22 @@ fun ChatScaffold(
     // — cold start lands on Sessions) does not spuriously fire. The draft
     // guard keeps a user mid-composition (draftWorkdir set) on Chat even if
     // they closed every existing tab — their draft is the active work.
-    LaunchedEffect(onBackToHome) {
+    //
+    // §fix-effect-key-stability (opus review): AppShell passes onBackToHome
+    // as an inline lambda `{ backToHome() }` (unstable — new instance per
+    // recomposition). Keying the LaunchedEffect on it would restart the
+    // effect on every recomposition, and drop(1) would then skip a valid
+    // openSessions→0 transition that coincided with a recomposition. Use a
+    // stable Unit key (effect lives for ChatScaffold's lifetime — it is
+    // disposed when we navigate away to home anyway) and rememberUpdatedState
+    // so the latest lambda is always invoked.
+    val currentOnBackToHome by rememberUpdatedState(onBackToHome)
+    LaunchedEffect(Unit) {
         snapshotFlow { sessionList.openSessionIds.size to (composer.draftWorkdir != null) }
             .distinctUntilChanged()
             .drop(1)
             .filter { (size, hasDraft) -> size == 0 && !hasDraft }
-            .collect { onBackToHome() }
+            .collect { currentOnBackToHome() }
     }
     val pagerEngaged = openSessions.size >= 2 &&
         topBarState.parentSessionId == null &&

@@ -274,6 +274,17 @@ internal fun launchLoadSessions(
                     // atomically cleared chat if needed; loading messages for
                     // the just-archived id is wasteful + racy vs the reducer's
                     // clear. Non-archive path runs for sessions that survived.
+                    //
+                    // §fix-archive-early-return-flag (oracle review): the
+                    // early-return below skips the mutateSessionList that sets
+                    // hasCompletedInitialLoad=true. A first load that cleaned
+                    // archived-open tabs MUST still count as "initial load
+                    // completed", otherwise a later close-all-tabs would see
+                    // the flag still false and re-fire the cold-start
+                    // auto-select. The BulkSessionsRefreshed reducer dispatched
+                    // by the callback writes sessions/openIds but does NOT set
+                    // this flag, so set it explicitly here.
+                    slices.mutateSessionList { it.copy(hasCompletedInitialLoad = true) }
                     return@onSuccess
                 }
                 slices.mutateSessionList {
