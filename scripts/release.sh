@@ -2,13 +2,14 @@
 # scripts/release.sh — ocdroid 发版唯一入口（打 semver tag）。
 # 详见 .opencode/policies/versioning.md 与 docs/build-apk.md §6。
 #
-# 用法: ./scripts/release.sh <patch|minor|major>
+# 用法: ./scripts/release.sh <patch|minor|major> [--allow-dirty]
 #
 # 版本模型（go-around pattern）：版本号不写在任何文件里，唯一来源是 git——
 #   versionName = git describe --tags --always --dirty（见 app/build.gradle.kts）
 #   versionCode = git rev-list --count HEAD（单调递增，每 commit +1）
 # 本脚本只做「给仓库打一个新 semver tag」：
-#   1. 校验分支=main、工作区干净（已跟踪文件）
+#   1. 校验分支=main、工作区干净（与 gradle 一致：git status --porcelain 为空；
+#      dirty 默认报错，仅 --allow-dirty 才放行，产物名带 -dirty）
 #   2. 质量门禁（./scripts/check.sh）
 #   3. 由最新 git tag 推算下一版本（patch|minor|major）
 #   4. assembleRelease + archiveReleaseApk（-PreleaseVersion 注入干净 tag 名）
@@ -27,8 +28,16 @@
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
-TYPE="${1:?用法: release.sh <patch|minor|major>}"
-[[ "$TYPE" =~ ^(patch|minor|major)$ ]] || { echo "❌ 类型必须是 patch|minor|major"; exit 1; }
+TYPE=""
+ALLOW_DIRTY=0
+for arg in "$@"; do
+  case "$arg" in
+    --allow-dirty) ALLOW_DIRTY=1 ;;
+    patch|minor|major) TYPE="$arg" ;;
+    *) echo "❌ 未知参数: $arg（用法: release.sh <patch|minor|major> [--allow-dirty]）"; exit 1 ;;
+  esac
+done
+[[ -n "$TYPE" ]] || { echo "用法: release.sh <patch|minor|major> [--allow-dirty]"; exit 1; }
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$REPO_ROOT"
@@ -37,11 +46,22 @@ cd "$REPO_ROOT"
 BRANCH=$(git branch --show-current)
 [[ "$BRANCH" == "main" ]] || { echo "❌ 当前分支=$BRANCH，发版必须在 main"; exit 1; }
 
-# 允许 untracked（APK/、local.properties 等），但已跟踪文件不能有改动
-if ! git diff --quiet HEAD || ! git diff --cached --quiet; then
-  echo "❌ 工作区有未提交的已跟踪改动，请先 commit 或 stash"
-  git status --short
-  exit 1
+# 与 gradle 的 dirty 判定完全一致（app/build.gradle.kts:54 用 git status --porcelain）：
+# 任何非 gitignored 的改动（含 untracked 文件）都会让 versionName/产物名带 -dirty 后缀。
+# 里程碑 tag 必须对应一棵干净树——默认 dirty 直接报错；仅 --allow-dirty 显式放行
+# （此时产物名带 -dirty）。gitignored 的 APK/、local.properties 不算 dirty。
+DIRTY=""
+if [[ -n "$(git status --porcelain)" ]]; then
+  if [[ "$ALLOW_DIRTY" -eq 1 ]]; then
+    echo "⚠️  --allow-dirty：工作区非干净，产物 versionName 将带 -dirty 后缀"
+    git status --short
+    DIRTY="-dirty"
+  else
+    echo "❌ 工作区非干净（含 untracked 文件），里程碑发版要求干净树。"
+    echo "   请 commit / stash / 丢弃改动后重试；或确需带 dirty 发版，加 --allow-dirty。"
+    git status --short
+    exit 1
+  fi
 fi
 
 # --- 2. 质量门禁 ---
@@ -66,7 +86,7 @@ TAG="v$VERSION"
 # 短 hash = release 构建嵌入 versionName + APK 文件名的 commit 锚点（与 gradle
 # archiveReleaseApk 一致：二者都取 HEAD 的 git rev-parse --short）。
 SHORT=$(git rev-parse --short HEAD)
-FULL_VERSION="$VERSION-$SHORT"
+FULL_VERSION="$VERSION-$SHORT$DIRTY"
 echo "==> 版本：$PREV_TAG → $TAG（versionName=$FULL_VERSION）"
 
 # --- 4. release 构建 + 归档（-PreleaseVersion 覆盖 tag 部分；hash 自动来自 HEAD）---
