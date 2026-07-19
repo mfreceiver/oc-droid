@@ -176,6 +176,15 @@ class ConnectionCoordinator(
     private var lastHealthCheckTime = 0L
 
     /**
+     * §streaming-state-sync-diag (DEBUG-only): expose the current lifecycle
+     * layer (L1 / L2Active / L2Idle / L3) as a string for send-time
+     * diagnostics. Null when the coordinator is absent (legacy/test). The
+     * layer tells us whether SSE is live at send time (L1/L2Active = SSE on;
+     * L2Idle/L3 = SSE off, poller only). Temporary diagnostic surface.
+     */
+    val diagLayer: String? get() = streamingLifecycleCoordinator?.layer?.value?.toString()
+
+    /**
      * CP2 (notify Phase-0): TOFU state single source. CC delegates to the
      * injected [bootstrapCoordinator] (production: Hilt @Singleton shared
      * with the future SessionStreamingService). The lazy fallback preserves

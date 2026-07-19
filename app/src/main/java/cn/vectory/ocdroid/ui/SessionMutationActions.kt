@@ -403,8 +403,16 @@ internal fun launchSendMessage(
 ) {
 
     scope.launch {
+        // §streaming-state-sync-diag: send timing — POST prompt_async start.
+        cn.vectory.ocdroid.util.DebugLog.i(
+            "SendDiag",
+            "POST prompt_async send sid=$sessionId textLen=${text.length}",
+        )
         repository.sendMessage(sessionId, text, agent, model, attachments = attachments)
             .onSuccess {
+                // §streaming-state-sync-diag: POST succeeded — record before
+                // any branch (archived-skip / busy write) runs.
+                cn.vectory.ocdroid.util.DebugLog.i("SendDiag", "POST onSuccess sid=$sessionId")
                 // gro-2 Blocker 2a: if the session was archived mid-send (e.g.
                 // cross-device archive during the prompt_async window), do NOT
                 // resurrect it as ghost-busy. Check whether the session is
@@ -437,6 +445,15 @@ internal fun launchSendMessage(
                 // running workflow).
                 val newSessions = bumpSessionUpdated(currentSessions, sessionId, System.currentTimeMillis())
                 val newStatuses = currentStatuses + (sessionId to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"))
+                // §streaming-state-sync-diag (DEBUG-only): record the optimistic
+                // busy write so we can confirm whether it later gets overwritten
+                // by a stale idle from session.status / digest / poller.
+                if (cn.vectory.ocdroid.BuildConfig.DEBUG) {
+                    cn.vectory.ocdroid.util.DebugLog.d(
+                        "StatusDiag",
+                        "optimistic-onSuccess busy write sid=$sessionId",
+                    )
+                }
                 slices.mutateSessionList { sl -> sl.copy(sessions = newSessions, sessionStatuses = newStatuses) }
                 onSuccess?.invoke()
                 onRefreshSessions()
@@ -450,6 +467,11 @@ internal fun launchSendMessage(
                 onRefreshMessages(sessionId, true)
             }
             .onFailure { error ->
+                // §streaming-state-sync-diag: POST failed.
+                cn.vectory.ocdroid.util.DebugLog.w(
+                    "SendDiag",
+                    "POST onFailure sid=$sessionId err=${error.message}",
+                )
                 // §R-17 M3: read composer slice for the restore-decision; error
                 // → UiEvent, inputText → composer slice.
                 // Restore the failed prompt only if the user has not typed
@@ -459,6 +481,12 @@ internal fun launchSendMessage(
                 emit.emit(UiEvent.Error(R.string.error_send_message_failed, listOf(errorMessageOrFallback(error, "Failed to send message"))))
                 slices.mutateComposer { it.copy(inputText = restored) }
             }
+        // §streaming-state-sync-diag: POST completed (finally-equivalent) —
+        // about to clear sendingSessionIds.
+        cn.vectory.ocdroid.util.DebugLog.i(
+            "SendDiag",
+            "POST onComplete (clearing sendingSessionIds) sid=$sessionId",
+        )
         onComplete?.invoke()
     }
 }

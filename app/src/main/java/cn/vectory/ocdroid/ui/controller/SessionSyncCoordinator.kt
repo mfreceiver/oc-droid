@@ -683,6 +683,25 @@ class SessionSyncCoordinator(
      * writes, scheduling) stay inline.
      */
     private fun dispatchSseEvent(event: SSEEvent) {
+        // §streaming-state-sync-diag (DEBUG-only): log EVERY frame type that
+        // reaches dispatchSseEvent so we can confirm whether
+        // `message.part.delta` / `message.part.updated` ever arrive in slim
+        // mode. The existing "Sync/dispatch" log below THROTTLES noisy types
+        // (so it can't answer that question); this log captures the type
+        // unconditionally, gated on BuildConfig.DEBUG so release is unaffected.
+        if (cn.vectory.ocdroid.BuildConfig.DEBUG) {
+            val t = event.payload.type
+            val props = event.payload.properties
+            val extra = if (t == "session.digest" && props != null) {
+                val obj = props as? kotlinx.serialization.json.JsonObject
+                val sid = obj?.get("sessionID")?.toString()?.trim('"')
+                val st = obj?.get("status")?.toString()?.trim('"')
+                val ua = obj?.get("updatedAt")
+                val mid = obj?.get("messageID")
+                " sid=$sid status=$st updatedAt=$ua messageId=$mid"
+            } else ""
+            cn.vectory.ocdroid.util.DebugLog.d("SseDiag", "frame type=$t$extra")
+        }
         // Throttle dispatch logging to preserve the 1000-entry ring buffer's signal.
         // Skipped (noise): server.heartbeat (periodic), message.part.delta (per-token
         // during streaming — its render IS the proof), server.connected (fires on
@@ -809,6 +828,18 @@ class SessionSyncCoordinator(
                     // pure [evaluateUnread] evaluator. This branch only folds the new
                     // status into sessionStatuses so the evaluator sees it. (The CP4
                     // aggregator feeding above is independent of that edge capture.)
+                    // §streaming-state-sync-diag (DEBUG-only): record the OLD type
+                    // immediately before the sessionStatuses write so we can confirm
+                    // whether the optimistic busy gets overwritten by a stale idle.
+                    if (cn.vectory.ocdroid.BuildConfig.DEBUG) {
+                        val diagSid = statusEvent.sessionId
+                        val diagNewType = statusEvent.status.type
+                        val diagOldType = slices.sessionList.value.sessionStatuses[diagSid]?.type
+                        cn.vectory.ocdroid.util.DebugLog.d(
+                            "StatusDiag",
+                            "session.status write sid=$diagSid oldType=$diagOldType newType=$diagNewType",
+                        )
+                    }
                     slices.mutateSessionList {
                         it.applySessionStatus(statusEvent.sessionId, statusEvent.status).first
                     }
@@ -1891,6 +1922,14 @@ class SessionSyncCoordinator(
         )
         // Status badge (slim stand-in for session.status).
         digest.status?.takeIf { it.isNotBlank() }?.let { statusType ->
+            // §streaming-state-sync-diag (DEBUG-only): record each slim-digest
+            // status fold so we can attribute optimistic-busy overwrites.
+            if (cn.vectory.ocdroid.BuildConfig.DEBUG) {
+                cn.vectory.ocdroid.util.DebugLog.d(
+                    "StatusDiag",
+                    "slim digest status write sid=${digest.sessionId} status=$statusType",
+                )
+            }
             slices.mutateSessionList {
                 it.applySessionStatus(digest.sessionId, SessionStatus(type = statusType)).first
             }
@@ -1954,6 +1993,20 @@ class SessionSyncCoordinator(
             ReconcileMode.DIGEST_FOCUS
         } else {
             ReconcileMode.DIGEST_BACKGROUND
+        }
+        // §streaming-state-sync-diag: entry context for the reconcile decision.
+        // Logs the digest's updatedAt + the prior localApplied watermark so we
+        // can confirm the "updatedAt-not-advancing → fetch skipped" hypothesis.
+        // (Repo may be null in legacy/test construction — guard the read.)
+        if (cn.vectory.ocdroid.BuildConfig.DEBUG) {
+            val priorLocalApplied = repo.getSlimSessionState(sid)?.localAppliedUpdatedAt
+            val priorRemote = repo.getSlimSessionState(sid)?.remoteUpdatedAt
+            cn.vectory.ocdroid.util.DebugLog.d(
+                "DigestDiag",
+                "digest entry sid=$sid updatedAt=${digest.updatedAt} " +
+                    "priorLocalApplied=$priorLocalApplied priorRemote=$priorRemote mode=$mode " +
+                    "messageId=${digest.messageId}",
+            )
         }
         // T11 round-3 (oracle workflow-serialization): the reducer apply
         // + reconcile body run inside the SAME per-sid stripe lock so
@@ -2218,6 +2271,12 @@ class SessionSyncCoordinator(
             localAppliedTs = state.localAppliedUpdatedAt,
         )
         if (!catchUp) {
+            // §streaming-state-sync-diag: probe says caught up → no FETCH.
+            cn.vectory.ocdroid.util.DebugLog.d(
+                "DigestDiag",
+                "digest sid=$sid remoteUpdatedAt=${state.remoteUpdatedAt} " +
+                    "priorWatermark=${state.localAppliedUpdatedAt} decision=skip reason=aligned mode=$mode",
+            )
             if (mode.mayClearDirty()) {
                 if (!repo.markSlimReconcileAligned(sid, token)) {
                     return ReconcileResult.Stale(sid)
@@ -2230,9 +2289,21 @@ class SessionSyncCoordinator(
         }
         // ── needsCatchUp: FOCUS/RESYNC fetch; BACKGROUND refresh only ────
         if (!mode.mayFetch()) {
+            // §streaming-state-sync-diag: BACKGROUND mode → no FETCH (refresh row only).
+            cn.vectory.ocdroid.util.DebugLog.d(
+                "DigestDiag",
+                "digest sid=$sid remoteUpdatedAt=${state.remoteUpdatedAt} " +
+                    "priorWatermark=${state.localAppliedUpdatedAt} decision=skip reason=BACKGROUND mode=$mode",
+            )
             DebugLog.d("Sync", "reconcileSession sid=$sid mode=$mode BACKGROUND needsCatchUp → refresh row, keep dirty")
             return ReconcileResult.RefreshRow(sid)
         }
+        // §streaming-state-sync-diag: FETCH decision — about to call /slimapi/messages/since.
+        cn.vectory.ocdroid.util.DebugLog.d(
+            "DigestDiag",
+            "digest sid=$sid remoteUpdatedAt=${state.remoteUpdatedAt} " +
+                "priorWatermark=${state.localAppliedUpdatedAt} decision=FETCH mode=$mode",
+        )
         // Watermark-branched fetch (oracle I2):
         //   - localAppliedUpdatedAt != null → /since/{ts}
         //   - localAppliedUpdatedAt == null → bounded cursor drain façade
