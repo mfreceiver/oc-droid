@@ -258,6 +258,43 @@ class AppCore @Inject constructor(
 
     init {
         applySavedSettings(repository, settingsManager, hostProfileStore, store.slices)
+        // §streaming-state-sync-diag (DEBUG-only backdoor): pre-seed a host
+        // profile at the dev host's opencode (10.0.2.2 = the emulator's host-
+        // loopback alias; legacy non-slim; user/pass from .env) and select it
+        // current, so diagnostic emulator runs skip the multi-field host-config
+        // UI. Idempotent. No-op in release (BuildConfig.DEBUG gate).
+        if (cn.vectory.ocdroid.BuildConfig.DEBUG) {
+            appScope.launch {
+                val devId = "dev-debug-4096"
+                val present = runCatching { hostProfileStore.profiles() }.getOrDefault(emptyList())
+                if (present.none { it.id == devId || it.serverUrl.contains("10.0.2.2:4096") }) {
+                    runCatching {
+                        hostProfileController.saveHostProfile(
+                            profile = cn.vectory.ocdroid.data.model.HostProfile(
+                                id = devId,
+                                name = "dev 10.0.2.2:4096",
+                                serverUrl = "http://10.0.2.2:4096",
+                                basicAuth = cn.vectory.ocdroid.data.model.BasicAuthConfig(
+                                    username = "user",
+                                    passwordId = devId,
+                                ),
+                                slim = false,
+                                serverGroupFp = devId,
+                                lastUsedAt = System.currentTimeMillis(),
+                            ),
+                            basicAuthPassword = "pass",
+                            basicAuthEdited = true,
+                        )
+                    }
+                }
+                runCatching { hostProfileStore.select(devId) }
+                val cur = runCatching { hostProfileStore.currentProfile() }.getOrNull()
+                cn.vectory.ocdroid.util.DebugLog.i(
+                    "SendDiag",
+                    "dev host seed done: current=${cur?.id} url=${cur?.serverUrl} slim=${cur?.slim}",
+                )
+            }
+        }
         appScope.launch(start = CoroutineStart.UNDISPATCHED) {
             // §R18 Phase 2-G (P0-6): UiEvent.Error now carries a `@StringRes`
             // resId + format args instead of a hardcoded String. Resolve to
