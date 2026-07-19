@@ -13,8 +13,10 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
 import cn.vectory.ocdroid.data.model.SlimapiQuestionEntry
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.ProbeResult
 import cn.vectory.ocdroid.data.repository.SlimColdStartSnapshot
 import cn.vectory.ocdroid.data.repository.SlimFetchMessages
+import cn.vectory.ocdroid.data.repository.SlimSessionState
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.SliceFlows
@@ -26,12 +28,20 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -40,6 +50,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.TimeUnit
 
 /**
  * Cluster A / Phase 2 (Lane-CoordSvc): unit tests for slim wiring in
@@ -71,6 +82,21 @@ class SessionSyncCoordinatorSlimTest {
         scope = TestScope(UnconfinedTestDispatcher())
         repository = mockk(relaxed = true)
         slimMode = true
+
+        // C-D3 token guard stubs.
+        // captureSlimCommitToken: let relaxed mock auto-answer.
+        every { repository.isSlimCommitTokenCurrent(any()) } returns true
+        every { repository.commitIfSlimTokenCurrent(any(), any()) } answers {
+            secondArg<() -> Unit>().invoke()
+            true
+        }
+        // Boolean wrappers default to false on relaxed mocks — stub to true.
+        every { repository.clearSlimLocalMessages(any(), any()) } returns true
+        every { repository.markSlimReconcileFailure(any(), any()) } returns true
+        every { repository.markSlimReconcileAligned(any(), any()) } returns true
+        every { repository.markSlimSessionDeleted(any(), any()) } returns true
+        every { repository.markSlimDirty(any(), any()) } returns true
+        every { repository.invalidateSlimLocalApplied(any(), any()) } returns true
     }
 
     @After
@@ -113,11 +139,29 @@ class SessionSyncCoordinatorSlimTest {
     @Test
     fun `session digest applies reducer and merges messages for open session`() = runTest {
         slices.mutateChat { it.copy(currentSessionId = "sess-1") }
-        every { repository.applySlimDigest(any()) } returns SlimFetchMessages(
+        every { repository.applySlimDigest(any(), any()) } returns SlimFetchMessages(
             sessionId = "sess-1",
             since = 0L,
         )
-        coEvery { repository.getSlimapiMessagesSince("sess-1", 0L) } returns Result.success(
+        // T11 reconcile: probe is the single decision source. Set up a
+        // probe that drives needsCatchUp=true. T11 round-2 (oracle I2):
+        // when localAppliedUpdatedAt != null, /since path is used; when
+        // null, cursor drain façade. Pin the /since path by setting
+        // localAppliedUpdatedAt.
+        every { repository.getSlimSessionState("sess-1") } returns SlimSessionState(
+            sessionId = "sess-1",
+            remoteMessageId = "m1",
+            remoteUpdatedAt = 1000L,
+            localAppliedMessageId = "m0",
+            localAppliedUpdatedAt = 0L,
+            dirty = true,
+        )
+        coEvery { repository.probeLatestSlim("sess-1") } returns ProbeResult(
+            ok = true,
+            messageID = "m1",
+            updatedAt = 1000L,
+        )
+        coEvery { repository.getSlimapiMessagesSince("sess-1", 0L, any(), any(), any()) } returns Result.success(
             listOf(
                 MessageWithParts(
                     info = Message(id = "m1", role = "assistant", sessionId = "sess-1"),
@@ -130,8 +174,8 @@ class SessionSyncCoordinatorSlimTest {
         c.handleEvent(digestEvent("sess-1", status = "busy", updatedAt = 1000L, messageId = "m1"))
         scope.testScheduler.advanceUntilIdle()
 
-        verify(exactly = 1) { repository.applySlimDigest(match { it.sessionId == "sess-1" && it.updatedAt == 1000L }) }
-        coVerify(exactly = 1) { repository.getSlimapiMessagesSince("sess-1", 0L) }
+        verify { repository.applySlimDigest(match { it.sessionId == "sess-1" && it.updatedAt == 1000L }, any()) }
+        coVerify(exactly = 1) { repository.getSlimapiMessagesSince("sess-1", 0L, any(), any(), any()) }
         assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
         assertEquals("hi", slices.chat.value.partsByMessage["m1"]?.firstOrNull()?.text)
         assertEquals("busy", slices.sessionList.value.sessionStatuses["sess-1"]?.type)
@@ -140,7 +184,7 @@ class SessionSyncCoordinatorSlimTest {
     @Test
     fun `session digest skips message fetch when not current session`() = runTest {
         slices.mutateChat { it.copy(currentSessionId = "other") }
-        every { repository.applySlimDigest(any()) } returns SlimFetchMessages(
+        every { repository.applySlimDigest(any(), any()) } returns SlimFetchMessages(
             sessionId = "sess-1",
             since = 50L,
         )
@@ -149,13 +193,13 @@ class SessionSyncCoordinatorSlimTest {
         c.handleEvent(digestEvent("sess-1", updatedAt = 100L))
         scope.testScheduler.advanceUntilIdle()
 
-        verify(exactly = 1) { repository.applySlimDigest(any()) }
-        coVerify(exactly = 0) { repository.getSlimapiMessagesSince(any(), any()) }
+        verify { repository.applySlimDigest(any(), any()) }
+        coVerify(exactly = 0) { repository.getSlimapiMessagesSince(any(), any(), any(), any(), any()) }
     }
 
     @Test
     fun `session digest is handled and does not count as unknown event`() = runTest {
-        every { repository.applySlimDigest(any()) } returns null
+        every { repository.applySlimDigest(any(), any()) } returns null
         val c = coordinator()
         c.handleEvent(digestEvent("sess-1", status = "idle"))
         assertEquals(
@@ -169,14 +213,17 @@ class SessionSyncCoordinatorSlimTest {
     fun `loadPendingQuestions slim uses single getSlimapiQuestions and preserves routeToken`() = runTest {
         every { settingsManager.currentWorkdir } returns "/proj"
         every { settingsManager.getRecentWorkdirs(any()) } returns emptyList()
-        coEvery { repository.getSlimapiQuestions(any()) } returns Result.success(
-            listOf(
-                SlimapiQuestionEntry(
-                    id = "q1",
-                    sessionId = "s1",
-                    questions = listOf(QuestionInfo("Q?", "H", emptyList())),
-                    routeToken = "rt-abc",
+        coEvery { repository.getSlimapiQuestions(any(), any()) } returns Result.success(
+            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = listOf(
+                    SlimapiQuestionEntry(
+                        id = "q1",
+                        sessionId = "s1",
+                        questions = listOf(QuestionInfo("Q?", "H", emptyList())),
+                        routeToken = "rt-abc",
+                    ),
                 ),
+                authoritativeDirectories = null,
             ),
         )
 
@@ -184,7 +231,7 @@ class SessionSyncCoordinatorSlimTest {
         c.loadPendingQuestionsAllWorkdirs(repository)
         scope.testScheduler.advanceUntilIdle()
 
-        coVerify(exactly = 1) { repository.getSlimapiQuestions(any()) }
+        coVerify(exactly = 1) { repository.getSlimapiQuestions(any(), any()) }
         coVerify(exactly = 0) { repository.getPendingQuestions(any()) }
         val q = slices.sessionList.value.pendingQuestions.single()
         assertEquals("q1", q.id)
@@ -205,7 +252,7 @@ class SessionSyncCoordinatorSlimTest {
         scope.testScheduler.advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.getPendingQuestions("/proj") }
-        coVerify(exactly = 0) { repository.getSlimapiQuestions(any()) }
+        coVerify(exactly = 0) { repository.getSlimapiQuestions(any(), any()) }
         assertNull(slices.sessionList.value.pendingQuestions.single().routeToken)
     }
 
@@ -254,15 +301,18 @@ class SessionSyncCoordinatorSlimTest {
         slices.mutateChat { it.copy(currentSessionId = "sess-1") }
         val snapshot = SlimColdStartSnapshot(
             sessions = listOf(Session(id = "sess-1", directory = "/proj", title = "T")),
-            questions = listOf(
-                SlimapiQuestionEntry(
-                    id = "q1",
-                    sessionId = "sess-1",
-                    questions = emptyList(),
-                    routeToken = "rt-cs",
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = listOf(
+                    SlimapiQuestionEntry(
+                        id = "q1",
+                        sessionId = "sess-1",
+                        questions = emptyList(),
+                        routeToken = "rt-cs",
+                    ),
                 ),
+                authoritativeDirectories = null,
             ),
-            permissions = emptyList(),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(items = emptyList(), authoritativeDirectories = null),
             messages = listOf(
                 MessageWithParts(
                     info = Message(id = "m1", role = "user", sessionId = "sess-1"),
@@ -291,5 +341,503 @@ class SessionSyncCoordinatorSlimTest {
         val mapped = entry.toQuestionRequest()
         assertEquals("tok", mapped.routeToken)
         assertEquals("q", mapped.id)
+    }
+
+    // ── I-2 discriminator tests ──────────────────────────────────────────
+
+    /**
+     * I-2 D1: A succeeds, B fails → Partial; A-new replaces A-old; B-old preserved.
+     */
+    @Test
+    fun `I2-D1 A succeeds B fails - A replaced B preserved`() = runTest {
+        val snapshot = SlimColdStartSnapshot(
+            sessions = null,
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Partial(
+                items = listOf(
+                    SlimapiQuestionEntry(
+                        id = "q-a", sessionId = "s1",
+                        questions = listOf(QuestionInfo("new", "h", emptyList())),
+                        directory = "/dir-a",
+                    ),
+                ),
+                errors = listOf(cn.vectory.ocdroid.data.model.SlimapiAggregationError(directory = "/dir-b", code = "err")),
+                authoritativeDirectories = setOf("/dir-a"),
+            ),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Failure(),
+            messages = null,
+        )
+        // Prior: A-old and B-old.
+        slices.mutateSessionList {
+            it.copy(
+                pendingQuestions = listOf(
+                    QuestionRequest(id = "q-a", sessionId = "s1", questions = listOf(QuestionInfo("old", "h", emptyList())), directory = "/dir-a"),
+                    QuestionRequest(id = "q-b", sessionId = "s2", questions = listOf(QuestionInfo("old-b", "h", emptyList())), directory = "/dir-b"),
+                ),
+                pendingPermissions = emptyList(),
+            )
+        }
+
+        val c = coordinator()
+        c.applySlimColdStartSnapshot(snapshot)
+        scope.testScheduler.advanceUntilIdle()
+
+        val qs = slices.sessionList.value.pendingQuestions
+        assertEquals(2, qs.size)
+        assertEquals("new", qs.first { it.id == "q-a" }.questions.first().question)
+        assertEquals("old-b", qs.first { it.id == "q-b" }.questions.first().question)
+    }
+
+    /**
+     * I-2 D2: All sources succeed with empty items → Success(null dirs) → complete clear.
+     */
+    @Test
+    fun `I2-D2 global Success empty replaces all prior`() = runTest {
+        val snapshot = SlimColdStartSnapshot(
+            sessions = null,
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+            ),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+            ),
+            messages = null,
+        )
+        slices.mutateSessionList {
+            it.copy(
+                pendingQuestions = listOf(
+                    QuestionRequest(id = "q-old", sessionId = "s1", questions = emptyList()),
+                ),
+                pendingPermissions = listOf(
+                    PermissionRequest(id = "p-old", sessionId = "s1"),
+                ),
+            )
+        }
+
+        val c = coordinator()
+        c.applySlimColdStartSnapshot(snapshot)
+        scope.testScheduler.advanceUntilIdle()
+
+        assertTrue("questions cleared", slices.sessionList.value.pendingQuestions.isEmpty())
+        assertTrue("permissions cleared", slices.sessionList.value.pendingPermissions.isEmpty())
+    }
+
+    /**
+     * I-2 D3: Failure → prior retained byte-for-byte.
+     */
+    @Test
+    fun `I2-D3 Failure retains all prior state`() = runTest {
+        val priorQ = QuestionRequest(id = "q-keep", sessionId = "s1", questions = emptyList())
+        val priorP = PermissionRequest(id = "p-keep", sessionId = "s1")
+        val snapshot = SlimColdStartSnapshot(
+            sessions = null,
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Failure(),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Failure(),
+            messages = null,
+        )
+        slices.mutateSessionList {
+            it.copy(pendingQuestions = listOf(priorQ), pendingPermissions = listOf(priorP))
+        }
+
+        val c = coordinator()
+        c.applySlimColdStartSnapshot(snapshot)
+        scope.testScheduler.advanceUntilIdle()
+
+        assertEquals(listOf(priorQ), slices.sessionList.value.pendingQuestions)
+        assertEquals(listOf(priorP), slices.sessionList.value.pendingPermissions)
+    }
+
+    /**
+     * I-2 D4: Partial does NOT clobber existing complete questions (merge semantics).
+     */
+    @Test
+    fun `I2-D4 Partial merges with existing - unmentioned IDs preserved`() = runTest {
+        val priorQ = QuestionRequest(id = "q-existing", sessionId = "s1", questions = listOf(QuestionInfo("keep", "h", emptyList())), directory = "/dir-x")
+        val snapshot = SlimColdStartSnapshot(
+            sessions = null,
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Partial(
+                items = listOf(
+                    SlimapiQuestionEntry(id = "q-new", sessionId = "s2", questions = listOf(QuestionInfo("new", "h", emptyList())), directory = "/dir-a"),
+                ),
+                errors = listOf(cn.vectory.ocdroid.data.model.SlimapiAggregationError(directory = "/dir-b", code = "err")),
+                authoritativeDirectories = setOf("/dir-a"),
+            ),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Failure(),
+            messages = null,
+        )
+        slices.mutateSessionList { it.copy(pendingQuestions = listOf(priorQ), pendingPermissions = emptyList()) }
+
+        val c = coordinator()
+        c.applySlimColdStartSnapshot(snapshot)
+        scope.testScheduler.advanceUntilIdle()
+
+        val qs = slices.sessionList.value.pendingQuestions
+        assertTrue("q-existing preserved", qs.any { it.id == "q-existing" })
+        assertTrue("q-new added", qs.any { it.id == "q-new" })
+        assertEquals(2, qs.size)
+    }
+
+    /**
+     * I-2 D5: Directory scope — questions from a different directory are NOT applied.
+     */
+    @Test
+    fun `I2-D5 directory scope filters unrelated directory questions`() = runTest {
+        val priorQ = QuestionRequest(id = "q-other-dir", sessionId = "s1", questions = emptyList(), directory = "/dir-other")
+        val snapshot = SlimColdStartSnapshot(
+            sessions = null,
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = listOf(
+                    SlimapiQuestionEntry(id = "q-target", sessionId = "s2", questions = emptyList(), directory = "/dir-target"),
+                ),
+                authoritativeDirectories = setOf("/dir-target"),
+            ),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Failure(),
+            messages = null,
+        )
+        slices.mutateSessionList { it.copy(pendingQuestions = listOf(priorQ), pendingPermissions = emptyList()) }
+
+        val c = coordinator()
+        c.applySlimColdStartSnapshot(snapshot)
+        scope.testScheduler.advanceUntilIdle()
+
+        val qs = slices.sessionList.value.pendingQuestions
+        assertTrue("q-other-dir preserved (different directory)", qs.any { it.id == "q-other-dir" })
+        assertTrue("q-target added", qs.any { it.id == "q-target" })
+    }
+
+    /**
+     * I-2 D6: Partial's errors are accessible through the outcome type.
+     */
+    @Test
+    fun `I2-D6 partial outcome carries errors for retry affordance`() = runTest {
+        val errors = listOf(
+            cn.vectory.ocdroid.data.model.SlimapiAggregationError(directory = "/dir-down", code = "upstream_timeout"),
+        )
+        val outcome = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Partial(
+            items = listOf(SlimapiQuestionEntry(id = "q-ok", sessionId = "s1", questions = emptyList(), directory = "/dir-ok")),
+            errors = errors,
+            authoritativeDirectories = setOf("/dir-ok"),
+        )
+        assertTrue("outcome is Partial", outcome is cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Partial)
+        assertEquals(1, outcome.errors.size)
+        assertEquals("/dir-down", outcome.errors[0].directory)
+        assertEquals("upstream_timeout", outcome.errors[0].code)
+    }
+
+    // ── I-2 v2 production-fold discriminators ────────────────────────────
+
+    /**
+     * I-2 v2 §4.6: Partial production fold via applySlimColdStartSnapshot
+     * writes INCOMPLETE signal + failedSources, preserves failed-dir prior,
+     * and rejects a fetched item attributed to the failed directory.
+     */
+    @Test
+    fun `I2-v2 partial production fold writes INCOMPLETE signal and filters failed-dir fetched`() = runTest {
+        val priorA = QuestionRequest(
+            id = "q-a",
+            sessionId = "s1",
+            questions = listOf(QuestionInfo("old-a", "h", emptyList())),
+            directory = "/a",
+        )
+        val priorB = QuestionRequest(
+            id = "q-b",
+            sessionId = "s2",
+            questions = listOf(QuestionInfo("old-b", "h", emptyList())),
+            directory = "/b",
+        )
+        slices.mutateSessionList {
+            it.copy(pendingQuestions = listOf(priorA, priorB), pendingPermissions = emptyList())
+        }
+
+        val snapshot = SlimColdStartSnapshot(
+            sessions = null,
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Partial(
+                items = listOf(
+                    SlimapiQuestionEntry(
+                        id = "q-a",
+                        sessionId = "s1",
+                        questions = listOf(QuestionInfo("new-a", "h", emptyList())),
+                        directory = "/a",
+                    ),
+                    // Out-of-scope / failed-dir fetched item MUST be rejected.
+                    SlimapiQuestionEntry(
+                        id = "q-b-poison",
+                        sessionId = "s2",
+                        questions = listOf(QuestionInfo("poison", "h", emptyList())),
+                        directory = "/b",
+                    ),
+                ),
+                errors = listOf(
+                    cn.vectory.ocdroid.data.model.SlimapiAggregationError(
+                        directory = "/b",
+                        code = "upstream_timeout",
+                    ),
+                ),
+                authoritativeDirectories = setOf("/a"),
+            ),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+            ),
+            messages = null,
+        )
+
+        val c = coordinator()
+        val landed = c.applySlimColdStartSnapshot(snapshot)
+        assertTrue("token-gated fold must land", landed)
+
+        val qs = slices.sessionList.value.pendingQuestions
+        assertEquals(2, qs.size)
+        assertEquals("new-a", qs.first { it.id == "q-a" }.questions.first().question)
+        assertEquals("old-b", qs.first { it.id == "q-b" }.questions.first().question)
+        assertFalse("failed-dir poison item rejected", qs.any { it.id == "q-b-poison" })
+
+        val signal = slices.sessionList.value.questionAggregationSignal
+        assertEquals(
+            cn.vectory.ocdroid.ui.SlimAggregationCompleteness.INCOMPLETE,
+            signal.completeness,
+        )
+        assertEquals(1, signal.failedSources.size)
+        assertEquals("/b", signal.failedSources[0].directory)
+        assertEquals("upstream_timeout", signal.failedSources[0].code)
+    }
+
+    /**
+     * I-2 v2 §4.7: Failure production fold preserves prior, writes FAILED
+     * signal + failureMessage, and emits UiEvent.Error.
+     */
+    @Test
+    fun `I2-v2 failure production fold preserves prior emits UiEvent and FAILED signal`() = runTest {
+        val priorQ = QuestionRequest(
+            id = "q-keep",
+            sessionId = "s1",
+            questions = listOf(QuestionInfo("keep", "h", emptyList())),
+            directory = "/a",
+        )
+        slices.mutateSessionList {
+            it.copy(pendingQuestions = listOf(priorQ), pendingPermissions = emptyList())
+        }
+
+        val recorded = mutableListOf<cn.vectory.ocdroid.ui.UiEvent>()
+        val collector = scope.launch {
+            effects.uiEventsConsumed.toList(recorded)
+        }
+
+        val snapshot = SlimColdStartSnapshot(
+            sessions = null,
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Failure("HTTP 503"),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+            ),
+            messages = null,
+        )
+
+        val c = coordinator()
+        assertTrue(c.applySlimColdStartSnapshot(snapshot))
+        scope.testScheduler.advanceUntilIdle()
+        collector.cancel()
+
+        assertEquals(listOf(priorQ), slices.sessionList.value.pendingQuestions)
+        val signal = slices.sessionList.value.questionAggregationSignal
+        assertEquals(
+            cn.vectory.ocdroid.ui.SlimAggregationCompleteness.FAILED,
+            signal.completeness,
+        )
+        assertEquals("HTTP 503", signal.failureMessage)
+        assertTrue(
+            "Failure must emit UiEvent.Error for questions",
+            recorded.any {
+                it is cn.vectory.ocdroid.ui.UiEvent.Error &&
+                    it.resId == cn.vectory.ocdroid.R.string.error_slim_questions_fetch_failed
+            },
+        )
+    }
+
+    /**
+     * C-D3 v2 §4.5 / I-2: standalone loadPendingQuestionsSlim host switch
+     * with REAL OpenCodeRepository + MockWebServer + configure() rotation.
+     *
+     * 1. configure A; seed B-side slice that must survive.
+     * 2. trigger load; wait until /slimapi/questions request starts.
+     * 3. configure(B) rotates marker (real incarnation change).
+     * 4. deliver delayed A response.
+     * 5. assert B slice/signal/UiEvent untouched.
+     *
+     * Does NOT hand-force isSlimCommitTokenCurrent / commitIf false.
+     * Uses a real CoroutineScope (not UnconfinedTestDispatcher) so OkHttp
+     * can resume the launch after the delayed response.
+     */
+    @Test
+    fun `CD3-v2 standalone q-load host switch drops stale commit`() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        val realScope = kotlinx.coroutines.CoroutineScope(
+            Dispatchers.IO + kotlinx.coroutines.SupervisorJob(),
+        )
+        try {
+            every { settingsManager.currentWorkdir } returns "/proj"
+            every { settingsManager.getRecentWorkdirs(any()) } returns emptyList()
+
+            val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+            val baseUrl = server.url("/").toString().trimEnd('/')
+            realRepo.configure(baseUrl = baseUrl, slim = true)
+
+            val bSeed = QuestionRequest(
+                id = "q-b-seed",
+                sessionId = "s-b",
+                questions = listOf(QuestionInfo("b-seed", "h", emptyList())),
+                directory = "/b",
+            )
+            slices.mutateSessionList {
+                it.copy(
+                    pendingQuestions = listOf(bSeed),
+                    questionAggregationSignal = cn.vectory.ocdroid.ui.SlimAggregationSignal(
+                        completeness = cn.vectory.ocdroid.ui.SlimAggregationCompleteness.COMPLETE,
+                    ),
+                )
+            }
+
+            val body = """
+                {
+                  "items": [
+                    {
+                      "id": "q-a-stale",
+                      "sessionID": "s-a",
+                      "questions": [{"question":"stale-a","header":"h","options":[]}],
+                      "directory": "/a",
+                      "routeToken": "rt-stale"
+                    }
+                  ],
+                  "errors": []
+                }
+            """.trimIndent()
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody(body)
+                    .setHeader("Content-Type", "application/json")
+                    .setBodyDelay(400, TimeUnit.MILLISECONDS),
+            )
+
+            val recorded = mutableListOf<cn.vectory.ocdroid.ui.UiEvent>()
+            val collector = realScope.launch {
+                effects.uiEventsConsumed.toList(recorded)
+            }
+
+            val c = SessionSyncCoordinator(
+                scope = realScope,
+                slices = slices,
+                settingsManager = settingsManager,
+                effects = effects,
+                currentServerGroupFp = { "test-fp" },
+                isSlimMode = { true },
+                repository = realRepo,
+            )
+            c.loadPendingQuestionsAllWorkdirs(realRepo)
+
+            val started = server.takeRequest(5, TimeUnit.SECONDS)
+            assertNotNull("questions request must start under A", started)
+            assertTrue(
+                "path must be slim questions: ${started!!.path}",
+                started.path!!.startsWith("/slimapi/questions"),
+            )
+
+            // C-D3 rev-3: production order is beginSlimReconfigure BEFORE
+            // HostStatePurged / configure. Rotate marker first so the purge
+            // window already rejects old commitIf.
+            realRepo.beginSlimReconfigure()
+            realRepo.configure(baseUrl = baseUrl, slim = true)
+
+            // Wait for the delayed response + stale gate to finish.
+            kotlinx.coroutines.delay(800)
+            collector.cancel()
+
+            assertEquals(
+                "B seed must be unchanged after stale A response",
+                listOf(bSeed),
+                slices.sessionList.value.pendingQuestions,
+            )
+            assertEquals(
+                "B signal must stay COMPLETE (not polluted by A)",
+                cn.vectory.ocdroid.ui.SlimAggregationCompleteness.COMPLETE,
+                slices.sessionList.value.questionAggregationSignal.completeness,
+            )
+            assertTrue(
+                "no q-a-stale write under B",
+                slices.sessionList.value.pendingQuestions.none { it.id == "q-a-stale" },
+            )
+            assertTrue("no UiEvent from stale A aggregation", recorded.isEmpty())
+        } finally {
+            realScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+            server.shutdown()
+        }
+    }
+
+    /**
+     * Control for §4.5: without configure, the same aggregation response
+     * updates items + COMPLETE signal under a real repo + MockWebServer.
+     */
+    @Test
+    fun `CD3-v2 standalone q-load control updates items and signal without configure`() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        val realScope = kotlinx.coroutines.CoroutineScope(
+            Dispatchers.IO + kotlinx.coroutines.SupervisorJob(),
+        )
+        try {
+            every { settingsManager.currentWorkdir } returns "/proj"
+            every { settingsManager.getRecentWorkdirs(any()) } returns emptyList()
+
+            val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+            realRepo.configure(
+                baseUrl = server.url("/").toString().trimEnd('/'),
+                slim = true,
+            )
+
+            val body = """
+                {
+                  "items": [
+                    {
+                      "id": "q-ok",
+                      "sessionID": "s1",
+                      "questions": [{"question":"hello","header":"h","options":[]}],
+                      "directory": "/proj",
+                      "routeToken": "rt-ok"
+                    }
+                  ],
+                  "errors": []
+                }
+            """.trimIndent()
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody(body)
+                    .setHeader("Content-Type", "application/json"),
+            )
+
+            val c = SessionSyncCoordinator(
+                scope = realScope,
+                slices = slices,
+                settingsManager = settingsManager,
+                effects = effects,
+                currentServerGroupFp = { "test-fp" },
+                isSlimMode = { true },
+                repository = realRepo,
+            )
+            c.loadPendingQuestionsAllWorkdirs(realRepo)
+            kotlinx.coroutines.delay(500)
+
+            val qs = slices.sessionList.value.pendingQuestions
+            assertTrue("control path writes q-ok: $qs", qs.any { it.id == "q-ok" })
+            assertEquals(
+                cn.vectory.ocdroid.ui.SlimAggregationCompleteness.COMPLETE,
+                slices.sessionList.value.questionAggregationSignal.completeness,
+            )
+        } finally {
+            realScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+            server.shutdown()
+        }
     }
 }

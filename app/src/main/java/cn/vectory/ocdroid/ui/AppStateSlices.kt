@@ -11,11 +11,64 @@ import cn.vectory.ocdroid.data.model.ProvidersResponse
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.util.LocaleMode
 import cn.vectory.ocdroid.util.MarkdownFontSizes
 import cn.vectory.ocdroid.util.ThemeMode
 import kotlinx.coroutines.flow.StateFlow
+
+/**
+ * I-2 v2 §3.3: observable completeness signal for slimapi
+ * `/questions` + `/permissions` aggregation folds. Stored on
+ * [SessionListState] as `questionAggregationSignal` /
+ * `permissionAggregationSignal` so the UI can render an "incomplete"
+ * indicator or a retry button without re-fetching.
+ *
+ * Lifecycle: reset to defaults on cross-group
+ * [AppAction.HostStatePurged] (mirrors `sessionErrorsById`); same-group
+ * switches preserve the prior signal (server-identical data is still
+ * authoritative).
+ */
+enum class SlimAggregationCompleteness {
+    /** All requested directories returned successfully (or no errors). */
+    COMPLETE,
+
+    /**
+     * Some requested directories returned an upstream error; items from
+     * proven-successful directories are folded. [SlimAggregationSignal.failedSources]
+     * carries the per-directory cause.
+     */
+    INCOMPLETE,
+
+    /**
+     * The whole aggregation call failed (transport / HTTP / decode).
+     * Prior state is preserved; [SlimAggregationSignal.failureMessage]
+     * carries the cause. Surfaces a UiEvent.Error toast.
+     */
+    FAILED,
+}
+
+/**
+ * I-2 v2 §3.3: per-directory failed-source descriptor carried on
+ * [SlimAggregationSignal.failedSources] when completeness is
+ * [SlimAggregationCompleteness.INCOMPLETE].
+ */
+data class SlimAggregationFailedSource(
+    val directory: String? = null,
+    val code: String? = null,
+)
+
+/**
+ * I-2 v2 §3.3: observable aggregation-completeness signal stored on
+ * [SessionListState] for both `/questions` and `/permissions` folds.
+ * Default is `COMPLETE` (no signal / fresh state).
+ */
+data class SlimAggregationSignal(
+    val completeness: SlimAggregationCompleteness = SlimAggregationCompleteness.COMPLETE,
+    val failedSources: List<SlimAggregationFailedSource> = emptyList(),
+    val failureMessage: String? = null,
+)
 
 sealed class TunnelActivationState {
     data object Idle : TunnelActivationState()
@@ -331,6 +384,22 @@ data class ChatState(
     val revertCutoffs: Map<String, cn.vectory.ocdroid.data.model.RevertCutoff> = emptyMap(),
     val partsByMessage: Map<String, List<Part>> = emptyMap(),
     val streamingPartTexts: Map<String, String> = emptyMap(),
+    /**
+     * §slimapi-client-v1 §G6 (Task 16): per-part expand state for the
+     * "展开省略内容" affordance on skeleton parts. Layered alongside
+     * [streamingPartTexts] in the same chat slice — both are high-frequency
+     * during SSE streaming, but only this one is mutated by user taps.
+     *
+     * Keyed by [PartKey]`(messageId, partId)`. States transition via the
+     * expand action: Idle → Loading (tap) → Loaded | Failed (usecase outcome).
+     * Terminal states persist across unrelated chat mutations — only an
+     * explicit re-tap may change them.
+     *
+     * IMPORTANT: this map is SEPARATE from the legacy `expandedParts` /
+     * `onToggleExpand` mechanism (tool-call folds, reasoning cards, sub-agent
+     * cards, patch accordions). The two coexist deliberately.
+     */
+    val partExpandStates: Map<cn.vectory.ocdroid.ui.chat.PartKey, cn.vectory.ocdroid.ui.chat.PartExpandState> = emptyMap(),
     val streamingReasoningPart: Part? = null,
     val olderMessagesCursor: String? = null,
     // §F3-load-more: 默认 false，与 olderMessagesCursor=null 对称——避免任何
@@ -542,6 +611,85 @@ data class SessionListState(
      *  key = sessionId，value = 该会话累计的 FileDiff 列表。仅在打开会话时拉取 +
      *  SSE 增量更新；驱动聊天内 SessionDiffCard。 */
     val sessionDiffs: Map<String, List<cn.vectory.ocdroid.data.model.FileDiff>> = emptyMap(),
+    /**
+     * Task 12 (slimapi v1 §2 / §6.1 + §G2 session.error semantics): the
+     * canonical per-session upstream-error banner store. Keyed by sessionId;
+     * value is the latest [SlimSessionLastError] the sidecar surfaced for
+     * that session. UIs (StatusSlot / SessionRetryCard / chat row banner)
+     * read this map directly — there is NO separate banner abstraction.
+     *
+     * # Producers (this slice's [cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator])
+     *
+     *  - `session.error` SSE with a `sessionID` →
+     *    `sessionErrorsById[sid] = SlimSessionLastError(...)` (durable
+     *    banner). A session.error WITHOUT a `sessionID` is routed to a
+     *    global toast only and does NOT touch this map (the sidecar
+     *    signals a session-less failure; no banner to render).
+     *  - `session.digest` with `lastError` three-state:
+     *    [cn.vectory.ocdroid.data.model.LastErrorField.Set] →
+     *    `sessionErrorsById[sid] = error`;
+     *    [cn.vectory.ocdroid.data.model.LastErrorField.Cleared] →
+     *    `sessionErrorsById - sid` (sidecar signals recovery);
+     *    [cn.vectory.ocdroid.data.model.LastErrorField.Omitted] → no
+     *    change (debounce tick without lastError must not strand an
+     *    active banner).
+     *
+     * # Idempotency / concurrency (T12-C3)
+     *
+     * Writes go through `MutableStateFlow.update` (CAS) so concurrent
+     * by-sid writes serialize per-key — duplicate Set or duplicate
+     * session.error frames leave the map in the same state as a single
+     * application. The T11 per-sid stripe further serializes the
+     * digest-driven reconcile workflow (which advances the repo's own
+     * lastError merge), so digest + session.error for the same sid
+     * compose without interleaving inside the reconcile body.
+     *
+     * # NOT a banner abstraction (T12-C4)
+     *
+     * The map is the canonical store. There is no
+     * `repository.applySessionErrorBanner` / `sessionBanners` indirection
+     * — the coordinator writes the map directly via `mutateSessionList`.
+     *
+     * # Lifecycle cleanup (final-gate I-3)
+     *
+     * T12 owns the producer path (SET on error, REMOVE on `lastError =
+     * Cleared`). Three lifecycle reducers ADDITIONALLY drop entries so the
+     * map cannot leak across host / archive / delete boundaries (review-
+     * final-rev-gpt-20260719081038 §2):
+     *
+     *  - [cn.vectory.ocdroid.ui.AppAction.HostStatePurged] (cross-group):
+     *    `sessionErrorsById = emptyMap()` — old host's sid→error cannot
+     *    survive a host switch; a root-id collision on the new host would
+     *    otherwise render the prior host's banner. Same-group switches
+     *    PRESERVE the map (server-identical data is still authoritative).
+     *  - [cn.vectory.ocdroid.ui.AppAction.SessionArchived]: prunes the
+     *    archived subtree's entries (defensive — covers descendants that
+     *    did NOT receive their own archive event). Atomically committed
+     *    with the archive so collectors never observe a stale "archived
+     *    but still errored" torn state.
+     *  - [cn.vectory.ocdroid.ui.launchDeleteSession]: prunes the deleted
+     *    subtree's entries in the same `mutateSessionList` block as the
+     *    sessions / pendingQuestions purge.
+     *
+     * These lifecycle reductions do NOT change T12's set/remove logic;
+     * they close the retention gaps the final-gate review identified.
+     */
+    val sessionErrorsById: Map<String, SlimSessionLastError> = emptyMap(),
+    /**
+     * I-2 v2 §3.3: observable completeness signal for the latest
+     * slimapi `/questions` aggregation fold. Drives UI affordances
+     * (retry button, "1 directory unavailable" banner). Reset to
+     * [SlimAggregationSignal] (COMPLETE) on cross-group
+     * [AppAction.HostStatePurged] so the prior host's signal cannot
+     * leak into the new host.
+     */
+    val questionAggregationSignal: SlimAggregationSignal = SlimAggregationSignal(),
+    /**
+     * I-2 v2 §3.3: observable completeness signal for the latest
+     * slimapi `/permissions` aggregation fold. Mirrors
+     * [questionAggregationSignal].
+     */
+    val permissionAggregationSignal: SlimAggregationSignal = SlimAggregationSignal(),
     /**
      * §Q4-strict-sync: ids of sessions freshly created locally (via
      * [cn.vectory.ocdroid.ui.AppCore.materializeDraftSession] /

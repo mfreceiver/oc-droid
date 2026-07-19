@@ -347,4 +347,195 @@ class ProcessStatusPollerTest {
             sourceTimeMs: Long,
         ) = Unit
     }
+
+    // ── T13-C4 slim fan-out backoff (scheduleBackoff / resetBackoff) ──────
+
+    private fun newPoller(
+        appScope: TestScope,
+        input: RecordingStatusInput = RecordingStatusInput(GlobalBusyState.AllIdleFresh),
+    ): ProcessStatusPoller {
+        val store = ConnectionIdentityStore()
+        bindIdentity(store)
+        return ProcessStatusPoller(
+            scope = appScope,
+            statusAggregatorInput = input,
+            snapshotProvider = SessionSnapshotProvider { StatusSnapshot.Empty },
+            identityStore = store,
+            statusAggregator = input,
+            clock = { 0L },
+        )
+    }
+
+    @Test
+    fun `T13-C4 - scheduleBackoff grows exponentially with consecutive retryable sweeps`() =
+        runTest {
+            val appScope = TestScope(UnconfinedTestDispatcher())
+            val poller = newPoller(appScope)
+
+            // Deterministic (jitter = 0) so the schedule is purely exponential.
+            val first = poller.scheduleBackoff(jitter = 0.0f)
+            val second = poller.scheduleBackoff(jitter = 0.0f)
+            val third = poller.scheduleBackoff(jitter = 0.0f)
+
+            assertEquals(
+                "first delay is the base",
+                ProcessStatusPoller.BACKOFF_BASE_MS,
+                first,
+            )
+            assertEquals(
+                "second delay doubles the base",
+                ProcessStatusPoller.BACKOFF_BASE_MS * 2L,
+                second,
+            )
+            assertEquals(
+                "third delay quadruples the base",
+                ProcessStatusPoller.BACKOFF_BASE_MS * 4L,
+                third,
+            )
+            assertTrue(
+                "T13-C4: nextDelay > base on 503 (second > first)",
+                second > first,
+            )
+        }
+
+    @Test
+    fun `T13-C4 - scheduleBackoff is capped at BACKOFF_MAX_MS - 30s`() = runTest {
+        val appScope = TestScope(UnconfinedTestDispatcher())
+        val poller = newPoller(appScope)
+
+        // Many consecutive failures — the delay must stay ≤ BACKOFF_MAX_MS.
+        var last = 0L
+        repeat(20) { last = poller.scheduleBackoff(jitter = 0.0f) }
+
+        assertEquals(
+            "delay caps at BACKOFF_MAX_MS (= DEFAULT_INTERVAL_MS = 30s)",
+            ProcessStatusPoller.BACKOFF_MAX_MS,
+            last,
+        )
+        assertEquals(
+            "BACKOFF_MAX_MS equals the steady-state interval (polling never goes slower)",
+            ProcessStatusPoller.DEFAULT_INTERVAL_MS,
+            ProcessStatusPoller.BACKOFF_MAX_MS,
+        )
+    }
+
+    @Test
+    fun `T13-C4 - resetBackoff returns the state to base on success`() = runTest {
+        val appScope = TestScope(UnconfinedTestDispatcher())
+        val poller = newPoller(appScope)
+
+        poller.scheduleBackoff(jitter = 0.0f)
+        poller.scheduleBackoff(jitter = 0.0f)
+        poller.scheduleBackoff(jitter = 0.0f)
+        assertTrue(
+            "backoff state has grown",
+            poller.currentBackoffDelayMs() > ProcessStatusPoller.BACKOFF_BASE_MS,
+        )
+
+        // Success path: reset to base.
+        poller.resetBackoff()
+        assertEquals(
+            "reset clears pending backoff",
+            0L,
+            poller.currentBackoffDelayMs(),
+        )
+
+        // Next schedule starts fresh from the base.
+        val afterReset = poller.scheduleBackoff(jitter = 0.0f)
+        assertEquals(
+            "after reset, the next schedule is the base again",
+            ProcessStatusPoller.BACKOFF_BASE_MS,
+            afterReset,
+        )
+    }
+
+    @Test
+    fun `T13-C4 - scheduleBackoff jitter is clamped to plus-minus 20 percent`() = runTest {
+        val appScope = TestScope(UnconfinedTestDispatcher())
+        val poller = newPoller(appScope)
+
+        // Out-of-range jitter (e.g., 5.0 = 500%) is clamped to +20%.
+        val clampedHigh = poller.scheduleBackoff(jitter = 5.0f)
+        poller.resetBackoff()
+        val clampedLow = poller.scheduleBackoff(jitter = -5.0f)
+        poller.resetBackoff()
+        val exact = poller.scheduleBackoff(jitter = 0.2f)
+        poller.resetBackoff()
+        val exactLow = poller.scheduleBackoff(jitter = -0.2f)
+
+        // Clamped to ±20%: high == exact (+20%), low == exactLow (-20%).
+        assertEquals(
+            "out-of-range +jitter clamps to +20%",
+            exact,
+            clampedHigh,
+        )
+        assertEquals(
+            "out-of-range -jitter clamps to -20%",
+            exactLow,
+            clampedLow,
+        )
+        assertEquals(
+            "+20% jitter = base * 1.2",
+            (ProcessStatusPoller.BACKOFF_BASE_MS * 1.2f).toLong(),
+            exact,
+        )
+    }
+
+    @Test
+    fun `T13-C4 - currentBackoffDelayMs starts at 0 - no backoff pending`() = runTest {
+        val appScope = TestScope(UnconfinedTestDispatcher())
+        val poller = newPoller(appScope)
+
+        assertEquals(
+            "no pending backoff on a fresh poller",
+            0L,
+            poller.currentBackoffDelayMs(),
+        )
+    }
+
+    @Test
+    fun `T13-C4 M2 - default scheduleBackoff samples jitter (non-deterministic within ±20 percent)`() = runTest {
+        // Round-2 M2 fix: the default-arg call (no jitter supplied) must
+        // sample jitter internally so production callers cannot "forget".
+        // We sample N times + assert: every value is within ±20% of the
+        // deterministic base; AND not all values equal the deterministic
+        // base (i.e. sampling IS happening).
+        val appScope = TestScope(UnconfinedTestDispatcher())
+        val poller = newPoller(appScope)
+
+        val samples = mutableSetOf<Long>()
+        val base = ProcessStatusPoller.BACKOFF_BASE_MS
+        val lower = (base * 0.8f).toLong()
+        val upper = (base * 1.2f).toLong()
+        repeat(50) {
+            // resetBackoff so each sample is the FIRST attempt (base delay).
+            poller.resetBackoff()
+            // DEFAULT call (no jitter arg) → must sample internally.
+            val v = poller.scheduleBackoff()
+            samples.add(v)
+            assertTrue(
+                "sampled value $v must be within ±20% of base ($lower..$upper)",
+                v in lower..upper,
+            )
+        }
+        assertTrue(
+            "default sampling produced >1 distinct value (jitter is non-deterministic): $samples",
+            samples.size > 1,
+        )
+    }
+
+    @Test
+    fun `T13-C4 M2 - explicit jitter is respected (not sampled)`() = runTest {
+        // Caller-supplied jitter (e.g. 0.0f for tests) is NOT replaced by
+        // the internal sampler — deterministic value comes back.
+        val appScope = TestScope(UnconfinedTestDispatcher())
+        val poller = newPoller(appScope)
+
+        val deterministic = poller.scheduleBackoff(jitter = 0.0f)
+        assertEquals(
+            "explicit jitter=0.0f produces deterministic base",
+            ProcessStatusPoller.BACKOFF_BASE_MS,
+            deterministic,
+        )
+    }
 }

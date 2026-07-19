@@ -30,6 +30,7 @@ data class QuestionRequest(
     @SerialName("sessionID") val sessionId: String,
     val questions: List<QuestionInfo>,
     val tool: ToolRef? = null,
+    val directory: String? = null,
     /**
      * Slimapi HMAC the sidecar validates on reply/reject (~1h TTL). Present
      * only when the question arrived via slim SSE / `/slimapi/questions`;

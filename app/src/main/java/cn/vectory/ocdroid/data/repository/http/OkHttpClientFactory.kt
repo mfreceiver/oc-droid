@@ -10,18 +10,24 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * R-18: unified factory for the four OkHttp clients used by
- * `OpenCodeRepository` (REST / SSE / tunnel / health). Owns the singleton
- * HTTP cache, wires the per-purpose interceptor chain, and routes every
- * client through the shared [SslConfigFactory] / [applySsl] entry point so
- * the trust-all decision lives in exactly one place — this is the
- * consolidation of the four previously duplicated `applySsl(sslConfigFor(...))`
- * blocks in `buildRestClient` / `buildSseClient` / `buildTunnelOkHttpClient` /
- * `checkHealthFor`.
+ * R-18: unified factory for the OkHttp clients used by
+ * `OpenCodeRepository` (REST / SSE / tunnel / health / command / mutation).
+ * Owns the singleton HTTP cache, wires the per-purpose interceptor chain,
+ * and routes every client through the shared [SslConfigFactory] / [applySsl]
+ * entry point so the trust-all decision lives in exactly one place — this
+ * is the consolidation of the four previously duplicated
+ * `applySsl(sslConfigFor(...))` blocks in `buildRestClient` /
+ * `buildSseClient` / `buildTunnelOkHttpClient` / `checkHealthFor`.
  *
  * Client variants:
- *  - [restClient]: base chain + response-size guard (OOM P0) + 30 s read.
+ *  - [restClient]: base chain + response-size guard (OOM P0) + 30 s read
+ *    + `retryOnConnectionFailure(true)` (GET only — idempotent, safe to retry).
  *  - [sseClient]: base chain + 0 read timeout (SSE long connection).
+ *  - [mutationClient]: base chain + response-size guard + 30 s read
+ *    + `retryOnConnectionFailure(false)` (POST mutations — never auto-retry).
+ *  - [commandClient]: base chain + response-size guard + 300 s read
+ *    + `retryOnConnectionFailure(false)` (POST executeCommand — long server
+ *    work + never auto-retry).
  *  - [tunnelClient]: SSL + 10 s/10 s timeouts, no interceptors (form POST auth).
  *  - [healthClient]: SSL + 10 s/10 s timeouts, no interceptors (one-shot probe).
  *
@@ -52,6 +58,7 @@ class OkHttpClientFactory @Inject constructor(
     private val sslConfigFactory: SslConfigFactory,
     private val directoryHeaderInterceptor: DirectoryHeaderInterceptor,
     private val slimapiVersionInterceptor: SlimapiVersionInterceptor,
+    private val slimapiDebugInterceptor: SlimapiDebugInterceptor,
     private val authInterceptor: AuthInterceptor,
     private val cacheControlInterceptor: CacheControlInterceptor,
     private val trafficCountingInterceptor: TrafficCountingInterceptor,
@@ -124,23 +131,78 @@ class OkHttpClientFactory @Inject constructor(
             // auth 之前——版本头是路由门闩，逻辑上先于 auth/cache-control；同时
             // directory interceptor 不会触碰 /slimapi/ 路径，无顺序耦合。
             .addInterceptor(slimapiVersionInterceptor)
+            // POST-RELEASE instrumentation (slimapi-client-v1): dedicated
+            // slimapi DEBUG interceptor — logs method/encodedPath/version
+            // header/directory query/round-trip ms + best-effort error code
+            // on non-2xx. AFTER slimapiVersionInterceptor so the injected
+            // version header is observable in the log; BEFORE authInterceptor
+            // so the slimapi-debug grouping stays with the routing interceptors.
+            // Non-slimapi paths + release builds fast-path bypass (no work,
+            // no Logcat write).
+            .addInterceptor(slimapiDebugInterceptor)
             .addInterceptor(authInterceptor)
             .addInterceptor(cacheControlInterceptor)
             .addInterceptor(trafficCountingInterceptor)
             .connectTimeout(10, TimeUnit.SECONDS)
     }
 
-    /** REST client: base chain + §OOM P0 body-size cap + 30 s read timeout. */
+    /**
+     * REST client: base chain + §OOM P0 body-size cap + 30 s read timeout.
+     *
+     * **Retry policy** (T14): keeps OkHttp's default
+     * `retryOnConnectionFailure = true` because every method routed here is
+     * a GET (idempotent) — a connection failure mid-handshake is safe to
+     * retry, never doubles a mutation. POSTs MUST NOT use this client; they
+     * go through [mutationClient] (or [commandClient] for executeCommand).
+     */
     fun restClient(hostPort: String?): OkHttpClient =
         baseBuilder(hostPort)
             .addInterceptor(responseSizeGuardInterceptor)
             .readTimeout(30, TimeUnit.SECONDS)
+            // OkHttp default: retryOnConnectionFailure = true. Spelled out
+            // here for the contract — GET-only clients are safe to retry.
+            .retryOnConnectionFailure(true)
             .build()
 
     /** SSE client: base chain + 0 read timeout (SSE long connection). */
     fun sseClient(hostPort: String?): OkHttpClient =
         baseBuilder(hostPort)
             .readTimeout(0, TimeUnit.SECONDS)
+            .build()
+
+    /**
+     * T14 (CLIENT_CHANGES "mutation 只发一次，不因超时向 direct 重发"):
+     * dedicated client for **POST mutations** (every POST wrapper in
+     * [OpenCodeRepository] EXCEPT `executeCommand`, which has its own
+     * [commandClient] for the 300 s heavy-server-work window).
+     *
+     * **Why this exists** — OkHttp's default `retryOnConnectionFailure = true`
+     * can double-send a POST that the server already processed: if the TCP
+     * connection breaks AFTER the server received + applied the mutation
+     * but BEFORE the client finishes reading the ACK, OkHttp silently
+     * reopens and re-sends the same body. For an idempotent GET that is
+     * safe; for a POST (`/prompt_async` / `/abort` / `/fork` / `/revert` /
+     * `/permissions` / `/question/{id}/reply` / the slimapi analogues) it
+     * is a correctness hazard — the user clicks "send" once and the server
+     * applies it twice.
+     *
+     * **Config** — same base chain (auth / directory / slimapi-version /
+     * cache / traffic / logging / `connectTimeout(10 s)` /
+     * [responseSizeGuardInterceptor]) + 30 s read timeout (matches
+     * [restClient]; mutations don't have command's heavy-server-side wait) +
+     * `retryOnConnectionFailure(false)`. The retry flag is the WHOLE POINT
+     * of this client — never set it back to true here.
+     *
+     * **Routing table** (single source of truth):
+     *  - GET (every `api.getX` / `apiV2.getX`) → [restClient] (retry=true).
+     *  - POST `executeCommand` → [commandClient] (300 s + retry=false; T14-C3).
+     *  - Every other POST → **this client** (30 s + retry=false).
+     */
+    fun mutationClient(hostPort: String?): OkHttpClient =
+        baseBuilder(hostPort)
+            .addInterceptor(responseSizeGuardInterceptor)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(false)
             .build()
 
     /**
@@ -172,11 +234,24 @@ class OkHttpClientFactory @Inject constructor(
      * JSON), so it does not constrain real traffic — it is purely a
      * defence-in-depth bound that brings [commandClient]'s body-size
      * posture in line with [restClient]'s.
+     *
+     * **T14-C3** (`commandClient` retry): `executeCommand` is a POST, so it
+     * carries the SAME double-send risk as every other mutation — a
+     * connection break after the server ran the slash command but before
+     * the client read the ACK would, with `retryOnConnectionFailure=true`,
+     * trigger a silent re-POST that re-runs the command. The 300 s read
+     * timeout actually WORSENS the window (more time for a transient
+     * network blip to land between server-apply and ACK-read). So despite
+     * the long read timeout, `retryOnConnectionFailure(false)` is set
+     * unconditionally — never re-enable retry here without solving the
+     * double-send problem another way. (See [mutationClient] for the
+     * symmetric config on the 30 s POST path.)
      */
     fun commandClient(hostPort: String?): OkHttpClient =
         baseBuilder(hostPort)
             .addInterceptor(responseSizeGuardInterceptor)
             .readTimeout(300, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(false)
             .build()
 
     /**

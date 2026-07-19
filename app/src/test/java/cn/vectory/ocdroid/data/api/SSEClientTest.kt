@@ -14,6 +14,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Ignore
@@ -158,8 +159,131 @@ class SSEClientTest {
         assertEquals("ok", event.payload.type)
     }
 
-    // ───────────────────────── 2. URL 脱敏 ─────────────────────────
+    // ─────────────── T9: Last-Event-ID never sent (no-replay contract) ──────
+    //
+    // The deployed oc-slimapi sidecar's SSE feed NEVER replays past events
+    // (v1 contract §3 "resync ... 无 replay" + §4 "resync 不 replay 由 §3 的
+    // SSE 无 replay 语义保证"; SlimapiV1.kt:174 SlimapiResyncReason.IMPLICIT —
+    // "Client reconnected without Last-Event-ID ... server treats as resync").
+    // The standard SSE `Last-Event-ID` request header is the resume cursor
+    // for server-side replay buffers; since slimapi has none, sending it
+    // would be meaningless (and the deployed server ignores unknown headers
+    // anyway). SSEClient.connectOnce therefore NEVER adds it — on first
+    // connect OR reconnect. These three regression tests pin that behaviour
+    // so a future "helpful" LE-ID marker cannot sneak in (T9-C1/C2/C3).
 
+    /** T9-C1: first-connect request carries NO `Last-Event-ID` header. */
+    @Test
+    fun `first connect request carries no Last-Event-ID header`() = runBlocking {
+        val payload = """{"payload":{"type":"server.connected"}}"""
+        server.enqueue(sseResponse(dataFrame(payload)))
+
+        withTimeout(5_000) {
+            sse.connect(server.url("/").toString().trimEnd('/'))
+                .first { it.isSuccess }
+        }
+
+        val request = server.takeRequest()
+        assertNull(
+            "Last-Event-ID MUST NOT be sent on first connect " +
+                "(slimapi SSE never replays; v1 contract §3)",
+            request.getHeader("Last-Event-ID"),
+        )
+    }
+
+    /**
+     * T9-C2 (reframed): reconnect request (after a transient failure on the
+     * first connection) carries NO `Last-Event-ID` header.
+     *
+     * Original plan T9 wanted "Last-Event-ID: slim-no-replay" on reconnect —
+     * SUPERSEDED by the deployed no-replay contract (LE-ID is meaningless
+     * there). The reframed assertion: NO LE-ID.
+     */
+    @Test
+    fun `reconnect request carries no Last-Event-ID header`() = runBlocking {
+        // 1st request: 500 → onFailure → retryWhen backoff (≥1s wall-clock
+        // because INITIAL_RETRY_DELAY_MS=1000L is a `const val`, inlined).
+        server.enqueue(MockResponse().setResponseCode(500).setBody("boom"))
+        // 2nd request: succeeds — captures the RECONNECT request headers.
+        val payload = """{"payload":{"type":"server.connected"}}"""
+        server.enqueue(sseResponse(dataFrame(payload)))
+
+        withTimeout(10_000) {
+            sse.connect(server.url("/").toString().trimEnd('/'))
+                .first { it.isSuccess }
+                .getOrThrow()
+        }
+        assertTrue(
+            "both enqueued responses should have been consumed (requestCount=${server.requestCount})",
+            server.requestCount >= 2,
+        )
+
+        server.takeRequest() // discard initial connect
+        val reconnectRequest = server.takeRequest()
+        assertNull(
+            "reconnect request MUST NOT send Last-Event-ID " +
+                "(deployed slimapi SSE never replays; v1 contract §3)",
+            reconnectRequest.getHeader("Last-Event-ID"),
+        )
+    }
+
+    /**
+     * T9-C3 (reframed): "no-id frames → disconnect → reconnect" scenario.
+     *
+     * Original plan T9 used this scenario to verify LE-ID IS sent; reframed
+     * to verify the OPPOSITE: even after receiving SSE frames without an
+     * `id:` field and then being disconnected (server EOF → onClosed →
+     * retryWhen), the RECONNECT request carries NO `Last-Event-ID`.
+     *
+     * This matters because OkHttp's RealEventSource tracks Last-Event-ID
+     * internally per-EventSource; we prove that SSEClient's reconnect path
+     * builds a brand-new Request (via callbackFlow + retryWhen → fresh
+     * connectOnce invocation) and does NOT carry any tracked LE-ID forward.
+     */
+    @Test
+    fun `reconnect after no-id frames then disconnect carries no Last-Event-ID`() = runBlocking {
+        // 1st response: two valid frames WITHOUT `id:` field (the slimapi
+        // sidecar NEVER emits `id:` — there is no replay buffer to index).
+        // EOF after the body → OkHttp fires onClosed → close(exc) → retryWhen.
+        val p1 = """{"payload":{"type":"server.connected"}}"""
+        val p2 = """{"payload":{"type":"server.heartbeat"}}"""
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("data: $p1\n\ndata: $p2\n\n"),
+        )
+        // 2nd response (post-reconnect): one frame so the collector can
+        // observe that the reconnect actually delivered events.
+        val p3 = """{"payload":{"type":"server.connected"}}"""
+        server.enqueue(sseResponse(dataFrame(p3)))
+
+        // Consume across the disconnect boundary: p1, p2 from the first
+        // connection, then p3 from the reconnect. retryWhen transparently
+        // restarts connectOnce between p2 and p3.
+        val events = withTimeout(10_000) {
+            sse.connect(server.url("/").toString().trimEnd('/'))
+                .take(3)
+                .toList()
+                .map { it.getOrThrow() }
+        }
+        assertEquals(3, events.size)
+        assertEquals("server.connected", events[0].payload.type)
+        assertEquals("server.heartbeat", events[1].payload.type)
+        assertEquals("server.connected", events[2].payload.type) // post-reconnect
+
+        // 1st request = initial connect (delivered no-id frames p1, p2);
+        // 2nd request = reconnect after EOF.
+        server.takeRequest()
+        val reconnectRequest = server.takeRequest()
+        assertNull(
+            "after 'no-id frames → disconnect → reconnect', the reconnect " +
+                "request MUST NOT carry Last-Event-ID (slimapi SSE has no " +
+                "replay buffer to resume; v1 contract §3/§4)",
+            reconnectRequest.getHeader("Last-Event-ID"),
+        )
+    }
+
+    // ───────────────────────── 2. URL 脱敏 ─────────────────────────
     @Test
     fun `url userinfo is never written to debug log`() = runBlocking {
         // 用带 userinfo 的 URL 连接；服务端立即 401 关闭即可触发日志路径。

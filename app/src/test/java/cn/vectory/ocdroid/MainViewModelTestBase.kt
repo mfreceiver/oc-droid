@@ -68,6 +68,15 @@ abstract class MainViewModelTestBase {
     protected var streamingServiceLauncher: RecordingStreamingServiceLauncher = RecordingStreamingServiceLauncher()
         private set
 
+    /**
+     * T13 (round-2 review fix): the relaxed-mock poller wired into the core.
+     * Tests that exercise [ControllerEffect.RequestPollerBackoff] /
+     * [ControllerEffect.ResetPollerBackoff] dispatch verify on this mock
+     * via `verify { processStatusPoller.scheduleBackoff(any()) }`.
+     */
+    protected lateinit var processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller
+        private set
+
     @Before
     open fun setUp() {
         mockkStatic(Log::class)
@@ -106,11 +115,17 @@ abstract class MainViewModelTestBase {
         // setModelForSession was removed here (those APIs were deleted).
 
         every { repository.connectSSE(any()) } returns emptyFlow()
+        // C-D3 token guard: relaxed mock's isSlimCommitTokenCurrent defaults
+        // to false (MockK Boolean default). Stub it so the coordinator's token
+        // path works. Do NOT stub captureSlimCommitToken explicitly — the
+        // relaxed mock auto-answers it, and explicit every blocks cause MockK
+        // tracking issues with verify(exactly = N) in downstream tests.
+        every { repository.isSlimCommitTokenCurrent(any()) } returns true
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionsForDirectory(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
         coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
-        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
         coEvery { repository.getAgents() } returns Result.success(emptyList())
         coEvery { repository.getProviders() } returns Result.success(ProvidersResponse())
@@ -248,6 +263,13 @@ abstract class MainViewModelTestBase {
             // CP3 (notify Phase-0): SSE event stream + bridge.
             sseEventStream,
             sseEventBridge,
+            // T13 (round-2 review fix): ProcessStatusPoller — relaxed mock
+            // so AppCore's RequestPollerBackoff / ResetPollerBackoff
+            // dispatch has somewhere to land. Tests that exercise the
+            // backoff wiring (AppCoreDispatcherTest) verify on this mock.
+            mockk<cn.vectory.ocdroid.service.streaming.ProcessStatusPoller>(relaxed = true).also {
+                processStatusPoller = it
+            },
         )
         // §R-17 batch3e → §R18 Phase 4: side-channel Error/Success UiEvents
         // into a per-core ring buffer so tests can read the most-recent event

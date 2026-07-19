@@ -482,6 +482,12 @@
     <string name="chat_retry_in_seconds">%1$ds until retry</string>
     <string name="chat_retry_attempt">Attempt %1$d</string>
     <string name="chat_error_occurred">Error occurred</string>
+    <!-- §T17 slimapi v1 §2/§6.1: per-session upstream-error banner surfaced by
+         StatusSlot when the sidecar SET lastError for the current session
+         (SessionListState.sessionErrorsById[sid]). chat_session_error_label is
+         the a11y description for the banner's leading icon; the visible title
+         is the machine-readable lastError.name (code-style, not localized). -->
+    <string name="chat_session_error_label">Session error</string>
     <string name="chat_view">View</string>
     <string name="chat_stale_notice">You haven\'t viewed this for a while. Only the latest content is shown.</string>
     <string name="chat_reconnecting">Reconnecting to %1$s…</string>
@@ -583,4 +589,16 @@
          ACTION_CLOSE_BACKGROUND → coordinator teardown (L3). The label reads
          as a verb phrase the user taps to deliberately stop background work. -->
     <string name="notify_close_background">Stop background</string>
+
+    <!-- §slimapi-client-v1 §G6 (Task 16): inline affordance on skeleton parts
+         that have full content available for expansion. The user taps this
+         button to trigger the G6 batch-full fetch. -->
+    <string name="expand_omitted_content">Expand omitted content</string>
+    <string name="expand_omitted_error">Expansion failed</string>
+    <string name="expand_omitted_retry">Retry</string>
+
+    <!-- I-2 v2 §3.7: whole-call Failure toast for slim aggregation folds.
+         Partial incompleteness is signal-only (no toast on every resync). -->
+    <string name="error_slim_questions_fetch_failed">Failed to refresh pending questions; showing the previous state.</string>
+    <string name="error_slim_permissions_fetch_failed">Failed to refresh pending permissions; showing the previous state.</string>
 </resources>

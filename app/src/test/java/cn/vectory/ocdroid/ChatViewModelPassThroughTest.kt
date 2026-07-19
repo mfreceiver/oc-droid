@@ -667,7 +667,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         vm.loadMessages("s1")
         advanceUntilIdle()
 
-        coVerify { repository.getMessagesPaged("s1", any(), null) }
+        coVerify { repository.getMessagesPaged("s1", any(), null, any()) }
     }
 
     @Test

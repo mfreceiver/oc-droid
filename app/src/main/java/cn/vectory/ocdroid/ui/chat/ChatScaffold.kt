@@ -970,6 +970,11 @@ fun ChatScaffold(
                 onStartNewSession = onStartNewSessionInDrawer,
                 isStartNewSessionEnabled = recentWorkdirs.isNotEmpty(),
                 interactionsEnabled = !drawerInteractionLocked,
+                // §T17 slimapi v1 §6.1: pass the canonical per-session error
+                // store straight through to the drawer rows. The row's
+                // shouldShowSessionErrorIndicator helper looks up by session
+                // id; absence (sid not in the map / recovered) → no indicator.
+                sessionErrorsById = sessionList.sessionErrorsById,
             )
         },
     ) {
@@ -1228,6 +1233,18 @@ fun ChatScaffold(
                         currentActivityStartedAtMillis = currentActivity?.startedAtMillis,
                         compactStartedAt = chat.compactStartedAt,
                         isConnecting = connection.isConnecting && !connection.isConnected,
+                        // §T17 slimapi v1 §6.1: source the current
+                        // session's lastError from the canonical T12
+                        // store (SessionListState.sessionErrorsById).
+                        // The lookup uses the SAME sid derivation as
+                        // curSessionStatus above (chat.currentSessionId
+                        // → sessionList.sessionStatuses), so the banner
+                        // is in lockstep with the other session-scoped
+                        // slot inputs. Null when the sid is absent from
+                        // the map (no error / recovered) — the slot's
+                        // LastError branch NEVER fires for an absent sid.
+                        // Caller is the sole filter site (file doc rule).
+                        lastError = chat.currentSessionId?.let { sessionList.sessionErrorsById[it] },
                         // §1C-FIX-⑧: scheme E.4 metadata. Sourced from
                         // the canonical slices: host (host.hostProfiles
                         // + currentHostProfileId), workdir (current

@@ -257,12 +257,24 @@ class SlimGoldenPathIntegrationTest {
                 ),
             )
 
-            // 2) The digest-triggered GET. applySlimDigest on a FRESH session
-            //    anchors `since=0L` (no prior bookmark) → GET
-            //    /slimapi/messages/s1/since/0. After the fetch returns,
-            //    bumpSlimBookmarkFromItems bumps the bookmark to
-            //    max(prior=1000, max(items.time.updated)=200) = 1000
-            //    (monotonic — does not regress).
+            // 2) The digest-triggered reconcile. T11 round-2 (oracle I2):
+            //    reconcileSession ALWAYS probes first
+            //    (`GET /slimapi/messages/s1?limit=1&mode=skeleton`). When
+            //    `localAppliedUpdatedAt != null` it follows with /since/{ts};
+            //    when null (this cold-start case), it follows with the
+            //    bounded cursor drain façade
+            //    `GET /slimapi/messages/s1?limit=200&mode=skeleton` and
+            //    follows X-Next-Cursor. Three message requests are therefore
+            //    enqueued in arrival order:
+            //    a) the probe response (limit=1, single newest skeleton),
+            //    b) the cursor-drain page 1 (limit=200, the same skeleton
+            //       with a null X-Next-Cursor → terminates the walk).
+            //    After the drain returns, bumpSlimBookmarkFromItems (T11
+            //    rewired → onReconcileSuccess) advances localAppliedUpdatedAt
+            //    to the aggregated skeleton's time.updated=200 (we APPLIED
+            //    m1@200 locally). The digest's updatedAt=1000 stays in
+            //    remoteUpdatedAt (the sidecar's signal — NOT a local-applied
+            //    watermark).
             val skeleton = MessageWithParts(
                 info = Message(
                     id = "m1",
@@ -280,6 +292,10 @@ class SlimGoldenPathIntegrationTest {
                     ),
                 ),
             )
+            // (a) Probe response — limit=1 → first item.
+            server.enqueue(jsonResponse(json.encodeToString(listOf(skeleton))))
+            // (b) Cursor drain page 1 — limit=200, same skeleton, NO
+            //     X-Next-Cursor header (sidecar signals end-of-history).
             server.enqueue(jsonResponse(json.encodeToString(listOf(skeleton))))
 
             // 3) Start SSE collection on the coordinator scope. Each parsed
@@ -330,12 +346,47 @@ class SlimGoldenPathIntegrationTest {
                 )
                 assertSlimapiVersionHeader(sseRequest)
 
+                // T11 reconcile: probe request comes BEFORE the since-fetch
+                // (reconcileSession always probes first). The probe is
+                // `GET /slimapi/messages/s1?limit=1&mode=skeleton`.
+                val probeRequest = server.takeRequest()
+                assertEquals("GET", probeRequest.method)
+                assertTrue(
+                    "probe MUST hit /slimapi/messages/s1 with limit=1 + mode=skeleton: ${probeRequest.path}",
+                    probeRequest.path!!.startsWith("/slimapi/messages/s1"),
+                )
+                assertTrue(
+                    "probe MUST carry limit=1: ${probeRequest.path}",
+                    probeRequest.path!!.contains("limit=1"),
+                )
+                assertTrue(
+                    "probe MUST carry mode=skeleton: ${probeRequest.path}",
+                    probeRequest.path!!.contains("mode=skeleton"),
+                )
+                assertSlimapiVersionHeader(probeRequest)
+
                 val messagesRequest = server.takeRequest()
                 assertEquals("GET", messagesRequest.method)
-                assertEquals(
-                    "digest fetch anchors on since=0 for a fresh session bookmark",
-                    "/slimapi/messages/s1/since/0",
-                    messagesRequest.path,
+                // T11 round-2 (oracle I2): fresh session → bounded cursor
+                // drain façade (`/slimapi/messages/s1?limit=200&mode=skeleton`),
+                // NOT /since/0. The drain is owned by the repo's
+                // fetchSlimInitialWindowBounded; X-Next-Cursor was null in
+                // the enqueued response so the walk terminates after one page.
+                assertTrue(
+                    "fresh-session fetch MUST hit cursor drain path: ${messagesRequest.path}",
+                    messagesRequest.path!!.startsWith("/slimapi/messages/s1"),
+                )
+                assertTrue(
+                    "cursor drain MUST carry limit=200: ${messagesRequest.path}",
+                    messagesRequest.path!!.contains("limit=200"),
+                )
+                assertTrue(
+                    "cursor drain MUST carry mode=skeleton: ${messagesRequest.path}",
+                    messagesRequest.path!!.contains("mode=skeleton"),
+                )
+                assertTrue(
+                    "cursor drain MUST NOT use /since path (cold start): ${messagesRequest.path}",
+                    !messagesRequest.path!!.contains("/since/"),
                 )
                 assertSlimapiVersionHeader(messagesRequest)
 
@@ -367,11 +418,32 @@ class SlimGoldenPathIntegrationTest {
                     pendingQ.routeToken,
                 )
 
-                // Bookmark advanced to 1000 (digest's updatedAt wins; the
-                // fetched skeleton's time.updated=200 is older).
+                // T11 rewire (T6 hand-off): after the since-fetch
+                // succeeds, bumpSlimBookmarkFromItems calls
+                // onReconcileSuccess(state, [skeleton]) which advances
+                // localAppliedUpdatedAt=200 (the fetched skeleton's
+                // time.updated — we APPLIED m1@200 locally). The digest's
+                // updatedAt=1000 stays in remoteUpdatedAt (the sidecar's
+                // signal — NOT what we applied).
+                // updatedAt accessor = localAppliedUpdatedAt ?: remoteUpdatedAt = 200.
                 val bookmark = repository.snapshotSlimSseState()["s1"]
                 assertNotNull("bookmark entry created", bookmark)
-                assertEquals(1000L, bookmark!!.updatedAt)
+                assertEquals(
+                    "post-T11 rewire: localAppliedUpdatedAt=200 (the fetched skeleton)",
+                    200L,
+                    bookmark!!.localAppliedUpdatedAt,
+                )
+                assertEquals(
+                    "remoteUpdatedAt=1000 (digest signal, untouched by REST rewire)",
+                    1000L,
+                    bookmark.remoteUpdatedAt,
+                )
+                assertEquals(
+                    "updatedAt accessor prefers localAppliedUpdatedAt post-rewire",
+                    200L,
+                    bookmark.updatedAt,
+                )
+                assertEquals("m1", bookmark.localAppliedMessageId)
             } finally {
                 sseJob.cancel()
             }
@@ -444,6 +516,7 @@ class SlimGoldenPathIntegrationTest {
             // the bookmark — we simulate that state directly.
             repository.applySlimDigest(
                 SlimSessionDigest(sessionId = "s1", updatedAt = 1000L),
+                token = repository.captureSlimCommitToken(),
             )
             // Sanity: the bookmark reflects the seed.
             val seeded = repository.snapshotSlimSseState()["s1"]
@@ -465,7 +538,7 @@ class SlimGoldenPathIntegrationTest {
             )
             server.enqueue(jsonResponse(json.encodeToString(listOf(incrementalMessage))))
 
-            val result = repository.coldStartSlimSync(openSessionId = "s1")
+            val result = repository.coldStartSlimSync(openSessionId = "s1", token = repository.captureSlimCommitToken())
 
             assertTrue(
                 "coldStartSlimSync succeeds (per-piece degradation yields overall success)",

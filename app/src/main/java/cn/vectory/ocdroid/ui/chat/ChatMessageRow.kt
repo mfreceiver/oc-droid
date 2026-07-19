@@ -1,23 +1,30 @@
 package cn.vectory.ocdroid.ui.chat
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.theme.Dimens
 
 // ── Per-message row + Part dispatcher ────────────────────────────────────
 // MessageRow lays out a single turn (column of parts + footer caption +
@@ -63,7 +70,14 @@ internal fun MessageRow(
     // streaming-reasoning part (the standalone streaming item in
     // ChatMessageList already renders it). Null when no stream is active.
     streamingReasoningPartId: String? = null,
-    showMessageDecoration: Boolean = true
+    showMessageDecoration: Boolean = true,
+    // §slimapi-client-v1 §G6 (Task 16): per-part expand state for the
+    // "展开省略内容" affordance. The affordance renders when a part has
+    // `hasFull == true && omitted != null` and the state is Idle or Loading.
+    partExpandStates: Map<PartKey, PartExpandState> = emptyMap(),
+    // Dispatch: called when the user taps the expand affordance. Receives
+    // ALL parts of this message (the ViewModel batches eligible ones).
+    onExpandParts: (List<Part>) -> Unit = {},
 ) {
     val isUser = message.isUser
     // §issue-4: task completion messages arrive as user-role but should
@@ -215,6 +229,113 @@ internal fun MessageRow(
                 i += 1
             }
         }
+        // §slimapi-client-v1 §G6 (Task 16): inline "展开省略内容" affordance.
+        // Scans this message's parts for eligible ones (hasFull && omitted),
+        // checks their expand state, and renders:
+        //   - Idle   → inline TextButton ("展开省略内容")
+        //   - Loading → inline CircularProgressIndicator (small, aligned)
+        //   - Loaded → nothing (content already merged into cache)
+        //   - Failed → inline ErrorCard (reuses existing component; do NOT
+        //     invent a new error surface)
+        //
+        // Multiple eligible parts are merged into ONE batch call (T16-C1).
+        // This is an inline button (NOT a DropdownMenu / BottomSheet / AlertDialog),
+        // so it is Layer A-adjacent per ui-style-spec.md (T16-C2).
+        val expandEligible = parts.filter {
+            it.hasFull == true && it.omitted != null && it.messageId != null
+        }
+        if (expandEligible.isNotEmpty()) {
+            val allPartStates = expandEligible.map { part ->
+                PartKey(messageId = part.messageId!!, partId = part.id) to
+                    (partExpandStates[PartKey(part.messageId!!, part.id)] ?: PartExpandState.Idle)
+            }
+            val anyLoading = allPartStates.any { it.second is PartExpandState.Loading }
+            val anyFailed = allPartStates.filterIsInstance<Pair<PartKey, PartExpandState.Failed>>()
+            val anyIdle = allPartStates.any { it.second is PartExpandState.Idle }
+
+            if (anyFailed.isNotEmpty()) {
+                // At least one part failed → show inline ErrorCard for each
+                // distinct failure reason (reuses existing component per T16-C1).
+                // Add an inline Retry TextButton (NOT clickable ErrorCard —
+                // SelectionContainer conflict per oracle I2).
+                anyFailed.forEach { (_, failed) ->
+                    val errorText = if (failed.code != null) {
+                        "${stringResource(R.string.expand_omitted_error)} (${failed.code})"
+                    } else {
+                        stringResource(R.string.expand_omitted_error)
+                    }
+                    ErrorCard(
+                        text = errorText,
+                        modifier = Modifier.widthIn(max = cardMax)
+                    )
+                }
+                // Retry button: dispatches ONLY the Failed parts (not all row
+                // parts) to avoid unnecessarily re-fetching Loaded parts.
+                val failedParts = expandEligible.filter { part ->
+                    val key = PartKey(part.messageId!!, part.id)
+                    partExpandStates[key] is PartExpandState.Failed
+                }
+                if (failedParts.isNotEmpty()) {
+                    TextButton(
+                        onClick = { onExpandParts(failedParts) },
+                        modifier = Modifier.padding(start = Dimens.spacing1)
+                    ) {
+                        Text(
+                            text = stringResource(R.string.expand_omitted_retry),
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+            } else if (anyLoading) {
+                // At least one part is loading → show inline spinner.
+                Row(
+                    modifier = Modifier.padding(
+                        start = Dimens.spacing2,
+                        top = Dimens.spacing1,
+                        bottom = Dimens.spacing1
+                    ),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(Dimens.spacing1)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(Dimens.iconSm),
+                        strokeWidth = Dimens.hairline
+                    )
+                    Text(
+                        text = stringResource(R.string.expand_omitted_content),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else if (anyIdle) {
+                // P7: dispatch only Idle parts (not Loaded/Loading).
+                val idleParts = expandEligible.filter { part ->
+                    val key = PartKey(
+                        messageId = part.messageId!!,
+                        partId = part.id,
+                    )
+                    (partExpandStates[key] ?: PartExpandState.Idle) is PartExpandState.Idle
+                }
+
+                if (idleParts.isNotEmpty()) {
+                    TextButton(
+                        onClick = { onExpandParts(idleParts) },
+                        modifier = Modifier.padding(
+                            start = Dimens.spacing1,
+                            top = Dimens.spacing1,
+                            bottom = Dimens.spacing1,
+                        ),
+                    ) {
+                        Text(
+                            text = stringResource(R.string.expand_omitted_content),
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                }
+            }
+            // If all are Loaded, nothing renders (content merged into cache).
+        }
+
         // Footer caption — replaces the previous provider/model label.
         //  - Assistant: completion time (hh:mm), falling back to created time.
         //  - User: "<agent>·<modelId> <created hh:mm>" so the user can see which

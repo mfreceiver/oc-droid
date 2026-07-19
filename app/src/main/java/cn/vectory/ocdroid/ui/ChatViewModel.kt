@@ -376,6 +376,297 @@ class ChatViewModel @Inject constructor(
     }
 
     /**
+     * §slimapi-client-v1 §G6 (Task 16 round-2): dispatches the G6 batch-full
+     * expand for the tapped message's eligible parts.
+     *
+     * # C1 — compound identity gate + part-level compare-and-merge
+     *
+     * Request identity is `(serverGroupFp, sessionId)`, matching the existing
+     * captured-provider pattern at [loadMessages]. Completion applies only
+     * targeted part patches to the current cache — NEVER replaces the whole
+     * `partsByMessage` or `messages` list.
+     *
+     * # Dispatch-time sequence
+     *
+     *  1. Capture `serverGroupFp` once.
+     *  2. Read `chatFlow.value` once into `startState` (no repeated reads).
+     *  3. Abort unless `startState.currentSessionId == sessionId`.
+     *  4. Derive eligible keys and exclude keys already `Loading`.
+     *  5. Build `local` entirely from `startState.messages` + `startState.partsByMessage`.
+     *  6. In one `writeChat` reducer: recheck session + set Loading.
+     *  7. Invoke [ExpandPartsUseCase.expandParts].
+     *
+     * # Completion-time identity check
+     *
+     *  1. Before state write: drop if `serverGroupFp` differs.
+     *  2. Inside reducer: `if current.currentSessionId != requestedSessionId → return current`.
+     *  3. Process only outcome keys still `Loading` (prevents delayed duplicate).
+     *  4. Derive part patches from captured `local` + `mergedLocal` (only Loaded keys).
+     *  5. Apply patches against CURRENT `partsByMessage` (never whole-message replace).
+     *  6. Commit terminal states in the same atomic commit.
+     *
+     * CE discipline: [runSuspendCatching] in [ExpandPartsUseCase] ensures
+     * CancellationException propagates. Both success and failure paths are
+     * guarded by identity checks.
+     *
+     * @param sessionId the active session id.
+     * @param parts ALL parts of the tapped message (the usecase filters to
+     *   eligible ones internally).
+     */
+    fun expandParts(sessionId: String, parts: List<cn.vectory.ocdroid.data.model.Part>) {
+        // P4: capture host identity ONCE (no TOCTOU).
+        val capturedFp = core.currentServerGroupFp()
+
+        viewModelScope.launch {
+            // Step 2: single-read dispatch state (Main dispatcher — no suspension).
+            val startState = core.store.chatFlow.value
+
+            // Step 3: session guard.
+            if (startState.currentSessionId != sessionId) return@launch
+
+            // Step 4: derive eligible keys from the supplied row.
+            val eligibleKeys = parts
+                .filter { it.hasFull == true && it.omitted != null && it.messageId != null }
+                .map { cn.vectory.ocdroid.ui.chat.PartKey(it.messageId!!, it.id) }
+            if (eligibleKeys.isEmpty()) return@launch
+
+            // Step 5: suppress duplicate requests for keys already Loading.
+            val keysToLoad = eligibleKeys.filter { key ->
+                startState.partExpandStates[key] !is cn.vectory.ocdroid.ui.chat.PartExpandState.Loading
+            }
+            if (keysToLoad.isEmpty()) return@launch
+
+            // P3: send only newly claimed parts to T15.
+            val keysToLoadSet = keysToLoad.toHashSet()
+            val partsToLoad = parts.filter { part ->
+                part.hasFull == true &&
+                    part.omitted != null &&
+                    part.messageId != null &&
+                    cn.vectory.ocdroid.ui.chat.PartKey(
+                        messageId = part.messageId,
+                        partId = part.id,
+                    ) in keysToLoadSet
+            }
+            if (partsToLoad.isEmpty()) return@launch
+
+            // Step 6: build local from startState (single-read snapshot).
+            val local = startState.partsByMessage.entries
+                .mapNotNull { (msgId, msgParts) ->
+                    val msg = startState.messages.firstOrNull { it.id == msgId }
+                    if (msg != null) {
+                        cn.vectory.ocdroid.data.model.MessageWithParts(info = msg, parts = msgParts)
+                    } else {
+                        null
+                    }
+                }
+
+            // P4: set Loading in one atomic commit — recheck each key in CAS.
+            core.writeChat { current ->
+                if (current.currentSessionId != sessionId) return@writeChat current
+                if (core.currentServerGroupFp() != capturedFp) return@writeChat current
+
+                val loadingUpdates = keysToLoad
+                    .filter { key ->
+                        (current.partExpandStates[key]
+                            !is cn.vectory.ocdroid.ui.chat.PartExpandState.Loading)
+                    }
+                    .associateWith {
+                        cn.vectory.ocdroid.ui.chat.PartExpandState.Loading
+                    }
+
+                if (loadingUpdates.isEmpty()) {
+                    current
+                } else {
+                    current.copy(
+                        partExpandStates = current.partExpandStates + loadingUpdates,
+                    )
+                }
+            }
+
+            // P4: abort if identity changed during dispatch (before network call).
+            if (core.store.chatFlow.value.currentSessionId != sessionId) return@launch
+            if (core.currentServerGroupFp() != capturedFp) return@launch
+
+            // Step 8: invoke usecase (non-mutating, CE discipline).
+            val useCase = cn.vectory.ocdroid.ui.chat.ExpandPartsUseCase(core.repository)
+            val outcome = useCase.expandParts(
+                sessionId = sessionId,
+                local = local,
+                parts = partsToLoad,
+            ).getOrElse {
+                // P2: guard delayed failure — only mark keys still Loading.
+                core.writeChat { current ->
+                    if (current.currentSessionId != sessionId) return@writeChat current
+                    if (core.currentServerGroupFp() != capturedFp) return@writeChat current
+
+                    val updatedStates = current.partExpandStates.toMutableMap()
+                    keysToLoad.forEach { key ->
+                        if (current.partExpandStates[key]
+                            is cn.vectory.ocdroid.ui.chat.PartExpandState.Loading
+                        ) {
+                            updatedStates[key] =
+                                cn.vectory.ocdroid.ui.chat.PartExpandState.Failed(code = null)
+                        }
+                    }
+
+                    current.copy(partExpandStates = updatedStates)
+                }
+                return@launch
+            }
+
+            // ── P5/P6: derive targeted part patches (wire key) ───────────
+            fun cn.vectory.ocdroid.data.model.Part.normMsg(owner: String): String =
+                messageId ?: owner
+
+            data class PartPatch(
+                // P6: always the outcome's wire key.
+                val key: cn.vectory.ocdroid.ui.chat.PartKey,
+                val ownerMessageId: String,
+                val partId: String,
+                val replacementPart: cn.vectory.ocdroid.data.model.Part,
+            )
+
+            // Build owner lookup from captured local.
+            val localByInfoId: Map<String, cn.vectory.ocdroid.data.model.MessageWithParts> =
+                local.associateBy { it.info.id }
+            val localOwnerByPartId: Map<String, String> = buildMap {
+                local.forEach { lm -> lm.parts.forEach { p -> put(p.id, lm.info.id) } }
+            }
+
+            // Build mergedLocal lookup for replacement content.
+            val mergedByMsgId: Map<String, cn.vectory.ocdroid.data.model.MessageWithParts> =
+                outcome.mergedLocal?.associateBy { it.info.id } ?: emptyMap()
+
+            // P5: extraction compares replacement to CAPTURED LOCAL TARGET.
+            val patches: List<PartPatch> = buildList {
+                outcome.states.forEach { (key, state) ->
+                    if (state !is cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded) {
+                        return@forEach
+                    }
+
+                    // Same owner resolution as T15.
+                    val ownerMessageId =
+                        localByInfoId[key.messageId]?.info?.id
+                            ?: localOwnerByPartId[key.partId]
+                            ?: return@forEach
+
+                    val capturedOwner = localByInfoId[ownerMessageId]
+                        ?: return@forEach
+
+                    val capturedLocalTarget = capturedOwner.parts.firstOrNull { localPart ->
+                        localPart.id == key.partId
+                    } ?: return@forEach
+
+                    val mergedOwner = mergedByMsgId[ownerMessageId]
+                        ?: return@forEach
+
+                    // P5: compare replacement to CAPTURED LOCAL TARGET (not self-compare).
+                    val replacement = mergedOwner.parts.lastOrNull { fullPart ->
+                        fullPart.id == key.partId &&
+                            fullPart.normMsg(ownerMessageId) ==
+                            capturedLocalTarget.normMsg(ownerMessageId)
+                    } ?: return@forEach
+
+                    add(
+                        PartPatch(
+                            key = key,
+                            ownerMessageId = ownerMessageId,
+                            partId = key.partId,
+                            replacementPart = replacement,
+                        )
+                    )
+                }
+            }
+
+            // P6: patchesByKey (not patchedKeys).
+            val patchesByKey: Map<cn.vectory.ocdroid.ui.chat.PartKey, PartPatch> =
+                patches.associateBy { it.key }
+
+            // ── P1: completion reducer (guarded atomic per-key) ───────────
+            core.writeChat { current ->
+                // Compound identity guard against the exact CAS input.
+                if (current.currentSessionId != sessionId) return@writeChat current
+                if (core.currentServerGroupFp() != capturedFp) return@writeChat current
+
+                var updatedPartsByMessage = current.partsByMessage
+                val updatedStates = current.partExpandStates.toMutableMap()
+
+                outcome.states.forEach { (wireKey, outcomeState) ->
+                    // P1: this old completion owns neither cache nor state
+                    // once the key has left Loading. Skip completely.
+                    if (current.partExpandStates[wireKey]
+                        !is cn.vectory.ocdroid.ui.chat.PartExpandState.Loading
+                    ) {
+                        return@forEach
+                    }
+
+                    var actuallyApplied = false
+                    var alreadyFull = false
+
+                    if (outcomeState is cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded) {
+                        val patch = patchesByKey[wireKey]
+
+                        if (patch != null) {
+                            val currentParts = updatedPartsByMessage[patch.ownerMessageId]
+
+                            if (currentParts != null) {
+                                // P5 apply-time match: T8 identity check
+                                // against the CURRENT local target.
+                                val targetIndex = currentParts.indexOfFirst { currentPart ->
+                                    currentPart.id == patch.partId &&
+                                        currentPart.normMsg(patch.ownerMessageId) ==
+                                        patch.replacementPart.normMsg(patch.ownerMessageId)
+                                }
+
+                                if (targetIndex >= 0) {
+                                    val currentTarget = currentParts[targetIndex]
+                                    alreadyFull = currentTarget == patch.replacementPart
+
+                                    if (!alreadyFull) {
+                                        val nextParts = currentParts.toMutableList()
+                                        nextParts[targetIndex] = patch.replacementPart
+                                        updatedPartsByMessage =
+                                            updatedPartsByMessage +
+                                                (patch.ownerMessageId to nextParts)
+                                        actuallyApplied = true
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    updatedStates[wireKey] = when (outcomeState) {
+                        cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded -> {
+                            if (actuallyApplied || alreadyFull) {
+                                cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded
+                            } else {
+                                // T15 promised Loaded, but its full part could
+                                // not be represented in the current cache.
+                                cn.vectory.ocdroid.ui.chat.PartExpandState.Failed(code = null)
+                            }
+                        }
+
+                        is cn.vectory.ocdroid.ui.chat.PartExpandState.Failed -> {
+                            outcomeState
+                        }
+
+                        // ExpandPartsUseCase contract says outcomes are terminal.
+                        cn.vectory.ocdroid.ui.chat.PartExpandState.Idle,
+                        cn.vectory.ocdroid.ui.chat.PartExpandState.Loading -> {
+                            cn.vectory.ocdroid.ui.chat.PartExpandState.Failed(code = null)
+                        }
+                    }
+                }
+
+                current.copy(
+                    partsByMessage = updatedPartsByMessage,
+                    partExpandStates = updatedStates,
+                )
+            }
+        }
+    }
+
+    /**
      * §Wave5b-Q13: clear the active scroll intent (compare-and-clear by
      * requestId). Called by [cn.vectory.ocdroid.ui.chat.ChatMessageList]'s
      * LaunchedEffect AFTER it has performed the scroll (Latest or Restore) for

@@ -321,6 +321,17 @@ internal fun launchDeleteSession(
                         // §task5-lifecycle: question filter for removed subtree.
                         pendingQuestions = sl.pendingQuestions.filter { it.sessionId !in removedIds },
                         activeSessionIds = sl.activeSessionIds - removedIds,
+                        // §final-gate I-3 (review-final-rev-gpt-20260719081038 §2):
+                        // prune the deleted subtree's entries from
+                        // sessionErrorsById in the SAME committed state as
+                        // the sessions / directorySessions / pendingQuestions
+                        // purge. Pre-fix the deleted sid's lastError survived
+                        // forever (T12 only removes on `lastError = Cleared`),
+                        // causing unbounded retention + a stale banner if the
+                        // server later reused the id. Mirrors the existing
+                        // `pendingQuestions` filter style (immutable filter);
+                        // T12's set/remove producer logic is unchanged.
+                        sessionErrorsById = sl.sessionErrorsById.filterKeys { it !in removedIds },
                     )
                 }
                 // §task5-lifecycle: unread drop for the whole removed subtree.

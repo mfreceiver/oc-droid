@@ -106,11 +106,14 @@ class HostViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = HostViewModel(core)  // primary VM under test
+        // C-D3 rev-3 round-7: VM launches saveHostProfile in viewModelScope;
+        // advance the dispatcher so the launch runs before verify.
         hostVM.saveHostProfile(
             profile,
             basicAuthPassword = "new-secret",
             basicAuthEdited = true
         )
+        advanceUntilIdle()
 
         verify { settingsManager.setBasicAuthPassword("profile-1", "new-secret") }
     }
@@ -135,6 +138,7 @@ class HostViewModelTest : MainViewModelTestBase() {
             basicAuthPassword = "",
             basicAuthEdited = true
         )
+        advanceUntilIdle()
 
         // blank → setBasicAuthPassword with "" which SettingsManager maps to remove.
         verify { settingsManager.setBasicAuthPassword("profile-1", "") }
@@ -208,6 +212,7 @@ class HostViewModelTest : MainViewModelTestBase() {
             tunnelPassword = "tunnel-secret",
             tunnelEdited = true
         )
+        advanceUntilIdle()
 
         verify { settingsManager.setTunnelPassword("profile-1", "tunnel-secret") }
     }
@@ -232,6 +237,7 @@ class HostViewModelTest : MainViewModelTestBase() {
             tunnelPassword = "",
             tunnelEdited = true
         )
+        advanceUntilIdle()
 
         // blank → setTunnelPassword with "" which SettingsManager maps to remove.
         verify { settingsManager.setTunnelPassword("profile-1", "") }

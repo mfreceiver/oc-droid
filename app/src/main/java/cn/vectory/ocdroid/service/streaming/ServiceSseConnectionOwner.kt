@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.service.streaming
 
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.data.model.SlimapiResyncReason
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.events.SseEventStream
@@ -151,7 +152,7 @@ class ServiceSseConnectionOwner(
      * fetch failure must NOT tear down the SSE transport. The next digest /
      * q-p frame will re-drive incremental state.
      */
-    private val onResync: suspend () -> Unit = {},
+    private val onResync: suspend (isStillCurrent: () -> Boolean) -> Unit = { _ -> },
 ) {
     /**
      * The live SSE collector job, or null when no collector is running.
@@ -588,13 +589,46 @@ class ServiceSseConnectionOwner(
         val type = event.payload.type
         val isFirstFrameOfGen = !readiness.isCompleted
         val isResync = type == "resync"
+        // T10 (slimapi v1 §3 resync reason): when the frame IS a resync,
+        // parse the server-provided `reason` sub-field from the payload for
+        // OBSERVABILITY. The frame's `properties.reason` is a JsonPrimitive;
+        // we extract it via [SSEPayload.getString], which reads `.content`
+        // (NOT `as? String` — JsonPrimitive is not a String and that cast
+        // would always miss). Tolerates missing/null/unknown wire values →
+        // null via [SlimapiResyncReason.fromRaw]. The catch-up action is
+        // IDENTICAL regardless of reason — reason is pure telemetry and MUST
+        // NOT branch or gate control flow (no `when` on the enum; just log).
+        val serverReasonRaw: String? =
+            if (isResync) event.payload.getString("reason") else null
+        val serverReasonTyped: SlimapiResyncReason? =
+            if (isResync) SlimapiResyncReason.fromRaw(serverReasonRaw) else null
+        if (isResync) {
+            DebugLog.i(
+                TAG,
+                "slim resync reason: raw=$serverReasonRaw typed=$serverReasonTyped gen=$generation",
+            )
+        }
         if (isFirstFrameOfGen && resyncHandledForGen != generation) {
             resyncHandledForGen = generation
-            scheduleResync("first-frame type=$type", generation)
+            // First-frame cold-start. If this first frame IS itself a
+            // resync, include the parsed server reason in the label (T10).
+            // The scheduleResync signature is UNCHANGED — only the STRING
+            // label is enriched for log attribution.
+            val firstFrameReason = if (isResync) {
+                "first-frame type=$type server-reason=$serverReasonRaw"
+            } else {
+                "first-frame type=$type"
+            }
+            scheduleResync(firstFrameReason, generation)
         } else if (isResync) {
             // Mid-stream (or skipped-first-frame) explicit resync: NOT
             // gated. rev-grok 🔴2 — this is the core regression fix.
-            scheduleResync("explicit-resync", generation)
+            // T10: enrich the owner's internal label with the server's
+            // reason (raw + typed) for log attribution. Signature UNCHANGED.
+            scheduleResync(
+                "explicit-resync server-reason=$serverReasonRaw typed=$serverReasonTyped",
+                generation,
+            )
         }
         // D4-B M3: transport readiness completes on the first frame — NO
         // status refresh, NO baseline gating. Cancel the transport timeout
@@ -723,7 +757,7 @@ class ServiceSseConnectionOwner(
                     "slim cold-start/resync fire $reason gen=$generation",
                 )
                 try {
-                    onResync()
+                    onResync { isCurrentTransport(generation) }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {

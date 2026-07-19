@@ -18,6 +18,8 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.service.identity.ConnectionIdentity
+import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.runSuspendCatching
@@ -570,7 +572,13 @@ class AppLifecycleMonitor @Inject constructor(
     // §R18 Phase 2-E step 1: needed to pass the explicit directory header to
     // getPendingQuestions for the background poll (was injected from the
     // global currentDirectory before; that fallback is being phased out).
-    private val settingsManager: SettingsManager
+    private val settingsManager: SettingsManager,
+    /**
+     * C-D3 rev-3 / Important: background q/p notification poll must not
+     * publish under a host that reconfigured mid-flight. Capture + dual-check
+     * against this store (and [OpenCodeRepository] slim token) before notify.
+     */
+    private val identityStore: ConnectionIdentityStore,
 ) {
     /**
      * §4.3 foreground truth-source.
@@ -865,14 +873,36 @@ class AppLifecycleMonitor @Inject constructor(
         }
     }
 
-    private suspend fun pollPendingItems() {
+    /**
+     * C-D3 rev-3 round-5 (oracle §9.4 / §10.4): visibility bumped from
+     * `private` to `internal` so the background-poller discriminator test
+     * can invoke the REAL poll path (with MockWebServer + delayed response +
+     * mid-flight reconfigure) instead of approximating it via
+     * [handlePendingPermission] with hand-crafted stale fences. The test
+     * proves a host switch mid-flight causes the stale A response to be
+     * silent-dropped (notifier.notifyDecision NOT called).
+     */
+    internal suspend fun pollPendingItems() {
+        // C-D3 rev-3 Important: capture slim token + connection identity at
+        // poll entry so a host switch mid-flight cannot publish old-host
+        // permission/question notifications under the new host. Publish
+        // re-checks both fences; stale → silent drop (no error toast).
+        val slimToken = repository.captureSlimCommitToken()
+        val identityAtEntry = identityStore.currentIdentity.value
+
         // Permissions
         // R-14: runSuspendCatching rethrows CancellationException so the
         // background poller's viewModelScope/appScope cancellation still
         // propagates cleanly (runCatching would swallow it and keep the
         // cancelled poller looping).
         runSuspendCatching { repository.getPendingPermissions().getOrDefault(emptyList()) }
-            .onSuccess { permissions -> permissions.forEach { handlePendingPermission(it) } }
+            .onSuccess { permissions ->
+                if (!isBackgroundPollStillCurrent(slimToken, identityAtEntry)) {
+                    Log.d(TAG, "Background poll permissions dropped (stale host/token)")
+                    return@onSuccess
+                }
+                permissions.forEach { handlePendingPermission(it, slimToken, identityAtEntry) }
+            }
             .onFailure { Log.w(TAG, "Background poll getPendingPermissions failed", it) }
         // Questions
         // §R18 Phase 2-E step 1: explicit directory header (was injected from
@@ -881,9 +911,13 @@ class AppLifecycleMonitor @Inject constructor(
             repository.getPendingQuestions(settingsManager.currentWorkdir).getOrDefault(emptyList())
         }
             .onSuccess { questions ->
+                if (!isBackgroundPollStillCurrent(slimToken, identityAtEntry)) {
+                    Log.d(TAG, "Background poll questions dropped (stale host/token)")
+                    return@onSuccess
+                }
                 // §Phase1a instrumentation (Issue 1): workdir queried + count returned.
                 DebugLog.d("Question", "pollPendingQuestions workdir=${settingsManager.currentWorkdir ?: "null"} count=${questions.size}")
-                questions.forEach { handlePendingQuestion(it) }
+                questions.forEach { handlePendingQuestion(it, slimToken, identityAtEntry) }
             }
             .onFailure { Log.w(TAG, "Background poll getPendingQuestions failed", it) }
 
@@ -1046,7 +1080,29 @@ class AppLifecycleMonitor @Inject constructor(
         }
     }
 
-    internal suspend fun handlePendingPermission(permission: PermissionRequest) {
+    /**
+     * True when the background poll's entry fences still match the live
+     * repository incarnation and connection identity.
+     *
+     * - No identity at entry (cold start / post-beginReconfigure window):
+     *   rely on slim token only — if the slim marker rotated, drop.
+     * - Identity present at entry: both [OpenCodeRepository.isSlimCommitTokenCurrent]
+     *   and [ConnectionIdentityStore.isCurrent] must pass.
+     */
+    private fun isBackgroundPollStillCurrent(
+        slimToken: OpenCodeRepository.SlimCommitToken,
+        identityAtEntry: ConnectionIdentity?,
+    ): Boolean {
+        if (!repository.isSlimCommitTokenCurrent(slimToken)) return false
+        if (identityAtEntry != null && !identityStore.isCurrent(identityAtEntry)) return false
+        return true
+    }
+
+    internal suspend fun handlePendingPermission(
+        permission: PermissionRequest,
+        slimToken: OpenCodeRepository.SlimCommitToken? = null,
+        identityAtEntry: ConnectionIdentity? = null,
+    ) {
         val key = "perm:${permission.id}"
         // §Stage D (gpter 重要 #4) + T5-C4a: atomic claim + release-on-fail.
         // T5-review I1: owner-aware token-gated claim/complete/release.
@@ -1054,6 +1110,12 @@ class AppLifecycleMonitor @Inject constructor(
         // notify + complete run on Dispatchers.Main.immediate, serialized
         // with lifecycle callbacks (see [handleIdleAlert]).
         if (_isInForeground.value) return
+        // C-D3 rev-3: dual fence before claim (entry may have been current;
+        // host may have switched while suspended on network).
+        if (slimToken != null && !isBackgroundPollStillCurrent(slimToken, identityAtEntry)) {
+            Log.d(TAG, "perm notify SUPPRESSED (stale host/token) key=$key")
+            return
+        }
         val token = notificationSnapshot.claim(key) ?: run {
             Log.d(TAG, "perm claim LOST key=$key (already in dedup)")
             return
@@ -1062,6 +1124,12 @@ class AppLifecycleMonitor @Inject constructor(
             withContext(Dispatchers.Main.immediate) {
                 if (_isInForeground.value) {
                     Log.d(TAG, "perm notify SUPPRESSED (foreground) key=$key")
+                    return@withContext
+                }
+                // Final publish-boundary recheck (Main.immediate; host switch
+                // can still land between claim and notify).
+                if (slimToken != null && !isBackgroundPollStillCurrent(slimToken, identityAtEntry)) {
+                    Log.d(TAG, "perm notify SUPPRESSED (stale host/token at publish) key=$key")
                     return@withContext
                 }
                 val notified = notifier.notifyDecision(
@@ -1091,13 +1159,21 @@ class AppLifecycleMonitor @Inject constructor(
         }
     }
 
-    internal suspend fun handlePendingQuestion(question: QuestionRequest) {
+    internal suspend fun handlePendingQuestion(
+        question: QuestionRequest,
+        slimToken: OpenCodeRepository.SlimCommitToken? = null,
+        identityAtEntry: ConnectionIdentity? = null,
+    ) {
         val key = "q:${question.id}"
         // §Stage D (gpter 重要 #4) + T5-C4a: see handlePendingPermission.
         // T5-review I1: owner-aware token-gated claim/complete/release.
         // T5-review I2 + T5-re-review I2-R: Main.immediate publish gate
         // (see [handleIdleAlert]).
         if (_isForeground()) return
+        if (slimToken != null && !isBackgroundPollStillCurrent(slimToken, identityAtEntry)) {
+            Log.d(TAG, "question notify SUPPRESSED (stale host/token) key=$key")
+            return
+        }
         val token = notificationSnapshot.claim(key) ?: run {
             Log.d(TAG, "question claim LOST key=$key (already in dedup)")
             return
@@ -1106,6 +1182,10 @@ class AppLifecycleMonitor @Inject constructor(
             withContext(Dispatchers.Main.immediate) {
                 if (_isForeground()) {
                     Log.d(TAG, "question notify SUPPRESSED (foreground) key=$key")
+                    return@withContext
+                }
+                if (slimToken != null && !isBackgroundPollStillCurrent(slimToken, identityAtEntry)) {
+                    Log.d(TAG, "question notify SUPPRESSED (stale host/token at publish) key=$key")
                     return@withContext
                 }
                 val headline = question.questions.firstOrNull()?.header ?: NOTIF_DECISION_BODY

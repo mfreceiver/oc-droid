@@ -11,12 +11,21 @@ import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.data.model.LastErrorField
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
+import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.data.model.SlimapiQuestionEntry
+import cn.vectory.ocdroid.data.model.SlimapiPermissionEntry
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.ProbeResult
 import cn.vectory.ocdroid.data.repository.SlimColdStartSnapshot
+import cn.vectory.ocdroid.data.repository.SlimAggregationOutcome
+import cn.vectory.ocdroid.data.repository.SlimSessionState
+import cn.vectory.ocdroid.data.repository.catchUpSet
+import cn.vectory.ocdroid.data.repository.needsCatchUp
+import cn.vectory.ocdroid.data.repository.toPermissionRequest
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.status.SessionBusyStatus
@@ -51,6 +60,12 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
@@ -192,6 +207,158 @@ class SessionSyncCoordinator(
      * or use @Synchronized.
      */
     private val flushJobs = mutableMapOf<String, Job>()
+
+    /**
+     * Task 11 round-2 (oracle I5 — fixed striped locks): a fixed array of
+     * 64 [Mutex] used to serialize competing per-sid reconcile triggers.
+     * Replaces the round-1 keyed-map approach (which grew unbounded over
+     * a long-lived client's session-id churn).
+     *
+     * # Why striped (oracle I5)
+     *
+     * A per-sid keyed map (`mutableMapOf<String, Mutex>`) grows without
+     * bound: every session id the client ever observed (including
+     * long-deleted ones from prior hosts) gets an entry that's never
+     * removed. A fixed stripe array caps the memory at `STRIPES`
+     * regardless of session-id churn.
+     *
+     * # Stripe selection
+     *
+     * `stripeFor(sid) = stripes[floorMod(sid.hashCode(), STRIPES)]`.
+     * Different sids USUALLY land on different stripes → fully parallel;
+     * two sids with the same `hashCode() mod 64` collide and serialize
+     * (rare, benign — they proceed serially, both complete).
+     *
+     * # T11-C6 (per oracle D7 clarification)
+     *
+     * T11-C6 means **serialization of competing per-SID reconcile
+     * triggers** (digest-driven + resync-driven + explicit session.error
+     * reconcile if a future task adds it). It does NOT mean session.error
+     * + digest atomic UI (per problem-report-wip.md C-D7). The stripe
+     * lock guarantees no two concurrent reconcile bodies for the same sid
+     * race the read-modify-write inside the repository's atomic boundary.
+     *
+     * # Thread confinement
+     *
+     * The array is initialized once at construction; reads are
+     * plain (`stripes[i]`) — no synchronization needed for array element
+     * reads after construction. The [Mutex] values are awaited under
+     * [scope] (structured concurrency → cancellation propagates cleanly
+     * on scope cancel).
+     */
+    private val reconcileStripes: Array<Mutex> = Array(STRIPES) { Mutex() }
+
+    private fun stripeFor(sid: String): Mutex {
+        // floorMod keeps the result non-negative for negative hashCode().
+        val idx = ((sid.hashCode() % STRIPES) + STRIPES) % STRIPES
+        return reconcileStripes[idx]
+    }
+
+    /**
+     * Task 11: resync catch-up concurrency cap (§3 performance hint:
+     * "可加客户端并发上限（如 4）"). Bounds the number of concurrent
+     * [OpenCodeRepository.probeLatestSlim] + [getSlimapiMessagesSince]
+     * fetches during a resync catch-up sweep so a 50-session catch-up set
+     * does not stampede the sidecar. Pinned to 4 (matches the contract
+     * hint + the expand-batch fallback cap in OpenCodeRepository).
+     */
+    private val resyncConcurrencySemaphore = Semaphore(4)
+
+    /**
+     * Task 11: default per-sid deadline for a single session's reconcile
+     * during a resync catch-up sweep. Prevents one slow / hung session
+     * from blocking the batch — [withTimeout] cancels the per-sid job and
+     * the sweep moves on. The session's `dirty` is preserved (cancellation
+     * throws CE out of the per-sid job before any state mutation lands).
+     *
+     * 8 seconds is the upper bound for a single probe + (focus) since-fetch
+     * under normal sidecar load. Overridable per-call for tests.
+     */
+    private val defaultResyncPerSidDeadlineMs: Long = 8_000L
+
+    /**
+     * Task 11 (§3 / §4 reconcile lane): the outcome of a single
+     * [reconcileSession] invocation. The coordinator's
+     * [applyReconcileResult] branches on these to fold side effects
+     * (chat-slice mutation, session-list eviction) that can't live inside
+     * the repository's pure state-derive layer.
+     *
+     * Sealed so the [applyReconcileResult] `when` is exhaustive.
+     */
+    sealed class ReconcileResult {
+        /** The session is aligned — local view matches the probe's view. */
+        data class Aligned(val sid: String) : ReconcileResult()
+        /** Focus/RESYNC REST fetch succeeded + items merged into chat. */
+        data class Reconciled(val sid: String, val items: List<MessageWithParts>) : ReconcileResult()
+        /** BACKGROUND catch-up needed; row refreshed, dirty PRESERVED. */
+        data class RefreshRow(val sid: String) : ReconcileResult()
+        /** Probe 404 → session gone upstream; drop from list. */
+        data class MarkDeleted(val sid: String) : ReconcileResult()
+        /** Probe empty + local had messages; local cache cleared. */
+        data class ClearLocal(val sid: String) : ReconcileResult()
+        /** Probe transport failure OR REST failure; dirty preserved. */
+        data class Failure(val sid: String) : ReconcileResult()
+        /** Per-sid deadline exceeded; dirty preserved. */
+        data class TimedOut(val sid: String) : ReconcileResult()
+        /** No repository wired; reconcile is a no-op. */
+        data class NoRepository(val sid: String) : ReconcileResult()
+
+        /**
+         * C-D3 v2 §1.7: entry token became stale; no repo, slice, cache,
+         * or effect commit landed. Stale ≠ Failure — it is a clean no-op
+         * (no [markSlimReconcileFailure], no banner, no toast).
+         */
+        data class Stale(val sid: String) : ReconcileResult()
+    }
+
+    /**
+     * Task 11 round-2 (oracle I4 — ReconcileMode enum): replaces the
+     * round-1 `isFocus: Boolean` parameter on [reconcileSession]. Three
+     * modes encode the three calling contexts, each with a different
+     * branch matrix per the contract §3 + §4 + oracle's design.
+     *
+     * # Branch matrix (oracle I4)
+     *
+     * | Probe outcome                       | DIGEST_FOCUS         | DIGEST_BACKGROUND     | RESYNC               |
+     * | ---                                 | ---                  | ---                   | ---                  |
+     * | 404                                 | MarkDeleted          | MarkDeleted           | MarkDeleted          |
+     * | Other failure                       | Failure (keep dirty) | Failure (keep dirty)  | Failure (keep dirty) |
+     * | empty + local-has messages          | ClearLocal + clear   | no-op (keep dirty)    | ClearLocal + clear   |
+     * | empty + local empty                 | Aligned (clear)      | no-op (keep dirty)    | Aligned (clear)      |
+     * | aligned (probe says caught up)      | Aligned (clear)      | no-op (keep dirty)    | Aligned (clear)      |
+     * | needs catch-up                      | REST fetch + clear   | RefreshRow (no clear) | REST fetch + clear   |
+     * | REST success                        | clear-if-truly-aligned| n/a                  | clear-if-truly-aligned|
+     * | REST failure                        | Failure (keep dirty) | n/a                   | Failure (keep dirty) |
+     *
+     * The matrix is the canonical spec — every branch in [reconcileSessionLocked]
+     * MUST match this table.
+     *
+     * # Why three modes (oracle I4)
+     *
+     * Round-1 had only `isFocus: Boolean`. Two problems:
+     *  1. **C3 fix:** BACKGROUND (non-focus digest) must NEVER clear dirty
+     *     on aligned/empty (only focus + RESYNC may clear). The boolean
+     *     couldn't express "RESYNC clears on aligned but BACKGROUND doesn't".
+     *  2. **RESYNC fetch policy:** RESYNC always fetches on needsCatchUp
+     *     (regardless of focus), but BACKGROUND never fetches. The boolean
+     *     conflated "should fetch" with "is current tab".
+     *
+     * The enum separates the concerns: FOCUS/BACKGROUND select from
+     * [handleSessionDigest] based on `sid == currentSessionId`; RESYNC is
+     * passed by [performResyncCatchUp] / [performSlimResync] for every sid
+     * in the catch-up set.
+     */
+    enum class ReconcileMode {
+        /** Digest frame for the currently-open chat tab. May fetch + clear dirty. */
+        DIGEST_FOCUS,
+        /** Digest frame for a non-focus session. NEVER clears dirty; never fetches. */
+        DIGEST_BACKGROUND,
+        /** Resync sweep (every sid in the catch-up set). May fetch + clear dirty. */
+        RESYNC,
+    }
+
+    private fun ReconcileMode.mayFetch() = this == ReconcileMode.DIGEST_FOCUS || this == ReconcileMode.RESYNC
+    private fun ReconcileMode.mayClearDirty() = this == ReconcileMode.DIGEST_FOCUS || this == ReconcileMode.RESYNC
 
     /**
      * §R18 Phase 3 Wave 1 (P0-7): per-event-type counters for SSE events that
@@ -1170,9 +1337,8 @@ class SessionSyncCoordinator(
                 // JSON (name/data/message/statusCode + anything else) so the retry/
                 // error hydration parser in Phase 4 can be finalized against reality.
                 DebugLog.w("Retry", "session.error raw properties=${event.payload.properties?.toString() ?: "null"}")
-                // §error-feedback (Issue 4): the server emits session.error with
-                // payload { sessionID, error: { name, data: { message, statusCode } } }
-                // for rate-limit / quota / provider failures. Two surfaces:
+                // §error-feedback (Issue 4): the server emits session.error for
+                // rate-limit / quota / provider failures. Two surfaces:
                 //   (1) a UiEvent.Error toast (always — the user must know)
                 //   (2) attach the error to the current session's last assistant
                 //       message (if any non-error one exists) so ErrorCard can
@@ -1183,14 +1349,55 @@ class SessionSyncCoordinator(
                 // as SseSideEffect.SessionError. The chat-slice mutation (attach
                 // error to last assistant message) stays inline — it's a same-
                 // domain state transform, not a bus signal.
-                val errObj = event.payload.getJsonObject("error")
-                val name = (errObj?.get("name") as? kotlinx.serialization.json.JsonPrimitive)?.content
+                //
+                // Task 12 round-2 (slimapi v1 §G2 / T12-C1 + I2 + I3 fixes):
+                //  - I3 (defensive dual-shape parsing): the ocdroid slim contract
+                //    (docs/slimapi-client-impl-v1.md:43) declares slim session.error
+                //    fields as TOP-LEVEL { sessionID?, directory?, name, message, at }.
+                //    Legacy opencode emits NESTED { sessionID, error: { name, data:
+                //    { message, statusCode } } }. The deployed slimapi sidecar's
+                //    curated SSE set does NOT include session.error (problem-report-
+                //    wip.md C-D8), so the actual wire shape is unverified. Try
+                //    top-level first (contract truth), fall back to nested (legacy).
+                //  - I2 (slim-mode gate): the canonical sessionErrorsById write is
+                //    a NEW slim-only side effect. Legacy/non-slim session.error
+                //    MUST stay byte-for-byte unchanged (toast + chat attachment
+                //    only — no map write).
+                //  - I1 (stripe routing): the map write goes through T11's
+                //    per-sid stripe (stripeFor(sid).withLock) so it serializes
+                //    against digest-driven lastError writes + the reconcile
+                //    workflow (T12-C3 per-sid workflow serialization).
+                //
+                // Toast-suppression intent (round-1 Minor): toast is emitted in
+                // BOTH sid and no-sid cases (preserves existing UX; existing
+                // legacy tests depend on it). Brief C1's "no-sid → toast"
+                // describes the FALLBACK (no map write when no sid), not an
+                // exclusive route. The durable banner (slim-only, sid-required)
+                // is the addition; the toast stays as the immediate UX in both.
+                val props = event.payload.properties
+                val errObj = props?.get("error") as? JsonObject
+                // name: top-level first, fall back to nested error.name.
+                val name = (props?.get("name") as? kotlinx.serialization.json.JsonPrimitive)?.content
+                    ?: (errObj?.get("name") as? kotlinx.serialization.json.JsonPrimitive)?.content
+                // data: nested-only (legacy MessageError shape — kept for the
+                // chat-slice attachment's byte-for-byte preservation).
                 val data = errObj?.get("data") as? JsonObject
-                val rawMsg = (data?.get("message") as? kotlinx.serialization.json.JsonPrimitive)?.content
+                // message: top-level first (slim contract), then nested
+                // error.data.message (legacy primary), then error.data.error
+                // (legacy fallback), then error.message / error.error
+                // (defensive — covers sidecars that omit the data wrapper).
+                val rawMsg = (props?.get("message") as? kotlinx.serialization.json.JsonPrimitive)?.content
+                    ?: (data?.get("message") as? kotlinx.serialization.json.JsonPrimitive)?.content
                     ?: (data?.get("error") as? kotlinx.serialization.json.JsonPrimitive)?.content
+                    ?: (errObj?.get("message") as? kotlinx.serialization.json.JsonPrimitive)?.content
+                    ?: (errObj?.get("error") as? kotlinx.serialization.json.JsonPrimitive)?.content
                     ?: "Server session error"
+                // at: top-level first, fall back to nested error.at.
+                val at = (props?.get("at") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull()
+                    ?: (errObj?.get("at") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull()
                 applySseSideEffects(listOf(SseSideEffect.SessionError(name = name, rawMsg = rawMsg)))
                 val sid = event.payload.getString("sessionID")
+                    ?: (props?.get("sessionID") as? kotlinx.serialization.json.JsonPrimitive)?.content
                 if (sid != null && sid == slices.chat.value.currentSessionId) {
                     slices.mutateChat { c ->
                         val lastAssistant = c.messages.lastOrNull { it.isAssistant }
@@ -1198,6 +1405,27 @@ class SessionSyncCoordinator(
                         else c.copy(messages = c.messages.map { m ->
                             if (m.id == lastAssistant.id) m.copy(error = Message.MessageError(name = name, data = data)) else m
                         })
+                    }
+                }
+                // T12-C1 (slim-only, sid-required): durable banner. The map
+                // write is gated behind isSlimMode() (I2 — legacy non-slim
+                // paths stay byte-for-byte unchanged) and routed through T11's
+                // per-sid stripe (I1 — concurrent session.error + digest +
+                // reconcile for the same sid serialize end-to-end, satisfying
+                // T12-C3). No-sid frames fall through without touching the
+                // map (toast is the only surface for session-less errors).
+                if (sid != null && isSlimMode()) {
+                    val banner = SlimSessionLastError(
+                        name = name ?: "Unknown",
+                        message = rawMsg,
+                        at = at,
+                    )
+                    scope.launch {
+                        stripeFor(sid).withLock {
+                            slices.mutateSessionList { s ->
+                                s.copy(sessionErrorsById = s.sessionErrorsById + (sid to banner))
+                            }
+                        }
                     }
                 }
             }
@@ -1469,55 +1697,179 @@ class SessionSyncCoordinator(
      * [OpenCodeRepository.getSlimapiQuestions]. Maps each entry to legacy
      * [QuestionRequest] **preserving [QuestionRequest.routeToken]**. Same
      * authoritative reconcile + archived-session filter as the legacy fan-out.
+     *
+     * C-D3 v2 §2.2: standalone workflow entry — captures ONE token before
+     * the network suspend, then guards every slice / signal / effect
+     * commit inside a single `commitIfSlimTokenCurrent` block. A stale
+     * result is a clean no-op (no slice mutation, no UiEvent).
      */
     private fun loadPendingQuestionsSlim(repository: OpenCodeRepository) {
         DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs slim single-shot")
         scope.launch {
+            // Standalone workflow entry: ONE capture before first suspend.
+            val token = repository.captureSlimCommitToken()
+
             val startIds = slices.sessionList.value.pendingQuestions
                 .mapTo(mutableSetOf()) { it.id }
+
             val workdirs = computeQuestionFanOutWorkdirs(
                 directorySessionKeys = slices.sessionList.value.directorySessions.keys,
                 currentWorkdir = settingsManager.currentWorkdir,
                 recentWorkdirs = settingsManager.getRecentWorkdirs(currentServerGroupFp()),
             )
+
             val directories = workdirs.takeIf { it.isNotEmpty() }?.toList()
-            val fetched = repository.getSlimapiQuestions(directories)
-                .onSuccess { items ->
-                    DebugLog.d("Question", "loadPendingQuestionsSlim count=${items.size}")
+
+            val outcome = repository.getSlimapiQuestions(
+                directories = directories,
+                token = token,
+            ).getOrElse { error ->
+                if (error is OpenCodeRepository.StaleSlimCommitException) {
+                    return@launch
                 }
-                .onFailure { error ->
-                    DebugLog.w(tag, "slim getSlimapiQuestions failed: ${error.message}")
+                SlimAggregationOutcome.Failure(error.message)
+            }
+
+            // Fast rejection after suspension but before building work.
+            if (!repository.isSlimCommitTokenCurrent(token)) return@launch
+
+            // C-D3 v2 §2.2: ALL slice + effect commits land inside ONE
+            // commitIfSlimTokenCurrent atomic gate so a host rotation
+            // between the network return and the slice commit can NOT
+            // write a stale question list / signal under a new host.
+            repository.commitIfSlimTokenCurrent(token) {
+                val signal = aggregationSignal(outcome)
+
+                slices.mutateSessionList { current ->
+                    val sessionsById = allSessionsById(
+                        current.sessions,
+                        current.directorySessions,
+                        current.childSessions,
+                    )
+
+                    val folded = applyAggregationOutcome(
+                        prior = current.pendingQuestions,
+                        outcome = outcome,
+                        wireToUi = SlimapiQuestionEntry::toQuestionRequest,
+                        uiId = QuestionRequest::id,
+                        uiDirectory = QuestionRequest::directory,
+                    )
+
+                    // Preserve an SSE arrival that occurred during this poll.
+                    val foldedIds = folded.items.mapTo(mutableSetOf()) { it.id }
+                    val raceArrivals = current.pendingQuestions.filter { question ->
+                        question.id !in startIds &&
+                            question.id !in foldedIds
+                    }
+
+                    val merged = (folded.items + raceArrivals)
+                        .distinctBy { it.id }
+                        .let {
+                            filterArchivedSessionQuestions(it, sessionsById)
+                        }
+
+                    current.copy(
+                        pendingQuestions = merged,
+                        questionAggregationSignal = signal,
+                    )
                 }
-                .getOrDefault(emptyList())
-                .map { it.toQuestionRequest() }
-            val fetchedIds = mutableSetOf<String>()
-            val slSnap = slices.sessionList.value
-            val sessionsById = allSessionsById(
-                slSnap.sessions,
-                slSnap.directorySessions,
-                slSnap.childSessions,
-            )
-            val authoritative = buildList {
-                fetched.forEach { if (fetchedIds.add(it.id)) add(it) }
-                slSnap.pendingQuestions.forEach { q ->
-                    if (q.id !in fetchedIds && q.id !in startIds) add(q)
+
+                if (outcome is SlimAggregationOutcome.Failure) {
+                    effects.tryEmitUiEvent(
+                        UiEvent.Error(R.string.error_slim_questions_fetch_failed)
+                    )
                 }
-            }.let { filterArchivedSessionQuestions(it, sessionsById) }
-            slices.mutateSessionList { it.copy(pendingQuestions = authoritative) }
-            DebugLog.d(
-                "Question",
-                "loadPendingQuestionsSlim authoritative reconcile total=${authoritative.size} (had ${startIds.size} before)",
-            )
+            }
         }
     }
 
     /**
-     * Cluster A / Phase 2 (P2.2): `session.digest` → applySlimDigest → optional
-     * `/since` message merge into the current open session's chat slice.
-     * Also folds status / archived / deleted onto the session list when those
-     * fields are present (digest is the slim stand-in for session.status /
-     * session.updated).
+     * Task 12 (slimapi v1 §2 / §6.1 + §G2 — T12-C2): folds a decoded
+     * `session.digest.lastError` three-state value into the canonical
+     * [SessionListState.sessionErrorsById] map. Called from
+     * [reconcileDigest] INSIDE T11's per-sid stripe (round-2 I1 fix) so
+     * the fold serializes against session.error map writes + the
+     * reconcile body for the same sid.
+     *
+     * # Three-state semantics (per [LastErrorField])
+     *
+     *  - [LastErrorField.Set] → write/replace `sessionErrorsById[sid]`
+     *    (sidecar surfaces / replaces the upstream-error banner).
+     *  - [LastErrorField.Cleared] → remove `sessionErrorsById[sid]`
+     *    (sidecar signals upstream recovery — strand the active banner).
+     *  - [LastErrorField.Omitted] → no-op (a debounce tick that doesn't
+     *    restate `lastError` must NOT clear an active banner).
+     *
+     * # Idempotency / per-sid serialization (T12-C3, round-2 I1)
+     *
+     * Round-1 ran this fold INLINE in [handleSessionDigest] (outside the
+     * stripe), relying only on `MutableStateFlow.update` CAS for atomicity.
+     * That prevented structural lost-update but did NOT give per-sid
+     * workflow serialization — concurrent Set/Cleared/session.error for the
+     * same sid produced scheduling-dependent last-write-wins. Round-2 routes
+     * the fold THROUGH [reconcileDigest]'s `stripeFor(sid).withLock { ... }`,
+     * so digest lastError + session.error + reconcile all serialize
+     * end-to-end per sid. Duplicate Set / duplicate Cleared frames still
+     * converge to the same map state as a single application (idempotent).
+     *
+     * # NOT a banner abstraction (T12-C4)
+     *
+     * The map is written directly. There is no
+     * `repository.applySessionErrorBanner` / `sessionBanners` indirection.
      */
+    private fun applyDigestLastErrorToBanner(sid: String, field: LastErrorField) {
+        when (field) {
+            LastErrorField.Omitted -> { /* no-op — preserve prior banner */ }
+            LastErrorField.Cleared -> {
+                slices.mutateSessionList { s ->
+                    if (sid !in s.sessionErrorsById) s
+                    else s.copy(sessionErrorsById = s.sessionErrorsById - sid)
+                }
+            }
+            is LastErrorField.Set -> {
+                val banner = field.error
+                slices.mutateSessionList { s ->
+                    s.copy(sessionErrorsById = s.sessionErrorsById + (sid to banner))
+                }
+            }
+        }
+    }
+
+    /**
+     * Cluster A / Phase 2 → Task 11 (slimapi v1 §3 / §4 reconcile lane):
+     * `session.digest` frame handler.
+     *
+     * # What stays inline (UI side effects, same-domain slice mutations)
+     *
+     *  - Decode the digest via [lenientJson] (NON-COERCING — T6 invariant;
+     *    the [SlimSessionDigest.lastError] three-state Omitted/Cleared/Set
+     *    is faithful ONLY under non-coercing Json. Do NOT migrate to
+     *    `ssePayloadJson` / `coerceInputValues=true`).
+     *  - Status badge fold ([SlimSessionDigest.status] → sessionStatuses).
+     *  - Archived / deleted eviction (open-tabs + session list + cache
+     *    eviction effect).
+     *  - Lightweight `applyMessageTimestampBump` so recent-sort reflects
+     *    activity.
+     *  - Run the reducer ([OpenCodeRepository.applySlimDigest]) — mutates
+     *    `remote*` watermarks + ratchets `dirty`. The returned
+     *    [cn.vectory.ocdroid.data.repository.SlimFetchMessages] is now
+     *    IGNORED: T11's [reconcileSession] always probes, making the
+     *    reducer's optimistic fetch-decision redundant. (The reducer's
+     *    STATE mutation is still required — that's what advances remote
+     *    + sets dirty.)
+     *
+      * # What's delegated to [reconcileSession] (the message-fetch + dirty-clearing)
+      *
+      * The reducer having mutated state, we hand off to [reconcileSession]
+      * on [scope]. Per-sid serialization (T11-C6) is inside
+      * [reconcileSession].
+      *
+      * §CE-discipline (R-14): the [lenientJson] decode is synchronous (no
+      * CE possible) so the [runCatching] here is safe. The suspend path
+      * lives in [reconcileSession] / [OpenCodeRepository.probeLatestSlim] /
+      * [OpenCodeRepository.getSlimapiMessagesSince] which all use
+      * [cn.vectory.ocdroid.util.runSuspendCatching].
+      */
     private fun handleSessionDigest(event: SSEEvent) {
         val props = event.payload.properties
         if (props == null) {
@@ -1543,6 +1895,17 @@ class SessionSyncCoordinator(
                 it.applySessionStatus(digest.sessionId, SessionStatus(type = statusType)).first
             }
         }
+        // Task 12 round-2 (I1 fix): the digest's three-state `lastError`
+        // fold into [SessionListState.sessionErrorsById] is routed THROUGH
+        // T11's per-sid stripe — see [reconcileDigest] (the fold runs
+        // inside the stripe, before the reconcile body). Round-1 ran the
+        // fold inline here, which left it OUTSIDE the stripe and made
+        // concurrent session.error / digest / reconcile for the same sid
+        // scheduling-dependent (CAS-only, not per-sid workflow
+        // serialization). Routing through the stripe gives T12-C3's
+        // required per-sid serialization: digest lastError + session.error
+        // + reconcile serialize end-to-end via stripeFor(sid).
+        //
         // Archived / deleted eviction (slim stand-in for session.updated archived).
         if (digest.deleted == true || (digest.archived != null && digest.archived > 0L)) {
             val newOpenIds = slices.sessionList.value.openSessionIds.filter { id -> id != digest.sessionId }
@@ -1579,36 +1942,872 @@ class SessionSyncCoordinator(
         }
         val repo = repository
         if (repo == null) {
-            DebugLog.d("Sync", "session.digest: no repository wired — skip fetch decision")
+            DebugLog.d("Sync", "session.digest: no repository wired — skip reconcile")
             return
         }
-        val fetch = repo.applySlimDigest(digest) ?: return
-        // Only merge messages into the currently-open session's chat view
-        // (mirrors message.updated defensive session guard). Non-current
-        // sessions still advance the repository bookmark via applySlimDigest;
-        // a later switch reloads via LoadMessages.
-        val openSessionId = slices.chat.value.currentSessionId
-        if (fetch.sessionId != openSessionId) {
-            DebugLog.d(
-                "Sync",
-                "session.digest fetch deferred (not current) sid=${fetch.sessionId} since=${fetch.since}",
-            )
-            return
+        val sid = digest.sessionId
+        // T11 round-2 (oracle I4): select ReconcileMode based on whether
+        // this is the currently-open chat tab. FOCUS may fetch + clear
+        // dirty; BACKGROUND never clears dirty and never fetches (only
+        // refreshes the row).
+        val mode = if (sid == slices.chat.value.currentSessionId) {
+            ReconcileMode.DIGEST_FOCUS
+        } else {
+            ReconcileMode.DIGEST_BACKGROUND
         }
+        // T11 round-3 (oracle workflow-serialization): the reducer apply
+        // + reconcile body run inside the SAME per-sid stripe lock so
+        // competing digest / reconcile triggers for this sid serialize
+        // end-to-end. Round-2 applied the reducer OUTSIDE the stripe,
+        // which left a window where two digests for the same sid could
+        // interleave with duplicate / out-of-order reconcile scheduling
+        // (the repo atomic boundary prevented lost state, but not
+        // duplicate probe/fetch work). Round-3 closes that gap.
+        //
+        // Network I/O remains OUTSIDE the repo's [slimStateLock]
+        // (that's a separate invariant — the stripe lock CAN be held
+        // across network IO because it's per-sid and bounded by the
+        // Semaphore(4) for resync sweeps; the repo lock is the one that
+        // must stay in-memory-only).
+        val commitToken = repo.captureSlimCommitToken()
         scope.launch {
-            repo.getSlimapiMessagesSince(fetch.sessionId, fetch.since)
-                .onSuccess { items ->
-                    if (slices.chat.value.currentSessionId != fetch.sessionId) return@onSuccess
-                    mergeSlimMessagesIntoChat(items)
-                    DebugLog.d(
-                        "Sync",
-                        "session.digest merged ${items.size} messages into open session ${fetch.sessionId}",
-                    )
-                }
-                .onFailure { error ->
-                    DebugLog.w(tag, "session.digest getSlimapiMessagesSince failed: ${error.message}")
-                }
+            reconcileDigest(sid, mode, digest, repo, commitToken)
         }
+    }
+
+    /**
+     * T11 round-3 (oracle workflow-serialization): the digest-driven
+     * per-sid workflow entry. Acquires [stripeFor] ONCE for the WHOLE
+     * workflow (reducer apply + reconcile body) so competing digest /
+     * reconcile triggers for the same sid serialize end-to-end.
+     *
+     * # Why this exists (oracle review round-2 fix)
+     *
+     * Round-2 had `handleSessionDigest` apply `applySlimDigest` OUTSIDE
+     * the stripe, then `scope.launch { reconcileSession(sid, mode) }`
+     * which acquires the stripe only for the reconcile body. The repo's
+     * [slimStateLock] prevented state lost-update, but TWO concurrent
+     * digests for the same sid could both apply + both schedule
+     * reconciles (resulting in 2 probes / 2 fetches for one logical
+     * digest burst). Round-3 fixes that by acquiring the stripe ONCE
+     * for the entire workflow.
+     *
+     * # Network IO discipline
+     *
+     * The stripe lock CAN be held across network IO (it's per-sid,
+     * bounded by [resyncConcurrencySemaphore] for sweep concurrency).
+     * The REPO [slimStateLock] is the one that must stay in-memory-only
+     * (unchanged from round-2).
+     *
+     * # CE discipline
+     *
+     * [Mutex.withLock] propagates CE; [reconcileSessionLocked] uses
+     * [runSuspendCatching] internally. A scope cancel mid-workflow
+     * terminates cleanly.
+     */
+    private suspend fun reconcileDigest(
+        sid: String,
+        mode: ReconcileMode,
+        digest: SlimSessionDigest,
+        repo: OpenCodeRepository,
+        token: OpenCodeRepository.SlimCommitToken,
+    ) {
+        stripeFor(sid).withLock {
+            if (!repo.isSlimCommitTokenCurrent(token)) return@withLock
+
+            // C-D3 v2 §1.13: gate the banner commit so a stale token
+            // can NOT touch the sessionErrorsById slice.
+            val bannerCommitted = repo.commitIfSlimTokenCurrent(token) {
+                applyDigestLastErrorToBanner(sid, digest.lastError)
+            }
+
+            if (!bannerCommitted) return@withLock
+
+            repo.applySlimDigest(digest, token)
+
+            if (!repo.isSlimCommitTokenCurrent(token)) return@withLock
+
+            val result = reconcileSessionLocked(sid, mode, repo, token)
+            applyReconcileResult(result, token)
+        }
+    }
+
+    /**
+     * Task 11 round-2 (slimapi v1 §3 / §4 — per-session reconciler): the
+     * SINGLE entry point that serves BOTH digest-driven updates AND resync
+     * catch-up. Branch logic per [ReconcileMode]'s matrix (oracle I4).
+     *
+     * # Per-sid serialization (T11-C6)
+     *
+     * Concurrent dispatch for the same sid (digest + resync, OR multiple
+     * digests, OR explicit reconcile triggers) is serialized by the
+     * [stripeFor] lock. Different sids usually land on different stripes
+     * → fully parallel; the resync catch-up path bounds the global
+     * in-flight count via [resyncConcurrencySemaphore].
+     *
+     * # Watermark-branched fetch (oracle I2)
+     *
+     * On needsCatchUp with [ReconcileMode.mayFetch]:
+     *
+     *  - `localAppliedUpdatedAt != null` → `getSlimapiMessagesSince(sid, ts)`
+     *    (anchored on what we've actually applied).
+     *  - `localAppliedUpdatedAt == null` → `fetchSlimInitialWindowBounded(sid)`
+     *    (cursor-drain façade that reuses T5's drainSlimapiMessagesBounded).
+     *
+     * Both paths internally call `bumpSlimBookmarkFromItems → onReconcileSuccess`
+     * to advance localApplied + clear dirty (with T11 round-2 dirty
+     * re-evaluation inside the repo atomic boundary).
+     *
+     * # §CE-discipline (R-14)
+     *
+     * [OpenCodeRepository.probeLatestSlim] /
+     * [OpenCodeRepository.getSlimapiMessagesSince] /
+     * [OpenCodeRepository.fetchSlimInitialWindowBounded] all use
+     * [cn.vectory.ocdroid.util.runSuspendCatching] internally so CE
+     * propagates correctly. [Mutex.withLock] propagates CE. A scope cancel
+     * mid-reconcile terminates cleanly WITHOUT landing a partial state
+     * mutation (the repo atomic boundary is held only during pure
+     * read/derive/write, never across network IO).
+     *
+     * # Idle/non-slim guard
+     *
+     * When [repository] is null OR [isSlimMode] is false, this is a no-op
+     * ([ReconcileResult.NoRepository]). The legacy non-slim path is
+     * byte-for-byte unchanged (digest is recognized but not reconciled).
+     *
+     * @param sid the session id to reconcile.
+     * @param mode the calling context — see [ReconcileMode] for the
+     *   branch matrix.
+     */
+    internal suspend fun reconcileSession(sid: String, mode: ReconcileMode): ReconcileResult {
+        val repo = repository ?: return ReconcileResult.NoRepository(sid)
+        if (!isSlimMode()) return ReconcileResult.NoRepository(sid)
+
+        // C-D3 v2 §1.8: public workflow entry captures once before its
+        // first suspend point. Every nested suspend call and every commit
+        // surface receives this exact token — NO recapture inside.
+        val token = repo.captureSlimCommitToken()
+
+        return reconcileSessionWithToken(
+            sid = sid,
+            mode = mode,
+            repo = repo,
+            token = token,
+            isStillCurrent = { true },
+        )
+    }
+
+    /**
+     * C-D3 v2 §1.8: shared reconcile body that threads an externally-
+     * supplied token through the stripe + reconcile body. Used by:
+     *  - [reconcileSession] (public entry, captures fresh).
+     *  - [performResyncCatchUp] (uses the orchestrator's entry token,
+     *    no recapture).
+     *
+     * The resync path MUST call this (NOT public [reconcileSession]) so
+     * the orchestrator's single-entry-token invariant holds.
+     */
+    private suspend fun reconcileSessionWithToken(
+        sid: String,
+        mode: ReconcileMode,
+        repo: OpenCodeRepository,
+        token: OpenCodeRepository.SlimCommitToken,
+        isStillCurrent: () -> Boolean,
+    ): ReconcileResult = stripeFor(sid).withLock {
+        // C-D3 v2 §1.8: re-check both predicates under the stripe. A host
+        // switch between the entry capture and the stripe acquisition
+        // surfaces as Stale (NOT NoRepository — the repo IS wired, but
+        // the token predates the rotation).
+        if (!isStillCurrent() || !repo.isSlimCommitTokenCurrent(token)) {
+            return@withLock ReconcileResult.Stale(sid)
+        }
+
+        reconcileSessionLocked(sid, mode, repo, token)
+    }
+
+    /**
+     * Test-visible alias for [reconcileSession] — same semantics, named to
+     * make it obvious in stack traces + tests that this is the entry under
+     * test. Production callers ([handleSessionDigest],
+     * [performResyncCatchUp], [performSlimResync]) go through
+     * [reconcileSession] directly.
+     */
+    internal suspend fun reconcileSessionExposed(sid: String, mode: ReconcileMode): ReconcileResult =
+        reconcileSession(sid, mode)
+
+    /**
+     * Task 11: the reconciler body, called under the per-sid stripe lock.
+     * Reads the latest [SlimSessionState] (the reducer / a prior reconcile
+     * may have mutated it while this dispatch waited for the lock),
+     * probes, and dispatches to the appropriate T6 primitive via the
+     * repository's public mutators (which hold the repo-level atomic
+     * boundary).
+     *
+     * Branch matrix per [ReconcileMode] (oracle I4).
+     */
+    private suspend fun reconcileSessionLocked(
+        sid: String,
+        mode: ReconcileMode,
+        repo: OpenCodeRepository,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): ReconcileResult {
+        // T11 round-3: the slim-mode guard lives HERE (not just at the
+        // [reconcileSession] public entry) so the [reconcileDigest]
+        // workflow path (which calls this body directly under the
+        // stripe) ALSO short-circuits for legacy non-slim mode. The
+        // legacy non-slim path is byte-for-byte unchanged: digest is
+        // recognized but no probe / fetch / state mutation lands.
+        if (!isSlimMode()) return ReconcileResult.NoRepository(sid)
+        val state = repo.getSlimSessionState(sid) ?: SlimSessionState(sessionId = sid)
+        val probe = repo.probeLatestSlim(sid)
+        // ── probe failure branches (uniform across all modes) ────────────
+        if (!probe.ok) {
+            if (probe.httpStatus == 404) {
+                // Session gone upstream → mark deleted (all modes).
+                if (!repo.markSlimSessionDeleted(sid, token)) {
+                    return ReconcileResult.Stale(sid)
+                }
+                DebugLog.i("Sync", "reconcileSession sid=$sid mode=$mode 404 → markDeleted")
+                return ReconcileResult.MarkDeleted(sid)
+            }
+            // Transport / network failure → keep dirty (all modes).
+            if (!repo.markSlimReconcileFailure(sid, token)) {
+                return ReconcileResult.Stale(sid)
+            }
+            DebugLog.i(
+                "Sync",
+                "reconcileSession sid=$sid mode=$mode probe failed httpStatus=${probe.httpStatus} → keep dirty",
+            )
+            return ReconcileResult.Failure(sid)
+        }
+        // ── probe ok + empty branch ──────────────────────────────────────
+        if (probe.empty) {
+            val localHas = state.localAppliedMessageId != null ||
+                state.localAppliedUpdatedAt != null
+            if (localHas) {
+                // FOCUS/RESYNC: clear local + clear dirty.
+                // BACKGROUND: no-op (keep dirty; do NOT clear local — the
+                // local cache is the user's open tab's history).
+                if (mode.mayClearDirty()) {
+                    if (!repo.clearSlimLocalMessages(sid, token)) {
+                        return ReconcileResult.Stale(sid)
+                    }
+                    DebugLog.i("Sync", "reconcileSession sid=$sid mode=$mode probe empty + local-has → clearLocal")
+                    return ReconcileResult.ClearLocal(sid)
+                }
+                DebugLog.d("Sync", "reconcileSession sid=$sid mode=$mode probe empty + local-has → BACKGROUND no-op (keep dirty)")
+                return ReconcileResult.RefreshRow(sid)
+            }
+            // Local-empty + probe-empty: aligned.
+            // FOCUS/RESYNC: clear dirty.
+            // BACKGROUND: no-op (keep dirty).
+            if (mode.mayClearDirty()) {
+                if (!repo.markSlimReconcileAligned(sid, token)) {
+                    return ReconcileResult.Stale(sid)
+                }
+                DebugLog.d("Sync", "reconcileSession sid=$sid mode=$mode probe empty + local-empty → aligned")
+                return ReconcileResult.Aligned(sid)
+            }
+            DebugLog.d("Sync", "reconcileSession sid=$sid mode=$mode probe empty + local-empty → BACKGROUND no-op")
+            return ReconcileResult.RefreshRow(sid)
+        }
+        // ── probe ok + non-empty: needsCatchUp decision ─────────────────
+        val catchUp = needsCatchUp(
+            probe = probe,
+            localAppliedId = state.localAppliedMessageId,
+            localAppliedTs = state.localAppliedUpdatedAt,
+        )
+        if (!catchUp) {
+            if (mode.mayClearDirty()) {
+                if (!repo.markSlimReconcileAligned(sid, token)) {
+                    return ReconcileResult.Stale(sid)
+                }
+                DebugLog.d("Sync", "reconcileSession sid=$sid mode=$mode probe aligned → clear dirty")
+                return ReconcileResult.Aligned(sid)
+            }
+            DebugLog.d("Sync", "reconcileSession sid=$sid mode=$mode probe aligned → BACKGROUND no clear")
+            return ReconcileResult.RefreshRow(sid)
+        }
+        // ── needsCatchUp: FOCUS/RESYNC fetch; BACKGROUND refresh only ────
+        if (!mode.mayFetch()) {
+            DebugLog.d("Sync", "reconcileSession sid=$sid mode=$mode BACKGROUND needsCatchUp → refresh row, keep dirty")
+            return ReconcileResult.RefreshRow(sid)
+        }
+        // Watermark-branched fetch (oracle I2):
+        //   - localAppliedUpdatedAt != null → /since/{ts}
+        //   - localAppliedUpdatedAt == null → bounded cursor drain façade
+        return if (state.localAppliedUpdatedAt != null) {
+            val since = state.localAppliedUpdatedAt!!
+            val result = repo.getSlimapiMessagesSince(sid, since, token = token)
+            foldRestFetch(sid, mode, result, token)
+        } else {
+            // Cold path: no local watermark yet. Use the bounded cursor
+            // drain façade (reuses T5's drainSlimapiMessagesBounded).
+            val result = repo.fetchSlimInitialWindowBounded(sid, token = token)
+            foldRestFetch(sid, mode, result, token)
+        }
+    }
+
+    /**
+     * Task 11 round-2: shared fold for both fetch paths (/since and
+     * cursor-drain). On success: merge into chat slice (if current
+     * session) + return Reconciled. On failure: keep dirty + return
+     * Failure. The watermark advancement + dirty clear happens INSIDE
+     * `bumpSlimBookmarkFromItems` (the repo atomic boundary with dirty
+     * re-evaluation) — the coordinator doesn't double-clear here.
+     */
+    private suspend fun foldRestFetch(
+        sid: String,
+        mode: ReconcileMode,
+        result: Result<List<MessageWithParts>>,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): ReconcileResult {
+        val repo = repository ?: return ReconcileResult.NoRepository(sid)
+
+        return result.fold(
+            onSuccess = { items ->
+                // C-D3 v2 §1.9: guard EVERY slice/effect commit (not just
+                // the repo watermark bump, which already landed inside
+                // bumpSlimBookmarkFromItems under the same token). The
+                // banner / chat merge MUST land under the same atomic
+                // gate so a configure rotation between repo commit and
+                // slice commit cannot write a stale chat.
+                val committed = repo.commitIfSlimTokenCurrent(token) {
+                    if (slices.chat.value.currentSessionId == sid) {
+                        mergeSlimMessagesIntoChat(items)
+                    }
+                }
+
+                if (!committed) {
+                    DebugLog.i(
+                        "Sync",
+                        "drop stale REST result sid=$sid mode=$mode",
+                    )
+                    ReconcileResult.Stale(sid)
+                } else {
+                    DebugLog.i(
+                        "Sync",
+                        "reconcileSession sid=$sid mode=$mode REST success items=${items.size} → dirty cleared (if truly aligned)",
+                    )
+                    ReconcileResult.Reconciled(sid, items)
+                }
+            },
+            onFailure = { error ->
+                // C-D3 v2 §1.9: Stale ≠ Failure. A stale cursor result
+                // must NOT call markSlimReconcileFailure (that pollutes
+                // error state for the new incarnation). Only real
+                // transport failures map to Failure / markSlimReconcileFailure.
+                if (error is OpenCodeRepository.StaleSlimCommitException ||
+                    !repo.isSlimCommitTokenCurrent(token)
+                ) {
+                    return@fold ReconcileResult.Stale(sid)
+                }
+
+                val marked = repo.markSlimReconcileFailure(sid, token)
+                if (!marked) {
+                    ReconcileResult.Stale(sid)
+                } else {
+                    DebugLog.w(
+                        tag,
+                        "reconcileSession sid=$sid mode=$mode REST failed: ${error.message}",
+                    )
+                    ReconcileResult.Failure(sid)
+                }
+            },
+        )
+    }
+
+    /**
+     * Task 11: fold a [ReconcileResult] into UI side effects that can't
+     * live inside the repository's pure state-derive layer. Called by
+     * [handleSessionDigest] after [reconcileSession] returns.
+     *
+     *  - [ReconcileResult.MarkDeleted] → drop the session from the open-tabs
+     *    list + dispatch [AppAction.SessionArchived] so the row vanishes.
+     *    (The repository's `markSlimSessionDeleted` only flips the
+     *    `deleted` flag on the slim SSE state; the UI list mutation lives
+     *    here.)
+     *  - [ReconcileResult.ClearLocal] → wipe the chat slice's message
+     *    cache for [ReconcileResult.ClearLocal.sid] if it's the current
+     *    session (the reducer / a prior merge may have left stale rows).
+     *  - Other variants → state already updated inside [reconcileSession];
+     *    no additional side effects.
+     */
+    private fun applyReconcileResult(
+        result: ReconcileResult,
+        token: OpenCodeRepository.SlimCommitToken,
+    ) {
+        val repo = repository ?: return
+
+        // C-D3 v2 §1.10: Stale is a clean no-op (no slice / cache / effect
+        // commit, no Failure pollution).
+        if (result is ReconcileResult.Stale) return
+
+        // C-D3 v2 §1.10: ONE mandatory gate. The check + every slice /
+        // effect / cache mutation run atomically under slimStateLock so a
+        // configure() rotation cannot straddle the gate-commit boundary
+        // (TOCTOU mitigation — rev-gpt round-2 concern).
+        repo.commitIfSlimTokenCurrent(token) {
+            applyCurrentReconcileResult(result, token)
+        }
+    }
+
+    /**
+     * C-D3 v2 §1.10: the current-reincarnation body. Runs inside the
+     * [commitIfSlimTokenCurrent] atomic region — every branch must stay
+     * synchronous (no network, no delay, no blocking IO).
+     */
+    private fun applyCurrentReconcileResult(
+        result: ReconcileResult,
+        token: OpenCodeRepository.SlimCommitToken,
+    ) {
+        when (result) {
+            is ReconcileResult.MarkDeleted -> {
+                val sid = result.sid
+                val currentList = slices.sessionList.value
+                val newOpenIds = currentList.openSessionIds.filter { it != sid }
+
+                if (newOpenIds != currentList.openSessionIds) {
+                    settingsManager.openSessionIds = newOpenIds
+                }
+
+                val directory = currentList.sessions
+                    .firstOrNull { it.id == sid }
+                    ?.directory
+                    .orEmpty()
+
+                slices.store.dispatch(
+                    cn.vectory.ocdroid.ui.AppAction.SessionArchived(
+                        session = Session(
+                            id = sid,
+                            directory = directory,
+                            time = Session.TimeInfo(archived = 1L),
+                        ),
+                        openSessionIds = newOpenIds,
+                    )
+                )
+
+                effects.tryEmitEffect(
+                    ControllerEffect.EvictSession(currentServerGroupFp(), sid),
+                )
+            }
+
+            is ReconcileResult.ClearLocal -> {
+                val sid = result.sid
+
+                if (slices.chat.value.currentSessionId == sid) {
+                    slices.mutateChat {
+                        it.copy(
+                            messages = emptyList(),
+                            partsByMessage = emptyMap(),
+                        )
+                    }
+                }
+
+                effects.tryEmitEffect(
+                    ControllerEffect.EvictSession(currentServerGroupFp(), sid),
+                )
+            }
+
+            is ReconcileResult.Reconciled -> {
+                // T11 round-2 (oracle D1 — cache-coupled non-focus resync):
+                // if this Reconciled was for a NON-current session, write
+                // the fetched items to sessionWindowCache so a later
+                // switchTo finds them without a re-fetch. For the CURRENT
+                // session, items were already merged into the chat slice
+                // inside foldRestFetch — no extra work.
+                //
+                // T11 round-3 (oracle D1 part a — retention-bound dirty):
+                // the dirty clear already happened inside
+                // `bumpSlimBookmarkFromItems` (via `onReconcileSuccess`)
+                // during the fetch. If the cache-retention step below
+                // fails (empty result / filtered-to-nothing / bus drop),
+                // we RE-RATCHET dirty via [markSlimDirty] so the next
+                // pass retries the fetch. Without this binding, dirty
+                // could clear without a retained window — leaving the
+                // user with no cached messages and no scheduled retry.
+                val sid = result.sid
+                val isCurrent = slices.chat.value.currentSessionId == sid
+
+                if (!isCurrent && result.items.isNotEmpty()) {
+                    val messages = result.items
+                        .map { it.info }
+                        .filter { it.id.isNotEmpty() }
+
+                    val partsByMessage = result.items
+                        .filter {
+                            it.info.id.isNotEmpty() && it.parts.isNotEmpty()
+                        }
+                        .associate { it.info.id to it.parts }
+
+                    if (messages.isNotEmpty()) {
+                        val retained = effects.tryEmitEffect(
+                            ControllerEffect.WriteSessionWindow(
+                                serverGroupFp = currentServerGroupFp(),
+                                sessionId = sid,
+                                messages = messages,
+                                partsByMessage = partsByMessage,
+                            )
+                        )
+
+                        if (!retained) {
+                            DebugLog.w(tag, "applyReconcileResult sid=$sid WriteSessionWindow dropped → re-ratchet dirty")
+                            repository?.markSlimDirty(sid, token)
+                        }
+                    } else {
+                        DebugLog.w(tag, "applyReconcileResult sid=$sid filtered-to-nothing → re-ratchet dirty")
+                        repository?.markSlimDirty(sid, token)
+                    }
+                } else if (!isCurrent && result.items.isEmpty()) {
+                    DebugLog.d(tag, "applyReconcileResult sid=$sid empty non-focus result → re-ratchet dirty")
+                    repository?.markSlimDirty(sid, token)
+                }
+                // For the CURRENT session, items are already merged into
+                // the chat slice (retention = chat slice itself); no
+                // extra dirty work needed.
+            }
+
+            is ReconcileResult.RefreshRow,
+            is ReconcileResult.Aligned,
+            is ReconcileResult.Failure,
+            is ReconcileResult.TimedOut,
+            is ReconcileResult.NoRepository,
+            is ReconcileResult.Stale -> {
+                // C-D3 v2 §1.10: Stale is also caught by the entry guard;
+                // reproduced here to keep the `when` exhaustive without
+                // an `else`.
+                // State already updated inside reconcileSession; no extra UI work.
+            }
+        }
+    }
+
+    /**
+     * T13 — fold a slim on-demand fan-out summary into coordinator side
+     * effects. Slim on-demand ONLY; legacy non-slim callers never reach
+     * this (T13-C6 — the bulk L3 path [StatusAggregatorImpl.refresh] is
+     * byte-for-byte unchanged).
+     *
+     * Two side-effect arms (per the brief's "coordinator action hook"):
+     *
+     *  - **[StatusFanOutSummary.missingSids]** → emit a delete-session
+     *    effect per sid. The session is gone upstream (direct 404 OR
+     *    fake-idle per T13-C5 — both folded by [foldStatusOutcomes]).
+     *    Mirrors the session.updated archived + digest deleted branches'
+     *    [ControllerEffect.EvictSession] emission so the cache + open-tabs
+     *    list are cleaned uniformly (T13-C3).
+     *  - **[StatusFanOutSummary.retryableCount]** → request the poller's
+     *    bounded backoff when > 0 (T13-C4: transient sidecar/upstream/
+     *    transport fault → next sweep slows down); reset the backoff to
+     *    base when == 0 (the success path).
+     *
+     * **Minimally scoped** (T11/T12 just heavily modified this file):
+     * this hook touches ONLY the effect bus — it does NOT read or mutate
+     * the slice flows, the repo's slim SSE state, or the per-sid stripe
+     * locks. The hook is a pure routing step from a [StatusFanOutSummary]
+     * (produced by [cn.vectory.ocdroid.service.status.SlimStatusFanOut])
+     * to effect emissions.
+     *
+     * @param summary the fan-out result. Caller (the slim integration
+     *   layer / future fan-out scheduler) constructs this via
+     *   [cn.vectory.ocdroid.service.status.SlimStatusFanOut.checkSlimSessionsStatuses].
+     */
+    fun applySlimStatusFanOutSummary(summary: cn.vectory.ocdroid.service.status.StatusFanOutSummary) {
+        val fp = currentServerGroupFp()
+        // T13-C3: missingSids → delete-session effect per sid. 404 and
+        // fake-idle (T13-C5) both land here (folded by [foldStatusOutcomes]).
+        for (sid in summary.missingSids) {
+            effects.tryEmitEffect(ControllerEffect.EvictSession(fp, sid))
+        }
+        // T13-C4: retryableCount > 0 → ask the poller to schedule backoff;
+        // retryableCount == 0 → ask the poller to reset backoff to base
+        // (the success path; symmetric to keep the poller's backoff state
+        // machine coherent across sweeps).
+        if (summary.retryableCount > 0) {
+            effects.tryEmitEffect(ControllerEffect.RequestPollerBackoff)
+        } else {
+            effects.tryEmitEffect(ControllerEffect.ResetPollerBackoff)
+        }
+    }
+
+    /**
+     * Task 11 (slimapi v1 §3 / §4 resync catch-up): orchestrate a
+     * catch-up sweep across the union of (catchUpSet) per the contract §3
+     * catch-up-set definition. Each sid is reconciled via
+     * [reconcileSession] (probe + dispatch) with [ReconcileMode.RESYNC].
+     *
+     * # Concurrency model (T11-C5)
+     *
+     *  - [supervisorScope]: a single slow / failing sid does NOT propagate
+     *    its exception to the sweep (other sids still complete). A sid
+     *    throwing inside its [withTimeout] is caught here as a
+     *    [TimeoutCancellationException] (a CE subclass) → the per-sid job
+     *    completes-with-exception silently + the per-sid outcome is
+     *    recorded as [ReconcileResult.TimedOut] for diagnostics.
+     *  - [resyncConcurrencySemaphore] (Semaphore(4)): bounds the global
+     *    in-flight REST fetch count so a 50-session sweep doesn't
+     *    stampede the sidecar. Per the contract's performance hint
+     *    ("可加客户端并发上限（如 4）").
+     *  - **per-sid deadline** ([withTimeout]`[perSidDeadlineMs]`):
+     *    prevents ONE slow / hung sid from blocking the entire batch.
+     *
+     * # T11 round-2 (oracle D4 — timeout ordering)
+     *
+     * The ordering is `semaphore.withPermit { withTimeout { reconcile } }`
+     * (NOT `withTimeout { semaphore.withPermit { ... } }`). The deadline
+     * starts when the WORK starts (after the permit is acquired), not
+     * when the sid is QUEUED on the semaphore. Otherwise a sid that
+     * waited 5s for a permit would have only 3s of work budget left —
+     * premature timeouts under sustained load.
+     *
+     * # Idempotency (T11-C6)
+     *
+     * Each per-sid reconcile goes through [reconcileSession] → [stripeFor],
+     * so a digest arriving mid-sweep for a sid already being reconciled
+     * serializes (no double-apply).
+     *
+     * # CE discipline
+     *
+     * [supervisorScope] + [withTimeout] propagate CE correctly. A
+     * [scope] cancel mid-sweep cancels every per-sid job; partial state
+     * mutations are absent (each sid's state mutation is atomic inside
+     * the repository's [slimStateLock] boundary).
+     *
+     * @param catchUpSet the pre-computed catch-up set (focus ∪ localAll ∪
+     *   dirty). Caller (typically [performSlimResync]) is responsible for
+     *   building it so the snapshot timing is well-defined.
+     * @param perSidDeadlineMs per-sid timeout. Defaults to
+     *   [defaultResyncPerSidDeadlineMs]; tests pass a shorter value.
+     * @return per-sid outcomes (oracle D4 — observable timeout/failure
+     *   for diagnostics + dirty-preservation verification).
+     */
+    suspend fun performResyncCatchUp(
+        catchUpSet: Set<String>,
+        perSidDeadlineMs: Long = defaultResyncPerSidDeadlineMs,
+        /**
+         * C-D3 v2 §1.11: orchestrator-supplied entry token. The whole
+         * sweep uses THIS token; NO recapture inside per-sid children.
+         * Defaults to a fresh capture for backwards-compat with the
+         * public surface (callers that don't have one handy still get
+         * per-call current-token semantics).
+         */
+        token: OpenCodeRepository.SlimCommitToken? = null,
+        /**
+         * C-D3 v2 §1.11: orchestrator-supplied "still current" predicate
+         * (e.g. the SSE identity is still the live transport). Combined
+         * with the token check inside.
+         */
+        isStillCurrent: () -> Boolean = { true },
+    ): Map<String, ReconcileResult> {
+        val repo = repository ?: return emptyMap()
+        if (!isSlimMode() || catchUpSet.isEmpty()) return emptyMap()
+
+        // C-D3 v2 §1.11: prefer the orchestrator-supplied token; fall
+        // back to a fresh capture for the legacy single-call surface.
+        val entryToken = token ?: repo.captureSlimCommitToken()
+
+        fun current(): Boolean =
+            isStillCurrent() && repo.isSlimCommitTokenCurrent(entryToken)
+
+        if (!current()) {
+            // Stale at the gate: every sid is Stale (NO probe / fetch
+            // attempt — the orchestrator's token is already superseded).
+            return catchUpSet.associateWith { ReconcileResult.Stale(it) }
+        }
+
+        DebugLog.i(
+            "Sync",
+            "performResyncCatchUp union=${catchUpSet.size} deadlineMs=$perSidDeadlineMs",
+        )
+        val outcomes = java.util.concurrent.ConcurrentHashMap<String, ReconcileResult>()
+        // supervisorScope: a per-sid failure / timeout does NOT propagate
+        // to the sweep. Each per-sid launch is independent.
+        supervisorScope {
+            for (sid in catchUpSet) {
+                launch {
+                    // D4 timeout ordering: acquire the permit FIRST, then
+                    // start the deadline. A sid queued behind others does
+                    // not "use up" its deadline while waiting.
+                    resyncConcurrencySemaphore.withPermit {
+                        val result = try {
+                            withTimeout(perSidDeadlineMs) {
+                                // C-D3 v2 §1.11: per-sid reconcile uses
+                                // the SAME entry token (NO recapture).
+                                val reconciled = reconcileSessionWithToken(
+                                    sid = sid,
+                                    mode = ReconcileMode.RESYNC,
+                                    repo = repo,
+                                    token = entryToken,
+                                    isStillCurrent = isStillCurrent,
+                                )
+
+                                applyReconcileResult(reconciled, entryToken)
+                                reconciled
+                            }
+                        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                            // Per-sid deadline exceeded.
+                            if (!current()) {
+                                ReconcileResult.Stale(sid)
+                            } else {
+                                DebugLog.w(tag, "reconcileSession sid=$sid RESYNC timed out after ${perSidDeadlineMs}ms")
+                                ReconcileResult.TimedOut(sid)
+                            }
+                        }
+                        outcomes[sid] = result
+                    }
+                }
+            }
+        }
+        return outcomes.toMap()
+    }
+
+    /**
+     * Task 11 round-2 (oracle I1 — Coordinator-owned `performSlimResync`
+     * orchestrator): the SINGLE method [SessionStreamingService.onResync]
+     * calls. Replaces the round-1 direct `repository.coldStartSlimSync`
+     * invocation (which produced a snapshot but did NOT run the per-sid
+     * reconcile sweep, leaving [performResyncCatchUp] as dead code).
+     *
+     * # Ordering (oracle I1)
+     *
+     *  1. **Capture** the current focus + pre-refresh known SIDs + dirty
+     *     SIDs. The pre-refresh snapshot is the fallback catch-up set if
+     *     the metadata refresh fails.
+     *  2. **Metadata refresh**: `repository.coldStartSlimSync(openSessionId
+     *     = null, directories = ...)` — metadata-only (NO open-session
+     *     message fetch; the per-sid reconcile handles that uniformly).
+     *  3. **Fold** the snapshot via [applySlimColdStartSnapshot] (D2
+     *     nullable semantics — null pieces keep prior; empty replaces).
+     *  4. **Build catch-up set** = pre-refresh SIDs ∪ refreshed session
+     *     list ∪ SlimSseState keys ∪ dirty.
+     *  5. **[performResyncCatchUp]** with [ReconcileMode.RESYNC] for EVERY
+     *     sid in the union.
+     *
+     * If the metadata refresh fails, the catch-up still runs against the
+     * pre-refresh known set (oracle I1: "If metadata refresh fails, still
+     * catch up the pre-refresh known set").
+     *
+     * # Open-session message fetch policy
+     *
+     * `openSessionId = null` is passed to `coldStartSlimSync` so the
+     * metadata refresh does NOT fetch the open session's messages. The
+     * per-sid reconcile handles that uniformly (watermark-branched:
+     * `/since/{ts}` if localAppliedUpdatedAt set, else bounded cursor
+     * drain). This avoids a double-fetch race between cold-start snapshot
+     * apply and the reconcile sweep.
+     *
+     * # CE discipline
+     *
+     * `coldStartSlimSync` uses [runSuspendCatching]; CE propagates. The
+     * supervisorScope inside [performResyncCatchUp] isolates per-sid
+     * failures. A scope cancel mid-orchestration terminates cleanly
+     * (state mutations are atomic at the repo boundary).
+     *
+     * @param directories the workdirs to refresh (current + recent); null
+     *   = let the sidecar decide scope.
+     * @param sessionsDirty sessions explicitly marked dirty by the SSE
+     *   gap overlay (e.g. the prior current session at disconnect time).
+     * @return per-sid outcomes from the catch-up sweep (empty if the
+     *   sweep was skipped — no repo / non-slim / empty catch-up set).
+     */
+    suspend fun performSlimResync(
+        directories: List<String>? = null,
+        sessionsDirty: Set<String> = emptySet(),
+        perSidDeadlineMs: Long = defaultResyncPerSidDeadlineMs,
+        isStillCurrent: () -> Boolean = { true },
+    ): Map<String, ReconcileResult> {
+        val repo = repository ?: return emptyMap()
+        if (!isSlimMode()) return emptyMap()
+
+        // C-D3 v2 §1.12: ONE entry token; NO recapture after this point.
+        val token = repo.captureSlimCommitToken()
+
+        fun current(): Boolean =
+            isStillCurrent() && repo.isSlimCommitTokenCurrent(token)
+
+        if (!current()) return emptyMap()
+
+        // ── Step 1: capture pre-refresh state ───────────────────────────
+        val focus = slices.chat.value.currentSessionId
+        val preRefreshLocalAll = repo.snapshotSlimSseState().keys
+        val preRefreshSessions = slices.sessionList.value.sessions.map { it.id }.toSet()
+
+        // T11 round-3 (oracle I1 — dirty overlay wiring fix): the
+        // coordinator reads its OWN dirty overlay (`sseSyncState.sessionsDirty`)
+        // and unions it into the catch-up set. The Service-passed
+        // [sessionsDirty] param is ALSO unioned (caller-supplied extra
+        // dirty) but is no longer relied on as the sole dirty source —
+        // round-2 had Service pass `emptySet()` here which silently
+        // dropped every disconnected dirty sid. The coordinator owns the
+        // overlay; it must read it directly. (Service passing emptySet
+        // is now harmless.)
+        val overlayDirty = sseSyncState.sessionsDirty
+
+        // ── Step 2: metadata-only refresh (no open-session fetch) ───────
+        val snapshotResult = repo.coldStartSlimSync(
+            openSessionId = null,
+            directories = directories,
+            token = token,
+        )
+        val snapshot = snapshotResult.getOrNull()
+
+        // C-D3 v2 §1.5/§1.12: a stale incarnation makes coldStartSlimSync
+        // fail with StaleSlimCommitException (NOT collapse to null). The
+        // outer Result.failure surface is identical to other transport
+        // failures from the caller's perspective, but the token recheck
+        // below catches it either way.
+        if (!current()) return emptyMap()
+
+        if (snapshot == null) {
+            DebugLog.w(
+                tag,
+                "performSlimResync metadata refresh failed: ${snapshotResult.exceptionOrNull()?.message} — " +
+                    "falling back to pre-refresh known set",
+            )
+        } else {
+            // ── Step 3: fold snapshot under the same entry token ───────
+            if (!current()) return emptyMap()
+            // C-D3 v2 §3.6: token-gated snapshot fold. If the gate
+            // rejects, the snapshot is dropped and we abort the sweep
+            // (token superseded between cold-start commit and fold).
+            if (!applySlimColdStartSnapshot(snapshot, token)) {
+                return emptyMap()
+            }
+        }
+
+        if (!current()) return emptyMap()
+
+        // ── Step 4: build catch-up set (oracle I1 union) ────────────────
+        // Union: focus + pre-refresh local + pre-refresh session list +
+        // refreshed session list + post-refresh local + dirty (overlay
+        // + caller-supplied).
+        val refreshedSessions = snapshot?.sessions?.map { it.id }?.toSet() ?: emptySet()
+        val postRefreshLocalAll = repo.snapshotSlimSseState().keys
+        val catchUp = buildSet {
+            focus?.let { add(it) }
+            addAll(preRefreshLocalAll)
+            addAll(preRefreshSessions)
+            addAll(refreshedSessions)
+            addAll(postRefreshLocalAll)
+            addAll(overlayDirty)
+            addAll(sessionsDirty)
+        }
+        if (catchUp.isEmpty()) return emptyMap()
+        DebugLog.i(
+            "Sync",
+            "performSlimResync focus=$focus preRefreshLocal=${preRefreshLocalAll.size} " +
+                "preRefreshSessions=${preRefreshSessions.size} refreshed=${refreshedSessions.size} " +
+                "postRefreshLocal=${postRefreshLocalAll.size} overlayDirty=${overlayDirty.size} " +
+                "callerDirty=${sessionsDirty.size} union=${catchUp.size} deadlineMs=$perSidDeadlineMs",
+        )
+
+        // ── Step 5: per-sid reconcile sweep using the SAME entry token ─
+        if (!current()) return emptyMap()
+        return performResyncCatchUp(
+            catchUpSet = catchUp,
+            perSidDeadlineMs = perSidDeadlineMs,
+            token = token,
+            isStillCurrent = isStillCurrent,
+        )
     }
 
     /**
@@ -1645,53 +2844,120 @@ class SessionSyncCoordinator(
      * [OpenCodeRepository.coldStartSlimSync] — also the resync path) into the
      * UI slices. Called by [cn.vectory.ocdroid.service.SessionStreamingService]
      * after a successful cold-start / resync fetch. Failures are partial
-     * (empty lists); null messages means no open-session fetch was requested.
+     * (null pieces — see T11 round-2 / oracle D2 below); null messages means
+     * no open-session fetch was requested.
+     *
+     * # T11 round-2 (oracle D2 — typed null/empty outcomes)
+     *
+     * The metadata pieces (`sessions` / `questions` / `permissions`) are
+     * NULLABLE on the snapshot:
+     *
+     *  - `null` → fetch FAILED. Keep the prior list (cannot tell "server
+     *    authoritative empty" from "server unreachable").
+     *  - `emptyList()` → fetch succeeded with no entries. REPLACE the prior
+     *    list with empty (the server's authoritative view is "nothing").
+     *  - non-empty → fetch succeeded; replace prior list.
+     *
+     * Pre-T11-round-2 the snapshot folded null→emptyList, which made it
+     * impossible to clear stale rows when the server genuinely returned an
+     * empty list. The nullable shape fixes this.
      */
-    fun applySlimColdStartSnapshot(snapshot: SlimColdStartSnapshot) {
-        DebugLog.i(
-            "Sync",
-            "applySlimColdStartSnapshot sessions=${snapshot.sessions.size} " +
-                "questions=${snapshot.questions.size} permissions=${snapshot.permissions.size} " +
-                "messages=${snapshot.messages?.size ?: "null"}",
-        )
-        // Sessions: replace top-level list with the slim skeleton snapshot
-        // (excludes archived by default). Preserve directorySessions buckets
-        // that still match; rebuild from the flat list when possible.
-        if (snapshot.sessions.isNotEmpty()) {
-            val byDirectory = snapshot.sessions.groupBy { it.directory }
+    fun applySlimColdStartSnapshot(snapshot: SlimColdStartSnapshot): Boolean {
+        val repo = repository ?: return false
+
+        // C-D3 v2 §3.6: token-gated snapshot fold. The token is captured
+        // at this entry; if the caller already has a workflow token
+        // (performSlimResync), it routes through the token-taking overload
+        // below.
+        return applySlimColdStartSnapshot(snapshot, repo.captureSlimCommitToken())
+    }
+
+    /**
+     * C-D3 v2 §3.6: token-aware cold-start snapshot fold. Returns `false`
+     * when the gate rejects (caller MUST abort the surrounding workflow
+     * — e.g. [performSlimResync] returns emptyMap). Returns `true` when
+     * the snapshot landed (or was a no-op for null pieces).
+     *
+     * All slice + effect commits run inside ONE
+     * [commitIfSlimTokenCurrent] atomic region so a configure() rotation
+     * between cold-start fetch return and slice commit cannot write a
+     * stale snapshot under a new host.
+     */
+    fun applySlimColdStartSnapshot(
+        snapshot: SlimColdStartSnapshot,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): Boolean {
+        val repo = repository ?: return false
+
+        return repo.commitIfSlimTokenCurrent(token) {
+            DebugLog.i(
+                "Sync",
+                "applySlimColdStartSnapshot sessions=${snapshot.sessions?.size ?: "null"} " +
+                    "questions=${snapshot.questions::class.simpleName} " +
+                    "permissions=${snapshot.permissions::class.simpleName} " +
+                    "messages=${snapshot.messages?.size ?: "null"}",
+            )
+
+            val sessions = snapshot.sessions
+            if (sessions != null) {
+                val byDirectory = sessions.groupBy { it.directory }
+                slices.mutateSessionList { s ->
+                    s.copy(
+                        sessions = sessions,
+                        directorySessions = byDirectory,
+                    )
+                }
+            }
+
+            // I-2: questions + permissions use typed aggregation outcome.
             slices.mutateSessionList { s ->
+                val sessionsById = allSessionsById(s.sessions, s.directorySessions, s.childSessions)
+
+                val questionFold = applyAggregationOutcome(
+                    prior = s.pendingQuestions,
+                    outcome = snapshot.questions,
+                    wireToUi = SlimapiQuestionEntry::toQuestionRequest,
+                    uiId = QuestionRequest::id,
+                    uiDirectory = QuestionRequest::directory,
+                )
+
+                val permissionFold = applyAggregationOutcome(
+                    prior = s.pendingPermissions,
+                    outcome = snapshot.permissions,
+                    wireToUi = SlimapiPermissionEntry::toPermissionRequest,
+                    uiId = PermissionRequest::id,
+                    uiDirectory = PermissionRequest::directory,
+                )
+
                 s.copy(
-                    sessions = snapshot.sessions,
-                    directorySessions = byDirectory,
+                    pendingQuestions = filterArchivedSessionQuestions(
+                        questionFold.items,
+                        sessionsById,
+                    ),
+                    pendingPermissions = permissionFold.items,
+                    questionAggregationSignal = questionFold.signal,
+                    permissionAggregationSignal = permissionFold.signal,
                 )
             }
-        }
-        // Questions: authoritative replace preserving routeToken.
-        val questions = snapshot.questions.map { it.toQuestionRequest() }
-        val permissions = snapshot.permissions.map {
-            PermissionRequest(
-                id = it.id,
-                sessionId = it.sessionId,
-                permission = it.permission,
-                patterns = it.patterns,
-                metadata = it.metadata,
-                always = it.always,
-                tool = it.tool,
-                routeToken = it.routeToken,
-            )
-        }
-        slices.mutateSessionList { s ->
-            val sessionsById = allSessionsById(s.sessions, s.directorySessions, s.childSessions)
-            s.copy(
-                pendingQuestions = filterArchivedSessionQuestions(questions, sessionsById),
-                pendingPermissions = permissions,
-            )
-        }
-        // Open-session messages: merge by id when the snapshot targeted the
-        // currently open session.
-        val msgs = snapshot.messages
-        if (msgs != null) {
-            mergeSlimMessagesIntoChat(msgs)
+
+            val msgs = snapshot.messages
+            if (msgs != null) {
+                mergeSlimMessagesIntoChat(msgs)
+            }
+
+            // I-2: a whole-call Failure surfaces a toast. Partial
+            // incompleteness is observable via the signal — no toast on
+            // every resync.
+            if (snapshot.questions is SlimAggregationOutcome.Failure) {
+                effects.tryEmitUiEvent(
+                    UiEvent.Error(R.string.error_slim_questions_fetch_failed)
+                )
+            }
+            if (snapshot.permissions is SlimAggregationOutcome.Failure) {
+                effects.tryEmitUiEvent(
+                    UiEvent.Error(R.string.error_slim_permissions_fetch_failed)
+                )
+            }
         }
     }
 
@@ -1703,6 +2969,117 @@ class SessionSyncCoordinator(
          * of one per token.
          */
         private const val DELTA_COALESCE_MS = 100L
+
+        /**
+         * T11 round-2 (oracle I5): stripe count for [reconcileStripes].
+         * 64 stripes balances collision rate (~1.5% for 1k distinct sids
+         * under uniform hashing) against fixed memory (64 Mutex objects
+         * = ~2.3KB). The oracle design pins this value.
+         */
+        internal const val STRIPES = 64
+    }
+}
+
+/**
+ * I-2 v2 §3.5: directory-scoped apply for aggregation outcomes.
+ *
+ * Returns a [SlimAggregationFold] carrying BOTH the merged items AND
+ * the derived [SlimAggregationSignal] (completeness + failedSources
+ * + failureMessage) so the caller can update the slice's observable
+ * signal alongside the list. The signal is computed via
+ * [aggregationSignal] (top-level helper).
+ *
+ * - [SlimAggregationOutcome.Failure] → keep prior unchanged.
+ * - [SlimAggregationOutcome.Success] with `authoritativeDirectories=null`
+ *   → complete replacement (including empty).
+ * - [SlimAggregationOutcome.Success] / [SlimAggregationOutcome.Partial]
+ *   with non-null `authoritativeDirectories` → delete prior only from
+ *   directories proven successful; failed/unknown dirs survive.
+ *
+ * C-D3 v2 §3.5 (defensive filter): fetched entries attributed to
+ * directories OUTSIDE the proven-authoritative set are REJECTED.
+ * Pre-fix, the directory filter only decided which PRIOR entries to
+ * keep — a misbehaving sidecar could ship out-of-scope items and
+ * pollute the local cache.
+ *
+ * Fetched entries win on duplicate IDs.
+ */
+internal fun <Wire, Ui> applyAggregationOutcome(
+    prior: List<Ui>,
+    outcome: SlimAggregationOutcome<Wire>,
+    wireToUi: (Wire) -> Ui,
+    uiId: (Ui) -> String,
+    uiDirectory: (Ui) -> String?,
+): SlimAggregationFold<Ui> {
+    val signal = aggregationSignal(outcome)
+
+    when (outcome) {
+        is SlimAggregationOutcome.Failure -> {
+            return SlimAggregationFold(
+                items = prior,
+                signal = signal,
+            )
+        }
+
+        is SlimAggregationOutcome.Success -> {
+            val scope = outcome.authoritativeDirectories
+
+            val fetched = outcome.items
+                .map(wireToUi)
+                .let { mapped ->
+                    if (scope == null) {
+                        mapped
+                    } else {
+                        // C-D3 v2 §3.5 defensive: reject out-of-scope
+                        // envelope items.
+                        mapped.filter { item -> uiDirectory(item) in scope }
+                    }
+                }
+
+            if (scope == null) {
+                return SlimAggregationFold(
+                    items = fetched.distinctBy(uiId),
+                    signal = signal,
+                )
+            }
+
+            val result = LinkedHashMap<String, Ui>()
+
+            prior.asSequence()
+                .filter { item -> uiDirectory(item) !in scope }
+                .forEach { item -> result[uiId(item)] = item }
+
+            fetched.forEach { item -> result[uiId(item)] = item }
+
+            return SlimAggregationFold(
+                items = result.values.toList(),
+                signal = signal,
+            )
+        }
+
+        is SlimAggregationOutcome.Partial -> {
+            val scope = outcome.authoritativeDirectories
+
+            // A Partial item is accepted only from a proven-success
+            // source. Items attributed to failed, unknown, or out-of-
+            // request directories cannot replace local state.
+            val fetched = outcome.items
+                .map(wireToUi)
+                .filter { item -> uiDirectory(item) in scope }
+
+            val result = LinkedHashMap<String, Ui>()
+
+            prior.asSequence()
+                .filter { item -> uiDirectory(item) !in scope }
+                .forEach { item -> result[uiId(item)] = item }
+
+            fetched.forEach { item -> result[uiId(item)] = item }
+
+            return SlimAggregationFold(
+                items = result.values.toList(),
+                signal = signal,
+            )
+        }
     }
 }
 
@@ -1834,6 +3211,9 @@ internal fun ChatState.applyArchivedChatClear(): Pair<ChatState, List<SseSideEff
     currentSessionId = null,
     messages = emptyList(),
     partsByMessage = emptyMap(),
+    // §slimapi-client-v1 §G6 (Task 16 round-2): clear per-part expand states
+    // on archived-chat clear. Matches the partsByMessage clear above.
+    partExpandStates = emptyMap(),
     // FIX-B / §Wave5b-Q13: clear the unified scroll slot + parent-return
     // backstack — a pending scroll / checkpoint for an archived session is
     // meaningless.
@@ -2184,8 +3564,49 @@ internal fun SlimapiQuestionEntry.toQuestionRequest(): QuestionRequest =
         sessionId = sessionId,
         questions = questions,
         tool = tool,
+        directory = directory,
         routeToken = routeToken,
     )
+
+/**
+ * I-2 v2 §3.4: derive an observable [SlimAggregationSignal] from a
+ * [SlimAggregationOutcome]. Top-level so both
+ * [SessionSyncCoordinator] and [cn.vectory.ocdroid.ui.launchLoadPendingPermissionsSlim]
+ * use the SAME implementation.
+ */
+internal fun <T> aggregationSignal(
+    outcome: SlimAggregationOutcome<T>,
+): cn.vectory.ocdroid.ui.SlimAggregationSignal = when (outcome) {
+    is SlimAggregationOutcome.Success -> cn.vectory.ocdroid.ui.SlimAggregationSignal(
+        completeness = cn.vectory.ocdroid.ui.SlimAggregationCompleteness.COMPLETE,
+    )
+
+    is SlimAggregationOutcome.Partial -> cn.vectory.ocdroid.ui.SlimAggregationSignal(
+        completeness = cn.vectory.ocdroid.ui.SlimAggregationCompleteness.INCOMPLETE,
+        failedSources = outcome.errors.map { error ->
+            cn.vectory.ocdroid.ui.SlimAggregationFailedSource(
+                directory = error.directory,
+                code = error.code,
+            )
+        },
+    )
+
+    is SlimAggregationOutcome.Failure -> cn.vectory.ocdroid.ui.SlimAggregationSignal(
+        completeness = cn.vectory.ocdroid.ui.SlimAggregationCompleteness.FAILED,
+        failureMessage = outcome.message,
+    )
+}
+
+/**
+ * I-2 v2 §3.5: shared model returned by [applyAggregationOutcome].
+ * Carries BOTH the merged items AND the derived
+ * [cn.vectory.ocdroid.ui.SlimAggregationSignal] so the caller updates
+ * the slice's signal atomically with the list.
+ */
+internal data class SlimAggregationFold<Ui>(
+    val items: List<Ui>,
+    val signal: cn.vectory.ocdroid.ui.SlimAggregationSignal,
+)
 
 /**
  * Cluster A / Phase 2: parse a `permission.asked` SSE frame into a

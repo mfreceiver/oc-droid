@@ -8,6 +8,7 @@ import cn.vectory.ocdroid.data.model.QuestionInfo
 import cn.vectory.ocdroid.data.model.QuestionOption
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.coEvery
@@ -1133,5 +1134,74 @@ class SessionMutationActionsTest {
                 listOf(attachment),
             )
         }
+    }
+
+    // ── §final-gate I-3: launchDeleteSession clears sessionErrorsById ──────
+
+    @Test
+    fun `final-gate I-3 - launchDeleteSession removes deleted subtree from sessionErrorsById`() = runTest {
+        // Lifecycle gap #3 (final-gate review hand-off #2 / Important #3):
+        // deleting a session MUST purge its sid (and the sids of its subtree
+        // — defensive against a server cascade-delete that the client does
+        // not get per-id events for) from `sessionErrorsById`. Pre-fix the
+        // deleted sid stayed forever, causing unbounded retention + a stale
+        // banner if the server later reused the id.
+        //
+        // Discrimination: seeds {root→err, child→err, unrelated→err}; the
+        // mock delete simulates a server cascade-delete of root+child (the
+        // same shape `launchDeleteSession clears subtree unread and
+        // pendingQuestions` uses, so the subtree snapshot taken BEFORE the
+        // REST call still covers both root and child). Asserts root+child
+        // removed AND unrelated preserved. Fails if the cleanup line is
+        // missing (all three survive) OR if it is over-eager (drops
+        // unrelated too).
+        val parent = Session(id = "A", directory = "/x")
+        val child = Session(id = "C", directory = "/x", parentId = "A")
+        val unrelated = Session(id = "Z", directory = "/y")
+        store.mutateSessionList {
+            it.copy(sessions = listOf(parent, child, unrelated))
+        }
+        store.mutateSessionList {
+            it.copy(
+                sessionErrorsById = mapOf(
+                    "A" to SlimSessionLastError(name = "upstream_error", message = "root err"),
+                    "C" to SlimSessionLastError(name = "upstream_error", message = "child err"),
+                    "Z" to SlimSessionLastError(name = "session_not_found", message = "unrelated err"),
+                ),
+            )
+        }
+        // Mock simulates server cascade: deleteSession shrinks the slice's
+        // session metadata for both root and child (matches the existing
+        // `launchDeleteSession clears subtree unread and pendingQuestions`
+        // test shape so the pre-REST subtree snapshot covers the whole
+        // {A, C} subtree).
+        coEvery { repository.deleteSession(any()) } answers {
+            val id = firstArg<String>()
+            store.mutateSessionList { sl ->
+                sl.copy(sessions = sl.sessions.filter { it.id != id && it.id != "C" })
+            }
+            Result.success(Unit)
+        }
+
+        launchDeleteSession(scope, repository, slices, settingsManager, sessionId = "A", onSelectSession = {}, emit = emit)
+        advanceUntilIdle()
+
+        assertFalse(
+            "deleted root A removed from sessionErrorsById",
+            slices.sessionList.value.sessionErrorsById.containsKey("A"),
+        )
+        assertFalse(
+            "deleted child C (subtree, cascade) removed from sessionErrorsById",
+            slices.sessionList.value.sessionErrorsById.containsKey("C"),
+        )
+        assertTrue(
+            "unrelated session Z error preserved",
+            slices.sessionList.value.sessionErrorsById.containsKey("Z"),
+        )
+        assertEquals(
+            "only the unrelated entry remains",
+            1,
+            slices.sessionList.value.sessionErrorsById.size,
+        )
     }
 }

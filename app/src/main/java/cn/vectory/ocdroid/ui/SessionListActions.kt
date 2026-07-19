@@ -9,11 +9,17 @@ package cn.vectory.ocdroid.ui
  */
 
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.ui.controller.applyAggregationOutcome
+import cn.vectory.ocdroid.ui.controller.aggregationSignal
 import cn.vectory.ocdroid.ui.controller.applySessionDiffIfAbsent
 import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.ui.controller.normalizeAuthoritativeStatusSnapshot
 import cn.vectory.ocdroid.ui.controller.loadCompleteSessionTrees
 import cn.vectory.ocdroid.ui.controller.rootIdOf
+import cn.vectory.ocdroid.data.model.PermissionRequest
+import cn.vectory.ocdroid.data.model.SlimapiPermissionEntry
+import cn.vectory.ocdroid.data.repository.SlimAggregationOutcome
+import cn.vectory.ocdroid.data.repository.toPermissionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.RevertCutoff
@@ -882,13 +888,29 @@ internal fun launchLoadPendingQuestions(
  * Defensive: in slim mode, a final entry with a null routeToken logs WARN
  * (the slim respond path cannot route it correctly — surfaces the issue
  * instead of silently degrading to the legacy endpoint).
+ *
+ * C-D3 v2 §2.3: in slim mode, delegates to [launchLoadPendingPermissionsSlim]
+ * which captures ONE token before the network suspend + guards the slice /
+ * signal / UiEvent commits inside a single `commitIfSlimTokenCurrent` block.
+ * The legacy non-slim path is unchanged.
  */
 internal fun launchLoadPendingPermissions(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
     slices: SliceFlows,
+    effects: SharedEffectBus,
     tag: String,
 ) {
+    if (repository.isSlimMode) {
+        launchLoadPendingPermissionsSlim(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            effects = effects,
+            tag = tag,
+        )
+        return
+    }
     scope.launch {
         // §rev-grok 9.5 🟠1: snapshot pending ids BEFORE the poll so the
         // post-fetch merge can distinguish "existed at start" (REST-
@@ -948,6 +970,80 @@ internal fun launchLoadPendingPermissions(
                 }
             }
             .onFailure { error -> android.util.Log.w(tag, "Failed to load permissions: ${error.message}") }
+    }
+}
+
+/**
+ * C-D3 v2 §2.3 / I-2 v2 §3.3: slim standalone permissions load via
+ * [OpenCodeRepository.getSlimapiPermissions]. Captures ONE token before
+ * the network suspend; guards the slice + signal + UiEvent commits
+ * inside a single `commitIfSlimTokenCurrent` atomic region. A stale
+ * result is a clean no-op (no slice mutation, no signal update, no toast).
+ */
+private fun launchLoadPendingPermissionsSlim(
+    scope: CoroutineScope,
+    repository: OpenCodeRepository,
+    slices: SliceFlows,
+    effects: SharedEffectBus,
+    tag: String,
+) {
+    scope.launch {
+        // Standalone workflow entry: ONE capture before first suspend.
+        val token = repository.captureSlimCommitToken()
+
+        val startIds = slices.sessionList.value.pendingPermissions
+            .mapTo(mutableSetOf()) { it.id }
+
+        val outcome = repository.getSlimapiPermissions(
+            directories = null,
+            token = token,
+        ).getOrElse { error ->
+            if (error is OpenCodeRepository.StaleSlimCommitException) {
+                return@launch
+            }
+            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Failure(error.message)
+        }
+
+        if (!repository.isSlimCommitTokenCurrent(token)) return@launch
+
+        // C-D3 v2 §2.3: ALL slice + effect commits land inside ONE atomic
+        // gate so a host rotation between the network return and the slice
+        // commit cannot write a stale permission list / signal under a
+        // new host.
+        repository.commitIfSlimTokenCurrent(token) {
+            val signal = aggregationSignal(outcome)
+
+            slices.mutateSessionList { current ->
+                val folded = applyAggregationOutcome(
+                    prior = current.pendingPermissions,
+                    outcome = outcome,
+                    wireToUi = SlimapiPermissionEntry::toPermissionRequest,
+                    uiId = PermissionRequest::id,
+                    uiDirectory = PermissionRequest::directory,
+                )
+
+                val foldedIds = folded.items
+                    .mapTo(mutableSetOf()) { it.id }
+
+                val raceArrivals =
+                    current.pendingPermissions.filter { permission ->
+                        permission.id !in startIds &&
+                            permission.id !in foldedIds
+                    }
+
+                current.copy(
+                    pendingPermissions = (folded.items + raceArrivals)
+                        .distinctBy { it.id },
+                    permissionAggregationSignal = signal,
+                )
+            }
+
+            if (outcome is SlimAggregationOutcome.Failure) {
+                effects.tryEmitUiEvent(
+                    UiEvent.Error(R.string.error_slim_permissions_fetch_failed)
+                )
+            }
+        }
     }
 }
 

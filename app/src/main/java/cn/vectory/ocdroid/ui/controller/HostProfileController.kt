@@ -32,6 +32,7 @@ import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
+import cn.vectory.ocdroid.util.runSuspendCatching
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -132,8 +133,33 @@ class HostProfileController(
      *  - [tunnelEdited] / [tunnelPassword] follow the same rule.
      *
      * When basicAuth is null, the orphaned password is always cleared.
+     *
+     * **C-D3 rev-3 round-6 (oracle §6.5 + review §C1/I5):** for active-host
+     * connection-affecting edits (URL / mTLS / slim / Basic Auth), ALL
+     * persistence (cert ESP writes, password writes, profile save, model
+     * data clear) runs INSIDE the reconfigure boundary so a mid-flight
+     * old-host workflow cannot observe partial new state. Non-active or
+     * no-change edits run synchronously (no live host mutation → no boundary).
+     *
+     * `suspend` + `Result<Unit>` so the caller (HostViewModel → viewModelScope)
+     * observes completion + failure: a failed save (applyClientCertSave
+     * throws / configure throws / superseded ticket) returns `Result.failure`
+     * and the dialog stays open with the error. Effects (`ForceReconnect` /
+     * `HostProfileSwitched`) emit only on success.
+     *
+     * **C-D3 rev-3 round-7 (review I5-R7 CE discipline):** the body is wrapped
+     * in `runSuspendCatching` (NOT plain `runCatching`) so a coroutine
+     * [kotlinx.coroutines.CancellationException] thrown inside the boundary
+     * (e.g. viewModelScope cancelled on VM clear) PROPAGATES instead of being
+     * collapsed to `Result.failure`. Swallowing CE breaks structured
+     * concurrency; this matches the project's established discipline
+     * (`cn.vectory.ocdroid.util.runSuspendCatching` used 100+ times across
+     * OpenCodeRepository / AppLifecycleMonitor / PartExpandState). Business
+     * exceptions (applyClientCertSave IllegalArgumentException, configure
+     * IOException, SupersededSlimReconfigureException) are still returned as
+     * `Result.failure` — surface identical to plain runCatching for them.
      */
-    fun saveHostProfile(
+    suspend fun saveHostProfile(
         profile: HostProfile,
         basicAuthPassword: String = "",
         basicAuthEdited: Boolean = false,
@@ -143,36 +169,144 @@ class HostProfileController(
         // ——「未提供」≠「禁用」。非 Dialog 调用方（含 test pass-through）默认不动 ESP /
         // 不改 profile 的 mTLS 字段，避免误清既有证书。
         clientCertEdit: ClientCertEditIntent = ClientCertEditIntent.Unchanged,
-    ) {
+    ): Result<Unit> = runSuspendCatching {
         var normalized = if (profile.basicAuth != null) {
             profile.copy(basicAuth = profile.basicAuth.copy(passwordId = profile.id))
         } else {
             profile
         }
-        // #12: snapshot the previous profile (before save) so we can detect
-        // whether the serverUrl of the ACTIVE host changed — that is the case
-        // that needs a live repository reconfigure + reconnect. Without this,
-        // editing the current host's URL persisted the value but left the
-        // existing REST/SSE OkHttp clients on the old endpoint, so the change
-        // only took effect after a host switch or app restart.
-        // S-1: detect a serverUrl change on the ACTIVE host — previously
-        // editing the current host's URL persisted the new value but left the
-        // existing clients pointed at the OLD endpoint, so the change only
-        // took effect after a host switch / app restart. Treat it the same as
-        // a toggle change: reconfigure + force reconnect to build clients for
-        // the new URL.
-        // §tofu R2: the allowInsecure toggle no longer exists; serverUrl +
-        // mTLS are the only reconfigure-triggering changes.
+        // #12 / S-1 / §tofu R2: snapshot the previous profile to detect which
+        // connection-affecting fields changed on the ACTIVE host. serverUrl +
+        // mTLS + slim + Basic Auth username/password all feed the live
+        // auth-bearing client (AuthInterceptor reads hostConfig.username /
+        // password at request time; hostConfig is updated by configure), so
+        // ANY of them changing on the active host requires a reconfigure.
         val previous = hostProfileStore.profiles().firstOrNull { it.id == normalized.id }
-        // §review-r3 (gpter block): validate + persist mTLS material FIRST.
-        // applyClientCertSave can throw (e.g. mtlsEnabled with no client cert
-        // material → "开启 mTLS 需先导入客户端证书", or an invalid p12/CA failing
-        // buildMutualTlsConfig). Running it BEFORE the Basic/Tunnel password
-        // writes below guarantees a failed save is side-effect-free — no partial
-        // credential commit that would leave ESP (passwords) inconsistent with an
-        // unsaved profile. On success it writes p12/ca + returns normalized with
-        // the final clientCertId/mtlsEnabled; the password writes use normalized.id
-        // / normalized.basicAuth which it does not alter.
+        val isActiveHost = normalized.id == slices.host.value.currentHostProfileId
+        val urlChanged = previous?.serverUrl != normalized.serverUrl
+        val mtlsMaterialEdited = when (clientCertEdit) {
+            is ClientCertEditIntent.Update ->
+                clientCertEdit.stagedP12 != null ||
+                    clientCertEdit.caStage !is CaStage.Unchanged ||
+                    clientCertEdit.p12PasswordEdited
+            else -> false
+        }
+        // C-D3 rev-3 round-6: applyClientCertSave runs INSIDE the boundary now
+        // (per review §C1). For change detection, PROJECT the post-save
+        // mTLS fields from the edit intent (mirrors applyClientCertSave's
+        // transformation without writing ESP). This keeps mtlsChanged correct
+        // without leaking the boundary's mutating phase outside it.
+        val projectedMtlsEnabled = when (clientCertEdit) {
+            ClientCertEditIntent.Unchanged -> normalized.mtlsEnabled
+            ClientCertEditIntent.Disable -> false
+            is ClientCertEditIntent.Update -> true
+        }
+        val projectedClientCertId = when (clientCertEdit) {
+            ClientCertEditIntent.Unchanged -> normalized.clientCertId
+            ClientCertEditIntent.Disable -> null
+            is ClientCertEditIntent.Update ->
+                // First-time enable generates a new UUID inside applyClientCertSave;
+                // for change detection, treat null→"<new>" as a definite change.
+                // Re-imports keep the same id (no change unless material edited).
+                normalized.clientCertId ?: "<new-uuid-placeholder>"
+        }
+        val mtlsChanged = previous?.mtlsEnabled != projectedMtlsEnabled ||
+            previous?.clientCertId != projectedClientCertId ||
+            mtlsMaterialEdited
+        // §R8 slim-mode UI: 省流模式切换也是重连触发器——slim 字段影响路由
+        // （/slimapi/ vs legacy）和版本头注入，必须重建 client。
+        val slimChanged = previous?.slim != normalized.slim
+        // C-D3 rev-3 round-6 (review C1): Basic Auth username/password edits
+        // also feed the live auth-bearing client. AuthInterceptor reads
+        // hostConfig.username/password at request time; those fields are
+        // updated ONLY by repository.configure(...). So an active-host
+        // basicAuth-only edit MUST reconfigure to push the new credentials
+        // into HostConfig (previously excluded → live clients kept OLD
+        // credentials, stale configuration).
+        val basicAuthUsernameChanged = previous?.basicAuth?.username != normalized.basicAuth?.username
+        val basicAuthChanged = basicAuthUsernameChanged || basicAuthEdited
+        val needsReconfigure = isActiveHost &&
+            (urlChanged || mtlsChanged || slimChanged || basicAuthChanged)
+
+        if (needsReconfigure) {
+            if (reconfigureBarrier != null) {
+                // C-D3 rev-3 round-6: ALL connection-affecting mutations live
+                // INSIDE the barrier. applyClientCertSave (can throw — the
+                // throw escapes the barrier as Result.failure so the dialog
+                // stays open with the error), password writes, orphan clear,
+                // clearModelDataForGroup (when urlChanged), hostProfileStore.save,
+                // configure (with ctx.slimTicket — ticket-ownership), and
+                // refreshHostProfileState — all sequential inside the block.
+                // The barrier guarantees identity.beginReconfigure +
+                // beginSlimReconfigure run BEFORE any of them, so a mid-flight
+                // old-host workflow cannot observe partial new state.
+                reconfigureBarrier.reconfigure { ctx ->
+                    normalized = applyClientCertSave(normalized, clientCertEdit)
+                    if (basicAuthEdited) {
+                        settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
+                    }
+                    if (tunnelEdited) {
+                        settingsManager.setTunnelPassword(normalized.id, tunnelPassword)
+                    }
+                    if (normalized.basicAuth == null) {
+                        settingsManager.setBasicAuthPassword(normalized.id, "")
+                    }
+                    if (urlChanged) {
+                        // §bug5 / R-20 Phase 5: URL changed → drop model data
+                        // so stale disable config does not leak / orphan.
+                        // clearModelDataForGroup is fp-keyed; the profile keeps
+                        // its fp across URL edits.
+                        settingsManager.clearModelDataForGroup(
+                            normalized.serverGroupFp.ifBlank { normalized.id }
+                        )
+                    }
+                    hostProfileStore.save(normalized)
+                    configureRepositoryForProfileRaw(
+                        profile = normalized,
+                        ticket = ctx.slimTicket,
+                    )
+                    refreshHostProfileState()
+                }
+            } else {
+                // C-D3 rev-3 round-6 non-barrier fallback: identity + slim
+                // marker rotate BEFORE any persistence / host mutation, then
+                // the same mutation sequence as the barrier block. The
+                // returned ticket threads into configure (ticket-ownership —
+                // the SAME transaction invalidates + activates).
+                identityStore?.beginReconfigure()
+                val ticket = repository.beginSlimReconfigure()
+                effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
+                normalized = applyClientCertSave(normalized, clientCertEdit)
+                if (basicAuthEdited) {
+                    settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
+                }
+                if (tunnelEdited) {
+                    settingsManager.setTunnelPassword(normalized.id, tunnelPassword)
+                }
+                if (normalized.basicAuth == null) {
+                    settingsManager.setBasicAuthPassword(normalized.id, "")
+                }
+                if (urlChanged) {
+                    settingsManager.clearModelDataForGroup(
+                        normalized.serverGroupFp.ifBlank { normalized.id }
+                    )
+                }
+                hostProfileStore.save(normalized)
+                configureRepositoryForProfileRaw(profile = normalized, ticket = ticket)
+                refreshHostProfileState()
+            }
+            // Success path only — emit AFTER the barrier/fallback completes.
+            // If the block threw, runSuspendCatching returns Result.failure and
+            // these emissions are skipped (the dialog stays open with the error).
+            effects.tryEmitEffect(ControllerEffect.ForceReconnect)
+            if (urlChanged) effects.tryEmitEffect(ControllerEffect.HostProfileSwitched)
+            return@runSuspendCatching
+        }
+
+        // Non-active or no-change: persistence has no live-host side effect,
+        // run synchronously (no boundary needed). Still suspend because the
+        // signature is uniform with the reconfigure path; the body is non-
+        // suspending but Kotlin's suspend fun contract allows that.
         normalized = applyClientCertSave(normalized, clientCertEdit)
         if (basicAuthEdited) {
             settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
@@ -187,60 +321,6 @@ class HostProfileController(
         }
         hostProfileStore.save(normalized)
         refreshHostProfileState()
-
-        // #12 / S-1 / §fix-3 gro-1/gpt-2/glm-2: if the saved profile is the
-        // currently active host AND either its serverUrl OR its mTLS
-        // configuration actually changed, reconfigure the live repository
-        // clients (REST / SSE / image) and force a reconnect so the new TLS
-        // trust policy / endpoint / client cert takes effect immediately.
-        // Mirrors the reconfigure+reconnect path used by selectHostProfile /
-        // deleteHostProfile(wasCurrent).
-        //
-        // §tofu R2: allowInsecure toggle removed; serverUrl + mTLS are the
-        // only reconfigure triggers.
-        //
-        // §fix-3 gro-1/gpt-2/glm-2 阻断: 旧条件不含 mTLS → 当前 host 开/关/换 mTLS
-        // 证书后 live client 不重建。新增 mtlsChanged 维度。关键（glm-2/max-1 S1）：
-        // applyClientCertSave 在 oldId!=null 时复用 oldId，故「保持启用换证书」(重导
-        // p12 / 换 CA / 改密码) 时 clientCertId 不变——仅比 id 不够，必须用显式材料
-        // 编辑信号 [mtlsMaterialEdited]。
-        val isActiveHost = normalized.id == slices.host.value.currentHostProfileId
-        val urlChanged = previous?.serverUrl != normalized.serverUrl
-        val mtlsMaterialEdited = when (clientCertEdit) {
-            is ClientCertEditIntent.Update ->
-                clientCertEdit.stagedP12 != null ||
-                    clientCertEdit.caStage !is CaStage.Unchanged ||
-                    clientCertEdit.p12PasswordEdited
-            else -> false
-        }
-        val mtlsChanged = previous?.mtlsEnabled != normalized.mtlsEnabled ||
-            previous?.clientCertId != normalized.clientCertId ||
-            mtlsMaterialEdited
-        // §R8 slim-mode UI: 省流模式切换也是重连触发器——slim 字段影响路由
-        // （/slimapi/ vs legacy）和版本头注入，必须重建 client。
-        val slimChanged = previous?.slim != normalized.slim
-        if (isActiveHost && urlChanged) {
-            // §bug5 / R-20 Phase 5: URL changed → drop model data so stale
-            // disable config does not leak / orphan. Was clearModelDataForUrl
-            // (URL-keyed); now clearModelDataForGroup(fp-keyed) — the profile
-            // keeps its fp across URL edits, so the fp slot is the right one
-            // to clear. The HostProfileSwitched emission below reloads the
-            // (now-empty) set.
-            settingsManager.clearModelDataForGroup(normalized.serverGroupFp.ifBlank { normalized.id })
-        }
-        if (isActiveHost && (urlChanged || mtlsChanged || slimChanged)) {
-            if (reconfigureBarrier != null) {
-                scope.launch {
-                    configureRepositoryForProfileAwait(normalized)
-                    effects.emitEffect(ControllerEffect.ForceReconnect)
-                    if (urlChanged) effects.emitEffect(ControllerEffect.HostProfileSwitched)
-                }
-            } else {
-                configureRepositoryForProfile(normalized)
-                effects.tryEmitEffect(ControllerEffect.ForceReconnect)
-                if (urlChanged) effects.tryEmitEffect(ControllerEffect.HostProfileSwitched)
-            }
-        }
     }
 
     /**
@@ -328,12 +408,41 @@ class HostProfileController(
         val remainingInGroup = deletedFp?.let { fp ->
             hostProfileStore.profilesInGroup(fp).filter { it.id != profileId }
         } ?: emptyList()
+        // C-D3 rev-3 round-5 (oracle §6.3): active-profile deletion is a
+        // reconfigure — invalidate identity + slim incarnation BEFORE
+        // hostProfileStore.delete / clearClientCert / configure run, so a
+        // mid-flight old-host workflow cannot pass commitIfSlimTokenCurrent
+        // after the delete. The returned ticket threads into configure so the
+        // SAME transaction activates (ticket-ownership).
+        //
+        // Non-current profile delete skips the early boundary here — it does
+        // NOT mutate the live host, so [configureRepositoryForProfile]'s own
+        // boundary (called below) suffices. (A non-current profile delete only
+        // refreshes the unchanged current host's clients to drop the deleted
+        // profile's cert material.)
+        val ticket: OpenCodeRepository.SlimReconfigureTicket?
+        if (wasCurrent) {
+            identityStore?.beginReconfigure()
+            ticket = repository.beginSlimReconfigure()
+            effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
+        } else {
+            ticket = null
+        }
         hostProfileStore.delete(profileId)
         // §2.7: 清理被删 profile 的 mTLS 客户端证书材料（clientCertId 是 per-profile
         // 私有 UUID，无其它 profile 引用 → 安全 clear，防 ESP 悬空残留）。
         deletedProfile?.clientCertId?.let { settingsManager.clearClientCert(it) }
         val current = hostProfileStore.currentProfile()
-        configureRepositoryForProfile(current)
+        if (wasCurrent) {
+            // Active deletion: thread the pre-begun ticket so the SAME
+            // transaction that invalidated the incarnation activates it.
+            configureRepositoryForProfileRaw(profile = current, ticket = ticket)
+        } else {
+            // Non-current: live host unchanged; let the public helper do its
+            // own boundary + cancel-SSE + configure cycle (no early
+            // invalidation needed because no host mutation happens before it).
+            configureRepositoryForProfile(current)
+        }
         refreshHostProfileState()
         if (wasCurrent) {
             // §bug5 / R-20 Phase 5: drop the deleted active host's model data
@@ -394,7 +503,11 @@ class HostProfileController(
         var wasCurrent = false
         var deletedFp: String? = null
         var remainingInGroup: List<HostProfile> = emptyList()
-        reconfigureBarrier!!.reconfigure {
+        reconfigureBarrier!!.reconfigure { ctx ->
+            // C-D3 rev-3 round-5: barrier already invalidated identity + slim
+            // incarnation before teardown. delete + configure run inside the
+            // boundary; thread ctx.slimTicket into raw configure so the SAME
+            // transaction invalidates + activates (ticket-ownership).
             wasCurrent = profileId == slices.host.value.currentHostProfileId
             val deletedProfile = hostProfileStore.profiles().firstOrNull { it.id == profileId }
             deletedFp = deletedProfile?.serverGroupFp
@@ -403,7 +516,10 @@ class HostProfileController(
             }.orEmpty()
             hostProfileStore.delete(profileId)
             deletedProfile?.clientCertId?.let { settingsManager.clearClientCert(it) }
-            configureRepositoryForProfileRaw(hostProfileStore.currentProfile())
+            configureRepositoryForProfileRaw(
+                profile = hostProfileStore.currentProfile(),
+                ticket = ctx.slimTicket,
+            )
             refreshHostProfileState()
             if (wasCurrent) {
                 if (remainingInGroup.isEmpty()) {
@@ -462,23 +578,48 @@ class HostProfileController(
             // Step 1: snapshot previousFp BEFORE select (select's side effect
             // makes post-select currentProfile() read the NEW profile).
             val previousFp = hostProfileStore.currentProfile().serverGroupFp
-            effectiveConnectionConfigResolver?.activateProfile(profileId)
-            val profile = if (effectiveConnectionConfigResolver != null) {
-                hostProfileStore.currentProfile()
-            } else {
-                hostProfileStore.select(profileId)
-            }
-            val sameGroup = previousFp == profile.serverGroupFp
+            // C-D3 rev-3 round-5 (oracle §4.1): read-only target lookup BEFORE
+            // the barrier (so we know sameGroup without performing any
+            // mutation outside the boundary). The ACTIVATE/SELECT mutations
+            // move inside the barrier / after beginSlimReconfigure below.
+            val targetBeforeMutation =
+                hostProfileStore.profiles().firstOrNull { it.id == profileId } ?: return@launch
+            val sameGroup = previousFp == targetBeforeMutation.serverGroupFp
             if (reconfigureBarrier != null) {
-                reconfigureBarrier.reconfigure {
+                // Barrier already: identity.beginReconfigure → beginSlimReconfigure
+                // → streaming teardown, then this block (purge + configure).
+                // C-D3 rev-3 round-5: thread ctx.slimTicket into configure so
+                // the SAME transaction both invalidates and activates.
+                reconfigureBarrier.reconfigure { ctx ->
+                    effectiveConnectionConfigResolver?.activateProfile(profileId)
+                    val selected = if (effectiveConnectionConfigResolver != null) {
+                        hostProfileStore.currentProfile()
+                    } else {
+                        hostProfileStore.select(profileId)
+                    }
                     purgePerHostState(preserveServerGroupData = sameGroup)
-                    configureRepositoryForProfileRaw(profile)
+                    configureRepositoryForProfileRaw(profile = selected, ticket = ctx.slimTicket)
                     refreshHostProfileState()
                 }
             } else {
+                // C-D3 rev-3 round-5: identity + slim marker MUST rotate BEFORE
+                // HostStatePurged / activateProfile / select / settings purge /
+                // EvictGroup, otherwise an old q/p/digest workflow can still
+                // pass commitIfSlimTokenCurrent and write stale host state into
+                // the purged UI. The returned ticket threads into configure
+                // (ticket-ownership — same transaction invalidates + activates).
+                identityStore?.beginReconfigure()
+                val ticket = repository.beginSlimReconfigure()
+                effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
+                effectiveConnectionConfigResolver?.activateProfile(profileId)
+                val selected = if (effectiveConnectionConfigResolver != null) {
+                    hostProfileStore.currentProfile()
+                } else {
+                    hostProfileStore.select(profileId)
+                }
                 purgePerHostState(preserveServerGroupData = sameGroup)
                 if (!sameGroup) effects.emitEffect(ControllerEffect.EvictGroup(previousFp))
-                configureRepositoryForProfile(profile)
+                configureRepositoryForProfileRaw(profile = selected, ticket = ticket)
                 refreshHostProfileState()
             }
             if (reconfigureBarrier != null && !sameGroup) {
@@ -621,23 +762,38 @@ class HostProfileController(
     fun configureServer(url: String, username: String? = null, password: String? = null): Job? {
         if (reconfigureBarrier != null) {
             return scope.launch {
-                reconfigureBarrier.reconfigure { configureServerRaw(url, username, password) }
+                // C-D3 rev-3 round-5: barrier creates the slim ticket before
+                // teardown; thread it through the raw configure (ticket-ownership).
+                reconfigureBarrier.reconfigure { ctx ->
+                    configureServerRaw(url, username, password, ticket = ctx.slimTicket)
+                }
             }
         }
         identityStore?.beginReconfigure()
+        // C-D3 rev-3 round-5: rotate slim marker before settings/HostConfig
+        // mutation; thread the returned ticket through to configure.
+        val ticket = repository.beginSlimReconfigure()
         effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
-        configureServerRaw(url, username, password)
+        configureServerRaw(url, username, password, ticket = ticket)
         return null
     }
 
-    private fun configureServerRaw(url: String, username: String?, password: String?) {
+    /**
+     * C-D3 rev-3 round-5 (oracle §5): raw body accepts the slim ticket from
+     * the caller (barrier context or non-barrier beginSlimReconfigure return)
+     * and threads it into [OpenCodeRepository.configure].
+     */
+    private fun configureServerRaw(
+        url: String,
+        username: String?,
+        password: String?,
+        ticket: OpenCodeRepository.SlimReconfigureTicket? = null,
+    ) {
         val oldUrl = settingsManager.serverUrl
         val urlChanging = oldUrl != url
-        // CP1 (notify Phase-0) §2 step 1: SYNCHRONOUSLY bump the epoch AND
-        // invalidate the old identity BEFORE repository.configure() runs.
-        // The async CancelSseForReconfigure effect emission below does NOT
-        // guarantee the epoch bump lands before the client rebuild — this
-        // synchronous barrier does. FGS spec §2 «reconfigure 严格顺序».
+        // CP1 (notify Phase-0) §2 step 1: identity + slim marker are rotated by
+        // the caller (barrier or configureServer non-barrier path) BEFORE this
+        // raw body mutates settings / calls repository.configure().
         if (urlChanging) {
             // §bug5 / R-20 Phase 5: manual URL change also clears model data
             // so the disable set does not orphan against an identity the user
@@ -662,7 +818,8 @@ class HostProfileController(
         repository.configure(
             url, username, password,
             hostPort = hostPortFromUrl(url),
-            clientCert = clientCert
+            clientCert = clientCert,
+            reconfigureTicket = ticket,
         )
         // #12 / §2.5(b): mirror the host's TLS trust policy (incl. mTLS) into
         // the markdown image client (same as configureRepositoryForProfile).
@@ -696,20 +853,40 @@ class HostProfileController(
             return
         }
         identityStore?.beginReconfigure()
+        // C-D3 rev-3 round-5: rotate slim marker before configure / any host
+        // mutation. The returned ticket threads into configure so this same
+        // transaction activates the not-ready incarnation (ticket-ownership).
+        val ticket = repository.beginSlimReconfigure()
         effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
-        configureRepositoryForProfileRaw(profile)
+        configureRepositoryForProfileRaw(profile, ticket = ticket)
     }
 
     private suspend fun configureRepositoryForProfileAwait(profile: HostProfile) {
         val barrier = reconfigureBarrier
         if (barrier != null) {
-            barrier.reconfigure { configureRepositoryForProfileRaw(profile) }
+            // C-D3 rev-3 round-5: barrier creates the slim ticket before
+            // teardown; thread it through the raw configure so the SAME
+            // transaction both invalidates and activates (ticket-ownership).
+            barrier.reconfigure { ctx ->
+                configureRepositoryForProfileRaw(profile, ticket = ctx.slimTicket)
+            }
         } else {
             configureRepositoryForProfile(profile)
         }
     }
 
-    private fun configureRepositoryForProfileRaw(profile: HostProfile) {
+    /**
+     * C-D3 rev-3 round-5 (oracle §6.1): raw configure accepts the slim
+     * reconfigure ticket from the caller (barrier context or non-barrier
+     * [beginSlimReconfigure] return) and threads it into
+     * [OpenCodeRepository.configure]. This guarantees the not-ready
+     * incarnation invalidated at the boundary is the one activated on
+     * success — closing the T1/T2 completion race.
+     */
+    private fun configureRepositoryForProfileRaw(
+        profile: HostProfile,
+        ticket: OpenCodeRepository.SlimReconfigureTicket? = null,
+    ) {
         val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
         // §2.5(a): 注入 mTLS 客户端证书材料（profile.mtlsEnabled 时从 ESP 载入）。
         // configure(null) 会 clear 已持材料，所以切到非 mTLS profile 时停止出示证书。
@@ -717,7 +894,8 @@ class HostProfileController(
         repository.configure(
             profile.serverUrl, profile.basicAuth?.username, password,
             hostPort = hostPortFromUrl(profile.serverUrl),
-            clientCert = clientCert
+            clientCert = clientCert,
+            reconfigureTicket = ticket,
         )
         // #12 / §2.5(a): keep the markdown image HTTP client's TLS trust policy
         // in sync with the active host (now incl. mTLS) so self-signed HTTPS
@@ -869,6 +1047,8 @@ class HostProfileController(
         // caches are torn down); the epoch bump ensures any in-flight
         // collector / directory fetch from the pre-reset state is dropped.
         identityStore?.beginReconfigure()
+        // C-D3 rev-3: slim marker before local purge / slice reset.
+        repository.beginSlimReconfigure()
         // remove-message-persistence Task 5: the cacheRepository.clearAll() +
         // appContext.deleteDatabase(...) that used to wipe the SQLite cache DB
         // here were removed together with the persistence layer. The in-memory

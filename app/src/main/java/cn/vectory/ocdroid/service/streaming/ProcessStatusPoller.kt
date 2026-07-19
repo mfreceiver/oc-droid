@@ -6,6 +6,7 @@ import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.status.GlobalBusyState
 import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
+import cn.vectory.ocdroid.service.status.StatusFanOutSummary
 import cn.vectory.ocdroid.service.status.StatusSnapshot
 import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.CancellationException
@@ -84,6 +85,36 @@ class ProcessStatusPoller internal constructor(
     private val identityStore: ConnectionIdentityStore,
     private val statusAggregator: StatusAggregator,
     private val clock: () -> Long,
+    /**
+     * §final-gate I-1 (oracle §3.1): injectable slim-mode status fan-out
+     * runner. Returns null when slim mode is off (legacy gate) OR when the
+     * network sweep fails (the catch in [runSlimFanOut] swallows non-CE
+     * throwables). Defaults to `{ _, _ -> null }` so existing direct tests
+     * (pre-I-1) keep compiling + behave identically (no fan-out path
+     * engaged). Production wiring constructs a [SlimStatusFanOut] and
+     * routes through it (see [StreamingModule]).
+     *
+     * The runner receives the [ConnectionIdentity] + [StatusSnapshot] the
+     * poller captured for the tick; the runner is responsible for its OWN
+     * identity re-checks before issuing HTTP (the wrapper in
+     * [StreamingModule] gates on `identityStore.isCurrent(identity)`
+     * first, and `runSlimFanOut` re-checks before sinking the summary).
+     */
+    private val slimFanOutRunner:
+        suspend (ConnectionIdentity, StatusSnapshot) -> StatusFanOutSummary? =
+        { _, _ -> null },
+
+    /**
+     * §final-gate I-1 (oracle §3.1): sink for a non-null fan-out summary.
+     * Production routes through
+     * [cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator.applySlimStatusFanOutSummary]
+     * which emits per-sid `EvictSession` effects (404) + the poller
+     * backoff/reset effect (503 / success). Default `{}` preserves
+     * existing direct tests.
+     */
+    private val slimFanOutSummarySink:
+        (StatusFanOutSummary) -> Unit =
+        {},
 ) {
 
     /**
@@ -105,6 +136,45 @@ class ProcessStatusPoller internal constructor(
      */
     @Volatile
     private var runningIdentity: ConnectionIdentity? = null
+
+    /**
+     * T13-C4 — slim on-demand fan-out backoff state. Tracks consecutive
+     * retryable fan-out sweeps (503 / transport failures) so
+     * [scheduleBackoff] produces a bounded exponential + jitter delay
+     * (200ms → 400ms → 800ms → … capped at [BACKOFF_MAX_MS]=30s).
+     * [resetBackoff] returns the state to base on a successful sweep
+     * (retryableCount == 0). [currentBackoffDelayMs] exposes the pending
+     * delay so a slim-fan-out scheduler can pace its next sweep.
+     *
+     * Guarded by [stateLock] (the poller's existing serial-write guard).
+     * The bulk L3 loop ([runRefresh]) does NOT consume the backoff —
+     * T13-C6 keeps the host-wide bulk path byte-for-byte unchanged; the
+     * backoff is exposed for slim on-demand consumers.
+     */
+    private var backoffAttempt: Int = 0
+    private var pendingBackoffMs: Long = 0L
+
+    /**
+     * §final-gate I-1 (oracle §3.2): the single-flight retry job for the
+     * slim fan-out. Launched by [requestSlimFanOutRetry] when AppCore
+     * receives a [cn.vectory.ocdroid.ui.controller.ControllerEffect.RequestPollerBackoff]
+     * effect (the coordinator emits it whenever a sweep returned
+     * retryableCount > 0). A new retry request cancels the prior job so
+     * timers cannot stack. Cancelled by [stop] (host switch / lifecycle)
+     * and by [resetBackoff] (a successful sweep arrives before the retry
+     * fires).
+     */
+    private var slimRetryJob: Job? = null
+
+    /**
+     * §final-gate I-1 (oracle §3.2): serializes slim fan-out sweeps.
+     * Separate from [mutex] (which serializes startAndAwaitFirstPoll) so
+     * a sweep held on a network call does NOT block the start/stop
+     * command path, and vice versa. The fan-out retry job and the
+     * periodic / immediate triggers all funnel through this mutex so at
+     * most one sweep is in flight at a time.
+     */
+    private val slimFanOutMutex = Mutex()
 
     /**
      * D2 §4.4 — the immediate-first-poll entry. Cancels + joins any prior
@@ -153,6 +223,20 @@ class ProcessStatusPoller internal constructor(
             return@withLock SourceActivation.Rejected.StaleIdentity
         }
 
+        // §final-gate I-1 (oracle §3.4): immediate slim fan-out alongside
+        // the immediate bulk refresh above. Slim-only — slimFanOutRunner
+        // returns null in legacy mode (no fan-out HTTP). Runs in this
+        // same critical section as the first poll so the L2Idle handoff
+        // sees the post-fan-out summary effects (EvictSession for stale
+        // sids + backoff/reset) before the coordinator commits.
+        runSlimFanOut(identity, snapshot)
+        if (synchronized(stateLock) { generation != myGeneration }) {
+            return@withLock SourceActivation.Rejected.Superseded
+        }
+        if (!identityStore.isCurrent(identity)) {
+            return@withLock SourceActivation.Rejected.StaleIdentity
+        }
+
         val firstState = statusAggregator.stateAtNow()
         DebugLog.i(TAG, "startAndAwaitFirstPoll: first state=$firstState (identity epoch=${identity.epoch})")
 
@@ -161,7 +245,16 @@ class ProcessStatusPoller internal constructor(
                 delay(intervalMs)
                 if (synchronized(stateLock) { generation != myGeneration }) break
                 if (!identityStore.isCurrent(identity)) break
-                runRefresh(identity, snapshotProvider.current())
+                // §final-gate I-1 (oracle §3.4): each 30s tick now does
+                // (1) re-fetch the snapshot (the session list changes
+                // over time — archive / create / new directories), (2)
+                // the bulk runRefresh (unchanged), (3) the slim fan-out
+                // sweep over the LATEST snapshot's sids. nextSnapshot is
+                // captured ONCE per tick and reused for both calls so
+                // the bulk + slim paths see the same session list.
+                val nextSnapshot = snapshotProvider.current()
+                runRefresh(identity, nextSnapshot)
+                runSlimFanOut(identity, nextSnapshot)
             }
         }
         val accepted = synchronized(stateLock) {
@@ -200,13 +293,117 @@ class ProcessStatusPoller internal constructor(
      * Service.onDestroy does not reach into it.
      */
     fun stop() {
-        val job = synchronized(stateLock) {
+        // §final-gate I-1 (oracle §3.5): cancel BOTH the loop job and the
+        // slim fan-out retry job. The retry job is independent of the loop
+        // (it lives on the same ApplicationScope but is launched outside
+        // the loop), so the loop's cancel does not reach it. Bumping
+        // generation invalidates any retry that has already awoken on the
+        // delay; the explicit cancel reaches any retry still sleeping.
+        val (loop, retry) = synchronized(stateLock) {
             generation += 1
             runningIdentity = null
-            loopJob.also { loopJob = null }
+            val oldLoop = loopJob
+            val oldRetry = slimRetryJob
+            loopJob = null
+            slimRetryJob = null
+            oldLoop to oldRetry
         }
-        job?.cancel()
+        loop?.cancel()
+        retry?.cancel()
     }
+
+    /**
+     * T13-C4 — schedule a bounded exponential + jitter backoff for the
+     * slim on-demand fan-out's next sweep. Called by the coordinator's
+     * effect handler when a slim fan-out sweep returned `retryableCount > 0`
+     * (503 / transport fault per §6 G2).
+     *
+     * Each consecutive call DOUBLES the base delay
+     * ([BACKOFF_BASE_MS] = 200ms → 200/400/800/…), shifted by the
+     * current [backoffAttempt] (capped at [BACKOFF_MAX_SHIFT] so the
+     * exponent stops growing once the cap binds). The jittered delay is
+     * then clamped to [BACKOFF_MAX_MS] (= 30s — equals [DEFAULT_INTERVAL_MS]
+     * so polling never goes SLOWER than the steady-state interval; the
+     * cap keeps polling responsive even under sustained 503).
+     *
+     * ±20% jitter ([jitter] clamped to `[-0.2, +0.2]`, per
+     * [SseRecoveryPolicy.clampJitter]) — production samples a PRNG;
+     * tests pass `0.0f` for the deterministic base schedule.
+     *
+     * Returns the computed delay so callers (effect handlers / tests) can
+     * observe the value WITHOUT a separate read-modify-write race.
+     *
+     * **Legacy bulk L3 loop ([runRefresh]) is NOT affected** — T13-C6
+     * keeps the host-wide bulk path byte-for-byte unchanged; the backoff
+     * is exposed via [currentBackoffDelayMs] for slim on-demand
+     * consumers (the coordinator + a future slim-fan-out scheduler).
+     *
+     * @param jitter a deterministic-injection point in `[-0.2, +0.2]`
+     *  (production samples a PRNG; tests pass `0.0f` for the
+     *  deterministic base schedule). Outside that range is clamped
+     *  (defensive — the contract is ±20%). **Round-2 M2 fix:** the
+     *  default [DEFAULT_BACKOFF_JITTER] sentinel (`Float.NaN`) triggers
+     *  an internal PRNG sample (`Random.nextFloat() * 0.4f - 0.2f` →
+     *  uniform ±20%) so production callers that omit the parameter GET
+     *  jittered backoff (callers can't "forget"). Tests pass an explicit
+     *  `0.0f` for determinism.
+     * @return the computed next-delay in ms (always ≥ 0, ≤
+     *  [BACKOFF_MAX_MS]).
+     */
+    fun scheduleBackoff(jitter: Float = DEFAULT_BACKOFF_JITTER): Long {
+        // Round-2 M2: NaN sentinel = "sample jitter internally" so the
+        // production default path is jittered without the caller having
+        // to remember to pass a non-zero value.
+        val sampled = if (jitter.isNaN()) {
+            kotlin.random.Random.nextFloat() * 0.4f - 0.2f
+        } else {
+            jitter
+        }
+        // Clamp ±20% (mirrors [SseRecoveryPolicy.clampJitter] semantics;
+        // inlined because SseRecoveryPolicy.clampJitter is an instance
+        // member, not a companion function — and the poller deliberately
+        // does not inject an SseRecoveryPolicy instance for a one-line
+        // clamp). Belt-and-suspenders for the sampled path (the formula
+        // above already produces values in range, but a future caller
+        // could pass an out-of-range value explicitly).
+        val j = sampled.coerceIn(-0.2f, 0.2f)
+        return synchronized(stateLock) {
+            val attempt = backoffAttempt.coerceAtMost(BACKOFF_MAX_SHIFT)
+            val base = BACKOFF_BASE_MS * (1L shl attempt)
+            val next = SseRecoveryPolicy.applyJitter(base, j)
+                .coerceAtMost(BACKOFF_MAX_MS)
+                .coerceAtLeast(0L)
+            pendingBackoffMs = next
+            backoffAttempt = (backoffAttempt + 1).coerceAtMost(BACKOFF_MAX_SHIFT + 1)
+            next
+        }
+    }
+
+    /**
+     * T13-C4 — reset the backoff state to base (no pending backoff).
+     * Called by the coordinator's effect handler when a slim fan-out
+     * sweep returned `retryableCount == 0` (success). Idempotent.
+     */
+    fun resetBackoff() {
+        // §final-gate I-1 (oracle §3.5): a successful sweep arriving
+        // before a pending retry fires MUST cancel the retry (no stale
+        // retry stacking on top of fresh data). The retry job is
+        // independent of the loop's generation — an explicit cancel
+        // reaches it regardless of when it was scheduled.
+        val retry = synchronized(stateLock) {
+            backoffAttempt = 0
+            pendingBackoffMs = 0L
+            slimRetryJob.also { slimRetryJob = null }
+        }
+        retry?.cancel()
+    }
+
+    /**
+     * T13-C4 — test/diagnostic accessor for the currently-pending backoff
+     * delay. Returns 0 when no backoff is pending (the slim fan-out
+     * scheduler uses the steady-state cadence).
+     */
+    fun currentBackoffDelayMs(): Long = synchronized(stateLock) { pendingBackoffMs }
 
     /**
      * D5 (#2) — the supplemental poller entry. Tracks the actually-installed
@@ -263,6 +460,107 @@ class ProcessStatusPoller internal constructor(
         }
     }
 
+    /**
+     * §final-gate I-1 (oracle §3.3): the slim fan-out trigger helper.
+     * Called from the immediate first poll site AND from each 30s tick
+     * AND from [requestSlimFanOutRetry] (single-flight retry path).
+     *
+     * # Identity discipline (non-negotiable per oracle §3.3)
+     *
+     * A host switch during the network sweep invalidates every outcome —
+     * the new host's id-space may overlap the old host's, but the
+     * summary's per-sid outcomes refer to the OLD host's sessions. So:
+     *   1. isCurrent check BEFORE entering the mutex (cheap fast-path;
+     *      skip the sweep entirely when already stale);
+     *   2. isCurrent check INSIDE the mutex (the sweep runs serially, so
+     *      a host switch that landed between the outer check and mutex
+     *      acquisition is caught here);
+     *   3. isCurrent check AFTER the network sweep returns and BEFORE
+     *      sinking the summary (a host switch during the network call
+     *      invalidates the summary — drop it without invoking the sink).
+     *
+     * # CancellationException discipline
+     *
+     * CE is rethrown (per project convention). A non-CE throwable is
+     * swallowed + logged + collapsed to null (the summary sink is NOT
+     * invoked). This matches the [runRefresh] belt-and-suspenders style
+     * — the slim-fan-out path must not kill the poller loop.
+     */
+    private suspend fun runSlimFanOut(
+        identity: ConnectionIdentity,
+        snapshot: StatusSnapshot,
+    ) {
+        if (!identityStore.isCurrent(identity)) return
+
+        slimFanOutMutex.withLock {
+            if (!identityStore.isCurrent(identity)) return@withLock
+
+            val summary = try {
+                slimFanOutRunner(identity, snapshot)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                DebugLog.w(TAG, "slim status fan-out failed: ${e.message}")
+                null
+            } ?: return@withLock
+
+            // A host switch during the network sweep invalidates every outcome.
+            if (!identityStore.isCurrent(identity)) return@withLock
+
+            slimFanOutSummarySink(summary)
+        }
+    }
+
+    /**
+     * §final-gate I-1 (oracle §3.5): single-flight slim fan-out retry.
+     * Called by AppCore's
+     * [cn.vectory.ocdroid.ui.controller.ControllerEffect.RequestPollerBackoff]
+     * effect handler with the bounded delay returned by [scheduleBackoff]
+     * (200ms → 400ms → … → 30s cap).
+     *
+     * # Single-flight (non-negotiable per oracle §3.5)
+     *
+     * Each request cancels the prior retry job before launching the new
+     * one — multiple backoff effects cannot stack overlapping timers.
+     * This is enforced under [stateLock]: the prior job is captured AND
+     * replaced atomically, then cancelled outside the lock (cancel is
+     * safe to call on a job that has already completed).
+     *
+     * # Generation + identity re-checks (non-negotiable)
+     *
+     * Re-validates at EVERY await point: after the delay, before + after
+     * the snapshot fetch, and inside [runSlimFanOut]. A [stop] /
+     * superseding [startAndAwaitFirstPoll] bumps generation; a host
+     * switch invalidates identity. Either invalidates this retry.
+     */
+    fun requestSlimFanOutRetry(delayMs: Long) {
+        val identity = identityStore.currentIdentity.value ?: return
+        val expectedGeneration = synchronized(stateLock) { generation }
+
+        val retry = scope.launch {
+            delay(delayMs.coerceAtLeast(0L))
+
+            if (synchronized(stateLock) { generation != expectedGeneration }) {
+                return@launch
+            }
+            if (!identityStore.isCurrent(identity)) return@launch
+
+            val snapshot = snapshotProvider.current()
+
+            if (synchronized(stateLock) { generation != expectedGeneration }) {
+                return@launch
+            }
+            if (!identityStore.isCurrent(identity)) return@launch
+
+            runSlimFanOut(identity, snapshot)
+        }
+
+        val prior = synchronized(stateLock) {
+            slimRetryJob.also { slimRetryJob = retry }
+        }
+        prior?.cancel()
+    }
+
     companion object {
         private const val TAG = "ProcessStatusPoller"
 
@@ -275,5 +573,49 @@ class ProcessStatusPoller internal constructor(
          * [cn.vectory.ocdroid.di.AppLifecycleMonitor]'s legacy poller.
          */
         const val DEFAULT_INTERVAL_MS = 30_000L
+
+        // ── T13-C4 slim fan-out backoff strategy ─────────────────────────
+        //
+        // Pinned as `const val` so the strategy (200ms base, doubling, ±20%
+        // jitter, 30s cap) is readable in one place AND so unit tests can
+        // assert "scheduleBackoff grows exponentially" + "capped at
+        // BACKOFF_MAX_MS" without magic numbers. Mirrors the
+        // EXPAND_BACKOFF_* pinning in OpenCodeRepository.
+
+        /**
+         * T13-C4 backoff base delay in ms (jitter ±20%); doubles per
+         * retry: 200 / 400 / 800 / 1600 / 3200 / 6400 / 12800 / 25600 →
+         * capped at [BACKOFF_MAX_MS]. Mirrors
+         * [cn.vectory.ocdroid.data.repository.OpenCodeRepository.EXPAND_BACKOFF_BASE_MS]
+         * for cross-feature consistency.
+         */
+        const val BACKOFF_BASE_MS = 200L
+
+        /**
+         * T13-C4 backoff cap. Equals [DEFAULT_INTERVAL_MS] (30s) so the
+         * slim fan-out scheduler never paces SLOWER than the steady-state
+         * bulk loop — polling stays responsive even under sustained 503.
+         */
+        const val BACKOFF_MAX_MS = 30_000L
+
+        /**
+         * T13-C4 backoff max shift: log2([BACKOFF_MAX_MS] / [BACKOFF_BASE_MS])
+         * ≈ 7.2 → shift 8 caps the exponent at 256x base. After this many
+         * consecutive retryable sweeps the delay stays at [BACKOFF_MAX_MS]
+         * (the [coerceAtMost] clamp in [scheduleBackoff]).
+         */
+        const val BACKOFF_MAX_SHIFT = 8
+
+        /**
+         * T13-C4 default jitter sentinel passed to [scheduleBackoff].
+         * **Round-2 M2 fix:** `Float.NaN` is the sentinel that triggers
+         * internal PRNG sampling (`Random.nextFloat() * 0.4f - 0.2f` →
+         * uniform ±20%) so the production default path IS jittered
+         * (callers cannot "forget" to jitter). Tests that need a
+         * deterministic base pass `0.0f` explicitly; production callers
+         * (e.g. AppCore's [RequestPollerBackoff] dispatch) omit the
+         * parameter to get the sampled jitter.
+         */
+        const val DEFAULT_BACKOFF_JITTER: Float = Float.NaN
     }
 }

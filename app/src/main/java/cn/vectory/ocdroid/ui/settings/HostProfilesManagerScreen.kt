@@ -62,6 +62,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
+import cn.vectory.ocdroid.ui.HostProfileSaveState
 import cn.vectory.ocdroid.ui.theme.AppConfirmDialog
 import cn.vectory.ocdroid.ui.theme.AppFormDialog
 import cn.vectory.ocdroid.ui.theme.AppSectionHeader
@@ -102,6 +103,33 @@ internal fun HostProfilesManagerScreen(
     var editingProfile by remember { mutableStateOf<HostProfile?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     val deleteFailedText = stringResource(R.string.host_profile_delete_failed)
+    // C-D3 rev-3 round-7 (review I5-R7): the save transaction's lifecycle is
+    // owned by the VM (viewModelScope — survives screen navigation, holds the
+    // in-flight reconfigure so it MUST complete once begun). Observe here to
+    // drive the dialog close + the Save button's isSaving gate.
+    val saveState by viewModel.saveState.collectAsStateWithLifecycle()
+    val isSaving = saveState is HostProfileSaveState.Saving
+    // Handle Done: close the dialog only if the user is still editing THIS
+    // profile (dismiss/reopen-of-another-profile must not be closed by a
+    // stale completion). On failure, surface the error and keep the dialog
+    // open. Either way, consume the state so a later retry is accepted.
+    LaunchedEffect(saveState) {
+        val s = saveState
+        if (s is HostProfileSaveState.Done) {
+            s.result.onSuccess {
+                if (editingProfile?.id == s.profileId) editingProfile = null
+            }.onFailure {
+                // M2 (post-release polish): symmetric profileId guard — a stale
+                // failure from a dismissed profile (A) must not surface while
+                // the user has moved to editing a different profile (B). The
+                // success path already carries this guard; failure now matches.
+                if (editingProfile?.id == s.profileId) {
+                    error = it.message ?: deleteFailedText
+                }
+            }
+            viewModel.consumeSaveState()
+        }
+    }
 
     // §P5b-A / Q7: 流量统计 subscriptions — moved verbatim from the old
     // settings/storage route. The TrafficSection composable + reset path
@@ -263,6 +291,12 @@ internal fun HostProfilesManagerScreen(
             // §2.7 fix-3: onSave 透传 mTLS 编辑意图给 VM（Dialog 纯 UI，不碰 ESP）。VM
             // 据此试构建 + 原子写 ESP；失败（无 p12 / 试构建失败）抛异常 → 保留
             // 对话框并回显错误，不关闭。Dialog 据 mTLS 开关构造 Update / Disable intent。
+            // §C-D3 rev-3 round-7 (review I5-R7): viewModel.saveHostProfile is now
+            // non-suspend — the VM owns the launch (viewModelScope survives screen
+            // navigation; the reconfigure transaction must complete once begun).
+            // The screen observes saveState via LaunchedEffect above (close on
+            // success + profileId match, error on failure) and gates the Save
+            // button via isSaving (single-flight — double-submit ignored).
             onSave = { saved, basicAuthPassword, basicAuthEdited, tunnelPassword, tunnelEdited,
                        mtlsEnabled, slimEnabled, stagedP12, caStage, p12Password, p12PasswordEdited, hasImportedP12 ->
                 val clientCertEdit = if (mtlsEnabled) {
@@ -270,17 +304,14 @@ internal fun HostProfilesManagerScreen(
                 } else {
                     ClientCertEditIntent.Disable
                 }
-                runCatching {
-                    viewModel.saveHostProfile(
-                        saved,
-                        basicAuthPassword = basicAuthPassword,
-                        basicAuthEdited = basicAuthEdited,
-                        tunnelPassword = tunnelPassword,
-                        tunnelEdited = tunnelEdited,
-                        clientCertEdit = clientCertEdit,
-                    )
-                }.onSuccess { editingProfile = null }
-                    .onFailure { error = it.message ?: deleteFailedText }
+                viewModel.saveHostProfile(
+                    saved,
+                    basicAuthPassword = basicAuthPassword,
+                    basicAuthEdited = basicAuthEdited,
+                    tunnelPassword = tunnelPassword,
+                    tunnelEdited = tunnelEdited,
+                    clientCertEdit = clientCertEdit,
+                )
             },
             onDelete = {
                 runCatching { viewModel.deleteHostProfile(profile.id) }
@@ -307,6 +338,9 @@ internal fun HostProfilesManagerScreen(
             // （dialog 不再持有 connectionVM，参数化保 fix-12 的 UX 意图——
             // 版本不兼容时阻塞对话框）。
             slimapiVersionIncompatible = connectionState.slimapiVersionIncompatible,
+            // §C-D3 rev-3 round-7 (review I5-R7): gate the Save button + show
+            // spinner while a save transaction is in flight (single-flight).
+            isSaving = isSaving,
         )
     }
 
@@ -467,6 +501,12 @@ internal fun HostProfileEditorDialog(
     // 三元组；非 null 时弹 AlertDialog 提示用户升级。dialog 内部不再持有
     // ConnectionViewModel 引用（保持纯 UI 可测）。
     slimapiVersionIncompatible: Triple<Int, Int, Int>? = null,
+    // C-D3 rev-3 round-7 (review I5-R7): isSaving gate for the Save button.
+    // While a reconfigure transaction is in flight (HostProfileSaveState.Saving),
+    // the screen disables Save + shows a spinner. The VM's single-flight
+    // already ignores double-submit; this is the UX side — the user gets
+    // feedback that the save is running.
+    isSaving: Boolean = false,
 ) {
     val groupLabels = NamedGroupLabels // §grouping-rewrite Round-2 #4: was a local listOf("A","B","C","D") — centralised in SettingsSections.kt so the editor + ConnectionProfileSection stats line stay in lockstep.
     var name by remember(initial.id) { mutableStateOf(initial.name) }
@@ -774,10 +814,12 @@ internal fun HostProfileEditorDialog(
                     //   mTLS 开启但无可用客户端证书材料时禁用 Save，使原本会抛「需先导入
                     //   客户端证书」（错误回显在底层屏幕、被对话框遮挡，看起来像「点了没
                     //   反应」）的保存根本无法发起。
+                    // §C-D3 rev-3 round-7 (review I5-R7): 另受 isSaving 门控——
+                    //   a reconfigure transaction in flight 时禁用 Save 防 double-submit。
                     Button(
-                        enabled = !isConverting && !isTesting && !hasCertError && !(mtlsEnabled && !hasMaterial),
+                        enabled = !isConverting && !isTesting && !hasCertError && !(mtlsEnabled && !hasMaterial) && !isSaving,
                         onClick = {
-                            if (isConverting || isTesting || hasCertError || (mtlsEnabled && !hasMaterial)) return@Button
+                            if (isConverting || isTesting || hasCertError || (mtlsEnabled && !hasMaterial) || isSaving) return@Button
                             // §review-r4 (gpter R4 #3): Save / Test snapshot/branching
                             // logic hoisted into pure top-level [buildSaveCall] /
                             // [buildTestCall]. The onClick body now just assembles
@@ -822,7 +864,9 @@ internal fun HostProfileEditorDialog(
                             )
                         }
                     ) {
-                        if (isConverting) {
+                        // §C-D3 rev-3 round-7: show a spinner while a save transaction
+                        // is in flight (matches the isConverting pattern above).
+                        if (isConverting || isSaving) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(Dimens.iconSm),
                                 strokeWidth = 2.dp

@@ -302,6 +302,18 @@
     <string name="host_mtls_missing_cert">mTLS 已开启但客户端证书缺失或无效：%1$s</string>
     <!-- §review-r4 (gpter R4 #1): mTLS 开启但无可用客户端证书材料时在 mTLS 区块内联提示的原因。 -->
     <string name="host_mtls_missing_client_cert">需先导入客户端证书</string>
+    <!-- §R8 slim-mode UI：主机配置编辑器精简模式开关与连接模式说明 -->
+    <string name="host_slim_title">精简模式</string>
+    <string name="host_slim_summary">使用 oc-slimapi sidecar 以降低流量消耗。</string>
+    <string name="host_slim_mode_label">连接模式</string>
+    <string name="host_slim_mode_direct_opencode">直连 OpenCode</string>
+    <string name="host_slim_mode_stunnel_opencode">Stunnel + OpenCode</string>
+    <string name="host_slim_mode_direct_slim">直连 SlimAPI</string>
+    <string name="host_slim_mode_stunnel_slim">Stunnel + SlimAPI</string>
+    <!-- §R8 slimapi 版本不兼容：客户端版本超出接受范围时的阻塞对话框（Tier C） -->
+    <string name="slimapi_version_incompatible_title">版本不兼容</string>
+    <string name="slimapi_version_incompatible_message">SlimAPI 服务器不接受此客户端版本。\n\n客户端版本：%1$d\n接受范围：%2$d – %3$d\n\n请升级客户端或服务器以继续使用精简模式。</string>
+    <string name="slimapi_version_incompatible_dismiss">确定</string>
     <string name="host_profile_untitled">未命名</string>
     <string name="question_title">问题</string>
     <string name="question_multi_hint">可选择一个或多个选项</string>
@@ -444,6 +456,7 @@
     <string name="chat_retry_in_seconds">%1$ds 后重试</string>
     <string name="chat_retry_attempt">第 %1$d 次</string>
     <string name="chat_error_occurred">发生错误</string>
+    <string name="chat_session_error_label">会话错误</string>
     <string name="chat_view">查看</string>
     <string name="chat_stale_notice">长时间未查看，仅显示最新内容。</string>
     <string name="chat_reconnecting">正在重连 %1$s…</string>
@@ -532,4 +545,14 @@
          硬性），故 ongoing 通知常驻一个 Action，其文案即此串，PendingIntent
          投递 ACTION_CLOSE_BACKGROUND → 协调器 L3 teardown。 -->
     <string name="notify_close_background">关闭后台</string>
+
+    <!-- §slimapi-client-v1 §G6 (Task 16): skeleton parts 上的内联展开按钮。
+         用户点击此按钮触发 G6 批量获取完整内容。 -->
+    <string name="expand_omitted_content">展开省略内容</string>
+    <string name="expand_omitted_error">展开失败</string>
+    <string name="expand_omitted_retry">重试</string>
+
+    <!-- I-2 v2 §3.7: slim 聚合全量失败 toast；Partial 仅 signal，不 toast。 -->
+    <string name="error_slim_questions_fetch_failed">待处理问题刷新失败，已保留之前的状态。</string>
+    <string name="error_slim_permissions_fetch_failed">待处理权限刷新失败，已保留之前的状态。</string>
 </resources>

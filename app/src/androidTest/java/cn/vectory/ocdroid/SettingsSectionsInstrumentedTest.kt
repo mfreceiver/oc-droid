@@ -26,10 +26,12 @@ class SettingsSectionsInstrumentedTest {
                 HostProfileEditorDialog(
                     initial = profile,
                     onDismiss = {},
-                    // onSave arity is Function11 (profile, basicAuthPassword,
+                    // onSave arity is Function12 (profile, basicAuthPassword,
                     // basicAuthEdited, tunnelPassword, tunnelEdited, mtlsEnabled,
-                    // stagedP12, caStage, p12Password, p12PasswordEdited, hasImportedP12).
-                    onSave = { _, _, _, _, _, _, _, _, _, _, _ -> },
+                    // slimEnabled, stagedP12, caStage, p12Password, p12PasswordEdited,
+                    // hasImportedP12). slimEnabled (§R8) is the reconfigure-triggering
+                    // toggle added between mtlsEnabled and stagedP12.
+                    onSave = { _, _, _, _, _, _, _, _, _, _, _, _ -> },
                 )
             }
         }
@@ -89,7 +91,7 @@ class SettingsSectionsInstrumentedTest {
                 HostProfileEditorDialog(
                     initial = profile,
                     onDismiss = {},
-                    onSave = { _, _, _, _, _, _, _, _, _, _, _ -> },
+                    onSave = { _, _, _, _, _, _, _, _, _, _, _, _ -> },
                     initialHasCa = true,
                     initialClientSummary = "CN=client" to 1234,
                     initialCaSummary = "CN=opencode CA" to 5678,
@@ -121,7 +123,7 @@ class SettingsSectionsInstrumentedTest {
                 HostProfileEditorDialog(
                     initial = profile,
                     onDismiss = {},
-                    onSave = { _, _, _, _, _, _, _, _, _, _, _ -> },
+                    onSave = { _, _, _, _, _, _, _, _, _, _, _, _ -> },
                     initialHasCa = true,
                     initialClientSummary = null,
                     initialCaSummary = "CN=opencode CA" to 5678,

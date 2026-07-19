@@ -386,6 +386,62 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         assertTrue(handled)
     }
 
+    // ── T13 round-2 review fix: AppCore poller-backoff dispatch ───────────
+
+    @Test
+    fun `dispatchSessionSyncEffect handles RequestPollerBackoff by calling scheduleBackoff (T13 round-2 #6)`() {
+        // Round-2 review fix #6: the coordinator emits
+        // RequestPollerBackoff; AppCore MUST route it to
+        // processStatusPoller.scheduleBackoff() (the default-jitter arg
+        // kicks in so production jitter samples — see M2). Without this
+        // dispatch the emitted effect disappeared through the unhandled-
+        // effect warning path.
+        val core = newCore()
+
+        val handled = core.dispatchSessionSyncEffect(ControllerEffect.RequestPollerBackoff)
+
+        assertTrue(
+            "RequestPollerBackoff must be claimed by the session-sync dispatcher",
+            handled,
+        )
+        io.mockk.verify(exactly = 1) { processStatusPoller.scheduleBackoff() }
+    }
+
+    @Test
+    fun `dispatchSessionSyncEffect handles ResetPollerBackoff by calling resetBackoff (T13 round-2 #6)`() {
+        val core = newCore()
+
+        val handled = core.dispatchSessionSyncEffect(ControllerEffect.ResetPollerBackoff)
+
+        assertTrue(
+            "ResetPollerBackoff must be claimed by the session-sync dispatcher",
+            handled,
+        )
+        io.mockk.verify(exactly = 1) { processStatusPoller.resetBackoff() }
+    }
+
+    @Test
+    fun `dispatchEffect cascade routes RequestPollerBackoff end-to-end to the poller (T13 round-2 #6)`() = runTest {
+        // End-to-end: coordinator emit (via effectBus) → AppCore dispatchEffect
+        // cascade → dispatchSessionSyncEffect → scheduleBackoff. This pins
+        // the production wiring (the round-1 review found the cascade was
+        // missing the branch entirely).
+        val core = newCore()
+        DebugLog.clear()
+
+        core.effectBus.tryEmitEffect(ControllerEffect.RequestPollerBackoff)
+        advanceUntilIdle()
+
+        io.mockk.verify(exactly = 1) { processStatusPoller.scheduleBackoff() }
+        val unhandled = DebugLog.entries.value.filter {
+            it.message.startsWith("unhandled effect=")
+        }
+        assertTrue(
+            "RequestPollerBackoff must be claimed (no unhandled warning)",
+            unhandled.isEmpty(),
+        )
+    }
+
     @Test
     fun `dispatchSessionSyncEffect returns false for a foreground-catch-up effect`() {
         val core = newCore()
@@ -442,6 +498,11 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             // SessionSync
             ControllerEffect.ServerConnected,
             ControllerEffect.RefreshSessions,
+            // T13 round-2: AppCore now dispatches these — include them in
+            // the partition sweep so the "exactly one dispatcher" invariant
+            // covers the new branches.
+            ControllerEffect.RequestPollerBackoff,
+            ControllerEffect.ResetPollerBackoff,
         )
 
         representatives.forEach { effect ->

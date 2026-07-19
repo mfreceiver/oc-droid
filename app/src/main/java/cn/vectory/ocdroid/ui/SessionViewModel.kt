@@ -504,6 +504,7 @@ class SessionViewModel @Inject constructor(
             scope = appScope,
             repository = repository,
             slices = store.slices,
+            effects = effectBus,
             tag = TAG,
         )
     }

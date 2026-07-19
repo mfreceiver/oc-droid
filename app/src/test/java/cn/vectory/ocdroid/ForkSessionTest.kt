@@ -205,6 +205,9 @@ class ForkSessionTest {
             // CP3 (notify Phase-0): SSE event stream + bridge.
             sseEventStream,
             sseEventBridge,
+            // T13 (round-2 review fix): ProcessStatusPoller (relaxed mock —
+            // ForkSessionTest does not exercise backoff wiring).
+            mockk<cn.vectory.ocdroid.service.streaming.ProcessStatusPoller>(relaxed = true),
         )
     }
 

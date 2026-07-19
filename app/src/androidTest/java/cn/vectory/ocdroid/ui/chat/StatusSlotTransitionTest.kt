@@ -75,6 +75,10 @@ class StatusSlotTransitionTest {
                             currentActivityStartedAtMillis = null,
                             compactStartedAt = 0L,
                             isConnecting = false,
+                            // §T17: lastError = null (this test pre-dates the
+                            // LastError tier; the new param is required by the
+                            // composable's contract).
+                            lastError = null,
                             permissionMetadata = ChatPermissionMetadata(
                                 hostName = null,
                                 workdirBasename = null,
@@ -142,6 +146,10 @@ class StatusSlotTransitionTest {
                             currentActivityStartedAtMillis = null,
                             compactStartedAt = 0L,
                             isConnecting = false,
+                            // §T17: lastError = null (this test pre-dates the
+                            // LastError tier; the new param is required by the
+                            // composable's contract).
+                            lastError = null,
                             permissionMetadata = ChatPermissionMetadata(
                                 hostName = null,
                                 workdirBasename = null,
@@ -242,6 +250,10 @@ class StatusSlotTransitionTest {
                             currentActivityStartedAtMillis = null,
                             compactStartedAt = 0L,
                             isConnecting = false,
+                            // §T17: lastError = null (this test pre-dates the
+                            // LastError tier; the new param is required by the
+                            // composable's contract).
+                            lastError = null,
                             permissionMetadata = ChatPermissionMetadata(
                                 hostName = null,
                                 workdirBasename = null,

@@ -5,6 +5,7 @@ import cn.vectory.ocdroid.data.model.QuestionInfo
 import cn.vectory.ocdroid.data.model.QuestionOption
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -52,6 +53,19 @@ class StatusSlotPriorityTest {
                 options = listOf(QuestionOption("yes", "y")),
             )
         ),
+    )
+
+    /**
+     * §T17 slimapi v1 §6.1: the canonical test fixture for a SET
+     * [SlimSessionLastError]. Uses a representative `name` (a stable
+     * machine-readable error code) + an optional server-scrubbed message.
+     * Reused across every LastError-tier test so the priority rule is
+     * exercised against a realistic payload.
+     */
+    private val dummyLastError = SlimSessionLastError(
+        name = "upstream_error",
+        message = "provider returned 503",
+        at = 1_700_000_000_000L,
     )
 
     @Test
@@ -250,6 +264,7 @@ class StatusSlotPriorityTest {
                 StatusSlotPriority.Running,
                 StatusSlotPriority.Compacting,
                 StatusSlotPriority.Retry,
+                StatusSlotPriority.LastError,
                 StatusSlotPriority.Question,
                 StatusSlotPriority.Permission,
             ),
@@ -374,5 +389,170 @@ class StatusSlotPriorityTest {
         // conditions hold).
         val filteredNone = perms.firstOrNull { it.sessionId == "sX" }
         assertNull(filteredNone)
+    }
+
+    // ── §T17 slimapi v1 §6.1: LastError tier ────────────────────────────────
+    //
+    // The new tier sits BETWEEN Question and Retry in the binding order
+    // (Permission > Question > LastError > Retry > Compacting > Running >
+    // Connecting > None). The fixture [dummyLastError] is a representative
+    // `SlimSessionLastError`; the sid-scope rule (the caller pre-filters
+    // sessionErrorsById to the current sid) is asserted in the
+    // `session-scoped filter helper yields only this session's ...` test
+    // above — LastError reuses the same contract.
+
+    @Test
+    fun `lastError alone (no other state) yields LastError`() {
+        // Boundary: a SET lastError with no permission / question / retry /
+        // compacting / running / connecting fires the LastError branch —
+        // the slot renders the banner. Absent sid at the call site is the
+        // caller's responsibility (the composable passes null when the
+        // sid is absent from sessionErrorsById), so this test exercises
+        // the "error present, everything else quiescent" path.
+        val p = StatusSlotPriority.pick(
+            permission = null,
+            question = null,
+            lastError = dummyLastError,
+            sessionStatus = null,
+            isCompacting = false,
+            isRunning = false,
+            isConnecting = false,
+        )
+        assertEquals(StatusSlotPriority.LastError, p)
+    }
+
+    @Test
+    fun `null lastError with everything else quiescent yields None (null-safety gate)`() {
+        // T17 hard gate: an absent sid at the call site yields lastError =
+        // null. pick MUST fall through to None — the slot's LastError
+        // branch NEVER fires for an absent sid. This is the priority-level
+        // proof of the null-safety contract.
+        val p = StatusSlotPriority.pick(
+            permission = null,
+            question = null,
+            lastError = null,
+            sessionStatus = null,
+            isCompacting = false,
+            isRunning = false,
+            isConnecting = false,
+        )
+        assertEquals(StatusSlotPriority.None, p)
+    }
+
+    @Test
+    fun `lastError beats retry, compacting, running, connecting`() {
+        // The T17 ranking decision (file KDoc): a SET lastError is durable
+        // (the sidecar WILL NOT auto-clear it) and signals "this session
+        // is blocked right now" — higher user-urgency than transient Retry
+        // (auto-backoff) / Compacting / Running / Connecting. Pin the
+        // LastError > Retry > Compacting > Running > Connecting ordering.
+        val p = StatusSlotPriority.pick(
+            permission = null,
+            question = null,
+            lastError = dummyLastError,
+            sessionStatus = SessionStatus(type = "retry"),
+            isCompacting = true,
+            isRunning = true,
+            isConnecting = true,
+        )
+        assertEquals(StatusSlotPriority.LastError, p)
+    }
+
+    @Test
+    fun `lastError beats retry specifically (T17 ranking decision)`() {
+        // The most controversial tie-break: a session that is BOTH in retry
+        // backoff (SessionStatus.isRetry = true) AND has a SET lastError.
+        // Spec designates LastError the winner — the sidecar surfacing a
+        // hard error takes precedence over a transient auto-recovery
+        // affordance. See [StatusSlotPriority.LastError] KDoc for the full
+        // rationale. This test pins that exact decision so a future
+        // reorder has to update both the KDoc and the test.
+        val p = StatusSlotPriority.pick(
+            permission = null,
+            question = null,
+            lastError = dummyLastError,
+            sessionStatus = SessionStatus(type = "retry", message = "retrying", next = 1000L),
+            isCompacting = false,
+            isRunning = false,
+            isConnecting = false,
+        )
+        assertEquals(
+            "LastError > Retry (T17); a durable hard error pre-empts the retry countdown",
+            StatusSlotPriority.LastError,
+            p,
+        )
+    }
+
+    @Test
+    fun `permission beats lastError (interactive blocking still wins)`() {
+        // T17 ranking: Permission / Question are interactive blocking (the
+        // user MUST act) — they pre-empt LastError even when the session is
+        // hard-errored. If the error itself blocks the permission flow,
+        // the sidecar withdraws the pending permission and the slot
+        // naturally falls through to LastError.
+        val p = StatusSlotPriority.pick(
+            permission = dummyPermission,
+            question = null,
+            lastError = dummyLastError,
+            sessionStatus = null,
+            isCompacting = false,
+            isRunning = false,
+            isConnecting = false,
+        )
+        assertEquals(StatusSlotPriority.Permission, p)
+    }
+
+    @Test
+    fun `question beats lastError (interactive blocking still wins)`() {
+        // Symmetric to the permission-beats-lastError test. A pending
+        // question pre-empts the LastError banner.
+        val p = StatusSlotPriority.pick(
+            permission = null,
+            question = dummyQuestion,
+            lastError = dummyLastError,
+            sessionStatus = null,
+            isCompacting = false,
+            isRunning = false,
+            isConnecting = false,
+        )
+        assertEquals(StatusSlotPriority.Question, p)
+    }
+
+    @Test
+    fun `lastError null with retry present still yields Retry (null-safety)`() {
+        // T17 null-safety gate, retry-flavoured variant: when lastError is
+        // null (sid absent from the map / recovered) AND sessionStatus is
+        // retry, pick MUST return Retry — not None, not LastError. Proves
+        // the new tier does not perturb the existing Retry behaviour when
+        // there is no SET lastError.
+        val p = StatusSlotPriority.pick(
+            permission = null,
+            question = null,
+            lastError = null,
+            sessionStatus = SessionStatus(type = "retry", message = "retrying"),
+            isCompacting = false,
+            isRunning = false,
+            isConnecting = false,
+        )
+        assertEquals(StatusSlotPriority.Retry, p)
+    }
+
+    @Test
+    fun `lastError with running activity yields LastError (banner pre-empts running capsule)`() {
+        // Boundary: even if a stale activity text lingers in the slice
+        // while a lastError arrives, the priority rule guarantees
+        // LastError wins. The slot renders the banner; the running text
+        // is dropped on the floor for this frame. Mirrors the existing
+        // `permission class wins over isRunning text` test.
+        val p = StatusSlotPriority.pick(
+            permission = null,
+            question = null,
+            lastError = dummyLastError,
+            sessionStatus = null,
+            isCompacting = false,
+            isRunning = true,
+            isConnecting = true,
+        )
+        assertEquals(StatusSlotPriority.LastError, p)
     }
 }

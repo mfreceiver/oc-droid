@@ -333,11 +333,20 @@ class SessionStreamingService : Service() {
             // Cluster A / Phase 2 (P2.4 + P2.5): resync AND first-transport-ready
             // share the same cold-start path (v1 contract §4: resync = reuse
             // cold-start). directories from directorySessions keys + current
-            // workdir; openSessionId from the open chat slice so the message
-            // tail is filled without waiting for the first digest.
-            onResync = {
-                if (!repository.isSlimMode) return@ServiceSseConnectionOwner
-                val openSessionId = sharedStateStore.slices.chat.value.currentSessionId
+            // workdir.
+            //
+            // T11 round-2 (oracle I1): wired to
+            // [SessionSyncCoordinator.performSlimResync] — the SINGLE
+            // orchestrator that (1) captures focus + pre-refresh known
+            // SIDs, (2) calls coldStartSlimSync (metadata-only,
+            // openSessionId=null), (3) folds the snapshot, (4) builds the
+            // catch-up union, (5) runs performResyncCatchUp with
+            // ReconcileMode.RESYNC for every sid. Round-1 called
+            // coldStartSlimSync directly which left performResyncCatchUp
+            // as dead code (T11 review I1).
+            onResync = onResync@{ isStillCurrent ->
+                if (!isStillCurrent()) return@onResync
+                if (!repository.isSlimMode) return@onResync
                 val directories = buildList {
                     sharedStateStore.slices.sessionList.value.directorySessions.keys
                         .forEach { add(it) }
@@ -345,29 +354,17 @@ class SessionStreamingService : Service() {
                 }.distinct().ifEmpty { null }
                 DebugLog.i(
                     "SessionStreamingService",
-                    "slim coldStartSlimSync openSessionId=$openSessionId directories=$directories",
+                    "slim performSlimResync directories=$directories",
                 )
-                repository.coldStartSlimSync(
-                    openSessionId = openSessionId,
+                val outcomes = sessionSyncCoordinator.performSlimResync(
                     directories = directories,
-                ).onSuccess { snapshot ->
-                    // Fold into UI slices via the shared effect bus is NOT
-                    // available as a typed effect yet (Phase 3); apply through
-                    // the injected SessionSyncCoordinator when present. The
-                    // Service holds no SSC reference (architecture: Service →
-                    // stream → bridge → AppCore → SSC). Snapshot is folded by
-                    // emitting a synthetic path: store the result on the
-                    // repository is already done (bookmark bump inside
-                    // coldStartSlimSync); session/q/p/messages fold happens
-                    // via SharedStateStore + a best-effort direct apply when
-                    // sessionSyncCoordinator is injected.
-                    sessionSyncCoordinator.applySlimColdStartSnapshot(snapshot)
-                }.onFailure { error ->
-                    DebugLog.w(
-                        "SessionStreamingService",
-                        "slim coldStartSlimSync failed: ${error.message}",
-                    )
-                }
+                    sessionsDirty = emptySet(),
+                    isStillCurrent = isStillCurrent,
+                )
+                DebugLog.i(
+                    "SessionStreamingService",
+                    "slim performSlimResync complete outcomes=${outcomes.size}",
+                )
             },
         )
         controller = SessionStreamingController(

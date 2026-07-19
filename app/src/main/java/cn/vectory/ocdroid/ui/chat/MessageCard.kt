@@ -172,6 +172,10 @@ internal fun MessageCard(
     onCopy: (String) -> Unit,
     onEditAndRerun: (String) -> Unit,
     onFork: (String) -> Unit,
+    // §slimapi-client-v1 §G6 (Task 16): threaded through to MessageRow for
+    // the "展开省略内容" affordance.
+    partExpandStates: Map<PartKey, PartExpandState> = emptyMap(),
+    onExpandParts: (List<Part>) -> Unit = {},
 ) {
     var overflowOpen by remember { mutableStateOf(false) }
     // §press-anchor (Bug4 fix): capture the long-press touch point so the
@@ -260,6 +264,8 @@ internal fun MessageCard(
                 onToggleExpand = onToggleExpand,
                 staleQuestionPartKeys = staleQuestionPartKeys,
                 showMessageDecoration = showMessageDecoration,
+                partExpandStates = partExpandStates,
+                onExpandParts = onExpandParts,
             )
         }
 

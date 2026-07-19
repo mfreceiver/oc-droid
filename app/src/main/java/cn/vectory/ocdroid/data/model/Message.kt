@@ -206,7 +206,33 @@ data class Part(
     val mime: String? = null,
     val filename: String? = null,
     val url: String? = null,
-    @Serializable(with = PartSourceSerializer::class) val source: String? = null
+    @Serializable(with = PartSourceSerializer::class) val source: String? = null,
+    /**
+     * Task 1 (slimapi v1 §8) — true when the sidecar has a full
+     * representation of this part available via
+     * `GET /slimapi/messages/{sid}/full?ids=…` (G6 batch) or the legacy
+     * single-message `full/{mid}` transition endpoint. The skeleton
+     * response sets this to drive the "展开省略内容" affordance; the
+     * client expands on user action and replaces the local cache entry
+     * by `messageId+partId`.
+     *
+     * Nullable + defaulted so existing JSON without the key deserialises
+     * cleanly (kotlinx missing-key → default null) and `explicitNulls=false`
+     * keeps the field absent on the wire when the value is null — i.e.
+     * legacy opencode responses and pre-v1 slimapi digests stay
+     * byte-for-byte identical.
+     */
+    val hasFull: Boolean? = null,
+    /**
+     * Task 1 (slimapi v1 §8) — list of part-types (or opaque part tags)
+     * the sidecar OMITTED from this skeleton row, e.g. `["tool"]` when a
+     * text part is shipped but the corresponding tool output is held back
+     * pending expand. Pairs with [hasFull]: when both are set, the expand
+     * UI knows which slots will be filled by the G6 fetch.
+     *
+     * Same forward-compat discipline as [hasFull]: nullable + null default.
+     */
+    val omitted: List<String>? = null
 ) {
     val isText: Boolean get() = type == "text"
     val isReasoning: Boolean get() = type == "reasoning"

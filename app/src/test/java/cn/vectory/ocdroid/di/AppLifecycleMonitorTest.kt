@@ -4,10 +4,16 @@ import android.app.Application
 import android.app.NotificationManager
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.service.identity.ConnectionIdentity
+import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.ui.controller.IdleUnreadAlert
 import cn.vectory.ocdroid.util.SettingsManager
+import io.mockk.coEvery
+import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
 import kotlin.coroutines.ContinuationInterceptor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -715,6 +721,135 @@ class AppLifecycleMonitorTest {
         assertEquals("re-create is a no-op (single channel)", 1, sessionCount)
     }
 
+    // ── C-D3 rev-3 round-5 background poller host-switch (REAL pollPendingItems) ─
+
+    /**
+     * C-D3 rev-3 round-5 (oracle §10.4): the background-poller discriminator.
+     *
+     * Pre-round-5 this test approximated the poll path by calling
+     * `handlePendingPermission` directly with hand-crafted stale fences. That
+     * proves the handler's entry-check, but NOT that `pollPendingItems`
+     * itself drops stale responses — the gate could be wrongly placed inside
+     * the handler while the poller still claims/records the key.
+     *
+     * Round-5 rewrite: invoke the REAL `pollPendingItems` against a
+     * MockWebServer with a delayed `/slimapi/permissions` response. The
+     * delayed response gives us the in-flight window to reconfigure to host B
+     * mid-flight. When the A response arrives, `pollPendingItems`'s fence
+     * (captureSlimCommitToken + identityAtEntry captured at poll entry) must
+     * reject → silent drop → `notifier.notifyDecision` never called → the
+     * dedup key stays free for a later claim.
+     *
+     * Pattern (from SessionListActionsTest real-scope):
+     *  - `runBlocking` (not runTest — virtual time doesn't help with real
+     *    MockWebServer body delays)
+     *  - real `CoroutineScope(Dispatchers.IO + SupervisorJob())` for the
+     *    poll launch
+     *  - MockWebServer.enqueue(MockResponse().setBodyDelay(400ms))
+     *  - server.takeRequest(5s) to confirm the request started under A
+     *  - mid-flight: identityStore.beginReconfigure + repository.beginSlimReconfigure
+     *    + repository.configure(hostB) — production reconfigure order
+     *  - wait for the poll to drain the delayed response + run the fence
+     *  - assert dedup key is still claimable (no notify happened)
+     */
+    @Test
+    fun `CD3-rev3 background poller host switch does not notify old host permission`() {
+        kotlinx.coroutines.runBlocking {
+            val server = okhttp3.mockwebserver.MockWebServer()
+            server.start()
+            try {
+                val baseUrlA = server.url("/").toString().trimEnd('/')
+                val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+                realRepo.configure(baseUrl = baseUrlA, slim = true)
+                val identityStore = ConnectionIdentityStore()
+                identityStore.bind("g-a", "/a", baseUrlA)
+
+                val pollScope = kotlinx.coroutines.CoroutineScope(
+                    kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob(),
+                )
+                try {
+                    val monitor = AppLifecycleMonitor(
+                        application = app,
+                        appScope = pollScope,
+                        uiScope = pollScope,
+                        repository = realRepo,
+                        settingsManager = mockk(relaxed = true),
+                        identityStore = identityStore,
+                    )
+                    // Default `_isInForeground = false` (CP8) → background →
+                    // poll path is eligible. No need to flip foreground.
+
+                    // Delayed A-permissions response. The 400ms bodyDelay gives
+                    // the test window to reconfigure mid-flight.
+                    val body = """
+                        {
+                          "items": [
+                            {
+                              "id": "p-old",
+                              "sessionID": "s-old",
+                              "permission": "edit",
+                              "directory": "/a",
+                              "routeToken": "rt-stale"
+                            }
+                          ],
+                          "errors": []
+                        }
+                    """.trimIndent()
+                    server.enqueue(
+                        okhttp3.mockwebserver.MockResponse()
+                            .setResponseCode(200)
+                            .setBody(body)
+                            .setHeader("Content-Type", "application/json")
+                            .setBodyDelay(400, java.util.concurrent.TimeUnit.MILLISECONDS),
+                    )
+
+                    // Launch the REAL pollPendingItems. It captures slimToken +
+                    // identity at entry, then awaits the delayed response.
+                    val pollJob = pollScope.launch { monitor.pollPendingItems() }
+
+                    // Confirm the request actually hit A's MockWebServer.
+                    val started = server.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS)
+                    assertNotNull("permissions request must start under A", started)
+                    assertTrue(
+                        "path must be slim permissions: ${started!!.path}",
+                        started.path!!.startsWith("/slimapi/permissions"),
+                    )
+
+                    // Mid-flight host switch (production reconfigure order):
+                    // identity + slim marker rotate BEFORE configure rewires.
+                    identityStore.beginReconfigure()
+                    val ticket = realRepo.beginSlimReconfigure()
+                    realRepo.configure(
+                        baseUrl = baseUrlA,
+                        slim = true,
+                        reconfigureTicket = ticket,
+                    )
+
+                    // Wait for the poll to drain the delayed response + run
+                    // the fence check. The join is real-time (the MockWebServer
+                    // bodyDelay is real, not virtual) — but 400ms is fast.
+                    pollJob.join()
+
+                    // The fence at onSuccess must have rejected the entry-time
+                    // slimToken + identity → silent drop. handler was never
+                    // called → dedup key was never claimed → it's still free
+                    // for a later claim.
+                    val lateClaim = monitor.notificationSnapshot.claim("perm:p-old")
+                    assertNotNull(
+                        "stale A permission must NOT have claimed perm:p-old (silent drop via poll-level fence)",
+                        lateClaim,
+                    )
+                    // Release so the dedup map doesn't carry the test key.
+                    lateClaim?.let { monitor.notificationSnapshot.release("perm:p-old", it) }
+                } finally {
+                    pollScope.cancel()
+                }
+            } finally {
+                server.shutdown()
+            }
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────
 
     /**
@@ -732,6 +867,7 @@ class AppLifecycleMonitorTest {
         uiScope = uiScope,
         repository = mockk<OpenCodeRepository>(relaxed = true),
         settingsManager = mockk<SettingsManager>(relaxed = true),
+        identityStore = mockk(relaxed = true),
     )
 }
 

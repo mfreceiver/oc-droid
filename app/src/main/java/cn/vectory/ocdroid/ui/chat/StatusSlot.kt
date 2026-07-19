@@ -4,14 +4,28 @@
 // in-Column permission card with a single composable whose priority rule
 // guarantees at most one surface is visible at any time.
 //
-// RULE (plan §3.3 / scheme C.3, in binding order — highest priority wins):
+// RULE (plan §3.3 / scheme C.3 + T17 slimapi-v1 §6.1, in binding order —
+// highest priority wins):
 //   1. Permission (incoming, requires user action)
 //   2. Question    (incoming, requires user answer)
-//   3. Retry       (failed run, recoverable; SessionStatus.isRetry)
-//   4. Compacting  (user-initiated context compaction in progress)
-//   5. Running     (agent is producing; activity text available)
-//   6. Connecting  (network transitional)
+//   3. LastError   (T17: durable upstream error SET for this session in
+//                  SessionListState.sessionErrorsById — the session is
+//                  blocked; the banner stays until the sidecar clears it)
+//   4. Retry       (failed run, recoverable; SessionStatus.isRetry)
+//   5. Compacting  (user-initiated context compaction in progress)
+//   6. Running     (agent is producing; activity text available)
+//   7. Connecting  (network transitional)
 //   0. (none — slot renders nothing)
+//
+// T17 ranking decision (LastError vs Retry/Compacting/Running/Connecting):
+// a SET lastError means the sidecar surfaced a hard upstream error for this
+// session that is NOT being auto-recovered — the user needs to know the
+// session is blocked. That is higher-urgency than transient Retry (auto
+// backoff, forward progress expected), Compacting (user-initiated
+// maintenance), Running (normal streaming) or Connecting (transitional
+// handshake). Permission + Question still win because they are interactive
+// blocking (the user MUST act) — a hard error banner does not preempt a
+// pending permission/question. See [StatusSlotPriority.pick] KDoc.
 //
 // SESSION-SCOPED FILTER (plan §3.3 G.1 step 6 / scheme E.4 / P5-7):
 // callers MUST pre-filter the pending permission + question lists to
@@ -37,18 +51,34 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.saveable.SaveableStateHolder
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.PermissionResponse
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.data.model.SlimSessionLastError
+import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 
 /**
  * The binding priority of the status slot. The slot renders the surface
@@ -67,6 +97,39 @@ internal enum class StatusSlotPriority {
     Running,
     Compacting,
     Retry,
+    /**
+     * T17 (slimapi v1 §2 / §6.1): the current session has a durable upstream
+     * error SET in `SessionListState.sessionErrorsById[sid]`. The slot renders
+     * a compact banner with the sidecar's `SlimSessionLastError.name` (+ an
+     * optional `message` subtitle).
+     *
+     * # Ranking vs the other tiers
+     *
+     *  - Beats `Retry` / `Compacting` / `Running` / `Connecting`: a SET
+     *    lastError is durable (the sidecar WILL NOT auto-clear it — only a
+     *    subsequent `lastError=Cleared` digest or recovery does). It signals
+     *    "this session is blocked right now" — higher user-urgency than
+     *    transient Retry (auto-backoff with forward progress expected),
+     *    Compacting (user-initiated maintenance), Running (normal streaming)
+     *    or Connecting (handshake). Hiding the banner behind one of those
+     *    would silently swallow a hard failure.
+     *  - Loses to `Question` / `Permission`: those are interactive blocking
+     *    (the user MUST act — answer / approve) and pre-empt every other
+     *    surface; a hard error banner does not steal the slot from a pending
+     *    question/permission. If the error itself blocks the question/
+     *    permission flow, the sidecar will withdraw the pending item and the
+     *    slot naturally falls through to LastError.
+     *
+     * # Why above Retry specifically
+     *
+     * Retry and LastError can both be true for the same session (a retry in
+     * flight AND a `lastError=Set` digest). The spec designates LastError
+     * the winner: the sidecar surface that something is wrong takes
+     * precedence over a transient auto-recovery affordance. If retry wins
+     * (the previous ordering), the banner stays hidden behind an indefinite
+     * "retrying" capsule while the session is actually broken.
+     */
+    LastError,
     Question,
     Permission;
 
@@ -83,10 +146,19 @@ internal enum class StatusSlotPriority {
          * `idle` but the chat surface still has streaming text (e.g.
          * tail of stream during catch-up reload) does not lose the
          * "running" affordance.
+         *
+         * T17: [lastError] is the current session's entry in
+         * `SessionListState.sessionErrorsById` (T12 maintains it — SET on
+         * `session.error` / `lastError=Set`, REMOVED on `lastError=Cleared`
+         * / recovery). Null when the sid is absent (no banner); the slot's
+         * LastError branch NEVER fires for an absent sid. Caller-side
+         * filter (ChatScaffold looks up `sessionErrorsById[currentSid]`) is
+         * the sole source — see file doc on the session-scoped filter rule.
          */
         fun pick(
             permission: PermissionRequest?,
             question: QuestionRequest?,
+            lastError: SlimSessionLastError? = null,
             sessionStatus: SessionStatus?,
             isCompacting: Boolean,
             isRunning: Boolean,
@@ -94,6 +166,7 @@ internal enum class StatusSlotPriority {
         ): StatusSlotPriority = when {
             permission != null -> Permission
             question != null -> Question
+            lastError != null -> LastError
             sessionStatus?.isRetry == true -> Retry
             isCompacting -> Compacting
             isRunning -> Running
@@ -124,6 +197,14 @@ internal sealed class StatusSlotContent {
     object Running : StatusSlotContent()
     object Compacting : StatusSlotContent()
     object Retry : StatusSlotContent()
+    /**
+     * T17: carries the [SlimSessionLastError] payload so the exiting branch
+     * of the AnimatedContent (during LastError→None, when the sidecar clears
+     * the error) reads the value captured when its state became active —
+     * NOT the recomposed-to-null outer param. Same stale-closure-NPE fix
+     * pattern as Question / Permission (see class KDoc).
+     */
+    data class LastError(val error: SlimSessionLastError) : StatusSlotContent()
     data class Question(val question: QuestionRequest) : StatusSlotContent()
     data class Permission(val permission: PermissionRequest) : StatusSlotContent()
 }
@@ -174,6 +255,13 @@ internal fun BoxScope.StatusSlot(
     currentActivityStartedAtMillis: Long?,
     compactStartedAt: Long,
     isConnecting: Boolean,
+    // §T17 slimapi v1 §6.1: the current session's lastError, sourced by the
+    // caller from `SessionListState.sessionErrorsById[currentSid]`. Null
+    // (sid absent from the map) → no LastError banner; the slot's LastError
+    // branch NEVER fires for an absent sid. The caller is the sole filter
+    // site — the slot does NOT re-derive the lookup (matches the file's
+    // session-scope rule for permission / question).
+    lastError: SlimSessionLastError?,
     // §1C-FIX-⑧: scheme E.4 metadata (host / workdir / session /
     // tool / target) for the Permission card. Caller-sourced
     // (ChatScaffold reads from host.hostProfiles + session
@@ -190,6 +278,7 @@ internal fun BoxScope.StatusSlot(
     val priority = StatusSlotPriority.pick(
         permission = permission,
         question = question,
+        lastError = lastError,
         sessionStatus = sessionStatus,
         isCompacting = isCompacting,
         isRunning = currentActivityText != null,
@@ -202,11 +291,17 @@ internal fun BoxScope.StatusSlot(
     // outer parameter that has since recomposed to null. (AnimatedContent shares
     // one content lambda across entering+exiting children and re-invokes it with
     // the latest closure — so branches MUST read from `active`, not outer scope.)
+    //
+    // §T17: LastError carries the same data-capture pattern — an exiting
+    // LastError→None frame (sidecar clears the error) reads `active.error`
+    // instead of the recomposed-to-null outer `lastError` param.
     val content: StatusSlotContent = when (priority) {
         StatusSlotPriority.Permission ->
             permission?.let { StatusSlotContent.Permission(it) } ?: StatusSlotContent.None
         StatusSlotPriority.Question ->
             question?.let { StatusSlotContent.Question(it) } ?: StatusSlotContent.None
+        StatusSlotPriority.LastError ->
+            lastError?.let { StatusSlotContent.LastError(it) } ?: StatusSlotContent.None
         StatusSlotPriority.Retry -> StatusSlotContent.Retry
         StatusSlotPriority.Compacting -> StatusSlotContent.Compacting
         StatusSlotPriority.Running -> StatusSlotContent.Running
@@ -299,6 +394,17 @@ internal fun BoxScope.StatusSlot(
                     )
                 }
             }
+            is StatusSlotContent.LastError -> {
+                // §T17 slimapi v1 §6.1: durable upstream-error banner. Read
+                // `active.error` (the value captured when LastError became
+                // active) so the exiting branch during LastError→None (sidecar
+                // clears the error) still has the non-null payload — same
+                // stale-closure fix as Question / Permission. The banner is a
+                // STATUS SLOT, not a full-screen error page: lead with the
+                // machine-readable error code (`name`, monospace) + an optional
+                // server-scrubbed `message` subtitle.
+                SessionErrorBanner(error = active.error)
+            }
             StatusSlotContent.Retry -> {
                 // status != null when isRetry is true (see pick()). SessionRetryCard
                 // is a BoxScope-receiver composable; resolves to this composable's
@@ -337,6 +443,98 @@ internal fun BoxScope.StatusSlot(
             StatusSlotContent.None -> {
                 // No surface — render nothing. The AnimatedContent keeps a stable
                 // slot during enter/exit animation.
+            }
+        }
+    }
+}
+
+// ── §T17 slimapi v1 §6.1: LastError banner primitives ──────────────────────
+
+/**
+ * T17: title shown in the LastError banner. Leads with the machine-readable
+ * error code (`SlimSessionLastError.name`) — the sidecar's stable identifier
+ * the user can match against logs / docs. Rendered in monospace (BundledMonoFamily)
+ * inside [SessionErrorBanner] so it visually separates from the human-readable
+ * subtitle below.
+ *
+ * Pure (no Compose) so the contract is JVM-unit-testable without a Compose
+ * harness — see `LastErrorBannerTextTest`.
+ */
+internal fun lastErrorBannerTitle(error: SlimSessionLastError): String = error.name
+
+/**
+ * T17: subtitle shown under the LastError banner title. Returns the trimmed
+ * `SlimSessionLastError.message` (server-scrubbed per the v1 §2 contract —
+ * the client renders it verbatim, no further redaction) truncated to keep the
+ * banner a STATUS SLOT, not a full-screen error page.
+ *
+ * Returns `null` when the sidecar sent no message (the title alone is enough)
+ * OR the message is blank after trimming — the banner collapses to a single
+ * line and the subtitle row is omitted entirely. Pure for testability.
+ *
+ * @param maxChars soft cap on the rendered length. Default 120 ≈ two lines of
+ *   `bodySmall` at the chat width; longer messages end with an ellipsis
+ *   imposed by the Text's `maxLines = 2 + TextOverflow.Ellipsis`.
+ */
+internal fun lastErrorBannerSubtitle(
+    error: SlimSessionLastError,
+    maxChars: Int = 120,
+): String? = error.message
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+    ?.take(maxChars)
+
+/**
+ * T17: compact error banner for the LastError priority tier. Mirrors the
+ * visual language of [SessionRetryCard] + [ErrorCard] (`errorContainer` /
+ * `onErrorContainer` so a session error reads as a degraded state rather
+ * than a destructive confirmation). The title leads with the error code in
+ * monospace; the subtitle (if any) is the server-scrubbed message.
+ *
+ * Minimal acceptable styling — the @designer pass may tune color / spacing /
+ * typography. The structural contract (title-from-name, subtitle-from-message,
+ * banner absent when [lastErrorBannerSubtitle] returns null) is the T17 gate.
+ */
+@Composable
+private fun SessionErrorBanner(error: SlimSessionLastError) {
+    val onErrorContainer = MaterialTheme.colorScheme.onErrorContainer
+    val errorLabel = stringResource(R.string.chat_session_error_label)
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        shape = MaterialTheme.shapes.medium,
+        tonalElevation = 2.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.ErrorOutline,
+                contentDescription = errorLabel,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.error,
+            )
+            Column {
+                Text(
+                    text = lastErrorBannerTitle(error),
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = BundledMonoFamily,
+                        fontWeight = FontWeight.Medium,
+                    ),
+                    color = onErrorContainer,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                lastErrorBannerSubtitle(error)?.let { subtitle ->
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = onErrorContainer.copy(alpha = 0.8f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
     }

@@ -1112,15 +1112,14 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // mockk: when multiple stubs match a call, the LAST registered wins.
         // Register the generic fallback FIRST so the specific stubs below
         // override it (otherwise `any()` would shadow both specific matchers).
-        coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), any(), any()) } returns
             Result.success(MessagesPage(aLatest, "cursor-1"))
         // Initial open uses before=null.
-        coEvery { repository.getMessagesPaged("session-A", any(), null) } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), null, any()) } returns
             Result.success(MessagesPage(aLatest, "cursor-1"))
-        // loadMore uses before="cursor-1" and returns the older page (no next).
-        coEvery { repository.getMessagesPaged("session-A", any(), "cursor-1") } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), "cursor-1", any()) } returns
             Result.success(MessagesPage(aOlder, null))
-        coEvery { repository.getMessagesPaged("session-B", any(), any()) } returns
+        coEvery { repository.getMessagesPaged("session-B", any(), any(), any()) } returns
             Result.success(MessagesPage(emptyList(), null))
 
         val core = createCore()
@@ -1416,7 +1415,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // even if the corresponding message.updated event missed the local
         // view. The overlay-clear in launchLoadMessages is gated on !busy, so
         // this reload does NOT disrupt any in-flight streaming overlay.
-        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns
+        coEvery { repository.getMessagesPaged("session-1", any(), any(), any()) } returns
             Result.success(MessagesPage(emptyList(), null))
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -1452,7 +1451,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         assertNotNull(status)
         assertTrue(status!!.isBusy)
         // ...and a reload was issued for the current session.
-        coVerify(atLeast = 1) { repository.getMessagesPaged("session-1", any(), any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPaged("session-1", any(), any(), any()) }
 
         // (b) A busy transition on a NON-current session only updates the
         // status badge — it must NOT trigger a reload (the user is not viewing
@@ -1489,7 +1488,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val statusOther = sessionVM2.sessionListFlow.value.sessionStatuses["session-other"]
         assertNotNull(statusOther)
         assertTrue(statusOther!!.isBusy)
-        coVerify(exactly = 0) { repository.getMessagesPaged("session-other", any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged("session-other", any(), any(), any()) }
     }
 
     @Test

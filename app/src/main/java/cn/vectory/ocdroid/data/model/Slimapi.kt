@@ -130,4 +130,17 @@ data class SlimSessionDigest(
     val updatedAt: Long? = null,
     val archived: Long? = null,
     val deleted: Boolean? = null,
+    /**
+     * Task 1 (slimapi v1 §2 / §6.1) — three-state upstream-error field.
+     * See [LastErrorField] + [LastErrorFieldSerializer] for the full
+     * contract: ABSENT key → [LastErrorField.Omitted] (reducer preserves
+     * prior banner, the default here); present-null →
+     * [LastErrorField.Cleared]; present-object →
+     * [LastErrorField.Set]. The custom serializer is invoked by
+     * kotlinx ONLY when the key is present, which is what makes the
+     * absent-vs-present-null distinction possible under the project's
+     * `explicitNulls=false` Json config.
+     */
+    @Serializable(with = LastErrorFieldSerializer::class)
+    val lastError: LastErrorField = LastErrorField.Omitted,
 )

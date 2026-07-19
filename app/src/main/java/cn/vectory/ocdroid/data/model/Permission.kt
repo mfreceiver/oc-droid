@@ -12,6 +12,7 @@ data class PermissionRequest(
     val metadata: Metadata? = null,
     val always: List<String>? = null,
     val tool: ToolRef? = null,
+    val directory: String? = null,
     /**
      * Slimapi HMAC the sidecar validates on the permission response POST
      * (~1h TTL). Present only when the permission arrived via slim SSE /

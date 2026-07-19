@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.controller.HostProfileController
 import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
@@ -9,7 +10,51 @@ import cn.vectory.ocdroid.util.certSubjectOrNull
 import cn.vectory.ocdroid.util.loadClientP12OrNull
 import cn.vectory.ocdroid.util.parseCaCertOrNull
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import javax.inject.Inject
+
+/**
+ * C-D3 rev-3 round-7 (review I5-R7): the lifecycle state of an active
+ * [HostViewModel.saveHostProfile] transaction. Owned by [HostViewModel] so
+ * the save outlives the screen (a reconfigure transaction, once begun,
+ * MUST complete — abandoning it mid-flight leaves the host
+ * half-reconfigured). The screen observes via [HostViewModel.saveState] and
+ * guards completion by [Done.profileId] (a stale completion from a dismissed
+ * editor must not close a newer editor showing a different profile).
+ *
+ * Lifecycle:
+ *  - [Idle] — no save in flight; initial state.
+ *  - [Saving] — `viewModelScope.launch` running the boundary transaction;
+ *    double-submit is ignored (single-flight — see [HostViewModel.saveHostProfile]).
+ *  - [Done] — the launch finished (success OR failure). The screen handles
+ *    it (close on success + profileId match, error text on failure) and
+ *    calls [HostViewModel.consumeSaveState] to return to [Idle]. A later
+ *    retry is accepted because [Saving] is no longer current.
+ */
+sealed interface HostProfileSaveState {
+    /** No active save. */
+    object Idle : HostProfileSaveState
+
+    /**
+     * A save transaction is running in `viewModelScope`. [profileId] is the
+     * profile being saved — the screen's `LaunchedEffect(saveState)` uses
+     * it on completion to gate the close (only close if still editing the
+     * SAME profile).
+     */
+    data class Saving(val profileId: String) : HostProfileSaveState
+
+    /**
+     * The save launch finished. [result] is the [Result] from
+     * [HostProfileController.saveHostProfile] — `isSuccess` → close dialog;
+     * `isFailure` → surface error, keep dialog open. The screen MUST
+     * [HostViewModel.consumeSaveState] after handling so a later retry is
+     * accepted (state returns to [Idle]).
+     */
+    data class Done(val profileId: String, val result: Result<Unit>) : HostProfileSaveState
+}
 
 /**
  * R-17 batch3 → batch3d: Host-profile-domain ViewModel. Owns the host slice
@@ -50,6 +95,35 @@ class HostViewModel @Inject constructor(
     val connectionFlow get() = store.connectionFlow
     val settingsFlow get() = store.settingsFlow
 
+    /**
+     * C-D3 rev-3 round-7 (review I5-R7): the save transaction's lifecycle
+     * state. Owned by THIS VM (viewModelScope) so the save outlives the
+     * screen — a reconfigure transaction, once begun (identity invalidated
+     * + slim ticket started + barrier mutex acquired), MUST complete;
+     * abandoning it mid-flight leaves the host half-reconfigured. The
+     * screen-level scope was removed; this VM scope is the new owner.
+     */
+    private val _saveState = MutableStateFlow<HostProfileSaveState>(HostProfileSaveState.Idle)
+    val saveState: StateFlow<HostProfileSaveState> = _saveState.asStateFlow()
+
+    /**
+     * C-D3 rev-3 round-7 (review I5-R7): non-suspend save launcher. Owns
+     * execution in `viewModelScope` (Main dispatcher by default + survives
+     * screen navigation). The screen's Save button calls this directly; the
+     * result is observed via [saveState] + [HostProfileSaveState.Done].
+     *
+     * **Single-flight**: while [HostProfileSaveState.Saving] is current, a
+     * new call is IGNORED — a reconfigure transaction must finish once
+     * begun, so we do NOT cancel/restart the in-flight job. After
+     * [HostProfileSaveState.Done] (success or failure), the launch is no
+     * longer active so retry works (the screen calls [consumeSaveState]
+     * after handling Done to return to [HostProfileSaveState.Idle]).
+     *
+     * The controller's [HostProfileController.saveHostProfile] is suspend +
+     * `Result<Unit>`; [runSuspendCatching][cn.vectory.ocdroid.util.runSuspendCatching]
+     * rethrows `CancellationException` so viewModelScope cancellation (e.g.
+     * VM clear) propagates cleanly.
+     */
     fun saveHostProfile(
         profile: HostProfile,
         basicAuthPassword: String = "",
@@ -60,10 +134,33 @@ class HostViewModel @Inject constructor(
         // Dialog 路径构造 Update / Disable；其它调用方默认 Unchanged 不破坏。
         clientCertEdit: ClientCertEditIntent = ClientCertEditIntent.Unchanged,
     ) {
-        hostProfileController.saveHostProfile(
-            profile, basicAuthPassword, basicAuthEdited, tunnelPassword, tunnelEdited,
-            clientCertEdit = clientCertEdit,
-        )
+        // Single-flight: do NOT cancel/restart an in-flight save. A reconfigure
+        // transaction must finish once begun; the second call is silently
+        // ignored. After Done, the job is no longer active → retry accepted.
+        if (_saveState.value is HostProfileSaveState.Saving) return
+        _saveState.value = HostProfileSaveState.Saving(profile.id)
+        viewModelScope.launch {
+            val result = hostProfileController.saveHostProfile(
+                profile, basicAuthPassword, basicAuthEdited, tunnelPassword, tunnelEdited,
+                clientCertEdit = clientCertEdit,
+            )
+            _saveState.value = HostProfileSaveState.Done(profile.id, result)
+        }
+    }
+
+    /**
+     * C-D3 rev-3 round-7: the screen calls this after handling
+     * [HostProfileSaveState.Done] so the state returns to
+     * [HostProfileSaveState.Idle] (a later retry is accepted). Idempotent —
+     * calling while Idle / Saving is a no-op.
+     */
+    fun consumeSaveState() {
+        // M1 (post-release polish): honor the KDoc idempotence contract — only
+        // Done is consumable. Calling while Saving would clobber the in-flight
+        // reconfigure transaction (orphaning it half-done); calling while Idle
+        // is already a no-op. Guard makes impl match the documented behavior.
+        if (_saveState.value !is HostProfileSaveState.Done) return
+        _saveState.value = HostProfileSaveState.Idle
     }
 
     fun selectHostProfile(profileId: String) {

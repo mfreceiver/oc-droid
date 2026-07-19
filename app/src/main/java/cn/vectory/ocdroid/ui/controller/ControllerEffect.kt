@@ -115,6 +115,29 @@ sealed class ControllerEffect {
         val parts: List<Part>,
     ) : ControllerEffect()
     /**
+     * T11 round-2 (oracle D1 — cache-coupled non-focus resync): write a
+     * non-focus RESYNC result into the in-memory `sessionWindowCache`
+     * owned by [SessionSwitcher]. Emitted by
+     * [SessionSyncCoordinator.applyReconcileResult] when a RESYNC
+     * reconcile produced items for a session that is NOT currently open
+     * (so a later switchTo finds them without a re-fetch). Cache
+     * eviction (via [EvictSession]) clears the corresponding
+     * `localApplied*` watermark via [OpenCodeRepository.clearSlimLocalMessages].
+     *
+     * Routed via the bus because `SessionSwitcher` is an `AppCore` member
+     * while `SessionSyncCoordinator` is Hilt-provided and does NOT hold a
+     * reference to it — same pattern as `AppendMessageToCache` /
+     * `ClearSessionWindowCache` / `EvictSession`. Handled by
+     * [cn.vectory.ocdroid.ui.AppCore.dispatchSessionEffect] →
+     * `SessionSwitcher.writeSessionWindow`.
+     */
+    data class WriteSessionWindow(
+        val serverGroupFp: String,
+        val sessionId: String,
+        val messages: List<Message>,
+        val partsByMessage: Map<String, List<Part>>,
+    ) : ControllerEffect()
+    /**
      * R-20 Phase 1: evict one cached session + its messages, scoped to
      * `(serverGroupFp, sessionId)`. Emitted by:
      *  - SessionMutationActions.launchSetSessionArchived (per subtree id)
@@ -179,4 +202,23 @@ sealed class ControllerEffect {
     data object ServerConnected : ControllerEffect()
     /** Full session-list refresh. */
     data object RefreshSessions : ControllerEffect()
+    /**
+     * T13 — request the [cn.vectory.ocdroid.service.streaming.ProcessStatusPoller]
+     * to schedule a bounded exponential + jitter backoff (max 30s) for
+     * the slim on-demand fan-out's next sweep. Emitted by
+     * [SessionSyncCoordinator.applySlimStatusFanOutSummary] when a slim
+     * fan-out sweep returned `retryableCount > 0` (503 / transport fault
+     * per §6 G2). Handled by AppCore → forwards to
+     * [cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.scheduleBackoff].
+     */
+    data object RequestPollerBackoff : ControllerEffect()
+
+    /**
+     * T13 — request the poller to RESET its slim fan-out backoff state
+     * to base. Emitted by [SessionSyncCoordinator.applySlimStatusFanOutSummary]
+     * when a slim fan-out sweep returned `retryableCount == 0` (success
+     * — T13-C4 "success resets"). Handled by AppCore → forwards to
+     * [cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.resetBackoff].
+     */
+    data object ResetPollerBackoff : ControllerEffect()
 }

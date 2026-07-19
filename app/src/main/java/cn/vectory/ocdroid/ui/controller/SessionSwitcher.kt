@@ -126,11 +126,32 @@ class SessionSwitcher(
      * (Dispatchers.Main.immediate). LinkedHashMap is not thread-safe but every
      * access here is on the main dispatcher. `accessOrder = true` makes both
      * `get` and `put` promote the entry to MRU (LRU semantics).
+     *
+     * T11 round-3 (oracle D1 part b): the LRU-eviction override calls back
+     * into [repository.invalidateSlimLocalApplied] for the evicted sid so
+     * the per-session slim SSE local-applied watermark is cleared — a
+     * later switchTo that re-opens the evicted session re-enters the
+     * bounded cursor drain façade ([fetchSlimInitialWindowBounded])
+     * instead of fetching an empty /since tail anchored on the (now-stale)
+     * watermark. Same callback as the explicit [EvictSession] effect path
+     * in AppCore; both reach [invalidateSlimLocalApplied].
      */
     private val sessionWindowCache: MutableMap<CacheWindowKey, CachedSessionWindow> =
         object : LinkedHashMap<CacheWindowKey, CachedSessionWindow>(16, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<CacheWindowKey, CachedSessionWindow>?): Boolean =
-                size > SESSION_WINDOW_CACHE_CAPACITY
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<CacheWindowKey, CachedSessionWindow>?): Boolean {
+                val shouldEvict = size > SESSION_WINDOW_CACHE_CAPACITY
+                if (shouldEvict && eldest != null) {
+                    // T11 round-3 (oracle D1 part b): invalidate the
+                    // local-applied watermark for the evicted sid. The
+                    // repository is on the SAME main dispatcher
+                    // (Dispatchers.Main.immediate) — the
+                    // [invalidateSlimLocalApplied] call acquires the
+                    // repo's [slimStateLock] for the atomic derive+write.
+                    // Noop when the session has no slim SSE state.
+                    repository.invalidateSlimLocalApplied(eldest.key.sessionId, repository.captureSlimCommitToken())
+                }
+                return shouldEvict
+            }
         }
 
     /** Test-only visibility into the cache size (for assertions). */
@@ -408,6 +429,11 @@ class SessionSwitcher(
                 partsByMessage = emptyMap(),
                 streamingPartTexts = emptyMap(),
                 streamingReasoningPart = null,
+                // §slimapi-client-v1 §G6 (Task 16 round-2): clear per-part
+                // expand states atomically with the transcript clear. Without
+                // this, switching while a request is in flight leaves old keys
+                // permanently Loading/Failed after the completion is dropped.
+                partExpandStates = emptyMap(),
                 staleNotice = false,
                 // §F3-load-more: 切换会话时显式重置 cursor/hasMore，保证 chat slice
                 // 始终内部一致（cursor=null ∧ hasMore=false），由随后的

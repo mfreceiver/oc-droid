@@ -193,6 +193,10 @@ internal fun ChatMessageList(
     val partsByMessage: Map<String, List<Part>> = chatState.partsByMessage
     val streamingPartTexts: Map<String, String> = chatState.streamingPartTexts
     val streamingReasoningPart: Part? = chatState.streamingReasoningPart
+    // §slimapi-client-v1 §G6 (Task 16): per-part expand state for the
+    // "展开省略内容" affordance. Read from the same chat slice as
+    // streamingPartTexts; passed through to MessageCard → MessageRow.
+    val partExpandStates: Map<PartKey, PartExpandState> = chatState.partExpandStates
     val isLoading: Boolean = chatState.isLoadingMessages
     // §history-load-fix: the load-more button's spinner binds to THIS flag (the
     // user-initiated loadMore indicator), NOT [isLoading] (the background reload
@@ -1072,6 +1076,13 @@ internal fun ChatMessageList(
                                 onCopy = { text -> onCopyMessage(message.id, text) },
                                 onEditAndRerun = onEditAndRerun,
                                 onFork = onFork,
+                                // §slimapi-client-v1 §G6 (Task 16): threaded through
+                                // to MessageRow for the "展开省略内容" affordance.
+                                partExpandStates = partExpandStates,
+                                onExpandParts = { parts ->
+                                    val sid = sessionId
+                                    if (sid != null) chatVM.expandParts(sid, parts)
+                                },
                             )
                         }
                     }

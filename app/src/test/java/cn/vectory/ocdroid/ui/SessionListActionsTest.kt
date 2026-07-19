@@ -18,6 +18,7 @@ import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -49,6 +50,7 @@ class SessionListActionsTest {
     private lateinit var scope: TestScope
     private lateinit var emitted: MutableList<UiEvent>
     private lateinit var emit: EventEmitter
+    private lateinit var effects: SharedEffectBus
 
     @Before
     fun setUp() {
@@ -69,6 +71,13 @@ class SessionListActionsTest {
         scope = TestScope(UnconfinedTestDispatcher())
         emitted = mutableListOf()
         emit = EventEmitter { event -> emitted.add(event) }
+        effects = SharedEffectBus()
+        // C-D3 token guards for slim standalone permission load.
+        every { repository.isSlimCommitTokenCurrent(any()) } returns true
+        every { repository.commitIfSlimTokenCurrent(any(), any()) } answers {
+            secondArg<() -> Unit>().invoke()
+            true
+        }
     }
 
     @After
@@ -1545,7 +1554,7 @@ class SessionListActionsTest {
         )
         coEvery { repository.getPendingPermissions() } returns Result.success(listOf(perm))
 
-        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        launchLoadPendingPermissions(scope, repository, slices, effects, "Tag")
         advanceUntilIdle()
 
         assertEquals(listOf(perm), slices.sessionList.value.pendingPermissions)
@@ -1555,7 +1564,7 @@ class SessionListActionsTest {
     fun `launchLoadPendingPermissions failure leaves slice untouched`() = runTest {
         coEvery { repository.getPendingPermissions() } returns Result.failure(IllegalStateException("x"))
 
-        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        launchLoadPendingPermissions(scope, repository, slices, effects, "Tag")
         advanceUntilIdle()
 
         assertTrue(slices.sessionList.value.pendingPermissions.isEmpty())
@@ -1586,7 +1595,7 @@ class SessionListActionsTest {
         store.mutateSessionList { it.copy(pendingPermissions = listOf(existing)) }
         coEvery { repository.getPendingPermissions() } returns Result.success(listOf(fetched))
 
-        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        launchLoadPendingPermissions(scope, repository, slices, effects, "Tag")
         advanceUntilIdle()
 
         val merged = slices.sessionList.value.pendingPermissions
@@ -1604,7 +1613,7 @@ class SessionListActionsTest {
         store.mutateSessionList { it.copy(pendingPermissions = listOf(existing)) }
         coEvery { repository.getPendingPermissions() } returns Result.success(listOf(fetched))
 
-        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        launchLoadPendingPermissions(scope, repository, slices, effects, "Tag")
         advanceUntilIdle()
 
         val merged = slices.sessionList.value.pendingPermissions.single()
@@ -1630,7 +1639,7 @@ class SessionListActionsTest {
         store.mutateSessionList { it.copy(pendingPermissions = listOf(existing)) }
         coEvery { repository.getPendingPermissions() } returns Result.success(listOf(fetched))
 
-        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        launchLoadPendingPermissions(scope, repository, slices, effects, "Tag")
         advanceUntilIdle()
 
         val merged = slices.sessionList.value.pendingPermissions.single()
@@ -1650,7 +1659,7 @@ class SessionListActionsTest {
         store.mutateSessionList { it.copy(pendingPermissions = listOf(existing)) }
         coEvery { repository.getPendingPermissions() } returns Result.success(listOf(fetched))
 
-        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        launchLoadPendingPermissions(scope, repository, slices, effects, "Tag")
         advanceUntilIdle()
 
         val merged = slices.sessionList.value.pendingPermissions.associateBy { it.id }
@@ -1670,7 +1679,7 @@ class SessionListActionsTest {
         store.mutateSessionList { it.copy(pendingPermissions = listOf(existing)) }
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
 
-        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        launchLoadPendingPermissions(scope, repository, slices, effects, "Tag")
         advanceUntilIdle()
 
         val merged = slices.sessionList.value.pendingPermissions
@@ -1703,7 +1712,7 @@ class SessionListActionsTest {
             Result.success(emptyList())
         }
 
-        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        launchLoadPendingPermissions(scope, repository, slices, effects, "Tag")
         advanceUntilIdle()
 
         val merged = slices.sessionList.value.pendingPermissions
@@ -1742,7 +1751,7 @@ class SessionListActionsTest {
             Result.success(emptyList())  // REST no longer lists p1
         }
 
-        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        launchLoadPendingPermissions(scope, repository, slices, effects, "Tag")
         advanceUntilIdle()
 
         assertTrue(
@@ -1752,22 +1761,139 @@ class SessionListActionsTest {
     }
 
     @Test
-    fun `rev-grok fix1 - slim mode warns on final permission with null routeToken`() = runTest {
-        // §rev-grok fix1 defensive: in slim mode, a final pending permission
-        // with a null routeToken means the slim respond path cannot route
-        // correctly — surface via Log.w (no silent legacy fallback).
+    fun `rev-grok fix1 - slim mode writes via getSlimapiPermissions with null routeToken kept`() = runTest {
+        // Slim standalone path no longer uses getPendingPermissions + Log.w;
+        // it folds SlimAggregationOutcome via applyAggregationOutcome. A null
+        // routeToken is still written (no silent drop) so the UI can surface
+        // the unrouteable entry.
         every { repository.isSlimMode } returns true
-        val fetched = PermissionRequest(id = "p1", sessionId = "s1", permission = "edit", routeToken = null)
-        coEvery { repository.getPendingPermissions() } returns Result.success(listOf(fetched))
+        val entry = cn.vectory.ocdroid.data.model.SlimapiPermissionEntry(
+            id = "p1",
+            sessionId = "s1",
+            permission = "edit",
+            routeToken = null,
+        )
+        coEvery { repository.getSlimapiPermissions(any(), any()) } returns Result.success(
+            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = listOf(entry),
+                authoritativeDirectories = null,
+            ),
+        )
 
-        launchLoadPendingPermissions(scope, repository, slices, "Tag")
+        launchLoadPendingPermissions(scope, repository, slices, effects, "Tag")
         advanceUntilIdle()
 
-        // The permission is still written (no silent fallback / no drop).
         assertEquals(1, slices.sessionList.value.pendingPermissions.size)
-        // Log.w captured by the mockkStatic(Log::class) in setUp.
-        verify(atLeast = 1) {
-            Log.w(any<String>(), match<String> { it.contains("null routeToken") && it.contains("p1") })
+        assertEquals("p1", slices.sessionList.value.pendingPermissions.single().id)
+        assertNull(slices.sessionList.value.pendingPermissions.single().routeToken)
+        assertEquals(
+            SlimAggregationCompleteness.COMPLETE,
+            slices.sessionList.value.permissionAggregationSignal.completeness,
+        )
+    }
+
+    /**
+     * C-D3 v2 §4.5 permissions symmetry: real OpenCodeRepository +
+     * MockWebServer + configure() mid-flight. Host switch after
+     * /slimapi/permissions starts → B's pendingPermissions + signal
+     * must not be polluted by A's delayed response.
+     *
+     * Does NOT hand-force isSlimCommitTokenCurrent / commitIf false.
+     */
+    @Test
+    fun `CD3-v2 standalone p-load host switch drops stale commit`() = kotlinx.coroutines.runBlocking {
+        val server = okhttp3.mockwebserver.MockWebServer()
+        server.start()
+        val realScope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob(),
+        )
+        try {
+            val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+            val baseUrl = server.url("/").toString().trimEnd('/')
+            realRepo.configure(baseUrl = baseUrl, slim = true)
+
+            val bSeed = PermissionRequest(
+                id = "p-b-seed",
+                sessionId = "s-b",
+                permission = "edit",
+                directory = "/b",
+                routeToken = "rt-b",
+            )
+            slices.mutateSessionList {
+                it.copy(
+                    pendingPermissions = listOf(bSeed),
+                    permissionAggregationSignal = SlimAggregationSignal(
+                        completeness = SlimAggregationCompleteness.COMPLETE,
+                    ),
+                )
+            }
+
+            val body = """
+                {
+                  "items": [
+                    {
+                      "id": "p-a-stale",
+                      "sessionID": "s-a",
+                      "permission": "edit",
+                      "directory": "/a",
+                      "routeToken": "rt-stale"
+                    }
+                  ],
+                  "errors": []
+                }
+            """.trimIndent()
+            server.enqueue(
+                okhttp3.mockwebserver.MockResponse()
+                    .setResponseCode(200)
+                    .setBody(body)
+                    .setHeader("Content-Type", "application/json")
+                    .setBodyDelay(400, java.util.concurrent.TimeUnit.MILLISECONDS),
+            )
+
+            val recorded = mutableListOf<UiEvent>()
+            val collector = realScope.launch {
+                effects.uiEventsConsumed.collect { recorded.add(it) }
+            }
+
+            launchLoadPendingPermissions(
+                scope = realScope,
+                repository = realRepo,
+                slices = slices,
+                effects = effects,
+                tag = "Tag",
+            )
+
+            val started = server.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS)
+            assertNotNull("permissions request must start under A", started)
+            assertTrue(
+                "path must be slim permissions: ${started!!.path}",
+                started.path!!.startsWith("/slimapi/permissions"),
+            )
+
+            // C-D3 rev-3: beginSlimReconfigure before configure (purge window).
+            realRepo.beginSlimReconfigure()
+            realRepo.configure(baseUrl = baseUrl, slim = true)
+
+            kotlinx.coroutines.delay(800)
+            collector.cancel()
+
+            assertEquals(
+                "B seed must be unchanged after stale A response",
+                listOf(bSeed),
+                slices.sessionList.value.pendingPermissions,
+            )
+            assertEquals(
+                SlimAggregationCompleteness.COMPLETE,
+                slices.sessionList.value.permissionAggregationSignal.completeness,
+            )
+            assertTrue(
+                "no p-a-stale write under B",
+                slices.sessionList.value.pendingPermissions.none { it.id == "p-a-stale" },
+            )
+            assertTrue("no UiEvent from stale A aggregation", recorded.isEmpty())
+        } finally {
+            realScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+            server.shutdown()
         }
     }
 

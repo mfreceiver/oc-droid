@@ -10,6 +10,7 @@ import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.RevertCutoff
 import cn.vectory.ocdroid.data.model.RevertCutoffState
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.ui.controller.SeedFixture
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -1675,5 +1676,171 @@ class AppActionReducerTest {
         assertFalse("cur removed from unread", "cur" in out.unread.unreadSessions)
         assertFalse("child removed from unread", "child" in out.unread.unreadSessions)
         assertTrue("all subtree questions removed", out.sessionList.pendingQuestions.isEmpty())
+    }
+
+    // ── §final-gate I-3: sessionErrorsById lifecycle cleanup ───────────────
+    //
+    // The final whole-branch review (review-final-rev-gpt-20260719081038.md
+    // hand-off #2 / Important #3) identified that T12's
+    // `SessionListState.sessionErrorsById` was only cleared when the sidecar
+    // sent `lastError = Cleared`. Three lifecycle gaps allowed stale
+    // sid→error entries to survive:
+    //   1. `HostStatePurged` (cross-group) cleared sessions/status/q/p but
+    //      NOT sessionErrorsById → old host's sid→error persisted across
+    //      host switch; if the new host had the same sid, T17 rendered the
+    //      old host's banner.
+    //   2. `SessionArchived` did NOT remove archived subtree entries.
+    //   3. Session delete (in SessionMutationActions.launchDeleteSession)
+    //      did NOT remove deleted sid entries.
+    //
+    // The fix mirrors T16 round-3's `clearSessionData` partExpandStates
+    // clearing: atomic, in the same committed state as the lifecycle event,
+    // using the existing immutable `.copy()` style. The three tests below
+    // pin each cleanup so a regression (re-introducing the leak) fails
+    // the test. Each test seeds TWO sid entries and asserts the untouched
+    // one survives — this discriminates "cleanup ran" from "whole-slice
+    // accidentally wiped" and proves sid-scoped precision.
+
+    @Test
+    fun `final-gate I-3 - HostStatePurged cross-group clears sessionErrorsById`() {
+        // Lifecycle gap #1: cross-group host purge MUST drop the entire
+        // sessionErrorsById map. Pre-fix the map survived a cross-host
+        // switch, so an old host's sid→error leaked into the new host. If
+        // the new host surfaced a session with the same sid (e.g. a common
+        // short id), T17's StatusSlot would render the prior host's banner.
+        //
+        // Discrimination: seeds {sid1→err, sid2→err}; asserts the result's
+        // sessionErrorsById is `emptyMap()`. Fails if the cleanup line is
+        // removed (the map survives) OR if the reducer is changed to
+        // preserve the map cross-group.
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                sessions = listOf(Session(id = "sid1", directory = "/p")),
+                openSessionIds = listOf("sid1"),
+                sessionErrorsById = mapOf(
+                    "sid1" to SlimSessionLastError(name = "upstream_error", message = "old host err 1"),
+                    "sid2" to SlimSessionLastError(name = "session_not_found", message = "old host err 2"),
+                ),
+            ),
+        )
+
+        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+
+        assertTrue(
+            "cross-group HostStatePurged must clear sessionErrorsById (pre-fix leaked old host errors)",
+            out.sessionList.sessionErrorsById.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `I2-v2 HostStatePurged cross-group resets aggregation signals`() {
+        // I-2 v2 §3.3: cross-group purge MUST reset question/permission
+        // aggregation signals so a stale FAILED/INCOMPLETE from host A
+        // cannot surface on host B.
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                questionAggregationSignal = SlimAggregationSignal(
+                    completeness = SlimAggregationCompleteness.FAILED,
+                    failureMessage = "HTTP 503",
+                ),
+                permissionAggregationSignal = SlimAggregationSignal(
+                    completeness = SlimAggregationCompleteness.INCOMPLETE,
+                    failedSources = listOf(
+                        SlimAggregationFailedSource(directory = "/a", code = "timeout"),
+                    ),
+                ),
+            ),
+        )
+
+        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+
+        assertEquals(
+            SlimAggregationCompleteness.COMPLETE,
+            out.sessionList.questionAggregationSignal.completeness,
+        )
+        assertNull(out.sessionList.questionAggregationSignal.failureMessage)
+        assertEquals(
+            SlimAggregationCompleteness.COMPLETE,
+            out.sessionList.permissionAggregationSignal.completeness,
+        )
+        assertTrue(out.sessionList.permissionAggregationSignal.failedSources.isEmpty())
+    }
+
+    @Test
+    fun `final-gate I-3 - HostStatePurged same-group preserves sessionErrorsById`() {
+        // Symmetric boundary: a SAME-group switch preserves server-identical
+        // data (the server is the same, so the sid→error mapping is still
+        // authoritative). Only cross-group purges drop the map. This test
+        // pins that the cleanup is correctly scoped to cross-group only —
+        // a future "always clear" regression would fail it.
+        val errors = mapOf(
+            "sid1" to SlimSessionLastError(name = "upstream_error", message = "live err"),
+        )
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                sessions = listOf(Session(id = "sid1", directory = "/p")),
+                openSessionIds = listOf("sid1"),
+                sessionErrorsById = errors,
+            ),
+        )
+
+        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
+
+        assertEquals(
+            "same-group HostStatePurged MUST preserve sessionErrorsById (server-identical data)",
+            errors,
+            out.sessionList.sessionErrorsById,
+        )
+    }
+
+    @Test
+    fun `final-gate I-3 - SessionArchived removes archived subtree from sessionErrorsById`() {
+        // Lifecycle gap #2: archiving a session MUST remove its sid (and the
+        // sids of its subtree — defensive against a server that only emits
+        // the root archive event) from sessionErrorsById. Pre-fix archived
+        // sids stayed forever, producing unbounded retention + stale banners
+        // if the user later un-archived or the id was reused.
+        //
+        // Discrimination: seeds {root→err, child→err, unrelated→err}; archives
+        // root (whose subtree is {root, child}); asserts root+child removed
+        // AND unrelated preserved. Fails if the cleanup line is missing
+        // (all three survive) OR if the cleanup is over-eager (unrelated
+        // also dropped).
+        val archivedRoot = Session(id = "root", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                sessions = listOf(
+                    Session(id = "root", directory = "/p"),
+                    Session(id = "child", directory = "/p", parentId = "root"),
+                    Session(id = "unrelated", directory = "/p"),
+                ),
+                openSessionIds = listOf("root"),
+                sessionErrorsById = mapOf(
+                    "root" to SlimSessionLastError(name = "upstream_error", message = "root err"),
+                    "child" to SlimSessionLastError(name = "upstream_error", message = "child err"),
+                    "unrelated" to SlimSessionLastError(name = "session_not_found", message = "unrelated err"),
+                ),
+            ),
+        )
+
+        val out = reduce(prior, AppAction.SessionArchived(archivedRoot, openSessionIds = emptyList()))
+
+        assertFalse(
+            "archived root removed from sessionErrorsById",
+            out.sessionList.sessionErrorsById.containsKey("root"),
+        )
+        assertFalse(
+            "archived child (subtree, no own archive event) removed from sessionErrorsById",
+            out.sessionList.sessionErrorsById.containsKey("child"),
+        )
+        assertTrue(
+            "unrelated session's error preserved",
+            out.sessionList.sessionErrorsById.containsKey("unrelated"),
+        )
+        assertEquals(
+            "only the unrelated entry remains",
+            1,
+            out.sessionList.sessionErrorsById.size,
+        )
     }
 }

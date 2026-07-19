@@ -15,6 +15,7 @@ import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.service.status.StatusSnapshot
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
+import cn.vectory.ocdroid.util.DebugLog
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -29,9 +30,12 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
@@ -94,6 +98,9 @@ class ServiceSseConnectionOwnerResyncTest {
         aggregator = FakeAggregator()
         policy = TestRecoveryPolicy()
         resyncInvocations.set(0)
+        // T10: DebugLog is a process-singleton ring buffer; clear between
+        // tests so reason-log assertions only see THIS test's emissions.
+        DebugLog.clear()
 
         owner = ServiceSseConnectionOwner(
             scope = scope,
@@ -122,6 +129,22 @@ class ServiceSseConnectionOwnerResyncTest {
 
     private fun sseEvent(type: String): SSEEvent =
         SSEEvent(payload = SSEPayload(type = type))
+
+    /**
+     * T10 fixture: builds a `type=="resync"` frame carrying the given
+     * server `reason` value (or no `reason` key when [reason] is null).
+     * The shape mirrors the oc-slimapi sidecar's `event: resync` frame —
+     * `data:` carries the WHOLE properties object (see SSEClient's B1 fix
+     * path), so `reason` lives directly in `payload.properties`.
+     */
+    private fun sseResyncEvent(reason: String?): SSEEvent {
+        val props: JsonObject = if (reason == null) {
+            JsonObject(emptyMap())
+        } else {
+            JsonObject(mapOf("reason" to JsonPrimitive(reason)))
+        }
+        return SSEEvent(payload = SSEPayload(type = "resync", properties = props))
+    }
 
     private fun stubFeed(feed: MutableSharedFlow<Result<SSEEvent>>) {
         every { repository.connectSSE(any()) } returns feed.asSharedFlow()
@@ -551,6 +574,209 @@ class ServiceSseConnectionOwnerResyncTest {
         // Smoke: default construction does not throw; production wiring
         // (SessionStreamingService) always passes a non-empty onResync.
         assertNotNull("default owner constructs", defaultOwner)
+    }
+
+    // ── T10 (slimapi v1 §3): resync `reason` sub-field parsing ────────────
+    //
+    // The v1 contract §3 says every `resync` SSE frame carries a `reason`
+    // field INSIDE the payload (one of `reconnect_no_replay` /
+    // `subscriber_backpressure` / `implicit`). The OWNER's catch-up action
+    // is identical regardless of reason (cold-start / rebuild session list);
+    // reason exists purely for telemetry + future backoff tuning. These
+    // tests pin two T10 invariants:
+    //  - **T10-C2/C3**: all 3 defined reasons + an unknown string + a
+    //    missing/null field ALL reuse the existing `scheduleResync(reason,
+    //    generation)` path (signature UNCHANGED) and ALL fire `onResync`.
+    //    No control flow branches on the reason value.
+    //  - **T10-C1**: the reason is parsed via `JsonPrimitive.content`
+    //    (NOT `as? String`, which would always miss — JsonPrimitive is not
+    //    a String) and the typed [SlimapiResyncReason] is logged.
+
+    private fun connectAndFireFirstFrame(feed: MutableSharedFlow<Result<SSEEvent>>) {
+        scope.launch { owner.connect(bindIdentity()) }
+        runPending()
+        feed.tryEmit(Result.success(sseEvent("server.connected")))
+        runPending()
+        assertEquals("baseline: first-frame cold-start fired exactly once", 1, resyncInvocations.get())
+    }
+
+    @Test
+    fun `resync reason = reconnect_no_replay triggers onResync (T10-C3)`() = runTest {
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        stubFeed(feed)
+        aggregator.nextState = GlobalBusyState.Busy
+        connectAndFireFirstFrame(feed)
+
+        feed.tryEmit(Result.success(sseResyncEvent("reconnect_no_replay")))
+        runPending()
+
+        assertEquals(
+            "explicit resync with reason=reconnect_no_replay MUST trigger onResync " +
+                "(action is identical regardless of reason)",
+            2,
+            resyncInvocations.get(),
+        )
+    }
+
+    @Test
+    fun `resync reason = subscriber_backpressure triggers onResync (T10-C3)`() = runTest {
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        stubFeed(feed)
+        aggregator.nextState = GlobalBusyState.Busy
+        connectAndFireFirstFrame(feed)
+
+        feed.tryEmit(Result.success(sseResyncEvent("subscriber_backpressure")))
+        runPending()
+
+        assertEquals(
+            "explicit resync with reason=subscriber_backpressure MUST trigger onResync " +
+                "(action is identical regardless of reason)",
+            2,
+            resyncInvocations.get(),
+        )
+    }
+
+    @Test
+    fun `resync reason = implicit triggers onResync (T10-C3)`() = runTest {
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        stubFeed(feed)
+        aggregator.nextState = GlobalBusyState.Busy
+        connectAndFireFirstFrame(feed)
+
+        feed.tryEmit(Result.success(sseResyncEvent("implicit")))
+        runPending()
+
+        assertEquals(
+            "explicit resync with reason=implicit MUST trigger onResync " +
+                "(action is identical regardless of reason)",
+            2,
+            resyncInvocations.get(),
+        )
+    }
+
+    @Test
+    fun `resync with UNKNOWN reason string still triggers onResync (T10-C2 unknown)`() = runTest {
+        // Forward-compat: the sidecar may ship a new reason value before the
+        // client's enum catches up. `SlimapiResyncReason.fromRaw` returns null
+        // for unknown wire values, but the catch-up MUST still fire — the
+        // reason is observability, not a gate.
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        stubFeed(feed)
+        aggregator.nextState = GlobalBusyState.Busy
+        connectAndFireFirstFrame(feed)
+
+        feed.tryEmit(Result.success(sseResyncEvent("some-future-reason-v2")))
+        runPending()
+
+        assertEquals(
+            "explicit resync with UNKNOWN reason MUST still trigger onResync " +
+                "(forward-compat: reason is observability, not a gate)",
+            2,
+            resyncInvocations.get(),
+        )
+    }
+
+    @Test
+    fun `resync with NULL reason field still triggers onResync (T10-C2 null)`() = runTest {
+        // Tolerates `properties.reason` being absent (e.g. a frame where the
+        // sidecar omitted the field) AND `properties` itself being null
+        // (the existing `sseEvent("resync")` helper builds `SSEPayload` with
+        // default null `properties`). Both MUST trigger onResync.
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        stubFeed(feed)
+        aggregator.nextState = GlobalBusyState.Busy
+        connectAndFireFirstFrame(feed)
+
+        // Sub-case A: properties present but `reason` key absent.
+        feed.tryEmit(Result.success(sseResyncEvent(reason = null)))
+        runPending()
+        assertEquals(
+            "resync with properties but missing `reason` key MUST trigger onResync",
+            2,
+            resyncInvocations.get(),
+        )
+
+        // Sub-case B: `properties` itself null (default-constructed payload).
+        feed.tryEmit(Result.success(sseEvent("resync")))
+        runPending()
+        assertEquals(
+            "resync with null properties (no reason field at all) MUST trigger onResync",
+            3,
+            resyncInvocations.get(),
+        )
+    }
+
+    @Test
+    fun `resync reason is parsed via JsonPrimitive content and logged via SlimapiResyncReason fromRaw (T10-C1)`() = runTest {
+        // T10-C1: the `reason` sub-field lives in `payload.properties` as a
+        // JsonPrimitive; the owner MUST extract its value via `.content`
+        // (NOT `as? String` — JsonPrimitive is not a String and that cast
+        // would always return null) and log the typed enum via
+        // `SlimapiResyncReason.fromRaw`. This test pins the log emission so
+        // a regression that drops parsing (or reverts to `as? String`) is
+        // caught: the typed enum name and the raw wire value MUST appear in
+        // the in-memory debug ring buffer for downstream observability.
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        stubFeed(feed)
+        aggregator.nextState = GlobalBusyState.Busy
+        connectAndFireFirstFrame(feed)
+        DebugLog.clear()
+
+        feed.tryEmit(Result.success(sseResyncEvent("reconnect_no_replay")))
+        runPending()
+
+        val resyncReasonLogs = DebugLog.entries.value.filter {
+            it.tag == "ServiceSseOwner" && it.message.contains("slim resync reason")
+        }
+        assertTrue(
+            "resync reason MUST be logged via DebugLog (T10-C1). " +
+                "Matching entries: $resyncReasonLogs",
+            resyncReasonLogs.isNotEmpty(),
+        )
+        val firstMsg = resyncReasonLogs.first().message
+        assertTrue(
+            "raw wire value `reconnect_no_replay` MUST appear in log (proves JsonPrimitive.content " +
+                "was used, NOT `as? String` which would miss). Got: $firstMsg",
+            firstMsg.contains("reconnect_no_replay"),
+        )
+        assertTrue(
+            "typed SlimapiResyncReason.RECONNECT_NO_REPLAY enum name MUST appear in log " +
+                "(proves SlimapiResyncReason.fromRaw was invoked). Got: $firstMsg",
+            firstMsg.contains("RECONNECT_NO_REPLAY"),
+        )
+    }
+
+    @Test
+    fun `resync UNKNOWN reason logs null typed reason but still records raw wire value (T10-C1 forward-compat)`() = runTest {
+        // Companion to the test above: when the wire value is unknown, the
+        // typed enum is null but the raw string is still logged — this is
+        // how a future unmapped reason shows up in the in-app log viewer so
+        // the user can self-diagnose a sidecar upgrade.
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        stubFeed(feed)
+        aggregator.nextState = GlobalBusyState.Busy
+        connectAndFireFirstFrame(feed)
+        DebugLog.clear()
+
+        feed.tryEmit(Result.success(sseResyncEvent("some-future-reason-v2")))
+        runPending()
+
+        val resyncReasonLogs = DebugLog.entries.value.filter {
+            it.tag == "ServiceSseOwner" && it.message.contains("slim resync reason")
+        }
+        assertTrue(
+            "unknown reason MUST still be logged for observability. Matching: $resyncReasonLogs",
+            resyncReasonLogs.isNotEmpty(),
+        )
+        val firstMsg = resyncReasonLogs.first().message
+        assertTrue(
+            "raw unknown wire value MUST appear in log. Got: $firstMsg",
+            firstMsg.contains("some-future-reason-v2"),
+        )
+        assertTrue(
+            "typed reason MUST be null for unknown wire value (fromRaw returned null). Got: $firstMsg",
+            firstMsg.contains("typed=null"),
+        )
     }
 
     // ── Helper fakes (mirror ServiceSseConnectionOwnerTest) ────────────────

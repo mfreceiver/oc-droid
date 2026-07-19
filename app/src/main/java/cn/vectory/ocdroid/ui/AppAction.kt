@@ -307,10 +307,22 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
         // ids that had a stale pendingScrollRequest targeting them or a
         // parentReturnCheckpoints entry keyed by them).
         val newChatCleaned = newChat.cleanScrollStateForSubtree(subtree)
+        // §final-gate I-3 (review-final-rev-gpt-20260719081038 §2): prune the
+        // archived subtree's entries from sessionErrorsById atomically in the
+        // same committed state as the archive. Pre-fix the archived sid's
+        // lastError survived forever (T12 only removes entries on explicit
+        // `lastError = Cleared`), producing unbounded retention + a stale
+        // banner if the user later un-archives or the server reuses the id.
+        // The subtree scope mirrors the unread / pendingQuestions cleanup
+        // (defensive against a server that only emits the root archive event
+        // — descendants that did NOT get their own session.updated still get
+        // pruned here). T12's set/remove producer logic is unchanged.
+        val cleanedSessionErrors = state.sessionList.sessionErrorsById.filterKeys { it !in subtree }
         state.copy(
             sessionList = newSessionList.copy(
                 pendingQuestions = cleanedQuestions,
                 activeSessionIds = newSessionList.activeSessionIds - subtree,
+                sessionErrorsById = cleanedSessionErrors,
             ),
             chat = newChatCleaned,
             unread = newUnread,
@@ -363,6 +375,22 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
                     // and would ghost into the new host's list.
                     pendingCreateIds = emptySet(),
                     pendingCreatedAt = emptyMap(),
+                    // §final-gate I-3 (review-final-rev-gpt-20260719081038 §2):
+                    // cross-group purge must drop the entire sessionErrorsById
+                    // map — entries reference the prior host's sessions and a
+                    // root-id collision on the new host would let T17 render
+                    // the prior host's banner. Mirrors the cross-group reset
+                    // of sessionStatuses / pendingPermissions / pendingQuestions
+                    // above (T12's set/remove logic is unchanged — this is a
+                    // lifecycle cleanup, not a producer-path change).
+                    sessionErrorsById = emptyMap(),
+                    // I-2 v2 §3.3: cross-group purge MUST reset the
+                    // aggregation signals — they reference the prior host's
+                    // aggregation state and a stale "FAILED" would otherwise
+                    // surface on the new host. Defaults to COMPLETE (no signal).
+                    // Tied to I-3's sessionErrorsById cleanup (same lifecycle).
+                    questionAggregationSignal = SlimAggregationSignal(),
+                    permissionAggregationSignal = SlimAggregationSignal(),
                     // §fix-close-all-residual: re-arm the cold-start
                     // auto-select for the new host — its first load should
                     // land the user on a session just like a fresh launch.
@@ -614,6 +642,9 @@ private fun ChatState.clearSessionData(): ChatState = copy(
     partsByMessage = emptyMap(),
     streamingPartTexts = emptyMap(),
     streamingReasoningPart = null,
+    // §slimapi-client-v1 §G6 (Task 16 round-2): clear per-part expand states
+    // on transcript clear (host purge, archive, draft materialize).
+    partExpandStates = emptyMap(),
     olderMessagesCursor = null,
     hasMoreMessages = false,
     isLoadingMessages = false,

@@ -172,6 +172,24 @@ class AppCore @Inject constructor(
      * them as [ControllerEffect.OnSseEvent] for SSC's identity-checked fold.
      */
     internal val sseEventBridge: SseEventBridge,
+    /**
+     * T13 (round-2 review fix — AppCore dispatch): the process-level
+     * [ProcessStatusPoller], injected so [dispatchSessionSyncEffect] can
+     * route [ControllerEffect.RequestPollerBackoff] /
+     * [ControllerEffect.ResetPollerBackoff] (emitted by
+     * [SessionSyncCoordinator.applySlimStatusFanOutSummary]) to
+     * [ProcessStatusPoller.scheduleBackoff] /
+     * [ProcessStatusPoller.resetBackoff]. Without this wiring the emitted
+     * effects disappeared through the unhandled-effect warning path
+     * (rev-gpt round-1 review #6).
+     *
+     * `@Singleton` (provided by
+     * [cn.vectory.ocdroid.service.streaming.ProcessStatusPollerModule]);
+     * AppCore receives the SAME instance [SessionStreamingService] injects
+     * (the L3 background loop owner) so the backoff state machine is
+     * process-coherent.
+     */
+    internal val processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller,
 ) {
 
     // ── Slice accessors (delegate to SharedStateStore) ──────────────────────
@@ -583,6 +601,31 @@ class AppCore @Inject constructor(
             )
             true
         }
+        is ControllerEffect.WriteSessionWindow -> {
+            // T11 round-2 (oracle D1): non-focus RESYNC result written to
+            // the in-memory sessionWindowCache so a later switchTo finds
+            // the refreshed window without a re-fetch. Synchronous (same
+            // dispatcher-discipline rationale as AppendMessageToCache).
+            sessionSwitcher.writeSessionWindow(
+                effect.serverGroupFp,
+                effect.sessionId,
+                CachedSessionWindow(
+                    messages = effect.messages,
+                    partsByMessage = effect.partsByMessage,
+                    // Cursor + hasMore are unknown for a slim-skeleton
+                    // RESYNC batch (the cursor drain façade aggregates
+                    // skeletons without surfacing the sidecar's
+                    // X-Next-Cursor through to here). Conservative defaults:
+                    // null cursor + hasMore=false keeps the LRU entry
+                    // usable for switchTo without advertising more
+                    // history. A later loadMore on this session re-queries
+                    // the sidecar for the actual older-page cursor.
+                    olderMessagesCursor = null,
+                    hasMoreMessages = false,
+                ),
+            )
+            true
+        }
         else -> false
     }
 
@@ -620,7 +663,17 @@ class AppCore @Inject constructor(
             // `cacheRepository.evictSession` fire-and-forget persistent evict
             // was deleted together with the CacheRepository surface — the
             // process-in LRU is the sole cache layer now.
+            //
+            // T11 round-3 (oracle D1 part b): ALSO invalidate the repo's
+            // per-session localApplied* watermark. Without this, a later
+            // /since fetch anchored on the (still-set) watermark would
+            // return an empty tail and never rebuild the user's cached
+            // older messages. Clearing localApplied* makes the next fetch
+            // start fresh (cursor drain). Route through the repo's atomic
+            // [slimStateLock] boundary via [invalidateSlimLocalApplied].
+            // No-op when the session has no slim SSE state.
             sessionSwitcher.evictSession(effect.serverGroupFp, effect.sessionId)
+            repository.invalidateSlimLocalApplied(effect.sessionId, repository.captureSlimCommitToken())
             true
         }
         is ControllerEffect.EvictGroup -> {
@@ -665,7 +718,7 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.LoadPendingPermissions -> {
-            launchLoadPendingPermissions(appScope, repository, store.slices, TAG)
+            launchLoadPendingPermissions(appScope, repository, store.slices, effectBus, TAG)
             true
         }
         is ControllerEffect.OnSseEvent -> {
@@ -688,6 +741,46 @@ class AppCore @Inject constructor(
         }
         is ControllerEffect.RefreshSessions -> {
             loadSessionsForEffect()
+            true
+        }
+        /**
+         * T13 (round-2 review fix — AppCore dispatch #6) + §final-gate I-1
+         * (oracle §3.7): route the slim fan-out backoff/reset effects to
+         * the process-level poller. Emitted by
+         * [SessionSyncCoordinator.applySlimStatusFanOutSummary] for every
+         * slim fan-out sweep:
+         *
+         *  - [ControllerEffect.RequestPollerBackoff] (retryableCount > 0):
+         *    the poller schedules a bounded exponential + jitter backoff
+         *    for the next sweep AND launches a single-flight retry job
+         *    that fires one sweep after the delay. The default jitter
+         *    sampler inside [ProcessStatusPoller.scheduleBackoff] kicks
+         *    in (we do NOT pass jitter explicitly — see M2 fix).
+         *  - [ControllerEffect.ResetPollerBackoff] (retryableCount == 0):
+         *    the poller resets its backoff state to base (the success
+         *    path; symmetric so the state machine stays coherent across
+         *    sweeps) AND cancels any pending retry (no stale retry on
+         *    top of fresh data).
+         *
+         * These effects carry no payload by design (the poller owns the
+         * backoff state + the retry job; the coordinator just reports
+         * the sweep outcome).
+         */
+        is ControllerEffect.RequestPollerBackoff -> {
+            // §final-gate I-1 (oracle §3.7): schedule the slim fan-out
+            // retry with the bounded delay returned by scheduleBackoff
+            // (200ms → 400ms → … → 30s cap, ±20% jitter). The retry is
+            // single-flight (requestSlimFanOutRetry cancels any prior
+            // pending retry before launching the new one).
+            val delayMs = processStatusPoller.scheduleBackoff()
+            processStatusPoller.requestSlimFanOutRetry(delayMs)
+            true
+        }
+        is ControllerEffect.ResetPollerBackoff -> {
+            // §final-gate I-1 (oracle §3.7): a successful sweep cancels
+            // any pending retry (no stale retry stacking on top of fresh
+            // data) and resets the backoff state to base.
+            processStatusPoller.resetBackoff()
             true
         }
         else -> false

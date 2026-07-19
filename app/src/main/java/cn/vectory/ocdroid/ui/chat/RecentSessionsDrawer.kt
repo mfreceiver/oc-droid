@@ -12,6 +12,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
@@ -26,6 +27,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.Dimens
 
@@ -73,6 +75,13 @@ import cn.vectory.ocdroid.ui.theme.Dimens
  *   Add buttons and recent-session rows). The caller briefly clears this
  *   during the drawer-close transition before the workdir picker shows, to
  *   prevent a selectSession-vs-picker race. Defaults to `true`.
+ * @param sessionErrorsById T17 slimapi v1 §6.1: the canonical per-session
+ *   upstream-error store (sourced from `SessionListState.sessionErrorsById`
+ *   by the caller). Read by [shouldShowSessionErrorIndicator] to decide
+ *   whether a row renders the small error indicator. Empty map / sid
+ *   absent → no indicator (matches the StatusSlot LastError gate contract).
+ *   Defaults to an empty map so callers not surfacing T17 errors (or
+ *   pre-T17 test fixtures) render unchanged.
  * @param modifier applied to the outer [ModalDrawerSheet].
  */
 @Composable
@@ -83,6 +92,7 @@ internal fun RecentSessionsDrawer(
     onStartNewSession: () -> Unit = {},
     isStartNewSessionEnabled: Boolean = true,
     interactionsEnabled: Boolean = true,
+    sessionErrorsById: Map<String, SlimSessionLastError> = emptyMap(),
     modifier: Modifier = Modifier,
 ) {
     ModalDrawerSheet(modifier = modifier) {
@@ -149,6 +159,14 @@ internal fun RecentSessionsDrawer(
                     session = session,
                     onClick = { onSelect(session.id) },
                     enabled = interactionsEnabled,
+                    // §T17: indicator fires iff this session has a SET
+                    // lastError in the canonical T12 store (sid absent →
+                    // no indicator). Pure check, hoisted out of the
+                    // composable for testability.
+                    showErrorIndicator = shouldShowSessionErrorIndicator(
+                        sessionId = session.id,
+                        sessionErrorsById = sessionErrorsById,
+                    ),
                 )
             }
             // Trailing breathing room so the last row is not flush against
@@ -173,12 +191,21 @@ internal fun RecentSessionsDrawer(
  * be misleading; cross-session state indicators already surface via the
  * restored SessionTabStrip + StatusSlot in the chat body. The row shows only
  * identity: display name (headline) + workdir basename (supporting).
+ *
+ * §T17 slimapi v1 §6.1: when [showErrorIndicator] is true (the session has a
+ * SET lastError in `SessionListState.sessionErrorsById`), the row renders a
+ * small `ErrorOutline` icon in `trailingContent` tinted to `colorScheme.error`.
+ * The indicator is a non-blocking visual cue (the full banner renders in the
+ * chat surface's StatusSlot when the user opens the session). Minimal
+ * acceptable styling — a @designer pass may tune color/size; the structural
+ * contract (indicator present iff [showErrorIndicator]) is the T17 gate.
  */
 @Composable
 private fun RecentSessionRow(
     session: Session,
     onClick: () -> Unit,
     enabled: Boolean = true,
+    showErrorIndicator: Boolean = false,
 ) {
     val tone = remember(session.directory) { workdirTone(session.directory) }
     ListItem(
@@ -217,6 +244,38 @@ private fun RecentSessionRow(
                     .background(tone)
             )
         },
+        trailingContent = {
+            // §T17: per-session upstream-error indicator. Renders iff
+            // showErrorIndicator (caller-derived from sessionErrorsById).
+            // Anchored in trailingContent to preserve the row's existing
+            // identity layout (workdir dot + name + workdir basename) —
+            // the cue is additive, no redesign of the row.
+            if (showErrorIndicator) {
+                val errorLabel = stringResource(R.string.chat_session_error_label)
+                Icon(
+                    imageVector = Icons.Filled.ErrorOutline,
+                    contentDescription = errorLabel,
+                    modifier = Modifier.size(Dimens.iconSm),
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            }
+        },
         modifier = Modifier.clickable(enabled = enabled, onClick = onClick),
     )
 }
+
+/**
+ * T17 slimapi v1 §6.1: pure resolver backing the per-row error indicator.
+ * Returns true iff [sessionId] has a SET entry in the canonical T12 store
+ * ([sessionErrorsById]). Absent sid OR empty map → false (no indicator) —
+ * matches the StatusSlot LastError gate contract: the map holds SET errors
+ * only (T12 REMOVES on recovery), absence = no banner / no indicator.
+ *
+ * Extracted from the composable so the null-safety contract is
+ * JVM-unit-testable without a Compose harness — see
+ * `RecentSessionErrorIndicatorTest`.
+ */
+internal fun shouldShowSessionErrorIndicator(
+    sessionId: String,
+    sessionErrorsById: Map<String, SlimSessionLastError>,
+): Boolean = sessionErrorsById[sessionId] != null

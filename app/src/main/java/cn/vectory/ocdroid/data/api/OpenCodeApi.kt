@@ -311,13 +311,20 @@ interface OpenCodeApi {
      * Cluster A: cursor-paginated skeleton messages (v1 contract §2). Used
      * for the initial tail fetch when no anchor ts is known yet (mirrors
      * the legacy `session/{id}/message` pattern).
+     *
+     * `mode` (v1 contract §4 / G3): optional server-side expansion hint.
+     * Slim-mode callers pass `mode = "skeleton"` for the lightweight tail
+     * probe (and the cursor-paged skeleton fetch in T5); absent = server
+     * default. Kept nullable + defaulted so the existing two-arg callers
+     * (cold-start, since path) keep compiling byte-for-byte.
      */
     @Headers("X-Opencode-Skip-Dir: 1")
     @GET("slimapi/messages/{sid}")
     suspend fun getSlimapiMessages(
         @Path("sid") sessionId: String,
         @Query("limit") limit: Int? = null,
-        @Query("before") before: String? = null
+        @Query("before") before: String? = null,
+        @Query("mode") mode: String? = null
     ): retrofit2.Response<List<MessageWithParts>>
 
     /**
@@ -331,6 +338,71 @@ interface OpenCodeApi {
         @Path("sid") sessionId: String,
         @Path("mid") messageId: String
     ): MessageWithParts
+
+    /**
+     * Cluster A (slimapi v1 §5 G6): batched message-full expansion. Loads
+     * multiple messages by id in one round-trip
+     * (`GET /slimapi/messages/{sid}/full?ids=m1,m2,…&mode=full`) — the
+     * UI's "expand multiple collapsed thoughts/tools at once" path
+     * (T15/T16) hits this to drop RTT vs N parallel single-full calls.
+     *
+     * Returns the `{items, errors}` envelope ([SlimapiMessageFullBatch])
+     * so per-message failures ride alongside successes at HTTP 200
+     * (`errors[].messageID` → the UI marks just that message's expand
+     * state as failed). Whole-call failures (404 / 413 / 503 / 4xx)
+     * surface as non-2xx and are routed by the repository's
+     * [cn.vectory.ocdroid.data.repository.ExpandOutcome] sealed type.
+     *
+     * Wire contract §5 G6:
+     *  - `ids`: comma-separated messageId list, 1–20 entries per call
+     *    (server rejects more with HTTP 400 `invalid_ids`). The
+     *    repository dedupes + truncates BEFORE the call — the wire
+     *    value is already normalised.
+     *  - `mode`: `skeleton` | `full` (default `full`); mirrors the
+     *    single-message path's server-side expansion hint.
+     *  - `directory` (v1 §2): optional server-side routing hint; null
+     *    = the sidecar decides scope from the session id.
+     *
+     * **Transitional**: when the sidecar hasn't deployed the batch
+     * endpoint yet, it returns HTTP 404 `thin_route_not_found`; the
+     * repository's [ExpandOutcome] handling detects this and falls
+     * back to N parallel single-full calls (bounded by a Semaphore),
+     * so the UI's expand path works against both legacy and v1
+     * sidecars without per-call branching.
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/messages/{sid}/full")
+    suspend fun getSlimapiMessagesFullBatch(
+        @Path("sid") sessionId: String,
+        @Query("ids") ids: String,
+        @Query("mode") mode: String = "full",
+        @Query("directory") directory: String? = null,
+    ): retrofit2.Response<SlimapiMessageFullBatch>
+
+    /**
+     * Cluster A (slimapi v1 §6 G2): per-session status fetch
+     * (`GET /slimapi/sessions/{sid}/status`). Returns the sidecar's
+     * status envelope (`{"type":"busy"|"idle"|"retry", …}`) which
+     * deserialises directly into [SessionStatus]. Returns the raw
+     * [Response] so the repository can branch on HTTP status
+     * (404 / 400 / 502 / 503 → StatusOutcome routing) AND detect 200 +
+     * empty body as a protocol violation: the kotlinx-serialization
+     * converter throws [java.io.EOFException] on an empty stream, which
+     * the repo catches distinctly from real transport IOExceptions and
+     * surfaces as [StatusOutcome.UpstreamWarn] (rev-gpt IMPORTANT #1).
+     *
+     * Distinct from the legacy bulk [getSessionStatus] aggregator
+     * (`GET /session/status`) — that path stays untouched (T13 owns
+     * slim fan-out, and explicitly forbids touching the bulk
+     * StatusAggregator path). This is the NEW per-session slim
+     * endpoint that drives T7 (reconcile) + T11 (StatusAggregator)
+     * when polling a single session's status without fanning out.
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/sessions/{sid}/status")
+    suspend fun getSlimapiSessionStatus(
+        @Path("sid") sessionId: String,
+    ): Response<SessionStatus>
 
     /**
      * Cluster A: cross-directory pending-questions aggregate (v1 contract §2).

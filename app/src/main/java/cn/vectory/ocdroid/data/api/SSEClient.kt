@@ -135,6 +135,24 @@ class SSEClient(
         // the sidecar's instance-level `/slimapi/events` (no directory
         // routing); legacy mode keeps `/global/event` byte-for-byte unchanged.
         val eventsPath = if (slimMode) SLIM_EVENTS_PATH else LEGACY_EVENTS_PATH
+        // T9 no-replay contract (deployed server): the oc-slimapi sidecar's SSE
+        // feed NEVER replays past events — v1 contract §3 ("resync ...
+        // {reason:'reconnect_no_replay'}，无 replay") + §4 ("resync 不 replay
+        // 由 §3 的 SSE 无 replay 语义保证"). The standard SSE `Last-Event-ID`
+        // request header is the resume cursor for server-side replay buffers;
+        // since slimapi has none, sending it is semantically meaningless and
+        // the deployed server ignores unknown headers regardless. The client
+        // therefore NEVER adds `Last-Event-ID` on first connect OR on
+        // reconnect (retryWhen here rebuilds this Request fresh each attempt).
+        // Catch-up after a disconnect is driven by the SERVER: it emits
+        // `event: resync {reason:"reconnect_no_replay"|"implicit"}` (see
+        // SlimapiV1.kt:174 SlimapiResyncReason.IMPLICIT — "Client reconnected
+        // without Last-Event-ID ... server treats as resync"), which the
+        // client honours via its reconcileSession path (T10/T11).
+        //
+        // Regression guard: SSEClientTest pins this on both first-connect and
+        // reconnect (`*_Last-Event-ID_*` cases) to prevent a future "helpful"
+        // LE-ID marker from sneaking in.
         val request = Request.Builder()
             .url("$url$eventsPath")
             .header("Accept", "text/event-stream")
