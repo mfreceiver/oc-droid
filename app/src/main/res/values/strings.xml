@@ -458,6 +458,8 @@
     <string name="host_profile_url_placeholder">http://localhost:4096</string>
     <string name="host_profile_password_masked_placeholder">••••••••</string>
     <string name="debug_log_title">Debug Log</string>
+    <string name="settings_debug_verbose_title">Enable verbose diagnostics</string>
+    <string name="settings_debug_verbose_summary">Captures SendDiag/SseDiag/StatusDiag/DigestDiag/LayerDiag events. Off by default.</string>
     <string name="debug_log_paused_suffix">(paused)</string>
     <string name="debug_log_copy">Copy</string>
     <string name="debug_log_copied">Copied</string>

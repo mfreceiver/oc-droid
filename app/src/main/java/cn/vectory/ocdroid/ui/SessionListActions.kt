@@ -681,10 +681,10 @@ internal fun launchLoadSessionStatus(
                 val nextActiveIds = activeResult.getOrNull()
                     ?.intersect(authoritativeIds)
                     ?: sl.activeSessionIds.intersect(authoritativeIds)
-                // §streaming-state-sync-diag (DEBUG-only): log each merged
+                // §streaming-state-sync-diag (runtime-gated): log each merged
                 // status entry so we can attribute the optimistic-busy overwrite
                 // to the poller (vs SSE / digest / optimistic-onSuccess).
-                if (cn.vectory.ocdroid.BuildConfig.DEBUG) {
+                if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
                     nextStatuses.forEach { (sid, status) ->
                         cn.vectory.ocdroid.util.DebugLog.d(
                             "StatusDiag",

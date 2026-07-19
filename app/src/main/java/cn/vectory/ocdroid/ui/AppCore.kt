@@ -258,6 +258,12 @@ class AppCore @Inject constructor(
 
     init {
         applySavedSettings(repository, settingsManager, hostProfileStore, store.slices)
+        // §streaming-state-sync-diag (release-enabling): seed the runtime
+        // verbose-diag flag from its ESP-persisted value so the 5 *Diag tags
+        // (SendDiag/SseDiag/StatusDiag/DigestDiag/LayerDiag) start emitting
+        // immediately if the user enabled them in Settings → Debug. Default
+        // OFF → zero log noise / perf cost.
+        cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled = settingsManager.debugLogVerboseEnabled
         // §streaming-state-sync-diag (DEBUG-only backdoor): pre-seed a host
         // profile at the dev host's opencode (10.0.2.2 = the emulator's host-
         // loopback alias; legacy non-slim; user/pass from .env) and select it

@@ -445,10 +445,10 @@ internal fun launchSendMessage(
                 // running workflow).
                 val newSessions = bumpSessionUpdated(currentSessions, sessionId, System.currentTimeMillis())
                 val newStatuses = currentStatuses + (sessionId to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"))
-                // §streaming-state-sync-diag (DEBUG-only): record the optimistic
+                // §streaming-state-sync-diag (runtime-gated): record the optimistic
                 // busy write so we can confirm whether it later gets overwritten
                 // by a stale idle from session.status / digest / poller.
-                if (cn.vectory.ocdroid.BuildConfig.DEBUG) {
+                if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
                     cn.vectory.ocdroid.util.DebugLog.d(
                         "StatusDiag",
                         "optimistic-onSuccess busy write sid=$sessionId",

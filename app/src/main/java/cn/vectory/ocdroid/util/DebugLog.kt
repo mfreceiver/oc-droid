@@ -27,6 +27,28 @@ import kotlinx.coroutines.flow.update
  */
 object DebugLog {
 
+    /**
+     * §streaming-state-sync-diag (release-enabling): runtime toggle for the
+     * 5 verbose diagnostic tags (`SendDiag` / `SseDiag` / `StatusDiag` /
+     * `DigestDiag` / `LayerDiag`). Default OFF so release users get zero log
+     * noise / perf cost (the per-frame `SseDiag` block under the SSE delta
+     * flood would otherwise bloat the ring buffer + Logcat).
+     *
+     * The flag is read at every verbose-diag call site via
+     * `if (DebugLog.verboseDiagEnabled) { ... }` (replacing the prior
+     * compile-time `if (BuildConfig.DEBUG)` gate so release builds can opt in).
+     * `@Volatile` for cross-thread visibility (SSE collector, send path, UI
+     * toggle all touch this); the read is ~free, and when false the `if` body
+     * (including string-template arg evaluation) is skipped — zero alloc cost.
+     *
+     * Seeded at AppCore init from [SettingsManager.debugLogVerboseEnabled]
+     * (ESP-persisted). The Settings toggle writes BOTH the ESP value AND this
+     * field so the change takes effect immediately without a restart.
+     */
+    @JvmField
+    @Volatile
+    var verboseDiagEnabled: Boolean = false
+
     enum class Level { DEBUG, INFO, WARN, ERROR }
 
     data class Entry(

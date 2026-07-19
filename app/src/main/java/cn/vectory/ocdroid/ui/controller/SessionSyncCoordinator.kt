@@ -683,13 +683,14 @@ class SessionSyncCoordinator(
      * writes, scheduling) stay inline.
      */
     private fun dispatchSseEvent(event: SSEEvent) {
-        // §streaming-state-sync-diag (DEBUG-only): log EVERY frame type that
+        // §streaming-state-sync-diag (runtime-gated): log EVERY frame type that
         // reaches dispatchSseEvent so we can confirm whether
         // `message.part.delta` / `message.part.updated` ever arrive in slim
         // mode. The existing "Sync/dispatch" log below THROTTLES noisy types
         // (so it can't answer that question); this log captures the type
-        // unconditionally, gated on BuildConfig.DEBUG so release is unaffected.
-        if (cn.vectory.ocdroid.BuildConfig.DEBUG) {
+        // unconditionally, gated on the runtime verbose-diag toggle
+        // (default OFF) so release builds can opt in WITHOUT a reinstall.
+        if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
             val t = event.payload.type
             val props = event.payload.properties
             val extra = if (t == "session.digest" && props != null) {
@@ -828,10 +829,10 @@ class SessionSyncCoordinator(
                     // pure [evaluateUnread] evaluator. This branch only folds the new
                     // status into sessionStatuses so the evaluator sees it. (The CP4
                     // aggregator feeding above is independent of that edge capture.)
-                    // §streaming-state-sync-diag (DEBUG-only): record the OLD type
+                    // §streaming-state-sync-diag (runtime-gated): record the OLD type
                     // immediately before the sessionStatuses write so we can confirm
                     // whether the optimistic busy gets overwritten by a stale idle.
-                    if (cn.vectory.ocdroid.BuildConfig.DEBUG) {
+                    if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
                         val diagSid = statusEvent.sessionId
                         val diagNewType = statusEvent.status.type
                         val diagOldType = slices.sessionList.value.sessionStatuses[diagSid]?.type
@@ -1922,9 +1923,9 @@ class SessionSyncCoordinator(
         )
         // Status badge (slim stand-in for session.status).
         digest.status?.takeIf { it.isNotBlank() }?.let { statusType ->
-            // §streaming-state-sync-diag (DEBUG-only): record each slim-digest
+            // §streaming-state-sync-diag (runtime-gated): record each slim-digest
             // status fold so we can attribute optimistic-busy overwrites.
-            if (cn.vectory.ocdroid.BuildConfig.DEBUG) {
+            if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
                 cn.vectory.ocdroid.util.DebugLog.d(
                     "StatusDiag",
                     "slim digest status write sid=${digest.sessionId} status=$statusType",
@@ -1994,11 +1995,12 @@ class SessionSyncCoordinator(
         } else {
             ReconcileMode.DIGEST_BACKGROUND
         }
-        // §streaming-state-sync-diag: entry context for the reconcile decision.
-        // Logs the digest's updatedAt + the prior localApplied watermark so we
-        // can confirm the "updatedAt-not-advancing → fetch skipped" hypothesis.
+        // §streaming-state-sync-diag (runtime-gated): entry context for the
+        // reconcile decision. Logs the digest's updatedAt + the prior
+        // localApplied watermark so we can confirm the
+        // "updatedAt-not-advancing → fetch skipped" hypothesis.
         // (Repo may be null in legacy/test construction — guard the read.)
-        if (cn.vectory.ocdroid.BuildConfig.DEBUG) {
+        if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
             val priorLocalApplied = repo.getSlimSessionState(sid)?.localAppliedUpdatedAt
             val priorRemote = repo.getSlimSessionState(sid)?.remoteUpdatedAt
             cn.vectory.ocdroid.util.DebugLog.d(

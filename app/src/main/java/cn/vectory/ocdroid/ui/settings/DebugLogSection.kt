@@ -13,6 +13,7 @@ package cn.vectory.ocdroid.ui.settings
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -37,8 +38,10 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -57,6 +60,11 @@ import cn.vectory.ocdroid.ui.theme.Dimens
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.util.DebugLog
+import cn.vectory.ocdroid.util.SettingsManager
+import dagger.hilt.EntryPoint
+import dagger.hilt.InstallIn
+import dagger.hilt.android.EntryPointAccessors
+import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -66,6 +74,14 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
     val liveEntries by DebugLog.entries.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var copied by remember { mutableStateOf(false) }
+
+    // §streaming-state-sync-diag (release-enabling): the verbose-diag toggle.
+    // Reads/writes SettingsManager.debugLogVerboseEnabled (ESP-persisted) AND
+    // mirrors into DebugLog.verboseDiagEnabled so the change takes effect
+    // immediately (the call sites read the runtime flag on every event).
+    // Default OFF — release users get zero log noise / perf cost.
+    val settingsManager = rememberDebugVerboseSettingsManager()
+    var verboseEnabled by remember { mutableStateOf(settingsManager.debugLogVerboseEnabled) }
 
     // A — Level filter. Default INFO+ hides the per-token DEBUG spam so the
     // viewer surfaces decisions / lifecycle / failures instead of SSE noise.
@@ -92,6 +108,46 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
     if (!hideHeader) {
         AppSectionHeader(text = stringResource(R.string.debug_log_title))
     }
+
+    // §streaming-state-sync-diag (release-enabling): the verbose-diag toggle.
+    // M3 ListItem + Switch per ui-style-spec §2 (no scattered dp; ListItem
+    // self-pads horizontal 16dp so it shares one keyline with the Card below
+    // + AppSectionHeader above). Whole row is tappable (mirrors the
+    // persistent-notification row pattern in SettingsNotificationsRoute).
+    // Default OFF; on toggle, persist to ESP AND set DebugLog.verboseDiagEnabled
+    // for immediate effect (no restart).
+    ListItem(
+        headlineContent = {
+            Text(
+                text = stringResource(R.string.settings_debug_verbose_title),
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        },
+        supportingContent = {
+            Text(
+                text = stringResource(R.string.settings_debug_verbose_summary),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
+        trailingContent = {
+            Switch(
+                checked = verboseEnabled,
+                onCheckedChange = { next ->
+                    settingsManager.debugLogVerboseEnabled = next
+                    DebugLog.verboseDiagEnabled = next
+                    verboseEnabled = next
+                },
+            )
+        },
+        modifier = Modifier.clickable {
+            val next = !verboseEnabled
+            settingsManager.debugLogVerboseEnabled = next
+            DebugLog.verboseDiagEnabled = next
+            verboseEnabled = next
+        },
+    )
 
     // §review-AB: Card self-pads horizontal 16dp (route Column no longer pads)
     // so it shares one keyline with AppSectionHeader + ListItem.
@@ -271,4 +327,31 @@ private fun LevelChip(
             selectedTrailingIconColor = MaterialTheme.colorScheme.primary
         )
     )
+}
+
+/**
+ * §streaming-state-sync-diag (release-enabling): Hilt EntryPoint that exposes
+ * the application-wide [SettingsManager] to [DebugLogSection] without threading
+ * a new parameter through AppShell / SettingsAboutRoute. Mirrors the
+ * [NotificationsSettingsManagerEntryPoint] pattern in SettingsScreen.kt.
+ */
+@EntryPoint
+@InstallIn(SingletonComponent::class)
+interface DebugVerboseSettingsManagerEntryPoint {
+    fun settingsManager(): SettingsManager
+}
+
+/**
+ * Resolve the application-wide [SettingsManager] via Hilt EntryPoint.
+ * Cached on the application Context (stable across recompositions).
+ */
+@Composable
+private fun rememberDebugVerboseSettingsManager(): SettingsManager {
+    val context = LocalContext.current
+    return remember(context) {
+        EntryPointAccessors.fromApplication(
+            context.applicationContext,
+            DebugVerboseSettingsManagerEntryPoint::class.java,
+        ).settingsManager()
+    }
 }

@@ -416,11 +416,12 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
     val attachments = composer.imageAttachments
     if (text.isEmpty() && attachments.isEmpty()) return
 
-    // §streaming-state-sync-diag (DEBUG-only): snapshot the lifecycle layer
+    // §streaming-state-sync-diag (runtime-gated): snapshot the lifecycle layer
     // (L1/L2Active = SSE live; L2Idle/L3 = SSE off) + the current status +
     // sending set AT SEND-DECISION TIME, so we can confirm whether SSE was
-    // actually live when the user hit send.
-    if (cn.vectory.ocdroid.BuildConfig.DEBUG) {
+    // actually live when the user hit send. Gated on the runtime verbose-diag
+    // toggle (default OFF) so release builds can opt in WITHOUT a reinstall.
+    if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
         DebugLog.i(
             "LayerDiag",
             "dispatchSendMessage sid=$sessionId layer=${connectionCoordinator.diagLayer} " +
