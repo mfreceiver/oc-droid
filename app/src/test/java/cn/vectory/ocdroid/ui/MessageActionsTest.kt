@@ -643,4 +643,136 @@ class MessageActionsTest {
 
         assertEquals(listOf("old1", "cur1"), slices.chat.value.messages.map { it.id })
     }
+
+    // ── streaming-send-ux-fix regression: swallowed-reload timing ─────────────
+    //
+    // §context: the post-send full-list refresh (onRefreshSessions fan-out,
+    // removed in this commit) used to start an IMMEDIATE launchLoadMessages
+    // that occupied the single-flight isLoadingMessages slot. The better-
+    // timed 400ms post-send targeted reload (loadMessagesWithRetry →
+    // launchLoadMessagesWithRetry → onLoadMessages → launchLoadMessages) was
+    // then DISCARDED by launchLoadMessages' `if (isLoadingMessages) return`
+    // guard (MessageActions.kt:56-59) with NO trailing-edge retry → stale
+    // transcript committed, new user message hidden until the user switched
+    // away and back. These two tests pin the timing at JVM level using a
+    // gate-controlled repository mock + the test scheduler.
+
+    @Test
+    fun `streaming-send-ux regression - immediate post-send load swallows the delayed targeted reload (bug shape)`() = runTest {
+        // Reproduces the message-half of the bug at JVM level. The immediate
+        // post-send load (the buggy fan-out) returns a STALE transcript; the
+        // delayed targeted reload (which would carry the fresh user message)
+        // is discarded by the single-flight guard because the immediate load
+        // is still in flight.
+        val immediateLoadGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } coAnswers {
+            immediateLoadGate.await()
+            Result.success(MessagesPage(emptyList(), null))
+        }
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        // Simulate the (now-removed) buggy fan-out: the post-send full-list
+        // refresh triggered an immediate launchLoadMessages that holds the
+        // single-flight slot. The unconfined dispatcher runs the body up to
+        // repository.getMessagesPaged, which suspends on the gate →
+        // isLoadingMessages stays true.
+        launchLoadMessages(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "s1",
+            emit = emit,
+        )
+        // DO NOT advance time / complete the gate — keep the immediate load
+        // in flight (the buggy race window).
+        assertTrue("immediate load must hold isLoadingMessages=true", slices.chat.value.isLoadingMessages)
+
+        // Simulate the post-send delayed targeted reload (the survivor of the
+        // fix). The callback mirrors the real wiring (loadMessagesWithRetry →
+        // loadMessagesForEffect → launchLoadMessages).
+        launchLoadMessagesWithRetry(scope, "s1", slices, resetLimit = true) { sid, reset ->
+            launchLoadMessages(
+                scope = scope,
+                repository = repository,
+                slices = slices,
+                sessionId = sid,
+                resetLimit = reset,
+                emit = emit,
+            )
+        }
+        // Advance past the retry delay — the delayed callback fires.
+        scope.advanceTimeBy(MainViewModelTimings.messageRetryDelayMs)
+        scope.advanceUntilIdle()
+        scope.runCurrent()
+
+        // The delayed callback's launchLoadMessages call hit the
+        // single-flight guard and returned WITHOUT calling
+        // repository.getMessagesPaged. Exactly ONE call observed — the
+        // immediate load's. This is the bug: the delayed reload was swallowed.
+        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        assertTrue(
+            "immediate load still in flight (delayed reload did not clear the flag)",
+            slices.chat.value.isLoadingMessages,
+        )
+
+        // Complete the gate to let the immediate load finish with its STALE
+        // (empty) transcript, then assert the slice reflects ONLY the stale
+        // result — the fresh delayed reload never ran.
+        immediateLoadGate.complete(Unit)
+        scope.advanceUntilIdle()
+        scope.runCurrent()
+        assertTrue(
+            "stale empty transcript committed; the fresh delayed reload was discarded (bug reproducible at JVM)",
+            slices.chat.value.messages.isEmpty(),
+        )
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
+
+    @Test
+    fun `streaming-send-ux regression - without the immediate post-send load (fix applied), the delayed targeted reload executes`() = runTest {
+        // Pins the FIX shape: with the post-send immediate load REMOVED (this
+        // commit), nothing occupies the single-flight slot during the 400ms
+        // retry delay. The delayed targeted reload — which carries the fresh
+        // user message via the better-timed refresh — executes and surfaces
+        // the new prompt.
+        val freshMsgs = listOf(MessageWithParts(info = Message(id = "user-prompt", role = "user")))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(freshMsgs, null))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        // NO immediate launchLoadMessages call here — the fix removed the
+        // post-send fan-out. isLoadingMessages is still false.
+        assertFalse(
+            "no send-triggered immediate load may occupy the slot (fix applied)",
+            slices.chat.value.isLoadingMessages,
+        )
+
+        // The sole post-send fallback: the delayed targeted reload.
+        launchLoadMessagesWithRetry(scope, "s1", slices, resetLimit = true) { sid, reset ->
+            launchLoadMessages(
+                scope = scope,
+                repository = repository,
+                slices = slices,
+                sessionId = sid,
+                resetLimit = reset,
+                emit = emit,
+            )
+        }
+        // Advance past the retry delay — the callback fires.
+        scope.advanceTimeBy(MainViewModelTimings.messageRetryDelayMs)
+        scope.advanceUntilIdle()
+        scope.runCurrent()
+
+        // The delayed reload's launchLoadMessages call LANDED — repository
+        // fetched exactly once (the fresh transcript), the slot is no longer
+        // starved.
+        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        assertEquals(
+            "fresh user message surfaced via the delayed targeted reload (the fix)",
+            listOf("user-prompt"),
+            slices.chat.value.messages.map { it.id },
+        )
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
 }

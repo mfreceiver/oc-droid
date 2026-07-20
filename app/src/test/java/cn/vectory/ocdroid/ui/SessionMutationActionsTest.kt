@@ -902,7 +902,6 @@ class SessionMutationActionsTest {
         store.mutateSessionList { it.copy(sessions = listOf(session)) }
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         var refreshMsg = 0
-        var refreshSessions = 0
         var successCalled = 0
         var completeCalled = 0
 
@@ -915,7 +914,6 @@ class SessionMutationActionsTest {
             agent = "build",
             model = null,
             onRefreshMessages = { _, _ -> refreshMsg += 1 },
-            onRefreshSessions = { refreshSessions += 1 },
             onSuccess = { successCalled += 1 },
             onComplete = { completeCalled += 1 },
             emit = emit,
@@ -924,8 +922,10 @@ class SessionMutationActionsTest {
 
         coVerify { repository.sendMessage("s1", "hello", "build", null, any()) }
         assertEquals("busy", slices.sessionList.value.sessionStatuses["s1"]?.type)
+        // §streaming-send-ux-fix: onRefreshSessions was REMOVED from
+        // launchSendMessage — only the targeted message reload + onSuccess +
+        // onComplete fire. See launchSendMessage.onSuccess comment for why.
         assertEquals(1, refreshMsg)
-        assertEquals(1, refreshSessions)
         assertEquals(1, successCalled)
         assertEquals(1, completeCalled)
     }
@@ -936,13 +936,12 @@ class SessionMutationActionsTest {
     fun `gro-2 Blocker 2a - launchSendMessage skips bump and refresh when session archived mid-send`() = runTest {
         // If the session was archived/evicted mid-send (cross-device archive
         // during prompt_async), onSuccess must NOT bump time.updated, write
-        // sessionStatuses[busy], or fire onRefreshSessions/onRefreshMessages —
-        // that would resurrect a dead session as ghost-busy.
+        // sessionStatuses[busy], or fire onRefreshMessages — that would
+        // resurrect a dead session as ghost-busy.
         val archived = Session(id = "s1", directory = "/x", time = Session.TimeInfo(archived = 1L))
         store.mutateSessionList { it.copy(sessions = listOf(archived)) }
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         var refreshMsg = 0
-        var refreshSessions = 0
         var successCalled = 0
         var completeCalled = 0
 
@@ -955,7 +954,6 @@ class SessionMutationActionsTest {
             agent = "build",
             model = null,
             onRefreshMessages = { _, _ -> refreshMsg += 1 },
-            onRefreshSessions = { refreshSessions += 1 },
             onSuccess = { successCalled += 1 },
             onComplete = { completeCalled += 1 },
             emit = emit,
@@ -966,7 +964,6 @@ class SessionMutationActionsTest {
         assertNull("no busy status written for archived session", slices.sessionList.value.sessionStatuses["s1"])
         // No refresh triggered.
         assertEquals("onRefreshMessages NOT called for archived session", 0, refreshMsg)
-        assertEquals("onRefreshSessions NOT called for archived session", 0, refreshSessions)
         // onSuccess NOT called (the session is dead — no success side-effects).
         assertEquals("onSuccess NOT called for archived session", 0, successCalled)
         // onComplete IS called (the outer onComplete?.invoke() always fires
@@ -983,7 +980,6 @@ class SessionMutationActionsTest {
         store.mutateSessionList { it.copy(sessions = emptyList()) }
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         var refreshMsg = 0
-        var refreshSessions = 0
         var successCalled = 0
 
         launchSendMessage(
@@ -995,7 +991,6 @@ class SessionMutationActionsTest {
             agent = "build",
             model = null,
             onRefreshMessages = { _, _ -> refreshMsg += 1 },
-            onRefreshSessions = { refreshSessions += 1 },
             onSuccess = { successCalled += 1 },
             emit = emit,
         )
@@ -1004,7 +999,6 @@ class SessionMutationActionsTest {
         // Absent ≠ archived → normal path proceeds (lenient).
         assertEquals("busy status written (absent is not archived)", "busy", slices.sessionList.value.sessionStatuses["not-loaded-yet"]?.type)
         assertEquals("onRefreshMessages called", 1, refreshMsg)
-        assertEquals("onRefreshSessions called", 1, refreshSessions)
         assertEquals("onSuccess called", 1, successCalled)
     }
 
@@ -1021,7 +1015,6 @@ class SessionMutationActionsTest {
         store.mutateChat { it.copy(currentSessionId = "s2") }  // user switched to s2
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         var refreshMsg = 0
-        var refreshSessions = 0
         var successCalled = 0
 
         launchSendMessage(
@@ -1033,7 +1026,6 @@ class SessionMutationActionsTest {
             agent = "build",
             model = null,
             onRefreshMessages = { _, _ -> refreshMsg += 1 },
-            onRefreshSessions = { refreshSessions += 1 },
             onSuccess = { successCalled += 1 },
             emit = emit,
         )
@@ -1042,7 +1034,6 @@ class SessionMutationActionsTest {
         // Normal path: bump + busy + refresh all fire for s1 (stillAlive).
         assertEquals("busy status written for sent-to session", "busy", slices.sessionList.value.sessionStatuses["s1"]?.type)
         assertEquals("onRefreshMessages called", 1, refreshMsg)
-        assertEquals("onRefreshSessions called", 1, refreshSessions)
         assertEquals("onSuccess called", 1, successCalled)
     }
 
@@ -1060,7 +1051,6 @@ class SessionMutationActionsTest {
             agent = "build",
             model = null,
             onRefreshMessages = { _, _ -> },
-            onRefreshSessions = {},
             onComplete = { completeCalled += 1 },
             emit = emit,
         )
@@ -1087,7 +1077,6 @@ class SessionMutationActionsTest {
             agent = "build",
             model = null,
             onRefreshMessages = { _, _ -> },
-            onRefreshSessions = {},
             emit = emit,
         )
         // User typed something newer while send was in flight.
@@ -1120,7 +1109,6 @@ class SessionMutationActionsTest {
             agent = "review",
             model = Message.ModelInfo("openai", "gpt-5"),
             onRefreshMessages = { _, _ -> },
-            onRefreshSessions = {},
             emit = emit,
         )
         advanceUntilIdle()

@@ -396,7 +396,6 @@ internal fun launchSendMessage(
     agent: String?,
     model: Message.ModelInfo?,
     onRefreshMessages: (String, Boolean) -> Unit,
-    onRefreshSessions: () -> Unit,
     onSuccess: (() -> Unit)? = null,
     onComplete: (() -> Unit)? = null,
     emit: EventEmitter = EventEmitter { }
@@ -456,14 +455,41 @@ internal fun launchSendMessage(
                 }
                 slices.mutateSessionList { sl -> sl.copy(sessions = newSessions, sessionStatuses = newStatuses) }
                 onSuccess?.invoke()
-                onRefreshSessions()
-                // §15.1 (review N6): the post-send 1200ms double-refresh is
-                // gone — SSE will deliver `message.updated` (server 1.17.11+
-                // emits message.updated, not message.created, for new messages;
-                // see the insert-if-absent handler in MainViewModelSyncActions)
-                // and a foreground catch-up covers any dropped event. The single
-                // immediate reload here is the legacy first-paint path that
-                // selectSession/sendMessage use to bypass the debounce.
+                // §streaming-send-ux-fix: the post-send full-list refresh was
+                // REMOVED — it was the root cause of the "no live UI feedback"
+                // bug on normal sends (slash commands were unaffected because
+                // they never fired it). Two coupled failure modes:
+                //
+                //  (1) STATUS half: the refresh fanned out to GET /session/status
+                //      → launchLoadSessionStatus → mergeStatusSnapshot. That merge
+                //      only preserves a local value that CHANGED while REST was
+                //      in flight (localBefore[id] != after); it does NOT protect
+                //      the pre-existing optimistic busy we just wrote above. So
+                //      localBefore=busy, localAfter=busy, REST=idle → idle wins,
+                //      clobbering the optimistic busy → thinking/running UI gone.
+                //      SSE session.status{busy} is a one-shot transition event
+                //      (not repeated) so it never repairs the clobber.
+                //
+                //  (2) MESSAGE half: the same fan-out started an IMMEDIATE
+                //      messages GET that occupied the single-flight
+                //      isLoadingMessages slot; the better-timed 400ms post-send
+                //      reload (loadMessagesWithRetry) and the 400ms SSE-busy
+                //      reload then got DISCARDED by launchLoadMessages'
+                //      `if (isLoadingMessages) return` guard with no trailing-
+                //      edge retry → stale transcript committed, new user
+                //      message hidden until the user switches away and back.
+                //
+                // The fix matches the working slash path (AppCore.executeCommand),
+                // which does no post-send full-list refresh and relies on SSE +
+                // the targeted message reload below.
+                //
+                // KEEP the targeted message reload — it is the sole post-send
+                // fallback: legacy first-paint + user-text-part hydration (the
+                // user `message.part.updated` is intentionally ignored at
+                // SessionSyncCoordinator.kt:1154-1168), plus slim fallback +
+                // gap recovery. The 400ms-delayed sibling
+                // (loadMessagesWithRetry) is no longer starved by the dropped
+                // immediate load, so it now actually runs.
                 onRefreshMessages(sessionId, true)
             }
             .onFailure { error ->

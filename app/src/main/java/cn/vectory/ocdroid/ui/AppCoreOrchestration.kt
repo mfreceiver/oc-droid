@@ -488,7 +488,12 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
             agent = agent,
             model = model,
             onRefreshMessages = { sid, reset -> loadMessagesWithRetry(sid, reset) },
-            onRefreshSessions = { loadSessionsForEffect() },
+            // §streaming-send-ux-fix: NO onRefreshSessions here — the post-send
+            // full-list refresh was the root cause of the "no live UI feedback"
+            // bug on normal sends. See launchSendMessage.onSuccess comment for
+            // the two coupled failure modes (status clobber + swallowed delayed
+            // reload). The slash path (executeCommand) never had this call and
+            // relied on SSE + the targeted message reload — same shape now.
             onSuccess = {
                 settingsManager.setDraftText(currentServerGroupFp(), sessionId, "")
                 // §1B-FIX (I4): onSuccess is a no-op for fileReferences

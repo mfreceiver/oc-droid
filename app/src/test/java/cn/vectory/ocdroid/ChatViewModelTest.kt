@@ -226,11 +226,23 @@ class ChatViewModelTest : MainViewModelTestBase() {
     }
 
     @Test
-    fun `sendMessage success refreshes sessions`() = runTest {
+    fun `sendMessage success does NOT refresh sessions but DOES refresh targeted messages`() = runTest {
+        // §streaming-send-ux-fix (regression guard): the post-send full-list
+        // refresh was the root cause of the "no live UI feedback" bug on
+        // normal sends. Pin that send NO LONGER triggers a full
+        // getSessions(sessionFullLoadLimit) refresh, but STILL triggers the
+        // targeted message reload (the sole post-send fallback — legacy
+        // first-paint + user-text-part hydration + slim fallback).
         coEvery { repository.sendMessage(any(), any(), any(), any()) } returns Result.success(Unit)
         // §nav-redesign: launchLoadSessions uses sessionFullLoadLimit (500).
-        coEvery { repository.getSessions(cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit) } returns Result.success(
-            listOf(cn.vectory.ocdroid.data.model.Session(id = "session-1", directory = "/tmp/project", title = "Updated"))
+        // Marked as exhaustively = false because the post-send path must NOT
+        // call this; if it does, the coVerify below (atLeast = 0) would catch
+        // it. The base mock returns emptyList so any unexpected call is a
+        // no-op but still observable via coVerify.
+        coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
+        // The targeted message reload calls getMessagesPaged.
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(
+            MessagesPage(items = emptyList(), nextCursor = null)
         )
 
         val core = createCore()
@@ -243,14 +255,25 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val viewModel = ChatViewModel(core)  // primary VM under test
         sessionVM.selectSession("session-1")
         advanceUntilIdle()
+        // Reset invocation counters post-selectSession (selectSession itself
+        // triggers a hydrate-cycle that legitimately calls getSessions +
+        // getMessagesPaged). We only care about calls AFTER sendMessage.
+        io.mockk.clearMocks(repository, answers = false, recordedCalls = true)
+        coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(
+            MessagesPage(items = emptyList(), nextCursor = null)
+        )
         composerVM.setInputText("hello")
 
         chatVM.sendMessage()
         advanceUntilIdle()
 
-        // §nav-redesign: launchLoadSessions uses sessionFullLoadLimit (500).
-        coVerify(atLeast = 1) { repository.getSessions(cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit) }
-        assertEquals("Updated", sessionVM.sessionListFlow.value.sessions.single().title)
+        // (a) send does NOT trigger a full session-list refresh — the buggy
+        //     post-send onRefreshSessions fan-out is gone.
+        coVerify(exactly = 0) { repository.getSessions(cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit) }
+        // (b) send DOES trigger the targeted message reload (the sole post-send
+        //     fallback that must survive).
+        coVerify(atLeast = 1) { repository.getMessagesPaged("session-1", any(), any()) }
     }
 
     @Test
