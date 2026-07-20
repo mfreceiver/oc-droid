@@ -250,7 +250,14 @@ internal fun MessageRow(
                     (partExpandStates[PartKey(part.messageId!!, part.id)] ?: PartExpandState.Idle)
             }
             val anyLoading = allPartStates.any { it.second is PartExpandState.Loading }
-            val anyFailed = allPartStates.filterIsInstance<Pair<PartKey, PartExpandState.Failed>>()
+            // Type-safe filter: filterIsInstance<Pair<K, PartExpandState.Failed>> is unsound
+            // under JVM generic erasure — reified R can only check the raw `Pair` type, so
+            // Idle/Loaded/Loading pairs pass the `is R` test and the subsequent `.code`
+            // access throws ClassCastException (e.g. "Idle cannot be cast to Failed").
+            // Collect only genuinely-Failed pairs via a safe cast instead.
+            val anyFailed = allPartStates.mapNotNull { (key, state) ->
+                (state as? PartExpandState.Failed)?.let { key to it }
+            }
             val anyIdle = allPartStates.any { it.second is PartExpandState.Idle }
 
             if (anyFailed.isNotEmpty()) {
