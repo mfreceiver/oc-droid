@@ -610,6 +610,19 @@ class SessionSyncCoordinatorResyncTest {
 
     @Test
     fun `T11-C5c performSlimResync orchestrator builds catch-up union`() = runTest {
+        // SLIMMED CATCH-UP (Fix-2): the union previously was
+        //   focus + preRefreshLocalAll + preRefreshSessions + refreshedSessions
+        //   + postRefreshLocalAll + overlayDirty + sessionsDirty
+        // which ≈ ALL ~150 sessions × ≤250 skeletons ran on Main.immediate
+        // and blocked the user's session switch. It is now
+        //   focus + overlayDirty + sessionsDirty
+        // — un-reconciled sessions are left to loadMessagesForEffect + the
+        // slim digest reconciliation when the user actually switches to
+        // them. This test was updated from "all four sources probed" to
+        // "only focus + dirty probed" to lock the new behavior. The
+        // snapshot still returns refreshed-1 + the session list still has
+        // pre-1 + localAll still has local-1, but NONE of those should be
+        // probed anymore.
         every { repository.getSlimSessionState(any()) } returns null
         every { repository.snapshotSlimSseState() } returns mapOf(
             "local-1" to SlimSessionState(sessionId = "local-1"),
@@ -630,20 +643,33 @@ class SessionSyncCoordinatorResyncTest {
         slices.mutateSessionList {
             it.copy(sessions = listOf(cn.vectory.ocdroid.data.model.Session(id = "pre-1", directory = "/w")))
         }
+        // Set a focus (current session) so we can assert it IS in the slim
+        // catch-up alongside the dirty sid.
+        slices.mutateChat { it.copy(currentSessionId = "focus-1") }
 
         val c = coordinator()
         c.performSlimResync(directories = null, sessionsDirty = setOf("dirty-1"))
         scope.testScheduler.advanceUntilIdle()
 
-        // Union: preRefresh (pre-1) ∪ refreshed (refreshed-1) ∪ localAll (local-1) ∪ dirty (dirty-1).
-        coVerify(exactly = 1) { repository.probeLatestSlim("pre-1") }
-        coVerify(exactly = 1) { repository.probeLatestSlim("refreshed-1") }
-        coVerify(exactly = 1) { repository.probeLatestSlim("local-1") }
+        // Slimmed catch-up: focus (focus-1) + dirty (dirty-1) only.
+        coVerify(exactly = 1) { repository.probeLatestSlim("focus-1") }
         coVerify(exactly = 1) { repository.probeLatestSlim("dirty-1") }
+        // Pre-fix union members are NO LONGER probed:
+        coVerify(exactly = 0) { repository.probeLatestSlim("pre-1") }
+        coVerify(exactly = 0) { repository.probeLatestSlim("refreshed-1") }
+        coVerify(exactly = 0) { repository.probeLatestSlim("local-1") }
     }
 
     @Test
     fun `T11-C5d performSlimResync falls back to pre-refresh set on metadata failure`() = runTest {
+        // SLIMMED CATCH-UP (Fix-2): pre-fix this test asserted that on a
+        // metadata-fetch failure the orchestrator still probed
+        // preRefreshLocal + dirty. The slimmed catch-up no longer unions
+        // preRefreshLocalAll regardless of metadata success/failure — the
+        // on-demand path (loadMessagesForEffect + slim digest) owns those
+        // sessions. Only focus + dirty are probed now; this test was
+        // updated to lock that behavior. (Metadata failure path is still
+        // exercised — it just no longer contributes to the catch-up set.)
         every { repository.getSlimSessionState(any()) } returns null
         every { repository.snapshotSlimSseState() } returns mapOf(
             "local-1" to SlimSessionState(sessionId = "local-1"),
@@ -659,9 +685,10 @@ class SessionSyncCoordinatorResyncTest {
         c.performSlimResync(directories = null, sessionsDirty = setOf("dirty-1"))
         scope.testScheduler.advanceUntilIdle()
 
-        // Fallback: preRefresh local + dirty are still probed.
-        coVerify(exactly = 1) { repository.probeLatestSlim("local-1") }
+        // Slimmed catch-up: only dirty (focus is null in this test).
         coVerify(exactly = 1) { repository.probeLatestSlim("dirty-1") }
+        // preRefreshLocal is NO LONGER probed:
+        coVerify(exactly = 0) { repository.probeLatestSlim("local-1") }
     }
 
     // ── T11-C6: per-sid stripe serialization (oracle D7 clarification) ──────

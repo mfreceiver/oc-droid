@@ -2956,18 +2956,30 @@ class SessionSyncCoordinator(
 
         if (!current()) return emptyMap()
 
-        // ── Step 4: build catch-up set (oracle I1 union) ────────────────
-        // Union: focus + pre-refresh local + pre-refresh session list +
-        // refreshed session list + post-refresh local + dirty (overlay
-        // + caller-supplied).
+        // ── Step 4: build catch-up set (oracle I1 union, slimmed) ────────
+        // Slimmed catch-up: focus + dirty (overlay + caller-supplied).
+        //
+        // Pre-fix this ALSO unioned preRefreshLocalAll + preRefreshSessions
+        // + refreshedSessions + postRefreshLocalAll — i.e. ≈ ALL ~150
+        // sessions × ≤250 skeletons — which ran on Main.immediate and
+        // blocked the user's session switch (loadMessagesForEffect waits
+        // on this sweep). Those un-reconciled sessions are now left to
+        // the on-demand path: when the user actually switches to them,
+        // loadMessagesForEffect + the slim digest reconciliation corrects
+        // their state lazily. focus + dirty must stay here because:
+        //  - focus is the session the user is currently looking at (any
+        //    gap there is immediately visible);
+        //  - dirty marks sessions with a known SSE gap that the user
+        //    might switch to next.
+        //
+        // (refreshedSessions / postRefreshLocalAll are still computed
+        // below for the diagnostic DebugLog only — the size telemetry
+        // stays useful and is NOT what made the sweep slow; the per-sid
+        // reconcile in performResyncCatchUp was.)
         val refreshedSessions = snapshot?.sessions?.map { it.id }?.toSet() ?: emptySet()
         val postRefreshLocalAll = repo.snapshotSlimSseState().keys
         val catchUp = buildSet {
             focus?.let { add(it) }
-            addAll(preRefreshLocalAll)
-            addAll(preRefreshSessions)
-            addAll(refreshedSessions)
-            addAll(postRefreshLocalAll)
             addAll(overlayDirty)
             addAll(sessionsDirty)
         }
