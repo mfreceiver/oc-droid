@@ -2233,12 +2233,27 @@ class OpenCodeRepository @Inject constructor(
             throw e
         } catch (e: java.io.IOException) {
             // Step 9: transport failure (no HTTP status, no sidecar envelope).
+            // Diagnostic: distinguish transport-level failure from the G6
+            // envelope's per-message errors (foldOk Branch B) and from
+            // converter-level failures (the catch-all below).
+            DebugLog.w(
+                TAG,
+                "expand batch IOException ids=$ids sid=$sessionId " +
+                    "cause=${e.javaClass.simpleName}: ${e.message}",
+            )
             return ExpandOutcome.Failed(sessionId, null)
         } catch (e: Exception) {
             // Defensive: any other Throwable (e.g. Json decode of a 2xx body
             // throwing inside the converter) collapses to Failed(null) so
             // the UI never sees a crash from the expand path. Cancellation
             // is re-thrown above.
+            // Diagnostic: surface the unexpected exception type so we can
+            // tell converter/JSON bugs from transport IOExceptions above.
+            DebugLog.w(
+                TAG,
+                "expand batch exception ids=$ids sid=$sessionId " +
+                    "cause=${e.javaClass.simpleName}: ${e.message}",
+            )
             return ExpandOutcome.Failed(sessionId, null)
         }
         return when {

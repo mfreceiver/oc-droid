@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.util.DebugLog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -283,6 +284,8 @@ class ChatViewModel @Inject constructor(
          * to it without hardcoding the literal.
          */
         const val WATCHDOG_MS: Long = 180_000L
+
+        private const val TAG = "ChatViewModel"
     }
 
     fun clearCompacting() {
@@ -494,6 +497,19 @@ class ChatViewModel @Inject constructor(
                 local = local,
                 parts = partsToLoad,
             ).getOrElse {
+                // Diagnostic: usecase threw (NOT a normal Failed outcome —
+                // runSuspendCatching collapsed something unexpected, e.g.
+                // CancellationException outside the usecase's own runSuspend
+                // Catching, or an OOM/Json bug inside foldOk). Log exception
+                // type + message + the wire keys we were about to load so a
+                // "展开失败 (Failed null)" report can be distinguished from
+                // the foldOk Branch 0/A/B/C paths (which do NOT throw).
+                DebugLog.w(
+                    TAG,
+                    "expand usecase threw sessionId=$sessionId " +
+                        "keys=${keysToLoad.take(20)} " +
+                        "cause=${it.javaClass.simpleName}: ${it.message}",
+                )
                 // P2: guard delayed failure — only mark keys still Loading.
                 core.writeChat { current ->
                     if (current.currentSessionId != sessionId) return@writeChat current

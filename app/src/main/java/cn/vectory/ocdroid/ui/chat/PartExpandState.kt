@@ -172,7 +172,18 @@ class ExpandPartsUseCase(
     ): Result<ExpandPartsOutcome> = runSuspendCatching {
         // Step 1: filter to eligible parts.
         val targets = parts.filter { it.hasFull == true && it.omitted != null && it.messageId != null }
-        if (targets.isEmpty()) return@runSuspendCatching ExpandPartsOutcome.Empty
+        if (targets.isEmpty()) {
+            // Diagnostic: usecase is about to short-circuit WITHOUT calling
+            // G6 — if the user reported "展开失败", this WARN proves the
+            // tap never reached the network at all (eligibility filter
+            // dropped every part: missing hasFull / omitted / messageId).
+            DebugLog.w(
+                TAG,
+                "expand targets empty (no hasFull&&omitted&&messageId part) " +
+                    "sessionId=$sessionId partsCount=${parts.size}",
+            )
+            return@runSuspendCatching ExpandPartsOutcome.Empty
+        }
 
         // Step 2: dedup requested message ids (LinkedHashSet → deterministic order).
         val requestedMsgIds: Set<String> = targets.mapTo(LinkedHashSet()) { it.messageId!! }
@@ -308,15 +319,41 @@ class ExpandPartsUseCase(
                             // Surface as Failed so the UI offers retry instead
                             // of staying on a skeleton that Loaded promised to
                             // replace.
+                            DebugLog.w(
+                                TAG,
+                                "expand foldOk A partId=${part.id} part.messageId=${part.messageId} " +
+                                    "ownerMsgId=$ownerMsgId replaced=false " +
+                                    "fetchedPartIds=${itemByMsg.getValue(ownerMsgId).parts.map { it.id }.take(20)} " +
+                                    "itemMsgIds(${itemMsgIds.size})=${itemMsgIds.take(20)} " +
+                                    "failedMsgIds(${failedMsgIds.size})=${failedMsgIds.take(20)}",
+                            )
                             PartExpandState.Failed(code = null)
                         }
                     }
                     // Branch B: per-message failure in the G6 envelope's errors[].
-                    ownerMsgId in failedMsgIds -> PartExpandState.Failed(code = null)
+                    ownerMsgId in failedMsgIds -> {
+                        DebugLog.w(
+                            TAG,
+                            "expand foldOk B partId=${part.id} part.messageId=${part.messageId} " +
+                                "ownerMsgId=$ownerMsgId (in failedMsgIds) " +
+                                "itemMsgIds(${itemMsgIds.size})=${itemMsgIds.take(20)} " +
+                                "failedMsgIds(${failedMsgIds.size})=${failedMsgIds.take(20)}",
+                        )
+                        PartExpandState.Failed(code = null)
+                    }
                     // Branch C: residual — requested but dropped by 413-halve /
                     // 20-truncate. T3 design note: without this rule the part
                     // hangs in Loading forever.
-                    else -> PartExpandState.Failed(code = null)
+                    else -> {
+                        DebugLog.w(
+                            TAG,
+                            "expand foldOk C partId=${part.id} part.messageId=${part.messageId} " +
+                                "ownerMsgId=$ownerMsgId (residual — not in items nor failedIds) " +
+                                "itemMsgIds(${itemMsgIds.size})=${itemMsgIds.take(20)} " +
+                                "failedMsgIds(${failedMsgIds.size})=${failedMsgIds.take(20)}",
+                        )
+                        PartExpandState.Failed(code = null)
+                    }
                 }
                 put(key, state)
             }
