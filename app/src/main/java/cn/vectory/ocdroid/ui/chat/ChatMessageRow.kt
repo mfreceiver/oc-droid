@@ -1,15 +1,22 @@
 package cn.vectory.ocdroid.ui.chat
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -17,7 +24,12 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
@@ -49,6 +61,22 @@ internal sealed class ToolRenderItem {
     /** A folded group of contiguous tool/patch/reasoning items (total parts ≥ 2). */
     data class FoldedToolRun(val items: List<ToolRenderItem>) : ToolRenderItem()
 }
+
+/**
+ * Maps omitted field keys from the slim sidecar to human-readable labels
+ * for the expand affordance (e.g. "cost" → "费用", "reason" → "推理").
+ * Unknown keys are preserved as-is for forward compatibility.
+ */
+private fun omittedFieldLabels(omitted: List<String>): List<String> =
+    omitted.map { key ->
+        when (key) {
+            "cost" -> "费用"
+            "reason" -> "推理"
+            "tokens" -> "Token"
+            "thinking" -> "思考"
+            else -> key
+        }
+    }.distinct()
 
 @Composable
 internal fun MessageRow(
@@ -325,18 +353,62 @@ internal fun MessageRow(
                 }
 
                 if (idleParts.isNotEmpty()) {
-                    TextButton(
-                        onClick = { onExpandParts(idleParts) },
-                        modifier = Modifier.padding(
-                            start = Dimens.spacing1,
-                            top = Dimens.spacing1,
-                            bottom = Dimens.spacing1,
-                        ),
+                    // Collect unique omitted field keys from all idle parts and
+                    // map to human-readable labels (e.g. "推理 · 费用 · Token")
+                    // so the user knows what content is hidden before expanding.
+                    val omittedLabels = omittedFieldLabels(
+                        idleParts.flatMap { it.omitted.orEmpty() }
+                    )
+                    val labelText = omittedLabels.joinToString(" · ")
+
+                    // §G6-T16 Layer A-adjacent: compact clickable row (NOT a
+                    // DropdownMenu / BottomSheet / AlertDialog). Visual family
+                    // matches ToolCallFoldBar (surfaceContainer, RectangleShape,
+                    // labelSmall).
+                    Surface(
+                        modifier = Modifier
+                            .padding(
+                                start = Dimens.spacing1,
+                                top = Dimens.spacing1,
+                                bottom = Dimens.spacing1,
+                            )
+                            .clickable { onExpandParts(idleParts) }
+                            .semantics {
+                                contentDescription = labelText
+                                role = Role.Button
+                            },
+                        shape = RectangleShape,
+                        color = MaterialTheme.colorScheme.surfaceContainer
                     ) {
-                        Text(
-                            text = stringResource(R.string.expand_omitted_content),
-                            style = MaterialTheme.typography.labelSmall,
-                        )
+                        Row(
+                            modifier = Modifier.padding(
+                                horizontal = Dimens.spacing2,
+                                vertical = Dimens.spacing1,
+                            ),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(Dimens.spacing1)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.UnfoldMore,
+                                contentDescription = null,
+                                modifier = Modifier.size(Dimens.iconXs),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = labelText.ifEmpty {
+                                    stringResource(R.string.expand_omitted_content)
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(modifier = Modifier.weight(1f))
+                            Icon(
+                                imageVector = Icons.Default.ChevronRight,
+                                contentDescription = null,
+                                modifier = Modifier.size(Dimens.iconSm),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             }
