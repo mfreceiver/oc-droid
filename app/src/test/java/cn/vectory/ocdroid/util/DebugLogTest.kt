@@ -128,14 +128,17 @@ class DebugLogTest {
 
     @Test
     fun `ring buffer caps at MAX_ENTRIES and evicts oldest`() {
-        // The cap is 1000 (DebugLog.MAX_ENTRIES). Push 1002 distinct entries;
-        // only the most recent 1000 may survive, and they must be newest-first.
-        repeat(1002) { i -> DebugLog.log("T", "msg-$i") }
+        // The cap is 3000 (DebugLog.MAX_ENTRIES; bumped from 1000 when the
+        // verbose *Diag tags were scoped + coalesced — see DebugLog.MAX_ENTRIES
+        // comment). Push MAX+2 distinct entries; only the most recent MAX may
+        // survive, and they must be newest-first.
+        val cap = 3000
+        repeat(cap + 2) { i -> DebugLog.log("T", "msg-$i") }
 
         val entries = DebugLog.entries.value
-        assertEquals(1000, entries.size)
-        // Newest first → msg-1001 at index 0, msg-2 at the tail (msg-0 / msg-1 evicted).
-        assertEquals("msg-1001", entries.first().message)
+        assertEquals(cap, entries.size)
+        // Newest first → msg-(cap+1) at index 0, msg-2 at the tail (msg-0 / msg-1 evicted).
+        assertEquals("msg-${cap + 1}", entries.first().message)
         assertEquals("msg-2", entries.last().message)
     }
 

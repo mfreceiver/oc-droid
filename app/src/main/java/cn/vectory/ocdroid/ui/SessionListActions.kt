@@ -647,6 +647,14 @@ internal fun launchLoadSessionStatus(
             // §sse-rest-race: REST 发起前快照本地 status, onSuccess 时识别"REST 在途期间
             // 被 SSE 更新过的 session"——旧 REST 快照不得覆盖较新的 SSE 值。
             val localBefore = slices.sessionList.value.sessionStatuses
+            // §verbose-diag-flood: capture the current-session id + its prior
+            // status BEFORE the mutate so the post-mutate verbose log can do a
+            // single scoped + deduped comparison (current-session only + actual
+            // transition only). Reading these outside the mutate lambda avoids
+            // double-logging on StateFlow CAS retries (the lambda can run more
+            // than once).
+            val diagCurrentSid = slices.chat.value.currentSessionId
+            val diagPriorStatus = diagCurrentSid?.let { slices.sessionList.value.sessionStatuses[it] }
             val statusResult = repository.getSessionStatus()
             val activeResult = repository.getActiveSessionIds()
             val statuses = statusResult.getOrNull()
@@ -681,22 +689,28 @@ internal fun launchLoadSessionStatus(
                 val nextActiveIds = activeResult.getOrNull()
                     ?.intersect(authoritativeIds)
                     ?: sl.activeSessionIds.intersect(authoritativeIds)
-                // §streaming-state-sync-diag (runtime-gated): log each merged
-                // status entry so we can attribute the optimistic-busy overwrite
-                // to the poller (vs SSE / digest / optimistic-onSuccess).
-                if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
-                    nextStatuses.forEach { (sid, status) ->
-                        cn.vectory.ocdroid.util.DebugLog.d(
-                            "StatusDiag",
-                            "poller status write sid=$sid status=${status.type}",
-                        )
-                    }
-                }
                 applied = true
                 sl.copy(
                     sessionStatuses = nextStatuses,
                     activeSessionIds = nextActiveIds,
                 )
+            }
+            // §streaming-state-sync-diag (runtime-gated, scoped+dedup):
+            // attribute the optimistic-busy overwrite to the poller (vs SSE /
+            // digest / optimistic-onSuccess). Scope to the current (open)
+            // session AND log only on actual transition — the prior code
+            // logged EVERY status entry for EVERY session on EVERY poll cycle
+            // (idle→idle dominated the flood at ~500/sec). At most ONE line
+            // per poll cycle now, and only when the current session's status
+            // actually transitioned.
+            if (applied && cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled && diagCurrentSid != null) {
+                val diagNewStatus = slices.sessionList.value.sessionStatuses[diagCurrentSid]
+                if (diagNewStatus != diagPriorStatus) {
+                    cn.vectory.ocdroid.util.DebugLog.d(
+                        "StatusDiag",
+                        "poller status write sid=$diagCurrentSid oldType=${diagPriorStatus?.type} newType=${diagNewStatus?.type}",
+                    )
+                }
             }
             statusResult
                 .onSuccess {

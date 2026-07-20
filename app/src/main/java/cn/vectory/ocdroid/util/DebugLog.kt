@@ -59,7 +59,12 @@ object DebugLog {
         val message: String
     )
 
-    private const val MAX_ENTRIES = 1000
+    // §verbose-diag-flood: bumped 1000 → 3000 once the verbose *Diag tags were
+    // scoped + coalesced (commit following cc94564). 3x history at the same
+    // per-byte cost; the previous 1000-entry cap evicted in ~2s under the
+    // unscoped verbose flood. With scoping + 1Hz delta coalesce, 3000 covers
+    // ~5–10 minutes of signal-rich activity.
+    private const val MAX_ENTRIES = 3000
 
     /** Monotonic per-entry sequence — a stable, collision-free LazyColumn key
      *  (unlike hashCode, which collides when identical log lines land in the

@@ -388,6 +388,45 @@ class SessionSyncCoordinator(
     private var sseSyncState: SseSyncState = SseSyncState()
 
     /**
+     * §verbose-diag-flood: 1Hz coalesce window for the per-token SSE streaming
+     * events (`message.part.delta` + `message.part.updated`) inside
+     * [dispatchSseEvent]'s verbose SseDiag log. Both fire dozens–100s/sec
+     * during AI output (per [NOISY_SSE_LOG_EVENTS] comment); logging each one
+     * drowns the ring buffer. The coalesce emits ONE summary line per 1s
+     * window per current session: `part.delta/updated ×N in window sid=…`.
+     *
+     * Thread discipline: same as [sseSyncState] — `@Volatile` for forward-
+     * safety only; all reads/writes confined to the coordinator's single-
+     * threaded [scope] (Dispatchers.Main.immediate). Mutated ONLY inside
+     * [dispatchSseEvent]'s verbose diag block.
+     */
+    @Volatile
+    private var verboseSseDeltaFirstAt: Long = 0L
+    @Volatile
+    private var verboseSseDeltaCount: Int = 0
+    @Volatile
+    private var verboseSseDeltaSid: String? = null
+
+    /**
+     * Flush + reset the verbose delta coalesce window (emit the summary line
+     * if any deltas were buffered). Called on every non-delta event type so
+     * the per-event log line ordering in the viewer stays chronological
+     * relative to the coalesced delta summary; also called from inside the
+     * 1Hz tick when a new window opens. No-op when nothing is buffered.
+     */
+    private fun flushVerboseSseDeltaWindow() {
+        if (verboseSseDeltaCount > 0) {
+            cn.vectory.ocdroid.util.DebugLog.d(
+                "SseDiag",
+                "part.delta/updated ×$verboseSseDeltaCount in window sid=$verboseSseDeltaSid",
+            )
+            verboseSseDeltaCount = 0
+            verboseSseDeltaFirstAt = 0L
+            verboseSseDeltaSid = null
+        }
+    }
+
+    /**
      * CP1 (notify Phase-0): the generation counter has been REMOVED. The
      * private `hostGeneration: AtomicLong` that used to live here is gone —
      * it was a second generation that could drift apart from CC's
@@ -683,25 +722,63 @@ class SessionSyncCoordinator(
      * writes, scheduling) stay inline.
      */
     private fun dispatchSseEvent(event: SSEEvent) {
-        // §streaming-state-sync-diag (runtime-gated): log EVERY frame type that
-        // reaches dispatchSseEvent so we can confirm whether
-        // `message.part.delta` / `message.part.updated` ever arrive in slim
-        // mode. The existing "Sync/dispatch" log below THROTTLES noisy types
-        // (so it can't answer that question); this log captures the type
-        // unconditionally, gated on the runtime verbose-diag toggle
-        // (default OFF) so release builds can opt in WITHOUT a reinstall.
+        // §streaming-state-sync-diag (runtime-gated, scope+coalesce): cut the
+        // verbose SSE flood to a signal-rich ~5–20/sec during a send:
+        //  - SCOPE to the current (open) session — non-current events are not
+        //    rendered and carry no streaming-send signal. Rare sid-less frames
+        //    (server.connected, plugin.added, etc.) pass through.
+        //  - COALESCE `message.part.delta` + `message.part.updated` (the per-
+        //    token streaming events per NOISY_SSE_LOG_EVENTS) into ONE summary
+        //    line per 1s window per current session. The render path is the
+        //    proof of delivery; the verbose log only needs to confirm
+        //    "streaming IS happening for sid X" at low frequency.
+        // All other event types (session.status, session.digest,
+        // message.completed/updated, permission/question, unknown): log each
+        // normally — low volume, high signal. The 1Hz delta window is flushed
+        // before any such log so the viewer's chronological order is preserved.
         if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
             val t = event.payload.type
-            val props = event.payload.properties
-            val extra = if (t == "session.digest" && props != null) {
-                val obj = props as? kotlinx.serialization.json.JsonObject
-                val sid = obj?.get("sessionID")?.toString()?.trim('"')
-                val st = obj?.get("status")?.toString()?.trim('"')
-                val ua = obj?.get("updatedAt")
-                val mid = obj?.get("messageID")
-                " sid=$sid status=$st updatedAt=$ua messageId=$mid"
-            } else ""
-            cn.vectory.ocdroid.util.DebugLog.d("SseDiag", "frame type=$t$extra")
+            val evtSid = event.payload.getString("sessionID")
+            val currentSid = slices.chat.value.currentSessionId
+            val sidMatches = evtSid == null || evtSid == currentSid
+            when {
+                // Per-token streaming events for the current session: 1Hz coalesce.
+                // Counts ONLY deltas for the current session (non-current are not
+                // rendered and carry no signal). No per-event string allocation —
+                // just an int increment + timestamp check.
+                (t == "message.part.delta" || t == "message.part.updated") &&
+                    evtSid != null && evtSid == currentSid -> {
+                    val now = System.currentTimeMillis()
+                    if (verboseSseDeltaCount == 0 || now - verboseSseDeltaFirstAt >= 1000L) {
+                        // New window: flush any pending prior-window summary first
+                        // (defensive — should be empty here since non-delta events
+                        // flush on their way through), then open a fresh window.
+                        flushVerboseSseDeltaWindow()
+                        verboseSseDeltaFirstAt = now
+                        verboseSseDeltaCount = 1
+                        verboseSseDeltaSid = currentSid
+                    } else {
+                        verboseSseDeltaCount++
+                    }
+                }
+                // All other event types — flush any pending delta window first so
+                // the viewer's chronological order is preserved, then log this
+                // event if it's sid-less OR for the current session.
+                sidMatches -> {
+                    flushVerboseSseDeltaWindow()
+                    val props = event.payload.properties
+                    val extra = if (t == "session.digest" && props != null) {
+                        val obj = props as? kotlinx.serialization.json.JsonObject
+                        val sid = obj?.get("sessionID")?.toString()?.trim('"')
+                        val st = obj?.get("status")?.toString()?.trim('"')
+                        val ua = obj?.get("updatedAt")
+                        val mid = obj?.get("messageID")
+                        " sid=$sid status=$st updatedAt=$ua messageId=$mid"
+                    } else ""
+                    cn.vectory.ocdroid.util.DebugLog.d("SseDiag", "frame type=$t$extra")
+                }
+                // else: non-current session's non-delta event — skip (no signal).
+            }
         }
         // Throttle dispatch logging to preserve the 1000-entry ring buffer's signal.
         // Skipped (noise): server.heartbeat (periodic), message.part.delta (per-token
@@ -829,17 +906,22 @@ class SessionSyncCoordinator(
                     // pure [evaluateUnread] evaluator. This branch only folds the new
                     // status into sessionStatuses so the evaluator sees it. (The CP4
                     // aggregator feeding above is independent of that edge capture.)
-                    // §streaming-state-sync-diag (runtime-gated): record the OLD type
-                    // immediately before the sessionStatuses write so we can confirm
-                    // whether the optimistic busy gets overwritten by a stale idle.
+                    // §streaming-state-sync-diag (runtime-gated, scoped+dedup):
+                    // record the OLD type immediately before the sessionStatuses
+                    // write so we can confirm whether the optimistic busy gets
+                    // overwritten by a stale idle. Scope to the current session
+                    // AND log only on actual transition (idle→idle is the
+                    // dominant flood source — skip it entirely).
                     if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
                         val diagSid = statusEvent.sessionId
                         val diagNewType = statusEvent.status.type
                         val diagOldType = slices.sessionList.value.sessionStatuses[diagSid]?.type
-                        cn.vectory.ocdroid.util.DebugLog.d(
-                            "StatusDiag",
-                            "session.status write sid=$diagSid oldType=$diagOldType newType=$diagNewType",
-                        )
+                        if (diagSid == slices.chat.value.currentSessionId && diagOldType != diagNewType) {
+                            cn.vectory.ocdroid.util.DebugLog.d(
+                                "StatusDiag",
+                                "session.status write sid=$diagSid oldType=$diagOldType newType=$diagNewType",
+                            )
+                        }
                     }
                     slices.mutateSessionList {
                         it.applySessionStatus(statusEvent.sessionId, statusEvent.status).first
@@ -1923,9 +2005,13 @@ class SessionSyncCoordinator(
         )
         // Status badge (slim stand-in for session.status).
         digest.status?.takeIf { it.isNotBlank() }?.let { statusType ->
-            // §streaming-state-sync-diag (runtime-gated): record each slim-digest
-            // status fold so we can attribute optimistic-busy overwrites.
-            if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
+            // §streaming-state-sync-diag (runtime-gated, scoped): record each
+            // slim-digest status fold so we can attribute optimistic-busy
+            // overwrites. Scope to the current (open) session — non-current
+            // sessions' status folds carry no streaming-send signal.
+            if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled &&
+                digest.sessionId == slices.chat.value.currentSessionId
+            ) {
                 cn.vectory.ocdroid.util.DebugLog.d(
                     "StatusDiag",
                     "slim digest status write sid=${digest.sessionId} status=$statusType",
@@ -1995,12 +2081,16 @@ class SessionSyncCoordinator(
         } else {
             ReconcileMode.DIGEST_BACKGROUND
         }
-        // §streaming-state-sync-diag (runtime-gated): entry context for the
-        // reconcile decision. Logs the digest's updatedAt + the prior
+        // §streaming-state-sync-diag (runtime-gated, scoped): entry context
+        // for the reconcile decision. Logs the digest's updatedAt + the prior
         // localApplied watermark so we can confirm the
-        // "updatedAt-not-advancing → fetch skipped" hypothesis.
+        // "updatedAt-not-advancing → fetch skipped" hypothesis. Scope to the
+        // current (open) session — non-current digests go through BACKGROUND
+        // mode (no FETCH decision) and carry no streaming-send signal.
         // (Repo may be null in legacy/test construction — guard the read.)
-        if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
+        if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled &&
+            sid == slices.chat.value.currentSessionId
+        ) {
             val priorLocalApplied = repo.getSlimSessionState(sid)?.localAppliedUpdatedAt
             val priorRemote = repo.getSlimSessionState(sid)?.remoteUpdatedAt
             cn.vectory.ocdroid.util.DebugLog.d(
@@ -2273,12 +2363,19 @@ class SessionSyncCoordinator(
             localAppliedTs = state.localAppliedUpdatedAt,
         )
         if (!catchUp) {
-            // §streaming-state-sync-diag: probe says caught up → no FETCH.
-            cn.vectory.ocdroid.util.DebugLog.d(
-                "DigestDiag",
-                "digest sid=$sid remoteUpdatedAt=${state.remoteUpdatedAt} " +
-                    "priorWatermark=${state.localAppliedUpdatedAt} decision=skip reason=aligned mode=$mode",
-            )
+            // §streaming-state-sync-diag (runtime-gated, scoped): probe says
+            // caught up → no FETCH. Scope to current session (resync catch-up
+            // runs this body for every dirty sid — non-current sids carry no
+            // streaming-send signal).
+            if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled &&
+                sid == slices.chat.value.currentSessionId
+            ) {
+                cn.vectory.ocdroid.util.DebugLog.d(
+                    "DigestDiag",
+                    "digest sid=$sid remoteUpdatedAt=${state.remoteUpdatedAt} " +
+                        "priorWatermark=${state.localAppliedUpdatedAt} decision=skip reason=aligned mode=$mode",
+                )
+            }
             if (mode.mayClearDirty()) {
                 if (!repo.markSlimReconcileAligned(sid, token)) {
                     return ReconcileResult.Stale(sid)
@@ -2291,21 +2388,31 @@ class SessionSyncCoordinator(
         }
         // ── needsCatchUp: FOCUS/RESYNC fetch; BACKGROUND refresh only ────
         if (!mode.mayFetch()) {
-            // §streaming-state-sync-diag: BACKGROUND mode → no FETCH (refresh row only).
-            cn.vectory.ocdroid.util.DebugLog.d(
-                "DigestDiag",
-                "digest sid=$sid remoteUpdatedAt=${state.remoteUpdatedAt} " +
-                    "priorWatermark=${state.localAppliedUpdatedAt} decision=skip reason=BACKGROUND mode=$mode",
-            )
+            // §streaming-state-sync-diag (runtime-gated, scoped): BACKGROUND
+            // mode → no FETCH (refresh row only).
+            if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled &&
+                sid == slices.chat.value.currentSessionId
+            ) {
+                cn.vectory.ocdroid.util.DebugLog.d(
+                    "DigestDiag",
+                    "digest sid=$sid remoteUpdatedAt=${state.remoteUpdatedAt} " +
+                        "priorWatermark=${state.localAppliedUpdatedAt} decision=skip reason=BACKGROUND mode=$mode",
+                )
+            }
             DebugLog.d("Sync", "reconcileSession sid=$sid mode=$mode BACKGROUND needsCatchUp → refresh row, keep dirty")
             return ReconcileResult.RefreshRow(sid)
         }
-        // §streaming-state-sync-diag: FETCH decision — about to call /slimapi/messages/since.
-        cn.vectory.ocdroid.util.DebugLog.d(
-            "DigestDiag",
-            "digest sid=$sid remoteUpdatedAt=${state.remoteUpdatedAt} " +
-                "priorWatermark=${state.localAppliedUpdatedAt} decision=FETCH mode=$mode",
-        )
+        // §streaming-state-sync-diag (runtime-gated, scoped): FETCH decision —
+        // about to call /slimapi/messages/since.
+        if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled &&
+            sid == slices.chat.value.currentSessionId
+        ) {
+            cn.vectory.ocdroid.util.DebugLog.d(
+                "DigestDiag",
+                "digest sid=$sid remoteUpdatedAt=${state.remoteUpdatedAt} " +
+                    "priorWatermark=${state.localAppliedUpdatedAt} decision=FETCH mode=$mode",
+            )
+        }
         // Watermark-branched fetch (oracle I2):
         //   - localAppliedUpdatedAt != null → /since/{ts}
         //   - localAppliedUpdatedAt == null → bounded cursor drain façade
