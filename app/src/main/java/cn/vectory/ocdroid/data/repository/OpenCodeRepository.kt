@@ -2705,7 +2705,23 @@ class OpenCodeRepository @Inject constructor(
         // collapsed to a null piece (which would mask the cancellation as
         // a per-piece failure).
         val sessions: List<Session>? = runSuspendCatching {
-            api.getSlimapiSessions(directories = directories)
+            // §session-scope-narrow: pin `roots=true` + explicit limit so the
+            // cold-start snapshot fetches ONLY root/main sessions of the
+            // (caller-narrowed) directory set, NOT the unbounded child fan-out
+            // (subagent / task children). The default `limit=100` was silently
+            // truncating the list; `roots=true` filters children server-side.
+            // curl-verified on the live sidecar: roots=true drops ≈244 child
+            // rows; limit=500 captures the full root set (130 roots → 120 once
+            // the caller's local-project directory filter is applied).
+            // Combined with [SessionSyncCoordinator.performSlimResync]'s
+            // `recentWorkdirs` directory narrowing + the merge in
+            // [SessionSyncCoordinator.applySlimColdStartSnapshot] (fix-4),
+            // this is the second of the two scope-narrowing levers.
+            api.getSlimapiSessions(
+                directories = directories,
+                roots = true,
+                limit = SLIM_COLDSTART_SESSION_LIMIT,
+            )
         }.getOrNull()
         // §slim-envelope: /questions + /permissions return {items, errors};
         // flatten `.items` for UI. Per-directory `errors` are logged here
@@ -3419,6 +3435,19 @@ class OpenCodeRepository @Inject constructor(
          * to pass without change.
          */
         const val DEFAULT_SERVER = HostConfig.DEFAULT_SERVER
+
+        /**
+         * §session-scope-narrow: cold-start / resync `/slimapi/sessions` page
+         * size. The default (limit=100) was silently truncating the session
+         * list. 500 is "effectively all" — mirrors
+         * [cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit]
+         * (also 500) which is the page size the legacy Sessions-tab global
+         * fetch uses for the same "surface every root session" reason. Kept
+         * as a separate const (not imported from `ui`) to avoid a
+         * `data.repository` → `ui` layering inversion; the value duplication
+         * is deliberate and pinned here so a wire-contract change is local.
+         */
+        internal const val SLIM_COLDSTART_SESSION_LIMIT = 500
 
         /**
          * Tag for slimapi envelope-degradation warnings (per-directory

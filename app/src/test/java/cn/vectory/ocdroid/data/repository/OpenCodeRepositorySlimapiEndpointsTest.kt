@@ -602,9 +602,33 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         assertNull("no openSessionId → messages null", snapshot.messages)
 
         // Three requests were made in any order (parallel-ish sequential).
-        val paths = mutableListOf<String>()
-        repeat(3) { paths += server.takeRequest().path!! }
-        assertTrue("sessions path hit: $paths", paths.any { it == "/slimapi/sessions" })
+        // §session-scope-narrow: assert the sessions request carries the
+        // EXACT scope-narrowing query params (`roots=true` +
+        // `limit=SLIM_COLDSTART_SESSION_LIMIT`) by parsing the recorded
+        // URL with okhttp3.HttpUrl — NOT string-contains, which is too weak
+        // (a bare `/slimapi/sessions` prefix would pass even after a
+        // regression that dropped both params).
+        val requests = mutableListOf<okhttp3.mockwebserver.RecordedRequest>()
+        repeat(3) { requests += server.takeRequest() }
+        val paths = requests.map { it.path!! }
+        val sessionsRequest = requests.first { it.path!!.startsWith("/slimapi/sessions") }
+        val sessionsUrl = sessionsRequest.requestUrl!!
+        assertEquals(
+            "roots=true forwarded on sessions call: ${sessionsRequest.path}",
+            "true",
+            sessionsUrl.queryParameter("roots"),
+        )
+        assertEquals(
+            "limit=SLIM_COLDSTART_SESSION_LIMIT forwarded: ${sessionsRequest.path}",
+            OpenCodeRepository.SLIM_COLDSTART_SESSION_LIMIT.toString(),
+            sessionsUrl.queryParameter("limit"),
+        )
+        // coldStartSlimSync(token=…) with directories=null MUST NOT add
+        // any ?directory= query (the sidecar decides scope server-side).
+        assertNull(
+            "no directory param when directories=null: ${sessionsRequest.path}",
+            sessionsUrl.queryParameter("directory"),
+        )
         assertTrue("questions path hit: $paths", paths.any { it == "/slimapi/questions" })
         assertTrue("permissions path hit: $paths", paths.any { it == "/slimapi/permissions" })
     }
@@ -1875,6 +1899,11 @@ class OpenCodeRepositorySlimapiEndpointsTest {
     fun `coldStartSlimSync forwards directories to slimapi sessions endpoint`() = runBlocking {
         // §slim-reconcile-lane-repo (B4 T6): directories MUST reach the
         // /slimapi/sessions call (was: dropped on the floor in pre-T6 code).
+        // §session-scope-narrow: roots=true + limit=SLIM_COLDSTART_SESSION_LIMIT
+        // MUST also reach the call. Parse the recorded URL with
+        // okhttp3.HttpUrl for exact query-param assertions — the v1 contract
+        // pins `?directory=a&directory=b` (repeated params, NOT comma-joined)
+        // so queryParameterValues("directory") must return BOTH entries.
         server.enqueue(jsonResponse("[]"))  // sessions
         server.enqueue(jsonResponse("""{"items":[],"errors":[]}"""))  // questions
         server.enqueue(jsonResponse("""{"items":[],"errors":[]}"""))  // permissions
@@ -1882,13 +1911,21 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         repository.coldStartSlimSync(directories = listOf("/alpha", "/beta"), token = token())
 
         val sessionsRequest = server.takeRequest()
-        assertTrue(
+        val sessionsUrl = sessionsRequest.requestUrl!!
+        assertEquals(
             "directories forwarded as repeated query: ${sessionsRequest.path}",
-            sessionsRequest.path!!.contains("directory=%2Falpha"),
+            listOf("/alpha", "/beta"),
+            sessionsUrl.queryParameterValues("directory"),
         )
-        assertTrue(
-            "second directory forwarded: ${sessionsRequest.path}",
-            sessionsRequest.path!!.contains("directory=%2Fbeta"),
+        assertEquals(
+            "roots=true forwarded alongside directories: ${sessionsRequest.path}",
+            "true",
+            sessionsUrl.queryParameter("roots"),
+        )
+        assertEquals(
+            "limit=SLIM_COLDSTART_SESSION_LIMIT forwarded: ${sessionsRequest.path}",
+            OpenCodeRepository.SLIM_COLDSTART_SESSION_LIMIT.toString(),
+            sessionsUrl.queryParameter("limit"),
         )
     }
 
