@@ -330,6 +330,91 @@ class SessionSyncCoordinatorSlimTest {
         assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
     }
 
+    /**
+     * Sessions-merge regression (cold-start limit data-loss).
+     *
+     * Root cause: `coldStartSlimSync` does NOT pass a session limit, and the
+     * sidecar defaults to returning only the most recent ~100 sessions. With
+     * the historical FULL REPLACE in `applySlimColdStartSnapshot`, an SSE
+     * first-frame / cold-start payload covering only directory `/A` would
+     * substitute the entire prior list (e.g. 374 sessions spanning /A, /B,
+     * /C, …) with just /A's 100 — the rest of the session list "vanished".
+     *
+     * Lock the MERGE fix: fetched payload may only overwrite sessions in the
+     * directories it actually carries; sessions in every other directory
+     * must survive.
+     */
+    @Test
+    fun `applySlimColdStartSnapshot sessions merge preserves prior sessions in unmentioned directories`() = runTest {
+        // Prior: sessions spread across three directories.
+        val priorA = Session(id = "s-a-1", directory = "/A", title = "old-A1")
+        val priorA2 = Session(id = "s-a-2", directory = "/A", title = "old-A2")
+        val priorB = Session(id = "s-b-1", directory = "/B", title = "keep-B1")
+        val priorC = Session(id = "s-c-1", directory = "/C", title = "keep-C1")
+        slices.mutateSessionList {
+            it.copy(
+                sessions = listOf(priorA, priorA2, priorB, priorC),
+                directorySessions = mapOf(
+                    "/A" to listOf(priorA, priorA2),
+                    "/B" to listOf(priorB),
+                    "/C" to listOf(priorC),
+                ),
+            )
+        }
+
+        // Fetched snapshot covers ONLY /A (e.g. sidecar returned the most
+        // recent 100, all from /A). Includes an updated title for s-a-1 and
+        // a brand-new session s-a-3.
+        val fetchedA1 = Session(id = "s-a-1", directory = "/A", title = "NEW-A1")
+        val fetchedA3 = Session(id = "s-a-3", directory = "/A", title = "new-A3")
+        val snapshot = SlimColdStartSnapshot(
+            sessions = listOf(fetchedA1, fetchedA3),
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+            ),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+            ),
+            messages = null,
+        )
+
+        val c = coordinator()
+        c.applySlimColdStartSnapshot(snapshot)
+        scope.testScheduler.advanceUntilIdle()
+
+        val list = slices.sessionList.value
+
+        // /A was overwritten by fetched (s-a-2 dropped, s-a-1 updated, s-a-3 added).
+        // /B and /C MUST survive (the bug: they were erased under FULL REPLACE).
+        val byId = list.sessions.associateBy { it.id }
+        assertEquals("fetched /A entry updated", "NEW-A1", byId["s-a-1"]?.title)
+        assertTrue("fetched /A new entry added", byId.containsKey("s-a-3"))
+        assertFalse("dropped /A stale entry s-a-2", byId.containsKey("s-a-2"))
+        assertTrue("/B prior preserved (data-loss regression)", byId.containsKey("s-b-1"))
+        assertTrue("/C prior preserved (data-loss regression)", byId.containsKey("s-c-1"))
+        assertEquals("merged size = 4 (2 fetched /A + /B + /C)", 4, list.sessions.size)
+
+        // directorySessions must mirror the merge: /A overwritten, /B + /C kept.
+        assertEquals(setOf("/A", "/B", "/C"), list.directorySessions.keys)
+        assertEquals(
+            "fetched /A bucket = fetched list",
+            listOf("s-a-1", "s-a-3"),
+            list.directorySessions.getValue("/A").map { it.id },
+        )
+        assertEquals(
+            "/B bucket preserved",
+            listOf("s-b-1"),
+            list.directorySessions.getValue("/B").map { it.id },
+        )
+        assertEquals(
+            "/C bucket preserved",
+            listOf("s-c-1"),
+            list.directorySessions.getValue("/C").map { it.id },
+        )
+    }
+
     @Test
     fun `SlimapiQuestionEntry toQuestionRequest preserves routeToken`() {
         val entry = SlimapiQuestionEntry(
