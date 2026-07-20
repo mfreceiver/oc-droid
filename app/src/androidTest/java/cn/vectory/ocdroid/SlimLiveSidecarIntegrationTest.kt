@@ -30,11 +30,13 @@ import org.junit.runner.RunWith
  *  - Injected by `SlimapiVersionInterceptor` on the shared OkHttp base chain
  *    (gated by `HostConfig.slim == true` AND `/slimapi/` path prefix).
  *  - `GET /slimapi/sessions` with null `?directory` → 200 OK (returns all aggregated sessions).
- *  - **`GET /slimapi/questions` + `GET /slimapi/permissions` with null `?directory`
- *    → HTTP 422 `{"detail":[{"type":"missing","loc":["query","directory"],"msg":"Field required"}]}`**
- *    — sidecar REQUIRES directory. The client (`OpenCodeApi.getSlimapiQuestions`/
- *    `getSlimapiPermissions`) declares `directory: List<String>? = null` (KDoc says
- *    "null = all"). **This is a CONTRACT MISMATCH** — see the per-test notes below.
+ *  - **`GET /slimapi/questions` + `GET /slimapi/permissions`**: `?directory` is optional
+ *    (F1 / oc-slimapi v0.2.2+). Null = aggregate all scope dirs the sidecar fronts for
+ *    this client → HTTP 200 envelope `{items, errors, scope:{directories:N}}`
+ *    (`Success`/`Partial`; live probe saw N=21). The client
+ *    (`OpenCodeApi.getSlimapiQuestions`/`getSlimapiPermissions`) declares
+ *    `directory: List<String>? = null` with KDoc "null = all" — now aligned with
+ *    the sidecar. See the per-test notes below.
  *
  * **Test design**: robust. Does NOT depend on deep sidecar state, does NOT do
  * destructive POSTs. Each test guards with `assumeTrue` so an unreachable
@@ -241,23 +243,18 @@ class SlimLiveSidecarIntegrationTest {
     }
 
     /**
-     * **CONTRACT MISMATCH (slimapi-client-v1)**: `GET /slimapi/questions`
-     * WITH null `?directory` → HTTP 422
-     * `{"detail":[{"type":"missing","loc":["query","directory"],"msg":"Field required"}]}`.
+     * **F1 reconciled (oc-slimapi v0.2.2+)**: `GET /slimapi/questions` with
+     * null `?directory` → HTTP 200 aggregate envelope
+     * `{items, errors, scope:{directories:N}}` as `SlimAggregationOutcome.Success`
+     * or `Partial` (null = all dirs the sidecar aggregates for this client).
+     * Pre-F1 the sidecar returned 422 missing-directory; this pins the
+     * reconciled behavior.
      *
-     * The client (`OpenCodeApi.getSlimapiQuestions`) declares
-     * `directory: List<String>? = null` with KDoc "null = all directories
-     * the sidecar is aggregating for this client". The sidecar's actual
-     * behavior REQUIRES `?directory=...` (at least one value). This is a
-     * contract mismatch surfaced by live integration — flagging it here so
-     * the next sidecar/client contract revision can reconcile.
-     *
-     * The test calls both branches:
-     *  1. Null directory → asserts the call surfaces the failure (the
-     *     repository wraps the 422 in `Result.failure` via runSuspendCatching).
-     *  2. With a directory sourced from the live sessions list → expects
-     *     `SlimAggregationOutcome.Success` or `Partial` (200 with possibly
-     *     empty items). The shape itself is the assertion target.
+     * Branch 2 (with-directory success path) is intentionally NOT live-run
+     * here: a session's `directory` is not necessarily in the sidecar
+     * allowlist → 400 `directory_not_allowed` (environment-fragile, not a
+     * contract bug). With-dir success is covered by unit tests
+     * (`SessionSyncCoordinatorSlimTest` / `SlimapiV1ModelsTest`).
      */
     @Test
     fun slim_questions_null_directory_aggregates() = runBlocking {
@@ -294,10 +291,12 @@ class SlimLiveSidecarIntegrationTest {
     }
 
     /**
-     * **CONTRACT MISMATCH (slimapi-client-v1)**: `GET /slimapi/permissions`
-     * WITH null `?directory` → HTTP 422 (same shape as questions). See
-     * [slim_questions_requires_directory_contract_mismatch] for the full
-     * rationale. Both branches exercised for parity with the questions path.
+     * **F1 reconciled (oc-slimapi v0.2.2+)**: `GET /slimapi/permissions` with
+     * null `?directory` → HTTP 200 aggregate envelope (same shape as questions:
+     * `Success`/`Partial`). See [slim_questions_null_directory_aggregates] for
+     * the full F1 rationale; parity with the questions path. Branch 2
+     * (with-directory) is not live-exercised here for the same allowlist
+     * reason — covered by unit tests.
      */
     @Test
     fun slim_permissions_null_directory_aggregates() = runBlocking {
