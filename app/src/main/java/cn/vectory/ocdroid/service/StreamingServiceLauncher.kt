@@ -171,8 +171,32 @@ class AndroidStreamingServiceLauncher @Inject constructor(
                 ?.let { runCatching { it.getCompleted() }.getOrNull() }
         return when (ack) {
             is StartingAck.Accepted -> {
-                // Stage 1 accepted — await Stage 2 with NO second wall-clock.
-                attempt.terminal.await()
+                // Stage 1 accepted — await Stage 2 with a last-resort
+                // wall-clock timeout. The Service's own transport timeout
+                // (30s) runs inside
+                // ServiceSseConnectionOwner.setupConnectLocked; this outer
+                // guard exists for the case where a Starting owner leaked
+                // by OwnershipGate Case 2 never promotes to Ready nor
+                // refuses — `attempt.terminal` would otherwise NEVER
+                // complete, leaving ConnectionCoordinator parked in
+                // Connecting forever (the permanent "连接中" capsule).
+                // On timeout: return BootstrapFailed so CC walks the
+                // Disconnected branch (writes isConnected=false,
+                // isConnecting=false) — same shape as the existing
+                // Refused(...) returns above and below.
+                val stage2ElapsedMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000L
+                val terminal = withTimeoutOrNull(STAGE2_TIMEOUT_MS) { attempt.terminal.await() }
+                if (terminal == null) {
+                    DebugLog.w(
+                        TAG,
+                        "ensureStarted: Stage-2 timed out after ${STAGE2_TIMEOUT_MS}ms " +
+                            "(attemptId=${attempt.attemptId}, elapsedMs=$stage2ElapsedMs) " +
+                            "→ BootstrapFailed (CC will write Disconnected)",
+                    )
+                    OwnershipStartResult.Refused(OwnershipRefusal.BootstrapFailed)
+                } else {
+                    terminal
+                }
             }
             is StartingAck.Refused -> OwnershipStartResult.Refused(ack.reason)
             null -> {
@@ -189,5 +213,13 @@ class AndroidStreamingServiceLauncher @Inject constructor(
 
     private companion object {
         private const val TAG = "StreamingSvcLauncher"
+
+        // Stage-2 wall-clock guard: if the Service's Starting owner never
+        // promotes to Ready nor refuses (e.g. an OwnershipGate Case 2
+        // leftover), give up after 45s and return BootstrapFailed so CC
+        // writes Disconnected instead of hanging the capsule at "连接中"
+        // forever. 45s comfortably exceeds the Service's internal 30s
+        // transport timeout + the 5s Stage-1 ack window.
+        private const val STAGE2_TIMEOUT_MS = 45_000L
     }
 }
