@@ -159,7 +159,7 @@ internal fun ServerManagementDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    IconButton(onClick = onNavigateToSettings) {
+                    IconButton(onClick = { onNavigateToSettings(); onDismiss() }) {
                         Icon(
                             Icons.Default.Settings,
                             contentDescription = stringResource(R.string.server_dialog_system_settings),

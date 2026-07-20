@@ -1160,7 +1160,7 @@ internal fun HostProfileEditorDialog(
         // 用户可通过 toggles 直观区分四种连接形态。
         CollapsibleSection(
             title = stringResource(R.string.host_slim_title),
-            subtitle = stringResource(R.string.host_slim_summary),
+            subtitle = null,
             checked = slimEnabled,
             onCheckedChange = { slimEnabled = it },
         ) {
