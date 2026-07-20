@@ -3183,6 +3183,15 @@ class SessionSyncCoordinator(
  * pollute the local cache.
  *
  * Fetched entries win on duplicate IDs.
+ *
+ * T2 (slimapi v0.2.2 client-adapt): scope-directories gate. When
+ * [SlimAggregationOutcome.Success.serverScope] (or
+ * [SlimAggregationOutcome.Partial.serverScope]) reports
+ * `directories == 0`, the sidecar's allowlist is not yet ready and the
+ * (possibly empty) `items` are NOT authoritative — return prior
+ * unchanged (same as `Failure`). `directories > 0` means authoritative;
+ * `serverScope == null` (pre-0.2.2 sidecar / 503) preserves the original
+ * behavior. See task-2-brief.md.
  */
 internal fun <Wire, Ui> applyAggregationOutcome(
     prior: List<Ui>,
@@ -3202,6 +3211,14 @@ internal fun <Wire, Ui> applyAggregationOutcome(
         }
 
         is SlimAggregationOutcome.Success -> {
+            // T2: scope not ready → retain prior (do NOT clear stale).
+            if (outcome.serverScope?.directories == 0) {
+                return SlimAggregationFold(
+                    items = prior,
+                    signal = signal,
+                )
+            }
+
             val scope = outcome.authoritativeDirectories
 
             val fetched = outcome.items
@@ -3238,6 +3255,15 @@ internal fun <Wire, Ui> applyAggregationOutcome(
         }
 
         is SlimAggregationOutcome.Partial -> {
+            // T2: scope not ready → retain prior (do NOT clear stale).
+            // Mirrors the Success-branch gate.
+            if (outcome.serverScope?.directories == 0) {
+                return SlimAggregationFold(
+                    items = prior,
+                    signal = signal,
+                )
+            }
+
             val scope = outcome.authoritativeDirectories
 
             // A Partial item is accepted only from a proven-success

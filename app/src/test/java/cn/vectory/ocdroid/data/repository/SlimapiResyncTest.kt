@@ -34,17 +34,26 @@ class SlimapiResyncTest {
     // ── T6-C6: needsReconcile branches ─────────────────────────────────────
 
     @Test
-    fun `T6-C6 needsReconcile returns true when remoteMessageId differs from localAppliedMessageId`() {
+    fun `T1 needsReconcile returns true when equal ts and remote id strictly lexicographically larger`() {
+        // T1 tuple semantics: needsReconcile fires iff
+        // compareWatermark(remoteTs, remoteId, localTs, localId) > 0.
+        // With equal ts on both sides, the remote id STRICTLY lexicographically
+        // greater than the local id ⇒ tuple > 0 ⇒ true. This is the
+        // discriminating T1 case that the pre-T1 OR-of-two
+        // (`remoteId != localId || remoteTs > localTs`) could not distinguish
+        // from a stale-smaller-id digest (both fired → spurious reconcile).
+        // Fixture m2 > m1 makes the intent unambiguous (vs opaque
+        // "m-remote"/"m-local" strings whose ordering is coincidental).
         val state = SlimSessionState(
             sessionId = "s1",
-            remoteMessageId = "m-remote",
+            remoteMessageId = "m2",
             remoteUpdatedAt = 100L,
-            localAppliedMessageId = "m-local",
+            localAppliedMessageId = "m1",
             localAppliedUpdatedAt = 100L,
             dirty = false,
         )
         assertTrue(
-            "remote != localApplied messageID must trigger needsReconcile",
+            "equal ts + remote id strictly larger (m2 > m1) must trigger needsReconcile under T1 tuple semantics",
             needsReconcile(state)
         )
     }
@@ -114,7 +123,7 @@ class SlimapiResyncTest {
     }
 
     @Test
-    fun `T6-C6 needsReconcile returns false when localApplied ahead of remote`() {
+    fun `T6-C2 needsReconcile returns false when localApplied ahead of remote`() {
         // REST fetched beyond what digest signalled — local view exceeds
         // remote. No gap to reconcile.
         val state = SlimSessionState(
@@ -146,6 +155,29 @@ class SlimapiResyncTest {
             dirty = false,
         )
         assertFalse(needsReconcile(state))
+    }
+
+    @Test
+    fun `T1-C3 needsReconcile stale remote id behind local returns false`() {
+        // T1 tuple semantics: (remoteTs, remoteId) tuple must be STRICTLY
+        // greater than (localTs, localId) to trigger reconcile. Here
+        // remote id is lexicographically SMALLER than local (stale digest
+        // re-emit; the monotonic id contract guarantees a stale digest's
+        // id is smaller) → tuple compare returns negative → no reconcile.
+        // Pre-T1 this would have returned TRUE (remoteId != localAppliedId
+        // OR-of-two) → spurious reconcile loop.
+        val state = SlimSessionState(
+            sessionId = "s1",
+            remoteMessageId = "m1",
+            remoteUpdatedAt = 200L,
+            localAppliedMessageId = "m2",
+            localAppliedUpdatedAt = 200L,
+            dirty = false,
+        )
+        assertFalse(
+            "stale remote id (m1 < m2) on equal ts must NOT trigger reconcile under tuple semantics",
+            needsReconcile(state)
+        )
     }
 
     // ── T6-C2: onReconcileSuccess advances localApplied* + clears dirty ───
@@ -234,11 +266,14 @@ class SlimapiResyncTest {
     }
 
     @Test
-    fun `T6-M3 onReconcileSuccess with equal updatedAt values picks one consistently`() {
-        // Multiple items with the SAME updatedAt — maxByOrNull returns the
-        // FIRST max. Both id and ts come from that same first-max item, so
-        // the (id, ts) pair stays consistent regardless of which item is
-        // picked.
+    fun `T6-M3 onReconcileSuccess with equal updatedAt values picks max id consistently`() {
+        // T1 tuple semantics: when multiple items share the SAME updatedAt,
+        // the selection now uses `maxWithOrNull(compareBy(updated, id))` —
+        // i.e. among equal-ts items the LARGEST id wins (lexicographic tie-
+        // break, mirroring compareWatermark). Both id and ts come from that
+        // same item, so the (id, ts) pair stays consistent. Pre-T1 this
+        // returned the FIRST max-by-ts item (Kotlin maxByOrNull behavior);
+        // T1's tie-break makes the selection deterministic in id space too.
         val prior = SlimSessionState(sessionId = "s1", dirty = true)
         val items = listOf(
             messageWithParts(id = "first", updated = 200L),
@@ -246,23 +281,28 @@ class SlimapiResyncTest {
         )
         val out = onReconcileSuccess(prior, items)
         assertEquals(200L, out.localAppliedUpdatedAt)
-        // maxByOrNull returns the FIRST matching — both id and ts come from
-        // it. The exact id picked is an implementation detail as long as
-        // (id, ts) is consistent.
-        val expectedId = items.first { it.info.time?.updated == 200L }.info.id
-        assertEquals(expectedId, out.localAppliedMessageId)
+        // T1: max id wins among equal ts — "second" > "first" lexicographically.
+        assertEquals(
+            "T1 tuple selection: among equal-ts items the max id must be picked " +
+                "(compareBy(updated, id) tie-break — mirrors compareWatermark).",
+            "second",
+            out.localAppliedMessageId,
+        )
     }
 
     @Test
     fun `T6-C2 onReconcileSuccess retains prior pair when response max ts does not strictly advance`() {
-        // rev-gpt round-2 IMPORTANT fix: when items returned an OLDER tail
-        // than what local-applied already has (e.g. fetch anchored too
-        // early, duplicate response, or stale debounce re-fetch), the
-        // (localAppliedMessageId, localAppliedUpdatedAt) pair is retained
-        // ATOMICALLY — BOTH fields unchanged. The earlier implementation
-        // kept prior ts (via monotonic-max) but adopted observedId,
-        // splitting the pair → future needsReconcile would see
-        // "id differs but ts same" → spurious re-reconcile loops.
+        // rev-gpt round-2 IMPORTANT fix (preserved under T1 tuple semantics):
+        // when items returned an OLDER tail than what local-applied already
+        // has (e.g. fetch anchored too early, duplicate response, or stale
+        // debounce re-fetch), the (localAppliedMessageId,
+        // localAppliedUpdatedAt) pair is retained ATOMICALLY — BOTH fields
+        // unchanged. Under T1: compareWatermark(observedTs=200, observedId,
+        // prior=500, priorId) → tsA < tsB → returns negative → advances=false
+        // → pair retained. The earlier pre-T6 implementation kept prior ts
+        // (via monotonic-max) but adopted observedId, splitting the pair →
+        // future needsReconcile would see "id differs but ts same" →
+        // spurious re-reconcile loops.
         val prior = SlimSessionState(
             sessionId = "s1",
             localAppliedUpdatedAt = 500L,
@@ -290,36 +330,71 @@ class SlimapiResyncTest {
     }
 
     @Test
-    fun `T6-C2 tie regression - equal observedTs with different messageId retains prior pair`() {
-        // rev-gpt round-2: pin the TIE semantic. When observedTs EQUALS
-        // prior localAppliedUpdatedAt but the response carries a DIFFERENT
-        // messageId, the pair MUST stay at the prior values. Equal ts does
-        // NOT advance the pair — strict advance (observedTs > prior) is
-        // required. This is the discriminating case between "pair moves"
-        // and "pair stays"; under the old unconditional-id-update code,
-        // this would have produced ts=200 (equal, kept) + id=m-new (split).
+    fun `T1-C2 equal updatedAt larger messageID advances pair`() {
+        // T1 tuple semantics INVERT the pre-T1 tie rule. Pre-T1: equal ts
+        // never advanced (strict `observedTs > prior`), so equal-ts + any id
+        // retained prior. T1: compareWatermark((200, "m2"), (200, "m1")) →
+        // ts equal, "m2" > "m1" → returns POSITIVE → advances the pair to
+        // (200, "m2"). This is safe because opencode messageID is strictly
+        // monotonic by creation (see compareWatermark kdoc).
         val prior = SlimSessionState(
             sessionId = "s1",
             localAppliedUpdatedAt = 200L,
-            localAppliedMessageId = "m-old",
+            localAppliedMessageId = "m1",
             dirty = true,
         )
-        val items = listOf(
-            // observedTs == prior, but different id.
-            messageWithParts(id = "m-new", updated = 200L),
-        )
+        val items = listOf(messageWithParts(id = "m2", updated = 200L))
         val out = onReconcileSuccess(prior, items)
+        assertEquals(200L, out.localAppliedUpdatedAt)
         assertEquals(
-            "tie on ts: localAppliedUpdatedAt stays at prior (no strict advance)",
-            200L,
-            out.localAppliedUpdatedAt,
-        )
-        assertEquals(
-            "tie on ts: localAppliedMessageId MUST stay at prior (pair atomic). " +
-                "Old buggy code would have produced id=m-new ts=200 → split pair.",
-            "m-old",
+            "T1 INVERT: equal ts + larger id advances the pair " +
+                "(pre-T1 retained prior — strict-ts-only advance).",
+            "m2",
             out.localAppliedMessageId,
         )
+        assertFalse(out.dirty)
+    }
+
+    @Test
+    fun `T1-C2 equal updatedAt smaller messageID retains prior`() {
+        // T1 tuple semantics: compareWatermark((200, "m1"), (200, "m2")) →
+        // ts equal, "m1" < "m2" → returns NEGATIVE → advances=false → pair
+        // retained. This is the discriminating case for the stale-digest
+        // scenario: an out-of-order / re-emitted digest would carry a
+        // strictly-smaller id (monotonic id contract) → tuple compare
+        // correctly returns negative → no spurious advance.
+        val prior = SlimSessionState(
+            sessionId = "s1",
+            localAppliedUpdatedAt = 200L,
+            localAppliedMessageId = "m2",
+            dirty = true,
+        )
+        val items = listOf(messageWithParts(id = "m1", updated = 200L))
+        val out = onReconcileSuccess(prior, items)
+        assertEquals(200L, out.localAppliedUpdatedAt)
+        assertEquals(
+            "T1: equal ts + smaller id retains prior (stale-digest safe harbor).",
+            "m2",
+            out.localAppliedMessageId,
+        )
+        assertFalse(out.dirty)
+    }
+
+    @Test
+    fun `T1-C2 equal updatedAt equal messageID retains prior pair unchanged`() {
+        // Idempotent reconcile: same (ts, id) observed → compareWatermark
+        // returns 0 → NOT > 0 → advances=false → pair retained. No spurious
+        // movement on duplicate fetches / debounce re-emits.
+        val prior = SlimSessionState(
+            sessionId = "s1",
+            localAppliedUpdatedAt = 200L,
+            localAppliedMessageId = "m-same",
+            dirty = true,
+        )
+        val items = listOf(messageWithParts(id = "m-same", updated = 200L))
+        val out = onReconcileSuccess(prior, items)
+        assertEquals(200L, out.localAppliedUpdatedAt)
+        assertEquals("m-same", out.localAppliedMessageId)
         assertFalse(out.dirty)
     }
 
@@ -563,6 +638,26 @@ class SlimapiResyncTest {
 
         // Still needs reconcile.
         assertTrue(needsReconcile(state.get("s1")!!))
+    }
+
+    // ── T1-C1: compareWatermark lexicographic + null ordering ─────────────
+
+    @Test
+    fun `compareWatermark lexicographic and null ordering`() {
+        // ts 主导
+        assertTrue(compareWatermark(200L, "m1", 100L, "m9") > 0)
+        assertTrue(compareWatermark(100L, "m9", 200L, "m1") < 0)
+        // ts 相等 → id 字典序
+        assertTrue(compareWatermark(200L, "m2", 200L, "m1") > 0)
+        assertTrue(compareWatermark(200L, "m1", 200L, "m2") < 0)
+        assertEquals(0, compareWatermark(200L, "m1", 200L, "m1"))
+        // null ts = 最旧
+        assertTrue(compareWatermark(null, "m9", 100L, "m1") < 0)
+        assertTrue(compareWatermark(100L, "m1", null, "m9") > 0)
+        assertEquals(0, compareWatermark(null, "a", null, "b"))
+        // ts 相等 + null id = 最旧
+        assertTrue(compareWatermark(200L, null, 200L, "m1") < 0)
+        assertTrue(compareWatermark(200L, "m1", 200L, null) > 0)
     }
 
     // ── helpers ──────────────────────────────────────────────────────────

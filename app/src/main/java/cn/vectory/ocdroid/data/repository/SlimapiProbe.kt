@@ -92,13 +92,17 @@ data class ProbeResult(
  *    answers the catch-up boolean.)
  * 3. `localAppliedId == null` → `true`. We've never applied any message
  *    for this session locally; the server definitely has more than us.
- * 4. `probe.messageID != localAppliedId` → `true`. Server's latest
- *    skeleton id differs from the last one we applied — out of date.
- * 5. `probe.updatedAt != null` AND (`localAppliedTs == null` OR
- *    `probe.updatedAt > localAppliedTs`) → `true`. Same message id but
- *    the server's activity watermark is newer (or we have no ts
- *    watermark to compare against).
- * 6. Otherwise → `false`. Aligned; no REST pull needed.
+ * 4. T1 tuple compare: `(probe.updatedAt, probe.messageID)` STRICTLY
+ *    greater than `(localAppliedTs, localAppliedId)` in lexicographic
+ *    tuple order → `true`. Pre-T1 this was an OR-of-two (`messageID !=
+ *    localAppliedId || updatedAt > localAppliedTs`); T1 collapses it
+ *    into one [compareWatermark] call — see its kdoc for why the id
+ *    tie-break is safe (opencode messageID is lexicographically
+ *    strictly monotonic by creation). This also correctly returns
+ *    `false` on a STALE probe whose tuple is not strictly greater
+ *    (e.g. equal ts + smaller id from an out-of-order re-emit) — no
+ *    spurious catch-up.
+ * 5. Otherwise → `false`. Aligned; no REST pull needed.
  *
  * Pure: no `suspend`, no IO, no DI, no Android deps.
  */
@@ -110,8 +114,10 @@ fun needsCatchUp(
     if (!probe.ok) return false
     if (probe.empty || probe.messageID == null) return false
     if (localAppliedId == null) return true
-    if (probe.messageID != localAppliedId) return true
-    if (probe.updatedAt != null && (localAppliedTs == null || probe.updatedAt > localAppliedTs)) {
+    // T1: tuple compare collapses pre-T1 branches 4 (messageID differs)
+    // + 5 (updatedAt > localAppliedTs) into a single lexicographic
+    // decision. probe's updatedAt maps to tsA, probe's messageID to idA.
+    if (compareWatermark(probe.updatedAt, probe.messageID, localAppliedTs, localAppliedId) > 0) {
         return true
     }
     return false

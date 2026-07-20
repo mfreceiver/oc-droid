@@ -52,4 +52,54 @@ internal object WorkdirPaths {
      * skip the entry rather than grouping under `""`.
      */
     fun normalize(raw: String): String = raw.trim().trim('/')
+
+    /**
+     * **Server-facing** normalize for the `?directory=` query-param fan-out
+     * (slimapi `/sessions` / `/questions` / `/permissions`). Aligns with
+     * oc-slimapi v0.2.2's server-side `normalize_directory`:
+     *
+     *   `s.rstrip("/") or "/"`
+     *
+     * i.e. strip the trailing slash, but **preserve root `/`** (the empty
+     * string and `/` both normalize to `/`). Idempotent.
+     *
+     * **This is intentionally DISTINCT from [normalize]**:
+     *  - [normalize] is comparison-keying only — surrounding-slash-strip
+     *    (`trim().trim('/')`) used to decide "two paths refer to the same
+     *    project for grouping / disconnect-matching." The RAW string is
+     *    what gets stored / displayed / passed to server APIs (per the
+     *    existing contract documented above; do NOT change it).
+     *  - [normalizeDirectory] is the value actually SENT to the server in
+     *    the fan-out — it must agree with the server's `normalize_directory`
+     *    so the client's dedup count matches the server's dedup count
+     *    (slimapi v0.2.2 makes the server MORE lenient: it now strips +
+     *    dedups too, so this is a tighten-to-align, non-breaking).
+     *
+     * Without this client-side normalize, `/app` + `/app/` could fan out
+     * as 2 distinct entries (pre-server-normalize), inflating the
+     * `?directory=` list and producing redundant routeTokens. The slim
+     * q/p fan-out ([`computeQuestionFanOutWorkdirs`] + the resync
+     * `directories` construction in `SessionStreamingService.onResync`)
+     * runs this BEFORE `.distinct()` so both client and server see the
+     * same single canonical entry per logical workdir.
+     *
+     * Boundary behaviour:
+     *  - `""` → `"/"` (empty input is treated as root; never returns `""`)
+     *  - `"/"` → `"/"` (root preserved, NOT collapsed to `""`)
+     *  - `"/app/"` → `"/app"`
+     *  - `"/app//"` → `"/app"` (all trailing slashes stripped, matching
+     *    Python `rstrip("/")`)
+     *  - interior slashes preserved (`/a/b/c` stays `/a/b/c`)
+     *  - case / `.` / `..` / symlinks NOT touched (same minimalism as
+     *    [normalize] — the app cannot reliably resolve them cross-platform).
+     */
+    fun normalizeDirectory(directory: String): String {
+        val t = directory.trim()
+        if (t.isEmpty()) return "/"
+        // Server semantics: `s.rstrip("/") or "/"` — if stripping trailing
+        // slashes empties the string (input was all slashes, e.g. "//"),
+        // return root "/" rather than the empty string.
+        val stripped = t.trimEnd('/')
+        return if (stripped.isEmpty()) "/" else stripped
+    }
 }

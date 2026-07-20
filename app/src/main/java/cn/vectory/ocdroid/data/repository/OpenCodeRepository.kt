@@ -1174,6 +1174,29 @@ class OpenCodeRepository @Inject constructor(
     }
 
     /**
+     * T3-M1 (final review D4): shared slim-branch observability helper for
+     * the session-list endpoints. Mirrors the inline `.recoverCatching`
+     * pattern in [getSlimapiSessions] — parse the sidecar's coded envelope
+     * (`{"code":"upstream_unavailable"} / upstream_http_<N> / etc.`), emit a
+     * warn-level log for observability, and let the caller rethrow the
+     * original exception (no wrapper type, no Result-shape change). Non-
+     * HttpException throwables (e.g. IOException) have no Response to read
+     * and skip the parse/log silently.
+     *
+     * Used by [getSessions] + [getSessionsForDirectory] slim branches so
+     * production session-list loads get the same code log as
+     * [getSlimapiSessions] (closes the T3 architecture-fork log gap noted
+     * in task-3 review #1). Legacy `api.getSessions` branches are NOT
+     * routed through this helper (no slim envelope on that path).
+     */
+    private fun logSlimapiSessionsCodeIfPresent(e: Throwable) {
+        if (e !is retrofit2.HttpException) return
+        val resp = e.response() ?: return
+        val code = parseErrorCode(resp) ?: return
+        DebugLog.w(TAG, "slimapi sessions failed: $code")
+    }
+
+    /**
      * §slim-reconcile-lane-repo (B2 T2): in slim mode, route to the sidecar's
      * `/slimapi/sessions` (skeleton list, each row carries its own
      * `directory` so the caller filters client-side). The slimapi DTO IS the
@@ -1182,14 +1205,24 @@ class OpenCodeRepository @Inject constructor(
      * [getSessionsForDirectory] / [getPendingPermissions].
      *
      * legacy (`isSlimMode == false`): byte-for-byte unchanged.
+     *
+     * T3-M1 (final review D4): the slim branch applies the SAME
+     * `parseErrorCode` + `DebugLog.w` + rethrow pattern [getSlimapiSessions]
+     * uses, so production session-list loads get the same warn-level code
+     * log as the other slim catch sites. The legacy `api.getSessions`
+     * branch is left untouched (no slim envelope on that path).
      */
-    suspend fun getSessions(limit: Int? = null): Result<List<Session>> = runSuspendCatching {
+    suspend fun getSessions(limit: Int? = null): Result<List<Session>> =
         if (isSlimMode) {
-            api.getSlimapiSessions(directories = null, roots = null, limit = limit)
+            runSuspendCatching {
+                api.getSlimapiSessions(directories = null, roots = null, limit = limit)
+            }.recoverCatching { e ->
+                logSlimapiSessionsCodeIfPresent(e)
+                throw e
+            }
         } else {
-            api.getSessions(limit)
+            runSuspendCatching { api.getSessions(limit) }
         }
-    }
 
     /**
      * Fetches the root sessions whose [Session.directory] exactly matches
@@ -1202,18 +1235,25 @@ class OpenCodeRepository @Inject constructor(
      * — Retrofit expands the list into repeated `?directory=...` query
      * params (contract: repeated, NOT comma-joined). The sidecar filters
      * server-side identically to the legacy opencode route.
+     *
+     * T3-M1 (final review D4): slim branch observability — same
+     * `parseErrorCode` + `DebugLog.w` + rethrow pattern as [getSessions] /
+     * [getSlimapiSessions]; legacy branch untouched.
      */
     suspend fun getSessionsForDirectory(directory: String, limit: Int? = null): Result<List<Session>> =
-        runSuspendCatching {
-            if (isSlimMode) {
+        if (isSlimMode) {
+            runSuspendCatching {
                 api.getSlimapiSessions(
                     directories = listOf(directory),
                     roots = true,
                     limit = limit,
                 )
-            } else {
-                api.getSessions(limit = limit, directory = directory, roots = true)
+            }.recoverCatching { e ->
+                logSlimapiSessionsCodeIfPresent(e)
+                throw e
             }
+        } else {
+            runSuspendCatching { api.getSessions(limit = limit, directory = directory, roots = true) }
         }
 
     /**
@@ -2335,7 +2375,7 @@ class OpenCodeRepository @Inject constructor(
      * Reads [Response.errorBody] exactly once (OkHttp buffers it for
      * one-shot consumption); safe to call from any 4xx/5xx branch.
      */
-    private fun parseErrorCode(r: retrofit2.Response<*>): String? = try {
+    internal fun parseErrorCode(r: retrofit2.Response<*>): String? = try {
         val raw = r.errorBody()?.string() ?: return null
         // Reuse the repository's shared [json] instance (already configured with
         // ignoreUnknownKeys = true; the other settings — isLenient /
@@ -2365,6 +2405,39 @@ class OpenCodeRepository @Inject constructor(
         search: String? = null
     ): Result<List<Session>> = runSuspendCatching {
         api.getSlimapiSessions(directories, roots, limit, search)
+    }.recoverCatching { e ->
+        // Task 3 (slimapi v0.2.2): /sessions failure bodies now carry the
+        // sidecar's coded envelope ({"code":"upstream_unavailable"} /
+        // upstream_http_<N> / etc.) instead of FastAPI-default {"detail":…}.
+        // Correctness-wise the upstream "non-200 = failure" path already
+        // worked; this branch makes the failure OBSERVABLE (warn-level log
+        // carrying the parsed code, mirroring the existing
+        // getSlimapiSessionStatusOutcome / expandBatchInternal catch sites
+        // that already use [parseErrorCode]) WITHOUT changing the public
+        // Result shape — the original exception is rethrown so
+        // `result.exceptionOrNull() is HttpException` still holds and
+        // coldStartSlimSync's `.getOrNull()` → null (3-state) is preserved.
+        //
+        // Grill-confirmed (YAGNI): a dedicated SlimapiHttpException(code,
+        // cause) carrier type is NOT introduced — no caller of this method
+        // does `as? HttpException` specialization, so a carrier type
+        // carrying a code nobody consumes would be over-design. The code
+        // is logged for observability and the original exception is
+        // propagated verbatim.
+        //
+        // Non-HttpException throwables (e.g. IOException on transport
+        // failure) have no Response to read and skip this branch — they
+        // pass through unchanged.
+        if (e is retrofit2.HttpException) {
+            val resp = e.response()
+            if (resp != null) {
+                val code = parseErrorCode(resp)
+                if (code != null) {
+                    DebugLog.w(TAG, "slimapi sessions failed: $code")
+                }
+            }
+        }
+        throw e
     }
 
     /**
@@ -2397,6 +2470,7 @@ class OpenCodeRepository @Inject constructor(
             errors = aggregation.errors,
             requestedDirectories = directories,
             directoryOf = SlimapiQuestionEntry::directory,
+            serverScope = aggregation.scope,
         )
     }
 
@@ -2424,18 +2498,26 @@ class OpenCodeRepository @Inject constructor(
             errors = aggregation.errors,
             requestedDirectories = directories,
             directoryOf = SlimapiPermissionEntry::directory,
+            serverScope = aggregation.scope,
         )
     }
 
     /**
      * I-2: fold per-source aggregation envelope into a typed outcome.
      * [requestedDirectories] is the directory list passed to the API call.
+     *
+     * T2 (slimapi v0.2.2): [serverScope] is the envelope's `scope:{directories:N}`
+     * carried through into [SlimAggregationOutcome.Success] /
+     * [SlimAggregationOutcome.Partial] so the caller can gate on
+     * `directories==0` (sidecar allowlist not ready). Default null
+     * preserves the original behavior for non-slim / pre-0.2.2 callers.
      */
     private fun <T> aggregationOutcome(
         items: List<T>,
         errors: List<SlimapiAggregationError>,
         requestedDirectories: List<String>?,
         directoryOf: (T) -> String?,
+        serverScope: SlimapiScope? = null,
     ): SlimAggregationOutcome<T> {
         val requested = requestedDirectories?.toSet()
 
@@ -2443,6 +2525,7 @@ class OpenCodeRepository @Inject constructor(
             return SlimAggregationOutcome.Success(
                 items = items,
                 authoritativeDirectories = requested,
+                serverScope = serverScope,
             )
         }
 
@@ -2468,6 +2551,7 @@ class OpenCodeRepository @Inject constructor(
             items = items,
             errors = errors,
             authoritativeDirectories = successfulDirectories,
+            serverScope = serverScope,
         )
     }
 
@@ -2600,6 +2684,7 @@ class OpenCodeRepository @Inject constructor(
                 errors = agg.errors,
                 requestedDirectories = directories,
                 directoryOf = SlimapiQuestionEntry::directory,
+                serverScope = agg.scope,
             )
         }.getOrElse { error ->
             if (error is StaleSlimCommitException) throw error
@@ -2618,6 +2703,7 @@ class OpenCodeRepository @Inject constructor(
                 errors = agg.errors,
                 requestedDirectories = directories,
                 directoryOf = SlimapiPermissionEntry::directory,
+                serverScope = agg.scope,
             )
         }.getOrElse { error ->
             if (error is StaleSlimCommitException) throw error
@@ -3378,12 +3464,27 @@ sealed interface SlimAggregationOutcome<out T> {
     data class Success<T>(
         val items: List<T>,
         val authoritativeDirectories: Set<String>?,
+        /**
+         * T2 (slimapi v0.2.2): the sidecar readiness scope carried by the
+         * envelope (`scope:{directories:N}`). Null = old sidecar / 503 →
+         * original behavior. `directories==0` = not ready → caller retains
+         * prior. `directories>0` = authoritative.
+         */
+        val serverScope: SlimapiScope? = null,
     ) : SlimAggregationOutcome<T>
 
     data class Partial<T>(
         val items: List<T>,
         val errors: List<SlimapiAggregationError>,
         val authoritativeDirectories: Set<String>,
+        /**
+         * T2 (slimapi v0.2.2): same readiness contract as
+         * [Success.serverScope]. A Partial can also carry the scope from a
+         * 200-with-errors response (sidecar shipped `errors[]` AND a
+         * `scope`); the gating logic in `applyAggregationOutcome` applies
+         * the same `directories==0` retain-prior rule.
+         */
+        val serverScope: SlimapiScope? = null,
     ) : SlimAggregationOutcome<T>
 }
 

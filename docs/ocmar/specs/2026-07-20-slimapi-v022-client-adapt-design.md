@@ -31,7 +31,7 @@ oc-slimapi v0.2.1/v0.2.2 修复了 2 个 pre-existing 真 bug + ratify 了 ocdro
 - **当前 strict-advance 是纯标量**：`onReconcileSuccess`（`SlimapiResync.kt:135-195`）只在 `observedTs > priorTs` 时推进 `(ts, id)` pair（pair 取自 `maxByOrNull { time.updated }` 单条 item）；ts 相等则 pair 不动。
 - **watermark 存储**：`SlimSessionState`（`SlimSseReducer.kt:67-140`）4 个可空标量字段（`remoteMessageId` / `remoteUpdatedAt` / `localAppliedMessageId` / `localAppliedUpdatedAt`），存于 `SlimSseState.sessions: MutableMap`。
 - **`/since` 调用链**：`reconcileSessionLocked`（`SessionSyncCoordinator.kt:2416-2428`）→ `localAppliedUpdatedAt != null` 时 `repo.getSlimapiMessagesSince(sid, since)` → `bumpSlimBookmarkFromItems`（`OpenCodeRepository.kt:2731-2746`）→ `onReconcileSuccess`。
-- **已知陷阱**：`SlimSseReducer.bumpUpdatedAt`（`:192-200`）只写 `remoteUpdatedAt` 不写 `remoteMessageId`（不对称）；`remoteMessageId` 由 `reduceSlimDigest`（`:331`）单独 last-write-wins。tuple 语义下必须一致。
+- **已知陷阱（grill 后已澄清）**：`SlimSseReducer.bumpUpdatedAt`（`:193`）经 grep 确认 **vestigial**（main src 零 caller，T11 已 reroute）→ 加 `@Deprecated`，**不**对称化。真实 remote 写路径是 `reduceSlimDigest`（`:329-333`）：`remoteMessageId`=last-write-wins / `remoteUpdatedAt`=monotonic-max——经分析**无害**（messageID 单调 ⇒ 陈旧 digest 的 id 必更小 ⇒ tuple `needsReconcile` 正确判负），**不改合并策略**，仅注释记录不变量。
 - **测试将反转**：`SlimapiResyncTest.kt:151-414` 多条 "equal ts + different id → retain prior" 断言（`:257-324` tie/atomic-pair）在 tuple 字典序语义下**行为反转**（id 更大时应推进），须重写。
 
 ### 2.2 messageID 单调性 — **已源码核实（命门假设成立）**
@@ -88,7 +88,7 @@ opencode ID 生成器 `packages/opencode/src/id/id.ts`：
 2. `SlimapiResync.needsReconcile`（`:67-83`）：现 OR-of-two（`remoteId != localId || remoteTs > localTs`）→ tuple 字典序（`remoteTs > localTs || (remoteTs == localTs && remoteId != localId && remoteId > localId)`，等价于 `(remoteTs, remoteId) > (localTs, localId)`）。注意保留 `null` 边界（localTs==null 时仍需 reconcile）。
 3. `SlimapiProbe.needsCatchUp`（`:105-118`）：同 needsReconcile 的 tuple 化。
 4. `SlimSseReducer.reduceSlimDigest` fetch trigger（`:368-383`）：`incomingUpdatedAt > priorMax` 的触发条件 + messageId-only 防御分支 → tuple 字典序。
-5. `SlimSseReducer.bumpUpdatedAt`（`:192-200`）：消除不对称——tuple 语义下 `remoteMessageId` 与 `remoteUpdatedAt` 必须**一起**写（或显式确认 `:331` 的 last-write-wins 路径在所有 bump 路径上都覆盖；倾向直接修 `bumpUpdatedAt` 同写两字段，单一真相源）。
+5. `SlimSseReducer.bumpUpdatedAt`（`:193`）：**vestigial**（main src 零 caller，T11 已 reroute）→ 加 `@Deprecated`，**不**对称化。真实 remote 写路径 `reduceSlimDigest`（`:329-333`）的 `remoteMessageId`=last-write-wins / `remoteUpdatedAt`=monotonic-max **不改**——单调 id 保证其无害。注释记录该不变量。
 
 **测试改写**：`SlimapiResyncTest.kt:151-414` 的 tie / atomic-pair / "equal ts + different id → retain prior" 断言**行为反转**——重写为 "equal ts + larger id → advance to (ts, largerId)"、"equal ts + smaller id → retain prior"。新增同 ms 多消息（id 单调）收敛测试。
 
@@ -102,7 +102,7 @@ opencode ID 生成器 `packages/opencode/src/id/id.ts`：
 **改动点**：
 1. **DTO**（`data/model/Slimapi.kt:99/106`）：`SlimapiQuestionAggregation` / `SlimapiPermissionAggregation` 各加 `val scope: SlimapiScope? = null`；新增 `@Serializable data class SlimapiScope(val directories: Int)`。503 不含 scope → 反序列化为 null（与服务端契约一致）。
 2. **解析 + 透传**（`OpenCodeRepository.kt:2434` `aggregationOutcome`）：签名加 `scope` 参数；产出 `Success(items, authoritativeDirectories, serverScope)`（`SlimAggregationOutcome` 扩一个 `serverScope` 字段）。`requestedDirectories` 仍作 client-side authoritative 来源；`serverScope` 作 gating 信号。
-3. **gating**（`SessionSyncCoordinator.applyAggregationOutcome :3187`）：在 scope=null 全量替换分支前加判断——`if (serverScope?.directories == 0) → 保留 prior（等同 Failure 语义，不清 stale）`；否则原逻辑。`loadPendingQuestionsSlim`（`:1820`，走同一 `applyAggregationOutcome`）自动继承。
+3. **gating**（`SessionSyncCoordinator.applyAggregationOutcome :3187`）：在 scope=null 全量替换分支前加判断——`if (serverScope?.directories == 0) → 保留 prior（等同 Failure 语义，不清 stale）`；否则原逻辑。`loadPendingQuestionsSlim`（`:1820`，走同一 `applyAggregationOutcome`）自动继承。**对称门禁**：该 `directories==0 → retain prior` 规则在 **Success 与 Partial 两个分支都施加**（grill-accepted safe superset）——Partial 也能从 200-with-errors 响应携带 `scope`（sidecar 既 ship 了 `errors[]`、又 ship 了 `scope`），同属"scope 未就绪"语义，必须与 Success 一致地保留 prior；否则 Partial + 空 items + 非空 `authoritativeDirectories` 会绕过 Success-only 门禁清空 stale local state（residual false-clear hole）。
 4. `coldStartSlimSync` 内两处直调（`:2591/2609`）透传 scope 到 `aggregationOutcome`。
 
 **向后兼容**：旧字段全保留；scope=null（旧服务端 / 503）走原逻辑，不破坏。
@@ -113,6 +113,7 @@ opencode ID 生成器 `packages/opencode/src/id/id.ts`：
 - 502 `upstream_http_N` / 503 `upstream_unavailable` → 可重试失败（带 code）。
 - 其它 → 通用失败。
 **最小实现**：把 `parseErrorCode` 提升为 `internal fun`（或 `SlimapiErrorCodes` 伴生 helper）供 list 路径复用；list 返回类型维持 `Result<List<Session>>`（失败仍折 null/Failure，但带 code 供日志/未来 UX）。
+**最小深度（grill-confirmed）**：parse + log + rethrow **原始异常**——不引入 typed routing / 不新增异常类型 / 不改 Result 形状（与 §7 决策 #2 + grill 一致）。code 仅作 warn 级日志（可观测性）；原 `HttpException` 原样 rethrow，`coldStartSlimSync` 的 `.getOrNull()` → null 三态语义保持不变。typed routing（如 `SlimapiHttpException(code, cause)`）经 audit 确认无调用方做 `as? HttpException` 专门化 → YAGNI，**不**在本 task 范围内。
 **注意**：`coldStartSlimSync`（`:2578`）把 sessions 失败折成 `null`（三态保留）；改后仍折 null，但底层解析带 code。不破坏三态契约。
 
 ### 4.5 P2b — directory 客户端规范化去重
@@ -132,7 +133,7 @@ opencode ID 生成器 `packages/opencode/src/id/id.ts`：
 ### 5.1 P0
 - `onReconcileSuccess`：同 ts 不同 id，id 更大 → 推进到 (ts, largerId)；id 更小 → 保留 prior。同 ts 多消息收敛（应用全集后 watermark = (ts, maxId)）。
 - `needsReconcile` / `needsCatchUp`：tuple 字典序判定，含 null 边界。
-- `bumpUpdatedAt`：ts 推进时 remoteMessageId 同写（对称）。
+- `bumpUpdatedAt`（`:193`）：vestigial → `@Deprecated`，不对称化（grill 结论）；真实 remote 写路径 `reduceSlimDigest` merge 不变。
 - 回归：`/since` 真过滤下，watermark 推进不残留、不死循环（属性测试或场景测试）。
 
 ### 5.2 P1
@@ -156,7 +157,7 @@ opencode ID 生成器 `packages/opencode/src/id/id.ts`：
 | 风险 | 对策 |
 |---|---|
 | P0 tuple 语义在多入口（digest/probe/reconcile）不一致 → 部分路径漏改 → 死循环 | 集中提炼一个 `compareWatermark(tsA,idA,tsB,idB): Int` 纯函数，所有 4 处复用；单测覆盖每入口 |
-| `bumpUpdatedAt` 不对称历史陷阱 | 改为同写两字段；测试 `bumpUpdatedAt` 对称性 |
+| `bumpUpdatedAt` 看似不对称 | 经 grep 确认 vestigial（零 prod caller）→ `@Deprecated`；真实路径 `reduceSlimDigest` merge 经分析无害（单调 id），不改 |
 | P0 测试反转被误当回归失败 | 重写测试时标注语义变更（commit message + 测试注释引用本 spec §4.1） |
 | P1 scope==null 旧服务端回退 | scope 可空 + null 走原逻辑；测试覆盖 null/0/>0 三态 |
 | P2a 提升 `parseErrorCode` 可见性波及其它调用点 | 仅 `private`→`internal`，签名不变；现有 2 调用点零影响 |

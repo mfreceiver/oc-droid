@@ -5,6 +5,7 @@ import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.util.DebugLog
+import cn.vectory.ocdroid.util.WorkdirPaths
 import cn.vectory.ocdroid.util.runSuspendCatching
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -153,6 +154,15 @@ internal suspend fun AppCore.resolveQuestionDirectory(requestId: String): String
  * arriving for a recently-used-but-not-currently-connected workdir is missed
  * during catch-up (`directorySessions` only holds currently-connected ones).
  *
+ * **slimapi v0.2.2 T4 (P2b)**: now runs each entry through
+ * [WorkdirPaths.normalizeDirectory] BEFORE `.distinct()` so the client's
+ * fan-out count agrees with the server's normalize-dedup (server v0.2.2 strips
+ * trailing slash + dedups, preserving root `/`). Without this, `/app` +
+ * `/app/` could fan out as 2 distinct `?directory=` entries — pre-server-
+ * normalize that is 2 routeTokens; post-server-normalize the server folds
+ * them but the envelope still carries the redundant param. Tighten-to-align,
+ * non-breaking (server is strictly more lenient).
+ *
  * Pure free function (no AppCore coupling) so the coordinator can call it
  * directly without an import cycle.
  */
@@ -163,6 +173,7 @@ internal fun computeQuestionFanOutWorkdirs(
 ): List<String> =
     (directorySessionKeys + listOfNotNull(currentWorkdir) + recentWorkdirs)
         .filter { it.isNotBlank() }
+        .map { WorkdirPaths.normalizeDirectory(it) }
         .distinct()
 
 /** nav → session-list → chat. Used by the notification deep-link path. */

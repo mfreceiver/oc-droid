@@ -139,6 +139,112 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         assertTrue("w3 present: $path", path.contains("directory=%2Fw3"))
     }
 
+    // ── Task 3 (slimapi v0.2.2): /sessions list coded-error observability ──
+    //
+    // oc-slimapi v0.2.2 changed /slimapi/sessions failure bodies from
+    // FastAPI-default {"detail":...} passthrough to the sidecar's own
+    // coded envelope ({"code":"upstream_unavailable"} / upstream_http_<N>
+    // / etc.). Correctness-wise the existing "non-200 = failure" coarse
+    // handling already worked; Task 3 makes the failure OBSERVABLE
+    // (warn-level log carrying the parsed code) + CONSISTENT with the
+    // other catch sites that already use [parseErrorCode], WITHOUT
+    // changing the public Result shape (still Result.failure; still
+    // folded to null by coldStartSlimSync's .getOrNull() → 3-state
+    // preserved) and WITHOUT introducing a new exception type (grill
+    // confirmed no caller does as? HttpException specialization → a
+    // carrier type with a code nobody consumes = YAGNI).
+
+    @Test
+    fun `getSlimapiSessions 503 logs upstream_unavailable code at WARN and rethrows original HttpException`() = runBlocking {
+        // T3-C2: on retrofit2.HttpException the repo MUST parseErrorCode
+        // the sidecar's coded body, log the code at WARN (observability),
+        // and rethrow the ORIGINAL exception (no wrapper type).
+        server.enqueue(jsonResponse("""{"code":"upstream_unavailable"}""", 503))
+
+        val result = repository.getSlimapiSessions()
+
+        assertTrue(
+            "still Result.failure — 3-state contract with coldStartSlimSync preserved: $result",
+            result.isFailure,
+        )
+        assertTrue(
+            "exception is the ORIGINAL retrofit2.HttpException (NOT wrapped in a new type): ${result.exceptionOrNull()}",
+            result.exceptionOrNull() is retrofit2.HttpException,
+        )
+        // DebugLog.entries is a newest-first StateFlow; @Before already clear()ed it.
+        // T3-M2 (final review D5): tighten to assert BOTH the code message
+        // substring AND the level == WARN (previously only the substring
+        // was checked, leaving the door open to a level regression to
+        // DEBUG/INFO silently degrading observability).
+        val matches = DebugLog.entries.value.filter {
+            it.level == cn.vectory.ocdroid.util.DebugLog.Level.WARN &&
+                it.message.contains("upstream_unavailable")
+        }
+        assertTrue(
+            "code logged at WARN for observability: ${DebugLog.entries.value.map { "${it.level}:${it.message}" }}",
+            matches.isNotEmpty(),
+        )
+    }
+
+    @Test
+    fun `getSlimapiSessions 502 logs upstream_http_502 code at WARN and rethrows original HttpException`() = runBlocking {
+        // T3-M2 (final review D5): parallel to the 503 test above — 502
+        // carries the sidecar's `upstream_http_<N>` code (N=upstream HTTP
+        // status that the sidecar proxied-failed). Pinned so the 502 path
+        // surfaces its distinct code at WARN (not just the 503 path).
+        server.enqueue(jsonResponse("""{"code":"upstream_http_502"}""", 502))
+
+        val result = repository.getSlimapiSessions()
+
+        assertTrue(
+            "still Result.failure — 3-state contract preserved: $result",
+            result.isFailure,
+        )
+        assertTrue(
+            "exception is the ORIGINAL retrofit2.HttpException: ${result.exceptionOrNull()}",
+            result.exceptionOrNull() is retrofit2.HttpException,
+        )
+        val matches = DebugLog.entries.value.filter {
+            it.level == cn.vectory.ocdroid.util.DebugLog.Level.WARN &&
+                it.message.contains("upstream_http_502")
+        }
+        assertTrue(
+            "502 code logged at WARN for observability: ${DebugLog.entries.value.map { "${it.level}:${it.message}" }}",
+            matches.isNotEmpty(),
+        )
+    }
+
+    @Test
+    fun `getSlimapiSessions non-HttpException passes through unchanged and without code log`() = runBlocking {
+        // T3-C2 sibling: a transport-level failure (IOException, no HTTP
+        // status → no sidecar envelope) MUST NOT trigger the parseErrorCode
+        // branch — there is no Response to read. The repo rethrows as-is,
+        // Result.failure carries the original IOException, and no code log
+        // is emitted (no code to log). Pinned by pointing the repo at a
+        // dead port (MockWebServer shut down → ConnectException).
+        server.shutdown()
+        val deadRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+        deadRepo.configure(
+            baseUrl = "http://127.0.0.1:${server.url("").port}",
+            slim = true,
+        )
+
+        val result = deadRepo.getSlimapiSessions()
+
+        assertTrue("Result.failure on transport failure: $result", result.isFailure)
+        assertFalse(
+            "original exception NOT a retrofit2.HttpException (transport, not HTTP): ${result.exceptionOrNull()}",
+            result.exceptionOrNull() is retrofit2.HttpException,
+        )
+        // No HttpException → no parseErrorCode → no "slimapi sessions failed: <code>" log.
+        // (The transport layer may emit its own debug logs; we only assert
+        // OUR repo-level code-log line is absent.)
+        assertFalse(
+            "no repo-level code log on non-HttpException: ${DebugLog.entries.value.map { it.message }}",
+            DebugLog.entries.value.any { it.message.contains("slimapi sessions failed") },
+        )
+    }
+
     // ── /slimapi/messages/{sid}/since/{ts} (§5 A2=A) ───────────────────────
 
     @Test
@@ -330,6 +436,61 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         val entries = result.getOrThrow().items()
         assertEquals(1, entries.size)
         assertEquals("q-ok", entries[0].id)
+    }
+
+    // ── Task 2 (slimapi v0.2.2): scope.directories JSON → Success.serverScope e2e ──
+    //
+    // T2-C2 currently pins the DTO + gating by code review; this test
+    // locks the JSON→`Success.serverScope` end-to-end path through the
+    // real kotlinx deserializer + aggregationOutcome wiring. Without this,
+    // a future refactor that drops the `scope` field from the DTO (or
+    // breaks the envelope→Success wiring) would silently re-open the
+    // N==0 false-clear hole that T2-C3 pins at the coordinator layer.
+
+    @Test
+    fun `getSlimapiQuestions parses scope directories into Success serverScope`() = runBlocking {
+        // sidecar envelope carries scope.directories=N → must surface as
+        // Success.serverScope.directories == N (the gating signal for the
+        // N==0 retain-prior branch in applyAggregationOutcome).
+        val body = """{
+            "items": [],
+            "errors": [],
+            "scope": {"directories": 2}
+        }""".trimIndent()
+        server.enqueue(jsonResponse(body))
+
+        val result = repository.getSlimapiQuestions(token = token())
+
+        assertTrue(result.isSuccess)
+        val outcome = result.getOrThrow()
+        assertTrue("envelope → Success: $outcome", outcome is SlimAggregationOutcome.Success)
+        assertEquals(
+            "scope.directories N parses into Success.serverScope.directories",
+            2,
+            (outcome as SlimAggregationOutcome.Success).serverScope?.directories,
+        )
+    }
+
+    @Test
+    fun `getSlimapiQuestions with absent scope yields null Success serverScope`() = runBlocking {
+        // 503 / old sidecar / pre-0.2.2 envelope omits `scope` entirely →
+        // kotlinx defaults it to null → Success.serverScope == null →
+        // gating falls through to the original scope=null clear-stale
+        // behavior (T2-C3 backward-compat).
+        val body = """{
+            "items": [],
+            "errors": []
+        }""".trimIndent()
+        server.enqueue(jsonResponse(body))
+
+        val result = repository.getSlimapiQuestions(token = token())
+
+        assertTrue(result.isSuccess)
+        val outcome = result.getOrThrow() as SlimAggregationOutcome.Success
+        assertNull(
+            "absent scope → Success.serverScope == null (backward compat)",
+            outcome.serverScope,
+        )
     }
 
     @Test

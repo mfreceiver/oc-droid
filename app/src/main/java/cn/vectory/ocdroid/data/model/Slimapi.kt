@@ -95,10 +95,58 @@ data class SlimapiPermissionEntry(
  * routing doc `docs/slim-mode-api-routing.md` line 273 already pin this
  * envelope — this client shape MUST mirror the sidecar's `_aggregate` output.
  */
+/**
+ * Cluster A (slimapi v0.2.2 client-adapt): the sidecar readiness scope
+ * returned on the q/p aggregation envelope. Added so the client can tell
+ * "sidecar allowlist not yet ready" ([directories] == 0) from
+ * "authoritative empty across N ready directories" ([directories] > 0 &&
+ * `items` empty). Without this signal, both cases decode to `items=[]` and
+ * the [SlimAggregationOutcome.Success] full-replace branch falsely clears
+ * stale local pending q/p state during the narrow startup window.
+ *
+ * - [directories]: count of workdirs the sidecar aggregated in this
+ *   response (the size of its allowlist intersection at request time). 0
+ *   means the sidecar's allowlist is empty / not ready — the client MUST
+ *   treat the (possibly empty) `items` as non-authoritative and retain
+ *   prior local state.
+ *
+ * **Null vs zero**: the field defaults to 0 (the value JSON `scope:{}`
+ * yields if the object is present but the key is absent). When the WHOLE
+ * `scope` key is absent (pre-0.2.2 sidecar), the parent aggregation DTO
+ * keeps `scope = null` so the client preserves the original behavior.
+ */
+@Serializable
+data class SlimapiScope(
+    val directories: Int = 0,
+)
+
+/**
+ * Cluster A: envelope returned by `GET /slimapi/questions` and
+ * `GET /slimapi/permissions` (oc-slimapi `routes/questions.py::_aggregate`).
+ * The sidecar always returns `{"items": [...], "errors": [...]}` — a bare
+ * list would have been simpler, but the sidecar needs to surface per-
+ * directory upstream failures (e.g. one opencode down) without failing the
+ * whole aggregate (status stays 200 unless ALL directories failed → 503).
+ *
+ * v1 client policy: surface [items] to the UI; log [errors] but do NOT
+ * propagate per-directory failures to the user (the sidecar already degrades
+ * gracefully — a partial result is preferable to no result). v2 may surface
+ * a "1 directory unavailable" warning if metrics show it's actionable.
+ *
+ * **Contract**: oc-slimapi/docs/v1-contract.md §2 + design-v2 §1.7 + the
+ * routing doc `docs/slim-mode-api-routing.md` line 273 already pin this
+ * envelope — this client shape MUST mirror the sidecar's `_aggregate` output.
+ *
+ * **scope** (v0.2.2 additive): see [SlimapiScope]. Absent on pre-0.2.2
+ * sidecars and on 503 (all-fail) responses → null. The client treats null
+ * as "original behavior" (clear), 0 as "retain prior" (not ready), and >0
+ * as "authoritative" (clear or replace as usual).
+ */
 @Serializable
 data class SlimapiQuestionAggregation(
     val items: List<SlimapiQuestionEntry> = emptyList(),
     val errors: List<SlimapiAggregationError> = emptyList(),
+    val scope: SlimapiScope? = null,
 )
 
 /** Cluster A: permissions aggregate envelope — see [SlimapiQuestionAggregation]. */
@@ -106,6 +154,7 @@ data class SlimapiQuestionAggregation(
 data class SlimapiPermissionAggregation(
     val items: List<SlimapiPermissionEntry> = emptyList(),
     val errors: List<SlimapiAggregationError> = emptyList(),
+    val scope: SlimapiScope? = null,
 )
 
 /**

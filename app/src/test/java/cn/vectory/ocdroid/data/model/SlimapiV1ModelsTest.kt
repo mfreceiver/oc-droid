@@ -5,6 +5,7 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -235,5 +236,62 @@ class SlimapiV1ModelsTest {
         // Sanity: encoded form is the wire string wrapped in quotes.
         val wire = json.encodeToString(SlimapiResyncReason.IMPLICIT)
         assertTrue("expected wire string, got $wire", wire.contains("implicit"))
+    }
+
+    // ── T2 (slimapi v0.2.2 client-adapt): aggregation envelope scope ──────
+
+    /**
+     * T2-C1: `scope:{directories:N}` parses off the q/p aggregation envelope.
+     * oc-slimapi 0.2.2 ships `scope.directories` so the client can tell
+     * "sidecar allowlist not yet ready" (N==0) from "authoritative empty"
+     * (N>0 && items==[]). Without this field the client would clear local
+     * stale state on a not-ready response. See task-2-brief.md.
+     */
+    @Test
+    fun `question aggregation parses scope`() {
+        val out = json.decodeFromString<SlimapiQuestionAggregation>(
+            """{"items":[],"errors":[],"scope":{"directories":3}}"""
+        )
+        assertEquals(3, out.scope?.directories)
+    }
+
+    @Test
+    fun `question aggregation scope null when absent`() {
+        // Old sidecar / pre-0.2.2 envelope: no `scope` key → null (NOT the
+        // 0 default). The gating logic in applyAggregationOutcome treats
+        // null as "original behavior" (clear), so this MUST stay null.
+        val out = json.decodeFromString<SlimapiQuestionAggregation>(
+            """{"items":[],"errors":[]}"""
+        )
+        assertNull(out.scope)
+    }
+
+    @Test
+    fun `permission aggregation parses scope`() {
+        val out = json.decodeFromString<SlimapiPermissionAggregation>(
+            """{"items":[],"errors":[],"scope":{"directories":2}}"""
+        )
+        assertEquals(2, out.scope?.directories)
+    }
+
+    @Test
+    fun `permission aggregation scope null when absent`() {
+        val out = json.decodeFromString<SlimapiPermissionAggregation>(
+            """{"items":[],"errors":[]}"""
+        )
+        assertNull(out.scope)
+    }
+
+    @Test
+    fun `scope directories defaults to zero when scope object omits it`() {
+        // Forward-compat: sidecar ships `scope:{}` (object present, key
+        // absent). kotlinx falls back to the field default (0) rather than
+        // null-ing the whole scope. This matches the brief's
+        // `data class SlimapiScope(val directories: Int = 0)`.
+        val out = json.decodeFromString<SlimapiQuestionAggregation>(
+            """{"items":[],"errors":[],"scope":{}}"""
+        )
+        assertNotNull(out.scope)
+        assertEquals(0, out.scope?.directories)
     }
 }

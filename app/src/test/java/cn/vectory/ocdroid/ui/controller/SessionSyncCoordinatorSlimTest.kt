@@ -840,4 +840,253 @@ class SessionSyncCoordinatorSlimTest {
             server.shutdown()
         }
     }
+
+    // ── T2 (slimapi v0.2.2 client-adapt): scope.directories gating ────────
+
+    /**
+     * T2-C3: `serverScope.directories==0 && items==[]` → retain prior
+     * (sidecar allowlist not ready; do NOT clear stale local state).
+     *
+     * Reproduces the narrow-window false-clear bug: pre-fix, the empty
+     * Success folded through `applyAggregationOutcome` and clobbered
+     * `pendingQuestions` / `pendingPermissions` with `emptyList()`.
+     */
+    @Test
+    fun `T2-C3 scope directories 0 retains prior pending questions and permissions`() = runTest {
+        val priorQ = QuestionRequest(
+            id = "q-stale",
+            sessionId = "s1",
+            questions = listOf(QuestionInfo("keep", "h", emptyList())),
+            directory = "/a",
+        )
+        val priorP = PermissionRequest(id = "p-stale", sessionId = "s1")
+        slices.mutateSessionList {
+            it.copy(pendingQuestions = listOf(priorQ), pendingPermissions = listOf(priorP))
+        }
+
+        val snapshot = SlimColdStartSnapshot(
+            sessions = null,
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+                serverScope = cn.vectory.ocdroid.data.model.SlimapiScope(directories = 0),
+            ),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+                serverScope = cn.vectory.ocdroid.data.model.SlimapiScope(directories = 0),
+            ),
+            messages = null,
+        )
+
+        val c = coordinator()
+        c.applySlimColdStartSnapshot(snapshot)
+        scope.testScheduler.advanceUntilIdle()
+
+        assertEquals(
+            "scope==0 MUST retain prior questions (not-ready sidecar)",
+            listOf(priorQ),
+            slices.sessionList.value.pendingQuestions,
+        )
+        assertEquals(
+            "scope==0 MUST retain prior permissions (not-ready sidecar)",
+            listOf(priorP),
+            slices.sessionList.value.pendingPermissions,
+        )
+    }
+
+    /**
+     * T2-C3 complement: `serverScope.directories>0 && items==[]` → clear
+     * stale (authoritative empty across N ready directories).
+     */
+    @Test
+    fun `T2-C3 scope directories gt 0 with empty items clears stale`() = runTest {
+        val priorQ = QuestionRequest(
+            id = "q-stale",
+            sessionId = "s1",
+            questions = listOf(QuestionInfo("keep", "h", emptyList())),
+            directory = "/a",
+        )
+        val priorP = PermissionRequest(id = "p-stale", sessionId = "s1")
+        slices.mutateSessionList {
+            it.copy(pendingQuestions = listOf(priorQ), pendingPermissions = listOf(priorP))
+        }
+
+        val snapshot = SlimColdStartSnapshot(
+            sessions = null,
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+                serverScope = cn.vectory.ocdroid.data.model.SlimapiScope(directories = 2),
+            ),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+                serverScope = cn.vectory.ocdroid.data.model.SlimapiScope(directories = 2),
+            ),
+            messages = null,
+        )
+
+        val c = coordinator()
+        c.applySlimColdStartSnapshot(snapshot)
+        scope.testScheduler.advanceUntilIdle()
+
+        assertTrue(
+            "scope>0 + empty items → authoritative clear (questions)",
+            slices.sessionList.value.pendingQuestions.isEmpty(),
+        )
+        assertTrue(
+            "scope>0 + empty items → authoritative clear (permissions)",
+            slices.sessionList.value.pendingPermissions.isEmpty(),
+        )
+    }
+
+    /**
+     * T2-C3 backward-compat: `serverScope==null` (old sidecar / pre-0.2.2)
+     * preserves the original Success-empty semantics → clear stale. This
+     * MUST stay unaffected by the gating addition (scope is additive).
+     */
+    @Test
+    fun `T2-C3 serverScope null preserves original clear behavior`() = runTest {
+        val priorQ = QuestionRequest(
+            id = "q-stale",
+            sessionId = "s1",
+            questions = listOf(QuestionInfo("keep", "h", emptyList())),
+            directory = "/a",
+        )
+        slices.mutateSessionList {
+            it.copy(pendingQuestions = listOf(priorQ), pendingPermissions = emptyList())
+        }
+
+        val snapshot = SlimColdStartSnapshot(
+            sessions = null,
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+                serverScope = null,
+            ),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+                serverScope = null,
+            ),
+            messages = null,
+        )
+
+        val c = coordinator()
+        c.applySlimColdStartSnapshot(snapshot)
+        scope.testScheduler.advanceUntilIdle()
+
+        assertTrue(
+            "null serverScope → original behavior (clear)",
+            slices.sessionList.value.pendingQuestions.isEmpty(),
+        )
+    }
+
+    /**
+     * T2-C3b (final review M4): `Partial` + `serverScope.directories==0`
+     * + empty items + non-empty errors MUST retain prior. Locks the T2
+     * Partial symmetric gate extension (grill-accepted safe superset)
+     * against a future "brief said Success only" revert.
+     *
+     * Scenario: sidecar is not ready yet (allowlist empty → scope=0) AND
+     * ships `errors[]` for one directory → response folds to `Partial`
+     * with `serverScope.directories==0`. Without the symmetric gate, the
+     * empty items + non-empty authoritativeDirectories would clobber
+     * prior `pendingQuestions` / `pendingPermissions` with `emptyList()`
+     * — the residual false-clear hole the Success path closes (T2-C3).
+     * The Partial branch of `applyAggregationOutcome` must therefore
+     * apply the SAME `directories==0 → retain prior` rule.
+     */
+    @Test
+    fun `T2-C3b Partial scope directories 0 retains prior pending questions and permissions`() = runTest {
+        val priorQ = QuestionRequest(
+            id = "q-stale",
+            sessionId = "s1",
+            questions = listOf(QuestionInfo("keep", "h", emptyList())),
+            directory = "/a",
+        )
+        val priorP = PermissionRequest(id = "p-stale", sessionId = "s1")
+        slices.mutateSessionList {
+            it.copy(pendingQuestions = listOf(priorQ), pendingPermissions = listOf(priorP))
+        }
+
+        val snapshot = SlimColdStartSnapshot(
+            sessions = null,
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Partial(
+                items = emptyList(),
+                errors = listOf(
+                    cn.vectory.ocdroid.data.model.SlimapiAggregationError(
+                        directory = "/a",
+                        code = "upstream_unavailable",
+                    ),
+                ),
+                authoritativeDirectories = setOf("/a"),
+                serverScope = cn.vectory.ocdroid.data.model.SlimapiScope(directories = 0),
+            ),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Partial(
+                items = emptyList(),
+                errors = listOf(
+                    cn.vectory.ocdroid.data.model.SlimapiAggregationError(
+                        directory = "/a",
+                        code = "upstream_unavailable",
+                    ),
+                ),
+                authoritativeDirectories = setOf("/a"),
+                serverScope = cn.vectory.ocdroid.data.model.SlimapiScope(directories = 0),
+            ),
+            messages = null,
+        )
+
+        val c = coordinator()
+        c.applySlimColdStartSnapshot(snapshot)
+        scope.testScheduler.advanceUntilIdle()
+
+        assertEquals(
+            "Partial scope==0 MUST retain prior questions (not-ready sidecar)",
+            listOf(priorQ),
+            slices.sessionList.value.pendingQuestions,
+        )
+        assertEquals(
+            "Partial scope==0 MUST retain prior permissions (not-ready sidecar)",
+            listOf(priorP),
+            slices.sessionList.value.pendingPermissions,
+        )
+    }
+
+    /**
+     * T2-C4: `loadPendingQuestionsSlim` inherits the gating via the shared
+     * `applyAggregationOutcome`. A scope==0 envelope through the standalone
+     * load path MUST retain prior (same as the cold-start path).
+     */
+    @Test
+    fun `T2-C4 loadPendingQuestionsSlim inherits scope gating`() = runTest {
+        every { settingsManager.currentWorkdir } returns "/proj"
+        every { settingsManager.getRecentWorkdirs(any()) } returns emptyList()
+        coEvery { repository.getSlimapiQuestions(any(), any()) } returns Result.success(
+            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+                serverScope = cn.vectory.ocdroid.data.model.SlimapiScope(directories = 0),
+            ),
+        )
+
+        val priorQ = QuestionRequest(
+            id = "q-prior",
+            sessionId = "s1",
+            questions = listOf(QuestionInfo("keep", "h", emptyList())),
+            directory = "/a",
+        )
+        slices.mutateSessionList { it.copy(pendingQuestions = listOf(priorQ)) }
+
+        val c = coordinator()
+        c.loadPendingQuestionsAllWorkdirs(repository)
+        scope.testScheduler.advanceUntilIdle()
+
+        assertEquals(
+            "scope==0 through loadPendingQuestionsSlim MUST retain prior",
+            listOf(priorQ),
+            slices.sessionList.value.pendingQuestions,
+        )
+    }
 }

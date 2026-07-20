@@ -159,6 +159,123 @@ class SlimSseReducerTest {
         assertEquals(200L, state.get("s1")!!.remoteUpdatedAt)
     }
 
+    // ── 2b. T1 tuple trigger — equal-ts tie path direct coverage ──────────
+    //   The fetch TRIGGER was scalar `digest.updatedAt > max(priorRemote,
+    //   priorLocal)` pre-T1; T1 collapses it to a single compareWatermark
+    //   tuple compare. The equal-ts + larger-id advance case is exercised
+    //   directly at SlimapiResyncTest (onReconcileSuccess / needsReconcile
+    //   pair-advance), but the reducer's OWN fetch-trigger predicate was
+    //   only indirectly covered via the shared pure helper. This direct
+    //   test locks the correctness-critical equal-ts tie path at the
+    //   reducer site so a future "revert trigger to scalar >" cannot
+    //   silently re-disable the inverted tie-break at the reducer layer.
+
+    @Test
+    fun `T1 reduceSlimDigest fires when updatedAt equal but messageId larger`() {
+        // Seed: prior remote AND local-applied BOTH anchored at (100, "m1")
+        // — fully aligned (no spurious reconcile, no fetch on the seed).
+        state.put(
+            "s1",
+            SlimSessionState(
+                sessionId = "s1",
+                remoteUpdatedAt = 100L,
+                remoteMessageId = "m1",
+                localAppliedUpdatedAt = 100L,
+                localAppliedMessageId = "m1",
+                dirty = false,
+            )
+        )
+        // Incoming digest: SAME updatedAt (100) BUT a strictly larger id
+        // ("m2"). Under T1 tuple semantics compareWatermark((100, "m2"),
+        // (100, "m1")) > 0 ⇒ trigger fires on BOTH the remote-prior and
+        // local-prior compares. Pre-T1 (scalar updatedAt > max(...)) this
+        // would have been a no-op (100 > 100 is false) → debounce-drop a
+        // genuine within-ms newer message.
+        val decision = reduceSlimDigest(
+            state,
+            SlimSessionDigest(sessionId = "s1", updatedAt = 100L, messageId = "m2")
+        )
+        assertNotNull(
+            "equal ts + larger id MUST fire the fetch trigger under T1 tuple semantics",
+            decision,
+        )
+        // Anchor is localAppliedUpdatedAt (rev-gpt Critical fix) — 100 here.
+        assertEquals(
+            "anchor must be localAppliedUpdatedAt=100 (NOT max(remote, local))",
+            100L,
+            decision!!.since,
+        )
+        // remote* advanced in state: remoteUpdatedAt stays 100 (monotonic-
+        // max of equal values), remoteMessageId is last-write-wins → "m2".
+        val merged = state.get("s1")!!
+        assertEquals(100L, merged.remoteUpdatedAt)
+        assertEquals("m2", merged.remoteMessageId)
+    }
+
+    @Test
+    fun `T1 reduceSlimDigest does NOT fire when updatedAt equal and messageId smaller or equal`() {
+        // Symmetric discrimination: equal ts + smaller-or-equal id MUST NOT
+        // fire (stale-digest safe harbor / idempotent re-emit). Pinned
+        // alongside the larger-id fires case so the tie direction cannot
+        // silently invert.
+        state.put(
+            "s1",
+            SlimSessionState(
+                sessionId = "s1",
+                remoteUpdatedAt = 100L,
+                remoteMessageId = "m2",
+                localAppliedUpdatedAt = 100L,
+                localAppliedMessageId = "m2",
+                dirty = false,
+            )
+        )
+        // (a) Smaller id at equal ts — stale re-emit.
+        val smaller = reduceSlimDigest(
+            state,
+            SlimSessionDigest(sessionId = "s1", updatedAt = 100L, messageId = "m1")
+        )
+        assertNull(
+            "equal ts + smaller id MUST NOT fire (stale-digest safe harbor)",
+            smaller,
+        )
+        // (b) Equal id at equal ts — idempotent re-emit / debounce.
+        val equal = reduceSlimDigest(
+            state,
+            SlimSessionDigest(sessionId = "s1", updatedAt = 100L, messageId = "m2")
+        )
+        assertNull(
+            "equal ts + equal id MUST NOT fire (idempotent re-emit)",
+            equal,
+        )
+    }
+
+    @Test
+    fun `T1 reduceSlimDigest does NOT fire when updatedAt older even if messageId larger`() {
+        // ts dominates: an older ts with a larger id is still a stale
+        // digest (tsA < tsB ⇒ compareWatermark returns negative regardless
+        // of ids). Pinned so the tuple order (ts-first, id-tiebreak) cannot
+        // be confused with id-first ordering.
+        state.put(
+            "s1",
+            SlimSessionState(
+                sessionId = "s1",
+                remoteUpdatedAt = 200L,
+                remoteMessageId = "m1",
+                localAppliedUpdatedAt = 200L,
+                localAppliedMessageId = "m1",
+                dirty = false,
+            )
+        )
+        val decision = reduceSlimDigest(
+            state,
+            SlimSessionDigest(sessionId = "s1", updatedAt = 100L, messageId = "m9")
+        )
+        assertNull(
+            "older ts MUST NOT fire regardless of id (ts dominates tuple order)",
+            decision,
+        )
+    }
+
     // ── 3. Cold path ───────────────────────────────────────────────────────
 
     @Test

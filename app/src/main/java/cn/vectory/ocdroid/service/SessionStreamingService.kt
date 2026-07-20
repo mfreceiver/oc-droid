@@ -35,6 +35,7 @@ import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
+import cn.vectory.ocdroid.util.WorkdirPaths
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -351,7 +352,28 @@ class SessionStreamingService : Service() {
                     sharedStateStore.slices.sessionList.value.directorySessions.keys
                         .forEach { add(it) }
                     settingsManager.currentWorkdir?.let { add(it) }
-                }.distinct().ifEmpty { null }
+                }
+                    // slimapi v0.2.2 T4 (P2b): normalize each entry through
+                    // the SAME server-facing [WorkdirPaths.normalizeDirectory]
+                    // used by [computeQuestionFanOutWorkdirs] so this resync
+                    // fan-out agrees with the q/p fan-out + the server's
+                    // normalize-dedup. Without this, "/app" + "/app/" (one
+                    // from directorySessions.keys, one from currentWorkdir)
+                    // would survive `.distinct()` pre-normalize and ship as
+                    // 2 `?directory=` entries.
+                    //
+                    // T4-M1 (final review D7): `.filter { isNotBlank }`
+                    // BEFORE normalize mirrors [computeQuestionFanOutWorkdirs]
+                    // — without it a blank key / blank currentWorkdir would
+                    // normalize to "/" (root) and ship as `directory=/`,
+                    // diverging from the q/p fan-out which drops blanks
+                    // entirely. Same blank-handling alignment, no new
+                    // imports (filter is local; normalizeDirectory already
+                    // imported per T4).
+                    .filter { it.isNotBlank() }
+                    .map { WorkdirPaths.normalizeDirectory(it) }
+                    .distinct()
+                    .ifEmpty { null }
                 DebugLog.i(
                     "SessionStreamingService",
                     "slim performSlimResync directories=$directories",

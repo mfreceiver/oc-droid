@@ -3,6 +3,52 @@ package cn.vectory.ocdroid.data.repository
 import cn.vectory.ocdroid.data.model.MessageWithParts
 
 /**
+ * Task 1 (slimapi v0.2.2 §G5 tie-break): lexicographic compare of two
+ * watermark pairs `(ts, id)` — the single shared helper for the slim-mode
+ * SSE reconcile watermark decisions.
+ *
+ *  - ts compares first; null ts = oldest (the session has never observed
+ *    a server-signalled timestamp for this watermark).
+ *  - when ts is equal on both sides AND non-null, id compares
+ *    lexicographically; null id = oldest (defensive: a watermark pair
+ *    where ts is set but id never got populated is older than any pair
+ *    carrying the same ts + a concrete id).
+ *
+ * # Why the id tie-break is safe — messageID monotonicity
+ *
+ * The id tie-break correctness DEPENDS on opencode `messageID` being
+ * lexicographically strictly monotonic by creation. Confirmed from
+ * `packages/opencode/src/id/id.ts`: ascending, format
+ * `msg_<12 hex (timestamp*4096 + counter)><14 random base62>` — the
+ * 12-hex prefix is strictly increasing across creations (the counter
+ * auto-increments within the same millisecond), so the full id is
+ * lexicographically monotonic by creation **including within the same
+ * millisecond**. This is why we can tie-break `(ts, id)` without any
+ * monotonicity-agnostic fallback — YAGNI.
+ *
+ * Returns:
+ *  - `<0` if A is older than B,
+ *  - `0`  if A and B are equal,
+ *  - `>0` if A is newer than B.
+ *
+ * Used at 4 sites (T1-C2/C3/C4): [onReconcileSuccess], [needsReconcile]
+ * (this file), [needsCatchUp] (`SlimapiProbe.kt`), and the
+ * `reduceSlimDigest` fetch trigger (`SlimSseReducer.kt`).
+ *
+ * Pure — no IO, no Android deps.
+ */
+internal fun compareWatermark(tsA: Long?, idA: String?, tsB: Long?, idB: String?): Int {
+    if (tsA == null && tsB == null) return 0
+    if (tsA == null) return -1
+    if (tsB == null) return 1
+    if (tsA != tsB) return tsA.compareTo(tsB)
+    if (idA == null && idB == null) return 0
+    if (idA == null) return -1
+    if (idB == null) return 1
+    return idA.compareTo(idB)
+}
+
+/**
  * Task 6 (slimapi v1 §G5 — split watermark): pure reconcile primitives
  * for [SlimSessionState]. These are the **local-applied path** of the
  * split watermark model — the counterpart to the digest reducer's remote
@@ -47,20 +93,31 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
  * pass to bring its local-applied watermark up to the server-signalled
  * remote watermark?
  *
- * Branches (T6-C6 — every branch covered):
+ * Branches:
  *
  *  - [state.dirty] already `true` → `true`. Sticky: once a session is
  *    marked dirty, it stays dirty until [onReconcileSuccess] clears it.
  *    This is what makes a non-focus digest's `dirty=true` survive until
  *    the next focus / resync pass actually reconciles.
- *  - [SlimSessionState.remoteMessageId] is set AND differs from
- *    [SlimSessionState.localAppliedMessageId] → `true` (server has a
- *    newer / different latest message than what we've applied).
- *  - [SlimSessionState.remoteUpdatedAt] is set AND strictly greater than
- *    [SlimSessionState.localAppliedUpdatedAt] (or local is null) →
- *    `true` (server signalled newer activity than we've applied).
- *  - Otherwise → `false` (aligned — local view matches or exceeds the
- *    remote view).
+ *  - Otherwise the decision reduces to a single tuple compare (T1,
+ *    slimapi v0.2.2 §G5): `true` iff
+ *    `compareWatermark(remoteUpdatedAt, remoteMessageId,
+ *                      localAppliedUpdatedAt, localAppliedMessageId) > 0`
+ *    — i.e. the server-signalled `(remoteUpdatedAt, remoteMessageId)`
+ *    tuple is STRICTLY greater than the applied
+ *    `(localAppliedUpdatedAt, localAppliedMessageId)` tuple in
+ *    lexicographic order (ts first; equal ts ⇒ id tie-break).
+ *  - `false` otherwise — the applied tuple already matches or exceeds
+ *    the remote observation (e.g. equal ts + smaller remote id from an
+ *    out-of-order / stale digest → no spurious reconcile).
+ *
+ * Pre-T1 this was an OR-of-two scalar predicate (`remoteId != localId
+ * || remoteTs > localTs`); T1 collapses it into the single
+ * [compareWatermark] call above. DO NOT "restore" the OR-of-two — it
+ * would re-emit `true` for equal-ts + smaller-id stale digests and
+ * reintroduce spurious reconcile loops. The id tie-break is safe under
+ * opencode messageID lexicographic strict-monotonicity — see
+ * [compareWatermark] kdoc.
  *
  * Pure. No IO, no coroutine, no Android dependency.
  */
@@ -68,15 +125,22 @@ fun needsReconcile(state: SlimSessionState): Boolean {
     // Sticky dirty — once true, stays true until onReconcileSuccess.
     if (state.dirty) return true
 
-    // Server has a different latest messageID than what we've applied.
-    val remoteId = state.remoteMessageId
-    if (remoteId != null && remoteId != state.localAppliedMessageId) return true
-
-    // Server signalled newer activity than we've applied locally.
-    val remoteTs = state.remoteUpdatedAt
-    if (remoteTs != null) {
-        val localTs = state.localAppliedUpdatedAt
-        if (localTs == null || remoteTs > localTs) return true
+    // T1 tuple compare: (remoteTs, remoteId) STRICTLY greater than
+    // (localTs, localId) in lexicographic tuple order → server is ahead of
+    // what we've applied. Pre-T1 this was an OR-of-two (`remoteId !=
+    // localId || remoteTs > localTs`); T1 collapses it into one tuple
+    // compare via [compareWatermark] — see its kdoc for why the id tie-
+    // break is safe (opencode messageID is lexicographically strictly
+    // monotonic by creation). This also means a stale-digest whose
+    // (remoteTs, remoteId) tuple is NOT strictly greater (e.g. equal ts +
+    // smaller id from an out-of-order re-emit) correctly returns false —
+    // no spurious reconcile.
+    if (compareWatermark(
+            state.remoteUpdatedAt, state.remoteMessageId,
+            state.localAppliedUpdatedAt, state.localAppliedMessageId,
+        ) > 0
+    ) {
+        return true
     }
 
     return false
@@ -113,15 +177,25 @@ fun needsReconcile(state: SlimSessionState): Boolean {
  * the sidecar's chronological-order assumption isn't contracted).
  *
  * The pair is ATOMIC: it always refers to a SINGLE applied item (the
- * one with the max `updatedAt` we've successfully reconciled). It moves
- * TOGETHER iff the observed max ts STRICTLY advances the prior
- * [SlimSessionState.localAppliedUpdatedAt] (observed > prior, or prior
- * is null). When the response's max ts is `<= prior` (older/equal tail —
- * e.g. fetch anchored too early, duplicate response, or stale debounce
- * re-fetch), BOTH fields retain their prior values. Splitting the pair
- * (e.g. keeping prior ts but adopting the response's id) would make
- * future [needsReconcile] checks see "id differs but ts same" and
+ * one with the tuple-max `(updatedAt, id)` we've successfully
+ * reconciled). The pair advances TOGETHER iff
+ * `compareWatermark(observedTs, observedId, priorTs, priorId) > 0`
+ * (T1, slimapi v0.2.2 §G5) — i.e. the observed tuple is STRICTLY
+ * greater than the prior tuple in lexicographic order (ts first; equal
+ * ts ⇒ id tie-break). This subsumes the pre-T1 "strict ts advance"
+ * rule AND adds the equal-ts + larger-id advance case. When the
+ * observed tuple is `<= prior` (older/equal tail — e.g. fetch anchored
+ * too early, duplicate response, stale debounce re-fetch, or equal ts +
+ * smaller-or-equal id), BOTH fields retain their prior values.
+ * Splitting the pair (e.g. keeping prior ts but adopting the response's
+ * id) would make future [needsReconcile] checks see a regressed id and
  * trigger spurious re-reconcile loops.
+ *
+ * The equal-ts + larger-id advance is safe under the opencode messageID
+ * monotonic invariant: ids are lexicographically strictly monotonic by
+ * creation (see [compareWatermark] kdoc), so a strictly-larger id at
+ * the same ts necessarily identifies a strictly-later creation and is
+ * the genuine tuple-max observation.
  *
  * Defensive: items with no usable `time.updated` (> 0L) — e.g. legacy
  * endpoints or malformed skeletons — also leave BOTH fields at their
@@ -150,6 +224,16 @@ fun onReconcileSuccess(
     // to the same latest item makes localApplied* internally consistent
     // regardless of items order.
     //
+    // T1 (slimapi v0.2.2): selection is now `maxWithOrNull(compareBy(
+    // updated, id))` — when MULTIPLE items share the max updatedAt, the
+    // LARGEST id wins (lexicographic tie-break, mirroring [compareWatermark]).
+    // Pre-T1 used `maxByOrNull { updated }` (returns FIRST max-by-ts);
+    // T1 makes the selection deterministic in id space so the chosen
+    // (ts, id) pair is the tuple-max observed — which is what the new
+    // tuple strict-advance predicate below measures against. Safe under
+    // the opencode messageID-strictly-monotonic-by-creation invariant
+    // (see [compareWatermark] kdoc).
+    //
     // Defensive: items with no usable `time.updated` (> 0L) — e.g. legacy
     // endpoints or malformed skeletons — leave BOTH localApplied* fields
     // at their prior values (we can't reliably identify the "latest" item
@@ -158,31 +242,46 @@ fun onReconcileSuccess(
     // (reconcile did succeed — we just got no usable signal).
     val latest = items
         .filter { (it.info.time?.updated ?: 0L) > 0L }
-        .maxByOrNull { it.info.time!!.updated!! }
+        .maxWithOrNull(compareBy({ it.info.time!!.updated!! }, { it.info.id ?: "" }))
     val observedTs: Long? = latest?.info?.time?.updated
     val observedId: String? = latest?.info?.id
 
-    // Pair-level update rule (rev-gpt round-2 IMPORTANT fix):
-    // The pair (localAppliedMessageId, localAppliedUpdatedAt) is ATOMIC —
-    // it always refers to a SINGLE applied item (the one with the max
-    // updatedAt we've successfully reconciled). The pair moves TOGETHER
-    // iff observedTs STRICTLY advances the prior localAppliedUpdatedAt
-    // (observedTs > prior, or prior is null). When the response's max
-    // ts is <= prior (older/equal tail — e.g. the fetch was anchored too
-    // early and got stale items, or a duplicate of what we already have),
-    // BOTH fields stay at the prior values. Splitting the pair (keeping
-    // prior ts but adopting observedId) would make future needsReconcile
-    // checks see "id differs but ts same" → spurious re-reconcile loops.
+    // T1 tuple strict-advance predicate (replaces the pre-T1 scalar
+    // `observedTs > prior` rule): the pair advances iff the observed
+    // (ts, id) is STRICTLY GREATER than the prior (ts, id) in
+    // lexicographic tuple order — [compareWatermark] > 0. This means:
+    //   - observedTs > priorTs (any ids) → advance (ts dominates).
+    //   - observedTs == priorTs AND observedId > priorId → advance
+    //     (the inverted tie-break — equal ts + larger id now moves the
+    //     pair, undoing the pre-T1 "equal ts never advances" rule).
+    //   - observedTs == priorTs AND observedId == priorId → no advance
+    //     (idempotent — duplicate / debounce re-emit).
+    //   - observedTs == priorTs AND observedId < priorId → no advance
+    //     (stale-digest safe harbor — out-of-order re-emit carries a
+    //     strictly-smaller id under the monotonic-id invariant).
+    //   - observedTs < priorTs → no advance (older tail).
+    // Splitting the pair (e.g. keeping prior ts but adopting observedId)
+    // is therefore impossible — the pair moves atomically iff observed
+    // tuple > prior tuple, otherwise both fields stay at prior.
+    //
+    // rev-gpt round-2 IMPORTANT fix (preserved): the older pre-T6 code
+    // kept prior ts (via monotonic-max) but adopted observedId
+    // unconditionally, splitting the pair → future needsReconcile saw
+    // "id differs but ts same" → spurious re-reconcile loops. The atomic
+    // pair rule (now expressed via the tuple compare) closes that hole.
     val priorLocalAppliedUpdatedAt = state.localAppliedUpdatedAt
     val priorLocalAppliedMessageId = state.localAppliedMessageId
-    val strictAdvance = observedTs != null &&
-        (priorLocalAppliedUpdatedAt == null || observedTs > priorLocalAppliedUpdatedAt)
-    val newLocalAppliedUpdatedAt = if (strictAdvance) {
+    val advances = observedTs != null &&
+        compareWatermark(
+            observedTs, observedId,
+            priorLocalAppliedUpdatedAt, priorLocalAppliedMessageId,
+        ) > 0
+    val newLocalAppliedUpdatedAt = if (advances) {
         observedTs!!
     } else {
         priorLocalAppliedUpdatedAt
     }
-    val newLocalAppliedMessageId = if (strictAdvance) {
+    val newLocalAppliedMessageId = if (advances) {
         observedId ?: priorLocalAppliedMessageId
     } else {
         priorLocalAppliedMessageId

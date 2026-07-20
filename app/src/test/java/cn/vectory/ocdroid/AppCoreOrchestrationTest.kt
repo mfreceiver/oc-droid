@@ -1176,4 +1176,59 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         )
         assertEquals(listOf("/x", "/y"), result)
     }
+
+    // ── slimapi v0.2.2 T4 (P2b): fan-out normalize-dedup ──
+    //
+    // Server-side normalize-dedup (v0.2.2) is now more lenient: it strips
+    // trailing slash + dedups, preserving root "/". The client MUST
+    // normalize the same way BEFORE deduping so both sides agree on the
+    // fan-out count (otherwise "/app" + "/app/" could fan out as 2
+    // routeTokens pre-server-normalize, or surface as 2 distinct dirs in
+    // the request envelope). T4-C2 pin.
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs dedups slash-variants after normalize`() {
+        // T4-C2 brief matrix: ["/app","/app/","/app","/b"] → ["/app","/b"].
+        // Spread across all three sources to prove the normalize-dedup
+        // fires for cross-source variants too, not just within one source.
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/app", "/app/"),
+            currentWorkdir = "/app",
+            recentWorkdirs = listOf("/b"),
+        )
+        assertEquals(listOf("/app", "/b"), result)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs dedups slash entries after normalize preserving root`() {
+        // T4-M2 (final review D8): renamed — at the fan-out layer blank
+        // entries are FILTERED OUT (`.filter { isNotBlank }` BEFORE
+        // `.map normalizeDirectory`), NOT normalized to "/". The single
+        // "/" in the output comes from the actual "/" key (root form is
+        // preserved by normalizeDirectory), not from the "" entries.
+        // Pre-rename name ("normalizes root and empty to slash") implied
+        // empty was normalized to "/", which is misleading.
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("", "/"),
+            currentWorkdir = "/",
+            recentWorkdirs = listOf(""),
+        )
+        assertEquals(listOf("/"), result)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs preserves first-seen post-normalize form`() {
+        // The OUTPUT is the normalized form (so the server receives a
+        // clean canonical path), and first-seen order survives the
+        // normalize-dedup. The first variant encountered wins the slot,
+        // but its OUTPUT shape is the normalized one.
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/proj-a/"), // trailing-slash variant seen first
+            currentWorkdir = "/proj-a",
+            recentWorkdirs = listOf("/proj-b/"),
+        )
+        // /proj-a/ is normalized to /proj-a (NOT the raw "/proj-a/" form);
+        // /proj-b/ is normalized to /proj-b.
+        assertEquals(listOf("/proj-a", "/proj-b"), result)
+    }
 }

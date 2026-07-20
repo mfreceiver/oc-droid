@@ -188,7 +188,26 @@ class SlimSseState {
      * a fetch returning an OLDER tail than what a later digest already
      * advanced us to, or a stale debounce re-emit arriving after a
      * newer observation).
+     *
+     * # T1-C5 (slimapi v0.2.2) — vestigial
+     *
+     * grep confirms ZERO production callers (`OpenCodeRepository` no
+     * longer routes post-REST bumps through this method — T11 rewired
+     * everything to [reduceSlimDigest], which is the SOLE remote-write
+     * path under T1). The only callers are the `SlimSseReducerTest`
+     * invariant pins (which exist to lock the pre-T6 semantic during
+     * the T6→T11 transition). Not symmetric on `remoteMessageId`
+     * (writes only `remoteUpdatedAt`) — that asymmetry is a non-issue
+     * under T1 tuple semantics (see [reduceSlimDigest]'s T1-C5
+     * invariant note) and would be moot anyway once T11 removes the
+     * transitional callers. Marked deprecated to flag future cleanup;
+     * signature intentionally NOT changed (would be a pseudo-problem
+     * fix — grill confirmed YAGNI).
      */
+    @Deprecated(
+        "T11 后 vestigial；remote watermark 经 reduceSlimDigest 推进。" +
+            " T1 tuple 语义下不需要对称化（见 reduceSlimDigest 的 T1-C5 不变量注释）。",
+    )
     @Synchronized
     fun bumpUpdatedAt(sessionId: String, updatedAt: Long) {
         val prev = sessions[sessionId]
@@ -325,6 +344,20 @@ fun reduceSlimDigest(
     // on the rest. lastError is the three-state merge (T6-C4). localApplied* is
     // intentionally NOT copied here — invariant #2 (the reducer never advances
     // the local-applied watermark).
+    //
+    // T1-C5 invariant note (slimapi v0.2.2): `remoteMessageId` is last-write-
+    // wins while `remoteUpdatedAt` is monotonic-max — an ASYMMETRY that is
+    // harmless under T1's tuple watermark semantics. Correctness depends on
+    // opencode messageID being lexicographically strictly monotonic by
+    // creation (see [compareWatermark] kdoc — id.ts ascending). A stale /
+    // out-of-order digest necessarily carries a strictly-smaller id (the
+    // counter-based prefix is monotonic), so even though last-write-wins may
+    // regress remoteMessageId relative to remoteUpdatedAt, the resulting
+    // (remoteUpdatedAt, remoteMessageId) tuple is still <= any genuinely-newer
+    // observation — [needsReconcile]'s tuple compare correctly returns
+    // negative for stale digests and never spuriously fires a reconcile.
+    // Symmetrizing this merge (e.g. dropping a digest whose id regresses) is
+    // YAGNI — grill confirmed no real-world sidecar triggers this case.
     val candidate = prev.copy(
         directory = digest.directory ?: prev.directory,
         status = digest.status ?: prev.status,
@@ -343,17 +376,14 @@ fun reduceSlimDigest(
     val merged = if (needsReconcile(candidate)) candidate.copy(dirty = true) else candidate
     state.put(sessionId, merged)
 
-    // Fetch decision — TRIGGER vs ANCHOR split (rev-gpt Critical fix):
+    // Fetch decision — TRIGGER vs ANCHOR split (rev-gpt Critical fix,
+    // restated for the T1 tuple regime):
     //
-    //  - TRIGGER (whether to emit fetch at all): remote-aware debounce —
-    //    `digest.updatedAt > max(priorRemote, priorLocal)`. This preserves
-    //    the OLD single-watermark trigger semantic (the OLD single
-    //    updatedAt was effectively max(remote, local)): strictly newer
-    //    than both → fire; equal/older → no-op (debounce against SSE
-    //    re-delivery / sidecar debounce re-emit). Retry on reconcile
-    //    FAILURE is the wiring's job (T11 reconcile loop), not the
-    //    reducer's.
-    //
+    //  - TRIGGER (whether to emit fetch at all): T1 tuple compare — see
+    //    the full predicate + monotonic-id safety argument immediately
+    //    below. Pre-T1 this was a scalar `digest.updatedAt >
+    //    max(priorRemote, priorLocal)`; T1 collapses it to one tuple
+    //    compare so equal-ts + larger-id digests also fire.
     //  - ANCHOR (the `since` value the caller passes to
     //    `/slimapi/messages/{sid}/since/{ts}`, server returns
     //    `time.updated >= ts`): MUST be `localAppliedUpdatedAt` only.
@@ -363,22 +393,46 @@ fun reduceSlimDigest(
     //    and SKIP the (localApplied, remote] message range that was never
     //    fetched/applied. localApplied is the ONLY reliable "what we've
     //    actually got" boundary; remote just means "what the server told
-    //    us about". Per §3, server returns `time.updated >= ts` so the
-    //    boundary message is included for messageID dedup.
-    val priorMax = maxOfNullable(priorRemoteUpdatedAt, priorLocalAppliedUpdatedAt)
+    //    us about". The boundary message is included (server returns
+    //    `>= ts`) so messageID dedup still works.
+    //
+    // T1 tuple trigger (slimapi v0.2.2 §G5): fire iff the incoming
+    // `(digest.updatedAt, digest.messageId)` tuple is STRICTLY greater than
+    // BOTH prior tuples — `(priorRemoteUpdatedAt, priorRemoteMessageId)` and
+    // `(priorLocalAppliedUpdatedAt, priorLocalAppliedMessageId)` — in
+    // lexicographic order via [compareWatermark]. Pre-T1 this was a scalar
+    // `incomingUpdatedAt > max(priorRemote, priorLocal)` compare; T1
+    // collapses it to a single tuple compare so equal-ts + larger-id
+    // digests also fire (the inverted tie-break — see [compareWatermark]
+    // kdoc for the monotonic-id safety argument).
+    //
+    // Defensive: when the digest carries a fresh messageId WITHOUT an
+    // updatedAt ts (covering sidecars that omit `updatedAt` on pure-status
+    // digests), the tuple compare can't apply (tsA=null is always oldest).
+    // We fall back to the pre-T1 "id differs on BOTH watermarks" rule —
+    // unchanged from rev-gpt Critical fix. Anchor is still localApplied-
+    // only — same Critical rationale (using max(remote, local) here would
+    // skip the (localApplied, remote] message range when a prior reconcile
+    // failed).
     val fetchAnchor = priorLocalAppliedUpdatedAt ?: 0L
     val incomingUpdatedAt = digest.updatedAt
+    val firesOnTupleTrigger = incomingUpdatedAt != null && (
+        compareWatermark(
+            incomingUpdatedAt, digest.messageId,
+            priorRemoteUpdatedAt, priorRemoteMessageId,
+        ) > 0 &&
+            compareWatermark(
+                incomingUpdatedAt, digest.messageId,
+                priorLocalAppliedUpdatedAt, priorLocalAppliedMessageId,
+            ) > 0
+        )
+    val firesOnMessageIdOnly = incomingUpdatedAt == null &&
+        digest.messageId != null &&
+        digest.messageId != priorRemoteMessageId &&
+        digest.messageId != priorLocalAppliedMessageId
     val fetchSince: Long? = when {
-        incomingUpdatedAt != null &&
-            (priorMax == null || incomingUpdatedAt > priorMax) ->
-            fetchAnchor
-        // Defensive: fresh messageId (on BOTH watermarks) without an updatedAt ts.
-        // Anchor is still localApplied-only — same Critical rationale.
-        incomingUpdatedAt == null &&
-            digest.messageId != null &&
-            digest.messageId != priorRemoteMessageId &&
-            digest.messageId != priorLocalAppliedMessageId ->
-            fetchAnchor
+        firesOnTupleTrigger -> fetchAnchor
+        firesOnMessageIdOnly -> fetchAnchor
         else -> null
     }
 
@@ -460,14 +514,3 @@ internal fun mergeLastError(
     is LastErrorField.Set -> field.error
 }
 
-/**
- * Cluster A: nullable-aware max of two `Long?` watermarks. Both null →
- * null; otherwise the max of the non-null values. Used by the fetch
- * decision ([reduceSlimDigest]) to compute the OLD-equivalent single
- * watermark from the two split fields.
- */
-private fun maxOfNullable(a: Long?, b: Long?): Long? = when {
-    a == null -> b
-    b == null -> a
-    else -> maxOf(a, b)
-}
