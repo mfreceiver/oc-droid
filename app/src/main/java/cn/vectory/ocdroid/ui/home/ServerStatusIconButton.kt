@@ -56,17 +56,15 @@ import cn.vectory.ocdroid.ui.theme.SemanticColors
  *    Reconnecting / AwaitingTofuTrust).
  *
  * On click the composable opens [ServerManagementDialog], forwarding every
- * connection / traffic / host field + [onNavigateToSettings] (the dialog's own
+ * connection / host field + [onNavigateToSettings] (the dialog's own
  * Settings IconButton consumes it). Callers (SessionsScreen home page) source
- * the fields from `connectionVM` / `hostVM` / traffic slices — same reads
+ * the fields from `connectionVM` / `hostVM` — same reads
  * ChatScaffold performs for ChatTopBarState.
  *
  * @param isConnected          true when the connection is healthy.
  * @param isConnecting         true while a connect probe is in flight.
  * @param isIdle               true when the phase is [ConnectionPhase.Idle]
  *                              (no dot rendered).
- * @param trafficSent          cumulative bytes sent (dialog display).
- * @param trafficReceived      cumulative bytes received (dialog display).
  * @param hostProfiles         configured host profiles (dialog list).
  * @param currentHostProfileId the active host profile id (dialog highlight).
  * @param tunnelActivationState tunnel-activation slice (dialog button state).
@@ -84,8 +82,6 @@ internal fun ServerStatusIconButton(
     isConnected: Boolean,
     isConnecting: Boolean,
     isIdle: Boolean,
-    trafficSent: Long,
-    trafficReceived: Long,
     hostProfiles: List<HostProfile>,
     currentHostProfileId: String?,
     tunnelActivationState: TunnelActivationState,
@@ -166,8 +162,6 @@ internal fun ServerStatusIconButton(
             currentHostProfileId = currentHostProfileId,
             tunnelActivationState = tunnelActivationState,
             showTunnelAuth = showTunnelAuth,
-            trafficSent = trafficSent,
-            trafficReceived = trafficReceived,
             serverVersion = serverVersion,
             onSelectHost = onSelectHost,
             onRefresh = onRefresh,

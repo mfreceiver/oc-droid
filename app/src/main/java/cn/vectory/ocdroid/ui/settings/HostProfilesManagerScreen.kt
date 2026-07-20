@@ -35,6 +35,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -903,60 +904,18 @@ internal fun HostProfileEditorDialog(
             modifier = Modifier.fillMaxWidth()
         )
         Spacer(modifier = Modifier.height(Dimens.spacing3))
-        // §mtls-clipboard / §design E: 三个凭据区折叠——新 profile 全 false，
-        // 既有 profile 按是否配置种子。关则隐藏内容，保存时清空对应凭据。
-        CollapsibleSection(
-            title = stringResource(R.string.host_section_basic_auth_title),
-            subtitle = stringResource(R.string.host_section_basic_auth_sub),
-            checked = basicAuthEnabled,
-            onCheckedChange = { basicAuthEnabled = it },
-        ) {
-            // Username (optional) — label 槽（§issue-6）
-            OutlinedTextField(
-                value = authUsername,
-                onValueChange = { authUsername = it },
-                label = { Text(stringResource(R.string.host_profile_basic_auth_username)) },
-                placeholder = { Text(stringResource(R.string.common_optional)) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(modifier = Modifier.height(Dimens.spacingCompact))
-            // Password (optional, masked) — label 槽（§issue-6）
-            OutlinedTextField(
-                value = authPassword,
-                onValueChange = {
-                    passwordEdited = true
-                    authPassword = it
-                },
-                label = { Text(stringResource(R.string.host_profile_basic_auth_password)) },
-                placeholder = {
-                    // Mirror the tunnel-password field: the password is
-                    // write-only (never echoed back), but show masked dots
-                    // when a password is already stored so reopening the
-                    // editor doesn't look like the credential vanished.
-                    Text(
-                        if (initial.basicAuth != null && !passwordEdited) stringResource(R.string.host_profile_password_masked_placeholder)
-                        else stringResource(R.string.common_optional)
-                    )
-                },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                visualTransformation = if (showBasicPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                trailingIcon = {
-                    IconButton(onClick = { showBasicPassword = !showBasicPassword }) {
-                        Icon(
-                            if (showBasicPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                            contentDescription = if (showBasicPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
-                        )
-                    }
-                }
-            )
-        }
-        Spacer(modifier = Modifier.height(Dimens.spacing2))
         // §profile-cleanup R1: hide Tunnel password behind an Advanced expander.
         // Default expanded when an existing tunnel is configured so the
         // credential stays discoverable; collapsed for new profiles.
-        var advancedExpanded by remember(initial.id) { mutableStateOf(initial.tunnelPasswordId != null) }
+        var advancedExpanded by remember(initial.id) {
+            mutableStateOf(
+                initial.tunnelPasswordId != null ||
+                    initial.basicAuth != null ||
+                    initial.mtlsEnabled ||
+                    initial.slim ||
+                    initial.serverGroupFp in listOf("A", "B", "C", "D")
+            )
+        }
         val advancedExpandedDesc = stringResource(R.string.common_collapse)
         val advancedCollapsedDesc = stringResource(R.string.common_expand)
         Row(
@@ -985,6 +944,48 @@ internal fun HostProfileEditorDialog(
             enter = expandVertically() + fadeIn(),
             exit = shrinkVertically() + fadeOut()
         ) {
+            CollapsibleSection(
+                title = stringResource(R.string.host_section_basic_auth_title),
+                subtitle = stringResource(R.string.host_section_basic_auth_sub),
+                checked = basicAuthEnabled,
+                onCheckedChange = { basicAuthEnabled = it },
+            ) {
+                OutlinedTextField(
+                    value = authUsername,
+                    onValueChange = { authUsername = it },
+                    label = { Text(stringResource(R.string.host_profile_basic_auth_username)) },
+                    placeholder = { Text(stringResource(R.string.common_optional)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(Dimens.spacingCompact))
+                OutlinedTextField(
+                    value = authPassword,
+                    onValueChange = {
+                        passwordEdited = true
+                        authPassword = it
+                    },
+                    label = { Text(stringResource(R.string.host_profile_basic_auth_password)) },
+                    placeholder = {
+                        Text(
+                            if (initial.basicAuth != null && !passwordEdited) stringResource(R.string.host_profile_password_masked_placeholder)
+                            else stringResource(R.string.common_optional)
+                        )
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = if (showBasicPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showBasicPassword = !showBasicPassword }) {
+                            Icon(
+                                if (showBasicPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = if (showBasicPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
+                            )
+                        }
+                    }
+                )
+            }
+            Spacer(modifier = Modifier.height(Dimens.spacing2))
             CollapsibleSection(
                 title = stringResource(R.string.host_section_tunnel_title),
                 subtitle = stringResource(R.string.host_section_tunnel_sub),
@@ -1023,169 +1024,76 @@ internal fun HostProfileEditorDialog(
                     }
                 )
             }
-        }
-        Spacer(modifier = Modifier.height(Dimens.spacing3))
-        // §profile-cleanup R1: group selector as an M3 dropdown on the same
-        // row as the title + info icon (replaces the 5-segment bar).
-        var groupExpanded by remember(initial.id) { mutableStateOf(false) }
-        val groupOptions = listOf<Pair<String?, String>>(
-            null to stringResource(R.string.host_group_none),
-            "A" to "A",
-            "B" to "B",
-            "C" to "C",
-            "D" to "D"
-        )
-        val selectedGroupLabel = groupOptions.find { it.first == selectedGroup }?.second
-            ?: stringResource(R.string.host_group_none)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                stringResource(R.string.host_group_label),
-                style = MaterialTheme.typography.labelMedium,
+            Spacer(modifier = Modifier.height(Dimens.spacing3))
+            var groupExpanded by remember(initial.id) { mutableStateOf(false) }
+            val groupOptions = listOf<Pair<String?, String>>(
+                null to stringResource(R.string.host_group_none),
+                "A" to "A", "B" to "B", "C" to "C", "D" to "D"
             )
-            IconButton(onClick = { showGroupInfo = true }) {
-                Icon(
-                    Icons.Outlined.Info,
-                    contentDescription = stringResource(R.string.host_group_info),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Spacer(modifier = Modifier.width(Dimens.spacing2))
-            ExposedDropdownMenuBox(
-                expanded = groupExpanded,
-                onExpandedChange = { groupExpanded = it },
-                modifier = Modifier.weight(1f)
-            ) {
-                OutlinedTextField(
-                    value = selectedGroupLabel,
-                    onValueChange = {},
-                    readOnly = true,
-                    singleLine = true,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .menuAnchor(),
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = groupExpanded) }
-                )
-                ExposedDropdownMenu(
+            val selectedGroupLabel = groupOptions.find { it.first == selectedGroup }?.second
+                ?: stringResource(R.string.host_group_none)
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.host_group_label), style = MaterialTheme.typography.labelMedium)
+                IconButton(onClick = { showGroupInfo = true }) {
+                    Icon(Icons.Outlined.Info, contentDescription = stringResource(R.string.host_group_info), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(modifier = Modifier.width(Dimens.spacing2))
+                ExposedDropdownMenuBox(
                     expanded = groupExpanded,
-                    onDismissRequest = { groupExpanded = false }
+                    onExpandedChange = { groupExpanded = it },
+                    modifier = Modifier.weight(1f)
                 ) {
-                    groupOptions.forEach { (value, label) ->
-                        DropdownMenuItem(
-                            text = { Text(label) },
-                            onClick = {
+                    OutlinedTextField(
+                        value = selectedGroupLabel, onValueChange = {}, readOnly = true, singleLine = true,
+                        modifier = Modifier.fillMaxWidth().menuAnchor(),
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = groupExpanded) }
+                    )
+                    ExposedDropdownMenu(expanded = groupExpanded, onDismissRequest = { groupExpanded = false }) {
+                        groupOptions.forEach { (value, label) ->
+                            DropdownMenuItem(text = { Text(label) }, onClick = {
                                 selectedGroup = value
                                 groupExpanded = false
-                            }
-                        )
+                            })
+                        }
                     }
                 }
             }
-        }
-        Spacer(modifier = Modifier.height(Dimens.spacing3))
-        // §tofu R2: the legacy "Insecure HTTPS" toggle Row is REMOVED.
-        // Self-signed / unknown-issuer endpoints now surface a TOFU
-        // trust dialog at first connect (Accept once / Trust / Cancel),
-        // keyed by host:port. No editor affordance needed — the user
-        // trusts at runtime when the actual cert is in hand, not in
-        // the abstract per-profile. The strings
-        // host_allow_insecure_title / host_allow_insecure_summary
-        // are dropped from both locales (see strings.xml).
-        Spacer(modifier = Modifier.height(Dimens.spacing3))
-        // §mtls-clipboard: mTLS 区块——折叠区容器（与 Basic Auth / 隧道一致），
-        // 内容为客户端证书 + CA 两个剪贴板导入槽。
-        // §tofu R2: 与原 allowInsecure 的互斥（开 mTLS 强制重置 allowInsecure）
-        // 已无意义——allowInsecure 字段已删；mTLS 不再需要重置它。
-        CollapsibleSection(
-            title = stringResource(R.string.host_mtls_title),
-            subtitle = stringResource(R.string.host_mtls_summary),
-            checked = mtlsEnabled,
-            onCheckedChange = {
-                mtlsEnabled = it
-            },
-        ) {
-            // §mtls-clipboard: 降级 banner（缺失/损坏 或粘贴解析错误）。
-            val mtlsBanner = mtlsErrorHint ?: mtlsImportError
-            if (mtlsBanner != null) {
-                Text(
-                    mtlsBanner,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(bottom = Dimens.spacingCompact)
-                )
-            }
-            // §review-r4 (gpter R4 #1): mTLS on but no usable client-cert
-            // material (new profile never pasted, or existing cert removed
-            // via clientCleared). Surface the reason inline here so the
-            // disabled Save button is never a mystery — mirrors the
-            // mtlsBanner/mtlsImportError style above.
-            if (mtlsEnabled && !hasMaterial) {
-                Text(
-                    stringResource(R.string.host_mtls_missing_client_cert),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(bottom = Dimens.spacingCompact)
-                )
-            }
-            // §profile-cleanup R1: compact mTLS cert status row.
-            // Shows icon-only status for client + CA and a single trash
-            // affordance that clears both and disables mTLS.
-            CompactCertStatusRow(
-                clientStatus = clientSlotStatus,
-                caStatus = caSlotStatus,
-                clientLabel = stringResource(R.string.host_cert_compact_client),
-                caLabel = stringResource(R.string.host_cert_compact_ca),
-                clientPasteLabel = pasteClientLabel,
-                caPasteLabel = pasteCaLabel,
-                onImportClient = { triggerClientPaste() },
-                onImportCa = { triggerCaPaste() },
-                onClearAll = {
-                    clientEdited = true
-                    caEdited = true
-                    clientCleared = true
-                    mtlsEnabled = false
-                    stagedP12 = null
-                    clientSlotStatus = CertSlotStatus.Empty
-                    caStage = CaStage.Clear
-                    caSlotStatus = CertSlotStatus.Empty
-                    mtlsImportError = null
-                },
-                enabled = !isConverting,
-            )
-        }
-        Spacer(modifier = Modifier.height(Dimens.spacing2))
-        // §R8 slim-mode UI: 省流模式折叠区——与 mTLS 正交，形成四配置组合。
-        // 用户可通过 toggles 直观区分四种连接形态。
-        CollapsibleSection(
-            title = stringResource(R.string.host_slim_title),
-            subtitle = null,
-            checked = slimEnabled,
-            onCheckedChange = { slimEnabled = it },
-        ) {
-            // §R8: 连接模式摘要——根据 mtls × slim 两布尔显示当前四配置之一。
-            val modeLabel = when {
-                mtlsEnabled && slimEnabled -> stringResource(R.string.host_slim_mode_stunnel_slim)
-                mtlsEnabled && !slimEnabled -> stringResource(R.string.host_slim_mode_stunnel_opencode)
-                !mtlsEnabled && slimEnabled -> stringResource(R.string.host_slim_mode_direct_slim)
-                else -> stringResource(R.string.host_slim_mode_direct_opencode)
-            }
-            ListItem(
-                headlineContent = {
-                    Text(
-                        stringResource(R.string.host_slim_mode_label),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                },
-                supportingContent = {
-                    Text(
-                        modeLabel,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+            Spacer(modifier = Modifier.height(Dimens.spacing3))
+            CollapsibleSection(
+                title = stringResource(R.string.host_mtls_title),
+                subtitle = stringResource(R.string.host_mtls_summary),
+                checked = mtlsEnabled,
+                onCheckedChange = { mtlsEnabled = it },
+            ) {
+                val mtlsBanner = mtlsErrorHint ?: mtlsImportError
+                if (mtlsBanner != null) {
+                    Text(mtlsBanner, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = Dimens.spacingCompact))
                 }
-            )
+                if (mtlsEnabled && !hasMaterial) {
+                    Text(stringResource(R.string.host_mtls_missing_client_cert), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = Dimens.spacingCompact))
+                }
+                CompactCertStatusRow(
+                    clientStatus = clientSlotStatus, caStatus = caSlotStatus,
+                    clientLabel = stringResource(R.string.host_cert_compact_client), caLabel = stringResource(R.string.host_cert_compact_ca),
+                    clientPasteLabel = pasteClientLabel, caPasteLabel = pasteCaLabel,
+                    onImportClient = { triggerClientPaste() }, onImportCa = { triggerCaPaste() },
+                    onClearAll = {
+                        clientEdited = true; caEdited = true; clientCleared = true; mtlsEnabled = false
+                        stagedP12 = null; clientSlotStatus = CertSlotStatus.Empty; caStage = CaStage.Clear
+                        caSlotStatus = CertSlotStatus.Empty; mtlsImportError = null
+                    },
+                    enabled = !isConverting,
+                )
+            }
+            Spacer(modifier = Modifier.height(Dimens.spacing2))
+            Row(
+                modifier = Modifier.fillMaxWidth().heightIn(min = Dimens.touchTargetMin).padding(vertical = Dimens.spacing1),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(stringResource(R.string.host_slim_title), style = MaterialTheme.typography.titleSmall)
+                Switch(checked = slimEnabled, onCheckedChange = { slimEnabled = it })
+            }
         }
         // §issue-5: 全宽"测试连接"按钮已移除——触发器移入底部 action 行的
         // test icon（见 confirmButton）。此处仅保留结果回显（成功/失败小字），

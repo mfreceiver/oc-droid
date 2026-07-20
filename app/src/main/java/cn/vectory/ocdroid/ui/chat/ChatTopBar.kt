@@ -166,12 +166,6 @@ internal data class ChatTopBarActions(
      */
     val onRefreshMessages: () -> Unit = {},
     /**
-     * Refresh cumulative traffic counters (sent/received bytes) before the
-     * server popup renders them — otherwise the dialog shows stale `0 B`
-     * until the user visits Settings. Triggered when the popup opens.
-     */
-    val onRefreshTrafficStats: () -> Unit = {},
-    /**
      * §1B (D.4): formerly opened the [SessionPickerSheet] from the
      * navigation icon. §0.8.2 P2.1: the icon was replaced with a non-
      * clickable workdir initial; this callback is no longer invoked from

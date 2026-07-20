@@ -52,7 +52,6 @@ import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.SettingsViewModel
-import cn.vectory.ocdroid.ui.TrafficState
 import cn.vectory.ocdroid.ui.chat.copyToSystemClipboard
 import cn.vectory.ocdroid.ui.chat.workdirTone
 import cn.vectory.ocdroid.ui.currentHostProfile
@@ -147,11 +146,8 @@ fun SessionsScreen(
     // call site), remembered empty-state fallback flows keep the reads
     // non-null so the icon degrades to Idle / empty host list instead of NPE.
     val connectionFallback = remember { MutableStateFlow(ConnectionState()) }
-    val trafficFallback = remember { MutableStateFlow(TrafficState()) }
     val hostFallback = remember { MutableStateFlow(HostState()) }
     val connection by (connectionVM?.connectionFlow ?: connectionFallback)
-        .collectAsStateWithLifecycle()
-    val traffic by (connectionVM?.trafficFlow ?: trafficFallback)
         .collectAsStateWithLifecycle()
     val host by (hostVM?.hostFlow ?: hostFallback).collectAsStateWithLifecycle()
     val curHostProfile = currentHostProfile(host.hostProfiles, host.currentHostProfileId)
@@ -322,14 +318,12 @@ fun SessionsScreen(
                             )
                         }
                         // Top-right server-status affordance (T2). Wired to
-                        // the connection / traffic / host slices; degrades to
+                        // the connection / host slices; degrades to
                         // Idle / empty host list when the VMs are not wired.
                         ServerStatusIconButton(
                             isConnected = connection.isConnected,
                             isConnecting = connection.isConnecting,
                             isIdle = connection.connectionPhase is ConnectionPhase.Idle,
-                            trafficSent = traffic.trafficSent,
-                            trafficReceived = traffic.trafficReceived,
                             hostProfiles = host.hostProfiles,
                             currentHostProfileId = host.currentHostProfileId,
                             tunnelActivationState = connection.tunnelActivationState,

@@ -1,7 +1,6 @@
 // ChatServerManagementDialog.kt — server management popup (host profile list,
-// traffic counters, refresh, tunnel-activation, settings entry); traffic
-// counters use shared FormatUtils.formatBytes. Pure relocation from
-// ChatTopBar.kt with no behaviour change.
+// refresh, tunnel-activation, settings entry). Pure relocation from ChatTopBar.kt
+// with no behaviour change.
 
 package cn.vectory.ocdroid.ui.chat
 
@@ -38,7 +37,6 @@ import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.TunnelActivationState
-import cn.vectory.ocdroid.ui.util.formatBytes
 
 @Composable
 internal fun ServerManagementDialog(
@@ -46,8 +44,6 @@ internal fun ServerManagementDialog(
     currentHostProfileId: String?,
     tunnelActivationState: TunnelActivationState,
     showTunnelAuth: Boolean,
-    trafficSent: Long,
-    trafficReceived: Long,
     serverVersion: String?,
     onSelectHost: (String) -> Unit,
     onRefresh: () -> Unit,
@@ -132,27 +128,6 @@ internal fun ServerManagementDialog(
                     }
                 }
 
-                // --- Traffic statistics ---
-                // #4a: the two traffic counters are centered horizontally
-                // within the dialog (16dp spacing kept), so the ↑/↓ row reads
-                // as a balanced pair instead of left-aligned.
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally)
-                ) {
-                    Text(
-                        text = "↑ ${formatBytes(trafficSent)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        text = "↓ ${formatBytes(trafficReceived)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
                 // --- Action icon row: Settings / Tunnel / Refresh ---
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(
@@ -205,4 +180,3 @@ internal fun ServerManagementDialog(
         confirmButton = {}
     )
 }
-

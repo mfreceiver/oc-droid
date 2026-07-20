@@ -305,11 +305,6 @@
     <!-- §R8 slim-mode UI：主机配置编辑器精简模式开关与连接模式说明 -->
     <string name="host_slim_title">精简模式</string>
     <string name="host_slim_summary">使用 oc-slimapi sidecar 以降低流量消耗。</string>
-    <string name="host_slim_mode_label">连接模式</string>
-    <string name="host_slim_mode_direct_opencode">直连 OpenCode</string>
-    <string name="host_slim_mode_stunnel_opencode">Stunnel + OpenCode</string>
-    <string name="host_slim_mode_direct_slim">直连 SlimAPI</string>
-    <string name="host_slim_mode_stunnel_slim">Stunnel + SlimAPI</string>
     <!-- §R8 slimapi 版本不兼容：客户端版本超出接受范围时的阻塞对话框（Tier C） -->
     <string name="slimapi_version_incompatible_title">版本不兼容</string>
     <string name="slimapi_version_incompatible_message">SlimAPI 服务器不接受此客户端版本。\n\n客户端版本：%1$d\n接受范围：%2$d – %3$d\n\n请升级客户端或服务器以继续使用精简模式。</string>

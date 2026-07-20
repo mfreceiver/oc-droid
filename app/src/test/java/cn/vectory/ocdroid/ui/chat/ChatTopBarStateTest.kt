@@ -190,7 +190,6 @@ class ChatTopBarStateTest {
         a.onSelectHost("h1")
         a.onActivateTunnel()
         a.onRefreshMessages()
-        a.onRefreshTrafficStats()
         a.onOpenSessionPicker()
         a.onOpenOverflow()
         a.onSwitchModel("p", "m")
@@ -205,7 +204,6 @@ class ChatTopBarStateTest {
         var selectHost = ""
         var activateTunnel = 0
         var refreshMessages = 0
-        var refreshTraffic = 0
         var openSessionPicker = 0
         var openOverflow = 0
         var switchModel = ""
@@ -221,7 +219,6 @@ class ChatTopBarStateTest {
             onSelectHost = { selectHost = it },
             onActivateTunnel = { activateTunnel += 1 },
             onRefreshMessages = { refreshMessages += 1 },
-            onRefreshTrafficStats = { refreshTraffic += 1 },
             onOpenSessionPicker = { openSessionPicker += 1 },
             onOpenOverflow = { openOverflow += 1 },
             onSwitchModel = { p, m -> switchModel = "$p/$m" },
@@ -234,7 +231,6 @@ class ChatTopBarStateTest {
         a.onSelectHost("h1")
         a.onActivateTunnel()
         a.onRefreshMessages()
-        a.onRefreshTrafficStats()
         a.onOpenSessionPicker()
         a.onOpenOverflow()
         a.onSwitchModel("p", "m")
@@ -246,7 +242,6 @@ class ChatTopBarStateTest {
         assertEquals("h1", selectHost)
         assertEquals(1, activateTunnel)
         assertEquals(1, refreshMessages)
-        assertEquals(1, refreshTraffic)
         assertEquals(1, openSessionPicker)
         assertEquals(1, openOverflow)
         assertEquals("p/m", switchModel)
