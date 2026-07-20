@@ -805,7 +805,13 @@ class HostProfileControllerTest {
         verify { settingsManager.openSessionIds = emptyList() }
         verify { settingsManager.sessionCache = emptyList() }
         verify { settingsManager.currentWorkdir = null }
-        verify { settingsManager.clearRecentWorkdirs(any()) }
+        // §recent-workdirs fix: clearRecentWorkdirs was REMOVED from
+        // purgePerHostState (cross-group branch). currentServerGroupFp() reads
+        // the NEW (target) fp after select(), so the call cleared the target
+        // profile's history — switching back lost its recent projects. Now
+        // recentWorkdirs are isolated per fp (getRecentWorkdirs(fp)) and never
+        // actively cleared on switch.
+        verify(exactly = 0) { settingsManager.clearRecentWorkdirs(any()) }
     }
 
     @Test

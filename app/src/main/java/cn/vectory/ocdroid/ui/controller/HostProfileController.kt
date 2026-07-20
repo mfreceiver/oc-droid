@@ -691,16 +691,6 @@ class HostProfileController(
             )
         )
         if (!preserveServerGroupData) {
-            // §recent-workdirs / R-20 Phase 5: clear per-host workdir memory
-            // on 异组 switch (paths from server A are meaningless on server B).
-            // Was a single global slot (`recentWorkdirs = emptyList()`); now
-            // scoped to the current fp — same-group switches preserve the
-            // list (correct: same server, same workdirs). NOTE: at the call
-            // site (selectHostProfile) currentServerGroupFp() reads the NEW
-            // (target) fp because select() already ran. The NEW profile's
-            // recentWorkdirs is cleared so it starts fresh; the OLD profile's
-            // data is preserved (the user can switch back).
-            settingsManager.clearRecentWorkdirs(currentServerGroupFp())
             // §H3: clear persisted workdir — a path from host A is meaningless
             // on host B. configureRepositoryForProfile re-scopes to the (now-
             // null) workdir, which is correct for a fresh host.
