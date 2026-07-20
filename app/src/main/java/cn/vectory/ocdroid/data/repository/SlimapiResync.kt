@@ -200,7 +200,9 @@ fun needsReconcile(state: SlimSessionState): Boolean {
  * Defensive: items with no usable `time.updated` (> 0L) — e.g. legacy
  * endpoints or malformed skeletons — also leave BOTH fields at their
  * prior values (we can't reliably identify the "latest" item without a
- * ts). `dirty` clears either way (reconcile did succeed).
+ * ts). Items whose `info.id` is blank are likewise excluded from
+ * watermark selection (see valid-id anchor below). `dirty` clears
+ * either way (reconcile did succeed).
  *
  * Pure — no IO, no SlimSseState mutation, no Android dependency. The
  * caller (T11 wiring) is responsible for putting the returned state
@@ -234,6 +236,25 @@ fun onReconcileSuccess(
     // the opencode messageID-strictly-monotonic-by-creation invariant
     // (see [compareWatermark] kdoc).
     //
+    // # Valid-id watermark anchor (rev-opus M-4 / §5.4)
+    //
+    // The stored watermark pair MUST always correspond to a real message
+    // that carried a non-blank id. Candidates are therefore filtered to
+    // items with BOTH a usable `time.updated` (> 0L) AND a non-blank
+    // `info.id` before the tuple-max selection. Without this guard a
+    // malformed high-ts item whose id is blank (or was coalesced via
+    // `?: ""` for compareBy) could satisfy the ts-first advance check
+    // while the id branch fell back to prior (`observedId ?: prior`),
+    // producing the split pair `(newTs, priorId)` — a tuple that never
+    // matched any real message and would corrupt subsequent
+    // [compareWatermark] "unseen" decisions. Blank-id high-ts items are
+    // therefore ignored for watermark purposes (they remain eligible for
+    // the caller's merge/cache path); the next poll re-fetches them
+    // idempotently, and a later valid-id item with a greater tuple
+    // advances the watermark normally. Under normal opencode /
+    // slimapi data `info.id` is always non-blank, so this filter is a
+    // no-op on the healthy path.
+    //
     // Defensive: items with no usable `time.updated` (> 0L) — e.g. legacy
     // endpoints or malformed skeletons — leave BOTH localApplied* fields
     // at their prior values (we can't reliably identify the "latest" item
@@ -241,8 +262,8 @@ fun onReconcileSuccess(
     // ↔ ts correspondence the next fetch depends on). dirty still clears
     // (reconcile did succeed — we just got no usable signal).
     val latest = items
-        .filter { (it.info.time?.updated ?: 0L) > 0L }
-        .maxWithOrNull(compareBy({ it.info.time!!.updated!! }, { it.info.id ?: "" }))
+        .filter { (it.info.time?.updated ?: 0L) > 0L && it.info.id.isNotBlank() }
+        .maxWithOrNull(compareBy({ it.info.time!!.updated!! }, { it.info.id }))
     val observedTs: Long? = latest?.info?.time?.updated
     val observedId: String? = latest?.info?.id
 
@@ -260,9 +281,17 @@ fun onReconcileSuccess(
     //     (stale-digest safe harbor — out-of-order re-emit carries a
     //     strictly-smaller id under the monotonic-id invariant).
     //   - observedTs < priorTs → no advance (older tail).
-    // Splitting the pair (e.g. keeping prior ts but adopting observedId)
-    // is therefore impossible — the pair moves atomically iff observed
-    // tuple > prior tuple, otherwise both fields stay at prior.
+    //
+    // Pair integrity is enforced by construction:
+    //  1. Selection only considers items with non-blank ids (valid-id
+    //     anchor above), so `observedId` is never blank when `latest`
+    //     is non-null.
+    //  2. Both fields advance TOGETHER from that same `latest` item iff
+    //     the observed tuple > prior tuple; otherwise BOTH stay at prior.
+    // Splitting the pair (e.g. new ts + prior id, or prior ts + new id)
+    // is therefore impossible — the atomic-pair rule plus the valid-id
+    // filter close both the pre-T6 "adopt observedId unconditionally"
+    // hole and the blank-id high-ts hole.
     //
     // rev-gpt round-2 IMPORTANT fix (preserved): the older pre-T6 code
     // kept prior ts (via monotonic-max) but adopted observedId
@@ -272,6 +301,7 @@ fun onReconcileSuccess(
     val priorLocalAppliedUpdatedAt = state.localAppliedUpdatedAt
     val priorLocalAppliedMessageId = state.localAppliedMessageId
     val advances = observedTs != null &&
+        observedId != null &&
         compareWatermark(
             observedTs, observedId,
             priorLocalAppliedUpdatedAt, priorLocalAppliedMessageId,
@@ -282,7 +312,8 @@ fun onReconcileSuccess(
         priorLocalAppliedUpdatedAt
     }
     val newLocalAppliedMessageId = if (advances) {
-        observedId ?: priorLocalAppliedMessageId
+        // Valid-id filter guarantees a non-blank observedId when advances.
+        observedId!!
     } else {
         priorLocalAppliedMessageId
     }

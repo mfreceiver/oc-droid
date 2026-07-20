@@ -489,6 +489,75 @@ class SlimapiResyncTest {
         assertEquals(999L, out.remoteUpdatedAt)
     }
 
+    @Test
+    fun `M-4 blank-id high-ts item does not advance watermark or split pair`() {
+        // rev-opus M-4 / §5.4: a malformed max-ts item with blank `info.id`
+        // must NOT produce the split pair `(newTs, priorId)`. Pre-fix:
+        // filter kept any updated>0 item, compareBy coalesced id to "",
+        // ts-first compareWatermark advanced, then `observedId ?: prior`
+        // left id at prior → watermark = (newTs, priorId) — a tuple that
+        // never matched a real message. Guard: only non-blank-id items
+        // are eligible for watermark selection; blank high-ts is ignored
+        // and the prior pair is retained atomically. dirty still clears.
+        //
+        // Message.id is a non-null String in the model; blank is the
+        // constructible stand-in for the "no usable id" malformed case
+        // (null is not representable without breaking the data class).
+        val prior = SlimSessionState(
+            sessionId = "s1",
+            localAppliedUpdatedAt = 100L,
+            localAppliedMessageId = "m-prior",
+            dirty = true,
+        )
+        val items = listOf(
+            messageWithParts(id = "", updated = 500L),
+            messageWithParts(id = "   ", updated = 400L),
+        )
+        val out = onReconcileSuccess(prior, items)
+        assertEquals(
+            "blank-id high-ts must NOT advance localAppliedUpdatedAt " +
+                "(would create split pair with prior id)",
+            100L,
+            out.localAppliedUpdatedAt,
+        )
+        assertEquals(
+            "CRITICAL: localAppliedMessageId must stay at prior — " +
+                "watermark pair remains anchored to a real non-blank-id message",
+            "m-prior",
+            out.localAppliedMessageId,
+        )
+        assertFalse("dirty still clears (reconcile succeeded)", out.dirty)
+    }
+
+    @Test
+    fun `M-4 blank-id high-ts coexists with valid lower-ts item anchors to valid max`() {
+        // Among mixed items, only non-blank-id candidates participate in
+        // tuple-max selection. A blank id @500 is ignored; the valid-id
+        // max (m-valid @300) advances the pair atomically from prior.
+        // Pins that the guard does not discard healthy items and that
+        // the chosen pair is still a real message.
+        val prior = SlimSessionState(
+            sessionId = "s1",
+            localAppliedUpdatedAt = 100L,
+            localAppliedMessageId = "m-prior",
+            dirty = true,
+        )
+        val items = listOf(
+            messageWithParts(id = "", updated = 500L),
+            messageWithParts(id = "m-valid", updated = 300L),
+            messageWithParts(id = "m-older", updated = 200L),
+        )
+        val out = onReconcileSuccess(prior, items)
+        assertEquals(300L, out.localAppliedUpdatedAt)
+        assertEquals(
+            "watermark must anchor to the valid-id tuple-max (m-valid@300), " +
+                "NOT the blank-id high-ts (\"\"@500) and NOT prior",
+            "m-valid",
+            out.localAppliedMessageId,
+        )
+        assertFalse(out.dirty)
+    }
+
     // ── T6-C2: onReconcileFailure preserves dirty ────────────────────────
 
     @Test
