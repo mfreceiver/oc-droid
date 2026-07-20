@@ -54,7 +54,9 @@ import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.FLICKER_TAG
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.STREAMING_FLICKER_DEBUG
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -65,6 +67,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -184,6 +187,8 @@ class SessionSyncCoordinator(
      * race the next digest frame against an unadvanced bookmark.
      */
     private val repository: OpenCodeRepository? = null,
+    /** Worker lane for network/reconcile computation. UI commits switch to Main. */
+    internal val reconcileDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) {
     /** Tag for [reportNonFatalIssue]; mirrors the original MainViewModel TAG. */
     private val tag: String = "SessionSyncCoordinator"
@@ -2157,24 +2162,26 @@ class SessionSyncCoordinator(
         repo: OpenCodeRepository,
         token: OpenCodeRepository.SlimCommitToken,
     ) {
-        stripeFor(sid).withLock {
-            if (!repo.isSlimCommitTokenCurrent(token)) return@withLock
-
-            // C-D3 v2 §1.13: gate the banner commit so a stale token
-            // can NOT touch the sessionErrorsById slice.
-            val bannerCommitted = repo.commitIfSlimTokenCurrent(token) {
+        val uiSnapshot = ResyncUiSnapshot(slices.chat.value.currentSessionId)
+        // UI banner mutation happens before the worker lock.
+        val bannerCommitted = withContext(Dispatchers.Main.immediate) {
+            repo.commitIfSlimTokenCurrent(token) {
                 applyDigestLastErrorToBanner(sid, digest.lastError)
             }
-
-            if (!bannerCommitted) return@withLock
+        }
+        if (!bannerCommitted) return
+        val result: ReconcileResult = withContext(reconcileDispatcher) {
+            stripeFor(sid).withLock {
+            if (!repo.isSlimCommitTokenCurrent(token)) return@withLock ReconcileResult.Stale(sid)
 
             repo.applySlimDigest(digest, token)
 
-            if (!repo.isSlimCommitTokenCurrent(token)) return@withLock
+            if (!repo.isSlimCommitTokenCurrent(token)) return@withLock ReconcileResult.Stale(sid)
 
-            val result = reconcileSessionLocked(sid, mode, repo, token)
-            applyReconcileResult(result, token)
+                reconcileSessionLocked(sid, mode, repo, token, uiSnapshot.currentSessionId)
+            }
         }
+        applyReconcileResult(result, token, uiSnapshot)
     }
 
     /**
@@ -2227,19 +2234,21 @@ class SessionSyncCoordinator(
     internal suspend fun reconcileSession(sid: String, mode: ReconcileMode): ReconcileResult {
         val repo = repository ?: return ReconcileResult.NoRepository(sid)
         if (!isSlimMode()) return ReconcileResult.NoRepository(sid)
+        val uiSnapshot = ResyncUiSnapshot(slices.chat.value.currentSessionId)
 
         // C-D3 v2 §1.8: public workflow entry captures once before its
         // first suspend point. Every nested suspend call and every commit
         // surface receives this exact token — NO recapture inside.
         val token = repo.captureSlimCommitToken()
 
-        return reconcileSessionWithToken(
+        val result = reconcileSessionWithToken(
             sid = sid,
             mode = mode,
             repo = repo,
             token = token,
             isStillCurrent = { true },
         )
+        return applyReconcileResult(result, token, uiSnapshot)
     }
 
     /**
@@ -2258,7 +2267,8 @@ class SessionSyncCoordinator(
         repo: OpenCodeRepository,
         token: OpenCodeRepository.SlimCommitToken,
         isStillCurrent: () -> Boolean,
-    ): ReconcileResult = stripeFor(sid).withLock {
+    ): ReconcileResult = withContext(reconcileDispatcher) {
+        stripeFor(sid).withLock {
         // C-D3 v2 §1.8: re-check both predicates under the stripe. A host
         // switch between the entry capture and the stripe acquisition
         // surfaces as Stale (NOT NoRepository — the repo IS wired, but
@@ -2267,7 +2277,8 @@ class SessionSyncCoordinator(
             return@withLock ReconcileResult.Stale(sid)
         }
 
-        reconcileSessionLocked(sid, mode, repo, token)
+        reconcileSessionLocked(sid, mode, repo, token, null)
+        }
     }
 
     /**
@@ -2295,6 +2306,7 @@ class SessionSyncCoordinator(
         mode: ReconcileMode,
         repo: OpenCodeRepository,
         token: OpenCodeRepository.SlimCommitToken,
+        snapshotCurrentSessionId: String?,
     ): ReconcileResult {
         // T11 round-3: the slim-mode guard lives HERE (not just at the
         // [reconcileSession] public entry) so the [reconcileDigest]
@@ -2368,7 +2380,7 @@ class SessionSyncCoordinator(
             // runs this body for every dirty sid — non-current sids carry no
             // streaming-send signal).
             if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled &&
-                sid == slices.chat.value.currentSessionId
+                sid == snapshotCurrentSessionId
             ) {
                 cn.vectory.ocdroid.util.DebugLog.d(
                     "DigestDiag",
@@ -2391,7 +2403,7 @@ class SessionSyncCoordinator(
             // §streaming-state-sync-diag (runtime-gated, scoped): BACKGROUND
             // mode → no FETCH (refresh row only).
             if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled &&
-                sid == slices.chat.value.currentSessionId
+                sid == snapshotCurrentSessionId
             ) {
                 cn.vectory.ocdroid.util.DebugLog.d(
                     "DigestDiag",
@@ -2405,7 +2417,7 @@ class SessionSyncCoordinator(
         // §streaming-state-sync-diag (runtime-gated, scoped): FETCH decision —
         // about to call /slimapi/messages/since.
         if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled &&
-            sid == slices.chat.value.currentSessionId
+            sid == snapshotCurrentSessionId
         ) {
             cn.vectory.ocdroid.util.DebugLog.d(
                 "DigestDiag",
@@ -2446,31 +2458,8 @@ class SessionSyncCoordinator(
 
         return result.fold(
             onSuccess = { items ->
-                // C-D3 v2 §1.9: guard EVERY slice/effect commit (not just
-                // the repo watermark bump, which already landed inside
-                // bumpSlimBookmarkFromItems under the same token). The
-                // banner / chat merge MUST land under the same atomic
-                // gate so a configure rotation between repo commit and
-                // slice commit cannot write a stale chat.
-                val committed = repo.commitIfSlimTokenCurrent(token) {
-                    if (slices.chat.value.currentSessionId == sid) {
-                        mergeSlimMessagesIntoChat(items)
-                    }
-                }
-
-                if (!committed) {
-                    DebugLog.i(
-                        "Sync",
-                        "drop stale REST result sid=$sid mode=$mode",
-                    )
-                    ReconcileResult.Stale(sid)
-                } else {
-                    DebugLog.i(
-                        "Sync",
-                        "reconcileSession sid=$sid mode=$mode REST success items=${items.size} → dirty cleared (if truly aligned)",
-                    )
-                    ReconcileResult.Reconciled(sid, items)
-                }
+                if (!repo.isSlimCommitTokenCurrent(token)) ReconcileResult.Stale(sid)
+                else ReconcileResult.Reconciled(sid, items)
             },
             onFailure = { error ->
                 // C-D3 v2 §1.9: Stale ≠ Failure. A stale cursor result
@@ -2513,23 +2502,45 @@ class SessionSyncCoordinator(
      *  - Other variants → state already updated inside [reconcileSession];
      *    no additional side effects.
      */
-    private fun applyReconcileResult(
+    data class ResyncUiSnapshot(val currentSessionId: String?)
+
+    private suspend fun applyReconcileResult(
         result: ReconcileResult,
         token: OpenCodeRepository.SlimCommitToken,
-    ) {
-        val repo = repository ?: return
+        snapshot: ResyncUiSnapshot? = null,
+    ): ReconcileResult {
+        val repo = repository ?: return ReconcileResult.NoRepository(resultSid(result))
 
         // C-D3 v2 §1.10: Stale is a clean no-op (no slice / cache / effect
         // commit, no Failure pollution).
-        if (result is ReconcileResult.Stale) return
+        if (result is ReconcileResult.Stale) return result
 
-        // C-D3 v2 §1.10: ONE mandatory gate. The check + every slice /
-        // effect / cache mutation run atomically under slimStateLock so a
-        // configure() rotation cannot straddle the gate-commit boundary
-        // (TOCTOU mitigation — rev-gpt round-2 concern).
-        repo.commitIfSlimTokenCurrent(token) {
-            applyCurrentReconcileResult(result, token)
+        val stillCurrent = withContext(reconcileDispatcher) {
+            repo.isSlimCommitTokenCurrent(token)
         }
+        if (!stillCurrent) return ReconcileResult.Stale(resultSid(result))
+        var snapshotAccepted = false
+        val committed = withContext(Dispatchers.Main.immediate) {
+            repo.commitIfSlimTokenCurrent(token) {
+                val liveSessionId = slices.chat.value.currentSessionId
+                if (snapshot != null && snapshot.currentSessionId != liveSessionId) return@commitIfSlimTokenCurrent
+                snapshotAccepted = true
+                applyCurrentReconcileResult(result, token, liveSessionId)
+            }
+        }
+        return if (committed && snapshotAccepted) result else ReconcileResult.Stale(resultSid(result))
+    }
+
+    private fun resultSid(result: ReconcileResult): String = when (result) {
+        is ReconcileResult.Aligned -> result.sid
+        is ReconcileResult.Reconciled -> result.sid
+        is ReconcileResult.RefreshRow -> result.sid
+        is ReconcileResult.MarkDeleted -> result.sid
+        is ReconcileResult.ClearLocal -> result.sid
+        is ReconcileResult.Failure -> result.sid
+        is ReconcileResult.TimedOut -> result.sid
+        is ReconcileResult.NoRepository -> result.sid
+        is ReconcileResult.Stale -> result.sid
     }
 
     /**
@@ -2540,6 +2551,7 @@ class SessionSyncCoordinator(
     private fun applyCurrentReconcileResult(
         result: ReconcileResult,
         token: OpenCodeRepository.SlimCommitToken,
+        liveSessionId: String? = slices.chat.value.currentSessionId,
     ) {
         when (result) {
             is ReconcileResult.MarkDeleted -> {
@@ -2575,7 +2587,7 @@ class SessionSyncCoordinator(
             is ReconcileResult.ClearLocal -> {
                 val sid = result.sid
 
-                if (slices.chat.value.currentSessionId == sid) {
+                if (liveSessionId == sid) {
                     slices.mutateChat {
                         it.copy(
                             messages = emptyList(),
@@ -2590,6 +2602,9 @@ class SessionSyncCoordinator(
             }
 
             is ReconcileResult.Reconciled -> {
+                if (liveSessionId == result.sid) {
+                    mergeSlimMessagesIntoChat(result.items)
+                }
                 // T11 round-2 (oracle D1 — cache-coupled non-focus resync):
                 // if this Reconciled was for a NON-current session, write
                 // the fetched items to sessionWindowCache so a later
@@ -2607,7 +2622,7 @@ class SessionSyncCoordinator(
                 // could clear without a retained window — leaving the
                 // user with no cached messages and no scheduled retry.
                 val sid = result.sid
-                val isCurrent = slices.chat.value.currentSessionId == sid
+                val isCurrent = liveSessionId == sid
 
                 if (!isCurrent && result.items.isNotEmpty()) {
                     val messages = result.items
@@ -2763,6 +2778,26 @@ class SessionSyncCoordinator(
     suspend fun performResyncCatchUp(
         catchUpSet: Set<String>,
         perSidDeadlineMs: Long = defaultResyncPerSidDeadlineMs,
+        token: OpenCodeRepository.SlimCommitToken? = null,
+        isStillCurrent: () -> Boolean = { true },
+        snapshot: ResyncUiSnapshot? = null,
+    ): Map<String, ReconcileResult> {
+        // UI state is Main-confined: capture it before entering the worker lane.
+        val resyncUiSnapshot = snapshot ?: ResyncUiSnapshot(slices.chat.value.currentSessionId)
+        return withContext(reconcileDispatcher) {
+            performResyncCatchUpOnWorker(
+                catchUpSet,
+                perSidDeadlineMs,
+                token,
+                isStillCurrent,
+                resyncUiSnapshot,
+            )
+        }
+    }
+
+    private suspend fun performResyncCatchUpOnWorker(
+        catchUpSet: Set<String>,
+        perSidDeadlineMs: Long = defaultResyncPerSidDeadlineMs,
         /**
          * C-D3 v2 §1.11: orchestrator-supplied entry token. The whole
          * sweep uses THIS token; NO recapture inside per-sid children.
@@ -2777,6 +2812,7 @@ class SessionSyncCoordinator(
          * with the token check inside.
          */
         isStillCurrent: () -> Boolean = { true },
+        resyncUiSnapshot: ResyncUiSnapshot,
     ): Map<String, ReconcileResult> {
         val repo = repository ?: return emptyMap()
         if (!isSlimMode() || catchUpSet.isEmpty()) return emptyMap()
@@ -2820,7 +2856,6 @@ class SessionSyncCoordinator(
                                     isStillCurrent = isStillCurrent,
                                 )
 
-                                applyReconcileResult(reconciled, entryToken)
                                 reconciled
                             }
                         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
@@ -2832,7 +2867,16 @@ class SessionSyncCoordinator(
                                 ReconcileResult.TimedOut(sid)
                             }
                         }
-                        outcomes[sid] = result
+                        val finalResult = if (
+                            result is ReconcileResult.TimedOut || result is ReconcileResult.Stale
+                        ) {
+                            result
+                        } else {
+                            // Main switch/commit is deliberately outside the
+                            // network timeout and outside any worker lock.
+                            applyReconcileResult(result, entryToken, resyncUiSnapshot)
+                        }
+                        outcomes[sid] = finalResult
                     }
                 }
             }
@@ -2907,7 +2951,8 @@ class SessionSyncCoordinator(
         if (!current()) return emptyMap()
 
         // ── Step 1: capture pre-refresh state ───────────────────────────
-        val focus = slices.chat.value.currentSessionId
+        val resyncUiSnapshot = ResyncUiSnapshot(slices.chat.value.currentSessionId)
+        val focus = resyncUiSnapshot.currentSessionId
         val preRefreshLocalAll = repo.snapshotSlimSseState().keys
         val preRefreshSessions = slices.sessionList.value.sessions.map { it.id }.toSet()
 
@@ -2923,9 +2968,19 @@ class SessionSyncCoordinator(
         val overlayDirty = sseSyncState.sessionsDirty
 
         // ── Step 2: metadata-only refresh (no open-session fetch) ───────
+        // §session-scope-narrow: union currentWorkdir into the snapshot dirs so the
+        // currently-viewed project is always in scope, even if addRecentWorkdir hasn't
+        // persisted it yet (race / migration gap).
+        val currentWd = settingsManager.currentWorkdir
+        val recentWorkdirs = settingsManager.getRecentWorkdirs(currentServerGroupFp())
+        val effectiveDirs = (recentWorkdirs + listOfNotNull(currentWd))
+            .filter { it.isNotBlank() }
+            .distinct()
+        val snapshotDirectories = if (effectiveDirs.isNotEmpty()) effectiveDirs else directories
+
         val snapshotResult = repo.coldStartSlimSync(
             openSessionId = null,
-            directories = directories,
+            directories = snapshotDirectories,
             token = token,
         )
         val snapshot = snapshotResult.getOrNull()
@@ -2999,6 +3054,7 @@ class SessionSyncCoordinator(
             perSidDeadlineMs = perSidDeadlineMs,
             token = token,
             isStillCurrent = isStillCurrent,
+            snapshot = resyncUiSnapshot,
         )
     }
 

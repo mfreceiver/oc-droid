@@ -4,6 +4,7 @@ import android.util.Log
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
+import cn.vectory.ocdroid.MainDispatcherRule
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.SharedEffectBus
@@ -25,6 +26,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.mockwebserver.MockResponse
@@ -37,6 +39,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.Rule
 
 /**
  * rev-grok golden-path integration test for slim mode (省流 v1).
@@ -89,6 +92,9 @@ import org.junit.Test
  *    [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwnerResyncTest].
  */
 class SlimGoldenPathIntegrationTest {
+
+    @get:Rule
+    val mainDispatcherRule = MainDispatcherRule(UnconfinedTestDispatcher())
 
     private val server = MockWebServer()
     private lateinit var repository: OpenCodeRepository

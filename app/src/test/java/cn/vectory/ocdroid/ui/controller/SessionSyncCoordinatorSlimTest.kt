@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui.controller
 
 import android.util.Log
+import cn.vectory.ocdroid.MainDispatcherRule
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
@@ -60,6 +61,9 @@ import java.util.concurrent.TimeUnit
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionSyncCoordinatorSlimTest {
 
+    @get:org.junit.Rule
+    val mainDispatcherRule = MainDispatcherRule(UnconfinedTestDispatcher())
+
     private lateinit var slices: SliceFlows
     private lateinit var effects: SharedEffectBus
     private lateinit var settingsManager: SettingsManager
@@ -113,6 +117,7 @@ class SessionSyncCoordinatorSlimTest {
             currentServerGroupFp = { "test-fp" },
             isSlimMode = { slimMode },
             repository = repository,
+            reconcileDispatcher = UnconfinedTestDispatcher(),
         )
 
     private fun digestEvent(

@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui.controller
 
 import android.util.Log
+import cn.vectory.ocdroid.MainDispatcherRule
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
@@ -21,15 +22,18 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.spyk
+import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
@@ -74,6 +78,9 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionSyncCoordinatorResyncTest {
+
+    @get:org.junit.Rule
+    val mainDispatcherRule = MainDispatcherRule(UnconfinedTestDispatcher())
 
     private lateinit var slices: SliceFlows
     private lateinit var effects: SharedEffectBus
@@ -147,6 +154,7 @@ class SessionSyncCoordinatorResyncTest {
             currentServerGroupFp = { "test-fp" },
             isSlimMode = { slimMode },
             repository = repository,
+            reconcileDispatcher = UnconfinedTestDispatcher(),
         )
 
     private fun digestEvent(
@@ -689,6 +697,191 @@ class SessionSyncCoordinatorResyncTest {
         coVerify(exactly = 1) { repository.probeLatestSlim("dirty-1") }
         // preRefreshLocal is NO LONGER probed:
         coVerify(exactly = 0) { repository.probeLatestSlim("local-1") }
+    }
+
+    @Test
+    fun `Fix-5 snapshot directories union current workdir`() = runTest {
+        every { settingsManager.currentWorkdir } returns "/current"
+        every { settingsManager.getRecentWorkdirs("test-fp") } returns listOf("/recent")
+        val dirs = slot<List<String>>()
+        coEvery { repository.coldStartSlimSync(any(), capture(dirs), any()) } returns Result.success(
+            cn.vectory.ocdroid.data.repository.SlimColdStartSnapshot(
+                sessions = null,
+                questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(emptyList(), null),
+                permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(emptyList(), null),
+                messages = null,
+            )
+        )
+        coordinator().performSlimResync(directories = listOf("/caller"))
+        assertEquals(listOf("/recent", "/current"), dirs.captured)
+    }
+
+    @Test
+    fun `Fix-5 snapshot directories deduplicate current workdir`() = runTest {
+        every { settingsManager.currentWorkdir } returns "/same"
+        every { settingsManager.getRecentWorkdirs("test-fp") } returns listOf("/same", "/recent")
+        val dirs = slot<List<String>>()
+        coEvery { repository.coldStartSlimSync(any(), capture(dirs), any()) } returns Result.failure(java.io.IOException("down"))
+        coordinator().performSlimResync(directories = listOf("/caller"))
+        assertEquals(listOf("/same", "/recent"), dirs.captured)
+    }
+
+    @Test
+    fun `Fix-5 empty recent and current forwards caller directories`() = runTest {
+        every { settingsManager.currentWorkdir } returns null
+        every { settingsManager.getRecentWorkdirs("test-fp") } returns emptyList()
+        val dirs = slot<List<String>>()
+        val caller = listOf("/caller-a", "/caller-b")
+        coEvery { repository.coldStartSlimSync(any(), capture(dirs), any()) } returns Result.failure(java.io.IOException("down"))
+        coordinator().performSlimResync(directories = caller)
+        assertEquals(caller, dirs.captured)
+    }
+
+    @Test
+    fun `Fix-6 stale token during worker resync returns without blocking Main`() = runTest {
+        val worker = kotlinx.coroutines.test.StandardTestDispatcher(testScheduler)
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        every { repository.getSlimSessionState("stale") } returns SlimSessionState(sessionId = "stale", dirty = true)
+        coEvery { repository.probeLatestSlim("stale") } coAnswers {
+            entered.complete(Unit)
+            release.await()
+            ProbeResult(ok = true, messageID = "m", updatedAt = 1L)
+        }
+        val c = SessionSyncCoordinator(
+            scope = scope,
+            slices = slices,
+            settingsManager = settingsManager,
+            effects = effects,
+            currentServerGroupFp = { "test-fp" },
+            isSlimMode = { true },
+            repository = repository,
+            reconcileDispatcher = worker,
+        )
+        val job = scope.launch { c.performResyncCatchUp(setOf("stale")) }
+        worker.scheduler.runCurrent()
+        assertTrue(entered.isCompleted)
+
+        // A Main-side action remains serviceable while the worker is suspended.
+        slices.mutateChat { it.copy(currentSessionId = "fresh") }
+        assertEquals("fresh", slices.chat.value.currentSessionId)
+
+        every { repository.isSlimCommitTokenCurrent(any()) } returns false
+        release.complete(Unit)
+        worker.scheduler.advanceUntilIdle()
+        job.join()
+        assertEquals("fresh", slices.chat.value.currentSessionId)
+    }
+
+    @Test
+    fun `Fix-6 catch-up records Stale when UI gate rotates token after worker result`() = runTest {
+        val worker = StandardTestDispatcher(testScheduler)
+        val rotated = AtomicBoolean(false)
+        every { repository.getSlimSessionState("catch-up") } returns SlimSessionState(
+            sessionId = "catch-up",
+            localAppliedMessageId = "m1",
+            localAppliedUpdatedAt = 100L,
+            remoteMessageId = "m1",
+            remoteUpdatedAt = 100L,
+            dirty = true,
+        )
+        coEvery { repository.probeLatestSlim("catch-up") } returns ProbeResult(
+            ok = true,
+            messageID = "m1",
+            updatedAt = 100L,
+        )
+        every { repository.isSlimCommitTokenCurrent(any()) } answers { !rotated.get() }
+        every { repository.commitIfSlimTokenCurrent(any(), any()) } answers {
+            rotated.set(true)
+            false
+        }
+
+        val c = SessionSyncCoordinator(
+            scope = scope,
+            slices = slices,
+            settingsManager = settingsManager,
+            effects = effects,
+            currentServerGroupFp = { "test-fp" },
+            isSlimMode = { true },
+            repository = repository,
+            reconcileDispatcher = worker,
+        )
+        val outcomes = async {
+            c.performResyncCatchUp(setOf("catch-up"))
+        }
+        testScheduler.advanceUntilIdle()
+
+        assertTrue(rotated.get())
+        assertTrue(outcomes.await()["catch-up"] is SessionSyncCoordinator.ReconcileResult.Stale)
+        assertTrue(slices.chat.value.messages.isEmpty())
+    }
+
+    @Test
+    fun `Fix-6 session switch before UI commit returns Stale without applying result`() = runTest {
+        val worker = StandardTestDispatcher(testScheduler)
+        every { repository.getSlimSessionState("session-a") } returns SlimSessionState(
+            sessionId = "session-a",
+            localAppliedMessageId = "m1",
+            localAppliedUpdatedAt = 100L,
+            remoteMessageId = "m1",
+            remoteUpdatedAt = 100L,
+            dirty = true,
+        )
+        coEvery { repository.probeLatestSlim("session-a") } returns ProbeResult(
+            ok = true,
+            messageID = "m1",
+            updatedAt = 100L,
+        )
+        slices.mutateChat { it.copy(currentSessionId = "session-a") }
+        every { repository.commitIfSlimTokenCurrent(any(), any()) } answers {
+            slices.mutateChat { it.copy(currentSessionId = "session-b") }
+            secondArg<() -> Unit>().invoke()
+            true
+        }
+
+        val c = SessionSyncCoordinator(
+            scope = scope,
+            slices = slices,
+            settingsManager = settingsManager,
+            effects = effects,
+            currentServerGroupFp = { "test-fp" },
+            isSlimMode = { true },
+            repository = repository,
+            reconcileDispatcher = worker,
+        )
+        val result = async {
+            c.reconcileSession("session-a", SessionSyncCoordinator.ReconcileMode.RESYNC)
+        }
+        testScheduler.advanceUntilIdle()
+
+        assertTrue(result.await() is SessionSyncCoordinator.ReconcileResult.Stale)
+        assertEquals("session-b", slices.chat.value.currentSessionId)
+        assertTrue(slices.chat.value.messages.isEmpty())
+    }
+
+    @Test
+    fun `Fix-6 metadata refresh session switch preserves entry snapshot and returns Stale`() = runTest {
+        val metadataStarted = CompletableDeferred<Unit>()
+        val releaseMetadata = CompletableDeferred<Unit>()
+        slices.mutateChat { it.copy(currentSessionId = "session-a") }
+        coEvery { repository.coldStartSlimSync(any(), any(), any()) } coAnswers {
+            metadataStarted.complete(Unit)
+            releaseMetadata.await()
+            Result.failure(java.io.IOException("metadata unavailable"))
+        }
+
+        val c = coordinator()
+        val resync = async {
+            c.performSlimResync(directories = listOf("/project"))
+        }
+        metadataStarted.await()
+        slices.mutateChat { it.copy(currentSessionId = "session-b") }
+        releaseMetadata.complete(Unit)
+
+        val outcomes = resync.await()
+        assertTrue(outcomes["session-a"] is SessionSyncCoordinator.ReconcileResult.Stale)
+        assertEquals("session-b", slices.chat.value.currentSessionId)
+        assertTrue(slices.chat.value.messages.isEmpty())
     }
 
     // ── T11-C6: per-sid stripe serialization (oracle D7 clarification) ──────
