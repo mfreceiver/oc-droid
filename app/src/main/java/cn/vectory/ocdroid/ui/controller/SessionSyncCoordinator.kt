@@ -2507,6 +2507,11 @@ class SessionSyncCoordinator(
     private suspend fun applyReconcileResult(
         result: ReconcileResult,
         token: OpenCodeRepository.SlimCommitToken,
+        // T2 (Phase 3): the focus-snapshot gate that used this parameter was
+        // removed (see below). The parameter is retained because callers
+        // ([reconcileSession], [performResyncCatchUp]) still pass it and the
+        // [ResyncUiSnapshot] capture at resync entry stays for future use;
+        // the ABI is unchanged.
         snapshot: ResyncUiSnapshot? = null,
     ): ReconcileResult {
         val repo = repository ?: return ReconcileResult.NoRepository(resultSid(result))
@@ -2518,17 +2523,47 @@ class SessionSyncCoordinator(
         val stillCurrent = withContext(reconcileDispatcher) {
             repo.isSlimCommitTokenCurrent(token)
         }
+        // rev-grok rule #1: the token gate is all-or-nothing. A stale /
+        // superseded token (between fetch and commit) → full no-op + Stale.
+        // This is the ONLY branch that returns Stale from a non-Stale input.
         if (!stillCurrent) return ReconcileResult.Stale(resultSid(result))
-        var snapshotAccepted = false
+
+        // T2 (Phase 3): the OUTER focus-snapshot gate is gone. Pre-T2 a
+        // mid-reconcile session switch caused
+        //   `if (snapshot.currentSessionId != liveSessionId) return@commit`
+        // which dropped the ENTIRE result — including work that is NOT
+        // current-session-sensitive:
+        //   - MarkDeleted → openSessionIds mutation + SessionArchived +
+        //     EvictSession (session-list-GLOBAL; dropping it left a zombie
+        //     open tab).
+        //   - ClearLocal → EvictSession (global) was dropped even though
+        //     the chat clear itself is self-gated inside
+        //     applyCurrentReconcileResult by `liveSessionId == sid`.
+        //   - Reconciled for a NON-current session → WriteSessionWindow
+        //     cache write + dirty re-ratchet were skipped, leaving stale
+        //     dirty with no retained window for the next switchTo.
+        // The chat-merge (the ONE current-session-sensitive op) was ALREADY
+        // protected inside applyCurrentReconcileResult's Reconciled branch
+        // by `if (liveSessionId == result.sid) mergeSlimMessagesIntoChat`
+        // — rev-grok rule #3. The coarse outer gate was therefore redundant
+        // for chat safety and only wrongly suppressed global/retention work.
+        //
+        // Catch-up accounting note (Phase 3 review): the only caller-side
+        // consumer of this return value is the per-sid outcomes map logged
+        // by SessionStreamingService.onResync (`outcomes.size`). No control
+        // flow branches on Stale vs the real result, so returning the real
+        // result here cannot strand a re-enqueue/skip loop. The per-sid
+        // dirty clear/ratchet still happens inside the atomic
+        // bumpSlimBookmarkFromItems (during the fetch) and the retention
+        // branch below re-ratchets via markSlimDirty if the window wasn't
+        // retained — both paths terminate correctly under T2.
         val committed = withContext(Dispatchers.Main.immediate) {
             repo.commitIfSlimTokenCurrent(token) {
                 val liveSessionId = slices.chat.value.currentSessionId
-                if (snapshot != null && snapshot.currentSessionId != liveSessionId) return@commitIfSlimTokenCurrent
-                snapshotAccepted = true
                 applyCurrentReconcileResult(result, token, liveSessionId)
             }
         }
-        return if (committed && snapshotAccepted) result else ReconcileResult.Stale(resultSid(result))
+        return if (committed) result else ReconcileResult.Stale(resultSid(result))
     }
 
     private fun resultSid(result: ReconcileResult): String = when (result) {

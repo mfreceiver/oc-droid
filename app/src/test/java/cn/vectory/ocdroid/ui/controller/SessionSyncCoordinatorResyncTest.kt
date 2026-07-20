@@ -37,6 +37,7 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.flow.toList
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
@@ -817,26 +818,44 @@ class SessionSyncCoordinatorResyncTest {
     }
 
     @Test
-    fun `Fix-6 session switch before UI commit returns Stale without applying result`() = runTest {
+    fun `T2 session switch before UI commit applies non-current retention and returns real result`() = runTest {
+        // T2 (Phase 3): pre-T2 the coarse outer focus gate returned Stale
+        // here, dropping the entire Reconciled result. Post-T2 the real
+        // result is returned, retention work (WriteSessionWindow) fires
+        // for the now-non-current session-a, and the chat-merge is still
+        // correctly skipped by the INNER `liveSessionId == result.sid`
+        // gate inside applyCurrentReconcileResult (rev-grok rule #3).
         val worker = StandardTestDispatcher(testScheduler)
         every { repository.getSlimSessionState("session-a") } returns SlimSessionState(
             sessionId = "session-a",
-            localAppliedMessageId = "m1",
+            localAppliedMessageId = "m0",
             localAppliedUpdatedAt = 100L,
             remoteMessageId = "m1",
-            remoteUpdatedAt = 100L,
+            remoteUpdatedAt = 200L,
             dirty = true,
         )
         coEvery { repository.probeLatestSlim("session-a") } returns ProbeResult(
             ok = true,
             messageID = "m1",
-            updatedAt = 100L,
+            updatedAt = 200L,
+        )
+        coEvery { repository.getSlimapiMessagesSince("session-a", 100L, any(), any(), any()) } returns Result.success(
+            listOf(msg("m1", 200L, sid = "session-a")),
         )
         slices.mutateChat { it.copy(currentSessionId = "session-a") }
         every { repository.commitIfSlimTokenCurrent(any(), any()) } answers {
+            // Rotate focus to session-b BEFORE invoking the lambda so the
+            // inner branch sees liveSessionId="session-b" != result.sid.
             slices.mutateChat { it.copy(currentSessionId = "session-b") }
             secondArg<() -> Unit>().invoke()
             true
+        }
+
+        // Drain the effect bus so we can assert on the WriteSessionWindow
+        // retention emission for session-a.
+        val collectedEffects = mutableListOf<ControllerEffect>()
+        val collector = scope.launch {
+            effects.effectsConsumed.toList(collectedEffects)
         }
 
         val c = SessionSyncCoordinator(
@@ -853,21 +872,71 @@ class SessionSyncCoordinatorResyncTest {
             c.reconcileSession("session-a", SessionSyncCoordinator.ReconcileMode.RESYNC)
         }
         testScheduler.advanceUntilIdle()
+        collector.cancel()
 
-        assertTrue(result.await() is SessionSyncCoordinator.ReconcileResult.Stale)
+        // T2: real Reconciled result returned (NOT Stale).
+        assertTrue(
+            "T2: real Reconciled returned (got ${result.await()})",
+            result.await() is SessionSyncCoordinator.ReconcileResult.Reconciled,
+        )
+        // Focus rotation preserved.
         assertEquals("session-b", slices.chat.value.currentSessionId)
-        assertTrue(slices.chat.value.messages.isEmpty())
+        // rev-grok rule #3: chat-merge skipped because live (session-b) !=
+        // result.sid (session-a); the fetched items did NOT land in the
+        // chat slice.
+        assertTrue(
+            "chat-merge skipped (inner focus gate); m1 must NOT be in chat",
+            slices.chat.value.messages.none { it.id == "m1" },
+        )
+        // T2 retention branch fired: WriteSessionWindow emitted for session-a
+        // so a later switchTo(session-a) finds the cached items.
+        assertTrue(
+            "WriteSessionWindow emitted for non-current session-a: $collectedEffects",
+            collectedEffects.any {
+                it is ControllerEffect.WriteSessionWindow && it.sessionId == "session-a"
+            },
+        )
     }
 
     @Test
-    fun `Fix-6 metadata refresh session switch preserves entry snapshot and returns Stale`() = runTest {
+    fun `T2 metadata refresh session switch still applies per-sid retention work`() = runTest {
+        // T2 (Phase 3): pre-T2 this test asserted outcome["session-a"]
+        // was Stale (the coarse outer focus gate dropped it after the
+        // user switched to session-b mid-metadata-refresh). Post-T2 the
+        // real per-sid result is returned AND its non-current retention
+        // work applies. We pin a deterministic probe → Reconciled result
+        // (the relaxed-mock default would otherwise be a transport-
+        // failure Failure, making the assertion noisy). Chat-merge is
+        // skipped via the inner `liveSessionId == result.sid` gate.
         val metadataStarted = CompletableDeferred<Unit>()
         val releaseMetadata = CompletableDeferred<Unit>()
         slices.mutateChat { it.copy(currentSessionId = "session-a") }
+        every { repository.getSlimSessionState("session-a") } returns SlimSessionState(
+            sessionId = "session-a",
+            localAppliedMessageId = "m0",
+            localAppliedUpdatedAt = 100L,
+            remoteMessageId = "m1",
+            remoteUpdatedAt = 200L,
+            dirty = true,
+        )
+        coEvery { repository.probeLatestSlim("session-a") } returns ProbeResult(
+            ok = true,
+            messageID = "m1",
+            updatedAt = 200L,
+        )
+        coEvery { repository.getSlimapiMessagesSince("session-a", 100L, any(), any(), any()) } returns Result.success(
+            listOf(msg("m1", 200L, sid = "session-a")),
+        )
         coEvery { repository.coldStartSlimSync(any(), any(), any()) } coAnswers {
             metadataStarted.complete(Unit)
             releaseMetadata.await()
             Result.failure(java.io.IOException("metadata unavailable"))
+        }
+
+        // Drain the effect bus for the WriteSessionWindow retention check.
+        val collectedEffects = mutableListOf<ControllerEffect>()
+        val collector = scope.launch {
+            effects.effectsConsumed.toList(collectedEffects)
         }
 
         val c = coordinator()
@@ -875,13 +944,38 @@ class SessionSyncCoordinatorResyncTest {
             c.performSlimResync(directories = listOf("/project"))
         }
         metadataStarted.await()
+        // User switches sessions while the metadata fetch is still in
+        // flight. The catch-up snapshot captured focus="session-a" at
+        // performSlimResync entry, so "session-a" stays in the catch-up
+        // set; the inner focus gate inside applyCurrentReconcileResult
+        // will see live="session-b".
         slices.mutateChat { it.copy(currentSessionId = "session-b") }
         releaseMetadata.complete(Unit)
 
         val outcomes = resync.await()
-        assertTrue(outcomes["session-a"] is SessionSyncCoordinator.ReconcileResult.Stale)
+        testScheduler.advanceUntilIdle()
+        collector.cancel()
+
+        // T2: outcome for session-a is the REAL Reconciled (NOT Stale).
+        assertTrue(
+            "T2: outcome for session-a is Reconciled (got ${outcomes["session-a"]})",
+            outcomes["session-a"] is SessionSyncCoordinator.ReconcileResult.Reconciled,
+        )
+        // Focus rotation preserved.
         assertEquals("session-b", slices.chat.value.currentSessionId)
-        assertTrue(slices.chat.value.messages.isEmpty())
+        // rev-grok rule #3: chat-merge skipped (live session-b != result.sid
+        // session-a).
+        assertTrue(
+            "chat-merge skipped; m1 must NOT be in chat",
+            slices.chat.value.messages.none { it.id == "m1" },
+        )
+        // T2 retention branch fired for the now-non-current session-a.
+        assertTrue(
+            "WriteSessionWindow emitted for non-current session-a: $collectedEffects",
+            collectedEffects.any {
+                it is ControllerEffect.WriteSessionWindow && it.sessionId == "session-a"
+            },
+        )
     }
 
     // ── T11-C6: per-sid stripe serialization (oracle D7 clarification) ──────
@@ -1138,6 +1232,86 @@ class SessionSyncCoordinatorResyncTest {
         // For unit-test scope: verify the reconcile returned Reconciled
         // (which triggers the cache write branch inside applyReconcileResult).
         coVerify(atLeast = 1) { repository.getSlimapiMessagesSince("sid-nonfocus", 500L, any(), any(), any()) }
+    }
+
+    /**
+     * T3(a) (Phase 3 review): session-switch recovery path.
+     *
+     * After a mid-reconcile switch from session-a to session-b, the OLD
+     * session's reconcile result must NOT be dropped (T2). The retention
+     * branch (WriteSessionWindow) fires so the cache is populated for a
+     * later switchTo(session-a) without a re-fetch; the chat-merge is
+     * correctly skipped via the inner `liveSessionId == result.sid` gate
+     * (rev-grok rule #3); and the dirty clear/ratchet path stays
+     * consistent — with items present and the cache write succeeding,
+     * [markSlimDirty] is NOT re-invoked (the dirty clear inside
+     * bumpSlimBookmarkFromItems during the fetch stays authoritative, and
+     * the recovery path doesn't strand dirty in a "needs retry" loop).
+     *
+     * The observable recovery contract at this layer is: (1) the cache
+     * write request is emitted, (2) chat-merge is skipped, (3) dirty is
+     * NOT re-ratcheted when retention succeeded. The downstream
+     * SessionSwitcher consumes (1) so its later switchTo finds the
+     * cached items (verified end-to-end by the SlimGoldenPathIntegrationTest).
+     */
+    @Test
+    fun `T3a session-switch recovery writes session window cache without re-fetch`() = runTest {
+        // Start focused on session-a; switch mid-reconcile to session-b.
+        slices.mutateChat { it.copy(currentSessionId = "session-a") }
+        every { repository.getSlimSessionState("session-a") } returns SlimSessionState(
+            sessionId = "session-a",
+            localAppliedMessageId = "m0",
+            localAppliedUpdatedAt = 100L,
+            remoteMessageId = "m1",
+            remoteUpdatedAt = 200L,
+            dirty = true,
+        )
+        coEvery { repository.probeLatestSlim("session-a") } returns ProbeResult(
+            ok = true, messageID = "m1", updatedAt = 200L,
+        )
+        coEvery { repository.getSlimapiMessagesSince("session-a", 100L, any(), any(), any()) } returns Result.success(
+            listOf(msg("m1", 200L, sid = "session-a")),
+        )
+        every { repository.commitIfSlimTokenCurrent(any(), any()) } answers {
+            // Rotate focus to session-b BEFORE the lambda runs so the
+            // inner branch sees liveSessionId="session-b".
+            slices.mutateChat { it.copy(currentSessionId = "session-b") }
+            secondArg<() -> Unit>().invoke()
+            true
+        }
+
+        val collectedEffects = mutableListOf<ControllerEffect>()
+        val collector = scope.launch {
+            effects.effectsConsumed.toList(collectedEffects)
+        }
+
+        val c = coordinator()
+        val result = c.reconcileSession("session-a", SessionSyncCoordinator.ReconcileMode.RESYNC)
+        scope.testScheduler.advanceUntilIdle()
+        collector.cancel()
+
+        // T2: real Reconciled returned (NOT Stale).
+        assertTrue(
+            "T3a: real Reconciled returned (got $result)",
+            result is SessionSyncCoordinator.ReconcileResult.Reconciled,
+        )
+        // Cache write request emitted for the now-non-current session-a.
+        assertTrue(
+            "T3a: WriteSessionWindow emitted for session-a: $collectedEffects",
+            collectedEffects.any {
+                it is ControllerEffect.WriteSessionWindow && it.sessionId == "session-a"
+            },
+        )
+        // Items present + retention succeeded → markSlimDirty NOT re-invoked
+        // (dirty clear from the fetch stays authoritative; no retry loop).
+        coVerify(exactly = 0) { repository.markSlimDirty("session-a", any()) }
+        // rev-grok rule #3: chat-merge skipped (live session-b != result.sid
+        // session-a); m1 must NOT be in the chat slice.
+        assertTrue(
+            "T3a: chat-merge skipped; m1 must NOT be in chat",
+            slices.chat.value.messages.none { it.id == "m1" },
+        )
+        assertEquals("session-b", slices.chat.value.currentSessionId)
     }
 
     // ── Legacy + non-coercing Json invariants ───────────────────────────────

@@ -10,6 +10,7 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.SliceFlows
+import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
@@ -18,6 +19,7 @@ import cn.vectory.ocdroid.util.TrafficTracker
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
+import io.mockk.spyk
 import io.mockk.unmockkAll
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,6 +28,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -579,5 +582,174 @@ class SlimGoldenPathIntegrationTest {
             val advanced = repository.snapshotSlimSseState()["s1"]
             assertNotNull(advanced)
             assertEquals(2400L, advanced!!.updatedAt)
+        }
+
+    // ── Phase 3 T3(d): end-to-end session-switch partial-apply semantics ──
+
+    /**
+     * T3(d) (Phase 3 review): end-to-end session-switch assertion that
+     * reflects T2's new partial-apply semantics. Real wire bytes → real
+     * [OpenCodeRepository] → real [SessionSyncCoordinator] against a single
+     * [MockWebServer]. A mid-reconcile focus rotation (sess-a → sess-b) is
+     * injected at the commit gate via a [spyk] on the repo.
+     *
+     * Post-T2 contract pinned here:
+     *  - The OLD session's (sess-a) bookmark is advanced via the REAL fetch
+     *    path (`bumpSlimBookmarkFromItems` inside `getSlimapiMessagesSince` —
+     *    observable via `snapshotSlimSseState`), NOT dropped.
+     *  - The chat-merge is skipped (live `session-b` != `result.sid sess-a`)
+     *    so the NEW session's chat view stays clean of the OLD session's
+     *    items (rev-grok rule #3 — the INNER focus gate is preserved).
+     *  - The `WriteSessionWindow` retention effect is emitted for sess-a so
+     *    a later `switchTo(sess-a)` finds the cached items without a re-fetch.
+     *
+     * The fix-6 two-stage-dispatcher pins + the catch-up Stale pins in
+     * [cn.vectory.ocdroid.ui.controller.SessionSyncCoordinatorResyncTest]
+     * are unchanged; this test exclusively covers the new partial-apply
+     * behavior.
+     */
+    @Test
+    fun `T3d session-switch mid-reconcile applies retention and keeps new chat view clean`() =
+        runBlocking {
+            // Pre-seed sess-a so the reconcile uses /since/{ts} deterministically.
+            // applySlimDigest sets remote=1000; bumpSlimBookmarkFromItems inside
+            // the upcoming fetch will advance localApplied to the fetched
+            // skeleton's updated (2000).
+            val seedToken = repository.captureSlimCommitToken()
+            repository.applySlimDigest(
+                SlimSessionDigest(sessionId = "sess-a", updatedAt = 1000L, messageId = "m-seed"),
+                token = seedToken,
+            )
+
+            // Open sess-a as the current session so the digest / reconcile
+            // path picks it up.
+            slices.mutateChat { it.copy(currentSessionId = "sess-a") }
+
+            val item = MessageWithParts(
+                info = Message(
+                    id = "m-new",
+                    role = "assistant",
+                    sessionId = "sess-a",
+                    time = Message.TimeInfo(created = 1500L, updated = 2000L),
+                ),
+                parts = listOf(
+                    Part(
+                        id = "p-new",
+                        messageId = "m-new",
+                        sessionId = "sess-a",
+                        type = "text",
+                        text = "fresh skeleton for sess-a",
+                    ),
+                ),
+            )
+            val itemBody = json.encodeToString(listOf(item))
+
+            // Probe (limit=1) + since-fetch page (returns the new skeleton).
+            server.enqueue(jsonResponse(itemBody))
+            server.enqueue(jsonResponse(itemBody))
+
+            // Spy the repo to rotate focus at the commit gate (between the
+            // fetch returning + bookmark bumped and the chat-merge step).
+            // The real commitIfSlimTokenCurrent is invoked on the UNSPIED
+            // instance to avoid recursion through the spy (same pattern as
+            // `CD3-v2 UI effect gate drops REST merge after mid-flight
+            // configure` in SessionSyncCoordinatorResyncTest).
+            val switched = java.util.concurrent.atomic.AtomicBoolean(false)
+            val realRepo = repository
+            val spiedRepo = spyk(realRepo)
+            every { spiedRepo.commitIfSlimTokenCurrent(any(), any()) } answers {
+                val token = firstArg<OpenCodeRepository.SlimCommitToken>()
+                val block = secondArg<() -> Unit>()
+                if (switched.compareAndSet(false, true)) {
+                    // Rotate focus to sess-b BEFORE the lambda runs so the
+                    // inner branch sees liveSessionId="sess-b".
+                    slices.mutateChat { it.copy(currentSessionId = "sess-b") }
+                }
+                // Delegate to the real method (no recursion through the spy).
+                realRepo.commitIfSlimTokenCurrent(token, block)
+            }
+
+            // Re-wire the coordinator with the spied repo.
+            coordinator = SessionSyncCoordinator(
+                scope = scope,
+                slices = slices,
+                settingsManager = settingsManager,
+                effects = effects,
+                currentServerGroupFp = { "test-fp" },
+                isSlimMode = { true },
+                repository = spiedRepo,
+            )
+
+            // Drain the effect bus for the WriteSessionWindow retention check.
+            val collectedEffects = mutableListOf<ControllerEffect>()
+            val effectJob = scope.launch {
+                effects.effectsConsumed.toList(collectedEffects)
+            }
+
+            val result = coordinator.reconcileSession(
+                "sess-a",
+                SessionSyncCoordinator.ReconcileMode.RESYNC,
+            )
+
+            // Give the effect collector a tick to drain the WriteSessionWindow
+            // emission (it runs on Dispatchers.Default; poll briefly).
+            awaitCondition(2_000) {
+                collectedEffects.any {
+                    it is ControllerEffect.WriteSessionWindow && it.sessionId == "sess-a"
+                }
+            }
+            effectJob.cancel()
+
+            // ── T2 post-condition assertions ──────────────────────────────
+
+            // T2: the real Reconciled result is returned (NOT Stale).
+            assertTrue(
+                "T3d: real Reconciled returned (got $result)",
+                result is SessionSyncCoordinator.ReconcileResult.Reconciled,
+            )
+
+            // OLD session's bookmark advanced via the real fetch path
+            // (bumpSlimBookmarkFromItems inside getSlimapiMessagesSince).
+            val bookmark = spiedRepo.snapshotSlimSseState()["sess-a"]
+            assertNotNull("T3d: bookmark entry exists for sess-a", bookmark)
+            assertEquals(
+                "T3d: localAppliedUpdatedAt advanced to the fetched skeleton's updated=2000",
+                2000L,
+                bookmark!!.localAppliedUpdatedAt,
+            )
+            assertEquals("m-new", bookmark.localAppliedMessageId)
+
+            // rev-grok rule #3: chat-merge skipped (live session-b !=
+            // result.sid sess-a); the NEW session's chat view is clean.
+            assertTrue(
+                "T3d: chat-merge skipped; m-new must NOT be in chat slice",
+                slices.chat.value.messages.none { it.id == "m-new" },
+            )
+            assertEquals("sess-b", slices.chat.value.currentSessionId)
+
+            // T2 retention branch fired: WriteSessionWindow emitted for the
+            // now-non-current sess-a so a later switchTo(sess-a) finds the
+            // cached items without forcing a re-fetch.
+            assertTrue(
+                "T3d: WriteSessionWindow emitted for sess-a: $collectedEffects",
+                collectedEffects.any {
+                    it is ControllerEffect.WriteSessionWindow && it.sessionId == "sess-a"
+                },
+            )
+
+            // Verify the wire shape: probe + since-fetch both hit the real
+            // slimapi surface (the spy does not change URLs).
+            val probeReq = server.takeRequest()
+            assertTrue(
+                "T3d: probe hit /slimapi/messages/sess-a: ${probeReq.path}",
+                probeReq.path!!.startsWith("/slimapi/messages/sess-a"),
+            )
+            assertSlimapiVersionHeader(probeReq)
+            val fetchReq = server.takeRequest()
+            assertTrue(
+                "T3d: fetch hit /slimapi/messages/sess-a: ${fetchReq.path}",
+                fetchReq.path!!.startsWith("/slimapi/messages/sess-a"),
+            )
+            assertSlimapiVersionHeader(fetchReq)
         }
 }
