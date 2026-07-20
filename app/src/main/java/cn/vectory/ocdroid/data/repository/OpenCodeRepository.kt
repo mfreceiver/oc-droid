@@ -2245,6 +2245,17 @@ class OpenCodeRepository @Inject constructor(
             // Step 2: 200 + envelope.
             resp.isSuccessful -> {
                 val env = resp.body() ?: SlimapiMessageFullBatch()
+                // Diagnostic: server returned 200 but the envelope carried
+                // NEITHER items NOR per-message errors. That is the exact
+                // shape that drives foldOk's Branch 0/C orphan Failed(null)
+                // path client-side — surface it here so we can tell server-
+                // empty from client-resolveOwner-null on a "展开失败" report.
+                if (env.items.isEmpty() && env.errors.isEmpty()) {
+                    DebugLog.w(
+                        TAG,
+                        "expand batch 200 empty envelope ids=$ids sid=$sessionId",
+                    )
+                }
                 ExpandOutcome.Ok(
                     items = env.items,
                     failedIds = env.errors.map { it.messageId },
@@ -2302,7 +2313,20 @@ class OpenCodeRepository @Inject constructor(
                 }
             }
             // Step 8: 400 / 422 / other 4xx 5xx → Failed.
-            else -> ExpandOutcome.Failed(sessionId, parseErrorCode(resp))
+            else -> {
+                // errorBody() is one-shot (consumed on first read). Read
+                // ONCE into a local so we can BOTH log a body snippet AND
+                // parse the sidecar's `code` from the same buffer — the
+                // existing parseErrorCode(resp) path would otherwise see
+                // null on its second read and lose the code.
+                val rawBody = runCatching { resp.errorBody()?.string() }.getOrNull()
+                DebugLog.w(
+                    TAG,
+                    "expand batch http code=${resp.code()} ids=$ids sid=$sessionId " +
+                        "body=${rawBody?.take(500)}",
+                )
+                ExpandOutcome.Failed(sessionId, parseErrorCodeFromRaw(rawBody))
+            }
         }
     }
 
@@ -2375,17 +2399,23 @@ class OpenCodeRepository @Inject constructor(
      * Reads [Response.errorBody] exactly once (OkHttp buffers it for
      * one-shot consumption); safe to call from any 4xx/5xx branch.
      */
-    internal fun parseErrorCode(r: retrofit2.Response<*>): String? = try {
-        val raw = r.errorBody()?.string() ?: return null
-        // Reuse the repository's shared [json] instance (already configured with
-        // ignoreUnknownKeys = true; the other settings — isLenient /
-        // coerceInputValues / explicitNulls = false / encodeDefaults — are
-        // no-ops for a one-field `{"code":"…"}` lookup). Avoids per-call Json
-        // allocation (kotlinc warning: redundant format creation).
-        val obj = json.decodeFromString<JsonObject>(raw)
-        (obj["code"] as? JsonPrimitive)?.content
-    } catch (e: Exception) {
-        null
+    internal fun parseErrorCode(r: retrofit2.Response<*>): String? =
+        parseErrorCodeFromRaw(runCatching { r.errorBody()?.string() }.getOrNull())
+
+    /**
+     * Same parse as [parseErrorCode] but accepts the already-consumed
+     * errorBody string. Used by call sites that need to log the raw body
+     * snippet AND parse the code from the same one-shot buffer (calling
+     * [parseErrorCode] afterwards would re-read errorBody() and get null).
+     */
+    internal fun parseErrorCodeFromRaw(rawBody: String?): String? {
+        if (rawBody == null) return null
+        return try {
+            val obj = json.decodeFromString<JsonObject>(rawBody)
+            (obj["code"] as? JsonPrimitive)?.content
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /**

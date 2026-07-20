@@ -5,6 +5,7 @@ import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.ExpandOutcome
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.mergeFullBatchIntoLocal
+import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.runSuspendCatching
 
 /*
@@ -273,7 +274,22 @@ class ExpandPartsUseCase(
                     // established for this part. T8 would never see it
                     // (it's not in any lm.parts), so T8-equivalent merge
                     // is undefined; surface as Failed defensively.
-                    ownerMsgId == null -> PartExpandState.Failed(code = null)
+                    //
+                    // Diagnostic: log the partId + the wire messageId claim
+                    // + a bounded summary of local's known owners so we can
+                    // tell "part.messageId stale / not in local" (the
+                    // common round-2 regression) from "local cache evicted"
+                    // when triaging a "展开失败 (Failed null)" report.
+                    ownerMsgId == null -> {
+                        DebugLog.w(
+                            TAG,
+                            "expand resolveOwner null partId=${part.id} " +
+                                "part.messageId=${part.messageId} " +
+                                "localMsgIds(${localByInfoId.keys.size})=${localByInfoId.keys.take(20)} " +
+                                "localPartIds(${localOwnerByPartId.keys.size})=${localOwnerByPartId.keys.take(20)}",
+                        )
+                        PartExpandState.Failed(code = null)
+                    }
                     // Branch A: owner message was fetched. Apply T8's full
                     // triple-match (partId + normalizedMessageId, owner =
                     // lm.info.id) before trusting Loaded.
@@ -306,5 +322,9 @@ class ExpandPartsUseCase(
             }
         }
         return ExpandPartsOutcome(mergedLocal = merged, states = states)
+    }
+
+    private companion object {
+        private const val TAG = "PartExpandState"
     }
 }
