@@ -548,6 +548,8 @@
     <string name="expand_omitted_content">展开省略内容</string>
     <string name="expand_omitted_error">展开失败</string>
     <string name="expand_omitted_retry">重试</string>
+    <!-- §omitted-streaming: 消息正在流式生成时，省略内容卡片显示此提示（此时展开会失败）。 -->
+    <string name="expand_omitted_generating">生成中…</string>
 
     <!-- I-2 v2 §3.7: slim 聚合全量失败 toast；Partial 仅 signal，不 toast。 -->
     <string name="error_slim_questions_fetch_failed">待处理问题刷新失败，已保留之前的状态。</string>

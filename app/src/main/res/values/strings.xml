@@ -593,6 +593,9 @@
     <string name="expand_omitted_content">Expand omitted content</string>
     <string name="expand_omitted_error">Expansion failed</string>
     <string name="expand_omitted_retry">Retry</string>
+    <!-- §omitted-streaming: shown on the omitted-content card while the
+         message is actively streaming (expand would fail at this point). -->
+    <string name="expand_omitted_generating">生成中…</string>
 
     <!-- I-2 v2 §3.7: whole-call Failure toast for slim aggregation folds.
          Partial incompleteness is signal-only (no toast on every resync). -->

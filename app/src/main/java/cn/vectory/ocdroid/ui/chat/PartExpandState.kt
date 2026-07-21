@@ -36,9 +36,12 @@ import cn.vectory.ocdroid.util.runSuspendCatching
  *    affordance is visible.
  *  - [Loading] — set by the affordance tap handler (T16) before
  *    invoking [ExpandPartsUseCase]. UI shows inline progress.
- *  - [Loaded] — terminal success. The usecase folded the full content
- *    into the local cache via T8's [mergeFullBatchIntoLocal]; UI
- *    re-renders from the cache.
+ *  - [Loaded] — terminal success. The owner message was fetched
+ *    successfully AND the caller reconciled the fetched content into
+ *    the live partsByMessage; UI re-renders from the cache. (The
+ *    usecase's fetch-level candidate is promoted to a true terminal
+ *    Loaded only after the ViewModel's live-slice reconciliation places
+ *    the content.)
  *  - [Failed] — terminal failure. [code] carries the sidecar's
  *    machine-readable error code from `{"code":"…"}` when available
  *    (e.g. 503 `upstream_unavailable`); null on transport failure,
@@ -56,7 +59,12 @@ sealed interface PartExpandState {
     /** Tap landed; usecase in flight. UI shows inline progress. */
     data object Loading : PartExpandState
 
-    /** Usecase succeeded; full content merged into local cache. */
+    /**
+     * Terminal success: owner fetched AND live-slice reconciled. The
+     * usecase's fetch-level candidate is promoted to this only after the
+     * ViewModel reconciles the fetched content into the current
+     * partsByMessage.
+     */
     data object Loaded : PartExpandState
 
     /**
@@ -83,19 +91,32 @@ data class PartKey(val messageId: String, val partId: String)
 /**
  * T15 — terminal outcome of an [ExpandPartsUseCase] invocation. The
  * usecase is non-mutating (it does NOT touch any StateFlow): it
- * returns this summary and the caller (T16 chat wiring) applies both
- * halves.
+ * returns this summary and the caller (T16 chat wiring) reconciles the
+ * fetched content into the LIVE slice.
  *
- *  - [mergedLocal] — the result of T8's [mergeFullBatchIntoLocal] when
- *    an [ExpandOutcome.Ok] was returned (write back to local cache);
- *    `null` on [ExpandOutcome.SessionMissing] /
- *    [ExpandOutcome.Failed] (no merge happened — do not write cache).
- *  - [states] — terminal [PartExpandState] for every eligible requested
- *    part (Loaded OR Failed). The caller must have set [PartExpandState.Loading]
- *    on the same keys before invoking the usecase; this map is the
- *    "commit" half of the Loading → terminal transition.
+ *  - [fetchedItems] — the RAW fetched [MessageWithParts] list on an
+ *    [ExpandOutcome.Ok] (`outcome.items`); `null` on
+ *    [ExpandOutcome.SessionMissing] / [ExpandOutcome.Failed] / empty.
+ *    The caller reconciles these into the CURRENT live
+ *    `partsByMessage` via a per-owner merge. [mergedLocal] is a PURE
+ *    T8 result and is NOT written to the live slice wholesale.
+ *  - [mergedLocal] — the PURE result of T8's [mergeFullBatchIntoLocal]
+ *    over `(local, items)` on [ExpandOutcome.Ok]; retained for
+ *    diagnostics/tests only. `null` on SessionMissing / Failed.
+ *  - [states] — FETCH-LEVEL CANDIDATE [PartExpandState] for every
+ *    eligible requested part (Loaded OR Failed). A `Loaded` candidate
+ *    means "the owner message was fetched successfully"; it is NOT
+ *    proof the live UI cache already holds the content. The caller
+ *    (ViewModel) must reconcile [fetchedItems] into the CURRENT live
+ *    partsByMessage before treating `Loaded` as visible success; if
+ *    that reconciliation cannot place the content, the caller must
+ *    keep retry visible ([PartExpandState.Failed]).
+ *    The caller must have set [PartExpandState.Loading] on the same
+ *    keys before invoking the usecase; this map is the "commit" half
+ *    of the Loading → terminal transition.
  */
 data class ExpandPartsOutcome(
+    val fetchedItems: List<MessageWithParts>?,
     val mergedLocal: List<MessageWithParts>?,
     val states: Map<PartKey, PartExpandState>,
 ) {
@@ -105,7 +126,9 @@ data class ExpandPartsOutcome(
          * → the usecase short-circuited without invoking the repo.
          * Caller leaves the state map untouched.
          */
-        val Empty: ExpandPartsOutcome = ExpandPartsOutcome(mergedLocal = null, states = emptyMap())
+        val Empty: ExpandPartsOutcome = ExpandPartsOutcome(
+            fetchedItems = null, mergedLocal = null, states = emptyMap(),
+        )
     }
 }
 
@@ -127,15 +150,21 @@ data class ExpandPartsOutcome(
  * 3. **Call** T3's [OpenCodeRepository.expandMessagesFullBatch]
  *    (consume-only — unchanged).
  * 4. **Branch** on the outcome:
- *    - [ExpandOutcome.Ok] — merge `items` into `local` via T8's pure
- *      [mergeFullBatchIntoLocal]. Per-part terminal state:
- *      * part's `messageId` ∈ items' info.ids AND the part id is
- *        present in the fetched message's parts → [PartExpandState.Loaded]
- *      * part's `messageId` ∈ items but the part id is missing →
- *        [PartExpandState.Failed]`(null)` (server returned the message
- *        but not this specific part — anomalous; safe-default to Failed)
- *      * part's `messageId` ∈ `failedIds` → [PartExpandState.Failed]`(null)`
- *      * part's `messageId` ∈ residual (requested − items − failedIds) →
+ *    - [ExpandOutcome.Ok] — expose raw `items` as
+ *      [ExpandPartsOutcome.fetchedItems] and also fold them into `local`
+ *      via T8's pure [mergeFullBatchIntoLocal] (retained as
+ *      [ExpandPartsOutcome.mergedLocal] for diagnostics/tests ONLY — the
+ *      caller does NOT write it wholesale). Per-part terminal state
+ *      (FETCH-LEVEL CANDIDATE):
+ *      * owner message fetched OK (`ownerMsgId` ∈ items' info.ids) ⇒
+ *        candidate [PartExpandState.Loaded] for ALL parts — both
+ *        thin_placeholder and non-thin-placeholder. This asserts the
+ *        owner was fetched successfully, NOT that the live UI cache
+ *        holds the content; the caller reconciles `items` into the
+ *        CURRENT live partsByMessage before treating Loaded as visible
+ *        success.
+ *      * owner message ∈ `failedIds` → [PartExpandState.Failed]`(null)`
+ *      * owner message ∈ residual (requested − items − failedIds) →
  *        [PartExpandState.Failed]`(null)` — the residual rule.
  *    - [ExpandOutcome.SessionMissing] — the session is gone upstream;
  *      all targets → [PartExpandState.Failed]`(null)` (the coordinator
@@ -202,7 +231,7 @@ class ExpandPartsUseCase(
                 val states = targets.associate {
                     PartKey(it.messageId!!, it.id) to PartExpandState.Failed(code = null)
                 }
-                ExpandPartsOutcome(mergedLocal = null, states = states)
+                ExpandPartsOutcome(fetchedItems = null, mergedLocal = null, states = states)
             }
             is ExpandOutcome.Failed -> {
                 val state = if (outcome.exhausted) PartExpandState.Exhausted
@@ -210,7 +239,7 @@ class ExpandPartsUseCase(
                 val states = targets.associate {
                     PartKey(it.messageId!!, it.id) to state
                 }
-                ExpandPartsOutcome(mergedLocal = null, states = states)
+                ExpandPartsOutcome(fetchedItems = null, mergedLocal = null, states = states)
             }
         }
     }
@@ -268,20 +297,24 @@ class ExpandPartsUseCase(
 
         // Per-part terminal state (residual rule applied).
         //
-        // Loaded judgment (round-2 + round-3): must mirror T8's ACTUAL
-        // replacement condition, not just partId. T8's
-        // `mergeFullBatchIntoLocal` replaces a local part only when
-        // `(lm.info.id, partId, normalizedMessageId)` ALL three match:
-        //   1. local message's `info.id` ∈ fetched items' info.ids
-        //      (the outer `fullByMsg[lm.info.id]` lookup)
-        //   2. fetched part's `id` == local part's `id`
-        //      (the `replacements[lp.id]` lookup)
-        //   3. fetched part's `normMsg(owner)` == local part's
-        //      `normMsg(owner)`, where `normMsg(owner) = messageId ?: owner`
-        //      (the `takeIf { ... }` normalization guard)
-        // Round-3: `owner` is sourced from the LOCAL `lm.info.id`
-        // (via [resolveOwner]), NOT from `part.messageId!!`.
-        fun Part.normMsg(owner: String): String = messageId ?: owner
+        // Loaded judgment (FETCH-LEVEL CANDIDATE): owner message fetched
+        // OK ⇒ candidate Loaded for ALL parts (both thin_placeholder and
+        // non-thin-placeholder). This is a FETCH-level verdict only — it
+        // asserts the full owner message was retrieved successfully, NOT
+        // that the live UI cache already holds the content. The caller
+        // (ViewModel completion reducer) must reconcile `outcome.items`
+        // into the CURRENT live partsByMessage before treating this as
+        // visible success; if that reconciliation cannot place the content
+        // (owner/current slice gone at commit time), the caller keeps
+        // retry visible (Failed).
+        //
+        // The skeleton marker part's own `(id, normalizedMessageId)` is
+        // NOT a guaranteed stable key into the fetched full message
+        // (skeleton/streaming/thin_placeholder parts carry transient
+        // ids), so a per-part triple-match at THIS layer is a false
+        // negative. Genuine fetch failures (orphan / failedIds / residual)
+        // are caught by the dedicated branches below. `owner` is sourced
+        // from the LOCAL `lm.info.id` (via [resolveOwner]).
         val states: Map<PartKey, PartExpandState> = buildMap {
             targets.forEach { part ->
                 val key = PartKey(messageId = part.messageId!!, partId = part.id)
@@ -307,43 +340,30 @@ class ExpandPartsUseCase(
                         )
                         PartExpandState.Failed(code = null)
                     }
-                    // Branch A: owner message was fetched. Apply T8's full
-                    // triple-match (partId + normalizedMessageId, owner =
-                    // lm.info.id) before trusting Loaded.
+                    // Branch A: owner message fetched OK ⇒ candidate
+                    // Loaded for ALL parts (fetch-level verdict only).
+                    // The full owner message was fetched successfully;
+                    // the caller (ViewModel) must reconcile the fetched
+                    // content into the CURRENT live partsByMessage before
+                    // treating this as visible success. Candidate Loaded
+                    // here regardless of whether the part's own partId
+                    // verbatim reappears in the fetched message — a
+                    // per-part-id triple-match is too strict for skeleton
+                    // marker / thin_placeholder parts (transient ids) and
+                    // produced a false Failed(null) on a successful fetch.
                     ownerMsgId in itemMsgIds -> {
-                        // Rev F (CLIENT_CHANGES): thin placeholder parts are always
-                        // treated as Loaded when the owner message was fetched,
-                        // because T8 replaced the entire message's parts list with
-                        // the full fetch's parts (message-level whole replace).
-                        // No per-part-id matching is needed or possible.
-                        if (part.isThinPlaceholder()) {
-                            PartExpandState.Loaded
-                        } else {
-                            val fetchedParts = itemByMsg.getValue(ownerMsgId).parts
-                            val replaced = fetchedParts.any { fp ->
-                                fp.id == part.id &&
-                                    fp.normMsg(ownerMsgId) == part.normMsg(ownerMsgId)
-                            }
-                            if (replaced) {
-                                PartExpandState.Loaded
-                            } else {
-                                // No fetched part matches T8's triple — message
-                                // came back but T8 would not replace this part
-                                // (anomalous: missing partId OR messageId mismatch).
-                                // Surface as Failed so the UI offers retry instead
-                                // of staying on a skeleton that Loaded promised to
-                                // replace.
-                                DebugLog.w(
-                                    TAG,
-                                    "expand foldOk A partId=${part.id} part.messageId=${part.messageId} " +
-                                        "ownerMsgId=$ownerMsgId replaced=false " +
-                                        "fetchedPartIds=${itemByMsg.getValue(ownerMsgId).parts.map { it.id }.take(20)} " +
-                                        "itemMsgIds(${itemMsgIds.size})=${itemMsgIds.take(20)} " +
-                                        "failedMsgIds(${failedMsgIds.size})=${failedMsgIds.take(20)}",
-                                )
-                                PartExpandState.Failed(code = null)
-                            }
-                        }
+                        // DEBUG (normal success path): note the partId, owner,
+                        // thin-placeholder flag, and fetched part count for
+                        // diagnostics. Not WARN — this is the expected outcome.
+                        val fetchedPartCount = itemByMsg.getValue(ownerMsgId).parts.size
+                        DebugLog.d(
+                            TAG,
+                            "expand foldOk A Loaded partId=${part.id} part.messageId=${part.messageId} " +
+                                "ownerMsgId=$ownerMsgId isThinPlaceholder=${part.isThinPlaceholder()} " +
+                                "fetchedPartCount=$fetchedPartCount " +
+                                "itemMsgIds(${itemMsgIds.size})=${itemMsgIds.take(20)}",
+                        )
+                        PartExpandState.Loaded
                     }
                     // Branch B: per-message failure in the G6 envelope's errors[].
                     ownerMsgId in failedMsgIds -> {
@@ -373,7 +393,11 @@ class ExpandPartsUseCase(
                 put(key, state)
             }
         }
-        return ExpandPartsOutcome(mergedLocal = merged, states = states)
+        return ExpandPartsOutcome(
+            fetchedItems = outcome.items,
+            mergedLocal = merged,
+            states = states,
+        )
     }
 
     private companion object {

@@ -1051,6 +1051,14 @@ internal fun ChatMessageList(
                                     hasStreamingReasoning = streamingReasoningPart != null,
                                 )
                             )
+                            // §omitted-streaming: per-message streaming check for the
+                            // omitted-content affordance. Mirrors the canonical
+                            // isStreamingMsg derivation in reversedMessages (line ~665)
+                            // so the affordance disables during active streaming.
+                            val isMessageStreaming = msgParts.any { it.id in streamingPartTexts } ||
+                                streamingReasoningPart?.messageId == message.id ||
+                                (!message.isUser && sessionIsRunning &&
+                                    (msgParts.isEmpty() || msgParts.any { it.isText || it.isReasoning }))
                             MessageCard(
                                 message = message,
                                 parts = msgParts,
@@ -1083,6 +1091,9 @@ internal fun ChatMessageList(
                                     val sid = sessionId
                                     if (sid != null) chatVM.expandParts(sid, parts)
                                 },
+                                // §omitted-streaming: disable expand affordance while
+                                // the message is actively streaming.
+                                isMessageStreaming = isMessageStreaming,
                             )
                         }
                     }

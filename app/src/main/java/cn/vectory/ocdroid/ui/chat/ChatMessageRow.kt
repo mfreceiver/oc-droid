@@ -1,17 +1,21 @@
 package cn.vectory.ocdroid.ui.chat
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -74,6 +78,7 @@ private fun omittedFieldLabels(omitted: List<String>): List<String> =
             "reason" -> "推理"
             "tokens" -> "Token"
             "thinking" -> "思考"
+            "tool" -> "工具"
             else -> key
         }
     }.distinct()
@@ -106,6 +111,10 @@ internal fun MessageRow(
     // Dispatch: called when the user taps the expand affordance. Receives
     // ALL parts of this message (the ViewModel batches eligible ones).
     onExpandParts: (List<Part>) -> Unit = {},
+    // §omitted-streaming: when true, the omitted-content affordance shows
+    // a non-clickable "generating" skeleton instead of a clickable expand.
+    // Derived from the message's streaming status in ChatMessageContent.
+    isMessageStreaming: Boolean = false,
 ) {
     val isUser = message.isUser
     // §issue-4: task completion messages arrive as user-role but should
@@ -259,160 +268,27 @@ internal fun MessageRow(
         }
         // §slimapi-client-v1 §G6 (Task 16): inline "展开省略内容" affordance.
         // Scans this message's parts for eligible ones (hasFull && omitted),
-        // checks their expand state, and renders:
-        //   - Idle   → inline TextButton ("展开省略内容")
-        //   - Loading → inline CircularProgressIndicator (small, aligned)
-        //   - Loaded → nothing (content already merged into cache)
-        //   - Failed → inline ErrorCard (reuses existing component; do NOT
-        //     invent a new error surface)
+        // checks their expand state, and renders via [OmittedContentCard]:
+        //   - Idle + streaming    → non-clickable "生成中…" skeleton
+        //   - Idle + not streaming → clickable expand card (category labels)
+        //   - Loading             → spinner + label
+        //   - Failed / Exhausted  → error inline + retry
+        //   - Loaded              → nothing (content already merged into cache)
         //
         // Multiple eligible parts are merged into ONE batch call (T16-C1).
-        // This is an inline button (NOT a DropdownMenu / BottomSheet / AlertDialog),
+        // This is an inline card (NOT a DropdownMenu / BottomSheet / AlertDialog),
         // so it is Layer A-adjacent per ui-style-spec.md (T16-C2).
         val expandEligible = parts.filter {
             it.hasFull == true && it.omitted != null && it.messageId != null
         }
         if (expandEligible.isNotEmpty()) {
-            val allPartStates = expandEligible.map { part ->
-                PartKey(messageId = part.messageId!!, partId = part.id) to
-                    (partExpandStates[PartKey(part.messageId!!, part.id)] ?: PartExpandState.Idle)
-            }
-            val anyLoading = allPartStates.any { it.second is PartExpandState.Loading }
-            // Type-safe filter: filterIsInstance<Pair<K, PartExpandState.Failed>> is unsound
-            // under JVM generic erasure — reified R can only check the raw `Pair` type, so
-            // Idle/Loaded/Loading pairs pass the `is R` test and the subsequent `.code`
-            // access throws ClassCastException (e.g. "Idle cannot be cast to Failed").
-            // Collect only genuinely-Failed pairs via a safe cast instead.
-            val anyFailed = allPartStates.mapNotNull { (key, state) ->
-                (state as? PartExpandState.Failed)?.let { key to it }
-            }
-            val anyIdle = allPartStates.any { it.second is PartExpandState.Idle }
-
-            if (anyFailed.isNotEmpty()) {
-                // At least one part failed → show inline ErrorCard for each
-                // distinct failure reason (reuses existing component per T16-C1).
-                // Add an inline Retry TextButton (NOT clickable ErrorCard —
-                // SelectionContainer conflict per oracle I2).
-                anyFailed.forEach { (_, failed) ->
-                    val errorText = if (failed.code != null) {
-                        "${stringResource(R.string.expand_omitted_error)} (${failed.code})"
-                    } else {
-                        stringResource(R.string.expand_omitted_error)
-                    }
-                    ErrorCard(
-                        text = errorText,
-                        modifier = Modifier.widthIn(max = cardMax)
-                    )
-                }
-                // Retry button: dispatches ONLY the Failed parts (not all row
-                // parts) to avoid unnecessarily re-fetching Loaded parts.
-                val failedParts = expandEligible.filter { part ->
-                    val key = PartKey(part.messageId!!, part.id)
-                    partExpandStates[key] is PartExpandState.Failed
-                }
-                if (failedParts.isNotEmpty()) {
-                    TextButton(
-                        onClick = { onExpandParts(failedParts) },
-                        modifier = Modifier.padding(start = Dimens.spacing1)
-                    ) {
-                        Text(
-                            text = stringResource(R.string.expand_omitted_retry),
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                }
-            } else if (anyLoading) {
-                // At least one part is loading → show inline spinner.
-                Row(
-                    modifier = Modifier.padding(
-                        start = Dimens.spacing2,
-                        top = Dimens.spacing1,
-                        bottom = Dimens.spacing1
-                    ),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(Dimens.spacing1)
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(Dimens.iconSm),
-                        strokeWidth = Dimens.hairline
-                    )
-                    Text(
-                        text = stringResource(R.string.expand_omitted_content),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            } else if (anyIdle) {
-                // P7: dispatch only Idle parts (not Loaded/Loading).
-                val idleParts = expandEligible.filter { part ->
-                    val key = PartKey(
-                        messageId = part.messageId!!,
-                        partId = part.id,
-                    )
-                    (partExpandStates[key] ?: PartExpandState.Idle) is PartExpandState.Idle
-                }
-
-                if (idleParts.isNotEmpty()) {
-                    // Collect unique omitted field keys from all idle parts and
-                    // map to human-readable labels (e.g. "推理 · 费用 · Token")
-                    // so the user knows what content is hidden before expanding.
-                    val omittedLabels = omittedFieldLabels(
-                        idleParts.flatMap { it.omitted.orEmpty() }
-                    )
-                    val labelText = omittedLabels.joinToString(" · ")
-
-                    // §G6-T16 Layer A-adjacent: compact clickable row (NOT a
-                    // DropdownMenu / BottomSheet / AlertDialog). Visual family
-                    // matches ToolCallFoldBar (surfaceContainer, RectangleShape,
-                    // labelSmall).
-                    Surface(
-                        modifier = Modifier
-                            .padding(
-                                start = Dimens.spacing1,
-                                top = Dimens.spacing1,
-                                bottom = Dimens.spacing1,
-                            )
-                            .clickable { onExpandParts(idleParts) }
-                            .semantics {
-                                contentDescription = labelText
-                                role = Role.Button
-                            },
-                        shape = RectangleShape,
-                        color = MaterialTheme.colorScheme.surfaceContainer
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(
-                                horizontal = Dimens.spacing2,
-                                vertical = Dimens.spacing1,
-                            ),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(Dimens.spacing1)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.UnfoldMore,
-                                contentDescription = null,
-                                modifier = Modifier.size(Dimens.iconXs),
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                text = labelText.ifEmpty {
-                                    stringResource(R.string.expand_omitted_content)
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Spacer(modifier = Modifier.weight(1f))
-                            Icon(
-                                imageVector = Icons.Default.ChevronRight,
-                                contentDescription = null,
-                                modifier = Modifier.size(Dimens.iconSm),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-            }
-            // If all are Loaded, nothing renders (content merged into cache).
+            OmittedContentCard(
+                eligibleParts = expandEligible,
+                partExpandStates = partExpandStates,
+                isMessageStreaming = isMessageStreaming,
+                onExpandParts = onExpandParts,
+                modifier = Modifier.widthIn(max = cardMax),
+            )
         }
 
         // Footer caption — replaces the previous provider/model label.
@@ -430,6 +306,221 @@ internal fun MessageRow(
         }
         } // Column
         } // BoxWithConstraints
+}
+
+// ── §G6 omitted-content affordance ────────────────────────────────────
+/**
+ * §G6-T16 (redesign): unified inline card for omitted content expansion.
+ * Matches the tool-card visual family (surfaceContainer fill, 1dp
+ * outlineVariant border, RectangleShape, full-width flush form).
+ *
+ * State mapping:
+ *  - all Loaded → renders nothing (caller should not invoke).
+ *  - any Loading → spinner + label (fetch in flight).
+ *  - any Failed/Exhausted → error inline with retry (all in one card).
+ *  - any Idle + streaming → non-clickable "生成中…" skeleton (expand
+ *    would fail during streaming).
+ *  - any Idle + not streaming → clickable expand card with category
+ *    labels derived from the parts' `omitted` field.
+ */
+@Composable
+internal fun OmittedContentCard(
+    eligibleParts: List<Part>,
+    partExpandStates: Map<PartKey, PartExpandState>,
+    isMessageStreaming: Boolean,
+    onExpandParts: (List<Part>) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val allPartStates = eligibleParts.map { part ->
+        PartKey(messageId = part.messageId!!, partId = part.id) to
+            (partExpandStates[PartKey(part.messageId!!, part.id)] ?: PartExpandState.Idle)
+    }
+
+    val anyLoading = allPartStates.any { it.second is PartExpandState.Loading }
+    val anyFailed = allPartStates.mapNotNull { (key, state) ->
+        (state as? PartExpandState.Failed)?.let { key to it }
+    }
+    // Treat Exhausted identically to Failed (retry affordance).
+    val anyExhausted = allPartStates.any { it.second is PartExpandState.Exhausted }
+    val anyFailedOrExhausted = anyFailed.isNotEmpty() || anyExhausted
+    val anyIdle = allPartStates.any { it.second is PartExpandState.Idle }
+
+    // Collect omitted category labels (shared across streaming + idle states).
+    val omittedLabels = omittedFieldLabels(
+        eligibleParts.flatMap { it.omitted.orEmpty() }
+    )
+    val categoryText = omittedLabels.joinToString(" · ")
+
+    when {
+        // Fetch in flight → spinner + label.
+        anyLoading -> {
+            Surface(
+                modifier = modifier.padding(vertical = Dimens.spacing1),
+                shape = RectangleShape,
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                border = BorderStroke(Dimens.hairline, MaterialTheme.colorScheme.outlineVariant),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .padding(horizontal = Dimens.spacing2, vertical = Dimens.spacing2),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(Dimens.spacing1),
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(Dimens.iconSm),
+                        strokeWidth = Dimens.hairline,
+                    )
+                    Text(
+                        text = stringResource(R.string.expand_omitted_content),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        // At least one part failed or exhausted → inline error + retry.
+        anyFailedOrExhausted -> {
+            Surface(
+                modifier = modifier.padding(vertical = Dimens.spacing1),
+                shape = RectangleShape,
+                color = MaterialTheme.colorScheme.errorContainer,
+            ) {
+                Row(
+                    modifier = Modifier
+                        .padding(horizontal = Dimens.spacing2, vertical = Dimens.spacing2),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Default.ErrorOutline,
+                        contentDescription = null,
+                        modifier = Modifier.size(Dimens.iconXs),
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                    Spacer(modifier = Modifier.width(Dimens.spacing1))
+                    val errorText = if (anyFailed.size == 1 && anyFailed[0].second.code != null) {
+                        "${stringResource(R.string.expand_omitted_error)} (${anyFailed[0].second.code})"
+                    } else {
+                        stringResource(R.string.expand_omitted_error)
+                    }
+                    Text(
+                        text = errorText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    // Retry: dispatch only Failed/Exhausted parts.
+                    val retryParts = eligibleParts.filter { part ->
+                        val key = PartKey(part.messageId!!, part.id)
+                        when (partExpandStates[key]) {
+                            is PartExpandState.Failed, is PartExpandState.Exhausted -> true
+                            else -> false
+                        }
+                    }
+                    if (retryParts.isNotEmpty()) {
+                        TextButton(
+                            onClick = { onExpandParts(retryParts) },
+                            contentPadding = PaddingValues(
+                                horizontal = Dimens.spacing1,
+                                vertical = Dimens.spacing1,
+                            ),
+                        ) {
+                            Text(
+                                text = stringResource(R.string.expand_omitted_retry),
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Idle parts while message is streaming → non-clickable skeleton.
+        anyIdle && isMessageStreaming -> {
+            Surface(
+                modifier = modifier.padding(vertical = Dimens.spacing1),
+                shape = RectangleShape,
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                border = BorderStroke(Dimens.hairline, MaterialTheme.colorScheme.outlineVariant),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .padding(horizontal = Dimens.spacing2, vertical = Dimens.spacing2),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(Dimens.spacing1),
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(Dimens.iconSm),
+                        strokeWidth = Dimens.hairline,
+                    )
+                    Text(
+                        text = categoryText.ifEmpty {
+                            stringResource(R.string.expand_omitted_generating)
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    Text(
+                        text = stringResource(R.string.expand_omitted_generating),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        // Idle parts, message not streaming → clickable expand card.
+        anyIdle -> {
+            val idleParts = eligibleParts.filter { part ->
+                val key = PartKey(messageId = part.messageId!!, partId = part.id)
+                (partExpandStates[key] ?: PartExpandState.Idle) is PartExpandState.Idle
+            }
+            if (idleParts.isNotEmpty()) {
+                Surface(
+                    modifier = modifier
+                        .padding(vertical = Dimens.spacing1)
+                        .clickable { onExpandParts(idleParts) }
+                        .semantics {
+                            contentDescription = categoryText
+                            role = Role.Button
+                        },
+                    shape = RectangleShape,
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    border = BorderStroke(Dimens.hairline, MaterialTheme.colorScheme.outlineVariant),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .padding(horizontal = Dimens.spacing2, vertical = Dimens.spacing2),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(Dimens.spacing1),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.UnfoldMore,
+                            contentDescription = null,
+                            modifier = Modifier.size(Dimens.iconXs),
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                        Text(
+                            text = categoryText.ifEmpty {
+                                stringResource(R.string.expand_omitted_content)
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(modifier = Modifier.weight(1f))
+                        Icon(
+                            imageVector = Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            modifier = Modifier.size(Dimens.iconSm),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+        // all Loaded → render nothing.
+    }
 }
 
 @Composable

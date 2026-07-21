@@ -176,6 +176,9 @@ internal fun MessageCard(
     // the "展开省略内容" affordance.
     partExpandStates: Map<PartKey, PartExpandState> = emptyMap(),
     onExpandParts: (List<Part>) -> Unit = {},
+    // §omitted-streaming: when true, the omitted-content affordance shows
+    // a non-clickable "generating" skeleton instead of a clickable expand.
+    isMessageStreaming: Boolean = false,
 ) {
     var overflowOpen by remember { mutableStateOf(false) }
     // §press-anchor (Bug4 fix): capture the long-press touch point so the
@@ -266,6 +269,7 @@ internal fun MessageCard(
                 showMessageDecoration = showMessageDecoration,
                 partExpandStates = partExpandStates,
                 onExpandParts = onExpandParts,
+                isMessageStreaming = isMessageStreaming,
             )
         }
 

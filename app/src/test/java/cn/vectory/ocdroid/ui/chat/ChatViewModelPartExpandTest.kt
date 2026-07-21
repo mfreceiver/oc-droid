@@ -7,6 +7,7 @@ import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.data.repository.ExpandOutcome
+import cn.vectory.ocdroid.data.repository.isThinPlaceholder
 import cn.vectory.ocdroid.ui.ChatViewModel
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -561,10 +562,16 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
     // ── P9: delayed-completion discriminators ──────────────────────────────
 
     /**
-     * P9a: Part disappears before completion → commits Failed(null), not Loaded.
+     * P9a: Commit-failure visibility contract — when the owner/live slice is
+     * unavailable at commit time (here: removed entirely so
+     * `currentParts == null`), the reducer CANNOT reconcile the fetched
+     * content into the live partsByMessage. A successful network fetch
+     * (owner item present) does NOT by itself justify Loaded — that would
+     * hide the affordance while the content is invisible. The key must
+     * keep retry visible (`Failed(null)`), NOT Loaded.
      */
     @Test
-    fun `C1 - part disappears before completion commits Failed null`() = runTest {
+    fun `C1 - commit failure when owner slice unavailable keeps retry visible`() = runTest {
         val sessionId = "session-1"
         val key = PartKey("m1", "p1")
         val skeleton = skeleton("p1", "m1")
@@ -589,10 +596,11 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
             core.store.chatFlow.value.partExpandStates[key],
         )
 
-        // A fresh reducer removed the target before the old response completed.
+        // Remove the owner slice ENTIRELY before the old response completes,
+        // so current.partsByMessage["m1"] == null at commit time.
         core.writeChat { current ->
             current.copy(
-                partsByMessage = current.partsByMessage + ("m1" to emptyList()),
+                partsByMessage = current.partsByMessage - "m1",
             )
         }
 
@@ -618,11 +626,15 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
 
         val finalState = core.store.chatFlow.value
+        // Not Loaded merely because the network returned an owner item:
+        // the content could not be reconciled into the (now-gone) live
+        // slice, so retry must stay visible.
         assertEquals(
             PartExpandState.Failed(code = null),
             finalState.partExpandStates[key],
         )
-        assertTrue(finalState.partsByMessage["m1"].orEmpty().none { it.id == "p1" })
+        // Nothing was committed for the removed owner.
+        assertTrue(finalState.partsByMessage["m1"]?.none { it.id == "p1" } ?: true)
     }
 
     /**
@@ -745,5 +757,269 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
             "NEWER FULL",
             finalState.partsByMessage["m1"]?.single { it.id == "p1" }?.text,
         )
+    }
+
+    // ── Visibility contract: end-to-end partsByMessage content ────────────
+    //
+    // These tests assert the fetched content is actually VISIBLE in the live
+    // partsByMessage (not just that the state is Loaded). They guard the
+    // content-loss bug where Loaded hid the affordance while no content was
+    // committed.
+
+    /**
+     * thin_placeholder: a synthetic `thin_placeholder_*` skeleton part is
+     * resolved by a fetched message whose real parts have DIFFERENT ids.
+     * The reducer must insert the real parts, remove the placeholder, and
+     * mark Loaded. (The synthetic placeholder id never appears in the
+     * fetched message, so a per-part-id patch could never represent it.)
+     */
+    @Test
+    fun `visibility - thin_placeholder resolved, real parts inserted, Loaded`() = runTest {
+        val sessionId = "session-1"
+        val placeholder = Part(
+            id = "thin_placeholder_m1",
+            messageId = "m1",
+            type = "text",
+            text = "skeleton",
+            hasFull = true,
+            omitted = listOf("tool"),
+        )
+        val realPart = Part(id = "prt_real", messageId = "m1", type = "text", text = "real content")
+        seedSession(
+            sessionId,
+            Message(id = "m1", role = "assistant"),
+            listOf(placeholder),
+        )
+        val deferred = CompletableDeferred<ExpandOutcome>()
+        coEvery { repository.expandMessagesFullBatch(sessionId, any()) } coAnswers {
+            deferred.await()
+        }
+
+        chatVM.expandParts(sessionId, listOf(placeholder))
+        mainDispatcherRule.dispatcher.scheduler.runCurrent()
+        assertEquals(
+            PartExpandState.Loading,
+            core.store.chatFlow.value.partExpandStates[PartKey("m1", "thin_placeholder_m1")],
+        )
+
+        deferred.complete(ExpandOutcome.Ok(
+            items = listOf(msg("m1", listOf(realPart))),
+            failures = emptyList(),
+            usedBatch = true,
+        ))
+        mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
+
+        val finalState = core.store.chatFlow.value
+        val key = PartKey("m1", "thin_placeholder_m1")
+        // Real part is visible.
+        assertEquals(
+            "real content",
+            finalState.partsByMessage["m1"]?.single { it.id == "prt_real" }?.text,
+        )
+        // Placeholder is gone.
+        assertTrue(
+            "placeholder must be removed",
+            finalState.partsByMessage["m1"].orEmpty().none { it.isThinPlaceholder() },
+        )
+        assertEquals(PartExpandState.Loaded, finalState.partExpandStates[key])
+    }
+
+    /**
+     * part-id drift: skeleton id `p1`; before completion an unrelated current
+     * part is added; the fetched message returns a real id `real-1` (≠ p1).
+     * The fetched content must be visible, the unrelated current part must
+     * survive (lost-update protection), the stale skeleton p1 is cleaned up,
+     * and state is Loaded.
+     */
+    @Test
+    fun `visibility - part-id drift commits fetched content, keeps unrelated parts, Loaded`() = runTest {
+        val sessionId = "session-1"
+        val key = PartKey("m1", "p1")
+        val skeletonP1 = skeleton("p1", "m1")
+        val unrelated = Part(id = "other", messageId = "m1", type = "text", text = "other content")
+        seedSession(
+            sessionId,
+            Message(id = "m1", role = "assistant"),
+            listOf(skeletonP1, unrelated),
+        )
+        val deferred = CompletableDeferred<ExpandOutcome>()
+        coEvery { repository.expandMessagesFullBatch(sessionId, any()) } coAnswers {
+            deferred.await()
+        }
+
+        chatVM.expandParts(sessionId, listOf(skeletonP1))
+        mainDispatcherRule.dispatcher.scheduler.runCurrent()
+
+        deferred.complete(ExpandOutcome.Ok(
+            items = listOf(msg("m1", listOf(
+                Part(id = "real-1", messageId = "m1", type = "text", text = "drifted full"),
+            ))),
+            failures = emptyList(),
+            usedBatch = true,
+        ))
+        mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
+
+        val finalState = core.store.chatFlow.value
+        // Fetched content visible.
+        assertEquals(
+            "drifted full",
+            finalState.partsByMessage["m1"]?.single { it.id == "real-1" }?.text,
+        )
+        // Unrelated current part survived (lost-update protection).
+        assertEquals(
+            "other content",
+            finalState.partsByMessage["m1"]?.first { it.id == "other" }?.text,
+        )
+        // Stale skeleton marker cleaned up (its id did not come back).
+        assertTrue(
+            "stale skeleton p1 must be removed",
+            finalState.partsByMessage["m1"].orEmpty().none { it.id == "p1" },
+        )
+        assertEquals(PartExpandState.Loaded, finalState.partExpandStates[key])
+    }
+
+    /**
+     * fetched-part messageId mismatch: fetched owner stays `m1` but the
+     * fetched part's `messageId` is a different value. Commit identity is
+     * owner+partId, not the fetched part's wire messageId, so the full part
+     * is committed by id and state is Loaded.
+     */
+    @Test
+    fun `visibility - fetched part with mismatched messageId is committed by id`() = runTest {
+        val sessionId = "session-1"
+        val key = PartKey("m1", "p1")
+        val skeletonP1 = skeleton("p1", "m1")
+        seedSession(
+            sessionId,
+            Message(id = "m1", role = "assistant"),
+            listOf(skeletonP1),
+        )
+        val deferred = CompletableDeferred<ExpandOutcome>()
+        coEvery { repository.expandMessagesFullBatch(sessionId, any()) } coAnswers {
+            deferred.await()
+        }
+
+        chatVM.expandParts(sessionId, listOf(skeletonP1))
+        mainDispatcherRule.dispatcher.scheduler.runCurrent()
+
+        // Fetched owner info.id == "m1"; part id matches "p1" BUT its wire
+        // messageId is "m-X" (a different value).
+        deferred.complete(ExpandOutcome.Ok(
+            items = listOf(msg("m1", listOf(
+                Part(id = "p1", messageId = "m-X", type = "text", text = "full by id"),
+            ))),
+            failures = emptyList(),
+            usedBatch = true,
+        ))
+        mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
+
+        val finalState = core.store.chatFlow.value
+        // Committed by (owner, partId) regardless of the fetched part's
+        // wire messageId.
+        assertEquals(
+            "full by id",
+            finalState.partsByMessage["m1"]?.single { it.id == "p1" }?.text,
+        )
+        assertEquals(PartExpandState.Loaded, finalState.partExpandStates[key])
+    }
+
+    /**
+     * Refresh lost-update protection: an UNRELATED current part is added to
+     * the live slice before completion. The expand commit must NOT clobber
+     * it — it survives alongside the fetched content.
+     */
+    @Test
+    fun `visibility - unrelated concurrent refresh part survives expand commit`() = runTest {
+        val sessionId = "session-1"
+        val key = PartKey("m1", "p1")
+        val skeletonP1 = skeleton("p1", "m1")
+        seedSession(
+            sessionId,
+            Message(id = "m1", role = "assistant"),
+            listOf(skeletonP1),
+        )
+        val deferred = CompletableDeferred<ExpandOutcome>()
+        coEvery { repository.expandMessagesFullBatch(sessionId, any()) } coAnswers {
+            deferred.await()
+        }
+
+        chatVM.expandParts(sessionId, listOf(skeletonP1))
+        mainDispatcherRule.dispatcher.scheduler.runCurrent()
+
+        // Concurrent refresh adds an unrelated part to the live slice.
+        core.writeChat { current ->
+            val currentParts = current.partsByMessage["m1"] ?: emptyList()
+            current.copy(
+                partsByMessage = current.partsByMessage +
+                    ("m1" to currentParts + Part(id = "refresh-new", messageId = "m1", type = "text", text = "concurrent refresh")),
+            )
+        }
+        mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
+
+        deferred.complete(ExpandOutcome.Ok(
+            items = listOf(msg("m1", listOf(
+                Part(id = "p1", messageId = "m1", type = "text", text = "FULL"),
+            ))),
+            failures = emptyList(),
+            usedBatch = true,
+        ))
+        mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
+
+        val finalState = core.store.chatFlow.value
+        // Expand target replaced.
+        assertEquals(
+            "FULL",
+            finalState.partsByMessage["m1"]?.first { it.id == "p1" }?.text,
+        )
+        // Unrelated refresh part survived the expand commit.
+        assertEquals(
+            "concurrent refresh",
+            finalState.partsByMessage["m1"]?.first { it.id == "refresh-new" }?.text,
+        )
+        assertEquals(PartExpandState.Loaded, finalState.partExpandStates[key])
+    }
+
+    /**
+     * content-loss guard: the fetched owner message returns with NO parts
+     * (server returned the owner but with an empty parts list — no usable
+     * content). The reducer must NOT strip the skeleton or mark Loaded; it
+     * retains the skeleton and keeps retry visible. Guards the v2 content-
+     * loss edge where Loaded hid the affordance with nothing committed.
+     */
+    @Test
+    fun `visibility - empty fetched owner keeps skeleton and retry, not Loaded`() = runTest {
+        val sessionId = "session-1"
+        val key = PartKey("m1", "p1")
+        val skeletonP1 = skeleton("p1", "m1")
+        seedSession(
+            sessionId,
+            Message(id = "m1", role = "assistant"),
+            listOf(skeletonP1),
+        )
+        val deferred = CompletableDeferred<ExpandOutcome>()
+        coEvery { repository.expandMessagesFullBatch(sessionId, any()) } coAnswers {
+            deferred.await()
+        }
+
+        chatVM.expandParts(sessionId, listOf(skeletonP1))
+        mainDispatcherRule.dispatcher.scheduler.runCurrent()
+
+        // Owner m1 fetched but with NO parts — nothing to commit.
+        deferred.complete(ExpandOutcome.Ok(
+            items = listOf(msg("m1", emptyList())),
+            failures = emptyList(),
+            usedBatch = true,
+        ))
+        mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
+
+        val finalState = core.store.chatFlow.value
+        // Skeleton retained (not stripped) — retry can still target it.
+        assertTrue(
+            "skeleton p1 must be retained when no content was fetched",
+            finalState.partsByMessage["m1"].orEmpty().any { it.id == "p1" },
+        )
+        // Retry stays visible — NOT Loaded (no content committed).
+        val state = finalState.partExpandStates[key]
+        assertTrue("expected Failed (retry visible), got $state", state is PartExpandState.Failed)
     }
 }

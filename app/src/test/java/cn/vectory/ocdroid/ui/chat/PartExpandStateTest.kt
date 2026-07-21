@@ -173,17 +173,28 @@ class PartExpandStateTest {
         val result = uc.expandParts("s1", local, listOf(localPart)).getOrThrow()
 
         // Per-part state: Loaded (the part id was present in the fetched message).
+        // NOTE: this asserts the use-case's FETCH-LEVEL judgment only, not that
+        // the live UI cache holds the content (the ViewModel reconciles
+        // fetchedItems into partsByMessage separately).
         assertEquals(PartExpandState.Loaded, result.states[PartKey("m1", "p1")])
-        // Merge: T8's null-safe (messageId, partId) match replaces local's text.
+        // fetchedItems carries the RAW fetched owner message on Ok.
+        assertEquals(listOf("m1"), result.fetchedItems?.map { it.info.id })
+        assertEquals("FULL TEXT", result.fetchedItems?.single()?.parts?.single()?.text)
+        // Merge (diagnostics): T8's null-safe (messageId, partId) match
+        // replaces local's text.
         assertEquals("FULL TEXT", result.mergedLocal!!.single().parts.single().text)
     }
 
     @Test
-    fun `C2 - Ok with message present but part id absent surfaces as Failed`() = runTest {
-        // Anomalous server response: the message came back, but the specific
-        // part id we asked to expand is missing. Safe-default to Failed so
-        // the UI's affordance offers a retry instead of silently staying
-        // on a skeleton that the merge could not replace.
+    fun `C2 - Ok with owner fetched yields Loaded even when skeleton partId absent`() = runTest {
+        // New contract: owner message fetched OK ⇒ Loaded for ALL parts.
+        // The fetched message came back (owner "m1" ∈ items), but the
+        // specific skeleton partId "p1" is absent (only "other-part"
+        // present). T8's mergeFullBatchIntoLocal has already merged the
+        // full content at the message level; the skeleton marker's own
+        // partId is not a guaranteed stable key into the fetched message,
+        // so this is Loaded (NOT Failed). The old triple-match downgraded
+        // this to Failed(null) — the bug being fixed.
         val repo = mockk<OpenCodeRepository>(relaxed = true)
         coEvery { repo.expandMessagesFullBatch("s1", any()) } returns ExpandOutcome.Ok(
             items = listOf(msg("m1", listOf(Part(id = "other-part", messageId = "m1", type = "text")))),
@@ -191,44 +202,76 @@ class PartExpandStateTest {
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)
-        // Round-3: provide local owner so this exercises Branch A's
-        // "fetched message present, target partId absent" path (not
-        // Branch 0 orphan).
+        // Provide a local owner so this exercises Branch A's
+        // "owner message fetched" path (not Branch 0 orphan).
         val localPart = skeleton("p1", "m1")
         val local = listOf(msg("m1", listOf(localPart)))
 
         val result = uc.expandParts("s1", local, listOf(localPart)).getOrThrow()
 
-        assertEquals(PartExpandState.Failed(code = null), result.states[PartKey("m1", "p1")])
+        // Asserts the use-case's FETCH-LEVEL judgment only (owner fetched ⇒
+        // candidate Loaded), NOT live-slice visibility.
+        assertEquals(PartExpandState.Loaded, result.states[PartKey("m1", "p1")])
     }
 
     /**
-     * M2 (round-2 fix) — regression guard for the Loaded-judgment fix.
-     *
-     * The old Branch A check `fetchedParts.any { it.id == part.id }`
-     * marked this case Loaded (partId matches) even though T8's
-     * `mergeFullBatchIntoLocal` would NOT replace the local part,
-     * because T8's replacement condition also requires the fetched
-     * part's NORMALIZED messageId to match the owner (the
-     * `takeIf { it.normMsg(owner) == lp.normMsg(owner) }` guard in
-     * `SlimapiMessageMerge.kt:103-111`). A fetched part that carries
-     * `messageId = "m-X"` (≠ owner `m1`, ≠ null) fails T8's guard, so
-     * T8 keeps the local skeleton — and T15 must surface Failed to
-     * avoid a "state=Loaded, cache=skeleton" inconsistency.
-     *
-     * Discriminates: this test FAILS under the old partId-only check
-     * (which would have produced `Loaded`) and PASSES under the new
-     * triple-match judgment.
+     * Guards the fix for the "展开省略内容 → Failed(null) on a successful
+     * fetch" bug. Skeleton marker parts carry transient ids that are NOT
+     * stable keys into the fetched full message; when concurrent
+     * streaming has replaced the part id by the time the full fetch
+     * returns, the fetched message contains a DIFFERENT part id. Under
+     * the old triple-match this was Failed(null); under the new contract
+     * owner fetched ⇒ Loaded.
      */
     @Test
-    fun `C2 - Ok with same partId but mismatched messageId is NOT Loaded (T8 match condition)`() = runTest {
+    fun `C2 - Ok with owner fetched but part id drifted (streaming) yields Loaded not Failed`() = runTest {
         val repo = mockk<OpenCodeRepository>(relaxed = true)
-        // Fetched message's info.id == "m1" (so the message-level lookup
-        // succeeds), and it contains a part with the SAME id ("p1") BUT
-        // a mismatched messageId ("m-X" instead of "m1" / null).
+        // Fetched message owns "m1" but its only part has a DIFFERENT id
+        // ("real-1") than the skeleton marker "p1" we asked to expand.
+        coEvery { repo.expandMessagesFullBatch("s1", any()) } returns ExpandOutcome.Ok(
+            items = listOf(msg("m1", listOf(Part(id = "real-1", messageId = "m1", type = "text", text = "full")))),
+            failures = emptyList(),
+            usedBatch = true,
+        )
+        val uc = ExpandPartsUseCase(repo)
+        // Local owner "m1" carries the skeleton marker "p1".
+        val localPart = skeleton("p1", "m1", text = "skeleton")
+        val local = listOf(msg("m1", listOf(localPart)))
+
+        val result = uc.expandParts("s1", local, listOf(localPart)).getOrThrow()
+
+        // Asserts the use-case's FETCH-LEVEL judgment only (owner fetched ⇒
+        // candidate Loaded), NOT live-slice visibility.
+        assertEquals(
+            "drifted partId under streaming must be Loaded (owner fetched), not Failed",
+            PartExpandState.Loaded,
+            result.states[PartKey("m1", "p1")],
+        )
+    }
+
+    /**
+     * New contract — owner message fetched ⇒ Loaded for ALL parts,
+     * regardless of the fetched part's normalized messageId.
+     *
+     * The fetched message's info.id == "m1" (owner fetched OK), and it
+     * contains a part with the SAME id ("p1") BUT a mismatched
+     * messageId ("m-X" instead of "m1" / null). Under the OLD
+     * triple-match judgment this was downgraded to Failed(null) (the
+     * normMsg guard rejected it). Under the new contract, owner fetched
+     * ⇒ Loaded unconditionally: the content has been merged at the
+     * message level, and the skeleton marker's normalized messageId is
+     * not a stable key. This guards the fix against a normMsg-based
+     * false negative.
+     */
+    @Test
+    fun `C2 - Ok with owner fetched yields Loaded even when fetched part messageId mismatches`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        // Fetched message's info.id == "m1" (so the owner-fetched
+        // condition holds), containing a part with the SAME id ("p1")
+        // BUT a mismatched messageId ("m-X").
         val fetchedPartMismatch = Part(
             id = "p1",
-            messageId = "m-X", // ← NOT the owner's id; T8 will not replace
+            messageId = "m-X", // ← NOT the owner's id; irrelevant under new contract
             type = "text",
             text = "full text from wrong message",
         )
@@ -238,21 +281,20 @@ class PartExpandStateTest {
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)
-        // Round-3: provide a local owner so the messageId-mismatch check
-        // is actually exercised. With empty local, the new owner-resolution
-        // would mark this an orphan → Failed for the wrong reason; this
-        // local pinning ensures Failed comes from the T8 normMsg guard.
+        // Provide a local owner so owner-resolution finds "m1" and the
+        // owner-fetched (Branch A) path is exercised (not orphan).
         val localPart = skeleton("p1", "m1", text = "skeleton")
         val local = listOf(msg("m1", listOf(localPart)))
 
         val result = uc.expandParts("s1", local, listOf(localPart)).getOrThrow()
 
-        // NOT Loaded — T8's normMsg guard rejects the fetched part, so
-        // T15's Loaded judgment must match (defensive: don't assume the
-        // server always sets part.messageId == owner.info.id).
+        // Loaded — owner message fetched OK; the per-part normMsg guard
+        // is no longer applied (it was a false-negative source). Asserts
+        // the use-case's FETCH-LEVEL judgment only, NOT live-slice
+        // visibility.
         assertEquals(
-            "mismatched-messageId fetched part must NOT be Loaded (matches T8)",
-            PartExpandState.Failed(code = null),
+            "owner fetched ⇒ Loaded even with mismatched fetched part messageId",
+            PartExpandState.Loaded,
             result.states[PartKey("m1", "p1")],
         )
     }
@@ -463,6 +505,7 @@ class PartExpandStateTest {
             PartExpandState.Failed(code = "upstream_unavailable"),
             result.states[PartKey("m2", "p2")],
         )
+        assertNull(result.fetchedItems)
         assertNull(result.mergedLocal)
     }
 
@@ -493,6 +536,7 @@ class PartExpandStateTest {
         // per-part state is just so the UI does not stay in Loading.
         assertEquals(PartExpandState.Failed(code = null), result.states[PartKey("m1", "p1")])
         assertEquals(PartExpandState.Failed(code = null), result.states[PartKey("m2", "p2")])
+        assertNull(result.fetchedItems)
         assertNull(result.mergedLocal)
     }
 

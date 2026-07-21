@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.isThinPlaceholder
 import cn.vectory.ocdroid.util.DebugLog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
@@ -404,9 +405,14 @@ class ChatViewModel @Inject constructor(
      *  1. Before state write: drop if `serverGroupFp` differs.
      *  2. Inside reducer: `if current.currentSessionId != requestedSessionId → return current`.
      *  3. Process only outcome keys still `Loading` (prevents delayed duplicate).
-     *  4. Derive part patches from captured `local` + `mergedLocal` (only Loaded keys).
-     *  5. Apply patches against CURRENT `partsByMessage` (never whole-message replace).
-     *  6. Commit terminal states in the same atomic commit.
+     *  4. For Loaded candidates: reconcile the raw fetched owner message
+     *     (`outcome.fetchedItems`) into the CURRENT `partsByMessage` via a
+     *     per-owner merge (replace-by-id + thin_placeholder removal +
+     *     skeleton-drift cleanup). Never write `mergedLocal` wholesale.
+     *  5. Mark a key `Loaded` only when that reconciliation placed the
+     *     fetched content (or it was already full); otherwise `Failed(null)`
+     *     keeps retry visible.
+     *  6. Commit cache + terminal states in the same atomic `writeChat`.
      *
      * CE discipline: [runSuspendCatching] in [ExpandPartsUseCase] ensures
      * CancellationException propagates. Both success and failure paths are
@@ -530,75 +536,22 @@ class ChatViewModel @Inject constructor(
                 return@launch
             }
 
-            // ── P5/P6: derive targeted part patches (wire key) ───────────
-            fun cn.vectory.ocdroid.data.model.Part.normMsg(owner: String): String =
-                messageId ?: owner
-
-            data class PartPatch(
-                // P6: always the outcome's wire key.
-                val key: cn.vectory.ocdroid.ui.chat.PartKey,
-                val ownerMessageId: String,
-                val partId: String,
-                val replacementPart: cn.vectory.ocdroid.data.model.Part,
-            )
-
-            // Build owner lookup from captured local.
+            // ── Owner resolution (captured local — mirrors foldOk) ──────────
+            // The completion reducer reconciles fetched content into the
+            // CURRENT live partsByMessage. Owner identity must match what
+            // foldOk used so the Loaded candidate and the live write agree.
             val localByInfoId: Map<String, cn.vectory.ocdroid.data.model.MessageWithParts> =
                 local.associateBy { it.info.id }
             val localOwnerByPartId: Map<String, String> = buildMap {
                 local.forEach { lm -> lm.parts.forEach { p -> put(p.id, lm.info.id) } }
             }
 
-            // Build mergedLocal lookup for replacement content.
-            val mergedByMsgId: Map<String, cn.vectory.ocdroid.data.model.MessageWithParts> =
-                outcome.mergedLocal?.associateBy { it.info.id } ?: emptyMap()
-
-            // P5: extraction compares replacement to CAPTURED LOCAL TARGET.
-            val patches: List<PartPatch> = buildList {
-                outcome.states.forEach { (key, state) ->
-                    if (state !is cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded) {
-                        return@forEach
-                    }
-
-                    // Same owner resolution as T15.
-                    val ownerMessageId =
-                        localByInfoId[key.messageId]?.info?.id
-                            ?: localOwnerByPartId[key.partId]
-                            ?: return@forEach
-
-                    val capturedOwner = localByInfoId[ownerMessageId]
-                        ?: return@forEach
-
-                    val capturedLocalTarget = capturedOwner.parts.firstOrNull { localPart ->
-                        localPart.id == key.partId
-                    } ?: return@forEach
-
-                    val mergedOwner = mergedByMsgId[ownerMessageId]
-                        ?: return@forEach
-
-                    // P5: compare replacement to CAPTURED LOCAL TARGET (not self-compare).
-                    val replacement = mergedOwner.parts.lastOrNull { fullPart ->
-                        fullPart.id == key.partId &&
-                            fullPart.normMsg(ownerMessageId) ==
-                            capturedLocalTarget.normMsg(ownerMessageId)
-                    } ?: return@forEach
-
-                    add(
-                        PartPatch(
-                            key = key,
-                            ownerMessageId = ownerMessageId,
-                            partId = key.partId,
-                            replacementPart = replacement,
-                        )
-                    )
-                }
-            }
-
-            // P6: patchesByKey (not patchedKeys).
-            val patchesByKey: Map<cn.vectory.ocdroid.ui.chat.PartKey, PartPatch> =
-                patches.associateBy { it.key }
-
             // ── P1: completion reducer (guarded atomic per-key) ───────────
+            // A per-part patch miss is not sufficient evidence of success.
+            // The reducer reconciles the raw fetched owner message into the
+            // CURRENT live parts; mark Loaded only when that reconciliation
+            // placed the fetched content or it was already present, otherwise
+            // keep retry visible.
             core.writeChat { current ->
                 // Compound identity guard against the exact CAS input.
                 if (current.currentSessionId != sessionId) return@writeChat current
@@ -607,6 +560,130 @@ class ChatViewModel @Inject constructor(
                 var updatedPartsByMessage = current.partsByMessage
                 val updatedStates = current.partExpandStates.toMutableMap()
 
+                // Decides the terminal for a Loaded candidate whose live-slice
+                // merge could NOT be performed: Loaded only if the current
+                // target part is already a resolved (non-skeleton) part
+                // (concurrent expand/SSE resolved it); otherwise Failed(null)
+                // so retry stays visible. `ownerOverride` short-circuits owner
+                // re-resolution when the caller already knows it.
+                fun alreadyFullOrFailed(
+                    key: cn.vectory.ocdroid.ui.chat.PartKey,
+                    ownerOverride: String?,
+                ): cn.vectory.ocdroid.ui.chat.PartExpandState {
+                    val oid = ownerOverride
+                        ?: localByInfoId[key.messageId]?.info?.id
+                        ?: localOwnerByPartId[key.partId]
+                        ?: return cn.vectory.ocdroid.ui.chat.PartExpandState.Failed(code = null)
+                    val parts = current.partsByMessage[oid]
+                        ?: return cn.vectory.ocdroid.ui.chat.PartExpandState.Failed(code = null)
+                    val target = parts.firstOrNull { it.id == key.partId }
+                        ?: return cn.vectory.ocdroid.ui.chat.PartExpandState.Failed(code = null)
+                    // alreadyFull: target no longer carries the skeleton
+                    // markers (hasFull != true OR omitted == null).
+                    val alreadyFull = target.hasFull != true || target.omitted == null
+                    return if (alreadyFull) {
+                        cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded
+                    } else {
+                        cn.vectory.ocdroid.ui.chat.PartExpandState.Failed(code = null)
+                    }
+                }
+
+                // Only Loaded-outcome keys still Loading (CAS) can reconcile
+                // content. Group them by resolved owner so each owner is
+                // merged ONCE, then all its Loaded keys are finalised.
+                val activeLoadedKeys: List<cn.vectory.ocdroid.ui.chat.PartKey> =
+                    outcome.states.entries
+                        .filter { (key, state) ->
+                            state is cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded &&
+                                (current.partExpandStates[key]
+                                    is cn.vectory.ocdroid.ui.chat.PartExpandState.Loading)
+                        }
+                        .map { it.key }
+
+                val keysByOwner: Map<String?, List<cn.vectory.ocdroid.ui.chat.PartKey>> =
+                    activeLoadedKeys.groupBy { key ->
+                        localByInfoId[key.messageId]?.info?.id
+                            ?: localOwnerByPartId[key.partId]
+                    }
+
+                // Per-key terminal decision for Loaded candidates.
+                val loadedTerminal =
+                    HashMap<cn.vectory.ocdroid.ui.chat.PartKey, cn.vectory.ocdroid.ui.chat.PartExpandState>()
+                // Owners whose live-slice merge succeeded → write once each.
+                val ownerMergedParts =
+                    HashMap<String, List<cn.vectory.ocdroid.data.model.Part>>()
+
+                keysByOwner.forEach { (ownerId, keys) ->
+                    if (ownerId == null) {
+                        // Cannot establish an owner — cannot reconcile. Keep
+                        // retry visible unless the target is already full.
+                        keys.forEach { key ->
+                            loadedTerminal[key] = alreadyFullOrFailed(key, ownerOverride = null)
+                        }
+                        return@forEach
+                    }
+                    val fetchedOwner = outcome.fetchedItems
+                        ?.firstOrNull { it.info.id == ownerId }
+                    val currentParts = current.partsByMessage[ownerId]
+                    if (fetchedOwner == null || currentParts == null) {
+                        // Owner/fetched/live-slice missing at commit time —
+                        // cannot reconcile. Keep retry visible unless the
+                        // target is already full (concurrent resolve).
+                        keys.forEach { key ->
+                            loadedTerminal[key] = alreadyFullOrFailed(key, ownerOverride = ownerId)
+                        }
+                        return@forEach
+                    }
+                    // §content-loss-guard: a fetch that returns the owner
+                    // message with NO parts carries no usable content and
+                    // cannot have resolved any omitted target. Retain the
+                    // skeleton markers and keep retry visible (unless a
+                    // concurrent op already resolved the target). Marking
+                    // Loaded here would strip the skeleton and hide the
+                    // affordance with nothing committed — the v2 content-
+                    // loss edge. A non-empty full-message fetch is treated
+                    // as authoritative for all of the owner's omitted
+                    // content (the server returns the complete message).
+                    if (fetchedOwner.parts.isEmpty()) {
+                        keys.forEach { key ->
+                            loadedTerminal[key] = alreadyFullOrFailed(key, ownerOverride = ownerId)
+                        }
+                        return@forEach
+                    }
+                    // Live-slice merge of the raw fetched owner message.
+                    val fetchedIds: HashSet<String> =
+                        fetchedOwner.parts.mapTo(HashSet()) { it.id }
+                    val merged = currentParts.toMutableList()
+                    // 1. replace-by-id (append new fetched parts).
+                    fetchedOwner.parts.forEach { fp ->
+                        val idx = merged.indexOfFirst { cp -> cp.id == fp.id }
+                        if (idx >= 0) merged[idx] = fp else merged.add(fp)
+                    }
+                    // 2. a successful expand resolves synthetic placeholders.
+                    merged.removeAll { cp -> cp.isThinPlaceholder() }
+                    // 3. drop each captured skeleton target that is still an
+                    //    unresolved omitted marker AND whose id did not come
+                    //    back in the fetched parts (part-id drift cleanup).
+                    keys.forEach { key ->
+                        merged.removeAll { cp ->
+                            cp.id == key.partId &&
+                                cp.id !in fetchedIds &&
+                                cp.hasFull == true &&
+                                cp.omitted != null
+                        }
+                    }
+                    ownerMergedParts[ownerId] = merged.toList()
+                    keys.forEach { key ->
+                        loadedTerminal[key] = cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded
+                    }
+                }
+
+                // Write each successfully-merged owner once.
+                ownerMergedParts.forEach { (ownerId, parts) ->
+                    updatedPartsByMessage = updatedPartsByMessage + (ownerId to parts)
+                }
+
+                // Apply terminal states for every outcome key (CAS-filtered).
                 outcome.states.forEach { (wireKey, outcomeState) ->
                     // P1: this old completion owns neither cache nor state
                     // once the key has left Loading. Skip completely.
@@ -616,51 +693,13 @@ class ChatViewModel @Inject constructor(
                         return@forEach
                     }
 
-                    var actuallyApplied = false
-                    var alreadyFull = false
-
-                    if (outcomeState is cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded) {
-                        val patch = patchesByKey[wireKey]
-
-                        if (patch != null) {
-                            val currentParts = updatedPartsByMessage[patch.ownerMessageId]
-
-                            if (currentParts != null) {
-                                // P5 apply-time match: T8 identity check
-                                // against the CURRENT local target.
-                                val targetIndex = currentParts.indexOfFirst { currentPart ->
-                                    currentPart.id == patch.partId &&
-                                        currentPart.normMsg(patch.ownerMessageId) ==
-                                        patch.replacementPart.normMsg(patch.ownerMessageId)
-                                }
-
-                                if (targetIndex >= 0) {
-                                    val currentTarget = currentParts[targetIndex]
-                                    alreadyFull = currentTarget == patch.replacementPart
-
-                                    if (!alreadyFull) {
-                                        val nextParts = currentParts.toMutableList()
-                                        nextParts[targetIndex] = patch.replacementPart
-                                        updatedPartsByMessage =
-                                            updatedPartsByMessage +
-                                                (patch.ownerMessageId to nextParts)
-                                        actuallyApplied = true
-                                    }
-                                }
-                            }
-                        }
-                    }
-
                     updatedStates[wireKey] = when (outcomeState) {
-                        cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded -> {
-                            if (actuallyApplied || alreadyFull) {
-                                cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded
-                            } else {
-                                // T15 promised Loaded, but its full part could
-                                // not be represented in the current cache.
-                                cn.vectory.ocdroid.ui.chat.PartExpandState.Failed(code = null)
-                            }
-                        }
+                        cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded ->
+                            // Reconciliation decision: Loaded only if the merge
+                            // placed the content or it was already full;
+                            // otherwise Failed(null) keeps retry visible.
+                            loadedTerminal[wireKey]
+                                ?: cn.vectory.ocdroid.ui.chat.PartExpandState.Failed(code = null)
 
                         is cn.vectory.ocdroid.ui.chat.PartExpandState.Failed -> {
                             outcomeState
