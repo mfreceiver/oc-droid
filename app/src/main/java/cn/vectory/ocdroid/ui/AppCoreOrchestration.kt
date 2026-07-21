@@ -665,7 +665,7 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
  * calls this AFTER its own 二次 guard confirmed fp match, so
  * `currentServerGroupFp()` here equals `effect.serverGroupFp`.
  */
-internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolean) {
+internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolean, forceInitialWindow: Boolean = false) {
     launchLoadMessages(
         scope = appScope,
         repository = repository,
@@ -678,6 +678,11 @@ internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolea
         // gpter 复审 final-fix: compound-key guard (captured fp + provider).
         expectedServerGroupFp = currentServerGroupFp(),
         currentServerGroupFp = currentServerGroupFp,
+        // §empty-window-fix: forwarded ONLY by the VerifyAndHydrate cold-load
+        // branch (resident-but-empty window OR genuine cache miss) so the slim
+        // fetch bypasses a stale watermark. All other callers keep the default
+        // (false → anchored /since).
+        forceInitialWindow = forceInitialWindow,
     )
 }
 

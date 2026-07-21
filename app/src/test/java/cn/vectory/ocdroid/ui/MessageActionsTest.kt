@@ -256,6 +256,43 @@ class MessageActionsTest {
     }
 
     @Test
+    fun `launchLoadMessages forceInitialWindow=true routes to getMessagesPagedUnanchored (empty-window-fix)`() = runTest {
+        // §empty-window-fix: forceInitialWindow=true (ONLY the VerifyAndHydrate
+        // cold-load branch sets it) must call getMessagesPagedUnanchored (the
+        // UNANCHORED slim fetch, since=0L) — NOT the anchored
+        // getMessagesPaged. The merge / cursor-seeding logic is identical
+        // (both return MessagesPage), so the result hydration + cursor seed
+        // behave the same as resetLimit=true on the anchored path.
+        val fetched = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
+        coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returns
+            Result.success(MessagesPage(fetched, nextCursor = "cursor-init"))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "s1",
+            resetLimit = true,
+            emit = emit,
+            forceInitialWindow = true,
+        )
+        advanceUntilIdle()
+
+        // Messages hydrated from the unanchored fetch.
+        assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
+        // Cursor seeded from the unanchored fetch's nextCursor (same as the
+        // anchored resetLimit=true path — preserves loadMore continuity).
+        assertEquals("cursor-init", slices.chat.value.olderMessagesCursor)
+        assertTrue(slices.chat.value.hasMoreMessages)
+        // The unanchored method was called.
+        coVerify(atLeast = 1) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
+        // The anchored method was NOT called.
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+    }
+
+    @Test
     fun `launchLoadMessages rebuilds cursor when resetLimit=false but cursor is unseeded`() = runTest {
         // §F3-rebuild: 缓存水合后 olderMessagesCursor=null / hasMoreMessages=false（toWindow
         // 重建结果）。Verified 分支的跟随加载是 resetLimit=false——此时必须用 page.nextCursor

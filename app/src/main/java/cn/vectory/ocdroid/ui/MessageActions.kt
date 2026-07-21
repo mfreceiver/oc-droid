@@ -44,6 +44,24 @@ internal fun launchLoadMessages(
      * group during the REST call; the stale response must NOT be written.
      */
     currentServerGroupFp: () -> String = { "" },
+    /**
+     * §empty-window-fix: when `true`, the slim fetch is UNANCHORED — calls
+     * [OpenCodeRepository.getMessagesPagedUnanchored] (forces `since=0L`,
+     * bypassing the cached slim watermark) instead of the anchored
+     * [OpenCodeRepository.getMessagesPaged]. Used ONLY by the VerifyAndHydrate
+     * cold-load path (resident-but-empty CachedSessionWindow OR genuine cache
+     * miss) so a stale watermark that already covers the server's latest
+     * message cannot return an empty `/since` response and preserve the empty
+     * UI window (root cause of the "session opens to 暂无消息 but send
+     * populates it" bug). Default `false` → all other callers (periodic
+     * resetLimit=false refresh, loadMore, catch-up, send's onRefreshMessages)
+     * keep the anchored `/since` behavior.
+     *
+     * The merge / §preserveUnfetched / §Bug3 selective-merge / cursor-seeding
+     * logic below is IDENTICAL for both branches — both methods return the
+     * same [cn.vectory.ocdroid.data.repository.MessagesPage] shape.
+     */
+    forceInitialWindow: Boolean = false,
 ) {
 
     // Coalesce concurrent loads. ADB showed startup triggers message loads from
@@ -68,7 +86,19 @@ internal fun launchLoadMessages(
         // X-Next-Cursor for future loadMore; subsequent periodic reloads fetch the
         // latest window only and preserve the cursor so scrolled history stays
         // loadable.
-        repository.getMessagesPaged(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
+        //
+        // §empty-window-fix: forceInitialWindow=true (ONLY the VerifyAndHydrate
+        // cold-load branch sets it) routes through getMessagesPagedUnanchored
+        // so the slim fetch is UNANCHORED (since=0L) — bypassing a stale slim
+        // watermark that would return an empty /since response and preserve an
+        // empty UI window. Both methods return the same MessagesPage shape, so
+        // the merge / cursor-seeding logic below is shared verbatim.
+        val pageResult = if (forceInitialWindow) {
+            repository.getMessagesPagedUnanchored(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
+        } else {
+            repository.getMessagesPaged(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
+        }
+        pageResult
             .onSuccess { page ->
                 DebugLog.d("Sync", "fetched ${page.items.size} messages, newestId=${page.items.lastOrNull()?.info?.id ?: "-"}")
                 // §R-17 batch2 step e final: slice-only reads. Single fresh

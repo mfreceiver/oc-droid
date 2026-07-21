@@ -126,6 +126,11 @@ abstract class MainViewModelTestBase {
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
         coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        // §empty-window-fix: default stub for the unanchored cold-load path
+        // (VerifyAndHydrate cold-load branch). Same empty-page default as the
+        // anchored stub above so tests that don't care about the slim
+        // watermark bypass still drive their coVerify targets.
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
         coEvery { repository.getAgents() } returns Result.success(emptyList())
         coEvery { repository.getProviders() } returns Result.success(ProvidersResponse())

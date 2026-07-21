@@ -609,7 +609,25 @@ class AppCore @Inject constructor(
                     )
                     return@launch
                 }
-                if (cached != null) {
+                // §empty-window-fix: treat a resident-but-EMPTY CachedSessionWindow
+                // as a cache MISS. An empty window gets written when
+                // SessionSwitcher.captureCurrentSessionWindow snapshots an outgoing
+                // session that was still loading or already cleared. Hydrating it
+                // and running the normal resetLimit=false refresh would hit the slim
+                // branch of getMessagesPaged — anchored on the EXISTING slim
+                // watermark + /since. If that watermark already covers the server's
+                // latest message, the response is EMPTY → the selective merge
+                // preserves the empty UI window → "暂无消息" on open (root cause of
+                // the "session opens empty but send populates it" bug). Falling
+                // through to the cold-load branch runs an UNANCHORED fetch
+                // (forceInitialWindow=true → getMessagesPagedUnanchored → since=0L)
+                // which bypasses the stale watermark.
+                //
+                // Classification uses ONLY messages.isEmpty() (NOT "no recent tail")
+                // so a window with older history but missing the tail still hydrates
+                // normally — the resetLimit=false refresh re-fetches the missing tail
+                // non-destructively (§preserveUnfetched).
+                if (cached != null && cached.messages.isNotEmpty()) {
                     store.mutateChat {
                         it.copy(
                             messages = cached.messages,
@@ -623,10 +641,15 @@ class AppCore @Inject constructor(
                     // (§preserveUnfetched in MessageActions).
                     loadMessagesForEffect(effect.sessionId, resetLimit = false)
                 } else {
-                    // No memory hit → cold-start fetch (latest window).
+                    // §empty-window-fix: cold-load path. This branch now covers
+                    // BOTH the genuine cache miss (cached == null) AND the
+                    // resident-but-empty window (cached.messages.isEmpty()).
+                    // forceInitialWindow=true makes the slim fetch UNANCHORED
+                    // (since=0L), bypassing any stale watermark that would
+                    // return an empty /since response.
                     // resetLimit=true wipes any partial state and seeds a
                     // fresh olderMessagesCursor.
-                    loadMessagesForEffect(effect.sessionId, resetLimit = true)
+                    loadMessagesForEffect(effect.sessionId, resetLimit = true, forceInitialWindow = true)
                 }
             }
             true

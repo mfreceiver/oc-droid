@@ -1061,6 +1061,16 @@ class ChatViewModelTest : MainViewModelTestBase() {
             Result.success(MessagesPage(aMessagesInitial, null))
         coEvery { repository.getMessagesPaged("session-B", any(), any()) } returns
             Result.success(MessagesPage(bMessages, null))
+        // §empty-window-fix: the INITIAL open of each session is now a
+        // VerifyAndHydrate cold-load (nothing cached → peek MISS) which routes
+        // through getMessagesPagedUnanchored (forceInitialWindow=true). The
+        // switch-BACK to A is a cache HIT (non-empty resident window) → still
+        // uses getMessagesPaged(resetLimit=false); that path's stubs (incl.
+        // the re-mock at ~line 1103) are unchanged.
+        coEvery { repository.getMessagesPagedUnanchored("session-A", any(), any()) } returns
+            Result.success(MessagesPage(aMessagesInitial, null))
+        coEvery { repository.getMessagesPagedUnanchored("session-B", any(), any()) } returns
+            Result.success(MessagesPage(bMessages, null))
 
         val core = createCore()
         // remove-message-persistence Task 2: switchTo now emits VerifyAndHydrate
@@ -1144,6 +1154,17 @@ class ChatViewModelTest : MainViewModelTestBase() {
             Result.success(MessagesPage(aOlder, null))
         coEvery { repository.getMessagesPaged("session-B", any(), any(), any()) } returns
             Result.success(MessagesPage(emptyList(), null))
+        // §empty-window-fix: the INITIAL open of A is a VerifyAndHydrate
+        // cold-load (nothing cached → peek MISS) which routes through
+        // getMessagesPagedUnanchored (forceInitialWindow=true). loadMore
+        // (older-page via "cursor-1") and the switch-back-to-A (cache HIT)
+        // stay on getMessagesPaged — those stubs above are unchanged. Mirror
+        // the same registration order (generic fallback first, specific
+        // before=null last) so the specific stub wins for A's initial open.
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns
+            Result.success(MessagesPage(aLatest, "cursor-1"))
+        coEvery { repository.getMessagesPagedUnanchored("session-A", any(), null, any()) } returns
+            Result.success(MessagesPage(aLatest, "cursor-1"))
 
         val core = createCore()
         // remove-message-persistence Task 2: the in-memory sessionWindowCache

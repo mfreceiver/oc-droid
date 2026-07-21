@@ -1364,6 +1364,77 @@ class OpenCodeRepository @Inject constructor(
     }
 
     /**
+     * §empty-window-fix: UNANCHORED slim initial-window fetch — same contract
+     * as [getMessagesPaged] but forces `since=0L` in slim mode (ignores the
+     * cached slim SSE watermark). Used ONLY by the VerifyAndHydrate cold-load
+     * path (via `launchLoadMessages(forceInitialWindow = true)` /
+     * `loadMessagesForEffect(forceInitialWindow = true)`) when a resident-but-
+     * EMPTY [cn.vectory.ocdroid.ui.controller.CachedSessionWindow] is treated
+     * as a cache miss.
+     *
+     * # Why this exists (root cause of the "session opens to 暂无消息 but send
+     * populates it" bug)
+     *
+     * An empty window gets written when
+     * [cn.vectory.ocdroid.ui.controller.SessionSwitcher.captureCurrentSessionWindow]
+     * snapshots an outgoing session that was still loading or already cleared.
+     * Pre-fix, VerifyAndHydrate hydrated that empty window and ran a
+     * `resetLimit=false` refresh → [getMessagesPaged]'s slim branch anchored on
+     * the EXISTING slim watermark + `/since/{ts}`. If that watermark already
+     * covered the server's latest message, the `/since` response was EMPTY, so
+     * the selective merge preserved the empty UI window. Net: server had
+     * messages, UI showed "暂无消息". Sending bypassed this because it triggers
+     * `onRefreshMessages(sessionId, true)` via `loadMessagesWithRetry` + SSE
+     * activity.
+     *
+     * Forcing `since=0L` makes the fetch UNANCHORED — it returns the server's
+     * actual initial window regardless of any cached watermark, exactly like a
+     * genuine cache-miss cold load.
+     *
+     * # Shape compatibility
+     *
+     * Returns the SAME [MessagesPage] shape (items + nextCursor) as
+     * [getMessagesPaged] so the caller's selective-merge
+     * (§preserveUnfetched / §Bug3) + cursor-seeding
+     * (`olderMessagesCursor` / `hasMoreMessages`) logic is IDENTICAL to the
+     * `resetLimit=true` path. The `X-Next-Cursor` header seeds the history
+     * cursor so `loadMore` continues to work.
+     *
+     * Legacy non-slim mode (`isSlimMode == false`) has no watermark concept —
+     * the body is byte-for-byte identical to [getMessagesPaged]'s legacy
+     * branch (same [api.getMessages] call, same header read).
+     *
+     * See [getMessagesPaged] for the anchored (watermark-based) counterpart.
+     * `getMessagesPaged`'s default behavior for all other callers is
+     * unchanged.
+     */
+    suspend fun getMessagesPagedUnanchored(
+        sessionId: String,
+        limit: Int? = null,
+        before: String? = null,
+        token: SlimCommitToken = captureSlimCommitToken(),
+    ): Result<MessagesPage> = runSuspendCatching {
+        if (isSlimMode) {
+            // §empty-window-fix: since=0L — fetch ALL messages regardless of
+            // the cached slim watermark. This is the unanchored semantic.
+            val response = api.getSlimapiMessagesSince(sessionId, 0L, limit, before)
+            if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
+            val items = response.body() ?: emptyList()
+            if (!bumpSlimBookmarkFromItems(sessionId, items, token)) {
+                throw StaleSlimCommitException()
+            }
+            val nextCursor = response.headers()["X-Next-Cursor"]
+            MessagesPage(items = items, nextCursor = nextCursor)
+        } else {
+            val response = api.getMessages(sessionId, limit, before)
+            if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
+            val items = response.body() ?: emptyList()
+            val nextCursor = response.headers()["X-Next-Cursor"]
+            MessagesPage(items = items, nextCursor = nextCursor)
+        }
+    }
+
+    /**
      * §Phase1B lightweight tail probe: fetches only the single newest message
      * id for [sessionId] (limit=1, desc default).
      */

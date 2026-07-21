@@ -732,9 +732,79 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             "cursor null on cold-start (resetLimit=true seeds nothing from cache)",
             c.store.chatFlow.value.olderMessagesCursor,
         )
-        // C3: loadMessages(resetLimit=true) fired.
+        // C3: loadMessages(resetLimit=true) fired. §empty-window-fix: the
+        // cold-load path now routes through getMessagesPagedUnanchored (the
+        // UNANCHORED slim fetch that bypasses a stale watermark).
         io.mockk.coVerify(atLeast = 1) {
-            repository.getMessagesPaged(any(), any(), any())
+            repository.getMessagesPagedUnanchored(any(), any(), any(), any())
+        }
+    }
+
+    @Test
+    fun `VerifyAndHydrate treats resident-but-EMPTY window as miss and cold-loads unanchored (empty-window-fix)`() = runTest {
+        // §empty-window-fix regression: a resident CachedSessionWindow with an
+        // EMPTY messages list + a stale slim watermark that already covers the
+        // server's latest → pre-fix the hydrate + resetLimit=false refresh
+        // returned an empty /since response → "暂无消息". The fix treats the
+        // empty window as a MISS and cold-loads via getMessagesPagedUnanchored
+        // (since=0L), which returns the server's actual initial window.
+        //
+        // Setup:
+        //  - default mock: getMessagesPaged (anchored) returns EMPTY (the bug
+        //    scenario — a stale watermark returns no new messages).
+        //  - stub: getMessagesPagedUnanchored returns real messages (the fix —
+        //    unanchored fetch returns the server's actual window).
+        val c = newCore()
+        io.mockk.every { hostProfileStore.currentProfile() } returns pinnedTestProfile()
+        c.store.mutateChat { it.copy(currentSessionId = "sess-A") }
+        // Seed a resident-but-EMPTY window — the root-cause state.
+        c.writeSessionWindow(
+            "test-fp", "sess-A",
+            CachedSessionWindow(
+                messages = emptyList(),
+                partsByMessage = emptyMap(),
+                olderMessagesCursor = null,
+                hasMoreMessages = false,
+            ),
+        )
+        // The anchored path (getMessagesPaged) returns empty — the bug
+        // scenario. This is the default mock, restated for clarity.
+        io.mockk.coEvery {
+            repository.getMessagesPaged(any(), any(), any(), any())
+        } returns Result.success(MessagesPage(emptyList(), null))
+        // The UNANCHORED path returns real messages — the fix.
+        val coldMsg = cn.vectory.ocdroid.data.model.Message(id = "server-m1", role = "user")
+        val coldMsgWithParts = cn.vectory.ocdroid.data.model.MessageWithParts(
+            info = coldMsg,
+            parts = emptyList(),
+        )
+        io.mockk.coEvery {
+            repository.getMessagesPagedUnanchored(any(), any(), any(), any())
+        } returns Result.success(MessagesPage(listOf(coldMsgWithParts), null))
+
+        c.dispatchSessionEffect(
+            ControllerEffect.VerifyAndHydrate("test-fp", "sess-A", createdAt = 1L)
+        )
+        advanceUntilIdle()
+
+        // The empty window did NOT hydrate (would have left the slice empty).
+        // The cold-load fetched the server's actual message via the unanchored
+        // path → the slice is populated, NOT "暂无消息".
+        assertEquals(
+            "empty resident window must cold-load server messages (not stay empty)",
+            listOf("server-m1"),
+            c.store.chatFlow.value.messages.map { it.id },
+        )
+        // The cold-load branch called getMessagesPagedUnanchored (NOT the
+        // anchored getMessagesPaged — that path returns empty under a stale
+        // watermark and is the root cause).
+        io.mockk.coVerify(atLeast = 1) {
+            repository.getMessagesPagedUnanchored(any(), any(), any(), any())
+        }
+        // The anchored getMessagesPaged must NOT be called for the cold-load
+        // path — the empty window is treated as a miss, not a hit-with-refresh.
+        io.mockk.coVerify(exactly = 0) {
+            repository.getMessagesPaged(any(), any(), any(), any())
         }
     }
 
