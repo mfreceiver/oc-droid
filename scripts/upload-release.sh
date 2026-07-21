@@ -72,37 +72,30 @@ if [[ -z "$RID" ]]; then
 fi
 echo "   release id: $RID"
 
-# §fix(gitea-epoch-created_at): Gitea 有个 bug —— tag 刚 push、还没被索引时建
-#   release，created_at 会被写成 1970-01-01（epoch），release 在页面上按
-#   created_at 倒序时沉到最底（v0.11.1 曾因此排到 v0.11.0 下方）。POST/PATCH 都
-#   无法改 created_at（字段被服务端忽略）。唯一可靠修法：删 release + 删远端
-#   tag + 重新 push（强制 Gitea 重新索引 tag 的 tagger date）+ 重建 release，
-#   新 release 的 created_at 会取 tagger date。best-effort：失败只告警不中断。
-YEAR=$(release_created_year)
-if [[ "$YEAR" == "1970" ]]; then
-  echo "⚠️  release created_at 卡在 epoch（Gitea 未及时索引 tag），执行自愈（删 release + 重新索引 tag + 重建）..."
-  if curl -sf -X DELETE "$API/$RID" -H "$AUTH" >/dev/null; then
-    TAG_SHA=$(git rev-parse "$TAG" 2>/dev/null || true)
-    if [[ -n "$TAG_SHA" ]] && git push origin --delete "$TAG" >/dev/null 2>&1; then
-      sleep 2
-      git push origin "$TAG" >/dev/null 2>&1 || true
-      # 轮询直到 Gitea 能解析该 tag 的 tagger date（索引完成）
-      for _ in $(seq 1 10); do
-        TD=$(curl -sf -H "$AUTH" "$GITEA_URL/api/v1/repos/$REPO/git/tags/$TAG_SHA" 2>/dev/null \
-          | python3 -c 'import sys,json;print(json.load(sys.stdin)["tagger"]["date"])' 2>/dev/null || true)
-        [[ -n "$TD" ]] && break
-        sleep 2
-      done
-      RID=$(create_release)
-      NEW_YEAR=$(release_created_year)
-      echo "   自愈完成：新 release id=$RID created_at 年份=$NEW_YEAR（tagger date=$TD）"
-    else
-      echo "   ⚠️ 删/重 push tag 失败，跳过自愈（手动处理：Gitea UI 重建 release）"
-      RID=$(release_id_by_tag || true)
-    fi
-  else
-    echo "   ⚠️ 删旧 release 失败，跳过自愈"
+# §fix(gitea-epoch-created_at): 真因 —— Gitea 服务端 createTag() 仅在 tag 尚不存在
+#   时才给 CreatedUnix 赋值；本流程是「先 git push tag、再 POST /releases」，故 tag
+#   在创建 release 时已存在 → CreatedUnix 留在 0 → created_at 立刻是 1970-01-01。
+#   created_at 不可经 POST/PATCH 设置（Gitea release API 结构体无此字段）。
+#   但在本实例上，tag-push 钩子会在数秒内异步把 created_unix 回填为 git tag 的
+#   tagger date（经验证：v0.11.0–v0.11.8 全部 12 个 release 最终都等于 tagger date，
+#   含刚创建时为 epoch 者）。因此历史上「DELETE release + git push --delete + 重
+#   push tag + 重建 release」的破坏性自愈既 (a) 不必要（异步回填会修）、(b) 有害
+#   （多余的 release/tag churn + 风险）、(c) 还会误报失败（重建后立即复检必然仍是
+#   epoch，因为异步回填还没落地）。
+#   现做法：非破坏性轮询等待（最多 ~60s）；超时只告警不中断 —— APK/notes 上传与
+#   created_at 无关，release 功能完整，排序问题大概率稍后自愈。
+echo "==> 等待 Gitea 异步回填 created_at（非破坏性轮询，最多 ~60s）..."
+YEAR=""
+for _ in $(seq 1 30); do
+  YEAR=$(release_created_year || true)
+  if [[ -n "$YEAR" && "$YEAR" != "1970" ]]; then
+    echo "   ✅ created_at 已就绪（年份=$YEAR）"
+    break
   fi
+  sleep 2
+done
+if [[ -z "$YEAR" || "$YEAR" == "1970" ]]; then
+  echo "   ⚠️ created_at 仍为 epoch 或读取失败（Gitea 异步回填未在 ~60s 内完成）；仅影响 UI 列表排序，release 功能完整，继续上传。"
 fi
 
 # --- 2. 上传 APK 附件 ---
