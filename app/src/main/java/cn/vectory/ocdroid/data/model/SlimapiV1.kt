@@ -196,6 +196,36 @@ enum class SlimapiResyncReason {
     }
 }
 
+// ── Sessions page (three headers) ────────────────────────────────────
+
+/**
+ * rev-F: page-level metadata returned by `GET /slimapi/sessions` as
+ * response headers (case-insensitive). Carries discovery-related information
+ * that the client must consume with correct semantics, NOT as regular
+ * pagination state.
+ */
+data class SlimSessionsPage(
+    val sessions: List<Session>,
+    /**
+     * `X-Complete`: `"true"` iff `len(sessions) < limit` (this page not
+     * full). NOT authoritative full universe — only a hint that the client
+     * might be missing rows if it applies limit + got `complete=false`.
+     */
+    val complete: Boolean? = null,
+    /**
+     * `X-Discovery-Directories`: allowlist size (NOT hit count). Int
+     * representation (the header string is parseable as an integer).
+     */
+    val discoveryDirectories: Int? = null,
+    /**
+     * `X-Discovery-Ready`: `"true"` if the sidecar has a last-known-good
+     * snapshot. `"false"` = discovery not ready — the client MUST NOT treat
+     * empty/null sessions as authoritative empty wipe. Null = old sidecar
+     * (pre-rev-F) — preserve original behavior.
+     */
+    val discoveryReady: Boolean? = null,
+)
+
 // ── §5 G6 batch full envelope ────────────────────────────────────────────
 
 /**

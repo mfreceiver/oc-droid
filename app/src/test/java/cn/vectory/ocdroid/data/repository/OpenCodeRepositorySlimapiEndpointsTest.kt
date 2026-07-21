@@ -4,6 +4,7 @@ import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.PermissionResponse
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
+import cn.vectory.ocdroid.data.model.SlimSessionsPage
 import cn.vectory.ocdroid.data.model.SlimapiPermissionEntry
 import cn.vectory.ocdroid.data.model.SlimapiQuestionEntry
 import cn.vectory.ocdroid.util.DebugLog
@@ -99,7 +100,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         val result = repository.getSlimapiSessions()
 
         assertTrue(result.isSuccess)
-        assertEquals(0, result.getOrThrow().size)
+        assertEquals(0, result.getOrThrow().sessions.size)
         val request = server.takeRequest()
         assertEquals("GET", request.method)
         assertEquals("/slimapi/sessions", request.path)
@@ -109,8 +110,10 @@ class OpenCodeRepositorySlimapiEndpointsTest {
     fun `getSlimapiSessions forwards directory and roots and limit`() = runBlocking {
         server.enqueue(jsonResponse("[]"))
 
-        repository.getSlimapiSessions(directories = listOf("/w"), roots = true, limit = 50)
+        val result = repository.getSlimapiSessions(directories = listOf("/w"), roots = true, limit = 50)
 
+        assertTrue(result.isSuccess)
+        assertTrue(result.getOrThrow() is SlimSessionsPage)
         val request = server.takeRequest()
         assertTrue("path contains directory: ${request.path}", request.path!!.contains("directory=%2Fw"))
         assertTrue("path contains roots=true: ${request.path}", request.path!!.contains("roots=true"))
@@ -124,8 +127,9 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         // Retrofit expands a List<String> into repeated query entries.
         server.enqueue(jsonResponse("[]"))
 
-        repository.getSlimapiSessions(directories = listOf("/w1", "/w2", "/w3"))
+        val result = repository.getSlimapiSessions(directories = listOf("/w1", "/w2", "/w3"))
 
+        assertTrue(result.isSuccess)
         val request = server.takeRequest()
         val path = request.path!!
         // Each entry must appear as its own `directory=` query (URL-encoded).

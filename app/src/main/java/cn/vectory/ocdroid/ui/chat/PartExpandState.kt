@@ -4,6 +4,7 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.ExpandOutcome
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.isThinPlaceholder
 import cn.vectory.ocdroid.data.repository.mergeFullBatchIntoLocal
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.runSuspendCatching
@@ -305,29 +306,38 @@ class ExpandPartsUseCase(
                     // triple-match (partId + normalizedMessageId, owner =
                     // lm.info.id) before trusting Loaded.
                     ownerMsgId in itemMsgIds -> {
-                        val fetchedParts = itemByMsg.getValue(ownerMsgId).parts
-                        val replaced = fetchedParts.any { fp ->
-                            fp.id == part.id &&
-                                fp.normMsg(ownerMsgId) == part.normMsg(ownerMsgId)
-                        }
-                        if (replaced) {
+                        // Rev F (CLIENT_CHANGES): thin placeholder parts are always
+                        // treated as Loaded when the owner message was fetched,
+                        // because T8 replaced the entire message's parts list with
+                        // the full fetch's parts (message-level whole replace).
+                        // No per-part-id matching is needed or possible.
+                        if (part.isThinPlaceholder()) {
                             PartExpandState.Loaded
                         } else {
-                            // No fetched part matches T8's triple — message
-                            // came back but T8 would not replace this part
-                            // (anomalous: missing partId OR messageId mismatch).
-                            // Surface as Failed so the UI offers retry instead
-                            // of staying on a skeleton that Loaded promised to
-                            // replace.
-                            DebugLog.w(
-                                TAG,
-                                "expand foldOk A partId=${part.id} part.messageId=${part.messageId} " +
-                                    "ownerMsgId=$ownerMsgId replaced=false " +
-                                    "fetchedPartIds=${itemByMsg.getValue(ownerMsgId).parts.map { it.id }.take(20)} " +
-                                    "itemMsgIds(${itemMsgIds.size})=${itemMsgIds.take(20)} " +
-                                    "failedMsgIds(${failedMsgIds.size})=${failedMsgIds.take(20)}",
-                            )
-                            PartExpandState.Failed(code = null)
+                            val fetchedParts = itemByMsg.getValue(ownerMsgId).parts
+                            val replaced = fetchedParts.any { fp ->
+                                fp.id == part.id &&
+                                    fp.normMsg(ownerMsgId) == part.normMsg(ownerMsgId)
+                            }
+                            if (replaced) {
+                                PartExpandState.Loaded
+                            } else {
+                                // No fetched part matches T8's triple — message
+                                // came back but T8 would not replace this part
+                                // (anomalous: missing partId OR messageId mismatch).
+                                // Surface as Failed so the UI offers retry instead
+                                // of staying on a skeleton that Loaded promised to
+                                // replace.
+                                DebugLog.w(
+                                    TAG,
+                                    "expand foldOk A partId=${part.id} part.messageId=${part.messageId} " +
+                                        "ownerMsgId=$ownerMsgId replaced=false " +
+                                        "fetchedPartIds=${itemByMsg.getValue(ownerMsgId).parts.map { it.id }.take(20)} " +
+                                        "itemMsgIds(${itemMsgIds.size})=${itemMsgIds.take(20)} " +
+                                        "failedMsgIds(${failedMsgIds.size})=${failedMsgIds.take(20)}",
+                                )
+                                PartExpandState.Failed(code = null)
+                            }
                         }
                     }
                     // Branch B: per-message failure in the G6 envelope's errors[].

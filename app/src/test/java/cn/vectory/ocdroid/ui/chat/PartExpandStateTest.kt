@@ -494,6 +494,71 @@ class PartExpandStateTest {
         assertNull(result.mergedLocal)
     }
 
+    /**
+     * Rev F (CLIENT_CHANGES): thin placeholder parts are Loaded when
+     * the owner message was fetched, regardless of per-part-id match.
+     */
+    @Test
+    fun `C2 - placeholder part with hasFull=true and omitted is Loaded when owner fetched`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        // Full message has real parts with different ids than the placeholder.
+        val realPart = Part(id = "prt_real", messageId = "m1", type = "text", text = "real content")
+        coEvery { repo.expandMessagesFullBatch("s1", any()) } returns ExpandOutcome.Ok(
+            items = listOf(msg("m1", listOf(realPart))),
+            failedIds = emptyList(),
+            usedBatch = true,
+        )
+        val uc = ExpandPartsUseCase(repo)
+        // Local part is a thin placeholder.
+        val placeholderPart = Part(
+            id = "thin_placeholder_m1",
+            messageId = "m1",
+            type = "text",
+            text = "skeleton",
+            hasFull = true,
+            omitted = listOf("tool"),
+        )
+        val local = listOf(msg("m1", listOf(placeholderPart)))
+
+        val result = uc.expandParts("s1", local, listOf(placeholderPart)).getOrThrow()
+
+        // Must be Loaded despite placeholder id not matching any fetched part.
+        assertEquals(
+            "thin placeholder must be Loaded when owner message is fetched",
+            PartExpandState.Loaded,
+            result.states[PartKey("m1", "thin_placeholder_m1")],
+        )
+        // Merge must have whole-replaced the parts list.
+        assertEquals(listOf(realPart), result.mergedLocal!!.single().parts)
+    }
+
+    @Test
+    fun `C2 - placeholder part with owner not fetched is Failed`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.expandMessagesFullBatch("s1", any()) } returns ExpandOutcome.Ok(
+            items = emptyList(),
+            failedIds = listOf("m1"),
+            usedBatch = true,
+        )
+        val uc = ExpandPartsUseCase(repo)
+        val placeholderPart = Part(
+            id = "thin_placeholder_m1",
+            messageId = "m1",
+            type = "text",
+            text = "skeleton",
+            hasFull = true,
+            omitted = listOf("tool"),
+        )
+        val local = listOf(msg("m1", listOf(placeholderPart)))
+
+        val result = uc.expandParts("s1", local, listOf(placeholderPart)).getOrThrow()
+
+        assertEquals(
+            PartExpandState.Failed(code = null),
+            result.states[PartKey("m1", "thin_placeholder_m1")],
+        )
+    }
+
     @Test
     fun `C2 - requests exactly the deduped set of message ids for eligible parts`() = runTest {
         val repo = mockk<OpenCodeRepository>(relaxed = true)

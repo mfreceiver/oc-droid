@@ -112,8 +112,9 @@ class SlimLiveSidecarIntegrationTest {
     fun slim_sessions_list_deserializes() = runBlocking {
         val result = repository.getSlimapiSessions()
         assertTrue("getSlimapiSessions failed: ${result.exceptionOrNull()}", result.isSuccess)
-        val sessions = result.getOrThrow()
-        assertNotNull(sessions)
+        val page = result.getOrThrow()
+        assertNotNull(page)
+        val sessions = page.sessions
         // Each session carries the contract-minimum fields. We do not assert
         // non-empty (the sidecar might be legitimately empty in some setups);
         // we DO assert that every returned row has the three required fields.
@@ -127,6 +128,7 @@ class SlimLiveSidecarIntegrationTest {
             )
         }
         println("[SlimLiveSidecar] sessions count=${sessions.size}")
+        println("[SlimLiveSidecar] complete=${page.complete} discoveryDirectories=${page.discoveryDirectories} discoveryReady=${page.discoveryReady}")
         sessions.take(3).forEach { s ->
             println("[SlimLiveSidecar]   id=${s.id} dir=${s.directory} title=${s.title ?: "-"}")
         }
@@ -188,9 +190,9 @@ class SlimLiveSidecarIntegrationTest {
         val sessionsResult = repository.getSlimapiSessions()
         assumeTrue(
             "Skipping: no sessions upstream (getSlimapiSessions failed: ${sessionsResult.exceptionOrNull()})",
-            sessionsResult.isSuccess && sessionsResult.getOrThrow().isNotEmpty(),
+            sessionsResult.isSuccess && sessionsResult.getOrThrow().sessions.isNotEmpty(),
         )
-        val sid = sessionsResult.getOrThrow().first().id
+        val sid = sessionsResult.getOrThrow().sessions.first().id
 
         val outcome = repository.getSlimapiSessionStatusOutcome(sid)
         println("[SlimLiveSidecar] status sid=$sid outcome=$outcome")
@@ -219,9 +221,9 @@ class SlimLiveSidecarIntegrationTest {
         val sessionsResult = repository.getSlimapiSessions()
         assumeTrue(
             "Skipping: no sessions upstream",
-            sessionsResult.isSuccess && sessionsResult.getOrThrow().isNotEmpty(),
+            sessionsResult.isSuccess && sessionsResult.getOrThrow().sessions.isNotEmpty(),
         )
-        val sid = sessionsResult.getOrThrow().first().id
+        val sid = sessionsResult.getOrThrow().sessions.first().id
 
         val result = repository.getSlimapiMessagesPage(
             sessionId = sid,

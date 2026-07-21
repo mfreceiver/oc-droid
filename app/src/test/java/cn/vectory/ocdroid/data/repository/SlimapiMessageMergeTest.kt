@@ -171,6 +171,91 @@ class SlimapiMessageMergeTest {
         assertTrue(merged.isEmpty())
     }
 
+    // ── Rev F (CLIENT_CHANGES): thin placeholder message-level whole replace ─
+
+    @Test
+    fun `T8-C1 thin placeholder message triggers whole-part replacement`() {
+        // Local has a thin_placeholder_p1 part; full has real prt_* parts.
+        // After merge, the local parts list must be fully replaced with the full parts.
+        val local = listOf(
+            msgWithParts(
+                "msg-1",
+                part(id = "thin_placeholder_m1", messageId = null, text = "skeleton"),
+            )
+        )
+        val full = listOf(
+            msgWithParts(
+                "msg-1",
+                part(id = "prt_foo", messageId = null, text = "real foo"),
+                part(id = "prt_bar", messageId = null, text = "real bar"),
+            )
+        )
+
+        val merged = mergeFullBatchIntoLocal(local, full)
+
+        assertEquals(1, merged.size)
+        assertEquals(2, merged[0].parts.size)
+        assertEquals("real foo", merged[0].parts[0].text)
+        assertEquals("real bar", merged[0].parts[1].text)
+    }
+
+    @Test
+    fun `T8-C1 thin placeholder message with no corresponding full leaves skeleton unchanged`() {
+        // Local has thin_placeholder; full has no message with matching id.
+        // The message should remain unchanged (the early-return `return@map lm`).
+        val local = listOf(
+            msgWithParts("msg-1", part(id = "thin_placeholder_m1", messageId = null, text = "skeleton")),
+        )
+        val full = emptyList<MessageWithParts>()
+
+        val merged = mergeFullBatchIntoLocal(local, full)
+
+        assertEquals(1, merged.size)
+        assertEquals(1, merged[0].parts.size)
+        assertEquals("skeleton", merged[0].parts[0].text)
+    }
+
+    @Test
+    fun `T8-C1 real parts still go through per-part merge (placeholder rule does not apply)`() {
+        // Local has normal part (not placeholder); merge must still work per-part-id.
+        val local = listOf(
+            msgWithParts("msg-1", part(id = "p1", messageId = null, text = "thin")),
+        )
+        val full = listOf(
+            msgWithParts("msg-1", part(id = "p1", messageId = null, text = "full-expanded")),
+        )
+
+        val merged = mergeFullBatchIntoLocal(local, full)
+
+        assertEquals(1, merged.size)
+        assertEquals(1, merged[0].parts.size)
+        assertEquals("full-expanded", merged[0].parts[0].text)
+    }
+
+    @Test
+    fun `T8-C1 mixed one message with placeholder another with real parts`() {
+        // Both messages: first has placeholder, second has real parts.
+        // First should whole-replace, second should per-part merge.
+        val local = listOf(
+            msgWithParts("msg-1", part(id = "thin_placeholder_m1", messageId = null, text = "skeleton1")),
+            msgWithParts("msg-2", part(id = "p2", messageId = null, text = "thin2")),
+        )
+        val full = listOf(
+            msgWithParts("msg-1", part(id = "real_1", messageId = null, text = "full1")),
+            msgWithParts("msg-2", part(id = "p2", messageId = null, text = "full2")),
+        )
+
+        val merged = mergeFullBatchIntoLocal(local, full)
+
+        assertEquals(2, merged.size)
+        // msg-1: whole-replace → 1 part "real_1"
+        assertEquals(1, merged[0].parts.size)
+        assertEquals("full1", merged[0].parts[0].text)
+        // msg-2: per-part merge → 1 part "p2" with "full2"
+        assertEquals(1, merged[1].parts.size)
+        assertEquals("full2", merged[1].parts[0].text)
+    }
+
     @Test
     fun `T8-C1 multiple messages each get their own replacement scope`() {
         // Two messages, each with one part sharing the same partId "p1".

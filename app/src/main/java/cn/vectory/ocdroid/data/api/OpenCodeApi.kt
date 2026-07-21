@@ -290,7 +290,7 @@ interface OpenCodeApi {
         @Query("roots") roots: Boolean? = null,
         @Query("limit") limit: Int? = null,
         @Query("search") search: String? = null
-    ): List<Session>
+    ): retrofit2.Response<List<Session>>
 
     /**
      * Cluster A: anchor-paginated message fetch (v1 contract §5, A2=A).

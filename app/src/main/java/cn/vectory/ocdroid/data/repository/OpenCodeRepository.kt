@@ -1214,12 +1214,8 @@ class OpenCodeRepository @Inject constructor(
      */
     suspend fun getSessions(limit: Int? = null): Result<List<Session>> =
         if (isSlimMode) {
-            runSuspendCatching {
-                api.getSlimapiSessions(directories = null, roots = null, limit = limit)
-            }.recoverCatching { e ->
-                logSlimapiSessionsCodeIfPresent(e)
-                throw e
-            }
+            getSlimapiSessions(directories = null, roots = null, limit = limit)
+                .mapCatching { page -> page.sessions }
         } else {
             runSuspendCatching { api.getSessions(limit) }
         }
@@ -1242,16 +1238,11 @@ class OpenCodeRepository @Inject constructor(
      */
     suspend fun getSessionsForDirectory(directory: String, limit: Int? = null): Result<List<Session>> =
         if (isSlimMode) {
-            runSuspendCatching {
-                api.getSlimapiSessions(
-                    directories = listOf(directory),
-                    roots = true,
-                    limit = limit,
-                )
-            }.recoverCatching { e ->
-                logSlimapiSessionsCodeIfPresent(e)
-                throw e
-            }
+            getSlimapiSessions(
+                directories = listOf(directory),
+                roots = true,
+                limit = limit,
+            ).mapCatching { page -> page.sessions }
         } else {
             runSuspendCatching { api.getSessions(limit = limit, directory = directory, roots = true) }
         }
@@ -2443,13 +2434,39 @@ class OpenCodeRepository @Inject constructor(
      * matching the v1 contract's repeated-param requirement). null = the
      * sidecar returns all directories it is aggregating for this client.
      */
+    /**
+     * rev-F: return [SlimSessionsPage] with parsed headers.
+     * The raw list comes from response body; headers carry discovery metadata.
+     * Case-insensitive header lookup, tolerant of absent headers (null).
+     */
     suspend fun getSlimapiSessions(
         directories: List<String>? = null,
         roots: Boolean? = null,
         limit: Int? = null,
         search: String? = null
-    ): Result<List<Session>> = runSuspendCatching {
-        api.getSlimapiSessions(directories, roots, limit, search)
+    ): Result<SlimSessionsPage> = runSuspendCatching {
+        val resp = api.getSlimapiSessions(directories, roots, limit, search)
+        if (!resp.isSuccessful) {
+            // Treat non-2xx responses as failures: log the error code and throw
+            // so the runSuspendCatching block returns Result.failure and the
+            // 3-state contract (coldStartSlimSync's .getOrNull() → null) holds.
+            val code = parseErrorCode(resp)
+            if (code != null) {
+                DebugLog.w(TAG, "slimapi sessions failed: $code")
+            }
+            // Throw an HttpException so the recoverCatching block also fires
+            // (it will log the code and rethrow). This preserves the existing
+            // "result.exceptionOrNull() is HttpException" contract.
+            throw retrofit2.HttpException(resp)
+        }
+        val sessions = resp.body() ?: emptyList()
+        val headers = resp.headers()
+        SlimSessionsPage(
+            sessions = sessions,
+            complete = headers?.get("X-Complete")?.toBooleanStrictOrNull(),
+            discoveryDirectories = headers?.get("X-Discovery-Directories")?.toIntOrNull(),
+            discoveryReady = headers?.get("X-Discovery-Ready")?.toBooleanStrictOrNull(),
+        )
     }.recoverCatching { e ->
         // Task 3 (slimapi v0.2.2): /sessions failure bodies now carry the
         // sidecar's coded envelope ({"code":"upstream_unavailable"} /
@@ -2704,7 +2721,7 @@ class OpenCodeRepository @Inject constructor(
         // so a scope cancel mid-fetch propagates as CE instead of being
         // collapsed to a null piece (which would mask the cancellation as
         // a per-piece failure).
-        val sessions: List<Session>? = runSuspendCatching {
+        val sessionsPage: SlimSessionsPage? = runSuspendCatching {
             // §session-scope-narrow: pin `roots=true` + explicit limit so the
             // cold-start snapshot fetches ONLY root/main sessions of the
             // (caller-narrowed) directory set, NOT the unbounded child fan-out
@@ -2717,11 +2734,11 @@ class OpenCodeRepository @Inject constructor(
             // `recentWorkdirs` directory narrowing + the merge in
             // [SessionSyncCoordinator.applySlimColdStartSnapshot] (fix-4),
             // this is the second of the two scope-narrowing levers.
-            api.getSlimapiSessions(
+            getSlimapiSessions(
                 directories = directories,
                 roots = true,
                 limit = SLIM_COLDSTART_SESSION_LIMIT,
-            )
+            ).getOrNull()
         }.getOrNull()
         // §slim-envelope: /questions + /permissions return {items, errors};
         // flatten `.items` for UI. Per-directory `errors` are logged here
@@ -2826,10 +2843,13 @@ class OpenCodeRepository @Inject constructor(
         // hard transport failure that threw out of runCatching surfaces
         // as Result.failure.
         SlimColdStartSnapshot(
-            sessions = sessions,
+            sessions = sessionsPage?.sessions,
             questions = questions,
             permissions = permissions,
             messages = messages,
+            complete = sessionsPage?.complete,
+            discoveryDirectories = sessionsPage?.discoveryDirectories,
+            discoveryReady = sessionsPage?.discoveryReady,
         )
     }
 
@@ -3571,6 +3591,10 @@ data class SlimColdStartSnapshot(
     val permissions: SlimAggregationOutcome<SlimapiPermissionEntry>,
     /** Null iff no openSessionId was requested; empty list iff fetched OK. */
     val messages: List<MessageWithParts>?,
+    /** rev-F: three-header discovery meta absent on pre-rev-F sidecars. */
+    val complete: Boolean? = null,
+    val discoveryDirectories: Int? = null,
+    val discoveryReady: Boolean? = null,
 )
 
 /**

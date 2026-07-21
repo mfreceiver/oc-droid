@@ -589,6 +589,7 @@ class ServiceSseConnectionOwner(
         val type = event.payload.type
         val isFirstFrameOfGen = !readiness.isCompleted
         val isResync = type == "resync"
+        val isServerReconfigured = type == "server.reconfigured"
         // T10 (slimapi v1 §3 resync reason): when the frame IS a resync,
         // parse the server-provided `reason` sub-field from the payload for
         // OBSERVABILITY. The frame's `properties.reason` is a JsonPrimitive;
@@ -599,7 +600,7 @@ class ServiceSseConnectionOwner(
         // IDENTICAL regardless of reason — reason is pure telemetry and MUST
         // NOT branch or gate control flow (no `when` on the enum; just log).
         val serverReasonRaw: String? =
-            if (isResync) event.payload.getString("reason") else null
+            if (isResync || isServerReconfigured) event.payload.getString("reason") else null
         val serverReasonTyped: SlimapiResyncReason? =
             if (isResync) SlimapiResyncReason.fromRaw(serverReasonRaw) else null
         if (isResync) {
@@ -608,7 +609,22 @@ class ServiceSseConnectionOwner(
                 "slim resync reason: raw=$serverReasonRaw typed=$serverReasonTyped gen=$generation",
             )
         }
-        if (isFirstFrameOfGen && resyncHandledForGen != generation) {
+        // rev-F 🔴1: `server.reconfigured` frame always triggers a
+        // cold-start / resync, like a mid-stream `resync`.
+        if (isServerReconfigured) {
+            // Parse `reason` and `at` from payload for logging only (do NOT
+            // branch control flow on reason — rev-F spec: discovery_changed is
+            // the signal; any reason value is informational).
+            val atRaw: Long? = event.payload.getString("at")?.toLongOrNull()
+            DebugLog.i(
+                TAG,
+                "slim server.reconfigured reason=$serverReasonRaw at=$atRaw gen=$generation",
+            )
+            scheduleResync(
+                "server.reconfigured reason=$serverReasonRaw at=$atRaw",
+                generation,
+            )
+        } else if (isFirstFrameOfGen && resyncHandledForGen != generation) {
             resyncHandledForGen = generation
             // First-frame cold-start. If this first frame IS itself a
             // resync, include the parsed server reason in the label (T10).
@@ -697,8 +713,10 @@ class ServiceSseConnectionOwner(
     }
 
     /**
-     * Cluster A (slim SSE, B2 fix — rev-grok 🔴2): launches ONE [onResync]
-     * cold-start invocation on [scope], SERIALIZED via [resyncMutex].
+     * Cluster A / Phase 2 (slim SSE, rev-G 🔴2 / rev-F 🔴1): launches ONE
+     * [onResync] cold-start invocation on [scope], SERIALIZED via
+     * [resyncMutex]. Supports coalescing of cold-start triggers that land
+     * while a cold-start is already in-flight for the same generation.
      *
      * Off-frame execution: SSE delivery does NOT block on the cold-start
      * fetch (the old inline `onResync()` call inside the collector's frame
@@ -731,8 +749,65 @@ class ServiceSseConnectionOwner(
      * fetch failure must NOT tear down the SSE transport — the next
      * digest / q-p frame re-drives incremental state). Cancellation is
      * propagated so a scope shutdown cleans up in-flight cold-starts.
+     *
+     * **rev-F 🔴1 — connect-establish coalescing**: if a cold-start
+     * trigger for this generation is already in-flight (the mutex is
+     * held, or queued behind the mutex), we set a dirty flag and return
+     * instead of spawning a parallel unbounded launch. After the
+     * in-flight `onResync` completes (still under the mutex), we check
+     * the dirty flag: if set for this generation, clear it and run one
+     * more `onResync` pass. This prevents double cold-start from a
+     * rapid `server.connected` + `resync` pair on connect
+     * establishment.
+     *
+     * Dirty flags are only set for **cold-start triggers** (first-frame
+     * of generation, and establish-window `resync`). Mid-stream
+     * `resync` and `server.reconfigured` AFTER the first cold-start
+     * has completed for a generation always fire normally (no dirty gating).
      */
+    @Volatile
+    private var resyncDirtyForGen: Long = -1L
+
+    /** rev-F 🔴1: marks that a cold-start is in flight FOR this generation.
+     *  Set BEFORE the launch, cleared inside the mutex after the first
+     *  `onResync` completes. A second trigger sees this and sets
+     *  [resyncDirtyForGen] instead of launching.
+     */
+    @Volatile
+    private var resyncInFlightForGen: Long = -1L
+
+    private fun isColdStartTrigger(reason: String): Boolean =
+        reason.startsWith("first-frame") || reason.startsWith("explicit-resync")
+
     private fun scheduleResync(reason: String, generation: Long) {
+        val isColdStart = isColdStartTrigger(reason)
+        if (isColdStart) {
+            // rev-F 🔴1: if a cold-start for this gen is already in-flight
+            // or queued, set dirty and return — do not spawn a new one.
+            if (resyncInFlightForGen == generation) {
+                // A cold-start is already in-flight; mark dirty for coalesce.
+                resyncDirtyForGen = generation
+                DebugLog.d(
+                    TAG,
+                    "slim cold-start/resync coalesce: already in-flight " +
+                        "$reason gen=$generation — set dirty, skip duplicate",
+                )
+                return
+            }
+            if (resyncDirtyForGen == generation) {
+                // There is a coalesce-scheduled extra run already pending;
+                // No need for another dirty or another launch.
+                DebugLog.d(
+                    TAG,
+                    "slim cold-start/resync coalesce: already dirty/pending " +
+                        "$reason gen=$generation — skip duplicate",
+                )
+                return
+            }
+            // Mark as in-flight BEFORE launch so a second trigger can
+            // detect concurrency and set dirty instead of spawning another.
+            resyncInFlightForGen = generation
+        }
         scope.launch {
             resyncMutex.withLock {
                 // 🟠2 fix (rev-grok 9.5): re-check generation AFTER acquiring
@@ -750,7 +825,21 @@ class ServiceSseConnectionOwner(
                             "gen=$generation (current=$transportGenerationCounter) — " +
                             "superseded by newer generation",
                     )
+                    // Clear in-flight/dirty state for the stale gen.
+                    if (isColdStart) {
+                        if (resyncInFlightForGen == generation) {
+                            resyncInFlightForGen = -1L
+                        }
+                        if (resyncDirtyForGen == generation) {
+                            resyncDirtyForGen = -1L
+                        }
+                    }
                     return@withLock
+                }
+                // Clear the in-flight flag (the dirty flag may be set by a
+                // concurrent second trigger that saw inFlight==generation).
+                if (isColdStart && resyncInFlightForGen == generation) {
+                    resyncInFlightForGen = -1L
                 }
                 DebugLog.i(
                     TAG,
@@ -766,10 +855,28 @@ class ServiceSseConnectionOwner(
                         "slim cold-start/resync refetch failed: ${e.message}",
                     )
                 }
+                // rev-F 🔴1: after in-flight onResync completes, check dirty
+                // for this generation. If dirty, clear and run ONE MORE pull
+                // (without setting dirty again — the extra run is a successor
+                // to the current one, not a duplicate).
+                if (isColdStart && resyncDirtyForGen == generation) {
+                    resyncDirtyForGen = -1L
+                    DebugLog.d(
+                        TAG,
+                        "slim cold-start/resync coalesce: extra run for dirty " +
+                            "gen=$generation",
+                    )
+                    // Re-check generation (may have been bumped by setupConnectLocked
+                    // while we were inside onResync — though that would set a new
+                    // dirty for the new gen, and this stale-gen extra run is safe
+                    // to skip via the existing stale-gen guard below).
+                    if (isCurrentTransport(generation)) {
+                        onResync { isCurrentTransport(generation) }
+                    }
+                }
             }
         }
     }
-
     /**
      * D2 gate #7 — cancels the in-flight collector + invokes the SAME
      * idempotent [emitGapOnce] path the terminal-collection-exception branch

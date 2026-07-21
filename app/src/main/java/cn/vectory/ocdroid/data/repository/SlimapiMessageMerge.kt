@@ -96,6 +96,46 @@ sealed interface MappedStatusAction {
  * Pure — no IO / no Android deps. Caller (T7 reconcile / T15 usecase)
  * is responsible for writing the returned list back into the cache.
  */
+/** A part whose `id` starts with "thin_placeholder_" is a skeleton
+ * injected by the server when the thin message has no real renderable
+ * part. Such parts must never be matched per-part-id — instead the
+ * entire message's parts list is replaced with the full fetch's parts
+ * (message-level whole replace). See [mergeFullBatchIntoLocal] for
+ * the implementation and [PartExpandState.foldOk] for the Loaded
+ * judgment.
+ */
+fun Part.isThinPlaceholder(): Boolean = id.startsWith("thin_placeholder_")
+
+/**
+ * §G6 (Task 8 — T8-C1) — fold a fetched-full batch ([fullItems], the
+ * `items` carried by [ExpandOutcome.Ok] from T3) into the current local
+ * cache ([local]), replacing each local [Part] with its full counterpart
+ * keyed by `(normalizedMessageId, partId)`.
+ *
+ * **Normalization:** a [Part] whose [Part.messageId] is null is treated
+ * as belonging to the [MessageWithParts.info].[Message.id] that owns it.
+ * This is the null-safe key — both the local and the full sides fall
+ * back to the same owner id when the wire-level `messageID` is missing,
+ * so a both-sided null pair still matches on `(ownerId, partId)`.
+ *
+ * **Behavior with thin placeholders (rev F / CLIENT_CHANGES):**
+ * If a local message has **any** part whose [id] starts with
+ * `"thin_placeholder_"`, the entire `parts` list of that local message
+ * is replaced wholesale with the fetched full message's `parts` list
+ * (message-level whole replace). The per-part-id lookup is skipped for
+ * such messages, because the placeholder id never appears in the full
+ * response.
+ *
+ * **Otherwise** (no placeholder parts on that local message), the
+ * existing algorithm applies: for each local part, look up the
+ * replacement by `partId` in the fetched full message's parts; if
+ * found AND the normalized messageId matches, swap in the full part;
+ * otherwise keep the local part (`?: lp` fallback preserves untouched
+ * parts).
+ *
+ * Pure — no IO / no Android deps. Caller (T7 reconcile / T15 usecase)
+ * is responsible for writing the returned list back into the cache.
+ */
 fun mergeFullBatchIntoLocal(
     local: List<MessageWithParts>,
     fullItems: List<MessageWithParts>,
@@ -104,10 +144,16 @@ fun mergeFullBatchIntoLocal(
     val fullByMsg: Map<String, Map<String, Part>> =
         fullItems.associate { it.info.id to it.parts.associateBy { p -> p.id } }
     return local.map { lm ->
-        val replacements = fullByMsg[lm.info.id] ?: return@map lm
+        val fullForMsg = fullByMsg[lm.info.id] ?: return@map lm
+        // Rev F (CLIENT_CHANGES): if any local part is a thin placeholder,
+        // replace the entire parts list with the full fetch's parts (message-level replace).
+        if (lm.parts.any { it.isThinPlaceholder() }) {
+            return@map lm.copy(parts = fullForMsg.values.toList())
+        }
+        // Otherwise (real part ids): per-part triple-match replacement.
         lm.copy(
             parts = lm.parts.map { lp ->
-                replacements[lp.id]
+                fullForMsg[lp.id]
                     ?.takeIf { it.normMsg(lm.info.id) == lp.normMsg(lm.info.id) }
                     ?: lp
             }

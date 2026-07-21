@@ -3178,52 +3178,62 @@ class SessionSyncCoordinator(
                 "applySlimColdStartSnapshot sessions=${snapshot.sessions?.size ?: "null"} " +
                     "questions=${snapshot.questions::class.simpleName} " +
                     "permissions=${snapshot.permissions::class.simpleName} " +
-                    "messages=${snapshot.messages?.size ?: "null"}",
+                    "messages=${snapshot.messages?.size ?: "null"} " +
+                    "complete=${snapshot.complete} discoveryDirectories=${snapshot.discoveryDirectories} " +
+                    "discoveryReady=${snapshot.discoveryReady}",
             )
 
             val sessions = snapshot.sessions
             if (sessions != null) {
-                // C-D3 v2 §3.6 (sessions-merge fix): fold the fetched
-                // sessions with MERGE semantics, mirroring the retain-prior
-                // pattern used by `applyAggregationOutcome`'s Success branch.
-                //
-                // Root cause this guards against: the slim cold-start fetch
-                // (coldStartSlimSync / SSE first-frame) does NOT pass a
-                // session limit, and the sidecar defaults to returning only
-                // the most recent 100 sessions. A FULL REPLACE here would
-                // therefore substitute the prior list (e.g. 374 sessions
-                // accumulated across directories) with just those 100 —
-                // making the entire session list "vanish" on cold start /
-                // SSE reconnect. The merge below restricts the fetched
-                // payload to overwriting ONLY the directories it actually
-                // covers; sessions in every other directory survive.
-                //
-                // `directory` is non-null on Session (data class), so the
-                // `mapNotNull` / null-directory defensive filters are a no-op
-                // today; left in place to stay correct if the field ever
-                // becomes nullable.
-                val byDirectory = sessions.groupBy { it.directory }
-                val fetchedDirs = sessions.mapNotNull { it.directory }.toSet()
-                slices.mutateSessionList { s ->
-                    if (fetchedDirs.isEmpty()) {
-                        // Defensive: fetched sessions carry no directory
-                        // (legacy / malformed payload) → fall back to the
-                        // historical FULL REPLACE so we don't silently pin
-                        // the entire list to stale entries.
-                        s.copy(
-                            sessions = sessions,
-                            directorySessions = byDirectory,
-                        )
-                    } else {
-                        val priorKept = s.sessions.filter { it.directory == null || it.directory !in fetchedDirs }
-                        val mergedSessions = (priorKept + sessions).distinctBy { it.id }
-                        val mergedByDir = s.directorySessions.filterKeys { it !in fetchedDirs } + byDirectory
-                        s.copy(
-                            sessions = mergedSessions,
-                            directorySessions = mergedByDir,
-                        )
+                // rev-F: if discoveryReady == false, treat empty/null sessions as
+                // "not ready" — do NOT authority-empty wipe the session list.
+                val isDiscoveryReady = snapshot.discoveryReady ?: true
+                if (isDiscoveryReady || sessions.isNotEmpty()) {
+                    // C-D3 v2 §3.6 (sessions-merge fix): fold the fetched
+                    // sessions with MERGE semantics, mirroring the retain-prior
+                    // pattern used by `applyAggregationOutcome`'s Success branch.
+                    //
+                    // Root cause this guards against: the slim cold-start fetch
+                    // (coldStartSlimSync / SSE first-frame) does NOT pass a
+                    // session limit, and the sidecar defaults to returning only
+                    // the most recent 100 sessions. A FULL REPLACE here would
+                    // therefore substitute the prior list (e.g. 374 sessions
+                    // accumulated across directories) with just those 100 —
+                    // making the entire session list "vanish" on cold start /
+                    // SSE reconnect. The merge below restricts the fetched
+                    // payload to overwriting ONLY the directories it actually
+                    // covers; sessions in every other directory survive.
+                    //
+                    // `directory` is non-null on Session (data class), so the
+                    // `mapNotNull` / null-directory defensive filters are a no-op
+                    // today; left in place to stay correct if the field ever
+                    // becomes nullable.
+                    val byDirectory = sessions.groupBy { it.directory }
+                    val fetchedDirs = sessions.mapNotNull { it.directory }.toSet()
+                    slices.mutateSessionList { s ->
+                        if (fetchedDirs.isEmpty()) {
+                            // Defensive: fetched sessions carry no directory
+                            // (legacy / malformed payload) → fall back to the
+                            // historical FULL REPLACE so we don't silently pin
+                            // the entire list to stale entries.
+                            s.copy(
+                                sessions = sessions,
+                                directorySessions = byDirectory,
+                            )
+                        } else {
+                            val priorKept = s.sessions.filter { it.directory == null || it.directory !in fetchedDirs }
+                            val mergedSessions = (priorKept + sessions).distinctBy { it.id }
+                            val mergedByDir = s.directorySessions.filterKeys { it !in fetchedDirs } + byDirectory
+                            s.copy(
+                                sessions = mergedSessions,
+                                directorySessions = mergedByDir,
+                            )
+                        }
                     }
                 }
+                // If isDiscoveryReady=false && sessions.isNotEmpty(), the merge
+                // above still applies (non-empty sessions are merged normally).
+                // The !isDiscoveryReady guard only prevents emptiness-triggered wipe.
             }
 
             // I-2: questions + permissions use typed aggregation outcome.
