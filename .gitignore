@@ -47,6 +47,9 @@ google-services.json
 *~
 .opencode/
 
+# omni-orch orchestrator internal reports (governance artifacts, not ocdroid source)
+.omni-orch/
+
 # ocmar workflow scratch (ledger / diffs / verify logs)
 .ocmar/
 
