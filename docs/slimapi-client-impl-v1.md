@@ -249,7 +249,9 @@ X-Slimapi-Version: 1
 **MUST**：
 - `items` 严格按请求 `ids` 去重后顺序（服务端保证）；客户端按序 merge。
 - 用于「展开多条思考/工具」：skeleton 多条 `hasFull` 时一次批量展开，降低 RTT。
-- **过渡策略**：可先用 N 次并行旧单条 `full/{mid}` 兼容未升级服务端，检测到新端点 404 时回退。
+- **主路径（rev F / v0.11.10+）**：服务端 G6 已生产可用；`expandMessagesFullBatch` 首调 batch。
+- **兼容回退**：旧实例 404 `thin_route_not_found` 时 N 并行单条 `full/{mid}`。
+- **placeholder（rev F）**：`partId.startsWith("thin_placeholder_")` → message-level 整消息替换 parts（禁止 part-level lookup）。
 
 ---
 
@@ -283,7 +285,7 @@ X-Slimapi-Version: 1
 - `hasFull: Boolean? = null`
 - `omitted: List<String>? = null`
 
-`hasFull && omitted` 的 part → 首次展开走 G6（或旧单条 `full/{mid}` 过渡）→ 按 `messageId+partId` 替换；loading/失败内联状态。
+`hasFull && omitted` 的 part → 首次展开走 G6（主路径；旧实例回退单条 `full/{mid}`）→ 真实 part 按 `messageId+partId` 替换；`thin_placeholder_*` 按 message-level 整消息替换；loading/失败内联状态。
 
 ---
 
