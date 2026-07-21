@@ -668,7 +668,8 @@ class ChatViewModel @Inject constructor(
 
                         // ExpandPartsUseCase contract says outcomes are terminal.
                         cn.vectory.ocdroid.ui.chat.PartExpandState.Idle,
-                        cn.vectory.ocdroid.ui.chat.PartExpandState.Loading -> {
+                        cn.vectory.ocdroid.ui.chat.PartExpandState.Loading,
+                        cn.vectory.ocdroid.ui.chat.PartExpandState.Exhausted -> {
                             cn.vectory.ocdroid.ui.chat.PartExpandState.Failed(code = null)
                         }
                     }

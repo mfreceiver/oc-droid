@@ -5,6 +5,7 @@ import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.model.HostProfileExportPayload
 import cn.vectory.ocdroid.data.model.HostProfileImportPayload
 import cn.vectory.ocdroid.data.model.normalizeGroupFp
+import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.builtins.ListSerializer
@@ -241,6 +242,28 @@ class HostProfileStore @Inject constructor(
         val safe = profiles.map { it.normalizeGroupFp() }
         settingsManager.hostProfilesJson = json.encodeToString(safe)
         settingsManager.currentHostProfileId = currentId ?: safe.firstOrNull()?.id
+    }
+
+    /**
+     * §G-ACL: iterates all stored profiles, applies [migrateForGacl] to each,
+     * and persists the migrated set. Returns the number of actually-migrated
+     * profiles (0 if none needed migration). Idempotent: calling again on
+     * already-migrated profiles returns 0.
+     *
+     * Call this once at app startup (e.g. from [AppCore.init]) to perform the
+     * one-time legacy → G-ACL migration for existing users.
+     */
+    @Synchronized
+    fun migrateAllForGacl(): Int {
+        val all = profiles().toList()
+        val migrated = all.map { it.migrateForGacl() }
+        val changed = all.zip(migrated).count { (a, b) -> a.serverUrl != b.serverUrl || a.mtlsEnabled != b.mtlsEnabled }
+        if (changed > 0) {
+            val currentId = settingsManager.currentHostProfileId
+            val migratedCurrentId = currentId?.takeIf { id -> migrated.any { it.id == id } }
+            saveProfiles(migrated, migratedCurrentId)
+        }
+        return changed
     }
 
     /**

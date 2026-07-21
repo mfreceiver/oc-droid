@@ -125,7 +125,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         val fullPart = Part(id = "p1", messageId = "m1", type = "text", text = "FULL")
         expandDeferred.complete(ExpandOutcome.Ok(
             items = listOf(msg("m1", listOf(fullPart))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         ))
         mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
@@ -220,7 +220,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         expandDeferred.complete(
             ExpandOutcome.Ok(
                 items = listOf(msg("m1", listOf(fullPart))),
-                failedIds = emptyList(),
+                failures = emptyList(),
                 usedBatch = true,
             )
         )
@@ -374,7 +374,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         // Complete m1.
         deferred1.complete(ExpandOutcome.Ok(
             items = listOf(msg("m1", listOf(Part(id = "p1", messageId = "m1", type = "text", text = "FULL1")))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         ))
         mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
@@ -382,7 +382,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         // Complete m2.
         deferred2.complete(ExpandOutcome.Ok(
             items = listOf(msg("m2", listOf(Part(id = "p2", messageId = "m2", type = "text", text = "FULL2")))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         ))
         mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
@@ -428,7 +428,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
             items = listOf(msg("m1", listOf(
                 Part(id = "p1", messageId = "m1", type = "text", text = "FULL p1"),
             ))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         ))
         mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
@@ -467,7 +467,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         // Complete the s1 response.
         deferred.complete(ExpandOutcome.Ok(
             items = listOf(msg("m1", listOf(Part(id = "p1", messageId = "m1", type = "text", text = "FULL")))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         ))
         mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
@@ -505,7 +505,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         // Complete with old fingerprint.
         deferred.complete(ExpandOutcome.Ok(
             items = listOf(msg("m1", listOf(Part(id = "p1", messageId = "m1", type = "text", text = "FULL")))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         ))
         mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
@@ -550,7 +550,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         // Complete.
         deferred.complete(ExpandOutcome.Ok(
             items = listOf(msg("m1", listOf(Part(id = "p1", messageId = "m1", type = "text", text = "FULL")))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         ))
         mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
@@ -611,7 +611,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
                         ),
                     )
                 ),
-                failedIds = emptyList(),
+                failures = emptyList(),
                 usedBatch = true,
             )
         )
@@ -677,7 +677,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
                         ),
                     )
                 ),
-                failedIds = emptyList(),
+                failures = emptyList(),
                 usedBatch = true,
             )
         )

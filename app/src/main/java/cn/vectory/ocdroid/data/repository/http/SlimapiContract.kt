@@ -54,5 +54,18 @@ object SlimapiContract {
      * （行为完全不变）。
      */
     const val LEGACY_HEALTH_PATH = "/global/health"
+
+    /**
+     * HTTP 头名称：客户端 capability 选入头。服务器端根据此头决定是否启用
+     * B2 Opt-A partial-envelope 行为。仅 slimapi 请求携带（门闩同 M1 版本头）。
+     */
+    const val X_SLIMAPI_CAPABILITIES = "X-Slimapi-Capabilities"
+
+    /**
+     * 当前客户端声明的唯一 capability：`mid-partial-envelope=1`（opt-in）。
+     * 值遵循逗号分隔的 `name=value` 语法（I-R4-CAP-GRAMMAR），目前仅此一项。
+     * 服务器端解析时 name 大小写不敏感、忽略前后空白。
+     */
+    const val MID_PARTIAL_ENVELOPE_CAPABILITY = "mid-partial-envelope=1"
 }
 

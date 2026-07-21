@@ -11,6 +11,8 @@ import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ProbeResult
+import cn.vectory.ocdroid.data.repository.SlimColdStartSnapshot
+import cn.vectory.ocdroid.data.repository.SlimAggregationOutcome
 import cn.vectory.ocdroid.data.repository.SlimSessionState
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
@@ -698,6 +700,12 @@ class SessionSyncCoordinatorResyncTest {
         coVerify(exactly = 1) { repository.probeLatestSlim("dirty-1") }
         // preRefreshLocal is NO LONGER probed:
         coVerify(exactly = 0) { repository.probeLatestSlim("local-1") }
+
+        // O-C weak-network §4: stale flag is set on metadata failure
+        assertTrue(
+            "stale flag should be true after metadata refresh failure",
+            slices.connection.value.stale,
+        )
     }
 
     @Test
@@ -715,6 +723,12 @@ class SessionSyncCoordinatorResyncTest {
         )
         coordinator().performSlimResync(directories = listOf("/caller"))
         assertEquals(listOf("/recent", "/current"), dirs.captured)
+
+        // O-C weak-network §4: stale flag is cleared on successful metadata refresh
+        assertFalse(
+            "stale flag should be false after successful metadata refresh",
+            slices.connection.value.stale,
+        )
     }
 
     @Test
@@ -1949,4 +1963,56 @@ class SessionSyncCoordinatorResyncTest {
         assertTrue(realRepo.snapshotSlimSseState().isEmpty())
         assertTrue(slices.chat.value.messages.isEmpty())
     }
+
+    // ── G-F1 cadence state machine tests ─────────────────────────────────
+
+    @Test
+    fun serial_resync_calls_within_interval_do_not_double_sweep() = runTest {
+        // Covers the cadence INTERVAL-DECLINE path: a 2nd AUTO resync fired
+        // within the 15-min window of a successful 1st must NOT launch a 2nd
+        // sweep (the internal guard declines "too soon" -> marks dirty + false).
+        //
+        // NOTE: this does NOT exercise the IN-FLIGHT + TRAILING path (a 2nd
+        // trigger arriving WHILE the 1st sweep is still running -> queue ≤1
+        // trailing -> trailing actually executes once after the 1st completes).
+        // That genuine trailing-execution test requires a SUSPENDING
+        // coldStartSlimSync mock + a StandardTestDispatcher-controlled scope to
+        // hold the 1st sweep in-flight — this class uses UnconfinedTestDispatcher
+        // (runs coroutines eagerly, no in-flight window). The genuine trailing
+        // test + the 15-min-interval / manual-bypass / single-flight /
+        // failure-preserve cadence-discipline tests are FOLLOW-UP DEBT
+        // (recommended: a focused PR switching to StandardTestDispatcher).
+        // The B1.5 livelock they would catch (double-guard on the trailing
+        // relaunch in finishResyncCadence) is FIXED in production
+        // (finishResyncCadence now launches the trailing unconditionally —
+        // internal guard is the sole authority).
+        val c = coordinator()
+
+        coEvery { repository.coldStartSlimSync(any(), any(), any()) } returns Result.success(
+            SlimColdStartSnapshot(
+                sessions = null,
+                questions = SlimAggregationOutcome.Success(emptyList(), null),
+                permissions = SlimAggregationOutcome.Success(emptyList(), null),
+                messages = null,
+            )
+        )
+        // 1st sweep: proceeds (no in-flight, fresh cadence).
+        val outcomes1 = c.performSlimResync(
+            directories = null, sessionsDirty = emptySet(), isManual = false,
+        )
+        scope.testScheduler.advanceUntilIdle()
+        assertTrue("first sweep ran and returned emptyMap", outcomes1.isEmpty())
+
+        // 2nd sweep immediately (within 15-min window): interval-decline -> emptyMap.
+        val outcomes2 = c.performSlimResync(
+            directories = null, sessionsDirty = emptySet(), isManual = false,
+        )
+        scope.testScheduler.advanceUntilIdle()
+        assertTrue("second sweep declined (within interval), returns emptyMap", outcomes2.isEmpty())
+
+        // Only the 1st sweep ran; the 2nd was declined by the interval guard.
+        coVerify(exactly = 1) { repository.coldStartSlimSync(any(), any(), any()) }
+    }
+
+    // G-F1 cadence interval tests (to be added in subsequent PRs)
 }

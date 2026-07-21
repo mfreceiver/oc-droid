@@ -131,6 +131,9 @@ class OkHttpClientFactory @Inject constructor(
             // auth 之前——版本头是路由门闩，逻辑上先于 auth/cache-control；同时
             // directory interceptor 不会触碰 /slimapi/ 路径，无顺序耦合。
             .addInterceptor(slimapiVersionInterceptor)
+            // I-R5-CAP-DUPLICATES: slimapi capability 选入头（B2 Opt-A），紧接版本头
+            // 之后，同样位于 auth 之前。门闩同版本头：仅 slim=true + /slimapi/ 路径。
+            .addInterceptor(SlimapiCapabilitiesInterceptor(slimapiVersionInterceptor.hostConfig))
             // POST-RELEASE instrumentation (slimapi-client-v1): dedicated
             // slimapi DEBUG interceptor — logs method/encodedPath/version
             // header/directory query/round-trip ms + best-effort error code

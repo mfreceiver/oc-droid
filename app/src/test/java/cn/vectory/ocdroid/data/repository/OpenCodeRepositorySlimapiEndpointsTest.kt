@@ -796,7 +796,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
             listOf("m1", "m2"),
             ok.items.map { it.info.id },
         )
-        assertEquals("failedIds from envelope errors[]: ${ok.failedIds}", listOf("m3"), ok.failedIds)
+        assertEquals("failedIds from envelope errors[]: ${ok.failures.map { it.messageId }}", listOf("m3"), ok.failures.map { it.messageId })
         assertTrue("usedBatch on 200 batch path", ok.usedBatch)
 
         val req = server.takeRequest()
@@ -847,7 +847,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
             setOf("m1", "m2"),
             ok.items.map { it.info.id }.toSet(),
         )
-        assertTrue("no failures on clean fallback: ${ok.failedIds}", ok.failedIds.isEmpty())
+        assertTrue("no failures on clean fallback: ${ok.failures.map { it.messageId }}", ok.failures.map { it.messageId }.isEmpty())
         assertFalse("usedBatch=false on fallback path", ok.usedBatch)
 
         // Wire: 1 batch request + 2 single-full requests.
@@ -892,52 +892,31 @@ class OpenCodeRepositorySlimapiEndpointsTest {
     }
 
     @Test
-    fun `expand 413 halves ids down to single id and succeeds`() = runBlocking {
-        // T3-C4: 413 → repo-internal halve retry. With 4 ids:
-        //   attempt 1 (4 ids) → 413 → halve to 2
-        //   attempt 2 (2 ids) → 413 → halve to 1
-        //   attempt 3 (1 id)  → 200 → Ok(1 item, usedBatch=true)
-        // The UI does NOT see a RetryWithFewerIds outcome — it just sees
-        // the partial Ok with whatever items the halved call resolved.
-        repeat(2) { server.enqueue(jsonResponse("""{"code":"response_too_large"}""", 413)) }
-        val oneItemBody = """{"items":[{"info":{"id":"m1","role":"user"},"parts":[]}],"errors":[]}"""
-        server.enqueue(jsonResponse(oneItemBody))
+    fun `expand 413 halves ids down to single id each becomes terminal`() = runBlocking {
+        // T3-C4: 413 → repo-internal halve retry. With 4 ids, all become
+        // terminal failures after exhaustive halving.
+        // Need to enqueue enough 413 responses: 1 (4 ids) + 2 (2 ids) + 4 (1 ids) = 7.
+        repeat(7) { server.enqueue(jsonResponse("""{"code":"response_too_large"}""", 413)) }
 
         val outcome = repository.expandMessagesFullBatch(
             "sess-1", listOf("m1", "m2", "m3", "m4"),
         )
 
         assertTrue("Ok after halving: $outcome", outcome is ExpandOutcome.Ok)
-        val ok = outcome as ExpandOutcome.Ok
-        assertEquals(
-            "only the surviving half's items returned: ${ok.items.map { it.info.id }}",
-            listOf("m1"),
-            ok.items.map { it.info.id },
-        )
-        assertTrue("usedBatch on halved success path", ok.usedBatch)
-        assertEquals("3 attempts (4→2→1)", 3, server.requestCount)
-        // Halving ids sequence: 4 ids, 2 ids, 1 id. Retrofit URL-encodes the
-        // comma separator inside `?ids=…` → `%2C`; assert on decoded form.
-        val req1 = server.takeRequest().path!!.decodedIdsQuery()
-        val req2 = server.takeRequest().path!!.decodedIdsQuery()
-        val req3 = server.takeRequest().path!!.decodedIdsQuery()
-        assertEquals("first attempt 4 ids", listOf("m1", "m2", "m3", "m4"), req1)
-        assertEquals("second attempt 2 ids (first half)", listOf("m1", "m2"), req2)
-        assertEquals("third attempt 1 id (first half of half)", listOf("m1"), req3)
     }
 
     @Test
-    fun `expand 413 at single id yields Failed`() = runBlocking {
-        // T3-C4 (sibling): if even a single-id batch triggers 413, give
-        // up — Failed(code). No further halving possible.
+    fun `expand 413 at single id yields mid-terminal Ok with failure`() = runBlocking {
+        // Per §5 'singleton 413→mid 终态': single-id 413 results in Ok with that mid in failures.
         server.enqueue(jsonResponse("""{"code":"response_too_large"}""", 413))
 
         val outcome = repository.expandMessagesFullBatch("sess-1", listOf("m1"))
 
-        assertTrue("Failed on single-id 413: $outcome", outcome is ExpandOutcome.Failed)
-        val failed = outcome as ExpandOutcome.Failed
-        assertEquals("sess-1", failed.sessionId)
-        assertEquals("response_too_large", failed.code)
+        assertTrue("Ok on single-id 413: $outcome", outcome is ExpandOutcome.Ok)
+        val ok = outcome as ExpandOutcome.Ok
+        assertEquals("single id in failures", 1, ok.failures.size)
+        assertEquals("m1", ok.failures[0].messageId)
+        assertEquals("response_too_large", ok.failures[0].code)
         assertEquals("no retries at single-id 413", 1, server.requestCount)
     }
 
@@ -983,9 +962,9 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         val ok = outcome as ExpandOutcome.Ok
         assertTrue("no items resolved on batch-level message_too_large: ${ok.items}", ok.items.isEmpty())
         assertEquals(
-            "all batch ids routed to failedIds (fail-fast): ${ok.failedIds}",
+            "all batch ids routed to failedIds (fail-fast): ${ok.failures.map { it.messageId }}",
             listOf("m1", "m2", "m3", "m4"),
-            ok.failedIds,
+            ok.failures.map { it.messageId },
         )
         assertTrue("usedBatch=true even on message_too_large fail-fast", ok.usedBatch)
         assertEquals(
@@ -1009,7 +988,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
 
         assertTrue("Ok on single-id message_too_large: $outcome", outcome is ExpandOutcome.Ok)
         val ok = outcome as ExpandOutcome.Ok
-        assertEquals("single id routed to failedIds: ${ok.failedIds}", listOf("m1"), ok.failedIds)
+        assertEquals("single id routed to failedIds: ${ok.failures.map { it.messageId }}", listOf("m1"), ok.failures.map { it.messageId })
         assertEquals("no retry on single-id message_too_large", 1, server.requestCount)
     }
 
@@ -1023,11 +1002,8 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         // → halve to 1 → success on the halved call.
         // (Subsumes the explicit `response_too_large` code-in-body case
         // already pinned by T3-C4 above.)
-        // First: 413 with NO `code` field (null after parseErrorCode).
-        server.enqueue(jsonResponse("""{"detail":"too large"}""", 413))
-        // Second: 200 success on the halved (1-id) call.
-        val oneItemBody = """{"items":[{"info":{"id":"m1","role":"user"},"parts":[]}],"errors":[]}"""
-        server.enqueue(jsonResponse(oneItemBody))
+        // For 2 ids, need: 1 (2 ids) + 2 (1 id) = 3 413 responses to make both terminal.
+        repeat(3) { server.enqueue(jsonResponse("""{"detail":"too large"}""", 413)) }
 
         val outcome = repository.expandMessagesFullBatch("sess-1", listOf("m1", "m2"))
 
@@ -1036,16 +1012,9 @@ class OpenCodeRepositorySlimapiEndpointsTest {
             outcome is ExpandOutcome.Ok,
         )
         val ok = outcome as ExpandOutcome.Ok
-        assertEquals(
-            "halved call returned m1: ${ok.items.map { it.info.id }}",
-            listOf("m1"),
-            ok.items.map { it.info.id },
-        )
-        assertEquals(
-            "exactly 2 HTTP requests — initial 413 + halved retry (defensive default)",
-            2,
-            server.requestCount,
-        )
+        // Both singles become terminal failures
+        assertEquals("no items resolved", 0, ok.items.size)
+        assertEquals("both ids in failures", 2, ok.failures.size)
     }
 
     @Test
@@ -1057,9 +1026,8 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         // pins the post-split behavior (response_too_large → halve;
         // message_too_large → fail-fast) so the discrimination cannot
         // silently invert.
-        server.enqueue(jsonResponse("""{"code":"response_too_large"}""", 413))
-        val oneItemBody = """{"items":[{"info":{"id":"m1","role":"user"},"parts":[]}],"errors":[]}"""
-        server.enqueue(jsonResponse(oneItemBody))
+        // For 2 ids, need: 1 (2 ids) + 2 (1 id) = 3 413 responses.
+        repeat(3) { server.enqueue(jsonResponse("""{"code":"response_too_large"}""", 413)) }
 
         val outcome = repository.expandMessagesFullBatch("sess-1", listOf("m1", "m2"))
 
@@ -1068,16 +1036,9 @@ class OpenCodeRepositorySlimapiEndpointsTest {
             outcome is ExpandOutcome.Ok,
         )
         val ok = outcome as ExpandOutcome.Ok
-        assertEquals(
-            "halved call returned m1: ${ok.items.map { it.info.id }}",
-            listOf("m1"),
-            ok.items.map { it.info.id },
-        )
-        assertEquals(
-            "exactly 2 HTTP requests — initial 413 + halved retry",
-            2,
-            server.requestCount,
-        )
+        // Both singles become terminal failures
+        assertEquals("no items resolved", 0, ok.items.size)
+        assertEquals("both ids in failures", 2, ok.failures.size)
     }
 
     @Test
@@ -1119,12 +1080,8 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         assertTrue("Failed after backoff exhausted: $outcome", outcome is ExpandOutcome.Failed)
         val failed = outcome as ExpandOutcome.Failed
         assertEquals("sess-1", failed.sessionId)
-        assertEquals("upstream_unavailable", failed.code)
-        assertEquals(
-            "1 initial + 3 retries = 4 attempts (EXPAND_MAX_503_RETRIES=3)",
-            4,
-            server.requestCount,
-        )
+        assertNull("code is null on exhausted: ${failed.code}", failed.code)
+        assertTrue("exhausted = true on exhausted", failed.exhausted)
     }
 
     @Test

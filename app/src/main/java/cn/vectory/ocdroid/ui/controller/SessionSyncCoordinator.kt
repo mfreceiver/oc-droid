@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui.controller
 
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 import cn.vectory.ocdroid.BuildConfig
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS
@@ -63,6 +64,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -121,6 +123,10 @@ import kotlinx.serialization.json.decodeFromJsonElement
  * buffer storage migrated to the slice and the per-branch state transforms
  * extracted as pure functions (R-17 batch5).
  */
+/** G-F1 clock override for tests. */
+@Volatile
+private var clockOverride: (() -> Long)? = null
+
 @Suppress("DEPRECATION")
 class SessionSyncCoordinator(
     private val scope: CoroutineScope,
@@ -162,7 +168,7 @@ class SessionSyncCoordinator(
      * consistent. Test-only override (the existing tests do not assert on
      * arrival times; the default is fine).
      */
-    internal val clock: () -> Long = { System.currentTimeMillis() },
+    internal val clock: () -> Long = { clockOverride?.invoke() ?: System.currentTimeMillis() },
     /**
      * Cluster A / Phase 2 (slim SSE): runtime slim-mode provider. Read on
      * every use (do NOT cache) so a host-profile switch that flips
@@ -482,6 +488,148 @@ class SessionSyncCoordinator(
         }
     }
 
+    /**
+     * G-F1 clock seam: set a non-null lambda to override the cadence's
+     * wall-clock. Intended for tests that need to control "now" without
+     * sleeping for 15 minutes. Default null keeps the real wall clock.
+     */
+    @VisibleForTesting
+    internal var resyncClockMsForTest: (() -> Long)? = null
+        set(value) { field = value; clockOverride = value }
+
+    /**
+     * G-F1: cadence state. [lastSuccessfulResyncAt] = epoch-ms of the most
+     * recent successful resync sweep (used for 15-min interval). [resyncInFlight]
+     * = true while a sweep is in-progress. [trailingQueued] = true if a
+     * second coalesced trigger is waiting. [resyncHostGeneration] = the
+     * generation this state machine is tracking (triggers with mismatched gen are
+     * stale). [resyncDirty] = true when a trigger was suppressed due to interval;
+     * the next eligible trigger will immediately launch.
+     */
+    private data class ResyncCadence(
+        val lastSuccessfulResyncAt: Long = 0L,
+        val resyncInFlight: Boolean = false,
+        val trailingQueued: Boolean = false,
+        val resyncHostGeneration: Long = 0L,
+        val resyncDirty: Boolean = false,
+    )
+
+    /** G-F1: bounded re-sync cadence state machine. Atomic reference for thread-safe updates. */
+    private val resyncCadence = AtomicReference(ResyncCadence())
+
+    /**
+     * G-F1: reset the cadence state for a new host generation. Clears any
+     * in-flight / trailing / dirty state and sets the generation.
+     */
+    private fun resetCadenceForGeneration(gen: Long) {
+        resyncCadence.set(ResyncCadence(resyncHostGeneration = gen))
+    }
+
+    /**
+     * G-F1: bounded re-sync cadence guard. Call this (on the coordinator's
+     * Main-immediate scope) before launching a resync sweep. Returns `true`
+     * if the sweep should proceed (respecting interval, single-flight, trailing).
+     *
+     * When [isManual] is true, the 15-min interval is bypassed.
+     * On stale generation (triggerGeneration != resyncCadence.resyncHostGeneration),
+     * returns false (caller should drop).
+     *
+     * Side effects: updates [resyncCadence] (in-flight, dirty, trailing).
+     * Does NOT actually launch the sweep — the caller must call
+     * [performSlimResync] after receiving true, and call
+     * [finishResyncCadence] afterward.
+     */
+    private fun maybeScheduleResync(
+        triggerGeneration: Long,
+        isManual: Boolean = false,
+        bypassIntervalCheck: Boolean = false,
+    ): Boolean {
+        // CAS loop for atomic update of resyncCadence.
+        while (true) {
+            val cur = resyncCadence.get()
+            if (triggerGeneration != cur.resyncHostGeneration) {
+                DebugLog.d(tag, "maybeScheduleResync: stale generation $triggerGeneration != ${cur.resyncHostGeneration}")
+                return false
+            }
+            val now = clock()
+            val tooSoon = !isManual && !bypassIntervalCheck &&
+                cur.lastSuccessfulResyncAt > 0L &&
+                now - cur.lastSuccessfulResyncAt < 15 * 60 * 1000L
+            if (tooSoon) {
+                DebugLog.d(tag, "maybeScheduleResync: too soon (<15min), mark dirty")
+                val next = cur.copy(resyncDirty = true)
+                if (resyncCadence.compareAndSet(cur, next)) return false
+                continue
+            }
+            if (cur.resyncInFlight) {
+                if (!cur.trailingQueued) {
+                    DebugLog.d(tag, "maybeScheduleResync: in-flight, queue trailing")
+                    val next = cur.copy(trailingQueued = true)
+                    if (resyncCadence.compareAndSet(cur, next)) return false
+                    continue
+                } else {
+                    DebugLog.d(tag, "maybeScheduleResync: in-flight + already queued, skip")
+                }
+                return false
+            }
+            // Launch eligible; clear dirty and trailing, set in-flight.
+            val next = cur.copy(
+                resyncInFlight = true,
+                resyncDirty = false,
+                trailingQueued = false,
+            )
+            if (resyncCadence.compareAndSet(cur, next)) return true
+            // CAS failed -> retry
+            continue
+        }
+    }
+
+    /**
+     * G-F1: call AFTER [performSlimResync] completes (success or failure).
+     * Updates [resyncCadence] based on outcome.
+     */
+    private fun finishResyncCadence(hadFailure: Boolean) {
+        val now = clock()
+        // CAS loop for atomic update.
+        while (true) {
+            val cur = resyncCadence.get()
+            val next = cur.copy(
+                resyncInFlight = false,
+                lastSuccessfulResyncAt = if (hadFailure) cur.lastSuccessfulResyncAt else now,
+            )
+            if (resyncCadence.compareAndSet(cur, next)) break
+        }
+        // Check trailing: if a trailing was queued while in-flight, launch it now.
+        val curAfter = resyncCadence.get()
+        if (curAfter.trailingQueued) {
+            val gen = curAfter.resyncHostGeneration
+            // CAS clear trailingQueued.
+            while (true) {
+                val cur2 = resyncCadence.get()
+                if (!cur2.trailingQueued) break
+                val next2 = cur2.copy(trailingQueued = false)
+                if (resyncCadence.compareAndSet(cur2, next2)) break
+            }
+            // Trailing runs with bypassIntervalCheck=true (was pre-approved when
+            // queued). The internal guard inside performSlimResync is the SOLE
+            // cadence authority — launching UNCONDITIONALLY here (NOT wrapping in
+            // maybeScheduleResync) avoids the double-guard that re-set inFlight and
+            // made the internal guard decline -> emptyMap -> finishResyncCadence
+            // re-launch -> livelock (B1.5). inFlight was cleared above; trailingQueued
+            // was cleared above; bypassIntervalCheck=true skips the 15-min interval.
+            scope.launch {
+                val outcomes = performSlimResync(bypassIntervalCheck = true)
+                finishResyncCadence(
+                    hadFailure = outcomes.any { (_, r) ->
+                        r is ReconcileResult.Failure ||
+                            r is ReconcileResult.TimedOut ||
+                            r is ReconcileResult.Stale
+                    }
+                )
+            }
+        }
+    }
+
     init {
         // §P1-10: observe the disconnect / host-reconfigure signals that the
         // SSE collector (ConnectionCoordinator) emits on the effects bus, so
@@ -528,6 +676,12 @@ class SessionSyncCoordinator(
                         // no-op.
                         val trigger = SseReconnectTrigger.HostReconfigured(effect.epoch)
                         sseSyncState = reconcileGap(sseSyncState, trigger).first
+
+                        // G-F1 cadence reset + schedule on host reconfigured.
+                        val gen = effect.epoch
+                        resetCadenceForGeneration(gen)
+                        // Internal guard in performSlimResync handles cadence.
+                        scope.launch { performSlimResync(isManual = false) }
                     }
                     else -> {}
                 }
@@ -603,9 +757,20 @@ class SessionSyncCoordinator(
             val currentSessionId = slices.chat.value.currentSessionId
             val gen = currentEpoch()
             val trigger = SseReconnectTrigger.ServerConnected(currentSessionId, gen)
+            val connectedOnceBefore = sseSyncState.connectedOnce
             val (nextState, decisions) = reconcileGap(sseSyncState, trigger)
             sseSyncState = nextState
             applySseSyncDecisions(decisions)
+
+            // G-F1 cadence reset + schedule on server connected.
+            resetCadenceForGeneration(gen)
+            // Only launch performSlimResync on RE-connect (not cold-start first connect).
+            // The initial cold-start snapshot is already handled by the normal
+            // reconcileSession path; triggering a superfluous resync here would
+            // cause extra HTTP requests that break the golden-path test expectations.
+            if (connectedOnceBefore) {
+                scope.launch { performSlimResync(isManual = false) }
+            }
         }
         dispatchSseEvent(event)
     }
@@ -2411,7 +2576,10 @@ class SessionSyncCoordinator(
                         "priorWatermark=${state.localAppliedUpdatedAt} decision=skip reason=BACKGROUND mode=$mode",
                 )
             }
-            DebugLog.d("Sync", "reconcileSession sid=$sid mode=$mode BACKGROUND needsCatchUp → refresh row, keep dirty")
+            DebugLog.d("Sync", "reconcileSession sid=$sid mode=$mode BACKGROUND needsCatchUp → schedule resync")
+            val gen = currentEpoch()
+            // Internal guard in performSlimResync handles cadence — launch unconditionally.
+            scope.launch { performSlimResync(sessionsDirty = setOf(sid), isManual = false) }
             return ReconcileResult.RefreshRow(sid)
         }
         // §streaming-state-sync-diag (runtime-gated, scoped): FETCH decision —
@@ -2973,124 +3141,162 @@ class SessionSyncCoordinator(
         sessionsDirty: Set<String> = emptySet(),
         perSidDeadlineMs: Long = defaultResyncPerSidDeadlineMs,
         isStillCurrent: () -> Boolean = { true },
+        isManual: Boolean = false,
+        bypassIntervalCheck: Boolean = false,
     ): Map<String, ReconcileResult> {
         val repo = repository ?: return emptyMap()
         if (!isSlimMode()) return emptyMap()
 
-        // C-D3 v2 §1.12: ONE entry token; NO recapture after this point.
-        val token = repo.captureSlimCommitToken()
+        // Cadence guard: if the cadence declines (stale gen / too soon / in-flight),
+        // skip the sweep entirely (caller may still have the partial/single-flight
+        // fallback from maybeScheduleResync returning false).
+        if (!maybeScheduleResync(currentEpoch(), isManual, bypassIntervalCheck)) return emptyMap()
 
-        fun current(): Boolean =
-            isStillCurrent() && repo.isSlimCommitTokenCurrent(token)
+        var hadFailure = true
+        try {
+            // C-D3 v2 §1.12: ONE entry token; NO recapture after this point.
+            val token = repo.captureSlimCommitToken()
 
-        if (!current()) return emptyMap()
+            fun current(): Boolean =
+                isStillCurrent() && repo.isSlimCommitTokenCurrent(token)
 
-        // ── Step 1: capture pre-refresh state ───────────────────────────
-        val resyncUiSnapshot = ResyncUiSnapshot(slices.chat.value.currentSessionId)
-        val focus = resyncUiSnapshot.currentSessionId
-        val preRefreshLocalAll = repo.snapshotSlimSseState().keys
-        val preRefreshSessions = slices.sessionList.value.sessions.map { it.id }.toSet()
-
-        // T11 round-3 (oracle I1 — dirty overlay wiring fix): the
-        // coordinator reads its OWN dirty overlay (`sseSyncState.sessionsDirty`)
-        // and unions it into the catch-up set. The Service-passed
-        // [sessionsDirty] param is ALSO unioned (caller-supplied extra
-        // dirty) but is no longer relied on as the sole dirty source —
-        // round-2 had Service pass `emptySet()` here which silently
-        // dropped every disconnected dirty sid. The coordinator owns the
-        // overlay; it must read it directly. (Service passing emptySet
-        // is now harmless.)
-        val overlayDirty = sseSyncState.sessionsDirty
-
-        // ── Step 2: metadata-only refresh (no open-session fetch) ───────
-        // §session-scope-narrow: union currentWorkdir into the snapshot dirs so the
-        // currently-viewed project is always in scope, even if addRecentWorkdir hasn't
-        // persisted it yet (race / migration gap).
-        val currentWd = settingsManager.currentWorkdir
-        val recentWorkdirs = settingsManager.getRecentWorkdirs(currentServerGroupFp())
-        val effectiveDirs = (recentWorkdirs + listOfNotNull(currentWd))
-            .filter { it.isNotBlank() }
-            .distinct()
-        val snapshotDirectories = if (effectiveDirs.isNotEmpty()) effectiveDirs else directories
-
-        val snapshotResult = repo.coldStartSlimSync(
-            openSessionId = null,
-            directories = snapshotDirectories,
-            token = token,
-        )
-        val snapshot = snapshotResult.getOrNull()
-
-        // C-D3 v2 §1.5/§1.12: a stale incarnation makes coldStartSlimSync
-        // fail with StaleSlimCommitException (NOT collapse to null). The
-        // outer Result.failure surface is identical to other transport
-        // failures from the caller's perspective, but the token recheck
-        // below catches it either way.
-        if (!current()) return emptyMap()
-
-        if (snapshot == null) {
-            DebugLog.w(
-                tag,
-                "performSlimResync metadata refresh failed: ${snapshotResult.exceptionOrNull()?.message} — " +
-                    "falling back to pre-refresh known set",
-            )
-        } else {
-            // ── Step 3: fold snapshot under the same entry token ───────
-            if (!current()) return emptyMap()
-            // C-D3 v2 §3.6: token-gated snapshot fold. If the gate
-            // rejects, the snapshot is dropped and we abort the sweep
-            // (token superseded between cold-start commit and fold).
-            if (!applySlimColdStartSnapshot(snapshot, token)) {
+            if (!current()) {
+                hadFailure = false
                 return emptyMap()
             }
+
+            // ── Step 1: capture pre-refresh state ───────────────────────────
+            val resyncUiSnapshot = ResyncUiSnapshot(slices.chat.value.currentSessionId)
+            val focus = resyncUiSnapshot.currentSessionId
+            val preRefreshLocalAll = repo.snapshotSlimSseState().keys
+            val preRefreshSessions = slices.sessionList.value.sessions.map { it.id }.toSet()
+
+            // T11 round-3 (oracle I1 — dirty overlay wiring fix): the
+            // coordinator reads its OWN dirty overlay (`sseSyncState.sessionsDirty`)
+            // and unions it into the catch-up set. The Service-passed
+            // [sessionsDirty] param is ALSO unioned (caller-supplied extra
+            // dirty) but is no longer relied on as the sole dirty source —
+            // round-2 had Service pass `emptySet()` here which silently
+            // dropped every disconnected dirty sid. The coordinator owns the
+            // overlay; it must read it directly. (Service passing emptySet
+            // is now harmless.)
+            val overlayDirty = sseSyncState.sessionsDirty
+
+            // ── Step 2: metadata-only refresh (no open-session fetch) ───────
+            // §session-scope-narrow: union currentWorkdir into the snapshot dirs so the
+            // currently-viewed project is always in scope, even if addRecentWorkdir hasn't
+            // persisted it yet (race / migration gap).
+            val currentWd = settingsManager.currentWorkdir
+            val recentWorkdirs = settingsManager.getRecentWorkdirs(currentServerGroupFp())
+            val effectiveDirs = (recentWorkdirs + listOfNotNull(currentWd))
+                .filter { it.isNotBlank() }
+                .distinct()
+            val snapshotDirectories = if (effectiveDirs.isNotEmpty()) effectiveDirs else directories
+
+            val snapshotResult = repo.coldStartSlimSync(
+                openSessionId = null,
+                directories = snapshotDirectories,
+                token = token,
+            )
+            val snapshot = snapshotResult.getOrNull()
+
+            // C-D3 v2 §1.5/§1.12: a stale incarnation makes coldStartSlimSync
+            // fail with StaleSlimCommitException (NOT collapse to null). The
+            // outer Result.failure surface is identical to other transport
+            // failures from the caller's perspective, but the token recheck
+            // below catches it either way.
+            if (!current()) {
+                hadFailure = false
+                return emptyMap()
+            }
+
+            if (snapshot == null) {
+                DebugLog.w(
+                    tag,
+                    "performSlimResync metadata refresh failed: ${snapshotResult.exceptionOrNull()?.message} — " +
+                        "falling back to pre-refresh known set",
+                )
+                // O-C weak-network §4: mark connection state as stale since we are
+                // serving cached (pre-refresh) data.
+                slices.mutateConnection { it.copy(stale = true) }
+            } else {
+                // ── Step 3: fold snapshot under the same entry token ───────
+                if (!current()) {
+                    hadFailure = false
+                    return emptyMap()
+                }
+                // C-D3 v2 §3.6: token-gated snapshot fold. If the gate
+                // rejects, the snapshot is dropped and we abort the sweep
+                // (token superseded between cold-start commit and fold).
+                if (!applySlimColdStartSnapshot(snapshot, token)) {
+                    hadFailure = false
+                    return emptyMap()
+                }
+                // O-C weak-network §4: refresh succeeded → clear stale flag.
+                slices.mutateConnection { it.copy(stale = false) }
+            }
+
+            if (!current()) {
+                hadFailure = false
+                return emptyMap()
+            }
+
+            // ── Step 4: build catch-up set (oracle I1 union, slimmed) ────────
+            // Slimmed catch-up: focus + dirty (overlay + caller-supplied).
+            //
+            // Pre-fix this ALSO unioned preRefreshLocalAll + preRefreshSessions
+            // + refreshedSessions + postRefreshLocalAll — i.e. ≈ ALL ~150
+            // sessions × ≤250 skeletons — which ran on Main.immediate and
+            // blocked the user's session switch (loadMessagesForEffect waits
+            // on this sweep). Those un-reconciled sessions are now left to
+            // the on-demand path: when the user actually switches to them,
+            // loadMessagesForEffect + the slim digest reconciliation corrects
+            // their state lazily. focus + dirty must stay here because:
+            //  - focus is the session the user is currently looking at (any
+            //    gap there is immediately visible);
+            //  - dirty marks sessions with a known SSE gap that the user
+            //    might switch to next.
+            //
+            // (refreshedSessions / postRefreshLocalAll are still computed
+            // below for the diagnostic DebugLog only — the size telemetry
+            // stays useful and is NOT what made the sweep slow; the per-sid
+            // reconcile in performResyncCatchUp was.)
+            val refreshedSessions = snapshot?.sessions?.map { it.id }?.toSet() ?: emptySet()
+            val postRefreshLocalAll = repo.snapshotSlimSseState().keys
+            val catchUp = buildSet {
+                focus?.let { add(it) }
+                addAll(overlayDirty)
+                addAll(sessionsDirty)
+            }
+            if (catchUp.isEmpty()) {
+                hadFailure = false
+                return emptyMap()
+            }
+            DebugLog.i(
+                "Sync",
+                "performSlimResync focus=$focus preRefreshLocal=${preRefreshLocalAll.size} " +
+                    "preRefreshSessions=${preRefreshSessions.size} refreshed=${refreshedSessions.size} " +
+                    "postRefreshLocal=${postRefreshLocalAll.size} overlayDirty=${overlayDirty.size} " +
+                    "callerDirty=${sessionsDirty.size} union=${catchUp.size} deadlineMs=$perSidDeadlineMs",
+            )
+
+            // ── Step 5: per-sid reconcile sweep using the SAME entry token ─
+            if (!current()) {
+                hadFailure = false
+                return emptyMap()
+            }
+            val result = performResyncCatchUp(
+                catchUpSet = catchUp,
+                perSidDeadlineMs = perSidDeadlineMs,
+                token = token,
+                isStillCurrent = isStillCurrent,
+                snapshot = resyncUiSnapshot,
+            )
+            hadFailure = false
+            return result
+        } finally {
+            finishResyncCadence(hadFailure)
         }
-
-        if (!current()) return emptyMap()
-
-        // ── Step 4: build catch-up set (oracle I1 union, slimmed) ────────
-        // Slimmed catch-up: focus + dirty (overlay + caller-supplied).
-        //
-        // Pre-fix this ALSO unioned preRefreshLocalAll + preRefreshSessions
-        // + refreshedSessions + postRefreshLocalAll — i.e. ≈ ALL ~150
-        // sessions × ≤250 skeletons — which ran on Main.immediate and
-        // blocked the user's session switch (loadMessagesForEffect waits
-        // on this sweep). Those un-reconciled sessions are now left to
-        // the on-demand path: when the user actually switches to them,
-        // loadMessagesForEffect + the slim digest reconciliation corrects
-        // their state lazily. focus + dirty must stay here because:
-        //  - focus is the session the user is currently looking at (any
-        //    gap there is immediately visible);
-        //  - dirty marks sessions with a known SSE gap that the user
-        //    might switch to next.
-        //
-        // (refreshedSessions / postRefreshLocalAll are still computed
-        // below for the diagnostic DebugLog only — the size telemetry
-        // stays useful and is NOT what made the sweep slow; the per-sid
-        // reconcile in performResyncCatchUp was.)
-        val refreshedSessions = snapshot?.sessions?.map { it.id }?.toSet() ?: emptySet()
-        val postRefreshLocalAll = repo.snapshotSlimSseState().keys
-        val catchUp = buildSet {
-            focus?.let { add(it) }
-            addAll(overlayDirty)
-            addAll(sessionsDirty)
-        }
-        if (catchUp.isEmpty()) return emptyMap()
-        DebugLog.i(
-            "Sync",
-            "performSlimResync focus=$focus preRefreshLocal=${preRefreshLocalAll.size} " +
-                "preRefreshSessions=${preRefreshSessions.size} refreshed=${refreshedSessions.size} " +
-                "postRefreshLocal=${postRefreshLocalAll.size} overlayDirty=${overlayDirty.size} " +
-                "callerDirty=${sessionsDirty.size} union=${catchUp.size} deadlineMs=$perSidDeadlineMs",
-        )
-
-        // ── Step 5: per-sid reconcile sweep using the SAME entry token ─
-        if (!current()) return emptyMap()
-        return performResyncCatchUp(
-            catchUpSet = catchUp,
-            perSidDeadlineMs = perSidDeadlineMs,
-            token = token,
-            isStillCurrent = isStillCurrent,
-            snapshot = resyncUiSnapshot,
-        )
     }
 
     /**
@@ -3182,6 +3388,19 @@ class SessionSyncCoordinator(
                     "complete=${snapshot.complete} discoveryDirectories=${snapshot.discoveryDirectories} " +
                     "discoveryReady=${snapshot.discoveryReady}",
             )
+
+            // O-C weak-network §1: when the server marks the snapshot as
+            // incomplete (X-Complete: false), the sidecar couldn't assemble the
+            // full snapshot on a flaky/lossy network. In that case, DO NOT
+            // full-replace (or even merge) — keep the existing page entirely
+            // to avoid wiping the user's current view with a partial snapshot.
+            if (snapshot.complete == false) {
+                DebugLog.w(
+                    "Sync",
+                    "applySlimColdStartSnapshot snapshot.complete=false — keeping prior page intact",
+                )
+                return@commitIfSlimTokenCurrent
+            }
 
             val sessions = snapshot.sessions
             if (sessions != null) {

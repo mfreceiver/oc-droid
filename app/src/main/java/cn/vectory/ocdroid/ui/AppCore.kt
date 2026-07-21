@@ -257,6 +257,8 @@ class AppCore @Inject constructor(
     }
 
     init {
+        // §G-ACL: one-time migration of legacy slimapi profiles (http:4097 → https:14097 mTLS).
+        hostProfileStore.migrateAllForGacl()
         applySavedSettings(repository, settingsManager, hostProfileStore, store.slices)
         // §streaming-state-sync-diag (release-enabling): seed the runtime
         // verbose-diag flag from its ESP-persisted value so the 5 *Diag tags

@@ -33,6 +33,7 @@ class TrafficCountingInterceptorTest {
     private val server = MockWebServer()
     private lateinit var tracker: TrafficTracker
     private lateinit var logger: TrafficLogger
+    private lateinit var interceptor: TrafficCountingInterceptor
     private lateinit var client: OkHttpClient
 
     @Before
@@ -40,8 +41,9 @@ class TrafficCountingInterceptorTest {
         server.start()
         tracker = mockk(relaxed = true)
         logger = mockk(relaxed = true)
+        interceptor = TrafficCountingInterceptor(tracker, logger)
         client = OkHttpClient.Builder()
-            .addInterceptor(TrafficCountingInterceptor(tracker, logger))
+            .addInterceptor(interceptor)
             .build()
     }
 
@@ -97,5 +99,78 @@ class TrafficCountingInterceptorTest {
             }
 
         verify(atLeast = 1) { tracker.add(sent = 0L, received = 26L) }
+    }
+
+    // ── O-C weak-network §2: traffic-attribution ledger tests ───────────────
+
+    @Test
+    fun `slimapi request increments slimapi category on ledger`() {
+        server.enqueue(MockResponse().setBody("ok"))
+        client.newCall(Request.Builder().url(server.url("/slimapi/sessions")).build())
+            .execute().use { it.body?.string() }
+
+        val snap = interceptor.snapshot()
+        println("DEBUG slimapi test: slimapiRequests=${snap.slimapiRequests} slimapiBytes=${snap.slimapiBytes}")
+        org.junit.Assert.assertTrue(
+            "slimapiRequests should be ≥1, got ${snap.slimapiRequests}",
+            snap.slimapiRequests >= 1,
+        )
+        org.junit.Assert.assertTrue(
+            "slimapiBytes should be sum of sent+received, got ${snap.slimapiBytes}",
+            snap.slimapiBytes >= 2L /* "ok" = 2 bytes */,
+        )
+    }
+
+    @Test
+    fun `non-slimapi request increments tunnel category on ledger`() {
+        server.enqueue(MockResponse().setBody("tunnel"))
+        client.newCall(Request.Builder().url(server.url("/health")).build())
+            .execute().use { it.body?.string() }
+
+        val snap = interceptor.snapshot()
+        org.junit.Assert.assertTrue(
+            "tunnelRequests should be ≥1, got ${snap.tunnelRequests}",
+            snap.tunnelRequests >= 1,
+        )
+        org.junit.Assert.assertTrue(
+            "tunnelBytes should be ≥6 (length of 'tunnel'), got ${snap.tunnelBytes}",
+            snap.tunnelBytes >= 6L,
+        )
+    }
+
+    @Test
+    fun `multiple requests accumulate correctly across categories`() {
+        // slimapi request
+        server.enqueue(MockResponse().setBody("a"))
+        client.newCall(Request.Builder().url(server.url("/slimapi/health")).build())
+            .execute().use { it.body?.string() }
+
+        // tunnel request
+        server.enqueue(MockResponse().setBody("bb"))
+        client.newCall(Request.Builder().url(server.url("/rest/config")).build())
+            .execute().use { it.body?.string() }
+
+        // another tunnel request
+        server.enqueue(MockResponse().setBody("ccc"))
+        client.newCall(Request.Builder().url(server.url("/command/run")).build())
+            .execute().use { it.body?.string() }
+
+        val snap = interceptor.snapshot()
+        org.junit.Assert.assertTrue(
+            "slimapiRequests should be 1, got ${snap.slimapiRequests}",
+            snap.slimapiRequests == 1L,
+        )
+        org.junit.Assert.assertTrue(
+            "slimapiBytes should be ≥1 (body 'a' = 1 byte), got ${snap.slimapiBytes}",
+            snap.slimapiBytes >= 1L,
+        )
+        org.junit.Assert.assertTrue(
+            "tunnelRequests should be 2, got ${snap.tunnelRequests}",
+            snap.tunnelRequests == 2L,
+        )
+        org.junit.Assert.assertTrue(
+            "tunnelBytes should be ≥5 (bodies 'bb' + 'ccc' = 5 bytes), got ${snap.tunnelBytes}",
+            snap.tunnelBytes >= 5L,
+        )
     }
 }

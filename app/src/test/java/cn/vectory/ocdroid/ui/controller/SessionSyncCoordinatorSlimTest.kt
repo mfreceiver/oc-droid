@@ -335,6 +335,34 @@ class SessionSyncCoordinatorSlimTest {
         assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
     }
 
+    @Test
+    fun `applySlimColdStartSnapshot with Complete=false keeps prior page intact`() = runTest {
+        // Given: prior state has existing sessions, questions, permissions, messages
+        slices.mutateSessionList { it.copy(sessions = listOf(Session(id = "existing", directory = "/proj", title = "Prior"))) }
+        slices.mutateSessionList { it.copy(pendingQuestions = listOf(QuestionRequest(id = "q-prior", sessionId = "existing", questions = emptyList(), directory = "/proj"))) }
+        slices.mutateSessionList { it.copy(pendingPermissions = listOf(PermissionRequest(id = "p-prior", sessionId = "existing", directory = "/proj"))) }
+        slices.mutateChat { it.copy(currentSessionId = "existing", messages = listOf(Message(id = "m-prior", role = "user", sessionId = "existing"))) }
+
+        // When: a snapshot arrives with complete=false (incomplete)
+        val snapshot = SlimColdStartSnapshot(
+            sessions = null, // fetch failed; keep prior
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Failure("incomplete"),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Failure("incomplete"),
+            messages = null,
+            complete = false,
+        )
+
+        val c = coordinator()
+        c.applySlimColdStartSnapshot(snapshot)
+
+        // Then: prior data is RETAINED (not wiped)
+        assertEquals(1, slices.sessionList.value.sessions.size)
+        assertEquals("Prior", slices.sessionList.value.sessions.single().title)
+        assertEquals("q-prior", slices.sessionList.value.pendingQuestions.single().id)
+        assertEquals("p-prior", slices.sessionList.value.pendingPermissions.single().id)
+        assertEquals("m-prior", slices.chat.value.messages.single().id)
+    }
+
     /**
      * Sessions-merge regression (cold-start limit data-loss).
      *

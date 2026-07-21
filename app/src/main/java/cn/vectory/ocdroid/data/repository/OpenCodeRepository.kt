@@ -44,6 +44,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -67,6 +68,11 @@ import java.security.SecureRandom
 import java.util.Base64
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
+import kotlin.math.ceil
+import kotlin.math.log2
 import javax.inject.Inject
 import javax.inject.Singleton
 import javax.net.ssl.KeyManagerFactory
@@ -190,6 +196,15 @@ class OpenCodeRepository @Inject constructor(
         explicitNulls = false  // Omit null fields - server rejects model: null
         encodeDefaults = true  // Include type in parts - server needs discriminator
     }
+
+    /** Test seam: last [ExpandBudgetCounters] from [expandMessagesFullBatch]. */
+    internal var lastExpandBudgetCounters: ExpandBudgetCounters? = null
+
+    /** Test seam: injectable wall-clock budget (ms) for [expandMessagesFullBatch]. */
+    internal var expandWallClockBudgetMsForTest: Long? = null
+
+    /** Test seam: injectable TTL (ms) for thin-route cache in [drivePartition]. */
+    internal var thinRouteTtlMsForTest: Long? = null
 
     // R-18: host profile + OkHttp composition extracted to dedicated classes.
     // Wired manually (rather than via Hilt) so the public constructor
@@ -2142,38 +2157,13 @@ class OpenCodeRepository @Inject constructor(
     }
 
     /**
-     * §slimapi-client-impl-v1 §5 G6 (Task 3) — expand multiple messages
-     * in one batch (`GET /slimapi/messages/{sid}/full?ids=m1,m2,…&mode=full`),
-     * with the **complete retry / halve / backoff / fallback strategy
-     * living in the repo** (T15 usecase + T16 UI just consume
-     * [ExpandOutcome] — they do NOT branch on HTTP status).
+     * §5 G6 + §O-A — budget-aware partition tree expand for multiple messages full.
      *
-     * Strategy:
-     *  1. **Normalise ids** (dedup preserve order via `LinkedHashSet`;
-     *     coerce 1..20 — empty → `Failed(null)`; >20 → take first 20
-     *     + `DebugLog.w`, NO throw). Catches the v1 bug where a stray
-     *     `require(size <= 20)` inside `runSuspendCatching` was swallowed
-     *     by `getOrElse` and the caller got `Failed` anyway — explicit
-     *     cap with a warning is the right shape.
-     *  2. **200** → `Ok(env.items, env.errors.map{messageId}, usedBatch=true)`.
-     *  3. **404 + `session_not_found`** → `SessionMissing`.
-     *  4. **404 + `thin_route_not_found`** → [fallbackSingleFull] (batch
-     *     endpoint not deployed — transitional compatibility).
-     *  5. **Other 404** → `Failed` (NO fallback — programming error).
-     *  6. **413** → repo-internal halve retry: recurse with
-     *     `ids.take(size/2)` until size 1 (one more attempt); still
-     *     413 at size 1 → `Failed`. Does NOT expose a `RetryWithFewerIds`
-     *     outcome (the UI does not care — it sees the final `Ok` with
-     *     the partial items that succeeded).
-     *  7. **503** → repo-internal bounded exponential backoff: max
-     *     [EXPAND_MAX_503_RETRIES] retries, base [EXPAND_BACKOFF_BASE_MS],
-     *     jitter ±30% (`kotlinx.coroutines.delay`); exhausted →
-     *     `Failed(sessionId, code)`.
-     *  8. **400 / 422 / other** → `Failed`.
-     *  9. **Network exception** → `Failed(sessionId, null)`.
+     * Entry point. Dedup + cap ids, then drive a bounded binary partition tree
+     * with per-node retry, concurrency ≤2, wall-clock ≤30s, single-flight dedup.
      *
-     * Cancellation is re-thrown (never collapsed into `Failed`) so the
-     * UI's dispose-driven cancel propagates cleanly.
+     * Returns [ExpandOutcome] with the usual branches; adds [Failed.exhausted]
+     * marker when the operation cannot finish within budget.
      */
     suspend fun expandMessagesFullBatch(
         sessionId: String,
@@ -2181,7 +2171,7 @@ class OpenCodeRepository @Inject constructor(
     ): ExpandOutcome {
         // Step 1: dedup preserve order, coerce 1..20.
         val deduped = ids.toCollection(LinkedHashSet()).toList()
-        if (deduped.isEmpty()) return ExpandOutcome.Failed(sessionId, null)
+        if (deduped.isEmpty()) return ExpandOutcome.Failed(sessionId, code = null, exhausted = false)
         val capped = if (deduped.size > EXPAND_BATCH_MAX_IDS) {
             DebugLog.w(
                 TAG,
@@ -2192,148 +2182,395 @@ class OpenCodeRepository @Inject constructor(
         } else {
             deduped
         }
-        return expandBatchInternal(sessionId, capped, retry503 = 0)
+        lastExpandBudgetCounters = null
+        val deadline = java.lang.System.currentTimeMillis() + EXPAND_MAX_WALLCLOCK_MS
+        val counters = ExpandBudgetCounters(
+            peakConcurrentPartitionRequests = 0,
+            totalHttpAttempts = 0,
+            partitionNodesCreated = 0,
+            wallClockMs = 0L,
+        )
+        val requestSemaphore = Semaphore(PARTITION_MAX_CONCURRENT)
+        val concurrentRequests = java.util.concurrent.atomic.AtomicInteger(0)
+        val globalMaxDepth = ceil(log2(capped.size.toDouble())).toInt().coerceAtLeast(1)
+        val hostPort = hostConfig.hostPort ?: ""
+        val result = try {
+            withTimeout(expandWallClockBudgetMsForTest ?: EXPAND_MAX_WALLCLOCK_MS) {
+                coroutineScope {
+                    drivePartition(
+                        sessionId = sessionId,
+                        ids = capped,
+                        depth = 0,
+                        globalMaxDepth = globalMaxDepth,
+                        deadline = deadline,
+                        counters = counters,
+                        singleFlightMap = singleFlightMap,
+                        hostPort = hostPort,
+                        requestSemaphore = requestSemaphore,
+                        concurrentRequests = concurrentRequests,
+                    )
+                }
+            }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            exhaustedOutcome(sessionId, capped)
+        }
+        // Log counters
+        counters.wallClockMs = java.lang.System.currentTimeMillis() - (deadline - EXPAND_MAX_WALLCLOCK_MS)
+        DebugLog.i(
+            TAG,
+            "expandMessagesFullBatch done: peakConcurrent=${counters.peakConcurrentPartitionRequests} " +
+                "httpAttempts=${counters.totalHttpAttempts} nodes=${counters.partitionNodesCreated} " +
+                "wallMs=${counters.wallClockMs}",
+        )
+        lastExpandBudgetCounters = counters
+        lastExpandBudgetCounters = counters
+        return result
     }
 
     /**
-     * §5 G6 — internal retry driver. Carries [retry503] as a tail-recursive
-     * counter so the 503 backoff loop is bounded without an explicit
-     * `while` / mutable state. Each invocation makes ONE batch HTTP call
-     * and either returns an [ExpandOutcome] or recurses with a smaller
-     * ids list (halve) / same ids + bumped retry count (503 backoff).
+     * §O-A — drive one partition node of the binary partition tree.
      *
-     * `runSuspendCatching` is NOT used here — the catch sites need to
-     * distinguish HTTP-status branches (which already produced a
-     * `retrofit2.Response`) from raw transport exceptions, and the
-     * `runSuspendCatching → getOrElse { Failed(null) }` collapse would
-     * erase that signal. Explicit try / catch with re-thrown
-     * `CancellationException` is the right shape.
+     * @param ids the message ids assigned to this partition node (non-empty).
+     * @param depth current tree depth (root = 0); used for max-depth check.
+     * @param deadline wall-clock deadline in epoch ms.
+     * @param counters mutable counters for the operation.
+
+     * @param singleFlightMap shared map keyed by host+sid+mid for single-flight.
+     * @param hostPort the current host:port authority for single-flight key.
+     * @param requestSemaphore semaphore bounding concurrent HTTP requests.
+     * @param concurrentRequests atomic counter for peak concurrency measurement.
      */
-    private suspend fun expandBatchInternal(
+    private suspend fun drivePartition(
         sessionId: String,
         ids: List<String>,
-        retry503: Int,
+        depth: Int,
+        globalMaxDepth: Int,
+        deadline: Long,
+        counters: ExpandBudgetCounters,
+
+
+        singleFlightMap: ConcurrentHashMap<String, CompletableDeferred<Result<MessageWithParts>>>,
+        hostPort: String,
+        requestSemaphore: Semaphore,
+        concurrentRequests: java.util.concurrent.atomic.AtomicInteger,
     ): ExpandOutcome {
-        if (ids.isEmpty()) return ExpandOutcome.Failed(sessionId, null)
-        val resp = try {
-            api.getSlimapiMessagesFullBatch(
-                sessionId = sessionId,
-                ids = ids.joinToString(","),
-            )
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: java.io.IOException) {
-            // Step 9: transport failure (no HTTP status, no sidecar envelope).
-            // Diagnostic: distinguish transport-level failure from the G6
-            // envelope's per-message errors (foldOk Branch B) and from
-            // converter-level failures (the catch-all below).
-            DebugLog.w(
-                TAG,
-                "expand batch IOException ids=$ids sid=$sessionId " +
-                    "cause=${e.javaClass.simpleName}: ${e.message}",
-            )
-            return ExpandOutcome.Failed(sessionId, null)
-        } catch (e: Exception) {
-            // Defensive: any other Throwable (e.g. Json decode of a 2xx body
-            // throwing inside the converter) collapses to Failed(null) so
-            // the UI never sees a crash from the expand path. Cancellation
-            // is re-thrown above.
-            // Diagnostic: surface the unexpected exception type so we can
-            // tell converter/JSON bugs from transport IOExceptions above.
-            DebugLog.w(
-                TAG,
-                "expand batch exception ids=$ids sid=$sessionId " +
-                    "cause=${e.javaClass.simpleName}: ${e.message}",
-            )
-            return ExpandOutcome.Failed(sessionId, null)
+        // Budget guard
+        if (java.lang.System.currentTimeMillis() > deadline) {
+            return exhaustedOutcome(sessionId, ids)
         }
-        return when {
-            // Step 2: 200 + envelope.
-            resp.isSuccessful -> {
-                val env = resp.body() ?: SlimapiMessageFullBatch()
-                // Diagnostic: server returned 200 but the envelope carried
-                // NEITHER items NOR per-message errors. That is the exact
-                // shape that drives foldOk's Branch 0/C orphan Failed(null)
-                // path client-side — surface it here so we can tell server-
-                // empty from client-resolveOwner-null on a "展开失败" report.
-                if (env.items.isEmpty() && env.errors.isEmpty()) {
-                    DebugLog.w(
-                        TAG,
-                        "expand batch 200 empty envelope ids=$ids sid=$sessionId",
+
+        // Max depth guard: ⌈log₂N_total⌉ edges. N_total=ids in entire batch.
+        if (depth > globalMaxDepth) {
+            return exhaustedOutcome(sessionId, ids)
+        }
+
+        // Increment node count
+        counters.partitionNodesCreated++
+
+        // m8 thin-route cache: if hostPort known and cache hit within TTL, skip probe
+        if (hostPort.isNotEmpty()) {
+            val now = java.lang.System.currentTimeMillis()
+            val cached = thinRouteNotFoundCache[hostPort]
+            if (cached != null) {
+                val elapsed = now - cached
+                val ttl = thinRouteTtlMsForTest ?: THIN_ROUTE_NOT_FOUND_TTL_MS
+                if (elapsed >= 0L && elapsed < ttl) {
+                    // Within TTL — skip probe, go direct to fallbackSingleFull
+                    return fallbackSingleFull(sessionId, ids, singleFlightMap)
+                }
+            }
+        }
+
+        // ── attempt loop (≤3 per node) ──────────────────────────────────
+        var currentIds = ids
+        var attempts = 0
+        lateinit var resp: retrofit2.Response<SlimapiMessageFullBatch>
+        val itemsMap = HashMap<String, MessageWithParts>()
+        val terminalFailures = mutableListOf<ExpandOutcome.MessageFailure>()
+        val unknownFailures = mutableListOf<ExpandOutcome.MessageFailure>()
+        while (attempts < 3) {
+            if (java.lang.System.currentTimeMillis() > deadline) {
+                return exhaustedOutcome(sessionId, ids)
+            }
+
+            // Acquire concurrency semaphore
+            requestSemaphore.acquire()
+            val cur = concurrentRequests.incrementAndGet()
+            // Update peak
+            if (cur > counters.peakConcurrentPartitionRequests) {
+                counters.peakConcurrentPartitionRequests = cur
+            }
+            try {
+                resp = api.getSlimapiMessagesFullBatch(
+                    sessionId = sessionId,
+                    ids = currentIds.joinToString(","),
+                    mode = "full",
+                )
+                counters.totalHttpAttempts++
+                attempts++
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                requestSemaphore.release()
+                concurrentRequests.decrementAndGet()
+                if (e is kotlinx.coroutines.TimeoutCancellationException) {
+                    return exhaustedOutcome(sessionId, ids)
+                }
+                throw e
+            } catch (e: java.io.IOException) {
+                requestSemaphore.release()
+                concurrentRequests.decrementAndGet()
+                counters.totalHttpAttempts++
+                attempts++
+                DebugLog.w(TAG, "drivePartition IOException ids=$ids sid=$sessionId " +
+                    "cause=${e.javaClass.simpleName}: ${e.message}")
+                if (attempts < 3) {
+                    val delayMs = backoffMs(attempts)
+                    delay(delayMs)
+                    continue
+                } else {
+                    return exhaustedOutcome(sessionId, ids)
+                }
+            } catch (e: Exception) {
+                requestSemaphore.release()
+                concurrentRequests.decrementAndGet()
+                // Defensive — collapse to exhausted to avoid hard crash
+                return exhaustedOutcome(sessionId, ids)
+            }
+            requestSemaphore.release()
+            concurrentRequests.decrementAndGet()
+
+            // HTTP call succeeded — branch on status
+            when {
+                resp.isSuccessful -> {
+                    // ── 200 envelope ──────────────────────────────────────────
+                    val env = resp.body() ?: SlimapiMessageFullBatch()
+                    if (env.items.isEmpty() && env.errors.isEmpty()) {
+                        DebugLog.w(TAG, "drivePartition 200 empty envelope ids=$currentIds sid=$sessionId")
+                    }
+
+                    // Merge items (accumulate across iterations)
+                    for (item in env.items) {
+                        // items win over errors — if already in itemsMap, skip error accumulation later
+                        itemsMap[item.info.id] = item
+                    }
+
+                    // Classify errors
+                    val retryableFailures = mutableListOf<ExpandOutcome.MessageFailure>()
+                    for (err in env.errors) {
+                        val mid = err.messageId
+                        val code = err.code
+                        when {
+                            code == SlimapiErrorCodes.MESSAGE_NOT_FOUND ||
+                                code == SlimapiErrorCodes.MESSAGE_TOO_LARGE ||
+                                (code == null && err.code == null) -> {
+                                // mid-terminal — no retry, keep skeleton
+                                terminalFailures += ExpandOutcome.MessageFailure(mid, code)
+                            }
+                            code?.startsWith(SlimapiErrorCodes.UPSTREAM_HTTP_PREFIX) == true ||
+                                code == SlimapiErrorCodes.UPSTREAM_UNAVAILABLE -> {
+                                // mid-retryable — bounded retry only this mid
+                                retryableFailures += ExpandOutcome.MessageFailure(mid, code)
+                            }
+                            else -> {
+                                // unknown code → fail-open to auto-recovery exhausted
+                                unknownFailures += ExpandOutcome.MessageFailure(mid, code)
+                            }
+                        }
+                    }
+
+                    // Unknown failures always exhaust immediately
+                    if (unknownFailures.isNotEmpty()) {
+                        return exhaustedOutcome(sessionId, currentIds)
+                    }
+
+                    // If there are retryable failures, retry them in-place
+                    if (retryableFailures.isNotEmpty()) {
+                        // If we still have attempts left, retry only the retryable mids
+                        if (attempts < 3) {
+                            currentIds = retryableFailures.map { it.messageId }
+                            continue
+                        } else {
+                            // No attempts left — move retryable to terminal with exhaustion marker
+                            for (mid in retryableFailures.map { it.messageId }) {
+                                terminalFailures += ExpandOutcome.MessageFailure(mid, null)
+                            }
+                        }
+                    }
+
+                    // No retryable remaining (or exhausted) — return accumulated result
+                    DebugLog.i(TAG, "drivePartition 200 OK ids=${currentIds.joinToString(",")} depth=$depth items=${itemsMap.size} failures=${terminalFailures.size}")
+                    return ExpandOutcome.Ok(
+                        items = itemsMap.values.toList(),
+                        failures = terminalFailures,
+                        usedBatch = true,
                     )
                 }
-                ExpandOutcome.Ok(
-                    items = env.items,
-                    failedIds = env.errors.map { it.messageId },
-                    usedBatch = true,
-                )
-            }
-            // Steps 3-5: 404 routing (session_not_found / thin_route_not_found / other).
-            resp.code() == 404 -> {
-                // Cache the parsed code: errorBody() is one-shot (consumed
-                // on first read). Calling parseErrorCode twice — once for
-                // the when-dispatch and once for the Failed payload — would
-                // see null the second time and lose the code.
-                val code = parseErrorCode(resp)
-                when (code) {
-                    SlimapiErrorCodes.SESSION_NOT_FOUND -> ExpandOutcome.SessionMissing(sessionId)
-                    SlimapiErrorCodes.THIN_ROUTE_NOT_FOUND -> fallbackSingleFull(sessionId, ids)
-                    else -> ExpandOutcome.Failed(sessionId, code)
+
+                resp.code() == 404 -> {
+                    val code = parseErrorCode(resp)
+                    when (code) {
+                        SlimapiErrorCodes.SESSION_NOT_FOUND -> {
+                            return ExpandOutcome.SessionMissing(sessionId)
+                        }
+                        SlimapiErrorCodes.THIN_ROUTE_NOT_FOUND -> {
+                            // Record timestamp for thin-route cache (if not already set)
+                            if (hostPort.isNotEmpty()) {
+                                val now = java.lang.System.currentTimeMillis()
+                                // Only set if absent, to avoid rewriting with fresh timestamp on each fallback
+                                thinRouteNotFoundCache.putIfAbsent(hostPort, now)
+                            }
+                            return fallbackSingleFull(sessionId, currentIds, singleFlightMap)
+                        }
+                        else -> {
+                            return ExpandOutcome.Failed(sessionId, code, exhausted = false)
+                        }
+                    }
                 }
-            }
-            // Step 6: 413 — discriminate by code (B1 §2 #4 split).
-            // `message_too_large` is a single-message HARD cap (32 MiB on
-            // /full/{mid} default mode); halving the batch cannot help
-            // because the offending message is too large at any batch
-            // size — fail the entire current batch's ids fast (mirrors
-            // the 200-envelope's per-message `errors[]` semantics: T16
-            // does NOT branch on outcome type here, it just routes
-            // failedIds to per-message expand-failed state). The
-            // thin-route fallback path [fallbackSingleFull] handles the
-            // same code per-id via runSuspendCatching{}.onFailure.
-            // `response_too_large` (batch aggregate cap) / null / unknown
-            // → defensive default: halve + retry (size-1 → give up).
-            resp.code() == 413 -> {
-                val code = parseErrorCode(resp)
-                if (code == SlimapiErrorCodes.MESSAGE_TOO_LARGE) {
-                    ExpandOutcome.Ok(items = emptyList(), failedIds = ids, usedBatch = true)
-                } else if (ids.size <= 1) {
-                    // Halved all the way down to a single id; still 413 → give up.
-                    ExpandOutcome.Failed(sessionId, code)
-                } else {
-                    expandBatchInternal(sessionId, ids.take(ids.size / 2), retry503 = 0)
+
+                resp.code() == 413 -> {
+                    val code = parseErrorCode(resp)
+                    if (code == SlimapiErrorCodes.MESSAGE_TOO_LARGE) {
+                        // mid-terminal — all ids are too large at any batch size
+                        return ExpandOutcome.Ok(
+                            items = emptyList(),
+                            failures = currentIds.map { ExpandOutcome.MessageFailure(it, code) },
+                            usedBatch = true,
+                        )
+                    }
+                    // RESPONSE_TOO_LARGE or unknown — split into both halves and recurse
+                    if (currentIds.size <= 1) {
+                        // singleton 413 → mid-terminal (per §5 'singleton 413→mid 终态')
+                        return ExpandOutcome.Ok(
+                            items = emptyList(),
+                            failures = currentIds.map { ExpandOutcome.MessageFailure(it, code) },
+                            usedBatch = true,
+                        )
+                    }
+                    val mid = currentIds.size / 2
+                    val result = coroutineScope {
+                        val left = async {
+                            drivePartition(
+                                sessionId = sessionId,
+                                ids = currentIds.subList(0, mid),
+                                depth = depth + 1,
+                                globalMaxDepth = globalMaxDepth,
+                                deadline = deadline,
+                                counters = counters,
+                                singleFlightMap = singleFlightMap,
+                                hostPort = hostPort,
+                                requestSemaphore = requestSemaphore,
+                                concurrentRequests = concurrentRequests,
+                            )
+                        }
+                        val right = async {
+                            drivePartition(
+                                sessionId = sessionId,
+                                ids = currentIds.subList(mid, currentIds.size),
+                                depth = depth + 1,
+                                globalMaxDepth = globalMaxDepth,
+                                deadline = deadline,
+                                counters = counters,
+                                singleFlightMap = singleFlightMap,
+                                hostPort = hostPort,
+                                requestSemaphore = requestSemaphore,
+                                concurrentRequests = concurrentRequests,
+                            )
+                        }
+                        mergeResults(left.await(), right.await(), currentIds)
+                    }
+                    return result
                 }
-            }
-            // Step 7: 503 bounded exponential backoff with ±30% jitter.
-            resp.code() == 503 -> {
-                if (retry503 >= EXPAND_MAX_503_RETRIES) {
-                    ExpandOutcome.Failed(sessionId, parseErrorCode(resp))
-                } else {
-                    val base = EXPAND_BACKOFF_BASE_MS * (1L shl retry503) // 200, 400, 800 ms
-                    val jitterRange = (base * EXPAND_BACKOFF_JITTER).toLong()
-                    // Uniform jitter in [-jitterRange, +jitterRange].
-                    val jitter = (Math.random() * (2.0 * jitterRange + 1.0)).toLong() - jitterRange
-                    val delayMs = (base + jitter).coerceAtLeast(0L)
-                    delay(delayMs)
-                    expandBatchInternal(sessionId, ids, retry503 = retry503 + 1)
+
+                resp.code() == 503 -> {
+                    // Read Retry-After header
+                    val retryAfterMs = retryAfterHeaderToMs(resp.headers()["Retry-After"])
+                    val delayMs = if (retryAfterMs > 0L) retryAfterMs else backoffMs(attempts)
+                    if (attempts < 3) {
+                        delay(delayMs)
+                        continue  // retry the SAME node ids (not a fan-out)
+                    } else {
+                        // Exhausted retries for this node
+                        return exhaustedOutcome(sessionId, ids)
+                    }
                 }
-            }
-            // Step 8: 400 / 422 / other 4xx 5xx → Failed.
-            else -> {
-                // errorBody() is one-shot (consumed on first read). Read
-                // ONCE into a local so we can BOTH log a body snippet AND
-                // parse the sidecar's `code` from the same buffer — the
-                // existing parseErrorCode(resp) path would otherwise see
-                // null on its second read and lose the code.
-                val rawBody = runCatching { resp.errorBody()?.string() }.getOrNull()
-                DebugLog.w(
-                    TAG,
-                    "expand batch http code=${resp.code()} ids=$ids sid=$sessionId " +
-                        "body=${rawBody?.take(500)}",
-                )
-                ExpandOutcome.Failed(sessionId, parseErrorCodeFromRaw(rawBody))
+
+                else -> {
+                    // Other 4xx/5xx
+                    val rawBody = runCatching { resp.errorBody()?.string() }.getOrNull()
+                    val code = parseErrorCodeFromRaw(rawBody)
+                    return ExpandOutcome.Failed(sessionId, code, exhausted = false)
+                }
             }
         }
+
+        // If we exit the while loop naturally (should not happen — we always return above)
+        return exhaustedOutcome(sessionId, ids)
+    }
+
+    /**
+     * §O-A — merge two [ExpandOutcome] results idempotently.
+     * Items and failures are mutually exclusive by messageId.
+     */
+    private fun mergeResults(
+        left: ExpandOutcome,
+        right: ExpandOutcome,
+        parentIds: List<String>,
+    ): ExpandOutcome {
+        if (left !is ExpandOutcome.Ok) return left
+        if (right !is ExpandOutcome.Ok) return right
+
+        val itemsMap = HashMap<String, MessageWithParts>()
+        for (item in left.items) itemsMap[item.info.id] = item
+        for (item in right.items) itemsMap[item.info.id] = item
+
+        // Dedup failures: items win over errors; also dedup by messageId (last-wins)
+        val failuresMap = mutableMapOf<String, ExpandOutcome.MessageFailure>()
+        for (f in left.failures) {
+            if (f.messageId !in itemsMap) {
+                failuresMap[f.messageId] = f
+            }
+        }
+        for (f in right.failures) {
+            if (f.messageId !in itemsMap) {
+                failuresMap[f.messageId] = f
+            }
+        }
+
+        return ExpandOutcome.Ok(
+            items = itemsMap.values.toList(),
+            failures = failuresMap.values.toList(),
+            usedBatch = true,
+        )
+    }
+
+    /**
+     * §O-A — produce an exhausted [ExpandOutcome.Failed] for the given ids.
+     */
+    /** §B1: extract Retry-After header value as capped ms (pure, no IO). */
+    internal fun retryAfterHeaderToMs(header: String?): Long {
+        if (header == null) return 0L
+        return ((header.toLongOrNull() ?: 0L) * 1000L).coerceIn(0L, 10_000L)
+    }
+
+    private fun exhaustedOutcome(
+        sessionId: String,
+        ids: List<String>,
+    ): ExpandOutcome.Failed {
+        val failures = ids.map { ExpandOutcome.MessageFailure(it, code = null) }
+        return ExpandOutcome.Failed(
+            sessionId = sessionId,
+            code = null,
+            exhausted = true,
+        )
+    }
+
+    /**
+     * §O-A — exponential backoff for per-node retry: 200ms, 400ms with ±30% jitter.
+     */
+    private fun backoffMs(attempt: Int): Long {
+        val base = EXPAND_BACKOFF_BASE_MS * (1L shl (attempt - 1))
+        val jitterRange = (base * EXPAND_BACKOFF_JITTER).toLong()
+        val jitter = (Math.random() * (2.0 * jitterRange + 1.0)).toLong() - jitterRange
+        return (base + jitter).coerceAtLeast(0L)
     }
 
     /**
@@ -2345,7 +2582,7 @@ class OpenCodeRepository @Inject constructor(
      * sidecar's per-client connection cap).
      *
      * Per-id failures (network exception OR HTTP non-2xx from
-     * `getSlimapiMessageFull`) land in `failedIds` rather than fail the
+     * `getSlimapiMessageFull`) land in [failures] rather than fail the
      * whole call — the UI marks just those messages' expand state as
      * failed; the rest render their full bodies. This mirrors the
      * batch envelope's per-message `errors[]` semantics on the fallback
@@ -2355,42 +2592,42 @@ class OpenCodeRepository @Inject constructor(
     private suspend fun fallbackSingleFull(
         sessionId: String,
         ids: List<String>,
+        singleFlightMap: ConcurrentHashMap<String, CompletableDeferred<Result<MessageWithParts>>>,
     ): ExpandOutcome.Ok = coroutineScope {
         val sem = Semaphore(EXPAND_FALLBACK_CONCURRENCY)
+        val hostPort = hostConfig.hostPort ?: ""
         val results = ids.map { id ->
             async {
                 sem.withPermit {
-                    // §CE-discipline: use [runSuspendCatching] (NOT plain
-                    // `runCatching`) so kotlinx.coroutines.CancellationException
-                    // propagates instead of collapsing into Result.failure.
-                    // Plain runCatching catches ALL Throwable (incl. CE),
-                    // which would let the async{} body return
-                    // `(id to failure(CE))` "normally" with the id silently
-                    // bucketed into failedIds. In the current path the
-                    // downstream awaitAll / coroutineScope also propagate
-                    // the cancel through their own machinery, so the
-                    // user-visible behavior happens to be the same — but
-                    // catching CE inside an async is a structured-concurrency
-                    // smell (rev-grok finding): the async job's state
-                    // transitions to Cancelled-with-value rather than
-                    // Cancelled-thrown-CE, which a future refactor that
-                    // lifts the awaitAll (or switches to lazy async) would
-                    // expose as a silent cancel-dropped bug. Matches the
-                    // batch path's [expandBatchInternal] explicit
-                    // `catch (CE) { throw e }` discipline.
-                    id to runSuspendCatching { api.getSlimapiMessageFull(sessionId, id) }
+                    val key = "$hostPort:$sessionId:$id"
+                    // Single-flight: use computeIfAbsent atomically.
+                    val newDeferred = CompletableDeferred<Result<MessageWithParts>>()
+                    val existing = singleFlightMap.computeIfAbsent(key) { newDeferred }
+                    if (existing === newDeferred) {
+                        // We won — make the call and complete the deferred
+                        try {
+                            val result = runSuspendCatching { api.getSlimapiMessageFull(sessionId, id) }
+                            newDeferred.complete(result)
+                            id to result
+                        } finally {
+                            singleFlightMap.remove(key)
+                        }
+                    } else {
+                        // Another call is in-flight — await its result
+                        id to existing.await()
+                    }
                 }
             }
         }.awaitAll()
         val items = mutableListOf<MessageWithParts>()
-        val failed = mutableListOf<String>()
+        val failures = mutableListOf<ExpandOutcome.MessageFailure>()
         for ((id, r) in results) {
-            r.onSuccess { items += it }.onFailure {
-                DebugLog.w(TAG, "expandMessagesFullBatch fallback single-full failed for $id: ${it.message}")
-                failed += id
+            r.onSuccess { items += it }.onFailure { e ->
+                DebugLog.w(TAG, "fallbackSingleFull failed for $id: ${e.message}")
+                failures += ExpandOutcome.MessageFailure(id, code = null)
             }
         }
-        ExpandOutcome.Ok(items = items, failedIds = failed, usedBatch = false)
+        ExpandOutcome.Ok(items = items, failures = failures, usedBatch = false)
     }
 
     /**
@@ -3222,10 +3459,25 @@ class OpenCodeRepository @Inject constructor(
      *
      * See [drainSlimapiMessagesBoundedOutcome] for the full rationale.
      */
+    /**
+     * Outcome of a bounded cursor-walk drain.
+     *
+     *  - [Success]: drained cleanly (cursor-null, item-bound, or page-count cap).
+     *  - [Partial]: mid-walk transport/page failure. Items are partial aggregate;
+     *    caller should keep dirty / retry.
+     *  - [Degraded]: loop detected (same cursor returned OR zero-new-items page)
+     *    — the server is misbehaving but partial aggregate is still useful.
+     *    Caller should keep dirty / retry, same as Partial.
+     */
     private sealed interface SlimDrainOutcome {
         val items: List<MessageWithParts>
         data class Success(override val items: List<MessageWithParts>) : SlimDrainOutcome
         data class Partial(
+            override val items: List<MessageWithParts>,
+            val cause: Throwable,
+        ) : SlimDrainOutcome
+        /** Loop or zero-progress page. Treated same as [Partial] by callers. */
+        data class Degraded(
             override val items: List<MessageWithParts>,
             val cause: Throwable,
         ) : SlimDrainOutcome
@@ -3286,58 +3538,88 @@ class OpenCodeRepository @Inject constructor(
             }
         }
 
-        repeat(maxPages) {
-            // C-D3 v2 §1.4: SAME entry token on every page. No recapture.
-            val page = getSlimapiMessagesPage(
-                sessionId = sessionId,
-                limit = pageLimit,
-                before = before,
-                mode = "skeleton",
-                bumpBookmark = false,
-                token = token,
-            ).getOrElse { error ->
-                // Stale incarnation is NOT an ordinary partial transport
-                // result; it invalidates the entire aggregate.
-                if (error is StaleSlimCommitException) {
-                    throw error
-                }
+        // G-F1: wall-clock bound for the entire cursor walk (30s). On timeout
+        // surface as Partial (preserve dirty, retain aggregated items).
+        return try {
+        withTimeout(30_000L) {
+            repeat(maxPages) {
+                // C-D3 v2 §1.4: SAME entry token on every page. No recapture.
+                val page = getSlimapiMessagesPage(
+                    sessionId = sessionId,
+                    limit = pageLimit,
+                    before = before,
+                    mode = "skeleton",
+                    bumpBookmark = false,
+                    token = token,
+                ).getOrElse { error ->
+                    // Stale incarnation is NOT an ordinary partial transport
+                    // result; it invalidates the entire aggregate.
+                    if (error is StaleSlimCommitException) {
+                        throw error
+                    }
 
-                if (bumpBookmarkOnPartialFailure) {
-                    commitBookmarkOrThrow()
-                }
-
-                return SlimDrainOutcome.Partial(
-                    items = aggregated.toList(),
-                    cause = error,
-                )
-            }
-
-            // Even with bumpBookmark=false, a host switch during the page
-            // request invalidates that page's payload.
-            requireSlimTokenCurrent(token)
-
-            for (item in page.items) {
-                if (seen.add(item.info.id)) {
-                    aggregated += item
-
-                    if (aggregated.size >= itemBound) {
+                    if (bumpBookmarkOnPartialFailure) {
                         commitBookmarkOrThrow()
-                        return SlimDrainOutcome.Success(aggregated.toList())
+                    }
+
+                    return@withTimeout SlimDrainOutcome.Partial(
+                        items = aggregated.toList(),
+                        cause = error,
+                    )
+                }
+
+                // Even with bumpBookmark=false, a host switch during the page
+                // request invalidates that page's payload.
+                requireSlimTokenCurrent(token)
+
+                // ── G-F1 loop detection ──────────────────────────────────────
+                // Loop = (a) same opaque cursor returned again, OR
+                //        (b) non-null cursor with zero new mids (all dupes).
+                val loopDetected =
+                    (before != null && page.nextCursor == before) ||
+                        (page.nextCursor != null && page.items.all { it.info.id in seen })
+                if (loopDetected) {
+                    // If no items aggregated at all, this is a complete failure;
+                    // if some items exist, this is a degraded walk.
+                    return@withTimeout if (aggregated.isEmpty()) {
+                        // No progress at all — surface as a Partial with cause.
+                        SlimDrainOutcome.Partial(
+                            items = emptyList(),
+                            cause = SlimDrainLoopException("loop detected on first page: cursor=$before"),
+                        )
+                    } else {
+                        SlimDrainOutcome.Degraded(
+                            items = aggregated.toList(),
+                            cause = SlimDrainLoopException("loop detected after page: cursor=$before"),
+                        )
                     }
                 }
-            }
 
-            if (page.nextCursor == null) {
-                commitBookmarkOrThrow()
-                return SlimDrainOutcome.Success(aggregated.toList())
-            }
+                for (item in page.items) {
+                    if (seen.add(item.info.id)) {
+                        aggregated += item
 
-            before = page.nextCursor
+                        if (aggregated.size >= itemBound) {
+                            commitBookmarkOrThrow()
+                            return@withTimeout SlimDrainOutcome.Success(aggregated.toList())
+                        }
+                    }
+                }
+
+                if (page.nextCursor == null) {
+                    commitBookmarkOrThrow()
+                    return@withTimeout SlimDrainOutcome.Success(aggregated.toList())
+                }
+
+                before = page.nextCursor
+            }
+            // Page-count safety cap reached (repeat exhausted maxPages).
+            commitBookmarkOrThrow()
+            SlimDrainOutcome.Success(aggregated.toList())
         }
-
-        // Page-count safety cap reached.
-        commitBookmarkOrThrow()
-        return SlimDrainOutcome.Success(aggregated.toList())
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            SlimDrainOutcome.Partial(aggregated.toList(), e)
+        }
     }
 
     /**
@@ -3397,8 +3679,17 @@ class OpenCodeRepository @Inject constructor(
      * and the ONE final local-watermark update on Success only (via
      * [bumpSlimBookmarkFromItems] → `onReconcileSuccess` → dirty-cleared
      * with T11 round-2 re-evaluation).
-     *
-     * # CE discipline (R-14)
+ *
+ * # Honest caveat (G-F1)
+ *
+ * The cursor-walk (`GET /slimapi/messages/{sid}` with `before=` parameter)
+ * shares the upstream newest-first sort / tie-break semantics with the
+ * `/since/{ts}` watermark endpoint. This means the cursor walk only AVOIDS
+ * the `/since` timestamp-filter boundary — it does NOT defend against an
+ * upstream sort bug. Loop detection (same cursor or zero-new-item pages)
+ * provides a fast-fail signal but cannot detect every pathological ordering.
+ *
+ * # CE discipline (R-14)
      *
      * [drainSlimapiMessagesBoundedOutcome] uses [runSuspendCatching]
      * internally (via [getSlimapiMessagesPage]); CE propagates out of
@@ -3432,6 +3723,12 @@ class OpenCodeRepository @Inject constructor(
                 // drain from the same pre-drain watermark.
                 throw SlimCursorPartialException(outcome.cause)
             }
+
+            is SlimDrainOutcome.Degraded -> {
+                // G-F1 loop/zero-progress detection — same contract as Partial:
+                // keep dirty, no watermark advance.
+                throw SlimCursorPartialException(outcome.cause)
+            }
         }
     }
 
@@ -3447,6 +3744,13 @@ class OpenCodeRepository @Inject constructor(
      */
     class SlimCursorPartialException(cause: Throwable) :
         java.io.IOException("slim cursor drain terminated mid-walk: ${cause.message}", cause)
+
+    /**
+     * G-F1: loop detected during cursor-walk drain. The server returned the
+     * same cursor again or a page with zero new message IDs. Carried as
+     * the [cause] inside [SlimDrainOutcome.Degraded] / [Partial].
+     */
+    class SlimDrainLoopException(message: String) : java.io.IOException(message)
 
     companion object {
         /**
@@ -3501,7 +3805,58 @@ class OpenCodeRepository @Inject constructor(
 
         /** §5 G6: parallel single-full fallback concurrency (thundering-herd guard). */
         internal const val EXPAND_FALLBACK_CONCURRENCY = 4
+
+        // ── O-A budget-aware partition tree new constants ────────────────────
+
+        /** §O-A: max concurrent partition HTTP requests in-flight (2). */
+        internal const val PARTITION_MAX_CONCURRENT = 2
+
+        /** §O-A: global wall-clock timeout ms for expand operation (30s). */
+        internal const val EXPAND_MAX_WALLCLOCK_MS = 30_000L
+
+        /** §O-A: TTL ms for thin_route_not_found cache (60s). */
+        internal const val THIN_ROUTE_NOT_FOUND_TTL_MS = 60_000L
     }
+
+    // ── O-A budget counters + thin-route cache ──────────────────────────
+
+    /**
+     * §O-A: counters logged at the end of an expand operation for test verification.
+     */
+    data class ExpandBudgetCounters(
+        var peakConcurrentPartitionRequests: Int,
+        var totalHttpAttempts: Int,
+        var partitionNodesCreated: Int,
+        var wallClockMs: Long,
+    )
+
+    /**
+     * §O-A: per-host thin_route_not_found timestamp cache.
+     * Keyed by [hostPort] (host:port authority from [HostConfig.hostPort]).
+     * Value is the epoch ms when THIN_ROUTE_NOT_FOUND was last seen.
+     * TTL = [THIN_ROUTE_NOT_FOUND_TTL_MS].
+     */
+    @Volatile
+    private var thinRouteNotFoundCache: MutableMap<String, Long> = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Invalidate the thin-route cache for the current host (e.g. on server reconnect).
+     * Called by the coordinator when it learns of a new server generation (host reconnect).
+     * Documented for external callers — this is the hook for §O-A m8 bypass.
+     */
+    fun invalidateThinRouteCache() {
+        val hp = hostConfig.hostPort
+        if (hp != null) {
+            thinRouteNotFoundCache -= hp
+            DebugLog.i(TAG, "Thin-route cache invalidated for host $hp")
+        }
+    }
+
+    /**
+     * §O-A: single-flight map keyed by `"$hostPort:$sessionId:$messageId"`.
+     * Ensures ≤1 in-flight request per mid across concurrent expand calls.
+     */
+    private val singleFlightMap = ConcurrentHashMap<String, CompletableDeferred<Result<MessageWithParts>>>()
 }
 
 /**

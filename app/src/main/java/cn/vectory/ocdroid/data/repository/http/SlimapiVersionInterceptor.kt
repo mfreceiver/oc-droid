@@ -29,7 +29,7 @@ import javax.inject.Singleton
  */
 @Singleton
 class SlimapiVersionInterceptor @Inject constructor(
-    private val hostConfig: HostConfig
+    val hostConfig: HostConfig
 ) : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {

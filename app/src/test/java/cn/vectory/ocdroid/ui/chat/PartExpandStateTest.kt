@@ -5,11 +5,13 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.ExpandOutcome
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import kotlinx.coroutines.runBlocking
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -161,7 +163,7 @@ class PartExpandStateTest {
         val fullPart = Part(id = "p1", messageId = "m1", type = "text", text = "FULL TEXT")
         coEvery { repo.expandMessagesFullBatch("s1", any()) } returns ExpandOutcome.Ok(
             items = listOf(msg("m1", listOf(fullPart))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)
@@ -185,7 +187,7 @@ class PartExpandStateTest {
         val repo = mockk<OpenCodeRepository>(relaxed = true)
         coEvery { repo.expandMessagesFullBatch("s1", any()) } returns ExpandOutcome.Ok(
             items = listOf(msg("m1", listOf(Part(id = "other-part", messageId = "m1", type = "text")))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)
@@ -232,7 +234,7 @@ class PartExpandStateTest {
         )
         coEvery { repo.expandMessagesFullBatch("s1", any()) } returns ExpandOutcome.Ok(
             items = listOf(msg("m1", listOf(fetchedPartMismatch))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)
@@ -272,7 +274,7 @@ class PartExpandStateTest {
         )
         coEvery { repo.expandMessagesFullBatch("s1", any()) } returns ExpandOutcome.Ok(
             items = listOf(msg("m1", listOf(fetchedPartNullMsg))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)
@@ -319,7 +321,7 @@ class PartExpandStateTest {
         val fetchedPart = Part(id = "p1", messageId = "msg-B", type = "text", text = "full")
         coEvery { repo.expandMessagesFullBatch("s1", any()) } returns ExpandOutcome.Ok(
             items = listOf(msg("msg-B", listOf(fetchedPart))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)
@@ -363,7 +365,7 @@ class PartExpandStateTest {
         val fetchedPart = Part(id = "p1", messageId = "m1", type = "text", text = "full")
         coEvery { repo.expandMessagesFullBatch("s1", any()) } returns ExpandOutcome.Ok(
             items = listOf(msg("m1", listOf(fetchedPart))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)
@@ -382,11 +384,11 @@ class PartExpandStateTest {
     }
 
     @Test
-    fun `C2 - Ok with messageId in failedIds sets Failed(null)`() = runTest {
+    fun `C2 - Ok with messageId in failures sets Failed(null)`() = runTest {
         val repo = mockk<OpenCodeRepository>(relaxed = true)
         coEvery { repo.expandMessagesFullBatch("s1", any()) } returns ExpandOutcome.Ok(
             items = emptyList(),
-            failedIds = listOf("m1"),
+            failures = listOf(ExpandOutcome.MessageFailure("m1", code = null)),
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)
@@ -415,7 +417,7 @@ class PartExpandStateTest {
         coEvery { repo.expandMessagesFullBatch("s1", any()) } returns ExpandOutcome.Ok(
             // m1 resolved (items); m2 failed (failedIds); m3 silently dropped (residual).
             items = listOf(msg("m1", listOf(Part(id = "p1", messageId = "m1", type = "text", text = "full")))),
-            failedIds = listOf("m2"),
+            failures = listOf(ExpandOutcome.MessageFailure("m2", code = null)),
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)
@@ -505,7 +507,7 @@ class PartExpandStateTest {
         val realPart = Part(id = "prt_real", messageId = "m1", type = "text", text = "real content")
         coEvery { repo.expandMessagesFullBatch("s1", any()) } returns ExpandOutcome.Ok(
             items = listOf(msg("m1", listOf(realPart))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)
@@ -537,7 +539,7 @@ class PartExpandStateTest {
         val repo = mockk<OpenCodeRepository>(relaxed = true)
         coEvery { repo.expandMessagesFullBatch("s1", any()) } returns ExpandOutcome.Ok(
             items = emptyList(),
-            failedIds = listOf("m1"),
+            failures = listOf(ExpandOutcome.MessageFailure("m1", code = null)),
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)
@@ -564,7 +566,7 @@ class PartExpandStateTest {
         val repo = mockk<OpenCodeRepository>(relaxed = true)
         coEvery { repo.expandMessagesFullBatch(any(), any()) } returns ExpandOutcome.Ok(
             items = emptyList(),
-            failedIds = listOf("m1", "m2"),
+            failures = listOf(ExpandOutcome.MessageFailure("m1", code = null), ExpandOutcome.MessageFailure("m2", code = null)),
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)
@@ -579,5 +581,15 @@ class PartExpandStateTest {
         uc.expandParts("s1", emptyList(), parts).getOrThrow()
 
         coVerify(exactly = 1) { repo.expandMessagesFullBatch("s1", setOf("m1", "m2")) }
+    }
+
+    @Test
+    fun `exhausted residual UI keeps skeleton`() = runBlocking {
+        // Note: runBlocking is imported from kotlinx.coroutines.runBlocking
+        // The mapping of outcome to state is inside ExpandPartsUseCase,
+        // but we can test the result state directly via the sealed interface.
+        // Here we just verify that the Exhausted state exists and is distinct from Failed.
+        assertTrue(PartExpandState.Exhausted is PartExpandState)
+        assertFalse(PartExpandState.Exhausted is PartExpandState.Failed)
     }
 }

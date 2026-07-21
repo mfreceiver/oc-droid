@@ -170,6 +170,11 @@ class SlimGoldenPathIntegrationTest {
             isSlimMode = { true },
             repository = repository,
         )
+
+        // NOTE: cold-start snapshot responses (sessions, questions, permissions)
+        // are NO LONGER pre-enqueued here. Each test that triggers the cadence-
+        // driven resync (which calls coldStartSlimSync) must enqueue them itself
+        // after the SSE body to ensure correct FIFO ordering with the SSE request.
     }
 
     @After
@@ -337,6 +342,11 @@ class SlimGoldenPathIntegrationTest {
                 }
 
                 // ── Wire-level assertions (request arrival order). ─────────
+                // With the cadence resync now suppressed on initial connect (G-F1 fix),
+                // there are exactly 3 HTTP requests in order:
+                // 1. SSE connect (GET /slimapi/events)
+                // 2. Probe (GET /slimapi/messages/s1?limit=1&mode=skeleton)
+                // 3. Cursor drain (GET /slimapi/messages/s1?limit=200&mode=skeleton)
                 val sseRequest = server.takeRequest()
                 assertEquals(
                     "slim mode MUST hit /slimapi/events (instance-level sidecar SSE)",

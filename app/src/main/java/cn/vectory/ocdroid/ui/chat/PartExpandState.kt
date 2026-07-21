@@ -66,6 +66,9 @@ sealed interface PartExpandState {
      * envelope error, or residual drop.
      */
     data class Failed(val code: String?) : PartExpandState
+
+    /** Budget exhaustion — skeleton preserved, retry affordance present. */
+    data object Exhausted : PartExpandState
 }
 
 /**
@@ -202,8 +205,10 @@ class ExpandPartsUseCase(
                 ExpandPartsOutcome(mergedLocal = null, states = states)
             }
             is ExpandOutcome.Failed -> {
+                val state = if (outcome.exhausted) PartExpandState.Exhausted
+                else PartExpandState.Failed(code = outcome.code)
                 val states = targets.associate {
-                    PartKey(it.messageId!!, it.id) to PartExpandState.Failed(code = outcome.code)
+                    PartKey(it.messageId!!, it.id) to state
                 }
                 ExpandPartsOutcome(mergedLocal = null, states = states)
             }
@@ -224,7 +229,7 @@ class ExpandPartsUseCase(
     ): ExpandPartsOutcome {
         val itemByMsg: Map<String, MessageWithParts> = outcome.items.associateBy { it.info.id }
         val itemMsgIds: Set<String> = itemByMsg.keys
-        val failedMsgIds: Set<String> = outcome.failedIds.toSet()
+        val failedMsgIds: Set<String> = outcome.failures.map { it.messageId }.toSet()
 
         // T8 pure merge — fold fetched-full items into local.
         val merged = mergeFullBatchIntoLocal(local, outcome.items)

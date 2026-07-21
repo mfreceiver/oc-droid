@@ -77,7 +77,7 @@ class PartExpandWiringTest {
         val fullPart2 = Part(id = "p2", messageId = "m1", type = "text", text = "FULL2")
         coEvery { repo.expandMessagesFullBatch("s1", setOf("m1")) } returns ExpandOutcome.Ok(
             items = listOf(msg("m1", listOf(fullPart1, fullPart2))),
-            failedIds = emptyList(),
+            failures = emptyList(),
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)
@@ -101,7 +101,7 @@ class PartExpandWiringTest {
         val repo = mockk<OpenCodeRepository>(relaxed = true)
         coEvery { repo.expandMessagesFullBatch("s1", setOf("m1")) } returns ExpandOutcome.Ok(
             items = emptyList(),
-            failedIds = listOf("m1"),
+            failures = listOf(ExpandOutcome.MessageFailure("m1", code = null)),
             usedBatch = true,
         )
         val uc = ExpandPartsUseCase(repo)

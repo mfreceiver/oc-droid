@@ -15,7 +15,7 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
  *
  * | outcome                                  | type            | notes |
  * | ---                                      | ---             | ---   |
- * | 200 + envelope                           | [Ok]            | `items` resolved; per-message failures ride in `failedIds` (HTTP stays 200 even when some ids fail) |
+ * | 200 + envelope                           | [Ok]            | `items` resolved; per-message failures ride in `failures` (HTTP stays 200 even when some ids fail) |
  * | 404 + `session_not_found`                | [SessionMissing]| the entire session is gone upstream — UI clears local cache (mirrors G2 status handling) |
  * | 404 + `thin_route_not_found` (transitional) | [Ok]         | sidecar hasn't deployed the batch endpoint; repo falls back to N parallel single-full calls (`usedBatch = false`) |
  * | 404 (other)                              | [Failed]        | programming error / unmapped route — NO fallback |
@@ -23,6 +23,8 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
  * | 503 after exhaustive backoff             | [Failed]        | repo exhausted 3 retries with exponential backoff |
  * | 400 / 422 / other 4xx 5xx                | [Failed]        | bad request — fix and retry upstream |
  * | Network / IO failure                     | [Failed]        | `code = null` (no sidecar envelope) |
+ * | Budget exhausted / cancelled /        | [Failed]        | `code = null` + `exhausted = true` (keep skeleton + show retry affordance) |
+ * | exhausted                                    |                |                                                                       |
  *
  * ## Purity
  *
@@ -35,12 +37,22 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
  */
 sealed interface ExpandOutcome {
     /**
+     * Represents a single per-message failure from the envelope or from retry exhaustion.
+     * Carries both the [messageId] and the [code] from the envelope error,
+     * or [code] = null for transport-level failure / exhaustion.
+     */
+    data class MessageFailure(
+        val messageId: String,
+        val code: String?,
+    )
+
+    /**
      * At least one batch attempt returned a usable result (200 envelope
      * OR the per-id fallback path). [items] carries every resolved
-     * [MessageWithParts] in the request's (deduped) order; [failedIds]
-     * carries the message ids that did NOT resolve (either per-message
+     * [MessageWithParts] in the request's (deduped) order; [failures]
+     * carries the message failures that did NOT resolve (either per-message
      * errors from the 200 envelope's `errors[]`, or per-id transport
-     * failures from the fallback path).
+     * failures from the fallback path, or budget-exhausted mids).
      *
      * [usedBatch] distinguishes the batched-success path (`true`, used
      * `GET /slimapi/messages/{sid}/full?ids=…`) from the per-id fallback
@@ -51,7 +63,7 @@ sealed interface ExpandOutcome {
      */
     data class Ok(
         val items: List<MessageWithParts>,
-        val failedIds: List<String>,
+        val failures: List<MessageFailure>,
         val usedBatch: Boolean,
     ) : ExpandOutcome
 
@@ -71,6 +83,17 @@ sealed interface ExpandOutcome {
      * from `{"code": "…"}` when available; null on transport failure
      * or unparseable body (UI surfaces a generic "expand failed"
      * affordance with retry).
+     *
+     * [exhausted] = true when the operation exhausted its budget
+     * (wall-clock, node budget, or partition count) before being able
+     * to resolve all ids. The unresolved mids are NOT in [Failed] —
+     * they are carried via the [exhausted] marker and the caller
+     * should keep skeleton + show retry affordance, NOT a terminal
+     * failure.
      */
-    data class Failed(val sessionId: String, val code: String?) : ExpandOutcome
+    data class Failed(
+        val sessionId: String,
+        val code: String?,
+        val exhausted: Boolean = false,
+    ) : ExpandOutcome
 }
