@@ -944,7 +944,10 @@ internal fun HostProfileEditorDialog(
             enter = expandVertically() + fadeIn(),
             exit = shrinkVertically() + fadeOut()
         ) {
-            CollapsibleSection(
+            // §fix-advanced-overlap: AnimatedVisibility provides BoxScope, so all
+            // direct children overlap at (0,0). Wrap in a Column to stack vertically.
+            Column {
+                CollapsibleSection(
                 title = stringResource(R.string.host_section_basic_auth_title),
                 subtitle = stringResource(R.string.host_section_basic_auth_sub),
                 checked = basicAuthEnabled,
@@ -1094,6 +1097,7 @@ internal fun HostProfileEditorDialog(
                 Text(stringResource(R.string.host_slim_title), style = MaterialTheme.typography.titleSmall)
                 Switch(checked = slimEnabled, onCheckedChange = { slimEnabled = it })
             }
+            } // Column (fix-advanced-overlap)
         }
         // §issue-5: 全宽"测试连接"按钮已移除——触发器移入底部 action 行的
         // test icon（见 confirmButton）。此处仅保留结果回显（成功/失败小字），
