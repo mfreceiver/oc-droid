@@ -54,6 +54,11 @@ import cn.vectory.ocdroid.ui.withUpdatedAtLeast
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.FLICKER_TAG
 import cn.vectory.ocdroid.util.SettingsManager
+import cn.vectory.ocdroid.ui.controller.sse.SseDispatchHost
+import cn.vectory.ocdroid.ui.controller.sse.SseEventRouter
+import cn.vectory.ocdroid.ui.controller.sse.SharedConversationSseHandler
+import cn.vectory.ocdroid.ui.controller.sse.LegacySseHandler
+import cn.vectory.ocdroid.ui.controller.sse.SlimSseHandler
 import cn.vectory.ocdroid.util.STREAMING_FLICKER_DEBUG
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -129,10 +134,10 @@ private var clockOverride: (() -> Long)? = null
 
 @Suppress("DEPRECATION")
 class SessionSyncCoordinator(
-    private val scope: CoroutineScope,
-    private val slices: SliceFlows,
-    private val settingsManager: SettingsManager,
-    private val effects: SharedEffectBus,
+    override val scope: CoroutineScope,
+    override val slices: SliceFlows,
+    override val settingsManager: SettingsManager,
+    override val effects: SharedEffectBus,
     /** R-20 Phase 1: provider for the current host's serverGroupFp. Used to
      *  key the [ControllerEffect.EvictSession] emission on the session.updated
      *  archived branch (plan §3 矩阵 "SSE 归档 session" 行). */
@@ -159,7 +164,7 @@ class SessionSyncCoordinator(
      * — when null, the SSE branch simply skips the aggregator feed (no
      * behaviour change for tests that did not wire the aggregator).
      */
-    internal val statusAggregatorInput: StatusAggregatorInput? = null,
+    override val statusAggregatorInput: StatusAggregatorInput? = null,
     /**
      * CP4 (notify Phase-0): the single clock used for SSE arrival timestamps
      * passed to [StatusAggregatorInput.applySseStatus]. Defaults to wall-clock
@@ -192,12 +197,20 @@ class SessionSyncCoordinator(
      * subsequent `/since` fetch must follow immediately. An effect hop would
      * race the next digest frame against an unadvanced bookmark.
      */
-    private val repository: OpenCodeRepository? = null,
+    override val repository: OpenCodeRepository? = null,
     /** Worker lane for network/reconcile computation. UI commits switch to Main. */
     internal val reconcileDispatcher: CoroutineDispatcher = Dispatchers.Default,
-) {
+) : SseDispatchHost {
     /** Tag for [reportNonFatalIssue]; mirrors the original MainViewModel TAG. */
     private val tag: String = "SessionSyncCoordinator"
+
+    /** T2: the SSE event router + domain handlers. Created at construction. */
+    private val sseRouter: SseEventRouter = run {
+        val shared = SharedConversationSseHandler(this)
+        val legacy = LegacySseHandler(this)
+        val slim = SlimSseHandler(this)
+        SseEventRouter(shared, legacy, slim)
+    }
     /**
      * §R-17 batch5: the ONLY coalesce state retained on the coordinator. The
      * Job references are bound to [scope] (a Job is neither serializable nor
@@ -259,7 +272,7 @@ class SessionSyncCoordinator(
      */
     private val reconcileStripes: Array<Mutex> = Array(STRIPES) { Mutex() }
 
-    private fun stripeFor(sid: String): Mutex {
+    private fun stripeForImpl(sid: String): Mutex {
         // floorMod keeps the result non-negative for negative hashCode().
         val idx = ((sid.hashCode() % STRIPES) + STRIPES) % STRIPES
         return reconcileStripes[idx]
@@ -830,7 +843,7 @@ class SessionSyncCoordinator(
      * effect sequencing auditable and the pure applyXxx functions testable
      * in isolation (they return the effects list; the dispatcher commits it).
      */
-    private fun applySseSideEffects(sideEffects: List<SseSideEffect>) {
+    private fun applySseSideEffectsImpl(sideEffects: List<SseSideEffect>) {
         if (sideEffects.isEmpty()) return
         for (effect in sideEffects) {
             when (effect) {
@@ -912,17 +925,10 @@ class SessionSyncCoordinator(
             val currentSid = slices.chat.value.currentSessionId
             val sidMatches = evtSid == null || evtSid == currentSid
             when {
-                // Per-token streaming events for the current session: 1Hz coalesce.
-                // Counts ONLY deltas for the current session (non-current are not
-                // rendered and carry no signal). No per-event string allocation —
-                // just an int increment + timestamp check.
                 (t == "message.part.delta" || t == "message.part.updated") &&
                     evtSid != null && evtSid == currentSid -> {
                     val now = System.currentTimeMillis()
                     if (verboseSseDeltaCount == 0 || now - verboseSseDeltaFirstAt >= 1000L) {
-                        // New window: flush any pending prior-window summary first
-                        // (defensive — should be empty here since non-delta events
-                        // flush on their way through), then open a fresh window.
                         flushVerboseSseDeltaWindow()
                         verboseSseDeltaFirstAt = now
                         verboseSseDeltaCount = 1
@@ -931,9 +937,6 @@ class SessionSyncCoordinator(
                         verboseSseDeltaCount++
                     }
                 }
-                // All other event types — flush any pending delta window first so
-                // the viewer's chronological order is preserved, then log this
-                // event if it's sid-less OR for the current session.
                 sidMatches -> {
                     flushVerboseSseDeltaWindow()
                     val props = event.payload.properties
@@ -947,883 +950,17 @@ class SessionSyncCoordinator(
                     } else ""
                     cn.vectory.ocdroid.util.DebugLog.d("SseDiag", "frame type=$t$extra")
                 }
-                // else: non-current session's non-delta event — skip (no signal).
             }
         }
         // Throttle dispatch logging to preserve the 1000-entry ring buffer's signal.
-        // Skipped (noise): server.heartbeat (periodic), message.part.delta (per-token
-        // during streaming — its render IS the proof), server.connected (fires on
-        // every reconnect), and plugin.added / catalog.updated / integration.updated
-        // (server-internal bursts that fire in large flurries when a run starts,
-        // e.g. when another client sends a message). Logging-only — dispatch is
-        // unchanged. All other types (message.created/updated, session.*,
-        // permission/question, todo, connection) are logged — they are the actual
-        // sync signal.
         val type = event.payload.type
         val evtSession = event.payload.getString("sessionID") ?: "-"
         val noisy = type in NOISY_SSE_LOG_EVENTS
         if (!noisy) {
             DebugLog.d("Sync", "dispatch $type session=$evtSession current=${slices.chat.value.currentSessionId}")
         }
-        when (event.payload.type) {
-            "session.created" -> {
-                val created = parseSessionCreatedEvent(event)
-                if (created != null) {
-                    // Multi-field pure helper (sessions + directorySessions +
-                    // pendingCreate clear + tree invalidation). NOT sessions-
-                    // only — SessionUpserted would drop co-writes. Stay on
-                    // mutateSessionList + applySessionCreated (1:1).
-                    slices.mutateSessionList { s -> s.applySessionCreated(created.session).first }
-                } else {
-                    applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid session.created payload")))
-                }
-            }
-            "session.updated" -> {
-                val updated = parseSessionUpdatedEvent(event)
-                if (updated != null) {
-                    if (updated.isArchived) {
-                        // Archived (typically by another client): evict the
-                        // id from the open-tabs list and persist, mirroring
-                        // the user-triggered archive path. If the archived
-                        // session is the currently-open one, also clear
-                        // currentSessionId + messages so the chat view falls
-                        // back to the empty state instead of lingering on an
-                        // archived session whose tab has disappeared.
-                        val newOpenIds = slices.sessionList.value.openSessionIds.filter { id -> id != updated.id }
-                        if (newOpenIds != slices.sessionList.value.openSessionIds) {
-                            settingsManager.openSessionIds = newOpenIds
-                        }
-                        // §A5-3 Phase B2: the pre-B2 dual
-                        // mutateSessionList(applyArchiveEviction) +
-                        // mutateChat(applyArchivedChatClear) (the latter only
-                        // when the archived session WAS the current one) is
-                        // collapsed into ONE atomic dispatch. The reducer
-                        // derives the "clear chat" decision from the snapshot
-                        // (chat.currentSessionId == updated.id), so the
-                        // action carries pure data only — no clearChat
-                        // boolean. The applyArchiveEviction + (conditional)
-                        // applyArchivedChatClear helpers are reused unchanged
-                        // inside [reduce]. ONE committed aggregate state →
-                        // no torn "sessionList archived but
-                        // chat.currentSessionId still references it"
-                        // intermediate for stateFlow collectors.
-                        slices.store.dispatch(
-                            cn.vectory.ocdroid.ui.AppAction.SessionArchived(
-                                session = updated,
-                                openSessionIds = newOpenIds,
-                            )
-                        )
-                        // R-20 Phase 1 (plan §3 矩阵 "SSE 归档 session" 行):
-                        // evict the archived session from both the memory LRU
-                        // and the persistent cache. The fp comes from the
-                        // currentServerGroupFp provider (the SSE feed is
-                        // generation-guarded by ConnectionCoordinator so a
-                        // stale-host event cannot reach here — see
-                        // §P1-10 hostGeneration guard). Routed through the
-                        // effect bus so AppCore.dispatchHostEffect runs the
-                        // memory + persistent halves.
-                        effects.tryEmitEffect(
-                            ControllerEffect.EvictSession(currentServerGroupFp(), updated.id)
-                        )
-                    } else {
-                        slices.mutateSessionList { s -> s.applySessionUpsert(updated).first }
-                    }
-                } else {
-                    applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid session.updated payload")))
-                }
-            }
-            "session.status" -> {
-                // §Phase1a instrumentation (Issue 4): capture the FULL raw properties
-                // JSON so we can confirm which fields actually arrive for retry
-                // (type/attempt/message/next + any `action` sub-object). Parser/model
-                // is Phase 4 — for now, raw toString() of the whole JsonObject.
-                DebugLog.d("Retry", "session.status raw properties=${event.payload.properties?.toString() ?: "null"}")
-                val statusEvent = parseSessionStatusEvent(event)
-                if (statusEvent != null) {
-                    // CP4 (notify Phase-0): feed the authoritative status aggregator
-                    // BEFORE the existing fold. The aggregator's input surface takes
-                    // the composite key `(serverGroupFp, workdir, sessionId)` and the
-                    // SSE arrival time `clock()` (same clock domain as the impl's
-                    // injected clock — merge timing inside the aggregator is consistent).
-                    // The identity gate already ran in [handleEvent(IdentifiedSseEvent)]
-                    // (CP1 isCurrent check) before this dispatch, so the current identity
-                    // is the live one — using [currentServerGroupFp] here matches the
-                    // session.updated archived branch's pattern.
-                    //
-                    // Unknown sessionId (not in sessionsById) → silently skipped
-                    // (matches the existing §unread-lifecycle "unknown id" exclusion;
-                    // we cannot build a composite key without the workdir).
-                    val aggregatorInput = statusAggregatorInput
-                    if (aggregatorInput != null) {
-                        val sessionsByIdNow = allSessionsById(
-                            slices.sessionList.value.sessions,
-                            slices.sessionList.value.directorySessions,
-                            slices.sessionList.value.childSessions,
-                        )
-                        val target = sessionsByIdNow[statusEvent.sessionId]
-                        if (target != null) {
-                            val key = SessionStatusKey(
-                                serverGroupFp = currentServerGroupFp(),
-                                workdir = target.directory,
-                                sessionId = statusEvent.sessionId,
-                            )
-                            aggregatorInput.applySseStatus(
-                                key,
-                                statusEvent.status.toSessionBusyStatus(),
-                                sourceTimeMs = clock(),
-                            )
-                        }
-                    }
-                    // §unread-soak (main): the prior busy→idle edge capture
-                    // (oldStatus / wasBusy / nowIdle) is GONE — the instant marking
-                    // it fed is now owned by the [UnreadSoakController] sweep + the
-                    // pure [evaluateUnread] evaluator. This branch only folds the new
-                    // status into sessionStatuses so the evaluator sees it. (The CP4
-                    // aggregator feeding above is independent of that edge capture.)
-                    // §streaming-state-sync-diag (runtime-gated, scoped+dedup):
-                    // record the OLD type immediately before the sessionStatuses
-                    // write so we can confirm whether the optimistic busy gets
-                    // overwritten by a stale idle. Scope to the current session
-                    // AND log only on actual transition (idle→idle is the
-                    // dominant flood source — skip it entirely).
-                    if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
-                        val diagSid = statusEvent.sessionId
-                        val diagNewType = statusEvent.status.type
-                        val diagOldType = slices.sessionList.value.sessionStatuses[diagSid]?.type
-                        if (diagSid == slices.chat.value.currentSessionId && diagOldType != diagNewType) {
-                            cn.vectory.ocdroid.util.DebugLog.d(
-                                "StatusDiag",
-                                "session.status write sid=$diagSid oldType=$diagOldType newType=$diagNewType",
-                            )
-                        }
-                    }
-                    slices.mutateSessionList {
-                        it.applySessionStatus(statusEvent.sessionId, statusEvent.status).first
-                    }
-                    // §cross-client-sync: when the CURRENT session goes busy, a run
-                    // just started — i.e. a message was sent, possibly from ANOTHER
-                    // client (e.g. the web UI). This is a belt-and-suspenders reload
-                    // that catches messages emitted before the message.updated
-                    // insert-if-absent path (below) has run / before the local view
-                    // is subscribed — the primary surfacing path is now message.updated
-                    // insert-if-absent (mirrors the web client). Debounced via
-                    // loadMessagesWithRetry's 400ms delay + isLoadingMessages
-                    // coalescing; the user message is persisted server-side before
-                    // the run starts. The overlay-clear in launchLoadMessages is
-                    // gated on !busy, so this does NOT disrupt the streaming overlay.
-                    //
-                    // §R-19 Sprint 3 P2-4: cross-slice effects (depend on chat /
-                    // unread state, not just SessionListState) are computed here
-                    // and routed through applySseSideEffects — the single side-
-                    // effect routing point. applySessionStatus itself returns
-                    // emptyList() (its state transform is pure same-slice).
-                    val statusEffects = mutableListOf<SseSideEffect>()
-                    val chatSnap = slices.chat.value
-                    val isCurrent = statusEvent.sessionId == chatSnap.currentSessionId
-                    // §unread-soak: unread marking is NO LONGER done here on
-                    // the instant busy→idle edge. The foreground
-                    // [UnreadSoakController] sweep + the pure [evaluateUnread]
-                    // evaluator now own the population logic — a root becomes
-                    // unread ONLY when (a) it AND all descendants are idle,
-                    // (b) that all-idle state persisted ≥10s, (c) it is not the
-                    // current session, AND (d) it was not viewed since idle.
-                    // This branch still updates sessionStatuses (via
-                    // applySessionStatus above) so the evaluator sees fresh
-                    // statuses; [applyMarkSessionUnread] remains the
-                    // low-level marker (now called only by the sweep).
-                    if (statusEvent.status.isBusy && isCurrent) {
-                        DebugLog.i("Sync", "session.status busy (current) → reload (cross-client message sync)")
-                        statusEffects.add(SseSideEffect.ReloadMessages(statusEvent.sessionId, resetLimit = true))
-                    }
-                    // SSE-trust model: session.status (busy/idle) only updates the
-                    // status badge. It does NOT reload or clear streaming buffers
-                    // (except the busy-current and idle-current finalization paths).
-                    // The finalized turn text is carried by streamingPartTexts
-                    // until a foreground catch-up reconciles the persisted message
-                    // list — mirroring opencode-web.
-                    //
-                    // §append-safe finalization (gpter MAJOR): the overlay-clear in
-                    // launchLoadMessages is gated on !busy, so if the last reload
-                    // happened while busy (overlay preserved), the overlay could
-                    // linger after the run settles. When the CURRENT session goes
-                    // idle with a non-empty overlay, reconcile against the now-
-                    // persisted authoritative window (loadMessagesWithRetry delays
-                    // internally so the server has time to persist the finalized
-                    // part text; status is now idle so the gated clear will run).
-                    //
-                    // §R-19 fix Blocker 2 v2: no sessionsDirty dedup — idle-driven
-                    // reloads ALWAYS fire based on overlay state; overlapping
-                    // reloads coalesce at the scheduling layer (isLoadingMessages
-                    // check-and-set + 400ms debounce).
-                    if (statusEvent.status.isIdle && isCurrent) {
-                        val overlayNonEmpty = chatSnap.streamingPartTexts.isNotEmpty() || chatSnap.streamingReasoningPart != null
-                        DebugLog.d("Sync", "session.status idle → ${if (overlayNonEmpty) "reload" else "no-op"}")
-                        if (overlayNonEmpty) {
-                            statusEffects.add(SseSideEffect.ReloadMessages(statusEvent.sessionId, resetLimit = true))
-                        }
-                    }
-                    applySseSideEffects(statusEffects)
-                } else {
-                    applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid session.status payload")))
-                }
-            }
-            "message.created" -> {
-                // NOTE: server 1.17.11+ does NOT emit message.created (only
-                // message.updated / message.part.*). This branch is retained for
-                // FORWARD COMPATIBILITY if a future server version adds it; today
-                // it is effectively dead code. New messages are surfaced by the
-                // message.updated insert-if-absent path above and the
-                // session.status busy reload.
-                //
-                // §unread-lifecycle Task 3: unread is produced SOLELY by the
-                // session.status root busy→idle path (lifecycle completion).
-                // This branch keeps only its time.updated bump + current-session
-                // reload for forward-compat; it no longer marks unread.
-                val sessionId = event.payload.getString("sessionID")
-                val isCurrent = sessionId != null && sessionId == slices.chat.value.currentSessionId
-                DebugLog.i("Sync", "message.created: ${if (isCurrent) "reload current" else "no-op (unread is lifecycle-driven)"}")
-
-                // §recent-sort-by-message: forward-compat parity with the
-                // message.updated branch — bump the session's time.updated to
-                // max(current, info.time.created) so the recent-sessions list
-                // reorders on a new message even if a future server emits
-                // message.created instead of message.updated.
-                if (sessionId != null) {
-                    val createdInfo = event.payload.getJsonObject("info")?.let {
-                        runCatching {
-                            lenientJson.decodeFromJsonElement<Message>(it)
-                        }.getOrNull()
-                    }
-                    val msgCreated = createdInfo?.time?.created ?: 0L
-                    if (msgCreated > 0L) {
-                        slices.mutateSessionList { s ->
-                            s.applyMessageTimestampBump(sessionId, msgCreated).first
-                        }
-                    }
-                }
-
-                // §R-19 Sprint 3 P2-4: side effects formalized as SseSideEffect list.
-                // Only the current session reloads; non-current sessions do NOT
-                // mark unread here (see the session.status busy→idle path).
-                val msgEffects = mutableListOf<SseSideEffect>()
-                if (sessionId != null && sessionId == slices.chat.value.currentSessionId) {
-                    msgEffects.add(SseSideEffect.ReloadMessages(sessionId, resetLimit = true))
-                }
-                applySseSideEffects(msgEffects)
-            }
-            "message.updated" -> {
-                // SSE-trust: patch the message metadata in-place from the server's
-                // authoritative `info` (mirrors opencode-web server-session.ts:706).
-                // Server payload confirmed to carry a full { info: Message } object.
-                // We replace the matching Message in the split `messages` store
-                // (List<Message>); its parts live separately in partsByMessage and
-                // are NOT touched.
-                //
-                // §cross-client-sync (server 1.17.11+): the server emits
-                // `message.updated` (NOT `message.created`) for NEW messages. So
-                // when the message id is ABSENT from the local list we INSERT it
-                // (append — the list is oldest-first and the new message is the
-                // newest). This mirrors the oc-ref web client's
-                // patch-if-found + insert-if-absent handler. Subsequent updates for
-                // the same id find it in the list and patch in place, so this is a
-                // once-per-new-id op (no storm — pure state update, no I/O, no
-                // reload). The session.status busy → reload path is the parallel
-                // belt-and-suspenders for messages emitted before the local view
-                // is even subscribed.
-                // Defensive session guard: only touch the current session's chat
-                // view (the slice mutation below).
-                val eventSessionId = event.payload.getString("sessionID")
-                val infoJson = event.payload.getJsonObject("info")
-                val updated = infoJson?.let {
-                    runCatching {
-                        lenientJson.decodeFromJsonElement<Message>(it)
-                    }.getOrNull()
-                }
-
-                // §recent-sort-by-message: bump the owning session's time.updated
-                // to max(current, message.time.created) on every message event so
-                // the "recent sessions" surfaces (SessionsScreen recent +
-                // SessionPickerSheet recent, both sortedByDescending { time.updated })
-                // reflect actual message activity, not just server-side session
-                // metadata timestamps. The bump applies to BOTH current and non-
-                // current sessions (cross-client messages from another client
-                // surface in the recent list). withUpdatedAtLeast is idempotent /
-                // monotonic, so repeated patches for the same message are a no-op
-                // (no thrash) and out-of-order / replay events never go backwards.
-                if (eventSessionId != null && updated != null) {
-                    val msgCreated = updated.time?.created ?: 0L
-                    if (msgCreated > 0L) {
-                        slices.mutateSessionList { s ->
-                            s.applyMessageTimestampBump(eventSessionId, msgCreated).first
-                        }
-                    }
-                }
-
-                // Defensive session guard: only touch the current session's chat view.
-                if (eventSessionId != null && eventSessionId != slices.chat.value.currentSessionId) return
-                if (updated != null && updated.id.isNotEmpty()) {
-                    // §R-17 batch5: pure transform returns (newState, found).
-                    // Single O(n) scan inside the atomic update — `found` is
-                    // set during the same `map` pass that builds the
-                    // replacement list, so the patch-vs-insert decision and
-                    // the found flag come from one atomic pass (no TOCTOU, no
-                    // second `.none{}` scan). When found, patch in place;
-                    // when NOT found, append (insert) the new message at the
-                    // tail (oldest-first list).
-                    // T1b: found is derived from the pre-dispatch snapshot so
-                    // DebugLog / cache-append side-effects stay at the call site
-                    // (the reducer only applies the pure transform).
-                    val found = slices.chat.value.messages.any { it.id == updated.id }
-                    slices.store.dispatch(
-                        cn.vectory.ocdroid.ui.AppAction.MessageUpdatedApplied(updated)
-                    )
-                    if (found) {
-                        DebugLog.d("Sync", "message.updated: patched")
-                    } else {
-                        DebugLog.i("Sync", "message.updated: inserted (new message, absent from local list)")
-                        // remove-message-persistence Task 3 (grilling 假设1
-                        // 修正): the new message was appended to the slice.
-                        // Mirror it into the IN-MEMORY sessionWindowCache so
-                        // a subsequent switch-back (VerifyAndHydrate → peek
-                        // hit) sees it without a re-fetch. The OLD path did
-                        // a fire-and-forget `cacheRepository
-                        // .appendMessageIfSessionCached` suspend write to
-                        // SQLite; that target is replaced by an effect bus
-                        // hop to AppCore → SessionSwitcher
-                        // .appendMessageIfCached (in-memory LRU only — no IO).
-                        // Why keep the append at all (vs deleting the SSE
-                        // cache write outright): if the user is away from
-                        // this session and >initialMessagePageSize (40) new
-                        // messages arrive, the切回 latest-40 fetch +
-                        // olderKept merge would drop the middle (olderKept
-                        // excludes messages newer than oldestFetched but
-                        // absent from the fetch). The pure-memory append
-                        // closes that loss window without re-introducing IO.
-                        // Append is scoped to the CURRENT session
-                        // (eventSessionId was guarded above to equal
-                        // currentSessionId); appendMessageIfCached is a
-                        // no-op when no cached window is resident.
-                        effects.tryEmitEffect(
-                            ControllerEffect.AppendMessageToCache(
-                                serverGroupFp = currentServerGroupFp(),
-                                sessionId = eventSessionId!!, // guarded non-null above
-                                message = updated,
-                                // §parts-by-message: the new message has no
-                                // parts yet (its first part.created /
-                                // part.updated will arrive separately).
-                                // Persist an empty list; the next part event
-                                // + the post-turn idle reload fills them in.
-                                parts = emptyList(),
-                            )
-                        )
-                    }
-                }
-            }
-            "message.part.updated" -> {
-                val deltaEvent = parseMessagePartDeltaEvent(event) ?: return
-                if (deltaEvent.sessionId == slices.chat.value.currentSessionId) {
-                    val msgId = deltaEvent.messageId
-                    val pId = deltaEvent.partId
-                    if (msgId != null && pId != null) {
-                        val key = pId
-                        // §user-part-guard (flicker root cause, secondary): the
-                        // server emits message.part.updated for the USER message
-                        // too — the user input text is reflected as a part event
-                        // (type=text). Treating it as streaming assistant output
-                        // pollutes streamingPartTexts with a partId that belongs
-                        // to the user message and injects a placeholder into the
-                        // user bubble, which (a) misleads the assistant's
-                        // isStreaming guard and (b) can render echoed text in the
-                        // user's own bubble. Only ASSISTANT output streams — skip
-                        // parts whose owning message is a user message. The user
-                        // message is always inserted before its part event, so
-                        // the lookup is reliable; an unknown msgId falls through
-                        // (it is the assistant message being born).
-                        val ownerIsUser = slices.chat.value.messages.any { it.id == msgId && it.isUser }
-                        if (ownerIsUser) return
-                        val fullText = deltaEvent.text
-                        val delta = deltaEvent.delta
-                        // §reasoning-routing-fix (symptom: reasoning rendered as
-                        // 正文 / main body text). The server creates a reasoning
-                        // part via part.updated with type=reasoning but BLANK text
-                        // (full=0) BEFORE streaming its content via part.delta.
-                        // The blank creation event used to fall through the
-                        // fullText/delta gates below (both require non-blank
-                        // content), so the type=reasoning info was LOST. The
-                        // subsequent part.delta events then injected a placeholder
-                        // using their `field` — which the server sets to "text"
-                        // even for reasoning content — so the reasoning part became
-                        // type=text and rendered as 正文, and streamingReasoningPart
-                        // was never set (no thinking card). Record the part's TRUE
-                        // type at creation here (inject correctly-typed placeholder
-                        // + set streamingReasoningPart) so content routes to the
-                        // standalone thinking card. Idempotent: once the part
-                        // exists with the correct type this is a no-op.
-                        val pType = deltaEvent.partType
-                        if (isStreamablePartType(pType)) {
-                            val existingParts = slices.chat.value.partsByMessage[msgId]
-                            val hasCorrectType = existingParts?.any { it.id == pId && it.type == pType } == true
-                            if (!hasCorrectType) {
-                                // T1b: two-phase phase 1 — separate dispatch so
-                                // collectors observe the placeholder intermediate
-                                // before phase 2 leading-edge writes streaming text.
-                                slices.store.dispatch(
-                                    cn.vectory.ocdroid.ui.AppAction.PartPlaceholderEnsured(
-                                        partType = pType,
-                                        partId = pId,
-                                        messageId = msgId,
-                                        sessionId = deltaEvent.sessionId,
-                                    )
-                                )
-                                // §streaming-flicker-diagnosis (Top1): the placeholder
-                                // Part (text=null) is now in partsByMessage but the first
-                                // delta/fullText has NOT yet been staged into
-                                // streamingPartTexts — this is the two-phase-mutation
-                                // intermediate state. inStreamingTexts is expected to be
-                                // false here; if Compose snapshots between this mutation
-                                // and the leading-edge write below, the ChatMessageContent
-                                // filter (Top1) drops the whole message → blank frame.
-                                if (STREAMING_FLICKER_DEBUG) {
-                                    val inStreamingTexts = key in slices.chat.value.streamingPartTexts
-                                    Log.w(
-                                        FLICKER_TAG,
-                                        "placeholder created partId=$key msgId=$msgId inStreamingTexts=$inStreamingTexts"
-                                    )
-                                }
-                            }
-                        }
-                        if (!fullText.isNullOrBlank()) {
-                            // Server sent full accumulated text — use it as the
-                            // authoritative streaming value (REPLACE, not append;
-                            // acts as a sync point). §Site1-coalesce: mirror the
-                            // Site2 (delta) leading-edge + trailing
-                            // DELTA_COALESCE_MS coalesce pattern. Some Site1
-                            // servers emit fullText per-token; without coalescing
-                            // each event recomposed. Leading edge writes
-                            // immediately (zero-latency first-token feel) + sets
-                            // streamingReasoningPart once + ensures the placeholder
-                            // part; subsequent fullText events within the window
-                            // buffer into fullTextBuffer (REPLACE — fullText is
-                            // authoritative accumulated text, only the latest value
-                            // matters) and flush in one state write.
-                            if (flushJobs[key]?.isActive != true) {
-                                // T1b: two-phase phase 2 fullText leading edge.
-                                // scheduleDeltaFlush stays at the call site (side effect).
-                                slices.store.dispatch(
-                                    cn.vectory.ocdroid.ui.AppAction.PartFullTextReceived(
-                                        partId = key,
-                                        fullText = fullText,
-                                        partType = deltaEvent.partType,
-                                        messageId = msgId,
-                                        sessionId = deltaEvent.sessionId,
-                                    )
-                                )
-                                scheduleDeltaFlush(key)
-                                // §streaming-flicker-diagnosis (Top1): first frame
-                                // (fullText) staged into streamingPartTexts — closes
-                                // the intermediate-state window opened by the
-                                // placeholder mutation above.
-                                if (STREAMING_FLICKER_DEBUG) {
-                                    Log.w(FLICKER_TAG, "first fullText staged partId=$key msgId=$msgId")
-                                }
-                            } else {
-                                // Trailing coalesce: buffer the latest fullText
-                                // (REPLACE). The pending DELTA_COALESCE_MS flush
-                                // writes the buffered fullText in one state write.
-                                // streamingReasoningPart was already set on this
-                                // part's leading edge.
-                                slices.store.dispatch(
-                                    cn.vectory.ocdroid.ui.AppAction.FullTextBuffered(key, fullText)
-                                )
-                            }
-                        } else if (!delta.isNullOrBlank()) {
-                            // §flicker-fix: apply the same leading-edge +
-                            // trailing DELTA_COALESCE_MS coalesce used by the
-                            // `message.part.delta` handler. The server emits
-                            // `message.part.updated` as the per-token streaming
-                            // event (dozens–100s/sec); without coalescing each
-                            // one wrote AppState and triggered a Compose
-                            // re-parse/recompose, causing streaming jitter.
-                            // Leading edge writes immediately (zero-latency
-                            // first-token feel) + sets streamingReasoningPart
-                            // once; subsequent deltas within the window buffer
-                            // into deltaBuffer and flush in one batch.
-                            if (flushJobs[key]?.isActive != true) {
-                                // T1b: two-phase phase 2 delta leading edge
-                                // (message.part.updated delta branch).
-                                // scheduleDeltaFlush stays at the call site.
-                                slices.store.dispatch(
-                                    cn.vectory.ocdroid.ui.AppAction.PartDeltaReceived(
-                                        partId = key,
-                                        delta = delta,
-                                        partType = deltaEvent.partType,
-                                        messageId = msgId,
-                                        sessionId = deltaEvent.sessionId,
-                                    )
-                                )
-                                scheduleDeltaFlush(key)
-                                // §streaming-flicker-diagnosis (Top1): first frame
-                                // (delta) staged into streamingPartTexts — closes
-                                // the intermediate-state window opened by the
-                                // placeholder mutation above.
-                                if (STREAMING_FLICKER_DEBUG) {
-                                    Log.w(FLICKER_TAG, "first delta staged partId=$key msgId=$msgId")
-                                }
-                            } else {
-                                // Trailing coalesce: buffer; the pending
-                                // DELTA_COALESCE_MS flush appends the batch in
-                                // one state write. streamingReasoningPart was
-                                // already set on this part's leading edge.
-                                slices.store.dispatch(
-                                    cn.vectory.ocdroid.ui.AppAction.DeltaBuffered(key, delta)
-                                )
-                            }
-                        }
-                        // Else: ids present + both text & delta null/blank =
-                        // part status flip. Do NOT clear streaming buffers and
-                        // do NOT reload — a foreground catch-up or the next
-                        // message.updated / part.created reconciles if needed.
-                    } else {
-                        // 闪屏修复：part.created（part 对象只有 type 无 messageID/id）
-                        // 在同一回合内每个新 part 都会发出（reasoning→text→tool…），
-                        // 并非原先注释假设的"全新回合"。原先这里无条件清空
-                        // streamingPartTexts + streamingReasoningPart，导致所有流式
-                        // 气泡（reasoning 卡片、正文 text）瞬间坍缩为零高度，下一个
-                        // 带 ID 的 part.updated 又重新填充 → 反复闪烁（用户观察：思考
-                        // 卡片与正文气泡持续闪屏）。
-                        //
-                        // 修复：不再手动清空 overlay。reload(resetLimit=false) 本身保留
-                        // streamingPartTexts/streamingReasoningPart（见 launchLoadMessages
-                        // §append-safe MessageActions.kt:175），当前流式
-                        // 气泡继续显示不坍缩。仅 clearDeltaBuffers() 丢弃旧 part 的 pending
-                        // delta 缓冲（新 part 随后用权威 fullText 恢复，不丢数据）。下一
-                        // 个带 ID 的 message.part.updated 正确更新流式状态；回合结束 idle
-                        // finalization（resetLimit=true + streamingFinalized）正常清空 overlay。
-                        //
-                        // §R-19 Sprint 3 P2-4: side effects routed through applySseSideEffects.
-                        clearDeltaBuffers()
-                        applySseSideEffects(listOf(
-                            SseSideEffect.ReloadMessages(deltaEvent.sessionId, resetLimit = false)
-                        ))
-                    }
-                }
-            }
-            "message.part.delta" -> {
-                // Web has an independent `message.part.delta` event (distinct from
-                // `message.part.updated`): top-level { sessionID, messageID, partID,
-                // field, delta }, field-level incremental append. Without this
-                // handler, when the server emits this event the client loses all
-                // streaming text. Payload shape per opencode-web server-session.ts.
-                //
-                // Phase 2 scope (docs/architecture-v3-sse-trust.md §246): only
-                // accumulate into streamingPartTexts. Field-level in-place updates
-                // on the Part object are deferred (needs field→property mapping).
-                // Keyed by bare partId (S4: streamingPartTexts is rekeyed from
-                // "msgId:partId" to partId, matching the UI consumers).
-                val sessionId = event.payload.getString("sessionID") ?: return
-                if (sessionId != slices.chat.value.currentSessionId) return
-                // messageID required for a well-formed delta event (validation guard).
-                val msgId = event.payload.getString("messageID") ?: return
-                val partId = event.payload.getString("partID") ?: return
-                // §user-part-guard (see message.part.updated): only assistant
-                // output streams — skip deltas whose owning message is a user
-                // message (the server reflects the user input as a part event).
-                if (slices.chat.value.messages.any { it.id == msgId && it.isUser }) return
-                // `field` defaults to "text"; it is the type hint for this
-                // delta (e.g. "text", "reasoning"). Used as the placeholder
-                // partType so a reasoning field-delta routes to ReasoningCard,
-                // not a generic text bubble.
-                val field = event.payload.getString("field") ?: "text"
-                val delta = event.payload.getString("delta")
-                if (!delta.isNullOrEmpty()) {
-                    val key = partId
-                    // §reasoning-routing-fix: prefer the part's KNOWN type (set by
-                    // the part.updated creation event) over the delta's `field` —
-                    // the server sends field="text" even for reasoning content.
-                    val knownType = slices.chat.value.partsByMessage[msgId]
-                        ?.firstOrNull { it.id == partId }?.type ?: field
-                    // Only streamable types (text/reasoning) are rendered via
-                    // streamingPartTexts; a non-streamable type's delta would
-                    // accumulate dead overlay text never consumed by PartView.
-                    if (!isStreamablePartType(knownType)) return
-                    // §M5 delta coalescing: leading-edge
-                    // immediate + trailing 100ms coalesce per partId. The FIRST
-                    // delta for a partId writes straight to streamingPartTexts
-                    // (zero-latency first-token feel); subsequent deltas within
-                    // DELTA_COALESCE_MS are buffered and flushed in one batch,
-                    // collapsing per-token Compose recompositions into one-per-
-                    // window. Keyed by partId (S4: streamingPartTexts is rekeyed
-                    // from "msgId:partId" to partId, matching UI consumers).
-                    if (flushJobs[key]?.isActive != true) {
-                        // Leading edge: write now, then open the coalesce window.
-                        // T1b: PartDeltaReceived + scheduleDeltaFlush (side effect
-                        // stays at call site).
-                        slices.store.dispatch(
-                            cn.vectory.ocdroid.ui.AppAction.PartDeltaReceived(
-                                partId = key,
-                                delta = delta,
-                                partType = knownType,
-                                messageId = msgId,
-                                sessionId = sessionId,
-                            )
-                        )
-                        scheduleDeltaFlush(key)
-                    } else {
-                        // Trailing coalesce: buffer; the pending DELTA_COALESCE_MS
-                        // flush will append the batch in one state write.
-                        slices.store.dispatch(
-                            cn.vectory.ocdroid.ui.AppAction.DeltaBuffered(key, delta)
-                        )
-                    }
-                }
-            }
-            "permission.asked" -> {
-                // §R-19 Sprint 3 P2-4: routed through applySseSideEffects.
-                // Cluster A / Phase 2: when the slim SSE frame carries a
-                // routeToken, fold it into pendingPermissions immediately so
-                // Phase 3 reply can return it; still also refresh via the
-                // aggregate REST path (authoritative reconcile).
-                val slimPermission = parsePermissionAskedEvent(event)
-                if (slimPermission != null && !slimPermission.routeToken.isNullOrBlank()) {
-                    slices.mutateSessionList { s -> s.applyPermissionAsked(slimPermission).first }
-                }
-                applySseSideEffects(listOf(SseSideEffect.LoadPendingPermissions))
-            }
-            "question.asked" -> {
-                // §Phase1c instrumentation (Issue 1): raw JSON for live-adherence
-                // insurance (schema already confirmed: {id, sessionID, questions, tool},
-                // no directory) — cheap parity check vs the confirmed contract.
-                DebugLog.d("Question", "question.asked raw properties=${event.payload.properties?.toString() ?: "null"}")
-                val question = parseQuestionAskedEvent(event)
-                if (question != null) {
-                    // §Phase1a→1c instrumentation: DebugLog moved here from inside
-                    // applyQuestionAsked to keep that transform pure (see L1187 note).
-                    val duplicate = slices.sessionList.value.pendingQuestions.any { it.id == question.id }
-                    DebugLog.d(
-                        "Question",
-                        "applyQuestionAsked id=${question.id} sid=${question.sessionId} " +
-                            "routeToken=${!question.routeToken.isNullOrBlank()} duplicate=$duplicate",
-                    )
-                    slices.mutateSessionList { currentState -> currentState.applyQuestionAsked(question).first }
-                } else {
-                    applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid question.asked payload")))
-                }
-            }
-            // Cluster A / Phase 2: slim-only curated frame. Debounced 250ms /
-            // session; properties ARE the SlimSessionDigest body (B1 unwrap).
-            // applySlimDigest advances the per-session bookmark; a non-null
-            // SlimFetchMessages decision triggers /since merge into the open
-            // chat slice (messageID-dedup, mirrors message.updated).
-            "session.digest" -> {
-                handleSessionDigest(event)
-            }
-            "question.replied", "question.rejected" -> {
-                val requestId = event.payload.getString("requestID")
-                    ?: event.payload.getString("id")
-                if (requestId != null) {
-                    // §Phase1a→1c instrumentation: DebugLog moved here from inside
-                    // applyQuestionResolved to keep that transform pure (see L1187 note).
-                    DebugLog.d("Question", "applyQuestionResolved id=$requestId")
-                    slices.mutateSessionList { currentState -> currentState.applyQuestionResolved(requestId).first }
-                }
-            }
-            "todo.updated" -> {
-                val sessionId = event.payload.getString("sessionID") ?: return
-                val todosArray = event.payload.properties?.get("todos") as? kotlinx.serialization.json.JsonArray ?: return
-                val todos = try {
-                    Json.decodeFromJsonElement<List<TodoItem>>(todosArray)
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid todo.updated payload: ${e.message}")))
-                    return
-                }
-                slices.mutateSessionList { s -> s.applyTodoUpdated(sessionId, todos).first }
-            }
-            "session.error" -> {
-                // §Phase1a instrumentation (Issue 4): capture the FULL raw properties
-                // JSON (name/data/message/statusCode + anything else) so the retry/
-                // error hydration parser in Phase 4 can be finalized against reality.
-                DebugLog.w("Retry", "session.error raw properties=${event.payload.properties?.toString() ?: "null"}")
-                // §error-feedback (Issue 4): the server emits session.error for
-                // rate-limit / quota / provider failures. Two surfaces:
-                //   (1) a UiEvent.Error toast (always — the user must know)
-                //   (2) attach the error to the current session's last assistant
-                //       message (if any non-error one exists) so ErrorCard can
-                //       render inline. Error-only turns (error set, no renderable
-                //       parts) are otherwise filtered out before render.
-                //
-                // §R-19 Sprint 3 P2-4: the UiEvent.Error emission is formalized
-                // as SseSideEffect.SessionError. The chat-slice mutation (attach
-                // error to last assistant message) stays inline — it's a same-
-                // domain state transform, not a bus signal.
-                //
-                // Task 12 round-2 (slimapi v1 §G2 / T12-C1 + I2 + I3 fixes):
-                //  - I3 (defensive dual-shape parsing): the ocdroid slim contract
-                //    (docs/slimapi-client-impl-v1.md:43) declares slim session.error
-                //    fields as TOP-LEVEL { sessionID?, directory?, name, message, at }.
-                //    Legacy opencode emits NESTED { sessionID, error: { name, data:
-                //    { message, statusCode } } }. The deployed slimapi sidecar's
-                //    curated SSE set does NOT include session.error (problem-report-
-                //    wip.md C-D8), so the actual wire shape is unverified. Try
-                //    top-level first (contract truth), fall back to nested (legacy).
-                //  - I2 (slim-mode gate): the canonical sessionErrorsById write is
-                //    a NEW slim-only side effect. Legacy/non-slim session.error
-                //    MUST stay byte-for-byte unchanged (toast + chat attachment
-                //    only — no map write).
-                //  - I1 (stripe routing): the map write goes through T11's
-                //    per-sid stripe (stripeFor(sid).withLock) so it serializes
-                //    against digest-driven lastError writes + the reconcile
-                //    workflow (T12-C3 per-sid workflow serialization).
-                //
-                // Toast-suppression intent (round-1 Minor): toast is emitted in
-                // BOTH sid and no-sid cases (preserves existing UX; existing
-                // legacy tests depend on it). Brief C1's "no-sid → toast"
-                // describes the FALLBACK (no map write when no sid), not an
-                // exclusive route. The durable banner (slim-only, sid-required)
-                // is the addition; the toast stays as the immediate UX in both.
-                val props = event.payload.properties
-                val errObj = props?.get("error") as? JsonObject
-                // name: top-level first, fall back to nested error.name.
-                val name = (props?.get("name") as? kotlinx.serialization.json.JsonPrimitive)?.content
-                    ?: (errObj?.get("name") as? kotlinx.serialization.json.JsonPrimitive)?.content
-                // data: nested-only (legacy MessageError shape — kept for the
-                // chat-slice attachment's byte-for-byte preservation).
-                val data = errObj?.get("data") as? JsonObject
-                // message: top-level first (slim contract), then nested
-                // error.data.message (legacy primary), then error.data.error
-                // (legacy fallback), then error.message / error.error
-                // (defensive — covers sidecars that omit the data wrapper).
-                val rawMsg = (props?.get("message") as? kotlinx.serialization.json.JsonPrimitive)?.content
-                    ?: (data?.get("message") as? kotlinx.serialization.json.JsonPrimitive)?.content
-                    ?: (data?.get("error") as? kotlinx.serialization.json.JsonPrimitive)?.content
-                    ?: (errObj?.get("message") as? kotlinx.serialization.json.JsonPrimitive)?.content
-                    ?: (errObj?.get("error") as? kotlinx.serialization.json.JsonPrimitive)?.content
-                    ?: "Server session error"
-                // at: top-level first, fall back to nested error.at.
-                val at = (props?.get("at") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull()
-                    ?: (errObj?.get("at") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull()
-                applySseSideEffects(listOf(SseSideEffect.SessionError(name = name, rawMsg = rawMsg)))
-                val sid = event.payload.getString("sessionID")
-                    ?: (props?.get("sessionID") as? kotlinx.serialization.json.JsonPrimitive)?.content
-                if (sid != null && sid == slices.chat.value.currentSessionId) {
-                    // T1b residual: LastAssistantErrorAttached (no-op if no
-                    // assistant / already has error — handled in reduce).
-                    slices.store.dispatch(
-                        cn.vectory.ocdroid.ui.AppAction.LastAssistantErrorAttached(
-                            Message.MessageError(name = name, data = data),
-                        )
-                    )
-                }
-                // T12-C1 (slim-only, sid-required): durable banner. The map
-                // write is gated behind isSlimMode() (I2 — legacy non-slim
-                // paths stay byte-for-byte unchanged) and routed through T11's
-                // per-sid stripe (I1 — concurrent session.error + digest +
-                // reconcile for the same sid serialize end-to-end, satisfying
-                // T12-C3). No-sid frames fall through without touching the
-                // map (toast is the only surface for session-less errors).
-                if (sid != null && isSlimMode()) {
-                    val banner = SlimSessionLastError(
-                        name = name ?: "Unknown",
-                        message = rawMsg,
-                        at = at,
-                    )
-                    scope.launch {
-                        stripeFor(sid).withLock {
-                            slices.mutateSessionList { s ->
-                                s.copy(sessionErrorsById = s.sessionErrorsById + (sid to banner))
-                            }
-                        }
-                    }
-                }
-            }
-            "sync" -> {
-                // §issue-1(3): 全局事件流的同步标记。服务端发布每个 durable 事件时
-                // 附带一个 type=sync 的回放封装（event-v2-bridge），上游 web 客户端
-                // 直接跳过（server-sdk.tsx:195）。ocdroid 不做多端回放，同样不消费；
-                // 显式 case 替代落入 else 的告警——已知且刻意忽略。
-            }
-            "models-dev.refreshed" -> {
-                // §F3: 服务端 models.dev 模型目录刷新通知（上游 schema/models-dev.ts:5，
-                // payload 为空对象）。ocdroid 不动态响应目录刷新，显式 no-op 以消除
-                // unrecognized event 告警。与 load-more 失效无关。
-            }
-            "session.idle" -> {
-                // §issue-1(2): 已废弃事件（schema/session-status-event.ts:43 标注
-                // deprecated）。服务端在 session.status{type:idle} 之后总是再发一次
-                // session.idle，二者时序等价。ocdroid 的会话状态（busy/idle、流式
-                // 收尾、未读清理）已由上方 "session.status" 分支完整驱动，此处不再
-                // 派发。若将来要做"回复就绪"主动通知，应挂在 session.status{idle}
-                // （非废弃源）而非本事件——此处仅显式识别以消除 else 告警。
-            }
-            "session.diff" -> {
-                // §issue-1(1): 会话文件变更快照。payload { sessionID, diff[] }，
-                // 每条 = SnapshotFileDiff（file/patch/additions/deletions/status）。
-                // 解析后写入 SessionListState.sessionDiffs，驱动聊天内 SessionDiffCard。
-                // 解析模式镜像 todo.updated（JsonArray → List<@Serializable>）。
-                val sessionId = event.payload.getString("sessionID") ?: return
-                val diffArray = event.payload.properties?.get("diff") as? kotlinx.serialization.json.JsonArray ?: return
-                // §gpter-B：用 lenientJson（ignoreUnknownKeys=true）与 REST getSessionDiff
-                // 路径（OpenCodeRepository.json）对齐——默认 Json 严格模式会在上游
-                // SnapshotFileDiff 多带字段时整条丢弃，导致 SSE/REST 行为不一致。
-                val diffs = try {
-                    lenientJson.decodeFromJsonElement<List<cn.vectory.ocdroid.data.model.FileDiff>>(diffArray)
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid session.diff payload: ${e.message}")))
-                    return
-                }
-                slices.mutateSessionList { it.applySessionDiff(sessionId, diffs).first }
-            }
-            // §files-events-noop: location-scoped filesystem events. Per
-            // opencode-src/v1.17.18/packages/schema/src/filesystem-watcher.ts /
-            // filesystem.ts, `file.watcher.updated` and `file.edited` carry NO
-            // sessionID — they fire for ANY path change under a watched
-            // directory, independent of which session touched the file. The
-            // dispatch log will show `session=-` (the SSE frame lacks
-            // sessionID) — this is NORMAL, not a missing-field bug. ocdroid
-            // does NOT react to these (the Files pane is driven by the file
-            // browser's own REST listing, not by these push events); an
-            // explicit empty case stops the unrecognized-event warning. A real
-            // Files-pane refresh on these events is a tracked follow-up. NOT
-            // added to NOISY_SSE_LOG_EVENTS (that set is for high-frequency
-            // noise; explicit no-op cases are semantically correct).
-            "file.watcher.updated", "file.edited" -> {
-            }
-            "command.executed" -> {
-                // §command-executed-noop: slash command 执行完成的元事件
-                // (opencode-src packages/schema/src/v1/legacy-event.ts)。
-                // payload {name, sessionID, arguments, messageID}。命令的实际输出（文本/工具/推理）
-                // 由该 messageID 的 message.updated / message.part.* 通路独立投递，此处无需再派发。
-                // 服务端唯一消费者是 project.ts(name==="init" 时标记 project 已初始化，写服务端 DB，
-                // 与 app 无关)；web/TUI 亦不消费。显式识别以消除 unrecognized-event 告警——与
-                // sync / session.idle / file.* 同策略。
-            }
-            else -> {
-                // §R18 Phase 3 Wave 1 (P0-7): surface unrecognized SSE event
-                // types instead of silently dropping them. NOISY_SSE_LOG_EVENTS
-                // (server.connected / plugin.added / catalog.updated /
-                // integration.updated / server.heartbeat / message.part.*)
-                // are known-intentional non-dispatched types — skip the warning
-                // to avoid log noise on every reconnect / per-token streaming
-                // event, but still bump the counter for diagnostics.
-                //
-                // §test-guard: the existing `plugin.added` test asserts
-                // `verify(exactly = 0) { Log.w(...) }`; the `!noisy` gate
-                // preserves that contract (DebugLog.w forwards to Log.w).
-                if (!noisy) {
-                    val keys = event.payload.properties?.keys?.take(5) ?: emptyList()
-                    DebugLog.w("SSE", "unrecognized event type=$type session=$evtSession payload-keys=$keys")
-                    if (BuildConfig.DEBUG) {
-                        effects.tryEmitUiEvent(UiEvent.Debug("unknown SSE: $type"))
-                    }
-                }
-                unknownEventCounters
-                    .computeIfAbsent(type) { java.util.concurrent.atomic.AtomicInteger(0) }
-                    .incrementAndGet()
-            }
-        }
+        // Route through the T2 router
+        sseRouter.route(event, this)
     }
 
     // ── §M5 delta coalescing helpers ────────────────
@@ -1837,7 +974,7 @@ class SessionSyncCoordinator(
      * [ChatState.pendingFlushPartIds], set by [ChatState.markFlushPending] on
      * the leading edge and cleared by [flushDeltaBuffer] / [clearDeltaBuffers].
      */
-    private fun scheduleDeltaFlush(partId: String) {
+    private fun scheduleDeltaFlushImpl(partId: String) {
         // Defensive: a stale/completed entry should never coexist with a leading
         // edge (the window self-clears on flush), but cancel anyway to avoid
         // ever having two flush jobs racing for one partId.
@@ -1897,12 +1034,27 @@ class SessionSyncCoordinator(
      * ViewModel clear may be wired by the caller — see §4.2). Safe to call
      * repeatedly.
      */
-    fun clearDeltaBuffers() {
+    override fun clearDeltaBuffers() {
         flushJobs.values.forEach { it.cancel() }
         flushJobs.clear()
         // T1b: Job cancel stays here; coalesce buffer clear via dispatch.
         slices.store.dispatch(cn.vectory.ocdroid.ui.AppAction.CoalesceBuffersCleared)
     }
+
+    // ── SseDispatchHost implementation ──────────────────────────────────────
+    override fun serverGroupFp(): String = currentServerGroupFp()
+    override fun stripeFor(sid: String): Mutex = stripeForImpl(sid)
+    override fun scheduleDeltaFlush(partId: String) { scheduleDeltaFlushImpl(partId) }
+    override fun applySseSideEffects(sideEffects: List<SseSideEffect>) { applySseSideEffectsImpl(sideEffects) }
+    override fun bumpUnknownEventCounter(type: String) {
+        unknownEventCounters
+            .computeIfAbsent(type) { java.util.concurrent.atomic.AtomicInteger(0) }
+            .incrementAndGet()
+    }
+    override fun sseClock(): Long = clock()
+    override fun slimMode(): Boolean = isSlimMode()
+    override fun isFlushActiveForPart(partId: String): Boolean = flushJobs[partId]?.isActive == true
+    override fun handleSessionDigest(event: SSEEvent) { handleSessionDigestImpl(event) }
 
     // ── §R18 Phase 3 Wave 1 (P1-9): multi-workdir pending questions fan-out ──
 
@@ -2181,7 +1333,7 @@ class SessionSyncCoordinator(
       * [OpenCodeRepository.getSlimapiMessagesSince] which all use
       * [cn.vectory.ocdroid.util.runSuspendCatching].
       */
-    private fun handleSessionDigest(event: SSEEvent) {
+    private fun handleSessionDigestImpl(event: SSEEvent) {
         val props = event.payload.properties
         if (props == null) {
             applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring session.digest with null properties")))
