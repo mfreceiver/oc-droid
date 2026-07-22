@@ -422,6 +422,16 @@ class SettingsManager @Inject constructor(
         set(value) = encryptedPrefs.edit().putBoolean(KEY_DEBUG_LOG_VERBOSE, value).apply()
 
     /**
+     * §debug-card-identity: runtime toggle for the in-chat debug card identity
+     * overlay. When ON, every chat card displays a small badge identifying the
+     * rendering composable + source location + part metadata. Default OFF —
+     * zero overhead in normal use.
+     */
+    var debugCardIdentityEnabled: Boolean
+        get() = encryptedPrefs.getBoolean(KEY_DEBUG_CARD_IDENTITY, false)
+        set(value) = encryptedPrefs.edit().putBoolean(KEY_DEBUG_CARD_IDENTITY, value).apply()
+
+    /**
      * §P5a (Q5): user-facing language preference. SYSTEM = follow the real
      * system locale (zh→zh, en→en, anything else→zh via AppLocaleController);
      * ZH/EN = force that language. First-launch default = SYSTEM (null in ESP
@@ -947,6 +957,7 @@ class SettingsManager @Inject constructor(
         private const val KEY_PERSISTENT_NOTIFICATION_ENABLED = "persistent_notification_enabled"
         /** §streaming-state-sync-diag: ESP key for [debugLogVerboseEnabled]. Default false. */
         private const val KEY_DEBUG_LOG_VERBOSE = "debug_log_verbose"
+        private const val KEY_DEBUG_CARD_IDENTITY = "debug_card_identity"
         /** §P5a (Q5): persisted [LocaleMode] (language preference). Default null → SYSTEM. */
         private const val KEY_LOCALE = "locale"
         private const val KEY_UI_FONT_SCALE = "ui_font_scale"

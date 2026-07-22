@@ -149,6 +149,39 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
         },
     )
 
+    // §debug-card-identity: toggle for the in-chat debug card identity overlay.
+    var cardIdentityEnabled by remember { mutableStateOf(settingsManager.debugCardIdentityEnabled) }
+    ListItem(
+        headlineContent = {
+            Text(
+                text = stringResource(R.string.settings_debug_card_identity_title),
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        },
+        supportingContent = {
+            Text(
+                text = stringResource(R.string.settings_debug_card_identity_summary),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
+        trailingContent = {
+            Switch(
+                checked = cardIdentityEnabled,
+                onCheckedChange = { next ->
+                    settingsManager.debugCardIdentityEnabled = next
+                    cardIdentityEnabled = next
+                },
+            )
+        },
+        modifier = Modifier.clickable {
+            val next = !cardIdentityEnabled
+            settingsManager.debugCardIdentityEnabled = next
+            cardIdentityEnabled = next
+        },
+    )
+
     // §review-AB: Card self-pads horizontal 16dp (route Column no longer pads)
     // so it shares one keyline with AppSectionHeader + ListItem.
     Card(

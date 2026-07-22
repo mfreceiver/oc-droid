@@ -455,6 +455,8 @@
     <string name="debug_log_title">Debug Log</string>
     <string name="settings_debug_verbose_title">Enable verbose diagnostics</string>
     <string name="settings_debug_verbose_summary">Captures SendDiag/SseDiag/StatusDiag/DigestDiag/LayerDiag events. Off by default.</string>
+    <string name="settings_debug_card_identity_title">Show card debug tags</string>
+    <string name="settings_debug_card_identity_summary">Displays composable name + source location on every chat card. Off by default.</string>
     <string name="debug_log_paused_suffix">(paused)</string>
     <string name="debug_log_copy">Copy</string>
     <string name="debug_log_copied">Copied</string>

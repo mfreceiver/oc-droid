@@ -213,23 +213,27 @@ internal fun MessageRow(
                                         }
                                     }
                                 } else {
-                                    ToolCallFoldBar(
-                                        counts = item.foldCounts(),
-                                        isRunning = foldIsRunning(item),
-                                        onToggleExpand = { onToggleExpand(foldKey, false) },
-                                        modifier = Modifier.widthIn(max = cardMax)
-                                    )
+                                    DebugCardIdentity(name = "ToolCallFoldBar", source = "MessageRow:216", part = item.items.firstOrNull()?.let { (it as? ToolRenderItem.Basic)?.part ?: (it as? ToolRenderItem.ThinkingPart)?.part }) {
+                                        ToolCallFoldBar(
+                                            counts = item.foldCounts(),
+                                            isRunning = foldIsRunning(item),
+                                            onToggleExpand = { onToggleExpand(foldKey, false) },
+                                            modifier = Modifier.widthIn(max = cardMax)
+                                        )
+                                    }
                                 }
                             }
-                            is ToolRenderItem.ThinkingPart -> ReasoningCard(
-                                text = item.streamingText ?: item.part.text ?: "",
-                                title = item.part.toolReason,
-                                isStreaming = false,
-                                expandedParts = expandedParts,
-                                onToggleExpand = onToggleExpand,
-                                expandedKey = "${message.id}|${item.part.id}",
-                                modifier = Modifier.widthIn(max = cardMax)
-                            )
+                            is ToolRenderItem.ThinkingPart -> DebugCardIdentity(name = "ReasoningCard", source = "MessageRow:224", part = item.part) {
+                                ReasoningCard(
+                                    text = item.streamingText ?: item.part.text ?: "",
+                                    title = item.part.toolReason,
+                                    isStreaming = false,
+                                    expandedParts = expandedParts,
+                                    onToggleExpand = onToggleExpand,
+                                    expandedKey = "${message.id}|${item.part.id}",
+                                    modifier = Modifier.widthIn(max = cardMax)
+                                )
+                            }
                             is ToolRenderItem.ContextGroup,
                             is ToolRenderItem.SubAgent,
                             is ToolRenderItem.WritePatch,
@@ -282,13 +286,15 @@ internal fun MessageRow(
             it.hasFull == true && it.omitted != null && it.messageId != null
         }
         if (expandEligible.isNotEmpty()) {
-            OmittedContentCard(
-                eligibleParts = expandEligible,
-                partExpandStates = partExpandStates,
-                isMessageStreaming = isMessageStreaming,
-                onExpandParts = onExpandParts,
-                modifier = Modifier.widthIn(max = cardMax),
-            )
+            DebugCardIdentity(name = "OmittedContentCard", source = "MessageRow:285", part = expandEligible.firstOrNull()) {
+                OmittedContentCard(
+                    eligibleParts = expandEligible,
+                    partExpandStates = partExpandStates,
+                    isMessageStreaming = isMessageStreaming,
+                    onExpandParts = onExpandParts,
+                    modifier = Modifier.widthIn(max = cardMax),
+                )
+            }
         }
 
         // Footer caption — replaces the previous provider/model label.
@@ -643,49 +649,52 @@ internal fun PartView(
                 (taskXml.state.equals("completed", ignoreCase = true) ||
                     taskXml.state.equals("error", ignoreCase = true))
             ) {
-                CompletedTaskCard(
-                    taskResult = taskXml,
-                    expandedParts = expandedParts,
-                    onToggleExpand = onToggleExpand,
-                    expandedKey = "task|$expandKey",
-                    modifier = Modifier.widthIn(max = cardMax)
-                )
+                DebugCardIdentity(name = "CompletedTaskCard", source = "PartView:648", part = part) {
+                    CompletedTaskCard(
+                        taskResult = taskXml,
+                        expandedParts = expandedParts,
+                        onToggleExpand = onToggleExpand,
+                        expandedKey = "task|$expandKey",
+                        modifier = Modifier.widthIn(max = cardMax)
+                    )
+                }
             } else if (isUser || !textContent.contains("<task_result>")) {
-                TextPart(
-                    text = textContent,
-                    isUser = isUser,
-                    modifier = modifier,
-                    repository = repository,
-                    workspaceDirectory = workspaceDirectory,
-                    isStreaming = streamingTextOverride != null,
-                    // §0.6.2 ora-2: stable identity shared between TextPart's
-                    // streaming and completed branches so HeightAnchorRegistry
-                    // carries the maxHeight across finalization → seamless.
-                    stableKey = "$messageId|${part.id}"
-                )
+                DebugCardIdentity(name = "TextPart", source = "PartView:656", part = part) {
+                    TextPart(
+                        text = textContent,
+                        isUser = isUser,
+                        modifier = modifier,
+                        repository = repository,
+                        workspaceDirectory = workspaceDirectory,
+                        isStreaming = streamingTextOverride != null,
+                        stableKey = "$messageId|${part.id}"
+                    )
+                }
             }
         }
-        // §tool-fold F7: the `part.isReasoning -> ReasoningCard(...)` branch
-        // that lived here is dead code — MessageRow's `isToolLike` now includes
-        // `isReasoning`, so every reasoning part (except the streaming one
-        // guarded at L92-95) is routed into the buffered tool run and rendered
-        // as a ThinkingPart. Removed to avoid silently resurrecting the old
-        // PartView path if a future reclassification lands here.
-        part.isImageAttachment -> ImageFilePart(part, modifier)
-        part.isFile -> FileAttachmentPart(part, modifier)
-        part.isSubAgentTask -> SubAgentCard(
-            part = part,
-            onOpenSubAgent = onOpenSubAgent,
-            modifier = Modifier.widthIn(max = cardMax)
-        )
-        part.isTool -> ToolCard(
-            part = part,
-            onFileClick = onFileClick,
-            expandedParts = expandedParts,
-            onToggleExpand = onToggleExpand,
-            expandedKey = expandKey,
-            modifier = Modifier.widthIn(max = cardMax)
-        )
+        part.isImageAttachment -> DebugCardIdentity(name = "ImageFilePart", source = "PartView:676", part = part) {
+            ImageFilePart(part, modifier)
+        }
+        part.isFile -> DebugCardIdentity(name = "FileAttachmentPart", source = "PartView:677", part = part) {
+            FileAttachmentPart(part, modifier)
+        }
+        part.isSubAgentTask -> DebugCardIdentity(name = "SubAgentCard", source = "PartView:678", part = part) {
+            SubAgentCard(
+                part = part,
+                onOpenSubAgent = onOpenSubAgent,
+                modifier = Modifier.widthIn(max = cardMax)
+            )
+        }
+        part.isTool -> DebugCardIdentity(name = "ToolCard", source = "PartView:683", part = part) {
+            ToolCard(
+                part = part,
+                onFileClick = onFileClick,
+                expandedParts = expandedParts,
+                onToggleExpand = onToggleExpand,
+                expandedKey = expandKey,
+                modifier = Modifier.widthIn(max = cardMax)
+            )
+        }
         // Dead code removed (评审 Stage C #1): the previous
         // `part.isPatch && part.filePathsForNavigationFiltered.isNotEmpty()`
         // branch was unreachable here because [MessageRow]'s `isToolLike`
@@ -719,55 +728,67 @@ internal fun renderToolItem(
     cardMax: Dp
 ) {
     when (item) {
-        is ToolRenderItem.ContextGroup -> ContextToolGroup(
-            parts = item.parts,
-            expandedParts = expandedParts,
-            onToggleExpand = onToggleExpand,
-            messageId = message.id,
-            modifier = Modifier.widthIn(max = cardMax)
-        )
-        is ToolRenderItem.SubAgent -> SubAgentCard(
-            part = item.part,
-            onOpenSubAgent = onOpenSubAgent,
-            modifier = Modifier.widthIn(max = cardMax)
-        )
+        is ToolRenderItem.ContextGroup -> DebugCardIdentity(name = "ContextToolGroup", source = "renderToolItem:727", part = item.parts.firstOrNull()) {
+            ContextToolGroup(
+                parts = item.parts,
+                expandedParts = expandedParts,
+                onToggleExpand = onToggleExpand,
+                messageId = message.id,
+                modifier = Modifier.widthIn(max = cardMax)
+            )
+        }
+        is ToolRenderItem.SubAgent -> DebugCardIdentity(name = "SubAgentCard", source = "renderToolItem:734", part = item.part) {
+            SubAgentCard(
+                part = item.part,
+                onOpenSubAgent = onOpenSubAgent,
+                modifier = Modifier.widthIn(max = cardMax)
+            )
+        }
         is ToolRenderItem.WritePatch -> {
             val writeFiles = item.part.files ?: emptyList()
             if (writeFiles.size > 1) {
-                MultiFilePatchAccordion(
-                    parts = listOf(item.part),
-                    onFileClick = onFileClick,
-                    modifier = Modifier.widthIn(max = cardMax)
-                )
+                DebugCardIdentity(name = "MultiFilePatchAccordion", source = "renderToolItem:742", part = item.part) {
+                    MultiFilePatchAccordion(
+                        parts = listOf(item.part),
+                        onFileClick = onFileClick,
+                        modifier = Modifier.widthIn(max = cardMax)
+                    )
+                }
             } else {
-                PatchCard(
-                    part = item.part,
-                    onFileClick = onFileClick,
-                    expandedParts = expandedParts,
-                    onToggleExpand = onToggleExpand,
-                    expandedKey = "${message.id}|${item.part.id}",
-                    modifier = Modifier.widthIn(max = cardMax)
-                )
+                DebugCardIdentity(name = "PatchCard", source = "renderToolItem:748", part = item.part) {
+                    PatchCard(
+                        part = item.part,
+                        onFileClick = onFileClick,
+                        expandedParts = expandedParts,
+                        onToggleExpand = onToggleExpand,
+                        expandedKey = "${message.id}|${item.part.id}",
+                        modifier = Modifier.widthIn(max = cardMax)
+                    )
+                }
             }
         }
-        is ToolRenderItem.Basic -> BasicTool(
-            part = item.part,
-            onFileClick = onFileClick,
-            expandedParts = expandedParts,
-            onToggleExpand = onToggleExpand,
-            expandedKey = "${message.id}|${item.part.id}",
-            isStale = item.part.id in staleQuestionPartKeys,
-            modifier = Modifier.widthIn(max = cardMax)
-        )
-        is ToolRenderItem.ThinkingPart -> ReasoningCard(
-            text = item.streamingText ?: item.part.text ?: "",
-            title = item.part.toolReason,
-            isStreaming = false,
-            expandedParts = expandedParts,
-            onToggleExpand = onToggleExpand,
-            expandedKey = "${message.id}|${item.part.id}",
-            modifier = Modifier.widthIn(max = cardMax)
-        )
+        is ToolRenderItem.Basic -> DebugCardIdentity(name = "BasicTool", source = "renderToolItem:758", part = item.part) {
+            BasicTool(
+                part = item.part,
+                onFileClick = onFileClick,
+                expandedParts = expandedParts,
+                onToggleExpand = onToggleExpand,
+                expandedKey = "${message.id}|${item.part.id}",
+                isStale = item.part.id in staleQuestionPartKeys,
+                modifier = Modifier.widthIn(max = cardMax)
+            )
+        }
+        is ToolRenderItem.ThinkingPart -> DebugCardIdentity(name = "ReasoningCard", source = "renderToolItem:767", part = item.part) {
+            ReasoningCard(
+                text = item.streamingText ?: item.part.text ?: "",
+                title = item.part.toolReason,
+                isStreaming = false,
+                expandedParts = expandedParts,
+                onToggleExpand = onToggleExpand,
+                expandedKey = "${message.id}|${item.part.id}",
+                modifier = Modifier.widthIn(max = cardMax)
+            )
+        }
         is ToolRenderItem.FoldedToolRun -> { /* defensive no-op — handled by caller */ }
     }
 }
