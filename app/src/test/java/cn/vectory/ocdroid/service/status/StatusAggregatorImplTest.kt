@@ -6,6 +6,8 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import io.mockk.coEvery
+import io.mockk.coVerify
+import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
@@ -757,5 +759,141 @@ class StatusAggregatorImplTest {
         // Never refreshed → cold-start guard refuses AllIdleFresh.
         assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
         assertEquals(GlobalBusyState.Unknown, aggregator.stateAtNow())
+    }
+
+    // ── T-R1 (slimapi R1) round-2: slim disconnect-fallback refresh seam ─────
+    //
+    // Locks the slim branch of [StatusAggregatorImpl.refresh] (the L2Idle/L3
+    // degraded fallback). On slim SSE loss, ProcessStatusPoller (≤30s) drives
+    // this refresh through the sidecar's bulk `GET /slimapi/sessions/status`
+    // per registered workdir — NOT legacy `GET /session/status`. These are
+    // regression locks (GREEN against the round-1 impl); they prevent future
+    // changes from silently re-routing the slim fallback back to legacy or
+    // mishandling the all-workdirs-failure case.
+
+    @Test
+    fun `T-R1 slim refresh routes through getSlimapiSessionsStatus per registered workdir and avoids legacy endpoint`() =
+        runTest {
+            val repo = mockk<OpenCodeRepository>(relaxed = true)
+            every { repo.isSlimMode } returns true
+            coEvery { repo.getSlimapiSessionsStatus(any()) } returns Result.success(
+                mapOf("s1" to SessionStatus(type = "busy"))
+            )
+            // Defensive stub — the assertion proves it is NOT called.
+            coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+            val aggregator = newAggregator(repo, clock = { 100L })
+
+            aggregator.refresh(
+                identity(),
+                snapshot(
+                    sessions = mapOf("s1" to session("s1", "/work-a")),
+                    registeredWorkdirs = setOf("/work-a"),
+                ),
+            )
+
+            // POSITIVE: slim routes per-workdir through the bulk slim endpoint.
+            coVerify(atLeast = 1) { repo.getSlimapiSessionsStatus(any()) }
+            // NEGATIVE: legacy bulk endpoint untouched in slim mode.
+            coVerify(exactly = 0) { repo.getSessionStatus() }
+            // The slim-sourced busy status is folded identically to the legacy path.
+            assertEquals(
+                SessionBusyStatus.Busy,
+                aggregator.statusByKey.value[key("s1", "/work-a")],
+            )
+        }
+
+    @Test
+    fun `T-R1 slim refresh all-workdirs-failure marks known sessions Unknown not Idle`() = runTest {
+        // When every per-directory slim bulk call fails, the slim branch must
+        // surface a composite failure so the projection routes through
+        // markRequestFailedInternal → known sessions become Unknown (NOT Idle).
+        // Locking this prevents a regression where a slim all-fail is silently
+        // treated as an empty-success and falsely flips the host to idle.
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        every { repo.isSlimMode } returns true
+        coEvery { repo.getSlimapiSessionsStatus(any()) } returns Result.failure(
+            java.io.IOException("upstream unavailable")
+        )
+        val aggregator = newAggregator(repo, clock = { 100L })
+
+        aggregator.refresh(
+            identity(),
+            snapshot(
+                sessions = mapOf("s1" to session("s1", "/work-a")),
+                registeredWorkdirs = setOf("/work-a"),
+            ),
+        )
+
+        assertEquals(
+            "all-workdirs slim failure must mark known session Unknown",
+            SessionBusyStatus.Unknown,
+            aggregator.statusByKey.value[key("s1", "/work-a")],
+        )
+        assertEquals(
+            "all-workdirs slim failure must NOT enter idle grace",
+            GlobalBusyState.Unknown,
+            aggregator.globalState.value,
+        )
+    }
+
+    @Test
+    fun `T-R1 slim refresh tolerates partial per-directory failure and folds successful workdirs`() =
+        runTest {
+            // One workdir's bulk call fails, the other succeeds → composite
+            // success (anySuccess=true) → the successful map is folded and the
+            // projection is NOT poisoned by the failed workdir.
+            val repo = mockk<OpenCodeRepository>(relaxed = true)
+            every { repo.isSlimMode } returns true
+            coEvery { repo.getSlimapiSessionsStatus("/work-a") } returns Result.success(
+                mapOf("s1" to SessionStatus(type = "busy"))
+            )
+            coEvery { repo.getSlimapiSessionsStatus("/work-b") } returns Result.failure(
+                java.io.IOException("upstream unavailable")
+            )
+            val aggregator = newAggregator(repo, clock = { 100L })
+
+            aggregator.refresh(
+                identity(),
+                snapshot(
+                    sessions = mapOf(
+                        "s1" to session("s1", "/work-a"),
+                        "s2" to session("s2", "/work-b"),
+                    ),
+                    registeredWorkdirs = setOf("/work-a", "/work-b"),
+                ),
+            )
+
+            // s1 (successful workdir) folded as Busy; s2 (failed workdir, known)
+            // is NOT in the merged success map → normalize fills Idle.
+            assertEquals(
+                SessionBusyStatus.Busy,
+                aggregator.statusByKey.value[key("s1", "/work-a")],
+            )
+            assertEquals(
+                "known session in the failed workdir is Idle (partial success), not Unknown",
+                SessionBusyStatus.Idle,
+                aggregator.statusByKey.value[key("s2", "/work-b")],
+            )
+            // Busy s1 keeps the host out of idle grace.
+            assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
+        }
+
+    @Test
+    fun `T-R1 slim refresh with no registered workdirs skips the slim endpoint`() = runTest {
+        // Cold-start before any workdir is registered: the per-workdir loop is
+        // empty so no slim HTTP is issued, and the result is success-empty
+        // (handled by the coverage marker's cold-start guard, not by poisoning
+        // entries as Unknown).
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        every { repo.isSlimMode } returns true
+        coEvery { repo.getSlimapiSessionsStatus(any()) } returns Result.success(emptyMap())
+        val aggregator = newAggregator(repo, clock = { 100L })
+
+        aggregator.refresh(
+            identity(),
+            snapshot(sessions = emptyMap(), registeredWorkdirs = emptySet()),
+        )
+
+        coVerify(exactly = 0) { repo.getSlimapiSessionsStatus(any()) }
     }
 }
