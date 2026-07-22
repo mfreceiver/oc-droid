@@ -1207,4 +1207,117 @@ class SessionSyncCoordinatorSlimTest {
             slices.sessionList.value.pendingQuestions,
         )
     }
+
+    // ── T0 (safety net): slim↔legacy fold-map non-cross-contamination ──────
+    //
+    // Pairs with LegacyGoldenPathRegressionTest `P0-6` (legacy side). The
+    // slim omitted-part affordance lives in `ChatState.partExpandStates`
+    // (AppStateSlices.kt:410); the legacy tool/reasoning fold lives in the
+    // SEPARATE `StoreState.expandedParts` (StoreState.kt:40). The two MUST
+    // never be written by the other mode's flow:
+    //   - slim cold-start / digest flows MUST NOT touch `expandedParts`
+    //     (the legacy fold map).
+    //   - legacy token streaming MUST NOT touch `partExpandStates`
+    //     (pinned in LegacyGoldenPathRegressionTest P0-6).
+    // These two cases pin the slim→legacy direction so a future reducer
+    // migration (T1) cannot accidentally route a slim expand into the legacy
+    // fold map or vice-versa.
+
+    /**
+     * T0 slim-track: a slim cold-start snapshot fold writes session-list +
+     * chat slices but MUST leave the legacy `expandedParts` fold map at its
+     * default (empty). Anchor: `applySlimColdStartSnapshot` only calls
+     * `mutateSessionList` / `mutateChat` — never `mutateExpandedParts`.
+     */
+    @Test
+    fun `T0 slim cold-start snapshot does NOT pollute legacy expandedParts fold map`() = runTest {
+        // Pre-seed the legacy fold map with a tool-card expansion that must
+        // survive the slim snapshot fold untouched.
+        slices.store.mutateExpandedParts { mapOf("fold:m1:part-1" to true) }
+        assertEquals(
+            "baseline: legacy expandedParts seeded",
+            mapOf("fold:m1:part-1" to true),
+            slices.store.expandedParts.value,
+        )
+
+        val snapshot = SlimColdStartSnapshot(
+            sessions = listOf(Session(id = "sess-1", directory = "/proj", title = "T")),
+            questions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+            ),
+            permissions = cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+            ),
+            messages = listOf(
+                MessageWithParts(
+                    info = Message(id = "m1", role = "user", sessionId = "sess-1"),
+                    parts = emptyList(),
+                ),
+            ),
+        )
+
+        val c = coordinator()
+        assertTrue("slim snapshot fold landed", c.applySlimColdStartSnapshot(snapshot))
+
+        assertEquals(
+            "slim cold-start MUST NOT touch the legacy expandedParts fold map",
+            mapOf("fold:m1:part-1" to true),
+            slices.store.expandedParts.value,
+        )
+    }
+
+    /**
+     * T0 slim-track: a slim digest→reconcile flow writes chat messages +
+     * session-list status but MUST leave the legacy `expandedParts` fold map
+     * untouched. Anchor: `handleSessionDigest` + reconcile commit through
+     * `mutateChat` / `mutateSessionList` — never `mutateExpandedParts`.
+     */
+    @Test
+    fun `T0 slim digest reconcile does NOT write legacy expandedParts fold map`() = runTest {
+        slices.mutateChat { it.copy(currentSessionId = "sess-1") }
+        slices.store.mutateExpandedParts { mapOf("fold:legacy:part-9" to true) }
+
+        every { repository.applySlimDigest(any(), any()) } returns SlimFetchMessages(
+            sessionId = "sess-1",
+            since = 0L,
+        )
+        every { repository.getSlimSessionState("sess-1") } returns SlimSessionState(
+            sessionId = "sess-1",
+            remoteMessageId = "m1",
+            remoteUpdatedAt = 1000L,
+            localAppliedMessageId = "m0",
+            localAppliedUpdatedAt = 0L,
+            dirty = true,
+        )
+        coEvery { repository.probeLatestSlim("sess-1") } returns ProbeResult(
+            ok = true,
+            messageID = "m1",
+            updatedAt = 1000L,
+        )
+        coEvery { repository.getSlimapiMessagesSince("sess-1", 0L, any(), any(), any()) } returns Result.success(
+            listOf(
+                MessageWithParts(
+                    info = Message(id = "m1", role = "assistant", sessionId = "sess-1"),
+                    parts = listOf(Part(id = "p1", messageId = "m1", sessionId = "sess-1", type = "text", text = "hi")),
+                ),
+            ),
+        )
+
+        val c = coordinator()
+        c.handleEvent(digestEvent("sess-1", status = "busy", updatedAt = 1000L, messageId = "m1"))
+        scope.testScheduler.advanceUntilIdle()
+
+        assertEquals(
+            "slim messages landed via digest→REST (proves the slim flow ran)",
+            listOf("m1"),
+            slices.chat.value.messages.map { it.id },
+        )
+        assertEquals(
+            "slim digest→reconcile MUST NOT write the legacy expandedParts fold map",
+            mapOf("fold:legacy:part-9" to true),
+            slices.store.expandedParts.value,
+        )
+    }
 }

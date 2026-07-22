@@ -3548,6 +3548,102 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         )
     }
 
+    // ── T0 (safety net) / task2 §2.3 P2: transport wire-shape isolation ────
+    //
+    // The slimapi interceptors (SlimapiVersionInterceptor /
+    // SlimapiCapabilitiesInterceptor) are DOUBLE-GATED: they inject their
+    // headers ONLY when `HostConfig.slim == true` AND the path starts with
+    // `/slimapi/` (SlimapiContract.SLIMAPI_PATH_PREFIX). Legacy mode (`slim=false`)
+    // MUST be byte-for-byte unchanged: no slimapi headers, no `/slimapi/` path
+    // prefix on ANY REST method.
+    //
+    // REGRESSION GUARD: removing the `!hostConfig.slim` door in either
+    // interceptor (SlimapiVersionInterceptor.kt:39 /
+    // SlimapiCapabilitiesInterceptor.kt:43) MUST turn the legacy test red
+    // (legacy would start emitting slimapi headers). The slim test pins the
+    // inverse: both headers MUST be present together on `/slimapi/` paths
+    // (removing EITHER door breaks it).
+
+    /**
+     * T0-P2 legacy wire-shape: with `slim=false`, REST methods emit NEITHER
+     * `X-Slimapi-Version` / `X-Slimapi-Capabilities` headers NOR any
+     * `/slimapi/` path prefix. Pins the double-door so a future "helpful"
+     * removal of the `!hostConfig.slim` interceptor gate cannot silently
+     * pollute legacy opencode-direct traffic.
+     */
+    @Test
+    fun `T0-P2 legacy mode emits no slimapi headers and no slimapi path prefix`() = runBlocking {
+        val legacyRepo = makeRepository(slim = false)
+
+        // getSessions → legacy /session (no /slimapi/ prefix).
+        server.enqueue(jsonResponse("[]"))
+        legacyRepo.getSessions(limit = 25)
+        val sessionsReq = server.takeRequest()
+        assertTrue(
+            "legacy getSessions path MUST NOT start with /slimapi/: ${sessionsReq.path}",
+            !sessionsReq.path!!.startsWith(cn.vectory.ocdroid.data.repository.http.SlimapiContract.SLIMAPI_PATH_PREFIX),
+        )
+        assertNull(
+            "legacy getSessions MUST NOT carry X-Slimapi-Version: ${sessionsReq.headers}",
+            sessionsReq.getHeader(cn.vectory.ocdroid.data.repository.http.SlimapiContract.X_SLIMAPI_VERSION),
+        )
+        assertNull(
+            "legacy getSessions MUST NOT carry X-Slimapi-Capabilities: ${sessionsReq.headers}",
+            sessionsReq.getHeader(cn.vectory.ocdroid.data.repository.http.SlimapiContract.X_SLIMAPI_CAPABILITIES),
+        )
+
+        // getMessagesPaged → legacy /session/{id}/message (no /slimapi/ prefix).
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody("[]")
+                .setHeader("Content-Type", "application/json")
+                .setHeader("X-Next-Cursor", "cur")
+        )
+        legacyRepo.getMessagesPaged("sess-1", limit = 20)
+        val msgsReq = server.takeRequest()
+        assertTrue(
+            "legacy getMessagesPaged path MUST NOT start with /slimapi/: ${msgsReq.path}",
+            !msgsReq.path!!.startsWith(cn.vectory.ocdroid.data.repository.http.SlimapiContract.SLIMAPI_PATH_PREFIX),
+        )
+        assertNull(
+            "legacy getMessagesPaged MUST NOT carry X-Slimapi-Version",
+            msgsReq.getHeader(cn.vectory.ocdroid.data.repository.http.SlimapiContract.X_SLIMAPI_VERSION),
+        )
+        assertNull(
+            "legacy getMessagesPaged MUST NOT carry X-Slimapi-Capabilities",
+            msgsReq.getHeader(cn.vectory.ocdroid.data.repository.http.SlimapiContract.X_SLIMAPI_CAPABILITIES),
+        )
+    }
+
+    /**
+     * T0-P2 slim wire-shape: with `slim=true`, a `/slimapi/` REST method MUST
+     * carry BOTH `X-Slimapi-Version` AND `X-Slimapi-Capabilities` together
+     * (the double-door AND). Pins that neither interceptor's path-prefix door
+     * nor the slim-flag door can be dropped silently.
+     */
+    @Test
+    fun `T0-P2 slim mode emits both slimapi version and capabilities headers on slimapi path`() = runBlocking {
+        // `repository` from setUp is configured slim=true.
+        server.enqueue(jsonResponse("[]"))
+        repository.getSlimapiSessions()
+
+        val req = server.takeRequest()
+        assertTrue(
+            "slim getSessions MUST hit /slimapi/ prefix: ${req.path}",
+            req.path!!.startsWith(cn.vectory.ocdroid.data.repository.http.SlimapiContract.SLIMAPI_PATH_PREFIX),
+        )
+        assertEquals(
+            "slimapi path MUST carry X-Slimapi-Version == SLIMAPI_CLIENT_VERSION",
+            cn.vectory.ocdroid.data.repository.http.SlimapiContract.SLIMAPI_CLIENT_VERSION.toString(),
+            req.getHeader(cn.vectory.ocdroid.data.repository.http.SlimapiContract.X_SLIMAPI_VERSION),
+        )
+        assertEquals(
+            "slimapi path MUST carry X-Slimapi-Capabilities == mid-partial-envelope=1",
+            cn.vectory.ocdroid.data.repository.http.SlimapiContract.MID_PARTIAL_ENVELOPE_CAPABILITY,
+            req.getHeader(cn.vectory.ocdroid.data.repository.http.SlimapiContract.X_SLIMAPI_CAPABILITIES),
+        )
+    }
+
     private fun skeleton(id: String, updated: Long): MessageWithParts =
         MessageWithParts(
             info = Message(
