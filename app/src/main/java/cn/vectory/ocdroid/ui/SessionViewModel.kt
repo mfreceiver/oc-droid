@@ -154,7 +154,8 @@ class SessionViewModel @Inject constructor(
                 ?: runSuspendCatching { repository.getSession(childSessionId).getOrNull() }.getOrNull()
             if (!isActive) return@launch
             if (child != null) {
-                store.mutateSessionList { state -> state.copy(sessions = upsertSession(state.sessions, child)) }
+                // T1c: SessionUpserted owns sessions-only upsert.
+                store.dispatch(AppAction.SessionUpserted(child))
                 selectSession(childSessionId)
             } else {
                 effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_child_session_unavailable))
@@ -244,7 +245,8 @@ class SessionViewModel @Inject constructor(
         val updated = store.sessionListFlow.value.openSessionIds.filter { it != sessionId }
         settingsManager.openSessionIds = updated
         val nextId = updated.lastOrNull()
-        store.mutateSessionList { it.copy(openSessionIds = updated) }
+        // T1c: OpenSessionIdsChanged owns openSessionIds-only write.
+        store.dispatch(AppAction.OpenSessionIdsChanged(updated))
         store.mutateUnread { it.copy(unreadSessions = it.unreadSessions - sessionId) }
         if (updated.isEmpty()) {
             // §fix-close-all-empty-tabs-home: ANY path that empties open tabs

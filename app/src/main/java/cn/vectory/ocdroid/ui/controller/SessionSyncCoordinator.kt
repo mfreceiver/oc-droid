@@ -969,6 +969,10 @@ class SessionSyncCoordinator(
             "session.created" -> {
                 val created = parseSessionCreatedEvent(event)
                 if (created != null) {
+                    // Multi-field pure helper (sessions + directorySessions +
+                    // pendingCreate clear + tree invalidation). NOT sessions-
+                    // only — SessionUpserted would drop co-writes. Stay on
+                    // mutateSessionList + applySessionCreated (1:1).
                     slices.mutateSessionList { s -> s.applySessionCreated(created.session).first }
                 } else {
                     applySseSideEffects(listOf(SseSideEffect.ReportNonFatal("Ignoring invalid session.created payload")))

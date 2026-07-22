@@ -106,31 +106,31 @@ internal suspend fun AppCore.resolveQuestionDirectory(requestId: String): String
         )
         return null
     }
-    // §Phase 2 gpter fix: CONDITIONAL CAS. The suspend fetch above may have
-    // raced with another load/SSE that hydrated this same session during the
-    // network wait. writeSessionList reads the LATEST state atomically inside
-    // its lambda — re-check there: if a fresher entry now exists (in sessions ∪
-    // directorySessions) with a non-blank directory, it is authoritative → keep
-    // it and do NOT let the fetched snapshot overwrite it. Only upsert `fetched`
-    // when the session is still absent/blank. Either way, return the
-    // authoritative directory (fresher entry's if present, else fetched's).
+    // §Phase 2 gpter fix: CONDITIONAL re-check after suspend fetch. The
+    // suspend fetch above may have raced with another load/SSE that hydrated
+    // this same session during the network wait. Re-check the LATEST state:
+    // if a fresher entry now exists (in sessions ∪ directorySessions) with a
+    // non-blank directory, it is authoritative → keep it and do NOT let the
+    // fetched snapshot overwrite it. Only upsert `fetched` when the session
+    // is still absent/blank. Either way, return the authoritative directory
+    // (fresher entry's if present, else fetched's).
+    // T1c: SessionUpserted owns the sessions-only upsert branch.
     val fetchedDir = fetched.directory
-    var resolved: String? = null
-    var casPath = "fetch-hit-cached"
-    writeSessionList { st ->
-        // §Phase 2 gpter round-3: non-blank predicate (same as branch 1) — a
-        // blank-dir duplicate hydrated during the fetch is NOT authoritative.
-        val current = (st.sessions + st.directorySessions.values.flatten())
-            .firstOrNull { it.id == sessionId && !it.directory.isNullOrBlank() }
-        if (current != null) {
-            // Fresher authoritative entry hydrated during the fetch — keep it.
-            resolved = current.directory
-            casPath = "fetch-hit-fresher-kept"
-            st // no overwrite
-        } else {
-            resolved = fetchedDir
-            st.copy(sessions = upsertSession(st.sessions, fetched))
-        }
+    val resolved: String?
+    val casPath: String
+    val st = store.sessionListFlow.value
+    // §Phase 2 gpter round-3: non-blank predicate (same as branch 1) — a
+    // blank-dir duplicate hydrated during the fetch is NOT authoritative.
+    val current = (st.sessions + st.directorySessions.values.flatten())
+        .firstOrNull { it.id == sessionId && !it.directory.isNullOrBlank() }
+    if (current != null) {
+        // Fresher authoritative entry hydrated during the fetch — keep it.
+        resolved = current.directory
+        casPath = "fetch-hit-fresher-kept"
+    } else {
+        resolved = fetchedDir
+        casPath = "fetch-hit-cached"
+        store.dispatch(AppAction.SessionUpserted(fetched))
     }
     DebugLog.d(
         "Question",
@@ -192,7 +192,8 @@ internal fun AppCore.openSessionFromDeepLink(sessionId: String) {
             // surrounding work is runSuspendCatching{}.getOrNull()).
             val fetched = runSuspendCatching { repository.getSession(sessionId).getOrNull() }.getOrNull()
             if (fetched != null) {
-                writeSessionList { st -> st.copy(sessions = upsertSession(st.sessions, fetched)) }
+                // T1c: SessionUpserted owns sessions-only upsert.
+                store.dispatch(AppAction.SessionUpserted(fetched))
             }
         }
         selectSessionForEffect(sessionId)
@@ -535,9 +536,8 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
         appScope.launch {
             repository.updateSessionArchived(sessionId, -1L)
                 .onSuccess { updated ->
-                    writeSessionList { state ->
-                        state.copy(sessions = state.sessions.map { session -> if (session.id == sessionId) updated else session })
-                    }
+                    // T1c: SessionUpserted owns sessions write (unarchive-before-send).
+                    store.dispatch(AppAction.SessionUpserted(updated))
                     dispatchSend()
                 }
                 .onFailure { error ->

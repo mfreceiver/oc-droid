@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.mergeStatusSnapshot
 import kotlinx.coroutines.CoroutineScope
@@ -104,35 +105,51 @@ internal class ForegroundSessionTreeHydrator(
                 val result = loadCompleteSessionTrees(repository, roots)
                 val statusBefore = store.sessionListFlow.value.sessionStatuses
                 val statusSnapshot = repository.getSessionStatus().getOrNull()
-                store.mutateSessionList { current ->
-                    // §gpter-blocker: the tree was invalidated mid-flight —
-                    // drop the stale result. The roots stay incomplete so the
-                    // next tick re-hydrates against the fresh tree.
-                    if (current.completenessEpoch != epochAtStart) return@mutateSessionList current
+                // T1c: call-site computes validated deltas + epochAtStart;
+                // SessionTreeHydrated reduce owns the epoch-guarded 3-field commit.
+                // Re-read latest snapshot for validation (same as prior mutate lambda).
+                val current = store.sessionListFlow.value
+                // §gpter-blocker: the tree was invalidated mid-flight —
+                // drop the stale result. The roots stay incomplete so the
+                // next tick re-hydrates against the fresh tree.
+                if (current.completenessEpoch != epochAtStart) {
+                    // Stale — SessionTreeHydrated would also no-op; skip dispatch.
+                } else {
                     val currentById = allSessionsById(current.sessions, current.directorySessions, current.childSessions)
                     val stillSameIdentity = store.hostFlow.value.currentHostProfileId == hostId
                     val validRoots = result.completeRootIds.filterTo(mutableSetOf()) { rootId ->
                         stillSameIdentity && currentById[rootId]?.directory == byId[rootId]?.directory
                     }
-                    if (validRoots.isEmpty()) return@mutateSessionList current
-                    val validParents = result.childrenByParent.filterKeys { parentId ->
-                        validRoots.any { rootId -> parentId in treeIds(rootId, currentById + result.childrenByParent.values.flatten().associateBy { it.id }) }
+                    if (validRoots.isNotEmpty()) {
+                        val validParents = result.childrenByParent.filterKeys { parentId ->
+                            validRoots.any { rootId ->
+                                parentId in treeIds(
+                                    rootId,
+                                    currentById + result.childrenByParent.values.flatten().associateBy { it.id },
+                                )
+                            }
+                        }
+                        val nextChildren = current.childSessions + validParents
+                        val nextStatuses = if (statusSnapshot != null) {
+                            val authoritativeIds = allSessionsById(
+                                current.sessions,
+                                current.directorySessions,
+                                nextChildren,
+                            ).keys
+                            val normalizedStatuses = normalizeAuthoritativeStatusSnapshot(statusSnapshot, authoritativeIds)
+                            mergeStatusSnapshot(statusBefore, current.sessionStatuses, normalizedStatuses)
+                        } else {
+                            current.sessionStatuses
+                        }
+                        store.dispatch(
+                            AppAction.SessionTreeHydrated(
+                                epochAtStart = epochAtStart,
+                                childSessionsDelta = validParents,
+                                completeRootIdsDelta = validRoots,
+                                sessionStatuses = nextStatuses,
+                            )
+                        )
                     }
-                    val nextChildren = current.childSessions + validParents
-                    val nextStatuses = if (statusSnapshot != null) {
-                        val authoritativeIds = allSessionsById(
-                            current.sessions,
-                            current.directorySessions,
-                            nextChildren,
-                        ).keys
-                        val normalizedStatuses = normalizeAuthoritativeStatusSnapshot(statusSnapshot, authoritativeIds)
-                        mergeStatusSnapshot(statusBefore, current.sessionStatuses, normalizedStatuses)
-                    } else current.sessionStatuses
-                    current.copy(
-                        childSessions = nextChildren,
-                        completeRootIds = current.completeRootIds + validRoots,
-                        sessionStatuses = nextStatuses,
-                    )
                 }
             } finally {
                 synchronized(inFlight) { roots.forEach { inFlight.remove(it.id) } }

@@ -39,13 +39,9 @@ internal fun launchCreateSession(
                 // pending-create so the next REST refresh does not evict it
                 // before the server's listing propagates. Removed atomically
                 // by the refresh's sweep or by SSE session.created.
-                slices.mutateSessionList { sl ->
-                    sl.copy(
-                        sessions = upsertSession(sl.sessions, session),
-                        pendingCreateIds = sl.pendingCreateIds + session.id,
-                        pendingCreatedAt = sl.pendingCreatedAt + (session.id to registeredAt),
-                    )
-                }
+                // T1c: SessionCreatedLocal owns sessions + pendingCreateIds +
+                // pendingCreatedAt in ONE dispatch.
+                slices.store.dispatch(AppAction.SessionCreatedLocal(session, registeredAt))
                 onSelectSession(session.id)
             }
             .onFailure { error ->
@@ -67,7 +63,8 @@ internal fun launchForkSession(
     scope.launch {
         repository.forkSession(sessionId, messageId)
             .onSuccess { session ->
-                slices.mutateSessionList { sl -> sl.copy(sessions = upsertSession(sl.sessions, session)) }
+                // T1c: SessionUpserted owns sessions-only upsert.
+                slices.store.dispatch(AppAction.SessionUpserted(session))
                 onSelectSession(session.id)
             }
             .onFailure { error ->
@@ -99,7 +96,8 @@ internal fun launchRenameSession(
     scope.launch {
         repository.updateSession(sessionId, title)
             .onSuccess { updated ->
-                slices.mutateSessionList { sl -> sl.copy(sessions = upsertSession(sl.sessions, updated)) }
+                // T1c: SessionUpserted owns sessions-only upsert.
+                slices.store.dispatch(AppAction.SessionUpserted(updated))
             }
             .onFailure { error ->
                 emit.emit(UiEvent.Error(R.string.error_rename_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
@@ -144,29 +142,10 @@ internal fun launchSetSessionArchived(
                 .onSuccess { updated ->
                     // §R-17 batch2 step e final: fresh capture after the suspend;
                     // used for all reads in this synchronous onSuccess block.
-                    val currentSessions = slices.sessionList.value.sessions
-                    val currentDirSessions = slices.sessionList.value.directorySessions
+                    // T1c: map-replace of sessions/dirSessions/childSessions is
+                    // owned by SessionArchivedLocal reduce (by session.id).
                     val currentOpenIds = slices.sessionList.value.openSessionIds
                     val currentCurrentId = slices.chat.value.currentSessionId
-
-                    val newSessions = currentSessions.map { session -> if (session.id == id) updated else session }
-                    // Keep directorySessions in sync so an archived session disappears
-                    // from the connected-projects list immediately (refreshDirectorySessions
-                    // repopulates this map on expand, but the local copy must not hold a
-                    // stale unarchived version).
-                    val newDirSessions = currentDirSessions.mapValues { (_, list) ->
-                        list.map { session -> if (session.id == id) updated else session }
-                    }
-                    // §task5-ghost-r2 (final-fix round 2): same sync for childSessions.
-                    // A descendant that lives only in childSessions (sub-agent surfaced
-                    // via loadChildSessions) must also be replaced with the archived
-                    // copy — otherwise the next reconcile's sessionsById snapshot still
-                    // sees it as unarchived, defeating the filterArchivedSessionQuestions
-                    // ancestor walk and letting its question ghost back.
-                    val currentChildSessions = slices.sessionList.value.childSessions
-                    val newChildSessions = currentChildSessions.mapValues { (_, list) ->
-                        list.map { session -> if (session.id == id) updated else session }
-                    }
                     val isArchive = archivedValue > 0
                     // Archived: evict the id from the open-tabs list (browser-tab close
                     // equivalent for archive) and persist via the existing SettingsManager
@@ -183,23 +162,23 @@ internal fun launchSetSessionArchived(
                     // chat.update below clears currentSessionId, and the AppCore
                     // collector drops null (no manual SettingsManager write).
 
-                    slices.mutateSessionList {
-                        // §task5-lifecycle: per-id question filter (presentation domain).
-                        val cleanedQuestions = if (isArchive) {
-                            it.pendingQuestions.filter { q -> q.sessionId !in subtree }
-                        } else {
-                            it.pendingQuestions
-                        }
-                        val activeIdsToRemove = if (isArchive) subtree else setOf(id)
-                        it.copy(
-                            sessions = newSessions,
-                            directorySessions = newDirSessions,
-                            childSessions = newChildSessions,
+                    // §task5-lifecycle: per-id question filter (presentation domain).
+                    val cleanedQuestions = if (isArchive) {
+                        slices.sessionList.value.pendingQuestions.filter { q -> q.sessionId !in subtree }
+                    } else {
+                        slices.sessionList.value.pendingQuestions
+                    }
+                    val activeIdsToRemove = if (isArchive) subtree else setOf(id)
+                    // T1c: SessionArchivedLocal owns the 6-field sessionList copy.
+                    // Cross-slice mutateUnread / mutateChat / ChatCleared stay below.
+                    slices.store.dispatch(
+                        AppAction.SessionArchivedLocal(
+                            session = updated,
                             openSessionIds = newOpenIds,
                             pendingQuestions = cleanedQuestions,
-                            activeSessionIds = it.activeSessionIds - activeIdsToRemove,
+                            activeSessionIdsToRemove = activeIdsToRemove,
                         )
-                    }
+                    )
                     if (isArchive) {
                         // §task5-lifecycle: archive clears the full known subtree.
                         slices.mutateUnread { it.removeSessions(subtree) }
@@ -303,32 +282,11 @@ internal fun launchDeleteSession(
                 // union render it — and re-selecting it would upsert a ghost
                 // copy of an already-deleted server session (#10).
                 // §R-17 batch2 step e final: slice-only reads.
-                val currentSessions = slices.sessionList.value.sessions
-                val currentDirSessions = slices.sessionList.value.directorySessions
-                val newSessions = currentSessions.filter { s -> s.id !in removedIds }
-                val newDirSessions = currentDirSessions
-                    .mapValues { (_, list) -> list.filter { s -> s.id !in removedIds } }
-                    .filterValues { it.isNotEmpty() }
-                slices.mutateSessionList { sl ->
-                    sl.copy(
-                        sessions = newSessions,
-                        directorySessions = newDirSessions,
-                        // §task5-lifecycle: question filter for removed subtree.
-                        pendingQuestions = sl.pendingQuestions.filter { it.sessionId !in removedIds },
-                        activeSessionIds = sl.activeSessionIds - removedIds,
-                        // §final-gate I-3 (review-final-rev-gpt-20260719081038 §2):
-                        // prune the deleted subtree's entries from
-                        // sessionErrorsById in the SAME committed state as
-                        // the sessions / directorySessions / pendingQuestions
-                        // purge. Pre-fix the deleted sid's lastError survived
-                        // forever (T12 only removes on `lastError = Cleared`),
-                        // causing unbounded retention + a stale banner if the
-                        // server later reused the id. Mirrors the existing
-                        // `pendingQuestions` filter style (immutable filter);
-                        // T12's set/remove producer logic is unchanged.
-                        sessionErrorsById = sl.sessionErrorsById.filterKeys { it !in removedIds },
-                    )
-                }
+                // T1c: SessionDeletedLocal owns the 5-field sessionList purge
+                // (sessions / directorySessions / pendingQuestions /
+                // activeSessionIds / sessionErrorsById) derived from removedIds.
+                // Cross-slice mutateUnread / ChatCleared stay below.
+                slices.store.dispatch(AppAction.SessionDeletedLocal(removedIds))
                 // §task5-lifecycle: unread drop for the whole removed subtree.
                 slices.mutateUnread { it.removeSessions(removedIds) }
                 val currentId = slices.chat.value.currentSessionId
@@ -430,16 +388,13 @@ internal fun launchSendMessage(
                     // equivalent). Just bail out of onSuccess.
                     return@onSuccess
                 }
-                // §R-17 batch2 step e final: slice-only reads.
-                val currentSessions = slices.sessionList.value.sessions
-                val currentStatuses = slices.sessionList.value.sessionStatuses
                 // §append-safe (glmer MAJOR-1): inputText is cleared
                 // synchronously at dispatch time, so do NOT touch it here —
                 // wiping now would destroy a follow-up the user typed during
                 // the in-flight prompt_async window (the core send-while-
                 // running workflow).
-                val newSessions = bumpSessionUpdated(currentSessions, sessionId, System.currentTimeMillis())
-                val newStatuses = currentStatuses + (sessionId to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"))
+                val updatedTimestamp = System.currentTimeMillis()
+                val busyStatus = cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")
                 // §streaming-state-sync-diag (runtime-gated): record the optimistic
                 // busy write so we can confirm whether it later gets overwritten
                 // by a stale idle from session.status / digest / poller.
@@ -449,7 +404,10 @@ internal fun launchSendMessage(
                         "optimistic-onSuccess busy write sid=$sessionId",
                     )
                 }
-                slices.mutateSessionList { sl -> sl.copy(sessions = newSessions, sessionStatuses = newStatuses) }
+                // T1c: SessionStatusPatched owns sessions (bump) + sessionStatuses.
+                slices.store.dispatch(
+                    AppAction.SessionStatusPatched(sessionId, updatedTimestamp, busyStatus)
+                )
                 onSuccess?.invoke()
                 // §streaming-send-ux-fix: the post-send full-list refresh was
                 // REMOVED — it was the root cause of the "no live UI feedback"

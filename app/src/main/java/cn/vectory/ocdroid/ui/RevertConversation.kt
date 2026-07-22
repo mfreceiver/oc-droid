@@ -41,7 +41,11 @@ class RevertConversation(private val core: AppCore) {
                 sessionId, messageId,
                 message.time?.created?.let(RevertCutoffState::Resolved) ?: RevertCutoffState.NoTimestamp
             )
-            core.writeSessionList { state -> state.copy(sessions = state.sessions.map { if (it.id == sessionId) updated else it }) }
+            // T1c: SessionUpserted owns sessions-only write. Map-replace by id
+            // is equivalent to upsert for an existing session (same id already
+            // in the list); upsertSession prepends + dedupes, which also lands
+            // the updated record. Prefer SessionUpserted for ownership.
+            core.store.dispatch(AppAction.SessionUpserted(updated))
             core.writeChat { it.copy(revertCutoffs = it.revertCutoffs + (sessionId to cutoff)) }
             // SessionCacheEntry is the sole persisted cutoff source. Disk writes
             // are best-effort: server success and the live fail-closed state win.

@@ -284,41 +284,21 @@ internal fun launchLoadSessions(
                     // the just-archived id is wasteful + racy vs the reducer's
                     // clear. Non-archive path runs for sessions that survived.
                     //
-                    // §fix-archive-early-return-flag (oracle review): the
-                    // early-return below skips the mutateSessionList that sets
-                    // hasCompletedInitialLoad=true. A first load that cleaned
-                    // archived-open tabs MUST still count as "initial load
-                    // completed", otherwise a later close-all-tabs would see
-                    // the flag still false and re-fire the cold-start
-                    // auto-select. The BulkSessionsRefreshed reducer dispatched
-                    // by the callback writes sessions/openIds but does NOT set
-                    // this flag, so set it explicitly here.
-                    slices.mutateSessionList { it.copy(hasCompletedInitialLoad = true) }
+                    // T1c gap fix: BulkSessionsRefreshed reducer now sets
+                    // hasCompletedInitialLoad=true atomically — no separate
+                    // mutateSessionList patch needed.
                     return@onSuccess
                 }
-                slices.mutateSessionList {
-                    it.copy(
+                // T1c: SessionsRefreshedLocal owns the 9-field non-archive
+                // full-refresh copy (distinct from BulkSessionsRefreshed).
+                slices.store.dispatch(
+                    AppAction.SessionsRefreshedLocal(
                         sessions = mergedSessions,
                         hasMoreSessions = newHasMore,
-                        isLoadingMoreSessions = false,
-                        isRefreshingSessions = false,
-                        // §Q4-strict-sync: update pendingCreateIds in the
-                        // SAME committed state as the sessions list (atomic).
                         pendingCreateIds = sweptPendingCreateIds,
                         pendingCreatedAt = sweptPendingCreatedAt,
-                        // §gpter-important: a full REST list replace is
-                        // authoritative for structure. If SSE dropped events,
-                        // stale completeness proofs could persist against a
-                        // structurally-changed tree. Discard them and bump the
-                        // epoch so in-flight hydrations drop (fail-closed).
-                        completeRootIds = emptySet(),
-                        completenessEpoch = it.completenessEpoch + 1L,
-                        // §fix-close-all-residual: this load has completed —
-                        // subsequent refreshes must NOT re-fire the cold-start
-                        // auto-select (see isInitialColdStart capture above).
-                        hasCompletedInitialLoad = true,
                     )
-                }
+                )
                 // Persist a BOUNDED session-metadata cache so the next cold
                 // start can reseed the session-list slice instantly (tabs/title/
                 // workdir groups). §Q4-strict-sync: now caches ALL non-archived
@@ -545,25 +525,16 @@ internal fun launchLoadMoreSessions(
                 val sweptPendingCreatedAt = currentPendingCreatedAt
                     .filterKeys { it in sweptPendingCreateIds }
                 val newHasMore = mergedSessions.size >= nextLimit
-                slices.mutateSessionList {
-                    it.copy(
+                // T1c: SessionsPageAppended owns the 8-field loadMore copy.
+                slices.store.dispatch(
+                    AppAction.SessionsPageAppended(
                         sessions = mergedSessions,
                         loadedSessionLimit = nextLimit,
                         hasMoreSessions = newHasMore,
-                        isLoadingMoreSessions = false,
-                        // §Q4-strict-sync: update pendingCreateIds atomically
-                        // with the sessions list.
                         pendingCreateIds = sweptPendingCreateIds,
                         pendingCreatedAt = sweptPendingCreatedAt,
-                        // §gpter-important: REST pagination is also a structural
-                        // catch-up — merged sessions may carry changed parentId
-                        // / archived state that SSE dropped. Discard cached
-                        // completeness proofs and bump the epoch so in-flight
-                        // hydrations drop (fail-closed).
-                        completeRootIds = emptySet(),
-                        completenessEpoch = it.completenessEpoch + 1L,
                     )
-                }
+                )
                 val currentId = currentSessionId
                 val refreshedSessions = mergedSessions
                 when {

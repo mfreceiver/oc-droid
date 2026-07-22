@@ -3,7 +3,9 @@ package cn.vectory.ocdroid.ui
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
+import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.ui.chat.ExpandPartsOutcome
 import cn.vectory.ocdroid.ui.controller.applyArchiveEviction
 import cn.vectory.ocdroid.ui.controller.applyArchivedChatClear
@@ -441,6 +443,102 @@ internal sealed interface AppAction {
         val local: List<MessageWithParts>,
         val expectedSessionId: String,
     ) : AppAction
+
+    // ── T1c: sessionList ownership (sessions + openSessionIds + co-written fields) ─
+
+    /**
+     * T1c: simple session upsert (sessions only). Covers fork / rename / child
+     * upsert / switchTo target upsert / revert / question-dir-resolve / SSE
+     * session.created/updated (non-archived). Reducer delegates to [upsertSession].
+     */
+    data class SessionUpserted(val session: Session) : AppAction
+
+    /**
+     * T1c: REST create success (SessionMutationActions launchCreateSession).
+     * Writes sessions + pendingCreateIds + pendingCreatedAt in ONE dispatch.
+     * Distinct from [DraftSessionMaterialized] (does NOT touch chat/unread).
+     */
+    data class SessionCreatedLocal(
+        val session: Session,
+        val registeredAt: Long,
+    ) : AppAction
+
+    /**
+     * T1c: openSessionIds-only write (closeSession / switchTo open-tab append).
+     * Caller computes the full list; reducer just stores it.
+     */
+    data class OpenSessionIdsChanged(val openSessionIds: List<String>) : AppAction
+
+    /**
+     * T1c: REST archive/restore of a single session id (one loop iteration of
+     * launchSetSessionArchived). Map-replaces [session] into sessions /
+     * directorySessions / childSessions by id; stores caller-computed
+     * [openSessionIds] / [pendingQuestions]; subtracts
+     * [activeSessionIdsToRemove] from activeSessionIds. Cross-slice
+     * mutateUnread / mutateChat / ChatCleared stay at the call site.
+     */
+    data class SessionArchivedLocal(
+        val session: Session,
+        val openSessionIds: List<String>,
+        val pendingQuestions: List<QuestionRequest>,
+        val activeSessionIdsToRemove: Set<String>,
+    ) : AppAction
+
+    /**
+     * T1c: REST delete success — purge the deleted subtree. Reducer derives
+     * all 5 filter fields from [removedIds].
+     */
+    data class SessionDeletedLocal(
+        val removedIds: Set<String>,
+    ) : AppAction
+
+    /**
+     * T1c: launchSendMessage onSuccess optimistic busy write. Reducer
+     * delegates sessions to [bumpSessionUpdated].
+     */
+    data class SessionStatusPatched(
+        val sessionId: String,
+        val updatedTimestamp: Long,
+        val status: SessionStatus,
+    ) : AppAction
+
+    /**
+     * T1c: launchLoadSessions NON-archive success path. 9-field sessionList
+     * copy. Distinct from [BulkSessionsRefreshed] (does NOT overwrite
+     * openSessionIds / intersect activeSessionIds / archive-subtree cleanup).
+     */
+    data class SessionsRefreshedLocal(
+        val sessions: List<Session>,
+        val hasMoreSessions: Boolean,
+        val pendingCreateIds: Set<String>,
+        val pendingCreatedAt: Map<String, Long>,
+    ) : AppAction
+
+    /**
+     * T1c: launchLoadMoreSessions success path. 8-field copy (includes
+     * loadedSessionLimit; does NOT touch isRefreshingSessions /
+     * hasCompletedInitialLoad).
+     */
+    data class SessionsPageAppended(
+        val sessions: List<Session>,
+        val loadedSessionLimit: Int,
+        val hasMoreSessions: Boolean,
+        val pendingCreateIds: Set<String>,
+        val pendingCreatedAt: Map<String, Long>,
+    ) : AppAction
+
+    /**
+     * T1c: SessionTreeHydrator.request commit. Epoch-guarded: if live
+     * completenessEpoch != [epochAtStart] → full no-op. Else merges
+     * [childSessionsDelta] / [completeRootIdsDelta] and replaces
+     * sessionStatuses.
+     */
+    data class SessionTreeHydrated(
+        val epochAtStart: Long,
+        val childSessionsDelta: Map<String, List<Session>>,
+        val completeRootIdsDelta: Set<String>,
+        val sessionStatuses: Map<String, SessionStatus>,
+    ) : AppAction
 }
 
 /**
@@ -791,6 +889,10 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
                     state.sessionList.childSessions,
                 ).keys
             ),
+            // T1c gap fix: bulk refresh (incl. archive-sync early-return path)
+            // is a completed initial load — set the flag atomically so the
+            // separate mutateSessionList patch at SessionListActions is gone.
+            hasCompletedInitialLoad = true,
         )
         // Compute the subtree UNION over ALL archived ids. Each archived root
         // may have descendants that did NOT get their own archive event —
@@ -1020,6 +1122,115 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
             expectedSessionId = action.expectedSessionId,
         ),
     )
+
+    // ── T1c sessionList ownership reduce ───────────────────────────────────
+
+    is AppAction.SessionUpserted -> state.copy(
+        sessionList = state.sessionList.copy(
+            sessions = upsertSession(state.sessionList.sessions, action.session),
+        ),
+    )
+
+    is AppAction.SessionCreatedLocal -> state.copy(
+        sessionList = state.sessionList.copy(
+            sessions = upsertSession(state.sessionList.sessions, action.session),
+            pendingCreateIds = state.sessionList.pendingCreateIds + action.session.id,
+            pendingCreatedAt = state.sessionList.pendingCreatedAt + (action.session.id to action.registeredAt),
+        ),
+    )
+
+    is AppAction.OpenSessionIdsChanged -> state.copy(
+        sessionList = state.sessionList.copy(
+            openSessionIds = action.openSessionIds,
+        ),
+    )
+
+    is AppAction.SessionArchivedLocal -> {
+        val id = action.session.id
+        state.copy(
+            sessionList = state.sessionList.copy(
+                sessions = state.sessionList.sessions.map {
+                    if (it.id == id) action.session else it
+                },
+                directorySessions = state.sessionList.directorySessions.mapValues { (_, list) ->
+                    list.map { if (it.id == id) action.session else it }
+                },
+                childSessions = state.sessionList.childSessions.mapValues { (_, list) ->
+                    list.map { if (it.id == id) action.session else it }
+                },
+                openSessionIds = action.openSessionIds,
+                pendingQuestions = action.pendingQuestions,
+                activeSessionIds = state.sessionList.activeSessionIds - action.activeSessionIdsToRemove,
+            ),
+        )
+    }
+
+    is AppAction.SessionDeletedLocal -> {
+        val ids = action.removedIds
+        state.copy(
+            sessionList = state.sessionList.copy(
+                sessions = state.sessionList.sessions.filter { it.id !in ids },
+                directorySessions = state.sessionList.directorySessions
+                    .mapValues { (_, list) -> list.filter { it.id !in ids } }
+                    .filterValues { it.isNotEmpty() },
+                pendingQuestions = state.sessionList.pendingQuestions.filter { it.sessionId !in ids },
+                activeSessionIds = state.sessionList.activeSessionIds - ids,
+                sessionErrorsById = state.sessionList.sessionErrorsById.filterKeys { it !in ids },
+            ),
+        )
+    }
+
+    is AppAction.SessionStatusPatched -> state.copy(
+        sessionList = state.sessionList.copy(
+            sessions = bumpSessionUpdated(
+                state.sessionList.sessions,
+                action.sessionId,
+                action.updatedTimestamp,
+            ),
+            sessionStatuses = state.sessionList.sessionStatuses + (action.sessionId to action.status),
+        ),
+    )
+
+    is AppAction.SessionsRefreshedLocal -> state.copy(
+        sessionList = state.sessionList.copy(
+            sessions = action.sessions,
+            hasMoreSessions = action.hasMoreSessions,
+            isLoadingMoreSessions = false,
+            isRefreshingSessions = false,
+            pendingCreateIds = action.pendingCreateIds,
+            pendingCreatedAt = action.pendingCreatedAt,
+            completeRootIds = emptySet(),
+            completenessEpoch = state.sessionList.completenessEpoch + 1L,
+            hasCompletedInitialLoad = true,
+        ),
+    )
+
+    is AppAction.SessionsPageAppended -> state.copy(
+        sessionList = state.sessionList.copy(
+            sessions = action.sessions,
+            loadedSessionLimit = action.loadedSessionLimit,
+            hasMoreSessions = action.hasMoreSessions,
+            isLoadingMoreSessions = false,
+            pendingCreateIds = action.pendingCreateIds,
+            pendingCreatedAt = action.pendingCreatedAt,
+            completeRootIds = emptySet(),
+            completenessEpoch = state.sessionList.completenessEpoch + 1L,
+        ),
+    )
+
+    is AppAction.SessionTreeHydrated -> {
+        if (state.sessionList.completenessEpoch != action.epochAtStart) {
+            state // stale hydration → full no-op
+        } else {
+            state.copy(
+                sessionList = state.sessionList.copy(
+                    childSessions = state.sessionList.childSessions + action.childSessionsDelta,
+                    completeRootIds = state.sessionList.completeRootIds + action.completeRootIdsDelta,
+                    sessionStatuses = action.sessionStatuses,
+                ),
+            )
+        }
+    }
 }
 
 /**

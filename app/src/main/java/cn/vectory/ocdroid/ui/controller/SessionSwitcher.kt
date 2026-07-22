@@ -13,7 +13,6 @@ import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.persistSessionCache
-import cn.vectory.ocdroid.ui.upsertSession
 import cn.vectory.ocdroid.util.SettingsManager
 
 /**
@@ -483,7 +482,8 @@ class SessionSwitcher(
         // it now so currentSession lookup + workdir sync work. (targetSession
         // was resolved in Step 3 above.)
         if (targetSession != null && slices.sessionList.value.sessions.none { it.id == sessionId }) {
-            slices.mutateSessionList { s -> s.copy(sessions = upsertSession(s.sessions, targetSession)) }
+            // T1c: SessionUpserted owns sessions-only upsert.
+            store.dispatch(AppAction.SessionUpserted(targetSession))
         }
 
         // ── Step 5: Reset collapsible-card expansion state ──────────────────
@@ -558,7 +558,8 @@ class SessionSwitcher(
         if (targetSession?.parentId == null && sessionId !in slices.sessionList.value.openSessionIds) {
             val updated = (slices.sessionList.value.openSessionIds + sessionId).takeLast(8)
             settingsManager.openSessionIds = updated
-            slices.mutateSessionList { it.copy(openSessionIds = updated) }
+            // T1c: OpenSessionIdsChanged owns openSessionIds-only write.
+            store.dispatch(AppAction.OpenSessionIdsChanged(updated))
             // Fix #5: persist the newly-opened session's metadata into
             // sessionCache so its tab survives a restart.
             val sourceSessions = (slices.sessionList.value.sessions + slices.sessionList.value.directorySessions.values.flatten())
