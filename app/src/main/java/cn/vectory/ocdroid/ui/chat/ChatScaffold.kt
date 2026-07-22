@@ -1334,181 +1334,68 @@ fun ChatScaffold(
     } // §home-hub T4: end ModalNavigationDrawer content lambda.
 
     // ── Phase 1B sheets / overflows / dialogs (new) ──────────────────────
-
-    // §0.8.2 P2.3: AgentPickerSheet. Trigger moved from the Composer's Agent
-    // AssistChip (deleted in P2.5) to the overflow menu's "Agent" item. The
-    // sheet body composable stays defined in Composer.kt (now `internal`).
-    // Slice reads: agents + currentAgentName come from the already-
-    // subscribed settings slice (filtered to visible agents — same filter
-    // the old chip Row used). onPick routes to composerVM.selectAgent (the
-    // identical domain path the Composer's sheet used).
-    if (showAgentPicker) {
-        AgentPickerSheet(
-            agents = settings.agents.filter { it.isVisible },
-            // §chat-ux-batch T7 (B2) + T8 (B3): selection reads `pending ?: infer ?: null`
-            // so the picker highlights the value the NEXT send will actually
-            // use. The legacy `SettingsState.selectedAgentName` field is gone
-            // (T8 deleted it); the parameter is renamed to `currentAgentName`.
-            currentAgentName = effectiveAgent,
-            onPick = { name -> composerVM.selectAgent(name); showAgentPicker = false },
-            onDismiss = { showAgentPicker = false },
-        )
-    }
-
-    // §0.8.2 P2.3: ModelPickerSheet. Trigger moved from the Composer's Model
-    // AssistChip (deleted in P2.5) to the overflow menu's "Model" item. The
-    // sheet body composable stays defined in Composer.kt (now `internal`).
-    // Slice reads: providers + disabledModels come from the settings slice;
-    // currentModel comes from the chat slice (cachedContextUsage is sourced
-    // from the same slice). onSwitch routes to composerVM.switchSessionModel
-    // (V1-per-prompt, identical domain path the Composer's sheet used).
-    if (showModelPicker) {
-        ModelPickerSheet(
-            providers = settings.providers,
-            disabledModels = settings.disabledModels,
-            // §chat-ux-batch T7 (B2): selection reads `pending ?: infer ?: null`
-            // so the picker highlights the value the NEXT send will actually
-            // use, and the new "默认" item highlights when that is null.
-            // ChatState.currentModel is intentionally RETAINED (T8-C2) as the
-            // load/compact mirror consumed by ChatViewModel.compactSession() —
-            // NOT deleted.
-            currentModel = effectiveModel,
-            onSwitch = { providerId, modelId ->
-                composerVM.switchSessionModel(providerId, modelId)
-                showModelPicker = false
-            },
-            // §chat-ux-batch T7 (B2): the top "默认" item — clears the
-            // transient pendingModel so the next send falls back to inference
-            // / server default (mirrors AgentPickerSheet's `onPick(null)`).
-            onClear = {
-                composerVM.clearSessionModel()
-                showModelPicker = false
-            },
-            onDismiss = { showModelPicker = false },
-        )
-    }
-
-    if (showSessionPicker) {
-        SessionPickerSheet(
-            sessions = sessionList.sessions,
-            sessionStatuses = sessionList.sessionStatuses,
-            activeSessionIds = sessionList.activeSessionIds,
-            currentSessionId = chat.currentSessionId,
-            unreadSessions = unread.unreadSessions,
-            questionSessionIds = questionRootIds(sessionList.pendingQuestions, sessionsById),
-            onSelect = { sessionId ->
-                sessionVM.selectSession(sessionId)
-                showSessionPicker = false
-            },
-            onNewSession = {
-                sessionVM.createSession()
-                showSessionPicker = false
-            },
-            onDismiss = { showSessionPicker = false },
-        )
-    }
-
-    // §1B-FIX (I6): the three parity dialogs (Todo / Context-usage) live
-    // here in ChatScaffold so the overflow can open them. The dialog body
-    // is unchanged from the old ChatTopBar.kt — only the owner moved.
-    // §0.8.2 P2.3: the open-triggers now fire from ChatTopBar's overflow
-    // menu (onOpenTodoDialog / onOpenContextDialog) instead of the remote
-    // ConversationOverflowMenu.
-    if (showTodoDialog) {
-        // §B4-P3C: Todo sheet 迁移到 AppBottomSheet（与 Context/Agent/Model 统一）。
-        // - title 经 recipe 自动 titleLarge + padding(24,8)（原手写 titleMedium 升级）。
-        // - skipPartiallyExpanded 默认 true（recipe 固化点①），与其它三个 sheet 一致；
-        //   Todo 原是现网唯一半展的 sheet，现按本批决策统一全展。
-        // - 容器色 surfaceContainerLow 由 recipe 统一（用户点 5：底色统一）。
-        // - 高度：自然高度 + heightIn(max ≈ 屏 0.75) 封顶超长列表；不用 weight(1f)。
-        val todoSheetMaxHeight = (LocalConfiguration.current.screenHeightDp * 0.75f).dp
-        AppBottomSheet(
-            onDismissRequest = { showTodoDialog = false },
-            title = stringResource(R.string.chat_todo),
-        ) {
-            TodoListPanel(
-                todos = sessionList.sessionTodos[chat.currentSessionId ?: ""] ?: emptyList(),
-                modifier = Modifier.heightIn(max = todoSheetMaxHeight),
-            )
-        }
-    }
-
-    if (showContextDialog) {
-        ContextUsageDialog(
-            usage = cachedContextUsage,
-            onDismiss = { showContextDialog = false },
-            onCompact = {
-                showContextDialog = false
-                chatVM.compactSession()
-            },
-        )
-    }
-
-    // §drawer-new-session: project picker when ≥2 workdirs connected (mirrors
-    // SessionsScreen's pendingWorkdirPick sheet). Selection starts a draft there.
-    // Wrapped in a scrollable, height-capped Column so up to ~30 workdirs stay
-    // reachable (mirrors the TodoListPanel heightIn(max) precedent).
-    if (pendingWorkdirPick) {
-        val pickerMaxHeight = (LocalConfiguration.current.screenHeightDp * 0.6f).dp
-        AppBottomSheet(
-            onDismissRequest = { pendingWorkdirPick = false },
-            title = stringResource(R.string.sessions_pick_workdir_title),
-        ) {
-            Column(
-                modifier = Modifier
-                    .heightIn(max = pickerMaxHeight)
-                    .verticalScroll(rememberScrollState()),
-            ) {
-                recentWorkdirs.forEach { workdir ->
-                    val basename = workdir.split("/")
-                        .filter { it.isNotEmpty() }
-                        .lastOrNull() ?: workdir
-                    ListItem(
-                        headlineContent = { Text(basename) },
-                        modifier = Modifier.clickable {
-                            pendingWorkdirPick = false
-                            sessionVM.createSessionInWorkdir(workdir)
-                        },
-                    )
-                }
-            }
-        }
-    }
-
-    // (Snackbar host is rendered inside the chat Surface; UiEvent collection
-    // is already wired above.)
-
-    // §PARITY: error-detail dialog. Unchanged from ChatScreen.
-    errorDetail?.let { detail ->
-        AlertDialog(
-            onDismissRequest = { errorDetail = null },
-            title = { Text(stringResource(R.string.chat_error_details)) },
-            text = {
-                SelectionContainer {
-                    Column(
-                        modifier = Modifier
-                            .heightIn(max = 400.dp)
-                            .verticalScroll(rememberScrollState())
-                    ) {
-                        Text(text = detail, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { errorDetail = null }) {
-                    Text(stringResource(R.string.common_done))
-                }
-            }
-        )
-    }
-
-    // §PARITY: TOFU trust dialog. Unchanged from ChatScreen.
-    connection.pendingTofuCapture?.let { capture ->
-        TofuTrustDialog(
-            capture = capture,
-            onDecision = { decision -> connectionVM.resolveTofuTrust(decision) }
-        )
-    }
+    ChatOverlayHost(
+        showAgentPicker = showAgentPicker,
+        showModelPicker = showModelPicker,
+        showSessionPicker = showSessionPicker,
+        showTodoDialog = showTodoDialog,
+        showContextDialog = showContextDialog,
+        pendingWorkdirPick = pendingWorkdirPick,
+        errorDetail = errorDetail,
+        onDismissAgentPicker = { showAgentPicker = false },
+        onPickAgent = { name -> composerVM.selectAgent(name); showAgentPicker = false },
+        onDismissModelPicker = { showModelPicker = false },
+        onSwitchModel = { providerId, modelId ->
+            composerVM.switchSessionModel(providerId, modelId)
+            showModelPicker = false
+        },
+        onClearModel = {
+            composerVM.clearSessionModel()
+            showModelPicker = false
+        },
+        onDismissSessionPicker = { showSessionPicker = false },
+        onSelectSession = { sessionId ->
+            sessionVM.selectSession(sessionId)
+            showSessionPicker = false
+        },
+        onNewSession = {
+            sessionVM.createSession()
+            showSessionPicker = false
+        },
+        onDismissTodo = { showTodoDialog = false },
+        onDismissContext = { showContextDialog = false },
+        onCompactContext = {
+            showContextDialog = false
+            chatVM.compactSession()
+        },
+        onDismissWorkdirPick = { pendingWorkdirPick = false },
+        onPickWorkdir = { workdir ->
+            pendingWorkdirPick = false
+            sessionVM.createSessionInWorkdir(workdir)
+        },
+        onDismissError = { errorDetail = null },
+        onTofuDecision = { decision -> connectionVM.resolveTofuTrust(decision) },
+        // Derived slice values
+        agents = settings.agents.filter { it.isVisible },
+        currentAgentName = effectiveAgent,
+        providers = settings.providers,
+        disabledModels = settings.disabledModels,
+        currentModel = effectiveModel,
+        sessions = sessionList.sessions,
+        sessionStatuses = sessionList.sessionStatuses,
+        activeSessionIds = sessionList.activeSessionIds,
+        currentSessionId = chat.currentSessionId,
+        unreadSessions = unread.unreadSessions,
+        todos = sessionList.sessionTodos[chat.currentSessionId ?: ""] ?: emptyList(),
+        cachedContextUsage = cachedContextUsage,
+        recentWorkdirs = recentWorkdirs,
+        pendingTofuCapture = connection.pendingTofuCapture,
+        questionSessionIds = questionRootIds(sessionList.pendingQuestions, sessionsById),
+        composerVM = composerVM,
+        sessionVM = sessionVM,
+        chatVM = chatVM,
+        connectionVM = connectionVM,
+    )
 }
 
 // §0.8.2 P2.3: the standalone `ConversationOverflowMenu` composable that
