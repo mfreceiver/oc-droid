@@ -100,3 +100,6 @@ client-cert*.b64
 .npm-cache/
 .pytest_cache/
 .build-env.sh
+
+# 生成式审计/规划报告，不应进 git，防污染发版脏树
+docs/ocmar/
