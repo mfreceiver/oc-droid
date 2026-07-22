@@ -330,15 +330,6 @@ class OpenCodeRepository @Inject constructor(
     private var apiV2: OpenCodeApiV2 = v2Retrofit.create(OpenCodeApiV2::class.java)
 
     /**
-     * Cluster A (slim SSE reducer/state): per-session bookmark accumulator
-     * for `session.digest` frames + the `/since/{ts}` anchor (§5 A2=A).
-     * Held as private state so the reducer [reduceSlimDigest] is pure (state
-     * in → state out + decision). Cleared by [configure] on a host switch
-     * (the bookmarks belong to the previous server).
-     */
-    private val slimSseState = SlimSseState()
-
-    /**
      * Task 11 round-2 (oracle I3 — atomic state mutation boundary): the
      * single lock that serializes EVERY compound slim SSE state transition
      * in this repository. Held while a mutator reads `slimSseState.get`,
@@ -395,12 +386,20 @@ class OpenCodeRepository @Inject constructor(
     private val slimStateLock = Any()
 
     /**
+     * §slim-sse-machine (T3 extracted): the slim state machine core.
+     * Owns [slimSseState], [slimCommitMarker], [slimIncarnationReady].
+     * Injected with [slimStateLock] for atomic boundary compatibility.
+     */
+    private val slimStateMachine = SlimSseStateMachine(slimStateLock)
+
+    /**
      * Opaque capability for one configured slim-state incarnation (C-D3).
      *
      * Equality is referential through [marker]. [issuedReady] is captured
      * permanently at [captureSlimCommitToken] time: a token captured while
      * the incarnation was NOT ready (mid-reconfigure) remains invalid even
      * after [completeSlimReconfigure] later activates a new incarnation.
+     *
      * Callers may capture and return the token to repository APIs, but
      * cannot manufacture a current token.
      */
@@ -448,58 +447,16 @@ class OpenCodeRepository @Inject constructor(
      * clears slimSseState so in-flight workflows carrying the previous
      * marker are rejected from that instant onward.
      */
-    // GuardedBy("slimStateLock") — documentary; rotated in beginSlimReconfigure().
-    private var slimCommitMarker: Any = Any()
-
-    /**
-     * C-D3 rev-3 readiness bit: false while a reconfigure transaction is
-     * in flight (between [beginSlimReconfigure] and a successful [configure]
-     * completion). Tokens captured while false carry [SlimCommitToken.issuedReady]
-     * = false permanently, closing the mid-transaction capture window where a
-     * marker-only check would accept a token captured during host mutation.
-     */
-    // GuardedBy("slimStateLock") — documentary.
-    private var slimIncarnationReady: Boolean = true
-
     fun captureSlimCommitToken(): SlimCommitToken =
-        synchronized(slimStateLock) {
-            SlimCommitToken(
-                marker = slimCommitMarker,
-                issuedReady = slimIncarnationReady,
-            )
-        }
+        slimStateMachine.captureSlimCommitToken()
 
     fun isSlimCommitTokenCurrent(token: SlimCommitToken): Boolean =
-        synchronized(slimStateLock) {
-            // Three-condition check: the token must (1) have been captured from
-            // a READY incarnation, (2) still match the current marker, and (3)
-            // the current incarnation must still be ready. This rejects both
-            // superseded markers AND mid-reconfigure captures.
-            token.issuedReady &&
-                slimIncarnationReady &&
-                token.marker === slimCommitMarker
-        }
-
-    private inline fun <T> withSlimStateCommit(
-        token: SlimCommitToken,
-        onStale: () -> T,
-        commit: () -> T,
-    ): T = synchronized(slimStateLock) {
-        if (!token.issuedReady ||
-            !slimIncarnationReady ||
-            token.marker !== slimCommitMarker
-        ) {
-            onStale()
-        } else {
-            commit()
-        }
-    }
+        slimStateMachine.isSlimCommitTokenCurrent(token)
 
     /**
      * C-D3 v2 §1.2: Runs a short, non-suspending commit atomically against
-     * marker rotation ([beginSlimReconfigure] / [configure] entry). The
-     * [commit] block MUST contain only in-memory state/effect commits: no
-     * network, delay, blocking disk I/O, or suspend call.
+     * the current incarnation. The [commit] block MUST contain only in-memory
+     * state/effect commits: no network, delay, blocking disk I/O, or suspend call.
      *
      * Returns `true` when [commit] ran (token was current), `false` when
      * the marker rotated first (the caller MUST treat as stale and
@@ -515,24 +472,15 @@ class OpenCodeRepository @Inject constructor(
     fun commitIfSlimTokenCurrent(
         token: SlimCommitToken,
         commit: () -> Unit,
-    ): Boolean = withSlimStateCommit(
-        token = token,
-        onStale = { false },
-    ) {
-        commit()
-        true
-    }
+    ): Boolean = slimStateMachine.commitIfSlimTokenCurrent(token, commit)
 
     /**
      * C-D3 v2 §1.2: Throws [StaleSlimCommitException] if [token] is no
      * longer the current repository incarnation. Used after every network
      * suspension (the marker may rotate while we were suspended on IO).
      */
-    fun requireSlimTokenCurrent(token: SlimCommitToken) {
-        if (!isSlimCommitTokenCurrent(token)) {
-            throw StaleSlimCommitException()
-        }
-    }
+    fun requireSlimTokenCurrent(token: SlimCommitToken) =
+        slimStateMachine.requireSlimTokenCurrent(token)
 
     /**
      * C-D3 rev-3 reconfigure-boundary: SYNCHRONOUSLY invalidates the slim
@@ -565,27 +513,10 @@ class OpenCodeRepository @Inject constructor(
      * host-first window inside [configure] itself.
      *
      * @return a [SlimReconfigureTicket] identifying this transaction's
-     *   not-yet-ready incarnation. Pass it to [configure] (as
-     *   `reconfigureTicket`) so [configure] activates THIS incarnation
-     *   instead of beginning a new one. The ticket's [SlimReconfigureTicket.marker]
-     *   matches [slimCommitMarker] until a later [beginSlimReconfigure]
-     *   supersedes it.
+     *   not-yet-ready incarnation.
      */
-    fun beginSlimReconfigure(): SlimReconfigureTicket = synchronized(slimStateLock) {
-        // Establish a new repository-state incarnation before clearing. Any
-        // in-flight operation carrying the previous token is stale from this
-        // exact critical section onward. The incarnation is marked NOT READY
-        // so tokens captured during the ensuing teardown/purge/configure
-        // window carry issuedReady=false permanently (mid-transaction capture
-        // gap closure). [completeSlimReconfigure] re-arms readiness only after
-        // [configure] fully succeeds — and only when presented with THIS
-        // transaction's ticket.
-        val marker = Any()
-        slimCommitMarker = marker
-        slimIncarnationReady = false
-        slimSseState.clear()
-        SlimReconfigureTicket(marker)
-    }
+    fun beginSlimReconfigure(): SlimReconfigureTicket =
+        slimStateMachine.beginSlimReconfigure()
 
     /**
      * C-D3 rev-3 round-5 (oracle §1.4): asserts [ticket] still identifies
@@ -596,19 +527,8 @@ class OpenCodeRepository @Inject constructor(
      * Throws [SupersededSlimReconfigureException] if [ticket] was superseded
      * by a later [beginSlimReconfigure]; never re-arms a new transaction.
      */
-    private fun requireCurrentReconfigureTicket(ticket: SlimReconfigureTicket) {
-        synchronized(slimStateLock) {
-            if (ticket.marker !== slimCommitMarker) {
-                throw SupersededSlimReconfigureException()
-            }
-            // The "already completed" branch is a programming error (calling
-            // configure twice with the same ticket) — keep it as ISE so it
-            // surfaces loudly in dev.
-            check(!slimIncarnationReady) {
-                "Slim reconfigure transaction already completed"
-            }
-        }
-    }
+    private fun requireCurrentReconfigureTicket(ticket: SlimReconfigureTicket) =
+        slimStateMachine.requireCurrentReconfigureTicket(ticket)
 
     /**
      * C-D3 rev-3 readiness bit: re-arm [slimIncarnationReady] after a
@@ -623,12 +543,8 @@ class OpenCodeRepository @Inject constructor(
      * [SupersededSlimReconfigureException] and NEVER re-arms readiness —
      * the winner's completion call owns that.
      */
-    fun completeSlimReconfigure(ticket: SlimReconfigureTicket): Unit = synchronized(slimStateLock) {
-        if (ticket.marker !== slimCommitMarker) {
-            throw SupersededSlimReconfigureException()
-        }
-        slimIncarnationReady = true
-    }
+    fun completeSlimReconfigure(ticket: SlimReconfigureTicket): Unit =
+        slimStateMachine.completeSlimReconfigure(ticket)
 
     /**
      * §slim-reconcile-lane-repo (B2 T1): the live host's slim-mode flag.
@@ -1372,9 +1288,7 @@ class OpenCodeRepository @Inject constructor(
         token: SlimCommitToken = captureSlimCommitToken(),
     ): Result<MessagesPage> = runSuspendCatching {
         if (isSlimMode) {
-            val since = synchronized(slimStateLock) {
-                slimSseState.get(sessionId)?.updatedAt
-            } ?: 0L
+            val since = slimStateMachine.getSlimSessionState(sessionId)?.updatedAt ?: 0L
             val response = api.getSlimapiMessagesSince(sessionId, since, limit, before)
             if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
             val items = response.body() ?: emptyList()
@@ -2141,15 +2055,8 @@ class OpenCodeRepository @Inject constructor(
      * the reducer's `get` and `put`. The reducer itself is UNCHANGED
      * (T6 locked).
      */
-    fun applySlimDigest(digest: SlimSessionDigest, token: SlimCommitToken): SlimFetchMessages? {
-        val parsed = digest.takeIf { it.sessionId.isNotBlank() } ?: return null
-        return withSlimStateCommit(
-            token = token,
-            onStale = { null },
-        ) {
-            reduceSlimDigest(slimSseState, parsed)
-        }
-    }
+    fun applySlimDigest(digest: SlimSessionDigest, token: SlimCommitToken): SlimFetchMessages? =
+        slimStateMachine.applySlimDigest(digest, token)
 
     /**
      * Cluster A: snapshot the per-session slim SSE state (testing + upper
@@ -2159,9 +2066,8 @@ class OpenCodeRepository @Inject constructor(
      * read (no concurrent mutator land grab between the snapshot and the
      * caller's branching on the snapshot).
      */
-    fun snapshotSlimSseState(): Map<String, SlimSessionState> = synchronized(slimStateLock) {
-        slimSseState.all()
-    }
+    fun snapshotSlimSseState(): Map<String, SlimSessionState> =
+        slimStateMachine.snapshotSlimSseState()
 
     /**
      * Cluster A: anchor-paginated message fetch (§5 A2=A). GETs
@@ -3130,12 +3036,7 @@ class OpenCodeRepository @Inject constructor(
             // (NOT collapses to null — that would mask a host rotation as
             // "server unreachable"). Other transport/HTTP failures degrade
             // to null as before (cold-start per-piece degradation).
-            val bookmark = synchronized(slimStateLock) {
-                if (token.marker !== slimCommitMarker) {
-                    throw StaleSlimCommitException()
-                }
-                slimSseState.get(sid)?.updatedAt
-            }
+            val bookmark = slimStateMachine.readBookmarkOrThrowIfStale(sid, token)
 
             if (bookmark != null) {
                 runSuspendCatching {
@@ -3236,18 +3137,7 @@ class OpenCodeRepository @Inject constructor(
         sessionId: String,
         items: List<MessageWithParts>,
         token: SlimCommitToken,
-    ): Boolean = withSlimStateCommit(
-        token = token,
-        onStale = { false },
-    ) {
-        val prev = slimSseState.get(sessionId) ?: SlimSessionState(sessionId)
-        val applied = onReconcileSuccess(prev, items)
-        val next =
-            if (needsReconcile(applied)) applied.copy(dirty = true)
-            else applied
-        slimSseState.put(sessionId, next)
-        true
-    }
+    ): Boolean = slimStateMachine.bumpSlimBookmarkFromItems(sessionId, items, token)
 
     /**
      * T11 (§3 reconcile lane wiring): reads the per-session slim SSE state.
@@ -3261,9 +3151,8 @@ class OpenCodeRepository @Inject constructor(
      * commit (no concurrent mutator land grab between this read and the
      * caller's branching).
      */
-    fun getSlimSessionState(sessionId: String): SlimSessionState? = synchronized(slimStateLock) {
-        slimSseState.get(sessionId)
-    }
+    fun getSlimSessionState(sessionId: String): SlimSessionState? =
+        slimStateMachine.getSlimSessionState(sessionId)
 
     /**
      * T11 (§3 reconcile lane wiring): marks the session as deleted upstream
@@ -3280,14 +3169,7 @@ class OpenCodeRepository @Inject constructor(
     fun markSlimSessionDeleted(
         sessionId: String,
         token: SlimCommitToken,
-    ): Boolean = withSlimStateCommit(
-        token = token,
-        onStale = { false },
-    ) {
-        val prev = slimSseState.get(sessionId) ?: SlimSessionState(sessionId)
-        slimSseState.put(sessionId, markDeleted(prev))
-        true
-    }
+    ): Boolean = slimStateMachine.markSlimSessionDeleted(sessionId, token)
 
     /**
      * T11 (§3 reconcile lane wiring): clears the local-applied message
@@ -3318,17 +3200,7 @@ class OpenCodeRepository @Inject constructor(
     fun clearSlimLocalMessages(
         sessionId: String,
         token: SlimCommitToken,
-    ): Boolean = withSlimStateCommit(
-        token = token,
-        onStale = { false },
-    ) {
-        val prev = slimSseState.get(sessionId) ?: SlimSessionState(sessionId)
-        val cleared = clearLocal(prev)
-        val applied = onReconcileSuccess(cleared, emptyList())
-        val next = if (needsReconcile(applied)) applied.copy(dirty = true) else applied
-        slimSseState.put(sessionId, next)
-        true
-    }
+    ): Boolean = slimStateMachine.clearSlimLocalMessages(sessionId, token)
 
     /**
      * T11 (§3 reconcile lane wiring): records that a reconcile attempt
@@ -3347,14 +3219,7 @@ class OpenCodeRepository @Inject constructor(
     fun markSlimReconcileFailure(
         sessionId: String,
         token: SlimCommitToken,
-    ): Boolean = withSlimStateCommit(
-        token = token,
-        onStale = { false },
-    ) {
-        val prev = slimSseState.get(sessionId) ?: SlimSessionState(sessionId)
-        slimSseState.put(sessionId, onReconcileFailure(prev))
-        true
-    }
+    ): Boolean = slimStateMachine.markSlimReconcileFailure(sessionId, token)
 
     /**
      * T11 (§3 reconcile lane wiring): records that a session is ALIGNED —
@@ -3373,16 +3238,7 @@ class OpenCodeRepository @Inject constructor(
     fun markSlimReconcileAligned(
         sessionId: String,
         token: SlimCommitToken,
-    ): Boolean = withSlimStateCommit(
-        token = token,
-        onStale = { false },
-    ) {
-        val prev = slimSseState.get(sessionId) ?: SlimSessionState(sessionId)
-        val applied = onReconcileSuccess(prev, emptyList())
-        val next = if (needsReconcile(applied)) applied.copy(dirty = true) else applied
-        slimSseState.put(sessionId, next)
-        true
-    }
+    ): Boolean = slimStateMachine.markSlimReconcileAligned(sessionId, token)
 
     /**
      * T11 round-3 (oracle D1 — eviction invalidates localApplied*):
@@ -3421,19 +3277,7 @@ class OpenCodeRepository @Inject constructor(
     fun invalidateSlimLocalApplied(
         sessionId: String,
         token: SlimCommitToken,
-    ): Boolean = withSlimStateCommit(
-        token = token,
-        onStale = { false },
-    ) {
-        val prev = slimSseState.get(sessionId) ?: return@withSlimStateCommit false
-        val cleared = prev.copy(
-            localAppliedMessageId = null,
-            localAppliedUpdatedAt = null,
-        )
-        val next = if (needsReconcile(cleared)) cleared.copy(dirty = true) else cleared
-        slimSseState.put(sessionId, next)
-        true
-    }
+    ): Boolean = slimStateMachine.invalidateSlimLocalApplied(sessionId, token)
 
     /**
      * T11 round-3 (oracle D1 — retention-bound dirty): explicitly mark
@@ -3454,15 +3298,7 @@ class OpenCodeRepository @Inject constructor(
     fun markSlimDirty(
         sessionId: String,
         token: SlimCommitToken,
-    ): Boolean = withSlimStateCommit(
-        token = token,
-        onStale = { false },
-    ) {
-        val prev = slimSseState.get(sessionId) ?: return@withSlimStateCommit false
-        val next = if (needsReconcile(prev)) prev.copy(dirty = true) else prev
-        slimSseState.put(sessionId, next)
-        true
-    }
+    ): Boolean = slimStateMachine.markSlimDirty(sessionId, token)
 
     /**
      * §slim-v1-paging (Task 5 / G5 cursor): cursor-follows the slimapi
