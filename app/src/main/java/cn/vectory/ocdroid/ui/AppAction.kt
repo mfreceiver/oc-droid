@@ -1000,7 +1000,7 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
 
     is AppAction.MessagesMerged -> state.copy(
         chat = state.chat.copy(
-            messages = action.messages,
+            messages = action.messages.chronological(),
             partsByMessage = action.partsByMessage,
             isLoadingMessages = false,
             streamingPartTexts = action.streamingPartTexts,
@@ -1013,7 +1013,7 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
 
     is AppAction.MessagesPrepended -> state.copy(
         chat = state.chat.copy(
-            messages = action.messages,
+            messages = action.messages.chronological(),
             partsByMessage = action.partsByMessage,
             olderMessagesCursor = action.olderMessagesCursor,
             hasMoreMessages = action.hasMoreMessages,
@@ -1023,7 +1023,7 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
 
     is AppAction.ChatWindowHydrated -> state.copy(
         chat = state.chat.copy(
-            messages = action.messages,
+            messages = action.messages.chronological(),
             partsByMessage = action.partsByMessage,
             olderMessagesCursor = action.olderMessagesCursor,
             hasMoreMessages = action.hasMoreMessages,

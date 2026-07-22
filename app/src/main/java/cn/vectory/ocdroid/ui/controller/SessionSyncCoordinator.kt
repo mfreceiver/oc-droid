@@ -34,7 +34,9 @@ import cn.vectory.ocdroid.service.status.SessionStatusKey
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.service.status.toSessionBusyStatus
 import cn.vectory.ocdroid.ui.ChatState
+import cn.vectory.ocdroid.ui.MESSAGE_CHRONO
 import cn.vectory.ocdroid.ui.SessionListState
+import cn.vectory.ocdroid.ui.chronological
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.UiEvent
@@ -3054,10 +3056,42 @@ internal fun SessionListState.applySessionStatus(
  * is oldest-first and the new message is the newest — mirrors opencode-web).
  */
 internal fun ChatState.applyMessageUpdated(updated: Message): Pair<ChatState, Boolean> {
-    var found = false
-    val newMessages = messages.map { if (it.id == updated.id) { found = true; updated } else it }
-    val finalMessages = if (found) newMessages else newMessages + updated
-    return copy(messages = finalMessages) to found
+    val idx = messages.indexOfFirst { it.id == updated.id }
+    if (idx >= 0) {
+        // Patch path: message found
+        val old = messages[idx]
+        if (old.time?.created == updated.time?.created) {
+            // Created timestamp unchanged → keep position, just patch content
+            val newMessages = messages.toMutableList().also { it[idx] = updated }
+            return copy(messages = newMessages) to true
+        }
+        // Created timestamp changed → remove old, re-insert chronologically
+        val remaining = messages.toMutableList().also { it.removeAt(idx) }
+        // For null-created, always append at tail (optimistic insert)
+        if (updated.time?.created == null) {
+            return copy(messages = remaining + updated) to true
+        }
+        // Insert using chronological comparator
+        val insertAt = remaining.binarySearch { MESSAGE_CHRONO.compare(it, updated) }
+        val insertIdx = if (insertAt < 0) -(insertAt + 1) else insertAt
+        val newMessages = remaining.toMutableList().also { it.add(insertIdx, updated) }
+        return copy(messages = newMessages) to true
+    } else {
+        // Insert path: message absent
+        // For null-created, always append at tail
+        if (updated.time?.created == null) {
+            return copy(messages = messages + updated) to false
+        }
+        if (messages.isEmpty() || MESSAGE_CHRONO.compare(messages.last(), updated) <= 0) {
+            // Append at end (common case)
+            return copy(messages = messages + updated) to false
+        }
+        // Find insertion point
+        val insertAt = messages.binarySearch { MESSAGE_CHRONO.compare(it, updated) }
+        val insertIdx = if (insertAt < 0) -(insertAt + 1) else insertAt
+        val newMessages = messages.toMutableList().also { it.add(insertIdx, updated) }
+        return copy(messages = newMessages) to false
+    }
 }
 
 /**
@@ -3067,24 +3101,33 @@ internal fun ChatState.applyMessageUpdated(updated: Message): Pair<ChatState, Bo
  * Behavior is byte-for-byte identical to the legacy private loop.
  */
 internal fun ChatState.mergeSlimMessages(items: List<MessageWithParts>): ChatState {
-    var messages = this.messages
+    if (items.isEmpty()) return this
+    // Collect ids of patched items for O(1) exclusion
+    val patchedIds = mutableSetOf<String>()
+    val patched = mutableListOf<Message>()
+    val absent = mutableListOf<Message>()
     var partsByMessage = this.partsByMessage
     for (item in items) {
         val updated = item.info
         if (updated.id.isEmpty()) continue
-        var found = false
-        messages = messages.map {
-            if (it.id == updated.id) {
-                found = true
-                updated
-            } else it
+        // Check if this id exists in current messages (O(n) but typically small;
+        // could use index if n grows, but mergeSlimMessages is bounded by chunk size)
+        val existingIdx = messages.indexOfFirst { it.id == updated.id }
+        if (existingIdx >= 0) {
+            patchedIds.add(updated.id)
+            patched.add(updated)
+        } else {
+            absent.add(updated)
         }
-        if (!found) messages = messages + updated
         if (item.parts.isNotEmpty()) {
             partsByMessage = partsByMessage + (updated.id to item.parts)
         }
     }
-    return copy(messages = messages, partsByMessage = partsByMessage)
+    // Preserve messages not in patchedIds
+    val preserved = messages.filterNot { it.id in patchedIds }
+    // Merge preserved + patched + absent, then chronological sort
+    val merged = (preserved + patched + absent).chronological()
+    return copy(messages = merged, partsByMessage = partsByMessage)
 }
 
 /**

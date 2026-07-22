@@ -3080,11 +3080,20 @@ class OpenCodeRepository @Inject constructor(
         // success — the caller folds null pieces as "keep prior". Only a
         // hard transport failure that threw out of runCatching surfaces
         // as Result.failure.
+        // §#5 belt: chronological sort the drain result so any cold-start
+        // merge sees chronological input even if the serving layer reorders.
+        // (optional defense, reducer has the canonical sort)
+        val chronoMessages = messages?.sortedWith(
+            compareBy<MessageWithParts>(
+                { it.info.time?.created ?: Long.MAX_VALUE },
+                { it.info.id },
+            )
+        )
         SlimColdStartSnapshot(
             sessions = sessionsPage?.sessions,
             questions = questions,
             permissions = permissions,
-            messages = messages,
+            messages = chronoMessages,
             complete = sessionsPage?.complete,
             discoveryDirectories = sessionsPage?.discoveryDirectories,
             discoveryReady = sessionsPage?.discoveryReady,

@@ -373,3 +373,26 @@ private fun tokenTotal(tokens: Message.TokenInfo?): Int? {
         tokens.cache?.write
     ).sum().takeIf { it > 0 }
 }
+
+/**
+ * §#5 chrono invariant: comparator that enforces "messages sorted ascending by
+ * created time, with id tie-break (opencode messageID dictionary order = creation order)".
+ * Null created → Long.MAX_VALUE (tail), so optimistic insert still works.
+ */
+internal val MESSAGE_CHRONO = compareBy<Message>(
+    { it.time?.created ?: Long.MAX_VALUE },
+    { it.id },
+)
+
+/**
+ * Returns [this] sorted chronologically if it isn't already. O(n) short-circuit
+ * when already sorted (zipWithNext early-exit). Zero allocation when sorted.
+ */
+fun List<Message>.chronological(): List<Message> {
+    // Fast path: when already sorted or trivial
+    if (size < 2 || zipWithNext().all { (a, b) -> MESSAGE_CHRONO.compare(a, b) <= 0 }) return this
+    // If ALL messages have null created, preserve the original insertion order
+    // (stable sort across equal keys). Otherwise sort by created then id.
+    return if (all { it.time?.created == null }) this
+    else sortedWith(MESSAGE_CHRONO)
+}
