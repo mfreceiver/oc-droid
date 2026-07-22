@@ -1296,6 +1296,35 @@ class OpenCodeRepository @Inject constructor(
     }
 
     /**
+     * T-R1 (slimapi R1) — BULK slim cold-start status fetch. The slim-mode
+     * replacement for the legacy [getSessionStatus] bulk endpoint: routes
+     * through the sidecar's `GET /slimapi/sessions/status?directory=` and
+     * returns the SAME `Map<String, SessionStatus>` shape (forwarded verbatim
+     * from upstream `/session/status`), so callers ([launchLoadSessionStatus]
+     * slim cold-start + [cn.vectory.ocdroid.service.status.StatusAggregatorImpl]
+     * L2Idle/L3 disconnect fallback) consume it identically to the legacy map.
+     *
+     * `directory` is REQUIRED by the sidecar (see [OpenCodeApi.getSlimapiSessionsStatus]);
+     * callers pass one registered workdir per call and merge. Non-2xx (incl.
+     * the sidecar's 503 `upstream_unavailable` / 502 `upstream_http_<N>`) and
+     * transport failures throw → collapse to [Result.failure] (the caller
+     * treats failure as "keep prior snapshot / mark Unknown", matching the
+     * legacy [getSessionStatus] failure semantics).
+     *
+     * Additive: legacy mode never calls this (the slim branches that invoke it
+     * are gated on [isSlimMode]). The wire contract is unchanged
+     * (`X-Slimapi-Version` stays 1, injected by interceptor).
+     */
+    suspend fun getSlimapiSessionsStatus(directory: String): Result<Map<String, SessionStatus>> =
+        runSuspendCatching {
+            val resp = api.getSlimapiSessionsStatus(directory)
+            if (!resp.isSuccessful) {
+                throw java.io.IOException("slim bulk status HTTP ${resp.code()}")
+            }
+            resp.body() ?: emptyMap()
+        }
+
+    /**
      * Fetches the child (sub-agent) sessions spawned by [sessionId], typically
      * via the `task` tool.
      */

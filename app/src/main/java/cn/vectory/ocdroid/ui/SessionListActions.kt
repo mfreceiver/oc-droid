@@ -30,6 +30,9 @@ import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.WorkdirPaths
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -635,6 +638,16 @@ internal fun launchLoadSessionStatus(
 ) {
     val myEpoch = statusLoadEpoch.incrementAndGet()
     val hostAtRequestStart = slices.host.value.currentHostProfileId
+    // T-R1 (slimapi R1): in slim mode the foreground status poll MUST NOT hit
+    // the legacy /session/status + /api/session/active endpoints. Status
+    // arrives via the slim digest `status` relay (steady-state,
+    // SessionSyncCoordinator.handleSessionDigest → applySessionStatus) + the
+    // bulk /slimapi/sessions/status cold-start fetch (below). Legacy mode is
+    // byte-for-byte unchanged (keeps the 6 GREEN characterization tests green).
+    if (repository.isSlimMode) {
+        launchLoadSessionStatusSlim(scope, repository, slices, myEpoch, hostAtRequestStart, onComplete)
+        return
+    }
     scope.launch {
         var completionCalled = false
         fun complete(success: Boolean) {
@@ -729,6 +742,111 @@ internal fun launchLoadSessionStatus(
             activeResult.onFailure { error ->
                 DebugLog.w("Sync", "Failed to load active sessions; retaining prior snapshot: ${error.message}")
             }
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            complete(false)
+            throw cancellation
+        } catch (_: Throwable) {
+            complete(false)
+        }
+    }
+}
+
+/**
+ * T-R1 (slimapi R1) — slim-mode foreground status cold-start. Replaces the
+ * legacy `/session/status` + `/api/session/active` fan-out that
+ * [launchLoadSessionStatus] performs in legacy mode.
+ *
+ * In slim mode the steady-state status source is the slim digest `status`
+ * relay ([SessionSyncCoordinator.handleSessionDigest] → [applySessionStatus]);
+ * this helper provides the COLD-START snapshot (and a periodic correction on
+ * each foreground sweep) by issuing one bulk
+ * `GET /slimapi/sessions/status?directory=X` per known workdir (the sidecar
+ * requires a single directory per call — see [OpenCodeApi.getSlimapiSessionsStatus])
+ * and folding the merged map into [SessionListState.sessionStatuses] via the
+ * same [normalizeAuthoritativeStatusSnapshot] + [mergeStatusSnapshot] discipline
+ * the legacy path uses.
+ *
+ * Active-session ids are NOT polled here — slim activity is owned by the
+ * digest relay + slim reconcile. The prior [SessionListState.activeSessionIds]
+ * snapshot is preserved (intersected against the authoritative tree so a
+ * deleted/archived session cannot remain active forever, matching the legacy
+ * fail-closed semantics). The legacy `/api/session/active` endpoint is never
+ * hit (T-R1 contract).
+ *
+ * No known directories yet (before the session list loads) → no-op success
+ * (the digest relay + later sweeps cover status once sessions arrive).
+ */
+private fun launchLoadSessionStatusSlim(
+    scope: CoroutineScope,
+    repository: OpenCodeRepository,
+    slices: SliceFlows,
+    myEpoch: Long,
+    hostAtRequestStart: String?,
+    onComplete: (Boolean) -> Unit,
+) {
+    scope.launch {
+        var completionCalled = false
+        fun complete(success: Boolean) {
+            if (!completionCalled) {
+                completionCalled = true
+                onComplete(success)
+            }
+        }
+        try {
+            // §sse-rest-race: REST 发起前快照本地 status (mirrors the legacy path).
+            val localBefore = slices.sessionList.value.sessionStatuses
+            val sl = slices.sessionList.value
+            val authoritative = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
+            // Derive the distinct workdirs to query (sidecar requires one
+            // directory per call). Empty before the session list loads.
+            val directories = authoritative.values
+                .mapNotNull { it.directory.takeIf { d -> d.isNotBlank() } }
+                .toSet()
+            if (directories.isEmpty()) {
+                complete(true)
+                return@launch
+            }
+            // Concurrent per-directory bulk fetch (bounded by the directory
+            // count, which is small — typically 1–3). Each failure is tolerated
+            // (the digest relay is the steady-state source); we fold whatever
+            // succeeded into one merged map.
+            val merged: Map<String, SessionStatus> = coroutineScope {
+                val results = directories.map { dir ->
+                    async { repository.getSlimapiSessionsStatus(dir) }
+                }.awaitAll()
+                val acc = mutableMapOf<String, SessionStatus>()
+                for (result in results) {
+                    result.getOrNull()?.let { acc.putAll(it) }
+                }
+                acc
+            }
+            var applied = false
+            slices.mutateSessionList { current ->
+                applied = false
+                if (myEpoch != statusLoadEpoch.get() ||
+                    slices.host.value.currentHostProfileId != hostAtRequestStart
+                ) {
+                    DebugLog.d("Sync", "launchLoadSessionStatusSlim: stale epoch/host, discarding snapshot")
+                    return@mutateSessionList current
+                }
+                val authoritativeIds = allSessionsById(
+                    current.sessions,
+                    current.directorySessions,
+                    current.childSessions,
+                ).keys
+                val normalized = normalizeAuthoritativeStatusSnapshot(merged, authoritativeIds)
+                val nextStatuses = mergeStatusSnapshot(localBefore, current.sessionStatuses, normalized)
+                applied = true
+                current.copy(
+                    sessionStatuses = nextStatuses,
+                    // Slim activity is digest-relay-owned: preserve the prior
+                    // activeSessionIds snapshot, fail-closed-intersected against
+                    // the authoritative tree (a deleted/archived session cannot
+                    // remain active forever — mirrors the legacy semantics).
+                    activeSessionIds = current.activeSessionIds.intersect(authoritativeIds),
+                )
+            }
+            complete(applied)
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             complete(false)
             throw cancellation

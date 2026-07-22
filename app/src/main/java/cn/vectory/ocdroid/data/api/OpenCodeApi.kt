@@ -405,6 +405,34 @@ interface OpenCodeApi {
     ): Response<SessionStatus>
 
     /**
+     * Cluster A (slimapi v1 §6 G2 / docs `slim-mode-api-routing.md` A7):
+     * BULK per-directory status fetch (`GET /slimapi/sessions/status`).
+     *
+     * Returns the sidecar's per-directory status map — the SAME shape as the
+     * legacy bulk [getSessionStatus] (`Map<String, SessionStatus>`), forwarded
+     * verbatim from upstream `/session/status?directory=` (oc-slimapi
+     * `routes/sessions.py:statuses` → `fetch_json_mapped`). T-R1 (slimapi R1)
+     * replaces the legacy bulk endpoint for slim cold-start (foreground poll)
+     * AND the L2Idle/L3 background disconnect fallback.
+     *
+     * `directory` is REQUIRED by the sidecar (FastAPI `directory: str` — a
+     * missing/blank param 422s). A caller that needs multiple workdirs issues
+     * one call per directory and merges; null is intentionally NOT accepted
+     * (the server rejects it). Mirrors the per-session
+     * [getSlimapiSessionStatus] declaration style (headers come from
+     * interceptors; `X-Opencode-Skip-Dir` makes the directory-header
+     * interceptor skip — slimapi scopes via `?directory`).
+     *
+     * Distinct from [getSessionStatus] (legacy `GET /session/status`, host-
+     * global, no directory param) — that path stays untouched in legacy mode.
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/sessions/status")
+    suspend fun getSlimapiSessionsStatus(
+        @Query("directory") directory: String,
+    ): Response<Map<String, SessionStatus>>
+
+    /**
      * Cluster A: cross-directory pending-questions aggregate (v1 contract §2).
      * Each entry carries its originating `directory` + `routeToken` for the
      * reply/reject response.

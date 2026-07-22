@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.service.status
 
+import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
@@ -239,7 +240,41 @@ class StatusAggregatorImpl internal constructor(
     override suspend fun refresh(identity: ConnectionIdentity, snapshot: StatusSnapshot) {
         val requestStartMs = clock()
         val epochAtRequestStart = identityStore.currentEpoch()
-        val result = withContext(Dispatchers.IO) { repository.getSessionStatus() }
+        // T-R1 (slimapi R1) #3 disconnect fallback: in slim mode route the bulk
+        // status fetch through the sidecar's `GET /slimapi/sessions/status`
+        // (one call per registered workdir — the sidecar requires a single
+        // directory per call) instead of the legacy `GET /session/status`.
+        // Same Map<String, SessionStatus> shape, so the merge/projection below
+        // is unchanged. This is the L2Idle/L3 degraded fallback: on slim SSE
+        // loss, ProcessStatusPoller (≤30s) drives this refresh using SLIM
+        // endpoints, NOT legacy. Legacy mode (isSlimMode == false) is
+        // byte-for-byte unchanged.
+        val result = if (repository.isSlimMode) {
+            withContext(Dispatchers.IO) {
+                val merged = mutableMapOf<String, SessionStatus>()
+                var anySuccess = false
+                for (dir in snapshot.registeredWorkdirs) {
+                    repository.getSlimapiSessionsStatus(dir)
+                        .onSuccess { merged.putAll(it); anySuccess = true }
+                        .onFailure { /* tolerate per-dir failure; all-fail handled below */ }
+                }
+                when {
+                    // No registered workdirs (cold-start): treat as success-empty
+                    // (the coverage marker's cold-start guard handles projection).
+                    snapshot.registeredWorkdirs.isEmpty() -> Result.success(merged)
+                    // All per-directory calls failed → surface as failure so the
+                    // projection marks every known session Unknown (NOT Idle),
+                    // matching the legacy failure semantics.
+                    !anySuccess -> Result.failure(
+                        java.io.IOException("slim bulk status failed for all registered workdirs")
+                    )
+                    // Partial/full success → fold the merged map.
+                    else -> Result.success(merged)
+                }
+            }
+        } else {
+            withContext(Dispatchers.IO) { repository.getSessionStatus() }
+        }
         // CP4 §2 epoch guard: drop the response if a reconfigure invalidated this request
         // mid-flight. The check happens AFTER the suspend (the only place an epoch bump
         // could have happened) and BEFORE any state mutation.
