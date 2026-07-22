@@ -430,6 +430,8 @@
     <string name="debug_log_title">调试日志</string>
     <string name="settings_debug_verbose_title">启用详细诊断</string>
     <string name="settings_debug_verbose_summary">开启后捕获 SendDiag/SseDiag/StatusDiag/DigestDiag/LayerDiag 详细事件；默认关闭</string>
+    <string name="settings_debug_card_identity_title">显示卡片调试标签</string>
+    <string name="settings_debug_card_identity_summary">在每条聊天卡片上显示 Composable 名称与源码位置；默认关闭</string>
     <string name="debug_log_paused_suffix">（已暂停）</string>
     <string name="debug_log_copy">复制</string>
     <string name="debug_log_copied">已复制</string>
