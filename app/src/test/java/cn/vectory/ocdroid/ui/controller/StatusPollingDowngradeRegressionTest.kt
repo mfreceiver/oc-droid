@@ -22,56 +22,64 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Ignore
 import org.junit.Test
 
 /**
- * T-R1 (slimapi R1) — STATUS POLLING DOWNGRADE regression contract.
+ * T-R1 (slimapi R1) — STATUS POLLING DOWNGRADE regression contract (方案A).
  *
- * Spec: `docs/ocmar/specs/2026-07-22-full-refactor-plan.md` §1.1 T-R1 row + §7.8 R1 row:
+ * Spec: `docs/ocmar/specs/2026-07-22-full-refactor-plan.md` §1.1 T-R1 row
+ * + §7.8 R1 row.
+ * Contract authority: `docs/ocmar/reports/2026-07-22-refactor-progress-handoff.md`
+ * §2 (T-R1 语义 = 方案A) + §6.2 (A contract points 1/3/6).
  *
- *   停 4s 轮询 `/session/status` + `/api/session/active` → `/slimapi/sessions/status`
- *   cold-start + digest `status` 接力; 断连降级 10–30s. 纯客户端, slimapi 零改动.
+ * # 方案A contract frozen here
  *
- * # What this file freezes
+ *  **Point 1 — slim connected 4s sweep = ZERO periodic status REST.**
+ *  [UnreadSoakController.ACTIVE_REFRESH_INTERVAL_MS] (=4000) drives the
+ *  foreground sweep → `requestStatusRefresh` callback →
+ *  [launchLoadSessionStatus]. In slim connected mode this sweep MUST NOT
+ *  issue ANY status REST — neither legacy `/session/status` +
+ *  `/api/session/active` NOR periodic slim bulk `/slimapi/sessions/status`.
+ *  Status arrives via the slim digest `status` relay (steady-state, point 3)
+ *  + the cold-start one-time bulk (point 2, frozen in
+ *  `StatusPollingDowngradeSeamsRegressionTest`).
  *
- * The foreground 4s status poll is driven by [UnreadSoakController.ACTIVE_REFRESH_INTERVAL_MS]
- * → `requestStatusRefresh` callback → `ControllerEffect.LoadSessionStatusWithCompletion`
- * → [launchLoadSessionStatus]. [launchLoadSessionStatus] currently issues BOTH legacy
- * endpoints (`/session/status` + `/api/session/active`) UNCONDITIONALLY, with no
- * `repository.isSlimMode` branch. T-R1 requires that in slim mode this REST fan-out
- * is stopped (status flows in via the slim digest `status` relay instead).
+ *  **Point 3 — slim digest `status` relay (GREEN, existing, unchanged).**
+ *  The slim steady-state status source is `SessionSyncCoordinator
+ *  .handleSessionDigest` → `applySessionStatus` folding `session.digest`
+ *  `.status` into `sessionStatuses`. This is what keeps status fresh
+ *  WITHOUT periodic REST in slim mode.
  *
- * This file pins three things:
- *  1. **Slim new contract (RED now)** — in slim mode the 4s-poll fan-out must NOT
- *     hit the legacy `/session/status` + `/api/session/active` endpoints.
- *  2. **Legacy characterization (GREEN now)** — the legacy 4s cadence + REST fan-out
- *     MUST stay byte-for-byte, so the impl lane does not over-reach and break legacy.
- *  3. **Slim digest relay characterization (GREEN now)** — the existing
- *     `session.digest` `status` → `sessionStatuses` fold (the slim steady-state
- *     status source T-R1 relies on) MUST keep working.
+ *  **Point 6 — legacy byte-for-byte unchanged (GREEN characterization).**
+ *  Legacy mode keeps the 4s cadence + REST fan-out unchanged. The impl
+ *  lane cannot over-reach and break legacy.
  *
- * # Design gaps flagged to the impl lane (NOT frozen here — not implementable today)
+ * # What is RED vs GREEN against the current (B-semantics) impl
  *
- * These pieces of the T-R1 contract do NOT exist in the client yet and CANNOT be
- * asserted by a compiling test until the impl lane adds the seam:
+ * The current impl routes [launchLoadSessionStatus] →
+ * `launchLoadSessionStatusSlim` which calls
+ * [OpenCodeRepository.getSlimapiSessionsStatus] per workdir on EVERY
+ * sweep (the code comment self-describes as "periodic correction on each
+ * foreground sweep"). That is the B semantics 方案A rejects. The slim
+ * sweep tests below that assert ZERO slim bulk calls are RED against the
+ * current impl and carry `@Ignore` pending the A-impl rework.
  *
- *  - **Bulk `/slimapi/sessions/status` Retrofit method is MISSING** from [OpenCodeApi].
- *    Only the per-session `getSlimapiSessionStatus` (`/slimapi/sessions/{sid}/status`)
- *    exists. `SlimStatusFanOut`'s docstring references a bulk `GET /slimapi/sessions/status`
- *    but [StatusAggregatorImpl.refresh] actually calls legacy `/session/status` — the
- *    bulk slim endpoint is aspirational. The impl lane must add the client Retrofit
- *    method + repository facade for the cold-start bulk fetch.
- *  - **Disconnect / SSE-loss degraded fallback (10–30s) does NOT exist** for the
- *    slim foreground path. No component / cadence const today. The impl lane must
- *    add it (and when it does, add a regression test asserting the cadence is in
- *    [10_000, 30_000] ms).
- *  - **No mode/connectedness seam on [UnreadSoakController]** — so the slim-connected
- *    suppression of the 4s sweep cannot be tested at the controller level without a
- *    production-side seam. The frozen RED tests below target [launchLoadSessionStatus]
- *    instead, which already has access to [OpenCodeRepository.isSlimMode].
+ * # C3 compliance
  *
- * C3: this file never asserts that slim SSE carries `message.part.*` (slim SSE
- * discards it). The slim status source is the digest relay only.
+ * Nothing here touches `message.part.*` — the slim status source locked
+ * here is REST endpoints + digest relay only.
+ *
+ * # Spec ambiguity flagged (not frozen — no assertion)
+ *
+ * `activeSessionIds` slim intersection semantics: the slim sweep preserves
+ * the prior snapshot intersected against the authoritative tree, never
+ * refreshing from server. If digest loss / host reconnect leaves stale
+ * active ids, they persist until the session archives. This needs spec
+ * confirmation (handoff §2). Not asserted here — the sweep becomes a
+ * no-op for status REST in 方案A, so activeSessionIds is not touched by
+ * the sweep at all; the digest relay's responsibility (if any) for
+ * activeSessionIds is a separate concern.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class StatusPollingDowngradeRegressionTest {
@@ -93,15 +101,13 @@ class StatusPollingDowngradeRegressionTest {
     }
 
     private fun slimRepository(): OpenCodeRepository = mockk(relaxed = true) {
-        // The slim-mode seam ALREADY exists on OpenCodeRepository (val isSlimMode).
-        // The impl lane can satisfy the RED tests below by branching on this.
         every { isSlimMode } returns true
-        // Stub both legacy endpoints for success so the test never crashes with a
-        // null Result if the current code path still calls them (it does). The
-        // assertions below use coVerify(exactly = 0) — a stubbed-but-not-called
-        // method still satisfies exactly = 0.
+        // Defensive stubs for ALL three status endpoints. The @Ignore sweep
+        // tests below assert these are NEVER called; a stubbed-but-not-called
+        // method still satisfies coVerify(exactly = 0).
         coEvery { getSessionStatus() } returns Result.success(emptyMap())
         coEvery { getActiveSessionIds() } returns Result.success(emptySet())
+        coEvery { getSlimapiSessionsStatus(any()) } returns Result.success(emptyMap())
     }
 
     private fun legacyRepository(): OpenCodeRepository = mockk(relaxed = true) {
@@ -110,58 +116,113 @@ class StatusPollingDowngradeRegressionTest {
         coEvery { getActiveSessionIds() } returns Result.success(emptySet())
     }
 
+    private fun seedSessions(vararg sessions: Session) {
+        store.mutateSessionList {
+            it.copy(sessions = sessions.toList())
+        }
+    }
+
+    private fun session(id: String, directory: String): Session =
+        Session(id = id, directory = directory)
+
     // ═══════════════════════════════════════════════════════════════════════
-    // Group 1 — SLIM NEW CONTRACT (expected RED against current code)
+    // Group 1 — SLIM CONNECTED SWEEP: ZERO PERIODIC STATUS REST (方案A point 1)
     //
-    // Current [launchLoadSessionStatus] calls BOTH legacy endpoints unconditionally
-    // (no isSlimMode branch). These tests assert the NEW contract — slim mode must
-    // NOT hit them — and FAIL now because the current code still does the 4s-poll
-    // fan-out into `/session/status` + `/api/session/active`.
+    // [launchLoadSessionStatus] is the foreground sweep entry (driven by
+    // [UnreadSoakController.ACTIVE_REFRESH_INTERVAL_MS]=4000 →
+    // requestStatusRefresh callback). In slim connected mode 方案A requires
+    // this sweep to issue ZERO status REST of any kind:
+    //   - NO legacy /session/status         (GREEN — impl already branches)
+    //   - NO legacy /api/session/active      (GREEN — impl already branches)
+    //   - NO periodic slim bulk /slimapi/sessions/status
+    //                                        (RED — Issue1: impl still calls)
+    //
+    // Sessions are SEEDED so the slim helper has directories to query —
+    // without seeding the slim helper short-circuits on empty directories
+    // and the test would pass trivially without exercising the REST path.
     // ═══════════════════════════════════════════════════════════════════════
 
     @Test
-    fun `slim mode - launchLoadSessionStatus does NOT poll legacy session_status endpoint`() =
-        runTest {
-            val repository = slimRepository()
+    fun `slim connected sweep does NOT poll legacy session_status endpoint`() = runTest {
+        val repository = slimRepository()
+        seedSessions(session("s1", "/work-a"))
 
-            launchLoadSessionStatus(scope, repository, slices)
-            advanceUntilIdle()
+        launchLoadSessionStatus(scope, repository, slices)
+        advanceUntilIdle()
 
-            // T-R1 contract: in slim mode the 4s-poll REST fan-out that drives
-            // GET /session/status MUST be stopped. Status arrives via the slim
-            // digest `status` relay (see Group 3) + /slimapi/sessions/status
-            // cold-start (design gap — impl lane adds the endpoint).
-            //
-            // EXPECTED-RED: current code calls getSessionStatus() unconditionally.
-            coVerify(exactly = 0) {
-                repository.getSessionStatus()
-            }
-        }
+        // 方案A point 1: slim connected sweep must not hit legacy /session/status.
+        // GREEN: current impl branches to launchLoadSessionStatusSlim which never
+        // calls legacy endpoints.
+        coVerify(exactly = 0) { repository.getSessionStatus() }
+    }
 
     @Test
-    fun `slim mode - launchLoadSessionStatus does NOT poll legacy api_session_active endpoint`() =
-        runTest {
-            val repository = slimRepository()
+    fun `slim connected sweep does NOT poll legacy api_session_active endpoint`() = runTest {
+        val repository = slimRepository()
+        seedSessions(session("s1", "/work-a"))
 
+        launchLoadSessionStatus(scope, repository, slices)
+        advanceUntilIdle()
+
+        // 方案A point 1: slim connected sweep must not hit legacy /api/session/active.
+        // GREEN: current impl branches to launchLoadSessionStatusSlim which never
+        // calls legacy endpoints.
+        coVerify(exactly = 0) { repository.getActiveSessionIds() }
+    }
+
+    @Test
+    @Ignore("RED: T-R1 impl rework to 方案A pending; un-ignore when green")
+    fun `slim connected sweep does NOT poll slim bulk sessions_status endpoint`() = runTest {
+        val repository = slimRepository()
+        seedSessions(
+            session("s1", "/work-a"),
+            session("s2", "/work-b"),
+        )
+
+        launchLoadSessionStatus(scope, repository, slices)
+        advanceUntilIdle()
+
+        // 方案A point 1 (Issue1 core): slim connected sweep must NOT issue
+        // periodic slim bulk /slimapi/sessions/status. Status arrives via
+        // digest relay (steady-state) + cold-start one-time bulk (point 2).
+        //
+        // RED against current impl: launchLoadSessionStatusSlim calls
+        // getSlimapiSessionsStatus per workdir on every sweep (the "periodic
+        // correction" comment). The A-impl rework must make the sweep a
+        // no-op for status REST in slim connected mode.
+        coVerify(exactly = 0) { repository.getSlimapiSessionsStatus(any()) }
+    }
+
+    @Test
+    @Ignore("RED: T-R1 impl rework to 方案A pending; un-ignore when green")
+    fun `slim connected sweep repeated invocations trigger ZERO total status REST`() = runTest {
+        val repository = slimRepository()
+        seedSessions(session("s1", "/work-a"))
+
+        // Simulate N foreground sweeps (each is one launchLoadSessionStatus call).
+        repeat(5) {
             launchLoadSessionStatus(scope, repository, slices)
             advanceUntilIdle()
-
-            // T-R1 contract: in slim mode GET /api/session/active (the "active
-            // sessions" fan-out piggybacked onto the 4s status poll) MUST be
-            // stopped. The /api/session/active lane exists solely because
-            // "active has no SSE" (UnreadSoakController.kt:101) — in slim mode
-            // the digest relay covers activity; the legacy active poll is
-            // redundant REST traffic T-R1 removes.
-            //
-            // EXPECTED-RED: current code calls getActiveSessionIds() unconditionally.
-            coVerify(exactly = 0) {
-                repository.getActiveSessionIds()
-            }
         }
 
+        // 方案A point 1 call-count boundary: N sweeps in slim connected mode
+        // must trigger ZERO status REST of ANY kind — no legacy, no slim bulk.
+        // The rev-gpt 🟠 flagged this call-count/interval boundary; this test
+        // pins it: the sweep is a complete no-op for status REST.
+        //
+        // RED against current impl: each sweep calls getSlimapiSessionsStatus
+        // once per workdir → 5 calls total.
+        coVerify(exactly = 0) { repository.getSessionStatus() }
+        coVerify(exactly = 0) { repository.getActiveSessionIds() }
+        coVerify(exactly = 0) { repository.getSlimapiSessionsStatus(any()) }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
-    // Group 2 — LEGACY CHARACTERIZATION (expected GREEN; locks legacy so the
-    // impl lane cannot over-reach and break the legacy 4s poll)
+    // Group 2 — LEGACY CHARACTERIZATION (方案A point 6: byte-for-byte unchanged)
+    //
+    // T-R1 downgrades slim only. Legacy MUST keep polling /session/status +
+    // /api/session/active exactly as today (legacy has no digest relay).
+    // These lock the legacy floor so the impl lane cannot over-reach.
     // ═══════════════════════════════════════════════════════════════════════
 
     @Test
@@ -171,8 +232,7 @@ class StatusPollingDowngradeRegressionTest {
         launchLoadSessionStatus(scope, repository, slices)
         advanceUntilIdle()
 
-        // T-R1 is slim-focused. Legacy MUST keep polling /session/status exactly
-        // as today (legacy has no digest relay). This locks the legacy floor.
+        // Legacy MUST keep polling /session/status (no digest relay).
         coVerify(atLeast = 1) { repository.getSessionStatus() }
     }
 
@@ -183,15 +243,14 @@ class StatusPollingDowngradeRegressionTest {
         launchLoadSessionStatus(scope, repository, slices)
         advanceUntilIdle()
 
-        // Legacy MUST keep polling /api/session/active (active has no SSE in legacy).
+        // Legacy MUST keep polling /api/session/active (active has no SSE).
         coVerify(atLeast = 1) { repository.getActiveSessionIds() }
     }
 
     @Test
     fun `legacy ACTIVE_REFRESH_INTERVAL_MS remains the 4s foreground cadence`() {
-        // T-R1 downgrades slim only. The legacy foreground active-poll cadence
-        // constant stays at 4s. If the impl lane changes this number, legacy
-        // behavior regresses — this lock catches that.
+        // 方案A point 6: T-R1 downgrades slim only. The legacy foreground
+        // active-poll cadence constant stays at 4s.
         assertEquals(
             "legacy foreground active-poll cadence must stay 4s",
             4_000L,
@@ -200,20 +259,18 @@ class StatusPollingDowngradeRegressionTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Group 3 — SLIM DIGEST `status` RELAY CHARACTERIZATION (expected GREEN;
-    // locks the slim steady-state status source T-R1 relies on)
+    // Group 3 — SLIM DIGEST `status` RELAY CHARACTERIZATION (方案A point 3)
     //
-    // The relay already exists: SessionSyncCoordinator.handleSessionDigest folds
-    // SlimSessionDigest.status → sessionStatuses via applySessionStatus. T-R1's
-    // "digest status relay" requirement is satisfied by THIS fold. These tests
-    // lock the fold surface so the impl lane keeps it intact while re-routing
-    // the foreground REST poll away from legacy endpoints.
+    // The slim steady-state status source: SessionSyncCoordinator
+    // .handleSessionDigest folds SlimSessionDigest.status → sessionStatuses
+    // via applySessionStatus. T-R1's "digest status relay" requirement is
+    // satisfied by THIS fold. These tests lock the fold surface so the impl
+    // lane keeps it intact while making the sweep zero-REST.
     // ═══════════════════════════════════════════════════════════════════════
 
     @Test
     fun `slim digest status relay folds busy status into sessionStatuses`() {
-        // Mirror exactly what SessionSyncCoordinator.handleSessionDigest does at
-        // SessionSyncCoordinator.kt:2190-2192:
+        // Mirror SessionSyncCoordinator.handleSessionDigest:
         //   slices.mutateSessionList {
         //       it.applySessionStatus(digest.sessionId, SessionStatus(type = statusType)).first
         //   }
@@ -233,10 +290,10 @@ class StatusPollingDowngradeRegressionTest {
 
     @Test
     fun `slim digest status relay overwrites prior status (event-driven freshness)`() {
-        // The relay is the slim steady-state status source: a later digest frame
-        // with a new status MUST overwrite the prior value (merge-timing for the
-        // sessionStatuses map is last-write-wins at the slice level — the relay
-        // is what keeps status fresh WITHOUT periodic REST in slim mode).
+        // The relay is the slim steady-state status source: a later digest
+        // frame with a new status MUST overwrite the prior value (last-write-
+        // wins at the slice level — the relay keeps status fresh WITHOUT
+        // periodic REST in slim mode).
         val sid = "slim-session-2"
         store.mutateSessionList {
             it.copy(sessions = listOf(Session(id = sid, directory = "/x")))
@@ -245,7 +302,6 @@ class StatusPollingDowngradeRegressionTest {
         store.mutateSessionList {
             it.applySessionStatus(sid, SessionStatus(type = "busy")).first
         }
-        // A later digest frame arrives — session went idle.
         store.mutateSessionList {
             it.applySessionStatus(sid, SessionStatus(type = "idle")).first
         }
@@ -260,9 +316,8 @@ class StatusPollingDowngradeRegressionTest {
 
     @Test
     fun `slim digest status relay is the non-REST status source - slice write surface exists`() {
-        // Sanity-lock the exact pure function the relay depends on. This is the
-        // surface T-R1's "digest status relay" requirement maps to. If the impl
-        // lane (or a later task) removes/renames it, this fails loudly.
+        // Sanity-lock the exact pure function the relay depends on. This is
+        // the surface T-R1's "digest status relay" maps to.
         val sid = "slim-session-3"
         val before = store.sessionListFlow.value.sessionStatuses
         assertTrue("no prior status for sid", sid !in before)

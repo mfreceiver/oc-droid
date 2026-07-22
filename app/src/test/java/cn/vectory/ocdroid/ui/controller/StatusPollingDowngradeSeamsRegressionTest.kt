@@ -1,206 +1,76 @@
 package cn.vectory.ocdroid.ui.controller
 
-import cn.vectory.ocdroid.data.model.Session
-import cn.vectory.ocdroid.data.model.SessionStatus
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.service.streaming.ProcessStatusPoller
-import cn.vectory.ocdroid.ui.SharedStateStore
-import cn.vectory.ocdroid.ui.SliceFlows
-import cn.vectory.ocdroid.ui.launchLoadSessionStatus
-import io.mockk.coEvery
-import io.mockk.coVerify
-import io.mockk.every
-import io.mockk.mockk
-import io.mockk.unmockkAll
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.UnconfinedTestDispatcher
-import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.runTest
-import org.junit.After
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Before
 import org.junit.Test
 
 /**
- * T-R1 round-2 — STATUS POLLING DOWNGRADE *new-seam* regression locks.
+ * T-R1 (slimapi R1) — STATUS POLLING DOWNGRADE *seam-boundary* regression
+ * locks (方案A).
  *
- * Round-1 (`StatusPollingDowngradeRegressionTest.kt`, FROZEN — do not modify)
- * locked the slim-mode *negatives* (foreground status load must NOT hit the
- * legacy `/session/status` + `/api/session/active` endpoints) plus the legacy
- * floor + digest relay characterization. Round-1 flagged 3 design gaps.
+ * Spec: `docs/ocmar/specs/2026-07-22-full-refactor-plan.md` §1.1 T-R1 +
+ * §7.8 R1.
+ * Contract: `docs/ocmar/reports/2026-07-22-refactor-progress-handoff.md`
+ * §2 (方案A) + §6.2 (points 2 + 4).
  *
- * The round-1 impl lane CLOSED those gaps by adding:
- *  1. Bulk Retrofit `OpenCodeApi.getSlimapiSessionsStatus(directory)` (`/slimapi/sessions/status`).
- *  2. Repo facade `OpenCodeRepository.getSlimapiSessionsStatus(directory)`.
- *  3. Slim foreground cold-start `launchLoadSessionStatusSlim` (branched in
- *     `launchLoadSessionStatus` on `repository.isSlimMode`).
- *  4. Disconnect fallback: `StatusAggregatorImpl.refresh()` slim branch routes
- *     per registered workdir through the slim bulk endpoint (covered in
- *     `StatusAggregatorImplTest`); cadence = `ProcessStatusPoller.DEFAULT_INTERVAL_MS`.
+ * # What this file freezes
  *
- * This file locks the *positives* of those seams — the behaviour round-1 could
- * only describe as gaps. These are REGRESSION tests: GREEN against the current
- * impl, and must stay GREEN so future changes cannot silently regress the
- * slim cold-start routing or the disconnect-fallback cadence band.
+ *  **Point 4 — disconnect fallback cadence band (GREEN).**
+ *  On slim SSE loss, `ProcessStatusPoller` (≤30s) drives status refresh
+ *  through slim endpoints (`getSlimapiSessionsStatus` / `SlimStatusFanOut`),
+ *  NOT legacy `/session/status`. The cadence must sit in [10s, 30s] — ≥10s
+ *  so it is a real downgrade from the legacy 4s sweep; ≤30s so it stays
+ *  responsive. The disconnect-fallback endpoint routing is covered in
+ *  `StatusAggregatorImplTest` (slim refresh branch).
  *
- * C3: nothing here expects slim SSE to carry `message.part.*`. The slim status
- * source locked here is the REST cold-start bulk endpoint only.
+ * # What this file does NOT freeze (design gap → impl lane)
+ *
+ *  **Point 2 — cold-start one-time bulk (DESIGN GAP, no compilable test).**
+ *  方案A requires slim cold-start (app/session/host-connect init) to issue
+ *  ONE bulk `GET /slimapi/sessions/status` per workdir. The current impl
+ *  conflates this with the 4s sweep (`launchLoadSessionStatusSlim` is
+ *  called from every sweep). The A-impl rework MUST:
+ *    (a) make the sweep path (`launchLoadSessionStatus`) a no-op for
+ *        status REST in slim connected mode (frozen in
+ *        `StatusPollingDowngradeRegressionTest` Group 1);
+ *    (b) add a separate cold-start entry that issues exactly ONE bulk per
+ *        workdir.
+ *
+ *  This file CANNOT compile a cold-start call-count test until the impl
+ *  lane adds the cold-start seam (the current `launchLoadSessionStatus`
+ *  is the sweep, not cold-start — asserting "calls bulk exactly once"
+ *  against it would lock the B semantics, not the A contract). The impl
+ *  lane should add the cold-start call-count test targeting the new seam
+ *  when it lands.
+ *
+ *  **Spec ambiguity — cold-start trigger point.** The exact lifecycle
+ *  event that fires cold-start (app start / session list load / host
+ *  connect / SSE ready) is NOT specified concretely enough to freeze.
+ *  The handoff §6.2 says "app/session/host-connect start" — the impl
+ *  lane should confirm the trigger point and document it. Flagged for
+ *  spec confirmation; no assertion frozen.
+ *
+ * # C3 compliance
+ *
+ * Nothing here touches `message.part.*`. The slim status sources are REST
+ * endpoints (disconnect fallback) + the cold-start bulk (design gap).
+ *
+ * # Round-2 history
+ *
+ * The prior round-2 freeze (7ec36cb) locked B-semantics "cold-start" tests
+ * that asserted `launchLoadSessionStatus` DOES call slim bulk from the
+ * sweep. Those are removed — 方案A rejects periodic bulk from the sweep.
+ * The disconnect cadence test is retained (GREEN, unchanged).
  */
-@OptIn(ExperimentalCoroutinesApi::class)
 class StatusPollingDowngradeSeamsRegressionTest {
 
-    private lateinit var store: SharedStateStore
-    private lateinit var slices: SliceFlows
-    private lateinit var scope: TestScope
-
-    @Before
-    fun setUp() {
-        store = SharedStateStore()
-        slices = store.slices
-        scope = TestScope(UnconfinedTestDispatcher())
-    }
-
-    @After
-    fun tearDown() {
-        unmockkAll()
-    }
-
-    private fun slimRepository(): OpenCodeRepository = mockk(relaxed = true) {
-        every { isSlimMode } returns true
-    }
-
-    private fun seedSessions(vararg sessions: Session) {
-        store.mutateSessionList {
-            it.copy(
-                sessions = sessions.toList(),
-                completeRootIds = sessions.filter { s -> s.parentId == null }
-                    .mapTo(mutableSetOf()) { s -> s.id },
-            )
-        }
-    }
-
-    private fun session(id: String, directory: String): Session =
-        Session(id = id, directory = directory)
-
     // ═══════════════════════════════════════════════════════════════════════
-    // Slim foreground cold-start — `launchLoadSessionStatus` slim branch
-    // (`launchLoadSessionStatusSlim`). Round-1 locked that legacy endpoints are
-    // NOT hit; these lock the POSITIVE routing + fold behaviour.
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Test
-    fun `slim cold-start calls bulk slim endpoint and avoids both legacy endpoints`() = runTest {
-        val repository = slimRepository()
-        seedSessions(session("s1", "/work-a"))
-        coEvery { repository.getSlimapiSessionsStatus(any()) } returns Result.success(
-            mapOf("s1" to SessionStatus(type = "busy"))
-        )
-        // Defensive stubs — the assertions prove these are NOT called.
-        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
-        coEvery { repository.getActiveSessionIds() } returns Result.success(emptySet())
-
-        launchLoadSessionStatus(scope, repository, slices)
-        advanceUntilIdle()
-
-        // POSITIVE: slim routes through the bulk slim endpoint.
-        coVerify(atLeast = 1) { repository.getSlimapiSessionsStatus(any()) }
-        // NEGATIVE (re-locks round-1 contract at the seam): legacy endpoints untouched.
-        coVerify(exactly = 0) { repository.getSessionStatus() }
-        coVerify(exactly = 0) { repository.getActiveSessionIds() }
-    }
-
-    @Test
-    fun `slim cold-start folds per-directory bulk results into sessionStatuses`() = runTest {
-        // Two directories → the sidecar requires one bulk call per directory;
-        // the slim helper merges the per-directory maps. s3 is authoritative but
-        // absent from both responses → normalize fills it as idle (mirrors the
-        // legacy `/session/status` omits-idle semantics).
-        val repository = slimRepository()
-        seedSessions(
-            session("s1", "/work-a"),
-            session("s2", "/work-b"),
-            session("s3", "/work-a"),
-        )
-        coEvery { repository.getSlimapiSessionsStatus("/work-a") } returns Result.success(
-            mapOf("s1" to SessionStatus(type = "busy"))
-        )
-        coEvery { repository.getSlimapiSessionsStatus("/work-b") } returns Result.success(
-            mapOf("s2" to SessionStatus(type = "retry"))
-        )
-
-        launchLoadSessionStatus(scope, repository, slices)
-        advanceUntilIdle()
-
-        val statuses = store.sessionListFlow.value.sessionStatuses
-        assertEquals("s1 folded from /work-a bulk result", "busy", statuses["s1"]?.type)
-        assertEquals("s2 folded from /work-b bulk result", "retry", statuses["s2"]?.type)
-        assertEquals(
-            "s3 authoritative-but-absent normalizes to idle",
-            "idle",
-            statuses["s3"]?.type,
-        )
-    }
-
-    @Test
-    fun `slim cold-start with no known directories is a no-op success and skips the bulk endpoint`() =
-        runTest {
-            // Before the session list loads there are no directories to query.
-            // The slim helper must short-circuit to a success without issuing
-            // any HTTP (the digest relay + later sweeps cover status once
-            // sessions arrive).
-            val repository = slimRepository()
-            // No sessions seeded → authoritative map empty → directories empty.
-            coEvery { repository.getSlimapiSessionsStatus(any()) } returns Result.success(emptyMap())
-            val completions = mutableListOf<Boolean>()
-
-            launchLoadSessionStatus(scope, repository, slices, completions::add)
-            advanceUntilIdle()
-
-            coVerify(exactly = 0) { repository.getSlimapiSessionsStatus(any()) }
-            assertEquals("no-dir slim load completes success", listOf(true), completions)
-            assertTrue(
-                "sessionStatuses untouched on no-dir slim load",
-                store.sessionListFlow.value.sessionStatuses.isEmpty(),
-            )
-        }
-
-    @Test
-    fun `slim cold-start tolerates per-directory failure and folds the successful directories`() =
-        runTest {
-            // One directory fetch fails, the other succeeds → the slim helper
-            // must NOT poison the whole sweep; it folds whatever succeeded
-            // (the digest relay is the steady-state source, so partial success
-            // is acceptable, total failure is handled by completion(false)).
-            val repository = slimRepository()
-            seedSessions(
-                session("s1", "/work-a"),
-                session("s2", "/work-b"),
-            )
-            coEvery { repository.getSlimapiSessionsStatus("/work-a") } returns Result.success(
-                mapOf("s1" to SessionStatus(type = "busy"))
-            )
-            coEvery { repository.getSlimapiSessionsStatus("/work-b") } returns Result.failure(
-                java.io.IOException("upstream unavailable")
-            )
-
-            launchLoadSessionStatus(scope, repository, slices)
-            advanceUntilIdle()
-
-            val statuses = store.sessionListFlow.value.sessionStatuses
-            assertEquals(
-                "successful /work-a result folded despite /work-b failure",
-                "busy",
-                statuses["s1"]?.type,
-            )
-        }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Disconnect fallback cadence band. The slim L2Idle/L3 degraded fallback
-    // is driven by ProcessStatusPoller at DEFAULT_INTERVAL_MS; T-R1 requires
-    // the fallback cadence to sit in the 10–30s band (≥10s so it is a real
-    // downgrade from the legacy 4s poll; ≤30s so it stays responsive).
+    // Disconnect fallback cadence band (方案A point 4)
+    //
+    // On slim SSE loss, ProcessStatusPoller drives the degraded fallback
+    // at DEFAULT_INTERVAL_MS. T-R1 requires the fallback cadence to sit in
+    // the 10–30s band: ≥10s so it is a real downgrade from the legacy 4s
+    // sweep; ≤30s so it stays responsive.
     // ═══════════════════════════════════════════════════════════════════════
 
     @Test
@@ -213,6 +83,19 @@ class StatusPollingDowngradeSeamsRegressionTest {
         assertTrue(
             "fallback cadence must be <= 30s (stay responsive): got $cadence",
             cadence <= 30_000L,
+        )
+    }
+
+    @Test
+    fun `T-R1 disconnect fallback cadence is a real downgrade from the 4s foreground sweep`() {
+        // 方案A point 4: the disconnect fallback cadence MUST be strictly
+        // greater than the legacy 4s sweep cadence. This confirms the fallback
+        // is a genuine downgrade (not the same cadence re-branded). If the
+        // impl lane accidentally sets the fallback to 4s, this catches it.
+        val cadence = ProcessStatusPoller.DEFAULT_INTERVAL_MS
+        assertTrue(
+            "fallback cadence must be > 4s sweep (real downgrade): got $cadence",
+            cadence > UnreadSoakController.ACTIVE_REFRESH_INTERVAL_MS,
         )
     }
 }
