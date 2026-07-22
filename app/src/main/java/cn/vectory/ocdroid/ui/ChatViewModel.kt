@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.data.model.isEffectivelyRenderableEmpty
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.isThinPlaceholder
 import cn.vectory.ocdroid.util.DebugLog
@@ -579,8 +580,16 @@ class ChatViewModel @Inject constructor(
                     val target = parts.firstOrNull { it.id == key.partId }
                         ?: return cn.vectory.ocdroid.ui.chat.PartExpandState.Failed(code = null)
                     // alreadyFull: target no longer carries the skeleton
-                    // markers (hasFull != true OR omitted == null).
-                    val alreadyFull = target.hasFull != true || target.omitted == null
+                    // markers (hasFull != true OR omitted == null) AND the
+                    // owner's current parts actually render something. An
+                    // owner whose only parts are still-omitted/blank markers
+                    // is not a visible success — guard the v3 content-loss
+                    // edge where the concurrent state is itself effectively
+                    // empty (would otherwise hide the affordance with nothing
+                    // committed).
+                    val alreadyFull =
+                        (target.hasFull != true || target.omitted == null) &&
+                            !isEffectivelyRenderableEmpty(parts)
                     return if (alreadyFull) {
                         cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded
                     } else {
@@ -672,9 +681,43 @@ class ChatViewModel @Inject constructor(
                                 cp.omitted != null
                         }
                     }
+                    // §content-loss-guard-v3: a NON-empty fetch can still
+                    // consist entirely of omitted/blank parts (hasFull=true,
+                    // omitted!=null, text=null). Those survive the merge
+                    // (id ∈ fetchedIds, so the step-3 skeleton cleanup keeps
+                    // them) and would be marked Loaded, hiding the
+                    // OmittedContentCard while the owner's merged parts stay
+                    // effectively-empty → the whole message is dropped by the
+                    // render filter ("text + affordance both disappear").
+                    // Treat a non-renderable merge exactly like a no-content
+                    // fetch: do NOT commit the merged (empty) parts (retain
+                    // the original skeleton so retry stays possible) and keep
+                    // retry visible.
+                    val mergedHasRenderableContent = !isEffectivelyRenderableEmpty(merged)
+                    if (!mergedHasRenderableContent) {
+                        keys.forEach { key ->
+                            loadedTerminal[key] = alreadyFullOrFailed(key, ownerOverride = ownerId)
+                        }
+                        return@forEach
+                    }
                     ownerMergedParts[ownerId] = merged.toList()
                     keys.forEach { key ->
-                        loadedTerminal[key] = cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded
+                        // Per-key Loaded only when this key's live target in
+                        // `merged` is no longer an omitted marker. (target ==
+                        // null is a VALID success: the skeleton was cleaned
+                        // up and real fetched content replaced it — that's
+                        // why the owner-level mergedHasRenderableContent
+                        // check carries the decision, not the per-key target
+                        // alone.)
+                        val target = merged.firstOrNull { it.id == key.partId }
+                        val resolved = target == null ||
+                            target.hasFull != true ||
+                            target.omitted == null
+                        loadedTerminal[key] = if (resolved) {
+                            cn.vectory.ocdroid.ui.chat.PartExpandState.Loaded
+                        } else {
+                            cn.vectory.ocdroid.ui.chat.PartExpandState.Failed(code = null)
+                        }
                     }
                 }
 

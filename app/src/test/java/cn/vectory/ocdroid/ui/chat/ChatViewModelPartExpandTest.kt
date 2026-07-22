@@ -1022,4 +1022,114 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         val state = finalState.partExpandStates[key]
         assertTrue("expected Failed (retry visible), got $state", state is PartExpandState.Failed)
     }
+
+    /**
+     * content-loss guard v3: the fetched owner message returns a NON-empty
+     * parts list, but the part is STILL an omitted/blank marker
+     * (hasFull=true, omitted!=null, text=null). Its id ∈ fetchedIds so the
+     * skeleton cleanup keeps it; without the v3 guard it would be marked
+     * Loaded and the owner's merged parts would be effectively-empty → the
+     * render filter drops the whole message ("text + affordance both
+     * disappear"). The reducer must retain the original skeleton and keep
+     * retry visible (Failed), NOT Loaded.
+     */
+    @Test
+    fun `visibility - non-empty fetch of still-omitted parts keeps skeleton and retry`() = runTest {
+        val sessionId = "session-1"
+        val key = PartKey("m1", "p1")
+        // Live skeleton: omitted text marker (text=null).
+        val omittedSkeleton = Part(
+            id = "p1",
+            messageId = "m1",
+            type = "text",
+            text = null,
+            hasFull = true,
+            omitted = listOf("text"),
+        )
+        seedSession(
+            sessionId,
+            Message(id = "m1", role = "assistant"),
+            listOf(omittedSkeleton),
+        )
+        val deferred = CompletableDeferred<ExpandOutcome>()
+        coEvery { repository.expandMessagesFullBatch(sessionId, any()) } coAnswers {
+            deferred.await()
+        }
+
+        chatVM.expandParts(sessionId, listOf(omittedSkeleton))
+        mainDispatcherRule.dispatcher.scheduler.runCurrent()
+
+        // Fetch returns a NON-empty list, but p1 is STILL omitted/blank.
+        deferred.complete(ExpandOutcome.Ok(
+            items = listOf(msg("m1", listOf(
+                Part(
+                    id = "p1",
+                    messageId = "m1",
+                    type = "text",
+                    text = null,
+                    hasFull = true,
+                    omitted = listOf("text"),
+                ),
+            ))),
+            failures = emptyList(),
+            usedBatch = true,
+        ))
+        mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
+
+        val finalState = core.store.chatFlow.value
+        // Retry stays visible — NOT Loaded (no renderable content committed).
+        val state = finalState.partExpandStates[key]
+        assertTrue("expected Failed (retry visible), got $state", state is PartExpandState.Failed)
+        // Original omitted skeleton retained (not wiped by a non-renderable merge).
+        assertTrue(
+            "omitted skeleton p1 must be retained when fetched content is still blank",
+            finalState.partsByMessage["m1"].orEmpty().any { it.id == "p1" },
+        )
+    }
+
+    /**
+     * content-loss guard v3 (variant): the fetched owner returns a NON-empty
+     * list containing ONLY a `thin_placeholder_*` part (no real content).
+     * After the merge strips the placeholder, the merged list is effectively
+     * empty → the reducer must retain the original skeleton and keep retry
+     * visible (Failed), NOT Loaded.
+     */
+    @Test
+    fun `visibility - non-empty fetch of only thin_placeholder keeps skeleton and retry`() = runTest {
+        val sessionId = "session-1"
+        val key = PartKey("m1", "p1")
+        val skeletonP1 = skeleton("p1", "m1")
+        seedSession(
+            sessionId,
+            Message(id = "m1", role = "assistant"),
+            listOf(skeletonP1),
+        )
+        val deferred = CompletableDeferred<ExpandOutcome>()
+        coEvery { repository.expandMessagesFullBatch(sessionId, any()) } coAnswers {
+            deferred.await()
+        }
+
+        chatVM.expandParts(sessionId, listOf(skeletonP1))
+        mainDispatcherRule.dispatcher.scheduler.runCurrent()
+
+        // Fetch returns a NON-empty list, but its only part is a placeholder.
+        deferred.complete(ExpandOutcome.Ok(
+            items = listOf(msg("m1", listOf(
+                Part(id = "thin_placeholder_m1", messageId = "m1", type = "text", text = null),
+            ))),
+            failures = emptyList(),
+            usedBatch = true,
+        ))
+        mainDispatcherRule.dispatcher.scheduler.advanceUntilIdle()
+
+        val finalState = core.store.chatFlow.value
+        // Retry stays visible — NOT Loaded.
+        val state = finalState.partExpandStates[key]
+        assertTrue("expected Failed (retry visible), got $state", state is PartExpandState.Failed)
+        // Original skeleton retained (merged list was non-renderable, not committed).
+        assertTrue(
+            "skeleton p1 must be retained when fetch holds no real content",
+            finalState.partsByMessage["m1"].orEmpty().any { it.id == "p1" },
+        )
+    }
 }
