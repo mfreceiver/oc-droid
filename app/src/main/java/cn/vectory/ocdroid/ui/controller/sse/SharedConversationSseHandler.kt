@@ -27,12 +27,14 @@ import kotlinx.serialization.json.decodeFromJsonElement
  */
 class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEventHandler {
 
-    override fun supports(type: String): Boolean = type in setOf(
+    private val supportedTypes = setOf(
         "message.created",
         "message.updated",
         "message.part.updated",
         "message.part.delta",
     )
+
+    override fun supports(type: String): Boolean = type in supportedTypes
 
     override fun handle(event: SSEEvent) {
         when (event.payload.type) {

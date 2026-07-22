@@ -8,7 +8,7 @@ import cn.vectory.ocdroid.util.DebugLog
 /**
  * Cluster A (slim SSE reducer): per-session view of the latest known state
  * derived from `session.digest` frames. Stored under
- * [OpenCodeRepository.slimSseState] so the reducer is pure (state in →
+ * [SlimSseStateMachine] (T3-extracted from OpenCodeRepository) so the reducer is pure (state in →
  * state out + decision) and unit-testable in isolation.
  *
  * # Task 6 (slimapi v1 §G5) — split watermark

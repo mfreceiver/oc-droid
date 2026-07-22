@@ -10,7 +10,7 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
  *
  * All public methods here are 1:1 forwarded from OpenCodeRepository's public
  * slim state API surface. Internal helpers ([withSlimStateCommit],
- * [requireCurrentReconfigureTicket]) are package-private for reducer access.
+ * [requireCurrentReconfigureTicket]) are private (state-machine internal).
  *
  * @param slimStateLock the per-repository atomic state boundary (injected;
  *       declared on OpenCodeRepository for freeze §4c binary compat).

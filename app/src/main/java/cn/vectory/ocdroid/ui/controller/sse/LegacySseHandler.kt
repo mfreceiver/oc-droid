@@ -44,7 +44,7 @@ import kotlinx.serialization.json.decodeFromJsonElement
  */
 class LegacySseHandler(private val host: SseDispatchHost) : SseEventHandler {
 
-    override fun supports(type: String): Boolean = type in setOf(
+    private val supportedTypes = setOf(
         "session.created",
         "session.updated",
         "session.status",
@@ -55,6 +55,8 @@ class LegacySseHandler(private val host: SseDispatchHost) : SseEventHandler {
         "todo.updated",
         "session.diff",
     )
+
+    override fun supports(type: String): Boolean = type in supportedTypes
 
     override fun handle(event: SSEEvent) {
         when (event.payload.type) {

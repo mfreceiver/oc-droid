@@ -21,10 +21,12 @@ import kotlinx.serialization.json.JsonObject
  */
 class SlimSseHandler(private val host: SseDispatchHost) : SseEventHandler {
 
-    override fun supports(type: String): Boolean = type in setOf(
+    private val supportedTypes = setOf(
         "session.digest",
         "session.error",
     )
+
+    override fun supports(type: String): Boolean = type in supportedTypes
 
     override fun handle(event: SSEEvent) {
         when (event.payload.type) {
