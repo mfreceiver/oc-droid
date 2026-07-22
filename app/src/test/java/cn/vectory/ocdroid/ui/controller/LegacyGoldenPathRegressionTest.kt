@@ -33,7 +33,6 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
-import org.junit.Ignore
 import org.junit.Test
 
 /**
@@ -554,7 +553,7 @@ class LegacyGoldenPathRegressionTest : MainViewModelTestBase() {
 
     // ── P0-5: legacy mode MUST reject slim cold-start snapshot (host-isolation)
     //
-    // *** EXPECTED-FAILING — host-isolation bug 6bf7bf7 family (pre-P1-1) ***
+    // *** T1d FREEZE ACTIVATION — @Ignore REMOVED; RED until P1-1 lands ***
     //
     // This is the documented T0 "destructive-probe anchor" (plan §4-T0 /
     // task2 §2.1 P0-5). It pins the DESIRED host-isolation contract: a slim
@@ -562,7 +561,7 @@ class LegacyGoldenPathRegressionTest : MainViewModelTestBase() {
     // the entry of [applySlimColdStartSnapshot] (throw IllegalStateException)
     // and MUST NOT rewrite `SessionListState.sessions`.
     //
-    // *** THE BUG (current reality) ***: [applySlimColdStartSnapshot]
+    // *** THE BUG (current reality, HEAD=acd9eb4) ***: [applySlimColdStartSnapshot]
     // (`SessionSyncCoordinator.kt:3354`) has NO `isSlimMode()` entry guard —
     // it trusts the caller's slim discipline + the slim commit token only.
     // When driven directly with a mock repository whose
@@ -570,45 +569,25 @@ class LegacyGoldenPathRegressionTest : MainViewModelTestBase() {
     // the snapshot's `mutateSessionList` REWRITES the legacy session list.
     // This is the heaviest historical bug class — the 6bf7bf7 family
     // (374 sessions replaced by 100 → list vanished) — and the structural
-    // fix is P1-1: add `check(isSlimMode()) { "cold-start snapshot must not
-    // apply in legacy mode" }` at the entry of `applySlimColdStartSnapshot`.
+    // fix is P1-1: add `check(isSlimMode()) { ... }` (or
+    // `requireSlimOnlyStateWrite(isSlimMode(), "cold-start-snapshot")`)
+    // at the entry of `applySlimColdStartSnapshot`, BEFORE
+    // `val repo = repository ?: return false`.
     //
     // *** ASSERTION FORM *** (rev-gpt round-2 fix): the P1-1 fix is a
-    // `check(isSlimMode())` (fail-fast), NOT a softening `return false`. So
-    // the assertion is `assertThrows<IllegalStateException> { applySlim... }`
-    // — pre-P1-1 (current) no exception is thrown, so assertThrows FAILS
-    // (RED); post-P1-1 the check throws IllegalStateException and assertThrows
-    // PASSES (GREEN). The session-list-unchanged assertion runs only when the
-    // entry guard threw BEFORE any mutation (post-P1-1 reality).
+    // `check(isSlimMode())` / `requireSlimOnlyStateWrite(...)` (fail-fast),
+    // NOT a softening `return false`. So the assertion is
+    // `assertThrows(IllegalStateException) { applySlim... }` — pre-P1-1
+    // (current) no exception is thrown, so assertThrows FAILS (RED);
+    // post-P1-1 the guard throws IllegalStateException (or the documented
+    // subclass SlimOnlyStateWriteException) and assertThrows PASSES (GREEN).
     //
-    // Methodology (spec §5.3 ③ host-isolation conflict): do NOT freeze the
-    // bug; assert the DESIRED contract as an expected-fail anchor. The test
-    // is @Ignore'd to keep `check.sh` GREEN across the T0→T1 window
-    // (AGENTS.md hard rule: the tree must be green after every change; a
-    // test red-until-T1 would pollute every check.sh run in between). The
-    // assertions stay FROZEN (hash-guarded by _priv-verifier) — only
-    // activation is deferred.
-    //
-    // LIFECYCLE:
-    //  - T1 test lane UN-IGNORES this test (removes the @Ignore below).
-    //  - T1 impl lane adds P1-1: `check(isSlimMode()) { "cold-start snapshot
-    //    must not apply in legacy mode" }` @ `SessionSyncCoordinator.kt:3354`
-    //    (BEFORE `val repo = repository ?: return false`).
-    //  - With both landed, this test goes GREEN: `applySlimColdStartSnapshot`
-    //    throws `IllegalStateException` at the entry guard → assertThrows
-    //    catches it → session-list-unchanged assertion holds (no mutation
-    //    ran).
-    //  - Removing the P1-1 guard later MUST turn this RED again — the
-    //    destructive-probe contract the verifier exercises at the T1 gate.
+    // *** T1d ACTIVATION ***: the @Ignore that kept this GREEN across the
+    // T0→T1 window is REMOVED here. This test is now RED until the T1d impl
+    // lane lands P1-1. check.sh will show this as a FAILURE — that is the
+    // intended freeze signal (impl MUST land P1-1 to turn it GREEN). The
+    // assertions are unchanged from the T0 round-2 freeze.
 
-    @Ignore(
-        "T0 host-isolation bug anchor: applySlimColdStartSnapshot lacks isSlimMode() " +
-            "entry guard (6bf7bf7 family — slim cold-start snapshot rewrites legacy " +
-            "SessionListState.sessions when driven directly). RED pre-P1-1 (no " +
-            "IllegalStateException thrown); kept green via @Ignore across T0→T1 per " +
-            "AGENTS.md check.sh-hard-rule; T1 test lane un-ignores, P1-1 " +
-            "check(isSlimMode()) guard @ SSC:3354 greens it. Frozen assertions unchanged.",
-    )
     @Test
     fun `P0-5 legacy mode MUST reject slim cold-start snapshot (host-isolation bug 6bf7bf7 family, pre-P1-1)`() = runTest {
         val slices = legacyStore.slices

@@ -2817,6 +2817,11 @@ class SessionSyncCoordinator(
             is ReconcileResult.ClearLocal -> {
                 val sid = result.sid
 
+                // T1d P1-3: slim-only ClearLocal path — fail-fast in legacy
+                // mode before any chat wipe (structural; normal legacy never
+                // reaches ClearLocal because reconcile early-returns).
+                requireSlimOnlyStateWrite(isSlimMode(), "clear-local")
+
                 if (liveSessionId == sid) {
                     // T1b: content-only wipe (messages + partsByMessage);
                     // streaming overlay / cursor / model preserved.
@@ -3333,6 +3338,8 @@ class SessionSyncCoordinator(
      */
     private fun mergeSlimMessagesIntoChat(items: List<MessageWithParts>) {
         if (items.isEmpty()) return
+        // T1d P1-2: slim-only state write — fail-fast in legacy mode.
+        requireSlimOnlyStateWrite(isSlimMode(), "merge-slim-messages")
         slices.store.dispatch(cn.vectory.ocdroid.ui.AppAction.SlimMessagesMerged(items))
     }
 
@@ -3360,6 +3367,8 @@ class SessionSyncCoordinator(
      * empty list. The nullable shape fixes this.
      */
     fun applySlimColdStartSnapshot(snapshot: SlimColdStartSnapshot): Boolean {
+        // T1d P1-1: fail-fast before any repo / token / fold work when not slim.
+        requireSlimOnlyStateWrite(isSlimMode(), "cold-start-snapshot")
         val repo = repository ?: return false
 
         // C-D3 v2 §3.6: token-gated snapshot fold. The token is captured
@@ -3384,6 +3393,9 @@ class SessionSyncCoordinator(
         snapshot: SlimColdStartSnapshot,
         token: OpenCodeRepository.SlimCommitToken,
     ): Boolean {
+        // T1d P1-1: same entry guard on the token-taking overload (direct
+        // callers / tests must not bypass via token path).
+        requireSlimOnlyStateWrite(isSlimMode(), "cold-start-snapshot")
         val repo = repository ?: return false
 
         return repo.commitIfSlimTokenCurrent(token) {
