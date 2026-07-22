@@ -167,6 +167,56 @@ class SessionSyncPureFunctionsTest {
     }
 
     @Test
+    fun `applySessionUpsert propagates the title into directorySessions buckets via conditional replace`() {
+        // §title-sync regression: SSE session.updated (parsed into applySessionUpsert)
+        // must propagate the refreshed Session into BOTH stores, not just the
+        // top-level `sessions` list. SessionsScreen + the chat header read the
+        // UNION of `sessions` and `directorySessions`; before the fix, a session
+        // that surfaces from a directory bucket kept a stale title (e.g. the
+        // server's auto-generated rename) until a REST refresh replaced the
+        // bucket wholesale. Mirrors applyMessageTimestampBump's two-store pattern
+        // via a CONDITIONAL replace (not upsert/append) so unrelated buckets
+        // don't get polluted.
+        val seed = SessionListState(
+            sessions = listOf(
+                Session(id = "s1", directory = "/project", title = "old")
+            ),
+            directorySessions = mapOf(
+                "/project" to listOf(Session(id = "s1", directory = "/project", title = "old")),
+                // Unrelated bucket that must NOT gain s1 (proves conditional-replace,
+                // not append).
+                "/other" to listOf(Session(id = "s2", directory = "/other", title = "untouched"))
+            )
+        )
+        val updated = Session(id = "s1", directory = "/project", title = "new title")
+
+        val (next, _) = seed.applySessionUpsert(updated)
+
+        // Top-level `sessions` keeps the replace-or-append upsert semantics.
+        val topS1 = next.sessions.first { it.id == "s1" }
+        assertEquals("new title", topS1.title)
+
+        // The /project bucket reflects the refreshed title.
+        val projS1 = next.directorySessions["/project"]?.firstOrNull { it.id == "s1" }
+        assertNotNull("seeded directory bucket entry must still be present", projS1)
+        assertEquals(
+            "title-sync must propagate into directorySessions buckets",
+            "new title",
+            projS1!!.title
+        )
+
+        // The unrelated /other bucket is unchanged AND does NOT gain s1.
+        val otherIds = next.directorySessions["/other"]?.map { it.id }
+        assertEquals(
+            "unrelated bucket must not gain the upserted id (conditional-replace, not append)",
+            listOf("s2"),
+            otherIds
+        )
+        val otherS2 = next.directorySessions["/other"]?.first { it.id == "s2" }
+        assertEquals("untouched", otherS2?.title)
+    }
+
+    @Test
     fun `session updated confirmation removes pending id and registration timestamp`() {
         val state = SessionListState(
             pendingCreateIds = setOf("s1", "other"),

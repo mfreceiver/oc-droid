@@ -3672,8 +3672,10 @@ internal fun <Wire, Ui> applyAggregationOutcome(
 // 11 branches, and the effect sequencing is auditable in one place.
 
 /**
- * session.created → upsert the parsed [Session] into [SessionListState.sessions].
- * Pure; effects empty (the dispatcher handles parse-failure via ReportNonFatal).
+ * session.created → upsert the parsed [Session] into BOTH [SessionListState.sessions]
+ * AND every matching [SessionListState.directorySessions] bucket (two-store pattern
+ * — see [upsertAndInvalidateTree]). Pure; effects empty (the dispatcher handles
+ * parse-failure via ReportNonFatal).
  *
  * §Q4-strict-sync: also removes [session].id from [SessionListState.pendingCreateIds]
  * — the server just confirmed the session exists, so it is no longer "pending".
@@ -3688,8 +3690,9 @@ internal fun SessionListState.applySessionCreated(session: Session): Pair<Sessio
     ) to emptyList()
 
 /**
- * session.updated (non-archived) → upsert the parsed [Session] into
- * [SessionListState.sessions]. Pure; effects empty.
+ * session.updated (non-archived) → upsert the parsed [Session] into BOTH
+ * [SessionListState.sessions] AND every matching [SessionListState.directorySessions]
+ * bucket (two-store pattern — see [upsertAndInvalidateTree]). Pure; effects empty.
  *
  * §Q4-strict-sync: also removes [updated].id from [SessionListState.pendingCreateIds]
  * — a session.updated event proves the server knows about this session, so it
@@ -3704,10 +3707,21 @@ internal fun SessionListState.applySessionUpsert(updated: Session): Pair<Session
 
 private fun SessionListState.upsertAndInvalidateTree(session: Session): SessionListState {
     val updatedSessions = upsertSession(sessions, session)
-    val byId = allSessionsById(updatedSessions, directorySessions, childSessions)
+    // §title-sync: also propagate the upsert into every directorySessions
+    // bucket (conditional replace — do NOT append to buckets that don't
+    // already contain this session). A session shown from a directory bucket
+    // (SessionsScreen + chat header read the union of stores) otherwise keeps
+    // a stale field (e.g. the server's auto-generated title) until a REST
+    // refresh replaces the bucket. Mirrors applyMessageTimestampBump's
+    // two-store pattern.
+    val updatedDirectorySessions = directorySessions.mapValues { (_, list) ->
+        list.map { s -> if (s.id == session.id) session else s }
+    }
+    val byId = allSessionsById(updatedSessions, updatedDirectorySessions, childSessions)
     val rootId = rootIdOf(session.id, byId)
     return copy(
         sessions = updatedSessions,
+        directorySessions = updatedDirectorySessions,
         // An unresolved parent chain cannot be attributed safely. Invalidate
         // every completeness proof rather than risk a false "all descendants
         // idle" result until hydration reconnects the new node to its root.
