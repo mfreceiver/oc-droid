@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -236,6 +238,12 @@ fun FilesScreen(
                         }
                     },
                     actions = {
+                        IconButton(onClick = viewModel::toggleShowHiddenFiles) {
+                            Icon(
+                                imageVector = if (state.showHiddenFiles) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                contentDescription = if (state.showHiddenFiles) "隐藏隐藏文件" else "显示隐藏文件",
+                            )
+                        }
                         IconButton(onClick = viewModel::refresh) {
                             Icon(
                                 Icons.Default.Refresh,

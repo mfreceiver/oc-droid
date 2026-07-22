@@ -35,7 +35,8 @@ data class FilesUiState(
     val selectedFilePath: String? = null,
     val isLoading: Boolean = false,
     val isPreviewRefreshing: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    val showHiddenFiles: Boolean = false
 )
 
 @HiltViewModel
@@ -129,6 +130,11 @@ class FilesViewModel @Inject constructor(
             onFileClick(file.path)
             loadFileContent(file.path, dir, gen)
         }
+    }
+
+    fun toggleShowHiddenFiles() {
+        _state.update { it.copy(showHiddenFiles = !it.showHiddenFiles) }
+        refresh()
     }
 
     fun closePreview() {
@@ -321,7 +327,7 @@ class FilesViewModel @Inject constructor(
         repository.getFileTree(directory, relPath)
             .onSuccess { tree ->
                 if (gen != requestGeneration.get()) return
-                setDirectoryPreview(path, relPath, tree.filterNot { f -> f.name.startsWith(".") })
+                setDirectoryPreview(path, relPath, tree.filterNot { f -> !_state.value.showHiddenFiles && (f.name.startsWith(".") || f.ignored == true) })
             }
             .onFailure { throwable ->
                 if (gen != requestGeneration.get()) return
@@ -342,7 +348,7 @@ class FilesViewModel @Inject constructor(
                     if (gen != requestGeneration.get()) return@launch
                     _state.update {
                         it.copy(
-                            files = tree.filterNot { f -> f.name.startsWith(".") },
+                            files = tree.filterNot { f -> !_state.value.showHiddenFiles && (f.name.startsWith(".") || f.ignored == true) },
                             isLoading = false
                         )
                     }

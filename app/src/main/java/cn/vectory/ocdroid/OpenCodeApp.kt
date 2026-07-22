@@ -6,6 +6,7 @@ import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.ui.AppCore
 import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.ui.controller.BackgroundUnreadPoller
+import cn.vectory.ocdroid.ui.controller.SessionMetadataPoller
 import cn.vectory.ocdroid.util.AppLocaleController
 import cn.vectory.ocdroid.util.CrashLogger
 import dagger.hilt.android.HiltAndroidApp
@@ -24,6 +25,9 @@ class OpenCodeApp : Application() {
 
     @Inject
     lateinit var backgroundUnreadPoller: BackgroundUnreadPoller
+
+    @Inject
+    lateinit var sessionMetadataPoller: SessionMetadataPoller
 
     /** §R-17 batch3: injected so cleanup() can be called on process teardown. */
     @Inject
