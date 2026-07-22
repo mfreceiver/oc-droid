@@ -16,7 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.AlertDialog
@@ -164,7 +164,10 @@ internal fun ServerManagementDialog(
                     }
                     IconButton(onClick = onRefresh) {
                         Icon(
-                            Icons.Default.Refresh,
+                            // §icon-distinction (#6b): Sync icon (not Refresh) — this is
+                            // the SERVER popup's HARD refresh (force reconnect), visually
+                            // distinct from the home screen's soft Refresh button.
+                            Icons.Default.Sync,
                             // §final-review F1: this is the SERVER popup's
                             // refresh (force reconnect), NOT the Chat
                             // message-refresh. Use server_dialog_refresh

@@ -185,7 +185,11 @@ internal fun SubAgentCard(
                 if (subAgentName == null && (isRunning || isError)) Spacer(modifier = Modifier.width(4.dp))
 
                 // Description as subtitle
+                // §hide-state-paths (#3): server emits state-path strings (e.g.
+                // "state.input.background") as title/description for some subagent
+                // tasks — never render these machine paths to the user.
                 val bodyTitle = cleanTitle.ifBlank { taskXml?.taskResult?.takeIf { it.isNotBlank() } }.orEmpty()
+                    .takeIf { !it.startsWith("state.") }.orEmpty()
                 if (bodyTitle.isNotBlank()) {
                     if (subAgentName != null) {
                         Text(

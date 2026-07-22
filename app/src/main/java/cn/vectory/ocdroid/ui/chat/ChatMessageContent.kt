@@ -1058,7 +1058,8 @@ internal fun ChatMessageList(
                             val isMessageStreaming = msgParts.any { it.id in streamingPartTexts } ||
                                 streamingReasoningPart?.messageId == message.id ||
                                 (!message.isUser && sessionIsRunning &&
-                                    (msgParts.isEmpty() || msgParts.any { it.isText || it.isReasoning }))
+                                    (msgParts.isEmpty() || msgParts.any { it.isText || it.isReasoning } ||
+                                        msgParts.any { it.isTool || it.isPatch }))
                             MessageCard(
                                 message = message,
                                 parts = msgParts,

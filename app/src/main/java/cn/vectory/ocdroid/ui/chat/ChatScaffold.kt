@@ -722,7 +722,10 @@ fun ChatScaffold(
                 if (sid != null) {
                     bus.tryEmitEffect(ControllerEffect.LoadMessages(sid, resetLimit = true))
                 }
-                bus.tryEmitEffect(ControllerEffect.ColdStartReconnect)
+                // §force-refresh-fix (#6a): pure data reload — drop ColdStartReconnect
+                // (it raced/overrode LoadMessages via the server.connected catch-up).
+                // Refresh the session list too so titles/metadata resync.
+                bus.tryEmitEffect(ControllerEffect.LoadSessions)
             },
         )
     }
