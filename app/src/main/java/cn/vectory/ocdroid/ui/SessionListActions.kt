@@ -630,20 +630,49 @@ private val statusLoadEpoch = java.util.concurrent.atomic.AtomicLong(0)
 // possible on this dispatcher.
 private val sessionListLoadEpoch = java.util.concurrent.atomic.AtomicLong(0)
 
+/**
+ * T-R1 (slimapi R1) 方案A: distinguishes the foreground 4s SWEEP (a no-op for
+ * status REST in slim connected mode — status arrives via the digest relay +
+ * the one-time cold-start bulk) from a COLD_START (app/session/host-connect
+ * init → one bulk `GET /slimapi/sessions/status` per workdir). Legacy mode
+ * ignores the distinction (no digest relay → always polls).
+ */
+internal enum class SessionStatusLoadTrigger { SWEEP, COLD_START }
+
 internal fun launchLoadSessionStatus(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
     slices: SliceFlows,
+    trigger: SessionStatusLoadTrigger = SessionStatusLoadTrigger.SWEEP,
     onComplete: (Boolean) -> Unit = {},
 ) {
+    // 🔴 T-R1 方案A EPOCH ORDER (critical landmine): the slim SWEEP short-circuit
+    // MUST happen BEFORE statusLoadEpoch.incrementAndGet(). The 4s foreground
+    // sweep (UnreadSoakController.ACTIVE_REFRESH_INTERVAL_MS →
+    // requestStatusRefresh → ControllerEffect.LoadSessionStatusWithCompletion →
+    // here with trigger=SWEEP) is a no-op for status REST in slim connected
+    // mode. If this no-op bumped the epoch FIRST, every 4s sweep bump would
+    // supersede an in-flight COLD_START bulk, and the cold-start's epoch guard
+    // below (myEpoch != statusLoadEpoch.get()) would discard its result — the
+    // cold-start snapshot would be silently dropped forever.
+    //
+    // onComplete(true) is synchronous-safe: the sweep callback only touches
+    // UnreadSoakController's Main-thread fields (no suspension, no launch), and
+    // the caller runs on appScope (Main.immediate) — no thread hop, so it
+    // completes well within the 15s timeout job.
+    if (repository.isSlimMode && trigger == SessionStatusLoadTrigger.SWEEP) {
+        onComplete(true)
+        return
+    }
     val myEpoch = statusLoadEpoch.incrementAndGet()
     val hostAtRequestStart = slices.host.value.currentHostProfileId
-    // T-R1 (slimapi R1): in slim mode the foreground status poll MUST NOT hit
-    // the legacy /session/status + /api/session/active endpoints. Status
-    // arrives via the slim digest `status` relay (steady-state,
-    // SessionSyncCoordinator.handleSessionDigest → applySessionStatus) + the
-    // bulk /slimapi/sessions/status cold-start fetch (below). Legacy mode is
-    // byte-for-byte unchanged (keeps the 6 GREEN characterization tests green).
+    // T-R1 (slimapi R1) 方案A: in slim mode the only path that reaches here is
+    // COLD_START (the SWEEP no-op returned above). It routes through the slim
+    // bulk cold-start fetch (one call per workdir) and MUST NOT hit the legacy
+    // /session/status + /api/session/active endpoints. Steady-state status
+    // arrives via the slim digest `status` relay
+    // (SessionSyncCoordinator.handleSessionDigest → applySessionStatus).
+    // Legacy mode (isSlimMode == false) is byte-for-byte unchanged.
     if (repository.isSlimMode) {
         launchLoadSessionStatusSlim(scope, repository, slices, myEpoch, hostAtRequestStart, onComplete)
         return

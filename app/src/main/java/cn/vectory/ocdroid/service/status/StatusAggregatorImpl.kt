@@ -117,6 +117,23 @@ class StatusAggregatorImpl internal constructor(
     )
 
     /**
+     * T-R1 (slimapi R1) 方案A Issue2: internal carrier for a status-fetch
+     * result shared by the slim + legacy branches of [refresh]. Carries the
+     * merged status map PLUS the set of workdirs whose per-directory slim fetch
+     * FAILED (always empty for legacy, which issues a single host-global call).
+     *
+     * The failed-workdir set lets the success fold mark sessions in failed
+     * workdirs [SessionBusyStatus.Unknown] (NOT Idle) on partial failure,
+     * preventing a false [GlobalBusyState.AllIdleFresh]. Legacy wraps its
+     * single call in `StatusFetch(it, emptySet())` so its fold is
+     * byte-for-byte unchanged.
+     */
+    private data class StatusFetch(
+        val statuses: Map<String, SessionStatus>,
+        val failedWorkdirs: Set<String>,
+    )
+
+    /**
      * D1 (gate #5): coverage metadata held alongside the per-key state map.
      *
      *  - [registeredWorkdirs] — the required set from [StatusSnapshot].
@@ -249,43 +266,50 @@ class StatusAggregatorImpl internal constructor(
         // loss, ProcessStatusPoller (≤30s) drives this refresh using SLIM
         // endpoints, NOT legacy. Legacy mode (isSlimMode == false) is
         // byte-for-byte unchanged.
-        val result = if (repository.isSlimMode) {
+        val result: Result<StatusFetch> = if (repository.isSlimMode) {
             withContext(Dispatchers.IO) {
                 val merged = mutableMapOf<String, SessionStatus>()
-                var anySuccess = false
+                val succeeded = mutableSetOf<String>()
+                val failed = mutableSetOf<String>()
                 for (dir in snapshot.registeredWorkdirs) {
                     repository.getSlimapiSessionsStatus(dir)
-                        .onSuccess { merged.putAll(it); anySuccess = true }
-                        .onFailure { /* tolerate per-dir failure; all-fail handled below */ }
+                        .onSuccess { merged.putAll(it); succeeded.add(dir) }
+                        .onFailure { failed.add(dir) }
                 }
                 when {
                     // No registered workdirs (cold-start): treat as success-empty
                     // (the coverage marker's cold-start guard handles projection).
-                    snapshot.registeredWorkdirs.isEmpty() -> Result.success(merged)
+                    snapshot.registeredWorkdirs.isEmpty() ->
+                        Result.success(StatusFetch(merged, failed))
                     // All per-directory calls failed → surface as failure so the
                     // projection marks every known session Unknown (NOT Idle),
                     // matching the legacy failure semantics.
-                    !anySuccess -> Result.failure(
+                    succeeded.isEmpty() -> Result.failure(
                         java.io.IOException("slim bulk status failed for all registered workdirs")
                     )
-                    // Partial/full success → fold the merged map.
-                    else -> Result.success(merged)
+                    // Partial/full success → fold the merged map + carry the
+                    // failed-workdir set so the fold marks their sessions Unknown.
+                    else -> Result.success(StatusFetch(merged, failed))
                 }
             }
         } else {
-            withContext(Dispatchers.IO) { repository.getSessionStatus() }
+            // Legacy: single host-global call. failedWorkdirs is always empty,
+            // so the fold below is byte-for-byte identical to the pre-T-R1 path.
+            withContext(Dispatchers.IO) {
+                repository.getSessionStatus().map { StatusFetch(it, emptySet()) }
+            }
         }
         // CP4 §2 epoch guard: drop the response if a reconfigure invalidated this request
         // mid-flight. The check happens AFTER the suspend (the only place an epoch bump
         // could have happened) and BEFORE any state mutation.
         if (identityStore.currentEpoch() != epochAtRequestStart) return
         result.fold(
-            onSuccess = { statuses ->
+            onSuccess = { fetch ->
                 update { current ->
                     val next = current.entries.toMutableMap()
                     val activeKeys = HashSet<SessionStatusKey>()
                     val unmapped = HashSet<String>()
-                    for ((sessionId, serverStatus) in statuses) {
+                    for ((sessionId, serverStatus) in fetch.statuses) {
                         val session = snapshot.sessionsById[sessionId]
                         if (session == null) {
                             // D1 gate #5: positively known active — server returned
@@ -306,14 +330,29 @@ class StatusAggregatorImpl internal constructor(
                         if (key in activeKeys) continue
                         val prev = next[key]
                         if (prev == null || requestStartMs >= prev.sourceTimeMs) {
-                            next[key] = Entry(SessionBusyStatus.Idle, requestStartMs, fresh = true)
+                            // T-R1 方案A Issue2: a known-but-absent session in a
+                            // FAILED workdir is NOT authoritatively idle — mark it
+                            // Unknown (fresh=false) so the projection refuses
+                            // AllIdleFresh on a partial slim failure. Successful
+                            // workdirs (and all of legacy, where failedWorkdirs is
+                            // always empty) fold Idle as before.
+                            val failedDir = session.directory in fetch.failedWorkdirs
+                            next[key] = Entry(
+                                status = if (failedDir) SessionBusyStatus.Unknown else SessionBusyStatus.Idle,
+                                sourceTimeMs = requestStartMs,
+                                fresh = !failedDir,
+                            )
                         }
                     }
                     current.copy(
                         entries = next.toMap(),
                         coverage = Coverage(
                             registeredWorkdirs = snapshot.registeredWorkdirs,
-                            coveredWorkdirs = snapshot.registeredWorkdirs,
+                            // 方案A Issue2: exclude failed workdirs from coverage so
+                            // the registered-workdir coverage predicate (project
+                            // :544) independently refuses AllIdleFresh when any
+                            // registered workdir was not successfully fetched.
+                            coveredWorkdirs = snapshot.registeredWorkdirs - fetch.failedWorkdirs,
                             unmappedActiveIds = unmapped,
                             lastSuccessTimeMs = requestStartMs,
                         ),

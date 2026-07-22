@@ -23,25 +23,18 @@ import org.junit.Test
  *  responsive. The disconnect-fallback endpoint routing is covered in
  *  `StatusAggregatorImplTest` (slim refresh branch).
  *
- * # What this file does NOT freeze (design gap → impl lane)
+ * # What this file does NOT freeze (filled elsewhere)
  *
- *  **Point 2 — cold-start one-time bulk (DESIGN GAP, no compilable test).**
+ *  **Point 2 — cold-start one-time bulk (filled by impl lane).**
  *  方案A requires slim cold-start (app/session/host-connect init) to issue
- *  ONE bulk `GET /slimapi/sessions/status` per workdir. The current impl
- *  conflates this with the 4s sweep (`launchLoadSessionStatusSlim` is
- *  called from every sweep). The A-impl rework MUST:
- *    (a) make the sweep path (`launchLoadSessionStatus`) a no-op for
- *        status REST in slim connected mode (frozen in
- *        `StatusPollingDowngradeRegressionTest` Group 1);
- *    (b) add a separate cold-start entry that issues exactly ONE bulk per
- *        workdir.
- *
- *  This file CANNOT compile a cold-start call-count test until the impl
- *  lane adds the cold-start seam (the current `launchLoadSessionStatus`
- *  is the sweep, not cold-start — asserting "calls bulk exactly once"
- *  against it would lock the B semantics, not the A contract). The impl
- *  lane should add the cold-start call-count test targeting the new seam
- *  when it lands.
+ *  ONE bulk `GET /slimapi/sessions/status` per workdir. The A-impl rework
+ *  added a `trigger` parameter to [launchLoadSessionStatus]:
+ *    (a) the sweep path (trigger=SWEEP) is a no-op for status REST in slim
+ *        connected mode (frozen in `StatusPollingDowngradeRegressionTest`
+ *        Group 1);
+ *    (b) the cold-start entry (trigger=COLD_START) issues exactly ONE bulk
+ *        per workdir (frozen in `StatusPollingDowngradeRegressionTest`
+ *        Group 4, including the epoch-order landmine guard).
  *
  *  **Spec ambiguity — cold-start trigger point.** The exact lifecycle
  *  event that fires cold-start (app start / session list load / host

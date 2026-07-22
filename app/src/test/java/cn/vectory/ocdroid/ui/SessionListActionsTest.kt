@@ -1035,7 +1035,7 @@ class SessionListActionsTest {
         coEvery { repository.getSessionStatus() } returns Result.success(statuses)
         val completions = mutableListOf<Boolean>()
 
-        launchLoadSessionStatus(scope, repository, slices, completions::add)
+        launchLoadSessionStatus(scope, repository, slices, onComplete = completions::add)
         advanceUntilIdle()
 
         assertEquals(listOf(true), completions)
@@ -1061,7 +1061,7 @@ class SessionListActionsTest {
         coEvery { repository.getSessionStatus() } returns Result.failure(IllegalStateException("offline"))
         val completions = mutableListOf<Boolean>()
 
-        launchLoadSessionStatus(scope, repository, slices, completions::add)
+        launchLoadSessionStatus(scope, repository, slices, onComplete = completions::add)
         advanceUntilIdle()
 
         assertEquals(listOf(false), completions)
@@ -1081,9 +1081,9 @@ class SessionListActionsTest {
         val firstCompletions = mutableListOf<Boolean>()
         val secondCompletions = mutableListOf<Boolean>()
 
-        launchLoadSessionStatus(scope, repository, slices, firstCompletions::add)
+        launchLoadSessionStatus(scope, repository, slices, onComplete = firstCompletions::add)
         advanceUntilIdle()
-        launchLoadSessionStatus(scope, repository, slices, secondCompletions::add)
+        launchLoadSessionStatus(scope, repository, slices, onComplete = secondCompletions::add)
         advanceUntilIdle()
         gate.complete(Unit)
         advanceUntilIdle()

@@ -5,12 +5,14 @@ import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.SliceFlows
+import cn.vectory.ocdroid.ui.SessionStatusLoadTrigger
 import cn.vectory.ocdroid.ui.launchLoadSessionStatus
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -22,7 +24,6 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
-import org.junit.Ignore
 import org.junit.Test
 
 /**
@@ -55,15 +56,16 @@ import org.junit.Test
  *  Legacy mode keeps the 4s cadence + REST fan-out unchanged. The impl
  *  lane cannot over-reach and break legacy.
  *
- * # What is RED vs GREEN against the current (B-semantics) impl
+ * # 方案A implementation status (impl lane: A-impl done)
  *
- * The current impl routes [launchLoadSessionStatus] →
- * `launchLoadSessionStatusSlim` which calls
- * [OpenCodeRepository.getSlimapiSessionsStatus] per workdir on EVERY
- * sweep (the code comment self-describes as "periodic correction on each
- * foreground sweep"). That is the B semantics 方案A rejects. The slim
- * sweep tests below that assert ZERO slim bulk calls are RED against the
- * current impl and carry `@Ignore` pending the A-impl rework.
+ * The A-impl rework added a `trigger` parameter to [launchLoadSessionStatus]:
+ * `SWEEP` (default, the 4s foreground sweep) is a zero-REST no-op in slim
+ * connected mode (returns before the epoch bump); `COLD_START`
+ * (app/session/host-connect init) routes through the slim bulk helper. The
+ * slim sweep tests (Group 1) assert ZERO slim bulk calls and are now GREEN.
+ * Group 4 locks the cold-start seam (exactly one bulk per workdir) + the
+ * epoch-order landmine (a sweep interleaved with an in-flight cold-start
+ * MUST NOT bump the epoch and drop the cold-start result).
  *
  * # C3 compliance
  *
@@ -171,7 +173,6 @@ class StatusPollingDowngradeRegressionTest {
     }
 
     @Test
-    @Ignore("RED: T-R1 impl rework to 方案A pending; un-ignore when green")
     fun `slim connected sweep does NOT poll slim bulk sessions_status endpoint`() = runTest {
         val repository = slimRepository()
         seedSessions(
@@ -194,7 +195,6 @@ class StatusPollingDowngradeRegressionTest {
     }
 
     @Test
-    @Ignore("RED: T-R1 impl rework to 方案A pending; un-ignore when green")
     fun `slim connected sweep repeated invocations trigger ZERO total status REST`() = runTest {
         val repository = slimRepository()
         seedSessions(session("s1", "/work-a"))
@@ -335,5 +335,87 @@ class StatusPollingDowngradeRegressionTest {
             "retry",
             next.sessionStatuses[sid]?.type,
         )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Group 4 — SLIM COLD-START: ONE BULK PER WORKDIR + EPOCH-ORDER SEAM
+    // (方案A point 2; fills the StatusPollingDowngradeSeamsRegressionTest
+    // design gap documented in that file's header.)
+    //
+    // 方案A point 2: the cold-start entry (trigger=COLD_START) issues exactly
+    // ONE bulk GET /slimapi/sessions/status per registered workdir. This is
+    // distinct from the SWEEP no-op (Group 1). The epoch-order test locks the
+    // 🔴 A-2 landmine: a SWEEP no-op interleaved with an in-flight cold-start
+    // MUST NOT bump statusLoadEpoch (the cold-start result must survive).
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `slim cold-start issues exactly one slim bulk call per registered workdir`() = runTest {
+        val repository = slimRepository()
+        seedSessions(
+            session("s1", "/work-a"),
+            session("s2", "/work-b"),
+        )
+
+        launchLoadSessionStatus(
+            scope,
+            repository,
+            slices,
+            trigger = SessionStatusLoadTrigger.COLD_START,
+        )
+        advanceUntilIdle()
+
+        // 方案A point 2: cold-start issues ONE bulk per workdir (2 workdirs → 2 calls).
+        // No legacy endpoints touched.
+        coVerify(exactly = 1) { repository.getSlimapiSessionsStatus("/work-a") }
+        coVerify(exactly = 1) { repository.getSlimapiSessionsStatus("/work-b") }
+        coVerify(exactly = 0) { repository.getSessionStatus() }
+        coVerify(exactly = 0) { repository.getActiveSessionIds() }
+    }
+
+    @Test
+    fun `slim cold-start bulk result survives an interleaved sweep no-op - epoch order guard`() = runTest {
+        // 🔴 A-2 EPOCH-ORDER landmine guard: the slim SWEEP short-circuit MUST
+        // NOT bump statusLoadEpoch. If it did, a 4s sweep interleaved with an
+        // in-flight cold-start bulk would make the cold-start's epoch guard
+        // (myEpoch != statusLoadEpoch.get() inside launchLoadSessionStatusSlim)
+        // discard its result — the cold-start snapshot would be silently lost.
+        val repository = slimRepository()
+        val gate = CompletableDeferred<Unit>()
+        var slimBulkCalls = 0
+        coEvery { repository.getSlimapiSessionsStatus(any()) } coAnswers {
+            slimBulkCalls++
+            gate.await()
+            Result.success(mapOf("s1" to SessionStatus(type = "idle")))
+        }
+        seedSessions(session("s1", "/work-a"))
+
+        // COLD_START enters the slim bulk path and suspends on the gate.
+        launchLoadSessionStatus(
+            scope,
+            repository,
+            slices,
+            trigger = SessionStatusLoadTrigger.COLD_START,
+        )
+        advanceUntilIdle()
+        assertEquals("cold-start issued exactly one slim bulk call", 1, slimBulkCalls)
+
+        // While cold-start is suspended, fire two sweeps. 方案A: each SWEEP is a
+        // no-op for status REST and MUST NOT bump statusLoadEpoch. If a sweep
+        // bumped the epoch, the cold-start's result would be dropped below.
+        repeat(2) {
+            launchLoadSessionStatus(scope, repository, slices) // default SWEEP
+        }
+        advanceUntilIdle()
+        assertEquals("sweeps issued zero additional slim bulk calls", 1, slimBulkCalls)
+
+        // Release the cold-start bulk.
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        // The cold-start result landed (epoch guard passed): s1 status folded.
+        val folded = slices.sessionList.value.sessionStatuses["s1"]
+        assertNotNull("cold-start bulk result survived the interleaved sweep no-op", folded)
+        assertEquals("idle", folded?.type)
     }
 }

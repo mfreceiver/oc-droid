@@ -694,7 +694,7 @@ internal fun AppCore.loadSessionsForEffect() {
         slices = store.slices,
         settingsManager = settingsManager,
         onSelectSession = { selectSessionForEffect(it) },
-        onLoadSessionStatus = { launchLoadSessionStatus(appScope, repository, store.slices) },
+        onLoadSessionStatus = { launchLoadSessionStatus(appScope, repository, store.slices, trigger = SessionStatusLoadTrigger.COLD_START) },
         onLoadMessages = { sessionId -> loadMessagesForEffect(sessionId, resetLimit = true) },
         emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
         // remove-message-persistence Task 6: the prior

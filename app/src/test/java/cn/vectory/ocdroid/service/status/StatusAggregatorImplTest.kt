@@ -20,7 +20,6 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Ignore
 import org.junit.Test
 
 /**
@@ -778,9 +777,9 @@ class StatusAggregatorImplTest {
     // Idle). All-fail → all Unknown. Successful workdirs fold normally. The
     // prior round-2 freeze (7ec36cb) locked the WRONG B-semantics: any success
     // → full-snapshot fold → failed-workdir sessions were filled Idle. The
-    // tests below freeze the CORRECT A contract. The partial-fail tests are
-    // RED against the current impl and carry `@Ignore` pending the A-impl
-    // rework of the slim branch.
+    // tests below freeze the CORRECT A contract. The A-impl rework tracks
+    // per-workdir success/failure via a `StatusFetch(statuses, failedWorkdirs)`
+    // carrier; the success fold marks failed-workdir sessions Unknown.
     //
     // **Critical counterexample**: successful workdir returns Idle + failed
     // workdir → failed session = Unknown, NOT Idle. If the failed session
@@ -855,7 +854,6 @@ class StatusAggregatorImplTest {
     }
 
     @Test
-    @Ignore("RED: T-R1 impl rework to 方案A pending; un-ignore when green")
     fun `T-R1 slim refresh partial failure marks failed-workdir sessions Unknown not Idle`() =
         runTest {
             // 方案A point 5 (Issue2): when some workdirs succeed and some fail,
@@ -907,7 +905,6 @@ class StatusAggregatorImplTest {
         }
 
     @Test
-    @Ignore("RED: T-R1 impl rework to 方案A pending; un-ignore when green")
     fun `T-R1 slim refresh partial failure - successful Idle plus failed Busy does NOT enter AllIdleFresh`() =
         runTest {
             // 方案A point 5 CRITICAL counterexample (Issue2):

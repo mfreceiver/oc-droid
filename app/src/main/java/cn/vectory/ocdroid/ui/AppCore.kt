@@ -527,7 +527,7 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.LoadSessionStatus -> {
-            launchLoadSessionStatus(appScope, repository, store.slices)
+            launchLoadSessionStatus(appScope, repository, store.slices, trigger = SessionStatusLoadTrigger.COLD_START)
             true
         }
         is ControllerEffect.LoadSessionStatusWithCompletion -> {
