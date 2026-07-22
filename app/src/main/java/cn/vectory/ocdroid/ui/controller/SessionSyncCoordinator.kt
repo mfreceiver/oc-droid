@@ -3052,8 +3052,10 @@ internal fun SessionListState.applySessionStatus(
  * caller can log patch vs. insert without a second O(n) scan). Single O(n)
  * atomic pass — no TOCTOU. Pure.
  *
- * When [found] is false, the new message is appended at the tail (the list
- * is oldest-first and the new message is the newest — mirrors opencode-web).
+ * When [found] is false, the new message is inserted in chronological order
+ * using [MESSAGE_CHRONO] (binarySearch). Exception: null-created messages
+ * (time?.created == null) are always appended at the tail (the list is
+ * oldest-first and the new message is the newest — mirrors opencode-web).
  */
 internal fun ChatState.applyMessageUpdated(updated: Message): Pair<ChatState, Boolean> {
     val idx = messages.indexOfFirst { it.id == updated.id }

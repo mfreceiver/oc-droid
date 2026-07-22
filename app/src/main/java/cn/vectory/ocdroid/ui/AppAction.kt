@@ -1090,7 +1090,7 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
     is AppAction.CatchUpMessagesMerged -> state.copy(
         // CatchUpActions:147-154 4-field merge (not MessagesMerged's 8).
         chat = state.chat.copy(
-            messages = action.messages,
+            messages = action.messages.chronological(),
             partsByMessage = action.partsByMessage,
             isLoadingMessages = false,
             staleNotice = false,

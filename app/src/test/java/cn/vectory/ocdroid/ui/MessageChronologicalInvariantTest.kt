@@ -74,6 +74,30 @@ class MessageChronologicalInvariantTest {
     }
 
     @Test
+    fun `applyMessageUpdated multiple null-created keep append order`() {
+        val state = ChatState(messages = listOf(
+            msg("b", created = 2000L),
+            msg("d", created = 4000L),
+        ))
+        val null1 = msg("a") // null created
+        val null2 = msg("c") // null created
+        val (after1, _) = state.applyMessageUpdated(null1)
+        val (after2, _) = after1.applyMessageUpdated(null2)
+        assertTrue("must be chronological", after2.messages.isChronological())
+        // null-created messages are appended at tail in insertion order
+        assertEquals(listOf("b", "d", "a", "c"), after2.messages.map { it.id })
+        // Additionally verify that even if a null-created is inserted between
+        // two server messages with later created times, the relative order
+        // of null-created messages is preserved (append order).
+        val serverLate = msg("e", created = 9999L)
+        val (after3, _) = after2.applyMessageUpdated(serverLate)
+        assertTrue("must still be chronological", after3.messages.isChronological())
+        assertEquals(listOf("b", "d", "e", "a", "c"), after3.messages.map { it.id })
+        // Server messages are sorted by created time; null-created stay at tail
+        // preserving their append order even if a late server message is inserted.
+    }
+
+    @Test
     fun `applyMessageUpdated patch with same created keeps position`() {
         val state = ChatState(messages = listOf(
             msg("a", created = 1000L),

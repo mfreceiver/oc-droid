@@ -1055,11 +1055,14 @@ internal fun ChatMessageList(
                             // omitted-content affordance. Mirrors the canonical
                             // isStreamingMsg derivation in reversedMessages (line ~665)
                             // so the affordance disables during active streaming.
+                            val hasActiveToolOrPatch = msgParts.any { p ->
+                                (p.isTool || p.isPatch) && p.stateDisplay !in TERMINAL_PART_STATES
+                            }
                             val isMessageStreaming = msgParts.any { it.id in streamingPartTexts } ||
                                 streamingReasoningPart?.messageId == message.id ||
                                 (!message.isUser && sessionIsRunning &&
                                     (msgParts.isEmpty() || msgParts.any { it.isText || it.isReasoning } ||
-                                        msgParts.any { it.isTool || it.isPatch }))
+                                        hasActiveToolOrPatch))
                             MessageCard(
                                 message = message,
                                 parts = msgParts,
@@ -1315,6 +1318,13 @@ private fun InFlightEmptyLoading(modifier: Modifier = Modifier) {
  * + LRU are retained so the future restore consumer lands on a bounded cache.
  */
 private const val MAX_SAVED_SESSIONS = 30
+
+/**
+ * Terminal part display states: parts in these states are considered complete
+ * (not in-flight). Used by [isMessageStreaming] to filter out completed
+ * tool/patch parts from the streaming check.
+ */
+private val TERMINAL_PART_STATES = setOf("completed", "done", "error")
 
 // ── §Wave5b-Q13: pure helpers for the Restore consumer (lifted out of the
 //     @Composable body so they are JVM-testable without Robolectric). ──────

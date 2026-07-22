@@ -689,32 +689,12 @@ fun ChatScaffold(
             onOpenTodoDialog = { showTodoDialog = true },
             onOpenAgentPicker = { showAgentPicker = true },
             onOpenModelPicker = { showModelPicker = true },
-            // §6 (强制刷新): emit ClearSessionWindowCache THEN
-            // ColdStartReconnect via the shared effect bus (the same path
-            // HostProfileController.resetLocalDataAndResync uses for this
-            // pair). Both are handled in AppCore.dispatchHostEffect:
-            //   - ClearSessionWindowCache → sessionSwitcher.clearSessionWindowCache()
-            //     (drops the in-memory message-window LRU across all sessions)
-            //   - ColdStartReconnect → connectionCoordinator.coldStartReconnect()
-            //     (TOFU-aware: FROZEN while a trust dialog is pending; force
-            //     probe with up to 3 retries — §6.4 needs NO extra throttling
-            //     because this is a user-triggered menu tap and the handler
-            //     self-guards against TOFU races).
-            // Order matches resetLocalDataAndResync (clear BEFORE reconnect so
-            // the reconnect probe does not re-hydrate a stale window).
-            // tryEmitEffect (non-suspend) mirrors the §R18 Phase 3 Wave 1 C类
-            // multi-emit pattern (HostProfileController:915/973).
-            //
-            // §Q11 (2026-07-16): the OLD emit pair cleared the cache but did
-            // NOT reload the current session's message window, so the screen
-            // showed no visible change → the button felt dead. SharedEffectBus
-            // is FIFO, so insert LoadMessages(currentSessionId,
-            // resetLimit=true) BETWEEN clear + reconnect: the cache is already
-            // dropped (LoadMessages can't hit the stale LRU) and it forces a
-            // full server re-fetch of the window (dispatchSessionEffect →
-            // loadMessagesForEffect). The captured chat.currentSessionId is
-            // kept fresh via the remember key above. Draft mode (sid == null)
-            // only clears + reconnects (no window to reload yet).
+            // §6 (强制刷新): emit ClearSessionWindowCache THEN LoadMessages + LoadSessions
+            // (pure data reload — no ColdStartReconnect). Previously this was
+            // ColdStartReconnect which raced/overrode LoadMessages via the
+            // server.connected catch-up. Now it is a clean three-step:
+            // clear cache → reload current session window → reload session list
+            // (titles/metadata resync).
             onForceRefresh = {
                 val bus = chatVM.core.effectBus
                 val sid = chat.currentSessionId

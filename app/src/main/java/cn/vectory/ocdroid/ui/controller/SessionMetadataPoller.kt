@@ -10,7 +10,10 @@ import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -34,14 +37,12 @@ class SessionMetadataPoller @Inject constructor(
     private var pollJob: Job? = null
 
     init {
-        appLifecycleMonitor.isInForeground
-            .onEach { foreground ->
-                if (foreground && store.connectionFlow.value.isConnected) {
-                    startPolling()
-                } else {
-                    stopPolling()
-                }
-            }
+        combine(
+            appLifecycleMonitor.isInForeground,
+            store.connectionFlow.map { it.isConnected },
+        ) { foreground, connected -> foreground && connected }
+            .distinctUntilChanged()
+            .onEach { shouldPoll -> if (shouldPoll) startPolling() else stopPolling() }
             .launchIn(scope)
     }
 
@@ -66,20 +67,22 @@ class SessionMetadataPoller @Inject constructor(
 
         val refreshed = repository.getSessions(MainViewModelTimings.sessionFullLoadLimit)
             .getOrElse {
-                DebugLog.w("SessionMetadataPoller", "getSessions failed: ${it.message}")
+                DebugLog.w(TAG, "getSessions failed: ${it.message}")
                 return
             }
 
-        val slice = store.sessionListFlow.value
-        val merged = mergeRefreshedSessionsPreservingLocalActivity(
-            refreshed = refreshed,
-            local = slice.sessions,
-            currentSessionId = store.chatFlow.value.currentSessionId,
-            openSessionIds = slice.openSessionIds.toSet(),
-            pendingCreateIds = slice.pendingCreateIds,
-        )
+        // Long RTT guard: re-check foreground + connected after network call
+        if (!appLifecycleMonitor.isInForeground.value) return
+        if (!store.connectionFlow.value.isConnected) return
 
         store.mutateSessionList { current ->
+            val merged = mergeRefreshedSessionsPreservingLocalActivity(
+                refreshed = refreshed,
+                local = current.sessions,   // CAS-current, not stale slice
+                currentSessionId = store.chatFlow.value.currentSessionId,
+                openSessionIds = current.openSessionIds.toSet(),
+                pendingCreateIds = current.pendingCreateIds,
+            )
             current.copy(sessions = merged)
         }
     }
