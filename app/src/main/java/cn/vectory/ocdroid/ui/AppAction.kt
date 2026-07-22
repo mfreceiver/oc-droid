@@ -228,6 +228,20 @@ internal sealed interface AppAction {
         /** Wall-clock time captured by the REST success path for timeout sweep. */
         val sweepNow: Long,
     ) : AppAction
+
+    /**
+     * T1a: toggle (or set) a collapsible card's expand state under [key].
+     * Mirrors the pre-T1a `mutateExpandedParts { it + (key to expanded) }`
+     * write 1:1 — including `expanded = false`, which SETS the key to false
+     * rather than removing it (`minus(key)` is intentionally NOT used).
+     */
+    data class PartExpansionToggled(val key: String, val expanded: Boolean) : AppAction
+
+    /**
+     * T1a: clear all collapsible-card expand state (session switch / explicit
+     * reset). Mirrors the pre-T1a `mutateExpandedParts { emptyMap() }` write 1:1.
+     */
+    data object ExpandedPartsCleared : AppAction
 }
 
 /**
@@ -614,6 +628,12 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
             unread = newUnread,
         )
     }
+
+    is AppAction.PartExpansionToggled ->
+        state.copy(expandedParts = state.expandedParts + (action.key to action.expanded))
+
+    AppAction.ExpandedPartsCleared ->
+        state.copy(expandedParts = emptyMap())
 }
 
 /**

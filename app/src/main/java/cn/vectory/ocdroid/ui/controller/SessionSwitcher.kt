@@ -533,8 +533,9 @@ class SessionSwitcher(
         // Switching sessions collapses all cards (#13). Done here so history
         // pagination (loadMore) preserves the user's in-progress expand state.
         // §R18 Phase 3 Wave 1 (C-2): .value = → .update { } (CAS, atomic).
-        // §R18 Phase 4 (P0-9): write via SharedStateStore.mutateExpandedParts.
-        store.mutateExpandedParts { emptyMap() }
+        // T1a: route via AppAction.ExpandedPartsCleared (1:1 with prior
+        // mutateExpandedParts { emptyMap() }).
+        store.dispatch(AppAction.ExpandedPartsCleared)
 
         // ── Step 6: Workdir tracking ───────────────────────────────────────
         // §R18 Phase 2-E step 2: the repository.setCurrentDirectory call was

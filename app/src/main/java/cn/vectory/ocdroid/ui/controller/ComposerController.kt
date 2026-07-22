@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.repository.HostProfileStore
+import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerFileReference
 import cn.vectory.ocdroid.ui.ComposerState
@@ -130,15 +131,17 @@ class ComposerController(
      */
     fun togglePartExpand(key: String, currentValue: Boolean) {
         // §R18 Phase 3 Wave 1 (C-2): .value = → .update { } (CAS, atomic).
-        // §R18 Phase 4 (P0-9): write via SharedStateStore.mutateExpandedParts.
-        store.mutateExpandedParts { it + (key to !currentValue) }
+        // T1a: route via AppAction.PartExpansionToggled (1:1 with prior
+        // mutateExpandedParts { it + (key to !currentValue) }).
+        store.dispatch(AppAction.PartExpansionToggled(key, !currentValue))
     }
 
     /** Reset the collapsible-card expansion state (e.g. on session switch). */
     fun clearExpandedParts() {
         // §R18 Phase 3 Wave 1 (C-2): .value = → .update { } (CAS, atomic).
-        // §R18 Phase 4 (P0-9): write via SharedStateStore.mutateExpandedParts.
-        store.mutateExpandedParts { emptyMap() }
+        // T1a: route via AppAction.ExpandedPartsCleared (1:1 with prior
+        // mutateExpandedParts { emptyMap() }).
+        store.dispatch(AppAction.ExpandedPartsCleared)
     }
 
     // ── File references (Phase 1B / scheme A) ───────────────────────────────
