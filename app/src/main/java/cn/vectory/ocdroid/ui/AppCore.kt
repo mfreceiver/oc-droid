@@ -628,14 +628,15 @@ class AppCore @Inject constructor(
                 // normally — the resetLimit=false refresh re-fetches the missing tail
                 // non-destructively (§preserveUnfetched).
                 if (cached != null && cached.messages.isNotEmpty()) {
-                    store.mutateChat {
-                        it.copy(
+                    // T1b: cached-window inject (4 fields) via ChatWindowHydrated.
+                    store.dispatch(
+                        AppAction.ChatWindowHydrated(
                             messages = cached.messages,
                             partsByMessage = cached.partsByMessage,
                             olderMessagesCursor = cached.olderMessagesCursor,
                             hasMoreMessages = cached.hasMoreMessages,
                         )
-                    }
+                    )
                     // resetLimit=false: keep the cached older history;
                     // loadMessages merges the latest tail non-destructively
                     // (§preserveUnfetched in MessageActions).

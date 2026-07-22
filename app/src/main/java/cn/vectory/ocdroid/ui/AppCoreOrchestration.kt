@@ -573,22 +573,11 @@ internal fun AppCore.performGlobalColdStartRefresh(currentId: String) {
     // checked, so a cold-start refresh could clobber an in-flight loadMore.
     if (store.chatFlow.value.isLoadingMessages || store.chatFlow.value.isLoadingMoreMessages) return
     sessionSwitcher.clearSessionWindowCache()
+    // refreshNonce is NOT a §2.3 target field — leave as a separate writeChat
+    // (minimal blast radius; not folded into ColdStartChatReset).
     writeChat { it.copy(refreshNonce = it.refreshNonce + 1) }
-    writeChat {
-        it.copy(
-            streamingPartTexts = emptyMap(),
-            streamingReasoningPart = null,
-            staleNotice = false,
-            messages = emptyList(),
-            partsByMessage = emptyMap(),
-            olderMessagesCursor = null,
-            // §F3-load-more: cold-start reset 时 hasMore 与 cursor 一致。
-            hasMoreMessages = false,
-            // §history-load-fix: cold-start reset also clears the user loadMore
-            // flag (parallel to the guard above + the list/cursor wipe).
-            isLoadingMoreMessages = false,
-        )
-    }
+    // T1b writeChat-bypass: 8-field cold-start chat reset via dispatch.
+    store.dispatch(AppAction.ColdStartChatReset)
     loadMessagesForEffect(currentId, resetLimit = true)
 }
 

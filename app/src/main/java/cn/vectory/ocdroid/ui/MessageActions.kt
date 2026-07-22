@@ -348,18 +348,19 @@ internal fun launchLoadMessages(
                         val newModel = inferCurrentModel(mergedMessages)
 
                         val beforeMergeSize = srcMessages.size
-                        slices.mutateChat { c ->
-                            c.copy(
+                        // T1b: full 8-field merge in ONE dispatch (no torn intermediate).
+                        // isLoadingMessages=false is unconditional inside the reducer.
+                        slices.store.dispatch(
+                            AppAction.MessagesMerged(
                                 messages = mergedMessages,
                                 partsByMessage = mergedParts,
-                                isLoadingMessages = false,
                                 streamingPartTexts = newStreamingTexts,
                                 streamingReasoningPart = newStreamingReasoning,
                                 olderMessagesCursor = newCursor,
                                 hasMoreMessages = newHasMore,
-                                currentModel = newModel
+                                currentModel = newModel,
                             )
-                        }
+                        )
                         // §chat-ux-batch T8 (B3): the legacy global←per-session
                         // selectedAgentName backfill (sync the settings slice
                         // from SettingsManager.getAgentForSession) was deleted
@@ -549,15 +550,16 @@ internal fun launchLoadMoreMessages(
                         }
                         val newMessagesFinal = newMessages
                         val newPartsFinal = newParts
-                        slices.mutateChat { c ->
-                            c.copy(
+                        // T1b: loadMore prepend; isLoadingMoreMessages=false is
+                        // unconditional inside the reducer.
+                        slices.store.dispatch(
+                            AppAction.MessagesPrepended(
                                 messages = newMessagesFinal,
                                 partsByMessage = newPartsFinal,
                                 olderMessagesCursor = newCursor,
                                 hasMoreMessages = newHasMore,
-                                isLoadingMoreMessages = false
                             )
-                        }
+                        )
                         // §Per-session message cache (write): a loadMore result
                         // expands the cached window — without this, switching away
                         // and back would lose the older page the user just paged

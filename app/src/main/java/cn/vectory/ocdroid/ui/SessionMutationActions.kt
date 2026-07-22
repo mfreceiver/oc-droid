@@ -229,13 +229,8 @@ internal fun launchSetSessionArchived(
                         // directly to preserve the pre-existing field set —
                         // streaming overlays / cursor / model are reset by the
                         // next switchTo's clearSessionData, not here.)
-                        slices.mutateChat {
-                            it.copy(
-                                currentSessionId = null,
-                                messages = emptyList(),
-                                partsByMessage = emptyMap()
-                            )
-                        }
+                        // T1b residual: ChatCleared (3-field clear).
+                        slices.store.dispatch(AppAction.ChatCleared)
                         // §fix-archive-persisted-null (opus review): also clear
                         // the PERSISTED currentSessionId synchronously. The
                         // AppCore collector now persists null too, but it is
@@ -356,7 +351,8 @@ internal fun launchDeleteSession(
                         // #10: no remaining OPEN session — clear currentSessionId
                         // on the chat slice too, otherwise a stale id survives in
                         // the runtime state pointing at a deleted session.
-                        slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                        // T1b residual: ChatCleared (3-field clear).
+                        slices.store.dispatch(AppAction.ChatCleared)
                         // §fix-delete-persisted-null (opus review): clear the
                         // PERSISTED currentSessionId synchronously too (mirrors
                         // closeSession / archive). The async AppCore collector

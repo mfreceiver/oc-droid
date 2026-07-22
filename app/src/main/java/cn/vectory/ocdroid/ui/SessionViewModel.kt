@@ -257,13 +257,8 @@ class SessionViewModel @Inject constructor(
             // Defensive: no open tab may leave a residual currentSessionId
             // (orphan current after non-current last-close, or race residue).
             if (store.chatFlow.value.currentSessionId != null) {
-                store.mutateChat {
-                    it.copy(
-                        currentSessionId = null,
-                        messages = emptyList(),
-                        partsByMessage = emptyMap(),
-                    )
-                }
+                // T1b residual: ChatCleared (3-field clear).
+                store.dispatch(AppAction.ChatCleared)
                 // §fix-close-all-residual: ALSO clear the PERSISTED
                 // currentSessionId synchronously (belt-and-suspenders with the
                 // AppCore null-persistence collector).

@@ -414,63 +414,20 @@ class SessionSwitcher(
         // lambda so the value is stable (a recompute inside the CAS loop of
         // state.update would yield a different id on retry).
         val scrollRequestId = nextScrollRequestId()
-        slices.mutateChat {
-            it.copy(
-                currentSessionId = sessionId,
-                // §Wave5b-Q13: the slot + the current-session flip share ONE
-                // commit so the consumer's first emission observes a
-                // consistent pair (currentSessionId == targetSessionId).
+        // T1b: 15-field compound chat clear + session flip in ONE
+        // SessionSelected dispatch (byte-for-byte with the pre-T1b mutateChat).
+        // Composer remains a separate mutateComposer below (out of scope).
+        // scrollRequestId is captured ONCE outside so the value is stable.
+        store.dispatch(
+            AppAction.SessionSelected(
+                sessionId = sessionId,
                 pendingScrollRequest = PendingScrollRequest(
                     requestId = scrollRequestId,
                     targetSessionId = sessionId,
                     behavior = behavior,
                 ),
-                messages = emptyList(),
-                partsByMessage = emptyMap(),
-                streamingPartTexts = emptyMap(),
-                streamingReasoningPart = null,
-                // §slimapi-client-v1 §G6 (Task 16 round-2): clear per-part
-                // expand states atomically with the transcript clear. Without
-                // this, switching while a request is in flight leaves old keys
-                // permanently Loading/Failed after the completion is dropped.
-                partExpandStates = emptyMap(),
-                staleNotice = false,
-                // §F3-load-more: 切换会话时显式重置 cursor/hasMore，保证 chat slice
-                // 始终内部一致（cursor=null ∧ hasMore=false），由随后的
-                // launchLoadMessages(resetLimit=true) 用服务端 X-Next-Cursor 重建。
-                olderMessagesCursor = null,
-                hasMoreMessages = false,
-                // §history-load-fix: drop the outgoing session's load flags so a
-                // stale in-flight loadMessages/catchUp/loadMore (if any) does not
-                // leak its spinner state into the newly-selected session.
-                // (round-4 gpt-2 🔴: isLoadingMessages MUST reset here too — the
-                // session-guarded finally in launchLoadMessages/catchUp declines
-                // to clear on a session mismatch, so without this reset a
-                // switch-during-load would leave isLoadingMessages stuck true and
-                // coalesce away the new session's loads — a permanent stuck.)
-                isLoadingMessages = false,
-                isLoadingMoreMessages = false,
-                // §model-selection (V1-per-prompt): drop the outgoing session's
-                // currentModel so any synchronous reader can't leak it across
-                // tabs during the window before launchLoadMessages completes
-                // for the newly-selected session. §chat-ux-batch T8 (B3): the
-                // authoritative per-session value is no longer persisted
-                // (setModelForSession/getModelForSession deleted); launchLoadMessages
-                // re-infers it from the latest assistant message (the new
-                // source). The per-send authority is the TRANSIENT pendingModel
-                // (cleared below) per T7's contract.
-                currentModel = null,
-                // §chat-ux-batch T7 (B2): clear the TRANSIENT pending picks on
-                // session switch — they are per-session by contract ("no
-                // cross-session carry"). Without this, an unfinished pending
-                // pick from session A would leak into session B during the
-                // window before the new session's transcript loads. The newly-
-                // selected session resolves its own `pending ?: infer` from
-                // its own ChatState snapshot (pending defaults null).
-                pendingAgent = null,
-                pendingModel = null,
             )
-        }
+        )
         // Restore the selected session's draft into the composer slice.
         // §1B-FIX (I4): fileReferences are NOT persisted (the F.4
         // writer only persists the textual `File: <path>` line via

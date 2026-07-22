@@ -406,7 +406,7 @@ internal fun launchLoadSessions(
                     currentSessionId == null &&
                         slices.composer.value.draftWorkdir == null &&
                         currentOpenIds.isEmpty() -> {
-                        slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                        slices.store.dispatch(AppAction.ChatCleared)
                     }
                     currentSessionId == null &&
                         slices.composer.value.draftWorkdir == null &&
@@ -420,7 +420,7 @@ internal fun launchLoadSessions(
                         if (candidateId != null) {
                             onSelectSession(candidateId)
                         } else {
-                            slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                            slices.store.dispatch(AppAction.ChatCleared)
                         }
                     }
                     // §fix-close-all-residual: null currentSessionId on a NON-
@@ -428,7 +428,7 @@ internal fun launchLoadSessions(
                     // empty rather than inventing a session.
                     currentSessionId == null &&
                         slices.composer.value.draftWorkdir == null -> {
-                        slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                        slices.store.dispatch(AppAction.ChatCleared)
                     }
                     // currentId is set: keep it. Even when the session is
                     // temporarily absent from the refreshed list (e.g. just
@@ -447,7 +447,7 @@ internal fun launchLoadSessions(
                         onLoadMessages(currentSessionId)
                     }
                     else -> {
-                        slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                        slices.store.dispatch(AppAction.ChatCleared)
                     }
                 }
             }
@@ -573,7 +573,7 @@ internal fun launchLoadMoreSessions(
                     currentId == null &&
                         slices.composer.value.draftWorkdir == null &&
                         currentOpenIds.isEmpty() -> {
-                        slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                        slices.store.dispatch(AppAction.ChatCleared)
                     }
                     currentId == null &&
                         slices.composer.value.draftWorkdir == null &&
@@ -587,14 +587,14 @@ internal fun launchLoadMoreSessions(
                         if (candidateId != null) {
                             onSelectSession(candidateId)
                         } else {
-                            slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                            slices.store.dispatch(AppAction.ChatCleared)
                         }
                     }
                     // A non-null currentId is never silently replaced by
                     // refreshedSessions.first(): tolerate the session even when
                     // it is temporarily absent from the refreshed list. #10.
                     currentId != null -> Unit
-                    else -> slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                    else -> slices.store.dispatch(AppAction.ChatCleared)
                 }
             }
             .onFailure { error ->

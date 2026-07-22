@@ -1053,45 +1053,18 @@ class HostProfileController(
         effects.tryEmitEffect(ControllerEffect.ClearSessionWindowCache)
         // 4. Tear down SSE + reset catch-up flags.
         effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
-        // 5. Reset slices to defaults, preserving the host slice (kept above)
-        //    and the chat slice's slice-only fields (isCompacting /
-        //    compactStartedAt / refreshNonce — use .copy() so they survive).
-        //    Equivalent to the pre-migration `AppState(hostProfiles,
-        //    currentHostProfileId)` full-reset: every AppState-represented
-        //    field returns to its default.
-        slices.mutateChat { c ->
-            c.copy(
-                currentSessionId = null,
-                messages = emptyList(),
-                partsByMessage = emptyMap(),
-                streamingPartTexts = emptyMap(),
-                streamingReasoningPart = null,
-                olderMessagesCursor = null,
-                // §F3-load-more: reset 时 hasMore 与 cursor 保持一致（均"无更多"）。
-                hasMoreMessages = false,
-                isLoadingMessages = false,
-                // §history-load-fix: reset the loadMore flag alongside the
-                // background-reload flag (parallel reset point).
-                isLoadingMoreMessages = false,
-                staleNotice = false,
-                currentModel = null,
-                // §chat-ux-batch T7 (B2): clear the TRANSIENT pending picks on
-                // host-switch reset — they are per-session and must NOT carry
-                // across hosts ("no cross-session carry" contract).
-                pendingAgent = null,
-                pendingModel = null,
+        // 5. T1b residual: chat + sessionList + unread via HostStatePurged
+        //    (superset of the prior mutateChat field set + epoch bump —
+        //    deliberate §fix-leak-window / ABA improvement). Connection /
+        //    traffic / composer / file / settings still need the full
+        //    reconnect defaults (isConnecting / Reconnecting / input wipe)
+        //    which HostStatePurged does not cover — those stay as explicit
+        //    slice resets below (effects stay at the call site).
+        slices.store.dispatch(
+            cn.vectory.ocdroid.ui.AppAction.HostStatePurged(
+                preserveServerGroupData = false,
             )
-        }
-        // §gpter-residual (oracle must-fix): reset every sessionList field to
-        // its default, but BUMP the completeness epoch from the previous value
-        // instead of resetting it to 0. A reset-to-0 creates an ABA window
-        // where a hydration captured before this reset (epoch == 0 on a fresh
-        // app start) could commit afterward and re-certify a stale root. The
-        // monotonic bump makes the epoch guard drop it fail-closed.
-        slices.mutateSessionList { previous ->
-            SessionListState().copy(completenessEpoch = previous.completenessEpoch + 1L)
-        }
-        slices.mutateUnread { UnreadState() }
+        )
         // 6. Reset the connection + traffic slices to "reconnecting / zeroed".
         //    Defaults already cover tunnelActivationState=Idle; we override
         //    isConnecting + connectionPhase to signal the in-flight reconnect.
@@ -1114,28 +1087,14 @@ class HostProfileController(
         settingsManager.clearAllLocalData()
         trafficTracker.reset()
         effects.tryEmitEffect(ControllerEffect.ClearSessionWindowCache)
-        slices.mutateChat { c ->
-            c.copy(
-                currentSessionId = null,
-                messages = emptyList(),
-                partsByMessage = emptyMap(),
-                streamingPartTexts = emptyMap(),
-                streamingReasoningPart = null,
-                olderMessagesCursor = null,
-                hasMoreMessages = false,
-                isLoadingMessages = false,
-                isLoadingMoreMessages = false,
-                staleNotice = false,
-                currentModel = null,
-                // §chat-ux-batch T7 (B2): clear the TRANSIENT pending picks on
-                // host-switch reset — per-session contract ("no cross-session
-                // carry").
-                pendingAgent = null,
-                pendingModel = null,
+        // T1b residual: same HostStatePurged path as resetLocalDataAndResync.
+        // HostStatePurged bumps completenessEpoch (fixes the prior ABA bug
+        // where this branch reset epoch to 0 via SessionListState()).
+        slices.store.dispatch(
+            cn.vectory.ocdroid.ui.AppAction.HostStatePurged(
+                preserveServerGroupData = false,
             )
-        }
-        slices.mutateSessionList { SessionListState() }
-        slices.mutateUnread { UnreadState() }
+        )
         slices.mutateConnection {
             ConnectionState(isConnecting = true, connectionPhase = ConnectionPhase.Reconnecting)
         }

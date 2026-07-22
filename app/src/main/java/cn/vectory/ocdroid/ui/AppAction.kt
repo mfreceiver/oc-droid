@@ -1,11 +1,26 @@
 package cn.vectory.ocdroid.ui
 
+import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.data.model.MessageWithParts
+import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.ui.chat.ExpandPartsOutcome
 import cn.vectory.ocdroid.ui.controller.applyArchiveEviction
 import cn.vectory.ocdroid.ui.controller.applyArchivedChatClear
+import cn.vectory.ocdroid.ui.controller.applyMessageUpdated
+import cn.vectory.ocdroid.ui.controller.applyPartCreatedPlaceholder
+import cn.vectory.ocdroid.ui.controller.applyPartDeltaLeadingEdge
+import cn.vectory.ocdroid.ui.controller.applyPartFullTextLeadingEdge
+import cn.vectory.ocdroid.ui.controller.appendDeltaBuffer
 import cn.vectory.ocdroid.ui.controller.cleanScrollStateForSubtree
+import cn.vectory.ocdroid.ui.controller.clearAllCoalesceBuffers
+import cn.vectory.ocdroid.ui.controller.clearCoalesceBufferForPart
+import cn.vectory.ocdroid.ui.controller.flushCoalesceBufferForPart
+import cn.vectory.ocdroid.ui.controller.markFlushPending
+import cn.vectory.ocdroid.ui.controller.mergeSlimMessages
 import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.ui.controller.removeSessions
+import cn.vectory.ocdroid.ui.controller.replaceFullTextBuffer
 import cn.vectory.ocdroid.ui.controller.subtreeIds
 
 /**
@@ -242,6 +257,190 @@ internal sealed interface AppAction {
      * reset). Mirrors the pre-T1a `mutateExpandedParts { emptyMap() }` write 1:1.
      */
     data object ExpandedPartsCleared : AppAction
+
+    // ── T1b: streaming-path ownership (streamingPartTexts family) ───────────
+
+    /**
+     * T1b two-phase placeholder phase 1 (SSC:1362). Injects a typed Part into
+     * partsByMessage + sets streamingReasoningPart when type is reasoning.
+     * Does NOT write streamingPartTexts (phase 2 does that).
+     */
+    data class PartPlaceholderEnsured(
+        val partType: String,
+        val partId: String,
+        val messageId: String,
+        val sessionId: String,
+    ) : AppAction
+
+    /**
+     * T1b two-phase leading edge — fullText (SSC:1397). REPLACE into
+     * streamingPartTexts + streamingReasoningPart + partsByMessage placeholder
+     * + pendingFlushPartIds. Caller still schedules [scheduleDeltaFlush].
+     */
+    data class PartFullTextReceived(
+        val partId: String,
+        val fullText: String,
+        val partType: String,
+        val messageId: String,
+        val sessionId: String,
+    ) : AppAction
+
+    /**
+     * T1b two-phase leading edge — delta (SSC:1436 / :1539). APPEND into
+     * streamingPartTexts + streamingReasoningPart + partsByMessage placeholder
+     * + pendingFlushPartIds. Uses the 5-arg [applyPartDeltaLeadingEdge].
+     */
+    data class PartDeltaReceived(
+        val partId: String,
+        val delta: String,
+        val partType: String,
+        val messageId: String,
+        val sessionId: String,
+    ) : AppAction
+
+    /** T1b trailing coalesce fullText REPLACE (SSC:1421). */
+    data class FullTextBuffered(val partId: String, val text: String) : AppAction
+
+    /** T1b trailing coalesce delta APPEND (SSC:1459 / :1552). */
+    data class DeltaBuffered(val partId: String, val delta: String) : AppAction
+
+    /**
+     * T1b flush buffered delta/fullText into streamingPartTexts then clear the
+     * 3 coalesce entries for [partId] (SSC:1850).
+     */
+    data class CoalesceFlushedForPart(val partId: String) : AppAction
+
+    /**
+     * T1b drop [partId]'s buffers WITHOUT flushing (SSC:1864). Overlay preserved.
+     */
+    data class CoalesceClearedForPart(val partId: String) : AppAction
+
+    /**
+     * T1b clear ALL coalesce buffers (SSC:1877 clearDeltaBuffers). Does NOT
+     * clear streamingPartTexts / streamingReasoningPart.
+     */
+    data object CoalesceBuffersCleared : AppAction
+
+    // ── T1b: conversation-path ownership (messages + partsByMessage) ───────
+
+    /**
+     * T1b message.updated patch-if-found / insert-if-absent (SSC:1270).
+     * Reducer: [applyMessageUpdated]. Found flag for DebugLog / cache-append
+     * side-effects stays at the call site (computed from prior snapshot).
+     */
+    data class MessageUpdatedApplied(val message: Message) : AppAction
+
+    /**
+     * T1b slim reconcile merge (SSC:3307 mergeSlimMessagesIntoChat).
+     * Reducer: [mergeSlimMessages] — patch-or-append message + replace parts.
+     */
+    data class SlimMessagesMerged(val items: List<MessageWithParts>) : AppAction
+
+    /**
+     * T1b MessageActions:351 full field-set merge. Writes 8 fields in ONE
+     * dispatch (messages + partsByMessage + isLoadingMessages=false +
+     * streamingPartTexts + streamingReasoningPart + olderMessagesCursor +
+     * hasMoreMessages + currentModel). isLoadingMessages is unconditionally
+     * false (not carried on the action).
+     */
+    data class MessagesMerged(
+        val messages: List<Message>,
+        val partsByMessage: Map<String, List<Part>>,
+        val streamingPartTexts: Map<String, String>,
+        val streamingReasoningPart: Part?,
+        val olderMessagesCursor: String?,
+        val hasMoreMessages: Boolean,
+        val currentModel: Message.ModelInfo?,
+    ) : AppAction
+
+    /**
+     * T1b MessageActions:552 loadMore prepend. isLoadingMoreMessages is
+     * unconditionally false (not carried on the action).
+     */
+    data class MessagesPrepended(
+        val messages: List<Message>,
+        val partsByMessage: Map<String, List<Part>>,
+        val olderMessagesCursor: String?,
+        val hasMoreMessages: Boolean,
+    ) : AppAction
+
+    /**
+     * T1b AppCore:631 VerifyAndHydrate cached-window inject (4 fields).
+     */
+    data class ChatWindowHydrated(
+        val messages: List<Message>,
+        val partsByMessage: Map<String, List<Part>>,
+        val olderMessagesCursor: String?,
+        val hasMoreMessages: Boolean,
+    ) : AppAction
+
+    /**
+     * T1b SessionSwitcher.switchTo compound chat clear (15 field writes in
+     * ONE dispatch). Composer stays on a separate mutateComposer at the
+     * call site.
+     */
+    data class SessionSelected(
+        val sessionId: String,
+        val pendingScrollRequest: PendingScrollRequest,
+    ) : AppAction
+
+    /**
+     * T1b ClearLocal arm (SSC:2794). Clears messages + partsByMessage ONLY
+     * (streaming overlay / cursor / model preserved).
+     */
+    data object SlimChatContentCleared : AppAction
+
+    // ── T1b residual: bypass write sites on §2.3 target fields ─────────────
+
+    /**
+     * T1b residual: 3-field chat clear used by SessionListActions /
+     * SessionMutationActions / SessionViewModel (close / archive / empty-tabs).
+     * Distinct from [SlimChatContentCleared] (preserves currentSessionId) and
+     * [HostStatePurged] (clears streaming / cursor / model too).
+     */
+    data object ChatCleared : AppAction
+
+    /**
+     * T1b residual: SSC session.error SSE — attach [error] to the LAST
+     * assistant message. No-op when no assistant exists or it already has an
+     * error (byte-for-byte with the pre-residual mutateChat at SSC:1706-1712).
+     */
+    data class LastAssistantErrorAttached(val error: Message.MessageError) : AppAction
+
+    /**
+     * T1b residual: CatchUpActions probe-page merge. 4-field set only
+     * (messages + partsByMessage + isLoadingMessages=false + staleNotice=false).
+     * Distinct from [MessagesMerged] (8 fields incl. streaming/cursor/model).
+     */
+    data class CatchUpMessagesMerged(
+        val messages: List<Message>,
+        val partsByMessage: Map<String, List<Part>>,
+    ) : AppAction
+
+    // ── T1b writeChat-bypass: last two target-field writeChat sites ────────
+
+    /**
+     * T1b writeChat-bypass: AppCoreOrchestration.performGlobalColdStartRefresh
+     * 8-field chat reset (streaming + content + cursor + loadMore flag).
+     * Does NOT clear currentSessionId / currentModel / pending* /
+     * partExpandStates / isLoadingMessages. refreshNonce++ stays a separate
+     * writeChat at the call site (non-target).
+     */
+    data object ColdStartChatReset : AppAction
+
+    /**
+     * T1b ExpandedParts CAS fix (Strategy 2): expandParts completion commit.
+     * Carries the raw [outcome] + captured [local] (not pre-merged maps).
+     * [reduce] runs [ChatState.reconcileExpandedPartsContent] against the
+     * **latest** chat inside `state.update` CAS — concurrent SSE updates to
+     * unrelated owners are preserved. fp guard stays at the call site;
+     * session guard is inside the pure reconcile.
+     */
+    data class ExpandedPartsContentCommitted(
+        val outcome: ExpandPartsOutcome,
+        val local: List<MessageWithParts>,
+        val expectedSessionId: String,
+    ) : AppAction
 }
 
 /**
@@ -634,6 +833,193 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
 
     AppAction.ExpandedPartsCleared ->
         state.copy(expandedParts = emptyMap())
+
+    // ── T1b streaming reduce (1:1 pure-fn delegates) ───────────────────────
+
+    is AppAction.PartPlaceholderEnsured -> state.copy(
+        chat = state.chat.applyPartCreatedPlaceholder(
+            action.partType, action.partId, action.messageId, action.sessionId,
+        ).first,
+    )
+
+    is AppAction.PartFullTextReceived -> state.copy(
+        // pId = partId (same key used by the SSC leading-edge call site).
+        chat = state.chat.applyPartFullTextLeadingEdge(
+            partId = action.partId,
+            fullText = action.fullText,
+            partType = action.partType,
+            pId = action.partId,
+            msgId = action.messageId,
+            sessionId = action.sessionId,
+        ).first.markFlushPending(action.partId).first,
+    )
+
+    is AppAction.PartDeltaReceived -> state.copy(
+        // 5-arg overload (knownType + msgId + sessionId); NOT the 6-arg
+        // part.updated variant. Matches SSC:1539 + the T1b freeze test.
+        chat = state.chat.applyPartDeltaLeadingEdge(
+            partId = action.partId,
+            delta = action.delta,
+            knownType = action.partType,
+            msgId = action.messageId,
+            sessionId = action.sessionId,
+        ).first.markFlushPending(action.partId).first,
+    )
+
+    is AppAction.FullTextBuffered -> state.copy(
+        chat = state.chat.replaceFullTextBuffer(action.partId, action.text).first,
+    )
+
+    is AppAction.DeltaBuffered -> state.copy(
+        chat = state.chat.appendDeltaBuffer(action.partId, action.delta).first,
+    )
+
+    is AppAction.CoalesceFlushedForPart -> state.copy(
+        chat = state.chat.flushCoalesceBufferForPart(action.partId).first,
+    )
+
+    is AppAction.CoalesceClearedForPart -> state.copy(
+        chat = state.chat.clearCoalesceBufferForPart(action.partId).first,
+    )
+
+    AppAction.CoalesceBuffersCleared -> state.copy(
+        chat = state.chat.clearAllCoalesceBuffers().first,
+    )
+
+    // ── T1b conversation reduce (1:1 pure-fn / field-set delegates) ────────
+
+    is AppAction.MessageUpdatedApplied -> state.copy(
+        chat = state.chat.applyMessageUpdated(action.message).first,
+    )
+
+    is AppAction.SlimMessagesMerged -> state.copy(
+        chat = state.chat.mergeSlimMessages(action.items),
+    )
+
+    is AppAction.MessagesMerged -> state.copy(
+        chat = state.chat.copy(
+            messages = action.messages,
+            partsByMessage = action.partsByMessage,
+            isLoadingMessages = false,
+            streamingPartTexts = action.streamingPartTexts,
+            streamingReasoningPart = action.streamingReasoningPart,
+            olderMessagesCursor = action.olderMessagesCursor,
+            hasMoreMessages = action.hasMoreMessages,
+            currentModel = action.currentModel,
+        ),
+    )
+
+    is AppAction.MessagesPrepended -> state.copy(
+        chat = state.chat.copy(
+            messages = action.messages,
+            partsByMessage = action.partsByMessage,
+            olderMessagesCursor = action.olderMessagesCursor,
+            hasMoreMessages = action.hasMoreMessages,
+            isLoadingMoreMessages = false,
+        ),
+    )
+
+    is AppAction.ChatWindowHydrated -> state.copy(
+        chat = state.chat.copy(
+            messages = action.messages,
+            partsByMessage = action.partsByMessage,
+            olderMessagesCursor = action.olderMessagesCursor,
+            hasMoreMessages = action.hasMoreMessages,
+        ),
+    )
+
+    is AppAction.SessionSelected -> state.copy(
+        // SessionSwitcher.kt:417-472 field set (15 writes) in ONE dispatch.
+        chat = state.chat.copy(
+            currentSessionId = action.sessionId,
+            pendingScrollRequest = action.pendingScrollRequest,
+            messages = emptyList(),
+            partsByMessage = emptyMap(),
+            streamingPartTexts = emptyMap(),
+            streamingReasoningPart = null,
+            partExpandStates = emptyMap(),
+            staleNotice = false,
+            olderMessagesCursor = null,
+            hasMoreMessages = false,
+            isLoadingMessages = false,
+            isLoadingMoreMessages = false,
+            currentModel = null,
+            pendingAgent = null,
+            pendingModel = null,
+        ),
+    )
+
+    AppAction.SlimChatContentCleared -> state.copy(
+        // ClearLocal: messages + partsByMessage ONLY (streaming preserved).
+        chat = state.chat.copy(
+            messages = emptyList(),
+            partsByMessage = emptyMap(),
+        ),
+    )
+
+    // ── T1b residual reduce ────────────────────────────────────────────────
+
+    AppAction.ChatCleared -> state.copy(
+        // 3-field clear only — streaming / cursor / model / staleNotice survive.
+        chat = state.chat.copy(
+            currentSessionId = null,
+            messages = emptyList(),
+            partsByMessage = emptyMap(),
+        ),
+    )
+
+    is AppAction.LastAssistantErrorAttached -> {
+        // SSC:1706-1712 1:1 — attach to last assistant; no-op if absent or
+        // already has an error.
+        val last = state.chat.messages.lastOrNull { it.isAssistant }
+        if (last == null || last.error != null) {
+            state
+        } else {
+            state.copy(
+                chat = state.chat.copy(
+                    messages = state.chat.messages.map { m ->
+                        if (m.id == last.id) m.copy(error = action.error) else m
+                    },
+                ),
+            )
+        }
+    }
+
+    is AppAction.CatchUpMessagesMerged -> state.copy(
+        // CatchUpActions:147-154 4-field merge (not MessagesMerged's 8).
+        chat = state.chat.copy(
+            messages = action.messages,
+            partsByMessage = action.partsByMessage,
+            isLoadingMessages = false,
+            staleNotice = false,
+        ),
+    )
+
+    // ── T1b writeChat-bypass reduce ────────────────────────────────────────
+
+    AppAction.ColdStartChatReset -> state.copy(
+        // AppCoreOrchestration:577-590 8-field reset (1:1).
+        chat = state.chat.copy(
+            streamingPartTexts = emptyMap(),
+            streamingReasoningPart = null,
+            staleNotice = false,
+            messages = emptyList(),
+            partsByMessage = emptyMap(),
+            olderMessagesCursor = null,
+            hasMoreMessages = false,
+            isLoadingMoreMessages = false,
+        ),
+    )
+
+    is AppAction.ExpandedPartsContentCommitted -> state.copy(
+        // Strategy 2: pure reconcile against latest chat (CAS via state.update).
+        // Session guard + merge live inside reconcileExpandedPartsContent.
+        chat = state.chat.reconcileExpandedPartsContent(
+            outcome = action.outcome,
+            local = action.local,
+            expectedSessionId = action.expectedSessionId,
+        ),
+    )
 }
 
 /**

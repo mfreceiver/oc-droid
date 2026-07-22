@@ -1266,12 +1266,13 @@ class SessionSyncCoordinator(
                     // second `.none{}` scan). When found, patch in place;
                     // when NOT found, append (insert) the new message at the
                     // tail (oldest-first list).
-                    var found = false
-                    slices.mutateChat { c ->
-                        val (next, wasFound) = c.applyMessageUpdated(updated)
-                        found = wasFound
-                        next
-                    }
+                    // T1b: found is derived from the pre-dispatch snapshot so
+                    // DebugLog / cache-append side-effects stay at the call site
+                    // (the reducer only applies the pure transform).
+                    val found = slices.chat.value.messages.any { it.id == updated.id }
+                    slices.store.dispatch(
+                        cn.vectory.ocdroid.ui.AppAction.MessageUpdatedApplied(updated)
+                    )
                     if (found) {
                         DebugLog.d("Sync", "message.updated: patched")
                     } else {
@@ -1359,9 +1360,17 @@ class SessionSyncCoordinator(
                             val existingParts = slices.chat.value.partsByMessage[msgId]
                             val hasCorrectType = existingParts?.any { it.id == pId && it.type == pType } == true
                             if (!hasCorrectType) {
-                                slices.mutateChat { c ->
-                                    c.applyPartCreatedPlaceholder(pType, pId, msgId, deltaEvent.sessionId).first
-                                }
+                                // T1b: two-phase phase 1 — separate dispatch so
+                                // collectors observe the placeholder intermediate
+                                // before phase 2 leading-edge writes streaming text.
+                                slices.store.dispatch(
+                                    cn.vectory.ocdroid.ui.AppAction.PartPlaceholderEnsured(
+                                        partType = pType,
+                                        partId = pId,
+                                        messageId = msgId,
+                                        sessionId = deltaEvent.sessionId,
+                                    )
+                                )
                                 // §streaming-flicker-diagnosis (Top1): the placeholder
                                 // Part (text=null) is now in partsByMessage but the first
                                 // delta/fullText has NOT yet been staged into
@@ -1394,16 +1403,17 @@ class SessionSyncCoordinator(
                             // authoritative accumulated text, only the latest value
                             // matters) and flush in one state write.
                             if (flushJobs[key]?.isActive != true) {
-                                slices.mutateChat { c ->
-                                    c.applyPartFullTextLeadingEdge(
+                                // T1b: two-phase phase 2 fullText leading edge.
+                                // scheduleDeltaFlush stays at the call site (side effect).
+                                slices.store.dispatch(
+                                    cn.vectory.ocdroid.ui.AppAction.PartFullTextReceived(
                                         partId = key,
                                         fullText = fullText,
                                         partType = deltaEvent.partType,
-                                        pId = pId,
-                                        msgId = msgId,
-                                        sessionId = deltaEvent.sessionId
-                                    ).first.markFlushPending(key).first
-                                }
+                                        messageId = msgId,
+                                        sessionId = deltaEvent.sessionId,
+                                    )
+                                )
                                 scheduleDeltaFlush(key)
                                 // §streaming-flicker-diagnosis (Top1): first frame
                                 // (fullText) staged into streamingPartTexts — closes
@@ -1418,7 +1428,9 @@ class SessionSyncCoordinator(
                                 // writes the buffered fullText in one state write.
                                 // streamingReasoningPart was already set on this
                                 // part's leading edge.
-                                slices.mutateChat { c -> c.replaceFullTextBuffer(key, fullText).first }
+                                slices.store.dispatch(
+                                    cn.vectory.ocdroid.ui.AppAction.FullTextBuffered(key, fullText)
+                                )
                             }
                         } else if (!delta.isNullOrBlank()) {
                             // §flicker-fix: apply the same leading-edge +
@@ -1433,16 +1445,18 @@ class SessionSyncCoordinator(
                             // once; subsequent deltas within the window buffer
                             // into deltaBuffer and flush in one batch.
                             if (flushJobs[key]?.isActive != true) {
-                                slices.mutateChat { c ->
-                                    c.applyPartDeltaLeadingEdge(
+                                // T1b: two-phase phase 2 delta leading edge
+                                // (message.part.updated delta branch).
+                                // scheduleDeltaFlush stays at the call site.
+                                slices.store.dispatch(
+                                    cn.vectory.ocdroid.ui.AppAction.PartDeltaReceived(
                                         partId = key,
                                         delta = delta,
                                         partType = deltaEvent.partType,
-                                        pId = pId,
-                                        msgId = msgId,
-                                        sessionId = deltaEvent.sessionId
-                                    ).first.markFlushPending(key).first
-                                }
+                                        messageId = msgId,
+                                        sessionId = deltaEvent.sessionId,
+                                    )
+                                )
                                 scheduleDeltaFlush(key)
                                 // §streaming-flicker-diagnosis (Top1): first frame
                                 // (delta) staged into streamingPartTexts — closes
@@ -1456,7 +1470,9 @@ class SessionSyncCoordinator(
                                 // DELTA_COALESCE_MS flush appends the batch in
                                 // one state write. streamingReasoningPart was
                                 // already set on this part's leading edge.
-                                slices.mutateChat { c -> c.appendDeltaBuffer(key, delta).first }
+                                slices.store.dispatch(
+                                    cn.vectory.ocdroid.ui.AppAction.DeltaBuffered(key, delta)
+                                )
                             }
                         }
                         // Else: ids present + both text & delta null/blank =
@@ -1536,20 +1552,24 @@ class SessionSyncCoordinator(
                     // from "msgId:partId" to partId, matching UI consumers).
                     if (flushJobs[key]?.isActive != true) {
                         // Leading edge: write now, then open the coalesce window.
-                        slices.mutateChat { c ->
-                            c.applyPartDeltaLeadingEdge(
+                        // T1b: PartDeltaReceived + scheduleDeltaFlush (side effect
+                        // stays at call site).
+                        slices.store.dispatch(
+                            cn.vectory.ocdroid.ui.AppAction.PartDeltaReceived(
                                 partId = key,
                                 delta = delta,
-                                knownType = knownType,
-                                msgId = msgId,
-                                sessionId = sessionId
-                            ).first.markFlushPending(key).first
-                        }
+                                partType = knownType,
+                                messageId = msgId,
+                                sessionId = sessionId,
+                            )
+                        )
                         scheduleDeltaFlush(key)
                     } else {
                         // Trailing coalesce: buffer; the pending DELTA_COALESCE_MS
                         // flush will append the batch in one state write.
-                        slices.mutateChat { c -> c.appendDeltaBuffer(key, delta).first }
+                        slices.store.dispatch(
+                            cn.vectory.ocdroid.ui.AppAction.DeltaBuffered(key, delta)
+                        )
                     }
                 }
             }
@@ -1683,13 +1703,13 @@ class SessionSyncCoordinator(
                 val sid = event.payload.getString("sessionID")
                     ?: (props?.get("sessionID") as? kotlinx.serialization.json.JsonPrimitive)?.content
                 if (sid != null && sid == slices.chat.value.currentSessionId) {
-                    slices.mutateChat { c ->
-                        val lastAssistant = c.messages.lastOrNull { it.isAssistant }
-                        if (lastAssistant == null || lastAssistant.error != null) c
-                        else c.copy(messages = c.messages.map { m ->
-                            if (m.id == lastAssistant.id) m.copy(error = Message.MessageError(name = name, data = data)) else m
-                        })
-                    }
+                    // T1b residual: LastAssistantErrorAttached (no-op if no
+                    // assistant / already has error — handled in reduce).
+                    slices.store.dispatch(
+                        cn.vectory.ocdroid.ui.AppAction.LastAssistantErrorAttached(
+                            Message.MessageError(name = name, data = data),
+                        )
+                    )
                 }
                 // T12-C1 (slim-only, sid-required): durable banner. The map
                 // write is gated behind isSlimMode() (I2 — legacy non-slim
@@ -1847,7 +1867,8 @@ class SessionSyncCoordinator(
      */
     private fun flushDeltaBuffer(partId: String) {
         flushJobs.remove(partId)
-        slices.mutateChat { c -> c.flushCoalesceBufferForPart(partId).first }
+        // T1b: flushJobs lifecycle stays here; state transform via dispatch.
+        slices.store.dispatch(cn.vectory.ocdroid.ui.AppAction.CoalesceFlushedForPart(partId))
     }
 
     /**
@@ -1861,7 +1882,8 @@ class SessionSyncCoordinator(
     @Suppress("unused")
     private fun cancelDeltaFlush(partId: String) {
         flushJobs.remove(partId)?.cancel()
-        slices.mutateChat { c -> c.clearCoalesceBufferForPart(partId).first }
+        // T1b: flushJobs cancel stays here; buffer drop via dispatch.
+        slices.store.dispatch(cn.vectory.ocdroid.ui.AppAction.CoalesceClearedForPart(partId))
     }
 
     /**
@@ -1874,7 +1896,8 @@ class SessionSyncCoordinator(
     fun clearDeltaBuffers() {
         flushJobs.values.forEach { it.cancel() }
         flushJobs.clear()
-        slices.mutateChat { c -> c.clearAllCoalesceBuffers().first }
+        // T1b: Job cancel stays here; coalesce buffer clear via dispatch.
+        slices.store.dispatch(cn.vectory.ocdroid.ui.AppAction.CoalesceBuffersCleared)
     }
 
     // ── §R18 Phase 3 Wave 1 (P1-9): multi-workdir pending questions fan-out ──
@@ -2791,12 +2814,9 @@ class SessionSyncCoordinator(
                 val sid = result.sid
 
                 if (liveSessionId == sid) {
-                    slices.mutateChat {
-                        it.copy(
-                            messages = emptyList(),
-                            partsByMessage = emptyMap(),
-                        )
-                    }
+                    // T1b: content-only wipe (messages + partsByMessage);
+                    // streaming overlay / cursor / model preserved.
+                    slices.store.dispatch(cn.vectory.ocdroid.ui.AppAction.SlimChatContentCleared)
                 }
 
                 effects.tryEmitEffect(
@@ -3303,29 +3323,13 @@ class SessionSyncCoordinator(
      * Cluster A / Phase 2: merge [MessageWithParts] skeletons into the open
      * chat slice by messageID (patch-if-found + insert-if-absent for messages;
      * parts map overwritten per fetched id). Mirrors message.updated fold.
+     *
+     * T1b: routes through [AppAction.SlimMessagesMerged] → [mergeSlimMessages]
+     * (1:1 with the pre-T1b private mutateChat loop).
      */
     private fun mergeSlimMessagesIntoChat(items: List<MessageWithParts>) {
         if (items.isEmpty()) return
-        slices.mutateChat { chat ->
-            var messages = chat.messages
-            var partsByMessage = chat.partsByMessage
-            for (item in items) {
-                val updated = item.info
-                if (updated.id.isEmpty()) continue
-                var found = false
-                messages = messages.map {
-                    if (it.id == updated.id) {
-                        found = true
-                        updated
-                    } else it
-                }
-                if (!found) messages = messages + updated
-                if (item.parts.isNotEmpty()) {
-                    partsByMessage = partsByMessage + (updated.id to item.parts)
-                }
-            }
-            chat.copy(messages = messages, partsByMessage = partsByMessage)
-        }
+        slices.store.dispatch(cn.vectory.ocdroid.ui.AppAction.SlimMessagesMerged(items))
     }
 
     /**
@@ -3886,6 +3890,33 @@ internal fun ChatState.applyMessageUpdated(updated: Message): Pair<ChatState, Bo
     val newMessages = messages.map { if (it.id == updated.id) { found = true; updated } else it }
     val finalMessages = if (found) newMessages else newMessages + updated
     return copy(messages = finalMessages) to found
+}
+
+/**
+ * T1b pure extract of the pre-T1b [SessionSyncCoordinator.mergeSlimMessagesIntoChat]
+ * private loop (patch-if-found + insert-if-absent for messages; parts map
+ * overwritten per fetched id when parts non-empty). Empty-id items are skipped.
+ * Behavior is byte-for-byte identical to the legacy private loop.
+ */
+internal fun ChatState.mergeSlimMessages(items: List<MessageWithParts>): ChatState {
+    var messages = this.messages
+    var partsByMessage = this.partsByMessage
+    for (item in items) {
+        val updated = item.info
+        if (updated.id.isEmpty()) continue
+        var found = false
+        messages = messages.map {
+            if (it.id == updated.id) {
+                found = true
+                updated
+            } else it
+        }
+        if (!found) messages = messages + updated
+        if (item.parts.isNotEmpty()) {
+            partsByMessage = partsByMessage + (updated.id to item.parts)
+        }
+    }
+    return copy(messages = messages, partsByMessage = partsByMessage)
 }
 
 /**

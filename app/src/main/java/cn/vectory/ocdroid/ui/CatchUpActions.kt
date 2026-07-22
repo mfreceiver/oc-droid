@@ -144,14 +144,13 @@ internal fun launchCatchUp(
                         val fetched = page.items.map { it.info }
                         val fetchedParts = page.items.associate { it.info.id to it.parts }
                         val merged = mergeProbeIntoSlice(slices, fetched, fetchedParts)
-                        slices.mutateChat { c ->
-                            c.copy(
+                        // T1b residual: 4-field catch-up merge (not MessagesMerged).
+                        slices.store.dispatch(
+                            AppAction.CatchUpMessagesMerged(
                                 messages = merged.first,
                                 partsByMessage = merged.second,
-                                isLoadingMessages = false,
-                                staleNotice = false
                             )
-                        }
+                        )
                         // §chat-ux-batch T8 (B3): the legacy
                         // syncAgentFromPage call was deleted here (T7
                         // rewired agent selection to transient
