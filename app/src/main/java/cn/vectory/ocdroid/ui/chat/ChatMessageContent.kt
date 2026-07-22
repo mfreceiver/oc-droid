@@ -1056,7 +1056,7 @@ internal fun ChatMessageList(
                             // isStreamingMsg derivation in reversedMessages (line ~665)
                             // so the affordance disables during active streaming.
                             val hasActiveToolOrPatch = msgParts.any { p ->
-                                (p.isTool || p.isPatch) && p.stateDisplay !in TERMINAL_PART_STATES
+                                (p.isTool || p.isPatch) && p.stateDisplay?.lowercase() !in TERMINAL_PART_STATES
                             }
                             val isMessageStreaming = msgParts.any { it.id in streamingPartTexts } ||
                                 streamingReasoningPart?.messageId == message.id ||

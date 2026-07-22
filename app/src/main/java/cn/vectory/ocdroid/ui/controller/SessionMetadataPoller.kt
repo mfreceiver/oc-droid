@@ -35,6 +35,8 @@ class SessionMetadataPoller @Inject constructor(
     private val store: SharedStateStore,
 ) {
     private var pollJob: Job? = null
+    @Volatile
+    private var pollGeneration = 0L
 
     init {
         combine(
@@ -42,7 +44,10 @@ class SessionMetadataPoller @Inject constructor(
             store.connectionFlow.map { it.isConnected },
         ) { foreground, connected -> foreground && connected }
             .distinctUntilChanged()
-            .onEach { shouldPoll -> if (shouldPoll) startPolling() else stopPolling() }
+            .onEach { shouldPoll ->
+                pollGeneration++
+                if (shouldPoll) startPolling() else stopPolling()
+            }
             .launchIn(scope)
     }
 
@@ -65,6 +70,7 @@ class SessionMetadataPoller @Inject constructor(
         if (!appLifecycleMonitor.isInForeground.value) return
         if (!store.connectionFlow.value.isConnected) return
 
+        val generation = pollGeneration   // capture the generation before network call
         val refreshed = repository.getSessions(MainViewModelTimings.sessionFullLoadLimit)
             .getOrElse {
                 DebugLog.w(TAG, "getSessions failed: ${it.message}")
@@ -76,14 +82,17 @@ class SessionMetadataPoller @Inject constructor(
         if (!store.connectionFlow.value.isConnected) return
 
         store.mutateSessionList { current ->
-            val merged = mergeRefreshedSessionsPreservingLocalActivity(
-                refreshed = refreshed,
-                local = current.sessions,   // CAS-current, not stale slice
-                currentSessionId = store.chatFlow.value.currentSessionId,
-                openSessionIds = current.openSessionIds.toSet(),
-                pendingCreateIds = current.pendingCreateIds,
+            // Atomic backstop: if gate changed during the poll's lifetime, skip commit
+            if (generation != pollGeneration) current
+            else current.copy(
+                sessions = mergeRefreshedSessionsPreservingLocalActivity(
+                    refreshed = refreshed,
+                    local = current.sessions,
+                    currentSessionId = store.chatFlow.value.currentSessionId,
+                    openSessionIds = current.openSessionIds.toSet(),
+                    pendingCreateIds = current.pendingCreateIds,
+                )
             )
-            current.copy(sessions = merged)
         }
     }
 
