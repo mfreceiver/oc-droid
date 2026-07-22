@@ -1,14 +1,14 @@
 package cn.vectory.ocdroid.ui.controller
 
 import android.util.Log
-import cn.vectory.ocdroid.MainDispatcherRule
+import cn.vectory.ocdroid.MainViewModelTestBase
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.model.Message
+import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.data.repository.HostProfileStore
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.SlimColdStartSnapshot
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
@@ -27,7 +27,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import org.junit.After
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -52,61 +52,72 @@ import org.junit.Test
  *  - Slim-only writes (cold-start snapshot / reconcile merge) must never land
  *    when `slimMode=false`; the structural early-returns are pinned here.
  *
+ * Harness (extends [MainViewModelTestBase] — same pattern as
+ * [cn.vectory.ocdroid.ui.AppCoreDispatcherTest]):
+ *  - **P0-1** drives the REAL AppCore consumer (`newCore()` →
+ *    `core.sessionSwitcher.switchTo(...)` for LRU capture + chat-clear, then
+ *    the AppCore init-block effectBus collector routes the emitted
+ *    `VerifyAndHydrate` to `dispatchSessionEffect` → the AppCore.kt:559-638
+ *    handler that injects the full cached window). No inline `mutateChat`.
+ *  - **P0-2/3/4/5/6** drive a legacy coordinator directly (via
+ *    [legacyCoordinator]) — these don't need the AppCore consumer; the
+ *    coordinator-level paths under test are synchronous or use the
+ *    `legacyScope` UnconfinedTestDispatcher for coalesce flushes. P0-4 / P0-5
+ *    additionally need the `repository` mock wired INTO the SSC (the AppCore
+ *    harness wires `repository = null` into SSC by default, which would mask
+ *    the host-isolation bug P0-5 pins + trivialize P0-4's NoRepository teeth).
+ *
  * Cases map 1:1 to the plan's P0-1~P0-6.
  */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-class LegacyGoldenPathRegressionTest {
+class LegacyGoldenPathRegressionTest : MainViewModelTestBase() {
 
-    @get:org.junit.Rule
-    val mainDispatcherRule = MainDispatcherRule(UnconfinedTestDispatcher())
-
-    private lateinit var slices: SliceFlows
-    private lateinit var effects: SharedEffectBus
-    private lateinit var settingsManager: SettingsManager
-    private lateinit var scope: TestScope
-    private lateinit var repository: OpenCodeRepository
+    /**
+     * Legacy-mode coordinator scope (UnconfinedTestDispatcher) for tests that
+     * drive the coordinator's coalesce flush job (P0-2/3/4/5/6 via
+     * [legacyCoordinator]). P0-1 uses the real AppCore harness via [newCore]
+     * (StandardTestDispatcher via the base class's MainDispatcherRule) +
+     * `runTest { advanceUntilIdle() }`.
+     */
+    private lateinit var legacyScope: TestScope
+    private lateinit var legacyStore: SharedStateStore
+    private lateinit var legacyEffects: SharedEffectBus
 
     @Before
-    fun setUp() {
-        // reportNonFatalIssue runs inline and calls android.util.Log.w; stub the
-        // statics so the JVM harness does not throw (mirrors SlimTest setUp).
-        mockkStatic(Log::class)
-        every { Log.w(any<String>(), any<String>()) } returns 0
+    override fun setUp() {
+        super.setUp()
+        // reportNonFatalIssue runs inline and calls Log.w(throwable) + Log.i;
+        // the base setUp stubs Log.d / Log.w(no-throwable) / Log.e but not
+        // these two variants.
         every { Log.w(any<String>(), any<String>(), any<Throwable>()) } returns 0
         every { Log.i(any<String>(), any<String>()) } returns 0
-        every { Log.d(any<String>(), any<String>()) } returns 0
 
-        val store = SharedStateStore()
-        slices = store.slices
-        settingsManager = mockk(relaxed = true)
-        effects = SharedEffectBus()
-        scope = TestScope(UnconfinedTestDispatcher())
-        repository = mockk(relaxed = true)
-
-        // C-D3 token guard stubs (same as SlimTest) — relaxed mock would
-        // default the boolean wrappers to false; stub to true so any path
-        // that reaches them is faithful to the slim wiring. These are only
-        // hit by slim-only code paths which the legacy guards below short-
-        // circuit BEFORE the token is consulted.
-        every { repository.isSlimCommitTokenCurrent(any()) } returns true
-        every { repository.commitIfSlimTokenCurrent(any(), any()) } answers {
-            secondArg<() -> Unit>().invoke()
-            true
-        }
+        legacyScope = TestScope(UnconfinedTestDispatcher())
+        legacyStore = SharedStateStore()
+        legacyEffects = SharedEffectBus()
     }
 
-    @After
-    fun tearDown() {
-        unmockkAll()
-    }
-
-    /** Legacy coordinator: `isSlimMode = { false }`. */
-    private fun coordinator(): SessionSyncCoordinator =
+    /**
+     * Legacy coordinator (`isSlimMode = { false }`) with the inherited
+     * `repository` mock wired INTO the SSC. Used by P0-2/3/4/5/6.
+     *
+     * P0-4 (reconcileSession) and P0-5 (applySlimColdStartSnapshot) NEED a
+     * non-null repository inside the SSC: P0-4's `coVerify(exactly = 0)
+     * { repository.probeLatestSlim(...) }` teeth require a real repo that
+     * COULD have been probed (legacy early-return is what skips it); P0-5's
+     * host-isolation bug only manifests when `applySlimColdStartSnapshot`
+     * actually reaches `commitIfSlimTokenCurrent { ... }` (which needs
+     * `repository != null` — the AppCore harness's SSC has `repository = null`
+     * which would mask the bug by short-circuiting at the `?: return false`).
+     * P0-2/3/6 don't touch the repository; they use this harness for diff
+     * stability.
+     */
+    private fun legacyCoordinator(): SessionSyncCoordinator =
         SessionSyncCoordinator(
-            scope = scope,
-            slices = slices,
+            scope = legacyScope,
+            slices = legacyStore.slices,
             settingsManager = settingsManager,
-            effects = effects,
+            effects = legacyEffects,
             currentServerGroupFp = { "test-fp" },
             isSlimMode = { false },
             repository = repository,
@@ -116,74 +127,94 @@ class LegacyGoldenPathRegressionTest {
     private fun event(type: String, block: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit): SSEEvent =
         SSEEvent(payload = SSEPayload(type = type, properties = buildJsonObject(block)))
 
-    // ── P0-1: A→B→A session switch round-trip preserves session A's chat ────
+    // ── P0-1: A→B→A session switch round-trip preserves session A's full window
 
     /**
      * P0-1: in legacy mode, a REAL A→B→A session-switch round-trip preserves
-     * session A's chat messages across the switch. spec §2.1 P0-1 requires
-     * "A 有消息 → 切到 B → 切回 A，A 消息存活（不被 B 的 cold-start 快照覆盖）".
+     * session A's chat window across the switch — pinned via the REAL AppCore
+     * `VerifyAndHydrate` consumer (no inline `mutateChat`). spec §2.1 P0-1
+     * requires "A 有消息 → 切到 B → 切回 A，A 消息存活（不被 B 的 cold-start 快照
+     * 覆盖）".
      *
-     * This test drives the real [SessionSyncCoordinator] (for the SSE layer)
-     * AND the real [SessionSwitcher] (for the LRU capture + chat-clear),
-     * sharing one [SharedStateStore] / [SharedEffectBus] / [SettingsManager]
-     * / [OpenCodeRepository]. The three preservation halves pinned here:
+     * This test drives the real [SessionSyncCoordinator] (for SSE), the real
+     * [SessionSwitcher] (for LRU capture + chat-clear), AND the real AppCore
+     * `dispatchSessionEffect(VerifyAndHydrate)` consumer (AppCore.kt:559-638
+     * — the handler that does the post-peek composite-key re-check and
+     * injects the FULL cached window). The four preservation halves pinned:
      *
      *  1. **List-upsert survival**: a legacy `session.created(B)` frame
-     *     upserts the session list (B prepended, A retained) and does NOT
-     *     full-replace-wipe — guards the 6bf7bf7 "list-disappear" class.
-     *  2. **Session-guard isolation**: a late-arriving legacy `message.updated`
+     *     upserts the session list (B prepended, A retained) — guards the
+     *     6bf7bf7 "list-disappear" class.
+     *  2. **Full-window LRU capture**: the real `SessionSwitcher.switchTo(B)`
+     *     captures ALL 4 CachedSessionWindow fields (messages /
+     *     partsByMessage / olderMessagesCursor / hasMoreMessages) with
+     *     NON-TRIVIAL seeded values (so a field-by-field assertion
+     *     distinguishes a real capture from a slice default).
+     *  3. **Session-guard isolation**: a late-arriving legacy `message.updated`
      *     for the NON-current session A is blocked by the coordinator's
-     *     session-guard (`eventSessionId != currentSessionId` early-return
-     *     @ `SessionSyncCoordinator.kt:1259`) from touching B's chat.
-     *  3. **LRU capture round-trip**: the real [SessionSwitcher.switchTo]
-     *     captures A's outgoing window into its in-memory LRU
-     *     (`captureCurrentSessionWindow`); the cache entry survives across
-     *     the B→A switch, so the AppCore VerifyAndHydrate consumer (NOT
-     *     constructed in this coordinator harness — see boundary note below)
-     *     would re-hydrate A's m1 from a peek hit.
-     *
-     * **HARNESS BOUNDARY** (do NOT weaken — annotate): the AppCore
-     * `dispatchSessionEffect(VerifyAndHydrate)` consumer that turns a peek
-     * hit into `mutateChat { messages = cached.messages }` lives in the
-     * orchestration layer (`AppCore`), not in the coordinator or
-     * [SessionSwitcher]. We drive the LRU capture + chat-clear via the real
-     * `SessionSwitcher.switchTo`, then inline-mirror that consumer's single
-     * re-hydration step (`mutateChat { copy(messages = peek.messages) }`).
-     * The pinned invariant is the coordinator-side preservation that makes
-     * the round-trip restorable; the full end-to-end verify-and-hydrate
-     * window-restore flow is pinned in [SessionSwitcherTest]
-     * `switchTo captures outgoing session window into cache`.
+     *     session-guard (`eventSessionId != currentSessionId` early-return @
+     *     `SessionSyncCoordinator.kt:1259`) from touching B's chat.
+     *  4. **Real consumer round-trip inject**: the real
+     *     `SessionSwitcher.switchTo(A)` emits `VerifyAndHydrate`; the AppCore
+     *     init-block effectBus collector dispatches it; the
+     *     `dispatchSessionEffect(VerifyAndHydrate)` arm runs the entry guard
+     *     → `peekSessionWindow(A)` hit → post-peek composite-key re-check
+     *     passes → `cached.messages.isNotEmpty()` → `store.mutateChat` copies
+     *     the FULL 4-field cached window (AppCore.kt:631-638). Field-by-field
+     *     assertion after the round-trip proves the real consumer injected
+     *     all 4 fields, not just message ids.
      */
     @Test
-    fun `P0-1 legacy A_to_B_to_A session switch round-trip preserves session A chat`() {
-        // ── Setup: session A is current with one message; list has A. ─────────
-        slices.mutateChat {
+    fun `P0-1 legacy A_to_B_to_A session switch round-trip preserves session A full window via real VerifyAndHydrate consumer`() = runTest {
+        val core = newCore()
+        // Pin the host profile so currentServerGroupFp() == "test-fp"
+        // consistently — the LRU is keyed by (fp, sid), and the VerifyAndHydrate
+        // post-peek composite-key re-check (AppCore.kt:601-611) requires
+        // effect.serverGroupFp == currentServerGroupFp(). The default base-class
+        // profile uses a random UUID serverGroupFp; pinning avoids cross-test
+        // key drift.
+        val testProfile = HostProfile(
+            id = "test-host",
+            name = "Test",
+            serverUrl = "http://test",
+            serverGroupFp = "test-fp",
+        )
+        every { hostProfileStore.currentProfile() } returns testProfile
+
+        // ── Seed A with NON-TRIVIAL values for all 4 CachedSessionWindow
+        //    fields. Real capture + real VerifyAndHydrate consumer inject
+        //    all 4; a field-by-field post-round-trip assertion distinguishes
+        //    a real injection from a slice default (empty list / null /
+        //    false). ─────────────────────────────────────────────────────────
+        val aMsg = Message(id = "m1", role = "user", sessionId = "session-A")
+        val aPart = Part(
+            id = "part-1",
+            messageId = "m1",
+            sessionId = "session-A",
+            type = "text",
+            text = "hello-A",
+        )
+        val expectedPartsByMessage = mapOf("m1" to listOf(aPart))
+        val expectedCursor = "cursor-A"
+        val expectedHasMore = true
+        core.store.mutateChat {
             it.copy(
                 currentSessionId = "session-A",
-                messages = listOf(Message(id = "m1", role = "user", sessionId = "session-A")),
-                partsByMessage = mapOf("m1" to emptyList()),
+                messages = listOf(aMsg),
+                partsByMessage = expectedPartsByMessage,
+                olderMessagesCursor = expectedCursor,
+                hasMoreMessages = expectedHasMore,
             )
         }
-        slices.mutateSessionList {
+        core.store.mutateSessionList {
             it.copy(sessions = listOf(Session(id = "session-A", directory = "/tmp/a")))
         }
 
-        val c = coordinator()
-        // Real SessionSwitcher sharing the coordinator's store/settings/repo/
-        // effects — the LRU capture + chat-clear run for real; only the
-        // AppCore VerifyAndHydrate consumer is mirrored inline (see above).
-        val switcher = SessionSwitcher(
-            store = slices.store,
-            settingsManager = settingsManager,
-            repository = repository,
-            effects = effects,
-            currentServerGroupFp = { "test-fp" },
-        )
-
-        // ── Step 1: a legacy session.created for B arrives while A is current.
-        //    The list upserts (B prepended, A retained); A's chat messages
-        //    survive the list mutation. Guards 6bf7bf7 list-disappear class.
-        c.handleEvent(event("session.created") {
+        // ── Step 1: legacy SSE session.created(B) while A is current. The
+        //    coordinator upserts the list (B prepended, A retained); A's full
+        //    chat window survives the list mutation. Guards the 6bf7bf7
+        //    list-disappear class. ───────────────────────────────────────────
+        core.handleSSEEvent(event("session.created") {
             put("session", buildJsonObject {
                 put("id", JsonPrimitive("session-B"))
                 put("directory", JsonPrimitive("/tmp/b"))
@@ -193,36 +224,52 @@ class LegacyGoldenPathRegressionTest {
         assertEquals(
             "session list upserted (not wiped): B prepended, A retained",
             listOf("session-B", "session-A"),
-            slices.sessionList.value.sessions.map { it.id },
+            core.store.slices.sessionList.value.sessions.map { it.id },
         )
         assertEquals(
             "current session A's chat messages survive the session-list mutation",
             listOf("m1"),
-            slices.chat.value.messages.map { it.id },
+            core.store.slices.chat.value.messages.map { it.id },
         )
 
-        // ── Step 2: switch A → B via the real SessionSwitcher. Its mutateChat
-        //    flips currentSessionId to B + clears chat (SessionSwitcher:417-469);
-        //    captureCurrentSessionWindow writes A's window into the LRU. ───────
-        switcher.switchTo("session-B")
+        // ── Step 2: switch A → B via the REAL SessionSwitcher. Its
+        //    mutateChat flips currentSessionId to B + clears chat;
+        //    captureCurrentSessionWindow writes A's FULL 4-field window into
+        //    the in-memory LRU. Pin the capture is full (not just messages). ─
+        core.sessionSwitcher.switchTo("session-B")
         assertEquals(
             "after switch A→B: currentSessionId flipped to B",
             "session-B",
-            slices.chat.value.currentSessionId,
+            core.store.slices.chat.value.currentSessionId,
         )
         assertTrue(
             "after switch A→B: chat slice cleared (SessionSwitcher mutateChat contract)",
-            slices.chat.value.messages.isEmpty(),
+            core.store.slices.chat.value.messages.isEmpty(),
         )
-        // The LRU capture is the half that makes the round-trip restorable —
-        // pin it via the internal peekSessionWindow probe
-        // (captureCurrentSessionWindow is private; peekSessionWindow is the
-        // internal read-only view of the same LRU).
-        val cachedA = switcher.peekSessionWindow("session-A")
+        val cachedA = core.peekSessionWindow("session-A")
+        assertNotNull(
+            "SessionSwitcher LRU captured A's window on switch-out",
+            cachedA,
+        )
         assertEquals(
-            "SessionSwitcher LRU captured A's window on switch-out (round-trip pivot)",
-            listOf("m1"),
-            cachedA?.messages?.map { it.id },
+            "captured messages field",
+            listOf(aMsg),
+            cachedA!!.messages,
+        )
+        assertEquals(
+            "captured partsByMessage field (NON-TRIVIAL — distinguishes real capture from slice default)",
+            expectedPartsByMessage,
+            cachedA.partsByMessage,
+        )
+        assertEquals(
+            "captured olderMessagesCursor field (NON-TRIVIAL)",
+            expectedCursor,
+            cachedA.olderMessagesCursor,
+        )
+        assertEquals(
+            "captured hasMoreMessages field (NON-TRIVIAL)",
+            expectedHasMore,
+            cachedA.hasMoreMessages,
         )
 
         // ── Step 3: a late-arriving legacy SSE frame for the NON-current
@@ -230,7 +277,7 @@ class LegacyGoldenPathRegressionTest {
         //    coordinator session-guard (@SSC:1259) early-returns when
         //    eventSessionId != currentSessionId. This is the coordinator-side
         //    preservation that keeps A's frozen window stable. ───────────────
-        c.handleEvent(event("message.updated") {
+        core.handleSSEEvent(event("message.updated") {
             put("sessionID", JsonPrimitive("session-A"))
             put("info", buildJsonObject {
                 put("id", JsonPrimitive("m-late-A"))
@@ -240,49 +287,53 @@ class LegacyGoldenPathRegressionTest {
         assertTrue(
             "late-arriving message.updated for non-current A does NOT touch B's chat " +
                 "(coordinator session-guard early-returns at SSC:1259)",
-            slices.chat.value.messages.none { it.id == "m-late-A" },
+            core.store.slices.chat.value.messages.none { it.id == "m-late-A" },
         )
         assertEquals(
             "B's chat stays empty (no spurious insert from the non-current SSE)",
             emptyList<String>(),
-            slices.chat.value.messages.map { it.id },
+            core.store.slices.chat.value.messages.map { it.id },
         )
 
-        // ── Step 4: switch B → A via the real SessionSwitcher. The chat slice
-        //    clears again; the AppCore VerifyAndHydrate consumer (NOT in this
-        //    coordinator harness — see HARNESS BOUNDARY in the kdoc) would
-        //    re-hydrate from the LRU peek hit. We inline-mirror that single
-        //    re-hydration step. ───────────────────────────────────────────────
-        switcher.switchTo("session-A")
-        assertEquals(
-            "after switch B→A: currentSessionId flipped back to A",
-            "session-A",
-            slices.chat.value.currentSessionId,
-        )
-        // Harness boundary: AppCore.dispatchSessionEffect(VerifyAndHydrate)
-        // does peekSessionWindow(sid) → on hit, mutateChat { messages = ... }.
-        // That consumer is not constructed here; inline-mirror its single
-        // re-hydration step. The peek proves the LRU still holds A's window
-        // across the B→A switch (the pivot the consumer relies on).
-        val stillCachedA = switcher.peekSessionWindow("session-A")
-        assertNotNull(
-            "SessionSwitcher LRU MUST still hold A's window across the B→A switch " +
-                "(AppCore VerifyAndHydrate consumer relies on this peek hit)",
-            stillCachedA,
-        )
-        assertEquals(
-            "A's cached window is byte-for-byte intact across the round-trip",
-            listOf("m1"),
-            stillCachedA!!.messages.map { it.id },
-        )
-        slices.mutateChat { it.copy(messages = stillCachedA.messages) }
+        // ── Step 4: switch B → A via the REAL SessionSwitcher. switchTo emits
+        //    VerifyAndHydrate(serverGroupFp="test-fp", sessionId="session-A")
+        //    to the effectBus. The REAL AppCore consumer (AppCore.init-block
+        //    effectBus collector → dispatchEffect → dispatchSessionEffect →
+        //    VerifyAndHydrate arm @ AppCore.kt:559-638) picks it up under
+        //    advanceUntilIdle: entry guard passes (currentSessionId was
+        //    flipped to "session-A" by switchTo's mutateChat) →
+        //    peekSessionWindow("session-A") hit → post-peek composite-key
+        //    re-check passes (fp + sid match) → cached.messages.isNotEmpty()
+        //    → store.mutateChat copies the FULL 4-field cached window
+        //    (AppCore.kt:631-638). No inline mutateChat — the real consumer
+        //    runs end-to-end. ────────────────────────────────────────────────
+        core.sessionSwitcher.switchTo("session-A")
+        advanceUntilIdle() // let the AppCore init collector's dispatch land
 
-        // ── Round-trip assertion: A's m1 survived the A→B→A switch. ───────────
+        // ── Step 5: field-by-field assertion — the real VerifyAndHydrate
+        //    consumer injected A's FULL cached window (all 4
+        //    CachedSessionWindow fields, not just message ids). Proves the
+        //    production hydrate path restored A across the A→B→A round-trip. ─
         assertEquals(
-            "round-trip A→B→A: session A's chat messages survived the switch " +
-                "(coordinator session-guard + SessionSwitcher LRU capture preserved A)",
-            listOf("m1"),
-            slices.chat.value.messages.map { it.id },
+            "round-trip A→B→A via real VerifyAndHydrate consumer: messages field injected",
+            listOf(aMsg),
+            core.store.slices.chat.value.messages,
+        )
+        assertEquals(
+            "round-trip A→B→A: partsByMessage field injected (NON-TRIVIAL — distinguishes " +
+                "real full-window injection from message-id-only or slice default)",
+            expectedPartsByMessage,
+            core.store.slices.chat.value.partsByMessage,
+        )
+        assertEquals(
+            "round-trip A→B→A: olderMessagesCursor field injected (NON-TRIVIAL)",
+            expectedCursor,
+            core.store.slices.chat.value.olderMessagesCursor,
+        )
+        assertEquals(
+            "round-trip A→B→A: hasMoreMessages field injected (NON-TRIVIAL)",
+            expectedHasMore,
+            core.store.slices.chat.value.hasMoreMessages,
         )
     }
 
@@ -315,6 +366,7 @@ class LegacyGoldenPathRegressionTest {
      */
     @Test
     fun `P0-2 legacy SSE message part delta lifecycle streams into overlay then finalizes via message list patch`() {
+        val slices = legacyStore.slices
         slices.mutateChat {
             it.copy(
                 currentSessionId = "session-A",
@@ -322,7 +374,7 @@ class LegacyGoldenPathRegressionTest {
             )
         }
 
-        val c = coordinator()
+        val c = legacyCoordinator()
 
         // ── Streaming phase (leading edge): legacy message.part.delta writes
         //    the shared overlay AND injects a placeholder Part so the assistant
@@ -364,7 +416,7 @@ class LegacyGoldenPathRegressionTest {
             put("field", JsonPrimitive("text"))
             put("delta", JsonPrimitive(", world!"))
         })
-        scope.testScheduler.advanceUntilIdle()
+        legacyScope.testScheduler.advanceUntilIdle()
 
         assertEquals(
             "coalesced flush accumulates the trailing delta (legacy streaming)",
@@ -384,7 +436,7 @@ class LegacyGoldenPathRegressionTest {
                 put("cost", JsonPrimitive(0.42))
             })
         })
-        scope.testScheduler.advanceUntilIdle()
+        legacyScope.testScheduler.advanceUntilIdle()
 
         val finalized = slices.chat.value.messages.firstOrNull { it.id == "m1" }
         assertNotNull(
@@ -418,6 +470,7 @@ class LegacyGoldenPathRegressionTest {
      */
     @Test
     fun `P0-3 legacy message updated patches an existing message in place`() {
+        val slices = legacyStore.slices
         slices.mutateChat {
             it.copy(
                 currentSessionId = "session-A",
@@ -428,7 +481,7 @@ class LegacyGoldenPathRegressionTest {
             )
         }
 
-        val c = coordinator()
+        val c = legacyCoordinator()
 
         c.handleEvent(event("message.updated") {
             put("sessionID", JsonPrimitive("session-A"))
@@ -460,9 +513,17 @@ class LegacyGoldenPathRegressionTest {
      * legacy guard at `SessionSyncCoordinator.kt:2401`) WITHOUT probing,
      * fetching, or mutating ChatState. Anchor: the `if (!isSlimMode()) return
      * NoRepository(sid)` early-return.
+     *
+     * The `coVerify(exactly = 0) { repository.probeLatestSlim(any()) }` teeth
+     * require a NON-NULL repository wired into the SSC (so the assertion
+     * proves the legacy early-return skipped a probe that COULD have run);
+     * this is why we use [legacyCoordinator] (repository wired) rather than
+     * the AppCore-harness SSC (which has `repository = null` and would
+     * trivially short-circuit at a different guard).
      */
     @Test
     fun `P0-4 legacy reconcileSession returns NoRepository without touching ChatState`() = runTest {
+        val slices = legacyStore.slices
         val seeded = listOf(
             Message(id = "m1", role = "user", sessionId = "session-A"),
             Message(id = "m2", role = "assistant", sessionId = "session-A"),
@@ -471,7 +532,7 @@ class LegacyGoldenPathRegressionTest {
             it.copy(currentSessionId = "session-A", messages = seeded)
         }
 
-        val c = coordinator()
+        val c = legacyCoordinator()
         val result = c.reconcileSessionExposed("session-A", SessionSyncCoordinator.ReconcileMode.DIGEST_FOCUS)
 
         assertTrue(
@@ -485,7 +546,8 @@ class LegacyGoldenPathRegressionTest {
             slices.chat.value.messages,
         )
         // No slim-side repo probe/fetch was ever issued (early-return is
-        // structural, before any repo I/O).
+        // structural, before any repo I/O — pinned via coVerify with the
+        // repository wired so the assertion has teeth).
         coVerify(exactly = 0) { repository.probeLatestSlim(any()) }
         verify(exactly = 0) { repository.getSlimSessionState(any()) }
     }
@@ -496,8 +558,9 @@ class LegacyGoldenPathRegressionTest {
     //
     // This is the documented T0 "destructive-probe anchor" (plan §4-T0 /
     // task2 §2.1 P0-5). It pins the DESIRED host-isolation contract: a slim
-    // cold-start snapshot landing while `slimMode=false` MUST be rejected
-    // (return false) and MUST NOT rewrite `SessionListState.sessions`.
+    // cold-start snapshot landing while `slimMode=false` MUST be rejected at
+    // the entry of [applySlimColdStartSnapshot] (throw IllegalStateException)
+    // and MUST NOT rewrite `SessionListState.sessions`.
     //
     // *** THE BUG (current reality) ***: [applySlimColdStartSnapshot]
     // (`SessionSyncCoordinator.kt:3354`) has NO `isSlimMode()` entry guard —
@@ -507,8 +570,16 @@ class LegacyGoldenPathRegressionTest {
     // the snapshot's `mutateSessionList` REWRITES the legacy session list.
     // This is the heaviest historical bug class — the 6bf7bf7 family
     // (374 sessions replaced by 100 → list vanished) — and the structural
-    // fix is P1-1: add `check(isSlimMode()) { ... }` at the entry of
-    // `applySlimColdStartSnapshot`.
+    // fix is P1-1: add `check(isSlimMode()) { "cold-start snapshot must not
+    // apply in legacy mode" }` at the entry of `applySlimColdStartSnapshot`.
+    //
+    // *** ASSERTION FORM *** (rev-gpt round-2 fix): the P1-1 fix is a
+    // `check(isSlimMode())` (fail-fast), NOT a softening `return false`. So
+    // the assertion is `assertThrows<IllegalStateException> { applySlim... }`
+    // — pre-P1-1 (current) no exception is thrown, so assertThrows FAILS
+    // (RED); post-P1-1 the check throws IllegalStateException and assertThrows
+    // PASSES (GREEN). The session-list-unchanged assertion runs only when the
+    // entry guard threw BEFORE any mutation (post-P1-1 reality).
     //
     // Methodology (spec §5.3 ③ host-isolation conflict): do NOT freeze the
     // bug; assert the DESIRED contract as an expected-fail anchor. The test
@@ -521,22 +592,26 @@ class LegacyGoldenPathRegressionTest {
     // LIFECYCLE:
     //  - T1 test lane UN-IGNORES this test (removes the @Ignore below).
     //  - T1 impl lane adds P1-1: `check(isSlimMode()) { "cold-start snapshot
-    //    must not apply in legacy mode" }` @ `SessionSyncCoordinator.kt:3354`.
+    //    must not apply in legacy mode" }` @ `SessionSyncCoordinator.kt:3354`
+    //    (BEFORE `val repo = repository ?: return false`).
     //  - With both landed, this test goes GREEN: `applySlimColdStartSnapshot`
-    //    throws `IllegalStateException` (check-fail) → test catches it /
-    //    sees the rejection → assertions pass.
+    //    throws `IllegalStateException` at the entry guard → assertThrows
+    //    catches it → session-list-unchanged assertion holds (no mutation
+    //    ran).
     //  - Removing the P1-1 guard later MUST turn this RED again — the
     //    destructive-probe contract the verifier exercises at the T1 gate.
 
     @Ignore(
         "T0 host-isolation bug anchor: applySlimColdStartSnapshot lacks isSlimMode() " +
             "entry guard (6bf7bf7 family — slim cold-start snapshot rewrites legacy " +
-            "SessionListState.sessions when driven directly). RED pre-P1-1; kept green " +
-            "via @Ignore across T0→T1 per AGENTS.md check.sh-hard-rule; T1 test lane " +
-            "un-ignores, P1-1 guard @ SSC:3354 greens it. Frozen assertions unchanged.",
+            "SessionListState.sessions when driven directly). RED pre-P1-1 (no " +
+            "IllegalStateException thrown); kept green via @Ignore across T0→T1 per " +
+            "AGENTS.md check.sh-hard-rule; T1 test lane un-ignores, P1-1 " +
+            "check(isSlimMode()) guard @ SSC:3354 greens it. Frozen assertions unchanged.",
     )
     @Test
     fun `P0-5 legacy mode MUST reject slim cold-start snapshot (host-isolation bug 6bf7bf7 family, pre-P1-1)`() = runTest {
+        val slices = legacyStore.slices
         val prior = listOf(
             Session(id = "legacy-A", directory = "/A", title = "keep-A"),
             Session(id = "legacy-B", directory = "/B", title = "keep-B"),
@@ -558,18 +633,23 @@ class LegacyGoldenPathRegressionTest {
             messages = null,
         )
 
-        val c = coordinator()
-        val landed = c.applySlimColdStartSnapshot(snapshot)
+        val c = legacyCoordinator()
 
-        // DESIRED (host-isolation contract): legacy mode rejects the snapshot.
-        assertFalse(
-            "needs-product-decision: applySlimColdStartSnapshot MUST be a no-op " +
-                "(return false) in legacy mode — currently returns $landed",
-            landed,
-        )
+        // DESIRED host-isolation contract (post-P1-1): the entry guard
+        // `check(isSlimMode())` throws IllegalStateException — applySlim-
+        // ColdStartSnapshot is a slim-only state write that MUST NEVER run in
+        // legacy mode. assertThrows (NOT assertFalse): P1-1's fix is a
+        // check() (fail-fast), not a softening return-false.
+        assertThrows(IllegalStateException::class.java) {
+            c.applySlimColdStartSnapshot(snapshot)
+        }
+        // The entry guard threw BEFORE any mutateSessionList — the legacy
+        // session list is byte-for-byte unchanged. (This assertion only runs
+        // post-P1-1; pre-P1-1 the assertThrows above fails first, which is
+        // the expected RED state of this @Ignore'd anchor.)
         assertEquals(
-            "needs-product-decision: legacy session list MUST NOT be rewritten by " +
-                "a slim cold-start snapshot (P1-1 guard missing today)",
+            "legacy session list MUST NOT be rewritten — the entry guard rejected " +
+                "the slim cold-start snapshot before any mutateSessionList (6bf7bf7 family fix)",
             prior,
             slices.sessionList.value.sessions,
         )
@@ -600,20 +680,18 @@ class LegacyGoldenPathRegressionTest {
      */
     @Test
     fun `P0-6 legacy fold toggle drives ComposerController expandedParts and partExpandStates stays empty`() {
+        val slices = legacyStore.slices
         // Structural separation (AppStateSlices.kt:406-410 "SEPARATE"):
         //   - StoreState.expandedParts (StoreState.kt:40): Map<String,Boolean>
         //     — the legacy tool/reasoning/sub-agent/patch fold.
         //   - ChatState.partExpandStates (AppStateSlices.kt:410):
         //     Map<PartKey, PartExpandState> — the slim omitted-part
         //     affordance (fed by slim digest→REST skeleton fills).
-        val store = slices.store
+        val store = legacyStore
 
         // ── Drive a REAL legacy fold toggle via ComposerController — the
         //    production writer of expandedParts (the UI's onToggleExpand
         //    routes ChatViewModel → ComposerController.togglePartExpand). ────
-        val hostProfileStore = mockk<HostProfileStore>(relaxed = true).also {
-            every { it.currentProfile() } returns HostProfile.defaultDirect("http://test")
-        }
         val composer = ComposerController(
             store = store,
             settingsManager = settingsManager,
@@ -641,7 +719,7 @@ class LegacyGoldenPathRegressionTest {
                 messages = listOf(Message(id = "m1", role = "assistant", sessionId = "session-A")),
             )
         }
-        val c = coordinator()
+        val c = legacyCoordinator()
         c.handleEvent(event("message.part.delta") {
             put("sessionID", JsonPrimitive("session-A"))
             put("messageID", JsonPrimitive("m1"))
@@ -649,7 +727,7 @@ class LegacyGoldenPathRegressionTest {
             put("field", JsonPrimitive("text"))
             put("delta", JsonPrimitive("streaming"))
         })
-        scope.testScheduler.advanceUntilIdle()
+        legacyScope.testScheduler.advanceUntilIdle()
 
         assertTrue(
             "streamingPartTexts populated by legacy streaming (shared real-time layer)",
