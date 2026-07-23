@@ -40,7 +40,9 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.theme.CardWidthScope
 import cn.vectory.ocdroid.ui.theme.Dimens
+import cn.vectory.ocdroid.ui.theme.StatusBanner
 
 // ── Per-message row + Part dispatcher ────────────────────────────────────
 // MessageRow lays out a single turn (column of parts + footer caption +
@@ -129,11 +131,10 @@ internal fun MessageRow(
 
     // §card-width (v0.2.12): responsive card width = 2/3 of the available row
     // width, capped at 480dp for tablets. Replaces the old fixed 220dp cap.
-    // Wrapped in BoxWithConstraints so all cards below read `cardMax`.
-    BoxWithConstraints(
+    // Wrapped in CardWidthScope so all cards below read `cardMax`.
+    CardWidthScope(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
-    ) {
-        val cardMax = minOf(maxWidth * 2f / 3f, 480.dp)
+    ) { cardMax ->
         Column(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = if (isUser && !isTaskCompletionMsg) Alignment.End else Alignment.Start
@@ -311,7 +312,7 @@ internal fun MessageRow(
             )
         }
         } // Column
-        } // BoxWithConstraints
+        } // CardWidthScope
 }
 
 // ── §G6 omitted-content affordance ────────────────────────────────────
@@ -360,43 +361,30 @@ internal fun OmittedContentCard(
     when {
         // Fetch in flight → spinner + label.
         anyLoading -> {
-            Surface(
-                modifier = modifier.padding(vertical = Dimens.spacing1),
-                shape = RectangleShape,
-                color = MaterialTheme.colorScheme.surfaceContainer,
-                border = BorderStroke(Dimens.hairline, MaterialTheme.colorScheme.outlineVariant),
-            ) {
-                Row(
-                    modifier = Modifier
-                        .padding(horizontal = Dimens.spacing2, vertical = Dimens.spacing2),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(Dimens.spacing1),
-                ) {
+            StatusBanner(
+                modifier = modifier,
+                content = {
                     CircularProgressIndicator(
                         modifier = Modifier.size(Dimens.iconSm),
                         strokeWidth = Dimens.hairline,
                     )
+                    Spacer(modifier = Modifier.width(Dimens.spacing1))
                     Text(
                         text = stringResource(R.string.expand_omitted_content),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                }
-            }
+                },
+            )
         }
 
         // At least one part failed or exhausted → inline error + retry.
         anyFailedOrExhausted -> {
-            Surface(
-                modifier = modifier.padding(vertical = Dimens.spacing1),
-                shape = RectangleShape,
+            StatusBanner(
+                modifier = modifier,
                 color = MaterialTheme.colorScheme.errorContainer,
-            ) {
-                Row(
-                    modifier = Modifier
-                        .padding(horizontal = Dimens.spacing2, vertical = Dimens.spacing2),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
+                border = null,
+                content = {
                     Icon(
                         Icons.Default.ErrorOutline,
                         contentDescription = null,
@@ -437,28 +425,20 @@ internal fun OmittedContentCard(
                             )
                         }
                     }
-                }
-            }
+                },
+            )
         }
 
         // Idle parts while message is streaming → non-clickable skeleton.
         anyIdle && isMessageStreaming -> {
-            Surface(
-                modifier = modifier.padding(vertical = Dimens.spacing1),
-                shape = RectangleShape,
-                color = MaterialTheme.colorScheme.surfaceContainer,
-                border = BorderStroke(Dimens.hairline, MaterialTheme.colorScheme.outlineVariant),
-            ) {
-                Row(
-                    modifier = Modifier
-                        .padding(horizontal = Dimens.spacing2, vertical = Dimens.spacing2),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(Dimens.spacing1),
-                ) {
+            StatusBanner(
+                modifier = modifier,
+                content = {
                     CircularProgressIndicator(
                         modifier = Modifier.size(Dimens.iconSm),
                         strokeWidth = Dimens.hairline,
                     )
+                    Spacer(modifier = Modifier.width(Dimens.spacing1))
                     Text(
                         text = categoryText.ifEmpty {
                             stringResource(R.string.expand_omitted_generating)
@@ -467,13 +447,15 @@ internal fun OmittedContentCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(modifier = Modifier.weight(1f))
+                    // Preserve pre-extract spacedBy(spacing1) gap before trailing label.
+                    Spacer(modifier = Modifier.width(Dimens.spacing1))
                     Text(
                         text = stringResource(R.string.expand_omitted_generating),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                }
-            }
+                },
+            )
         }
 
         // Idle parts, message not streaming → clickable expand card.
@@ -483,30 +465,21 @@ internal fun OmittedContentCard(
                 (partExpandStates[key] ?: PartExpandState.Idle) is PartExpandState.Idle
             }
             if (idleParts.isNotEmpty()) {
-                Surface(
+                StatusBanner(
                     modifier = modifier
-                        .padding(vertical = Dimens.spacing1)
-                        .clickable { onExpandParts(idleParts) }
                         .semantics {
                             contentDescription = categoryText
                             role = Role.Button
                         },
-                    shape = RectangleShape,
-                    color = MaterialTheme.colorScheme.surfaceContainer,
-                    border = BorderStroke(Dimens.hairline, MaterialTheme.colorScheme.outlineVariant),
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .padding(horizontal = Dimens.spacing2, vertical = Dimens.spacing2),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(Dimens.spacing1),
-                    ) {
+                    onClick = { onExpandParts(idleParts) },
+                    content = {
                         Icon(
                             imageVector = Icons.Default.UnfoldMore,
                             contentDescription = null,
                             modifier = Modifier.size(Dimens.iconXs),
                             tint = MaterialTheme.colorScheme.primary,
                         )
+                        Spacer(modifier = Modifier.width(Dimens.spacing1))
                         Text(
                             text = categoryText.ifEmpty {
                                 stringResource(R.string.expand_omitted_content)
@@ -521,8 +494,8 @@ internal fun OmittedContentCard(
                             modifier = Modifier.size(Dimens.iconSm),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                    }
-                }
+                    },
+                )
             }
         }
         // all Loaded → render nothing.

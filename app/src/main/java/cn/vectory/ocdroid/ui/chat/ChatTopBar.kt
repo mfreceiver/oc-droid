@@ -53,6 +53,7 @@ import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.resolveModelDisplayName
 import cn.vectory.ocdroid.ui.theme.Dimens
+import cn.vectory.ocdroid.ui.theme.MenuItem
 import cn.vectory.ocdroid.util.workdirBasename
 
 internal data class ChatTopBarState(
@@ -591,7 +592,7 @@ private fun ContextMenuCluster(
         ) {
             // 1. Context — "{pct}% {totalTokens/1000}/{contextLimit/1000}"
             //    or the label "Context" when usage is null.
-            DropdownMenuItem(
+            MenuItem(
                 text = {
                     Text(
                         if (usage != null) {
@@ -602,61 +603,37 @@ private fun ContextMenuCluster(
                         }
                     )
                 },
-                leadingIcon = {
-                    Icon(
-                        Icons.Default.DonutLarge,
-                        contentDescription = null,
-                        modifier = Modifier.size(Dimens.iconSm),
-                    )
-                },
+                icon = Icons.Default.DonutLarge,
                 enabled = enableSessionScopedItems,
                 onClick = onOpenContext,
             )
             // 2. Todo — "{completed}/{total}", always shown (including 0/0).
-            DropdownMenuItem(
+            MenuItem(
                 text = {
                     val completed = todos.count { it.isCompleted }
                     val total = todos.size
                     Text("$completed/$total")
                 },
-                leadingIcon = {
-                    Icon(
-                        Icons.Default.Checklist,
-                        contentDescription = null,
-                        modifier = Modifier.size(Dimens.iconSm),
-                    )
-                },
+                icon = Icons.Default.Checklist,
                 enabled = enableSessionScopedItems,
                 onClick = onOpenTodo,
             )
             // 3. Agent — selected agent name (or "Default").
-            DropdownMenuItem(
+            MenuItem(
                 text = {
                     Text(currentAgentName ?: stringResource(R.string.agent_default_label))
                 },
-                leadingIcon = {
-                    Icon(
-                        Icons.Default.SmartToy,
-                        contentDescription = null,
-                        modifier = Modifier.size(Dimens.iconSm),
-                    )
-                },
+                icon = Icons.Default.SmartToy,
                 onClick = onOpenAgent,
             )
             // 4. Model — current model display name (or "Select model").
-            DropdownMenuItem(
+            MenuItem(
                 text = {
                     Text(
                         currentModelName.ifEmpty { stringResource(R.string.chat_model_picker_title) }
                     )
                 },
-                leadingIcon = {
-                    Icon(
-                        Icons.Outlined.Memory,
-                        contentDescription = null,
-                        modifier = Modifier.size(Dimens.iconSm),
-                    )
-                },
+                icon = Icons.Outlined.Memory,
                 onClick = onOpenModel,
             )
             // 5. §6 (强制刷新): clear session-window cache + cold-start
@@ -664,17 +641,11 @@ private fun ContextMenuCluster(
             //    (NOT the §3 non-destructive tail refresh) — drops the
             //    memory LRU window cache across all sessions then forces a
             //    health-check reconnect with TOFU freeze + retries.
-            DropdownMenuItem(
+            MenuItem(
                 text = {
                     Text(stringResource(R.string.chat_force_refresh))
                 },
-                leadingIcon = {
-                    Icon(
-                        Icons.Default.Refresh,
-                        contentDescription = null,
-                        modifier = Modifier.size(Dimens.iconSm),
-                    )
-                },
+                icon = Icons.Default.Refresh,
                 enabled = enableSessionScopedItems,
                 onClick = onForceRefresh,
             )

@@ -58,6 +58,75 @@ import kotlinx.coroutines.launch
  * called from [MainViewModel.selectSession] and [MainViewModel.sendMessage]
  * so opening/creating a conversation persists its metadata immediately.
  */
+/**
+ * Sweep pending-create IDs: remove any that the server just confirmed (serverIds),
+ * and also drop any whose local creation timestamp is too old (beyond timeoutMs).
+ * Returns the surviving IDs + their filtered createdAt map.
+ */
+private fun sweepPendingCreateIds(
+    currentPendingCreateIds: Set<String>,
+    currentPendingCreatedAt: Map<String, Long>,
+    serverIds: Set<String>,
+    nowMs: Long,
+    timeoutMs: Long = MainViewModelTimings.pendingCreateTimeoutMs,
+): Pair<Set<String>, Map<String, Long>> {
+    val sweptIds = currentPendingCreateIds
+        .minus(serverIds)
+        .filter { pendingId ->
+            val registeredAt = currentPendingCreatedAt[pendingId]
+            registeredAt != null &&
+                nowMs - registeredAt <= timeoutMs
+        }
+        .toSet()
+    val sweptCreatedAt = currentPendingCreatedAt
+        .filterKeys { it in sweptIds }
+    return sweptIds to sweptCreatedAt
+}
+
+/**
+ * Decision helper for auto-select logic. Returns a sealed outcome describing
+ * which auto-select policy branch to follow. The caller maps each outcome to
+ * the appropriate action (onSelectSession / onLoadSessionStatus+onLoadMessages
+ * / dispatch ChatCleared / no-op).
+ *
+ * Never invents [sessions.first()]; restore-only from openSessionIds on cold
+ * start. The draftWorkdir gate prevents hijacking the draft UI.
+ */
+private sealed class AutoSelectDecision {
+    data object ClearChat : AutoSelectDecision()
+    data class SelectRestored(val sessionId: String) : AutoSelectDecision()
+    data class KeepCurrent(val sessionId: String) : AutoSelectDecision()
+    data object ClearChatResidual : AutoSelectDecision()
+}
+
+private fun decideAutoSelectSession(
+    currentSessionId: String?,
+    draftWorkdir: String?,
+    isInitialColdStart: Boolean,
+    currentOpenIds: List<String>,
+    refreshedSessions: List<Session>,
+): AutoSelectDecision {
+    return when {
+        currentSessionId == null && draftWorkdir == null && currentOpenIds.isEmpty() ->
+            AutoSelectDecision.ClearChat
+        currentSessionId == null && draftWorkdir == null && isInitialColdStart && currentOpenIds.isNotEmpty() -> {
+            val liveById = refreshedSessions
+                .filter { !it.isArchived }
+                .associateBy { it.id }
+            val candidateId = currentOpenIds.asReversed()
+                .firstOrNull { it in liveById }
+            if (candidateId != null) AutoSelectDecision.SelectRestored(candidateId)
+            else AutoSelectDecision.ClearChat
+        }
+        currentSessionId == null && draftWorkdir == null ->
+            AutoSelectDecision.ClearChatResidual
+        currentSessionId != null ->
+            AutoSelectDecision.KeepCurrent(currentSessionId)
+        else ->
+            AutoSelectDecision.ClearChatResidual
+    }
+}
+
 @Suppress("UNUSED_PARAMETER")
 internal fun persistSessionCache(
     settingsManager: SettingsManager,
@@ -228,16 +297,12 @@ internal fun launchLoadSessions(
                 // timestamps fail closed and are swept.
                 val sweepNow = System.currentTimeMillis()
                 val serverIds = sessions.mapTo(mutableSetOf()) { it.id }
-                val sweptPendingCreateIds = currentPendingCreateIds
-                    .minus(serverIds)
-                    .filter { pendingId ->
-                        val registeredAt = currentPendingCreatedAt[pendingId]
-                        registeredAt != null &&
-                            sweepNow - registeredAt <= MainViewModelTimings.pendingCreateTimeoutMs
-                    }
-                    .toSet()
-                val sweptPendingCreatedAt = currentPendingCreatedAt
-                    .filterKeys { it in sweptPendingCreateIds }
+                val (sweptPendingCreateIds, sweptPendingCreatedAt) = sweepPendingCreateIds(
+                    currentPendingCreateIds = currentPendingCreateIds,
+                    currentPendingCreatedAt = currentPendingCreatedAt,
+                    serverIds = serverIds,
+                    nowMs = sweepNow,
+                )
                 // remove-message-persistence Task 6: the prior
                 // `currentSessionVerifyResult = cacheRepository.verifyFingerprint`
                 // suspend + epoch/host re-check block was deleted together
@@ -362,72 +427,30 @@ internal fun launchLoadSessions(
                 // [anyArchivedOpen] / [onArchivedSessionsDetected]. This
                 // branch is reached only when no archives were detected OR
                 // the caller has no callback wired.)
-                when {
-                    // Skip auto-select when the user is mid-draft (a workdir
-                    // has been chosen but no session created yet): selecting a
-                    // session would discard the draft's repository workdir and
-                    // hijack the empty chat page the user is composing into.
-                    //
-                    // §fix-close-all-no-first (home-hub): NEVER invent a
-                    // current session from `sessions.first()`. Auto-select is
-                    // restore-only:
-                    //   - if openSessionIds is empty AND current is null →
-                    //     user closed every tab (or cold-started with no
-                    //     open tabs) → stay empty / Sessions hub.
-                    //   - if openSessionIds still has roots AND current is
-                    //     null (e.g. persisted current wiped but open tabs
-                    //     restored from cache) → restore the last open tab
-                    //     that is still non-archived in the refresh.
-                    //   - isInitialColdStart is retained only for the
-                    //     open-tabs restore path so a post-close refresh
-                    //     cannot re-open a residual tab.
-                    // HostStatePurged re-arms hasCompletedInitialLoad=false,
-                    // but empty openSessionIds still wins (no first()).
-                    currentSessionId == null &&
-                        slices.composer.value.draftWorkdir == null &&
-                        currentOpenIds.isEmpty() -> {
+                //
+                // Auto-select policy: see [decideAutoSelectSession] doc.
+                // §fix-close-all-no-first: never invents from sessions.first().
+                when (val decision = decideAutoSelectSession(
+                    currentSessionId = currentSessionId,
+                    draftWorkdir = slices.composer.value.draftWorkdir,
+                    isInitialColdStart = isInitialColdStart,
+                    currentOpenIds = currentOpenIds,
+                    refreshedSessions = refreshedSessions,
+                )) {
+                    is AutoSelectDecision.ClearChat,
+                    is AutoSelectDecision.ClearChatResidual -> {
                         slices.store.dispatch(AppAction.ChatCleared)
                     }
-                    currentSessionId == null &&
-                        slices.composer.value.draftWorkdir == null &&
-                        isInitialColdStart &&
-                        currentOpenIds.isNotEmpty() -> {
-                        val liveById = refreshedSessions
-                            .filter { !it.isArchived }
-                            .associateBy { it.id }
-                        val candidateId = currentOpenIds.asReversed()
-                            .firstOrNull { it in liveById }
-                        if (candidateId != null) {
-                            onSelectSession(candidateId)
-                        } else {
-                            slices.store.dispatch(AppAction.ChatCleared)
-                        }
+                    is AutoSelectDecision.SelectRestored -> {
+                        onSelectSession(decision.sessionId)
                     }
-                    // §fix-close-all-residual: null currentSessionId on a NON-
-                    // initial refresh with leftover open ids (rare) — keep
-                    // empty rather than inventing a session.
-                    currentSessionId == null &&
-                        slices.composer.value.draftWorkdir == null -> {
-                        slices.store.dispatch(AppAction.ChatCleared)
-                    }
-                    // currentId is set: keep it. Even when the session is
-                    // temporarily absent from the refreshed list (e.g. just
-                    // created, or a directory session), tolerate it — reload
-                    // its messages but do NOT silently reselect first(). #10.
-                    //
-                    // remove-message-persistence Task 6: the prior
-                    // `cacheRepository.verifyFingerprint` currentSessionId
-                    // self-consistency check (R-20 Phase 1 C7) was deleted
-                    // together with the CacheRepository surface — the
-                    // MismatchEvicted → clear + first-select branch is gone.
-                    // The currentSessionId is kept as-is; VerifyAndHydrate's
-                    // in-memory peek handles cold-start hydration.
-                    currentSessionId != null -> {
+                    is AutoSelectDecision.KeepCurrent -> {
+                        // currentId is set: keep it. Even when the session is
+                        // temporarily absent from the refreshed list (e.g. just
+                        // created, or a directory session), tolerate it — reload
+                        // its messages but do NOT silently reselect first(). #10.
                         onLoadSessionStatus()
-                        onLoadMessages(currentSessionId)
-                    }
-                    else -> {
-                        slices.store.dispatch(AppAction.ChatCleared)
+                        onLoadMessages(decision.sessionId)
                     }
                 }
             }
@@ -514,16 +537,12 @@ internal fun launchLoadMoreSessions(
                 // drop timed-out) — mirrors launchLoadSessions.
                 val sweepNow = System.currentTimeMillis()
                 val serverIds = sessions.mapTo(mutableSetOf()) { it.id }
-                val sweptPendingCreateIds = currentPendingCreateIds
-                    .minus(serverIds)
-                    .filter { pendingId ->
-                        val registeredAt = currentPendingCreatedAt[pendingId]
-                        registeredAt != null &&
-                            sweepNow - registeredAt <= MainViewModelTimings.pendingCreateTimeoutMs
-                    }
-                    .toSet()
-                val sweptPendingCreatedAt = currentPendingCreatedAt
-                    .filterKeys { it in sweptPendingCreateIds }
+                val (sweptPendingCreateIds, sweptPendingCreatedAt) = sweepPendingCreateIds(
+                    currentPendingCreateIds = currentPendingCreateIds,
+                    currentPendingCreatedAt = currentPendingCreatedAt,
+                    serverIds = serverIds,
+                    nowMs = sweepNow,
+                )
                 val newHasMore = mergedSessions.size >= nextLimit
                 // T1c: SessionsPageAppended owns the 8-field loadMore copy.
                 slices.store.dispatch(
@@ -537,35 +556,28 @@ internal fun launchLoadMoreSessions(
                 )
                 val currentId = currentSessionId
                 val refreshedSessions = mergedSessions
-                when {
-                    // §fix-close-all-no-first: mirror launchLoadSessions —
-                    // never invent a current from sessions.first(). Restore
-                    // only from remaining open tabs on true cold start.
-                    currentId == null &&
-                        slices.composer.value.draftWorkdir == null &&
-                        currentOpenIds.isEmpty() -> {
+                // §fix-close-all-no-first: mirror launchLoadSessions policy
+                // (see [decideAutoSelectSession] doc). Never invent from first().
+                when (val decision = decideAutoSelectSession(
+                    currentSessionId = currentId,
+                    draftWorkdir = slices.composer.value.draftWorkdir,
+                    isInitialColdStart = isInitialColdStart,
+                    currentOpenIds = currentOpenIds,
+                    refreshedSessions = refreshedSessions,
+                )) {
+                    is AutoSelectDecision.ClearChat,
+                    is AutoSelectDecision.ClearChatResidual -> {
                         slices.store.dispatch(AppAction.ChatCleared)
                     }
-                    currentId == null &&
-                        slices.composer.value.draftWorkdir == null &&
-                        isInitialColdStart &&
-                        currentOpenIds.isNotEmpty() -> {
-                        val liveById = refreshedSessions
-                            .filter { !it.isArchived }
-                            .associateBy { it.id }
-                        val candidateId = currentOpenIds.asReversed()
-                            .firstOrNull { it in liveById }
-                        if (candidateId != null) {
-                            onSelectSession(candidateId)
-                        } else {
-                            slices.store.dispatch(AppAction.ChatCleared)
-                        }
+                    is AutoSelectDecision.SelectRestored -> {
+                        onSelectSession(decision.sessionId)
                     }
-                    // A non-null currentId is never silently replaced by
-                    // refreshedSessions.first(): tolerate the session even when
-                    // it is temporarily absent from the refreshed list. #10.
-                    currentId != null -> Unit
-                    else -> slices.store.dispatch(AppAction.ChatCleared)
+                    is AutoSelectDecision.KeepCurrent -> {
+                        // A non-null currentId is never silently replaced by
+                        // refreshedSessions.first(): tolerate the session even when
+                        // it is temporarily absent from the refreshed list. #10.
+                        Unit // No-op for loadMore (status+msg already owned by initial load)
+                    }
                 }
             }
             .onFailure { error ->

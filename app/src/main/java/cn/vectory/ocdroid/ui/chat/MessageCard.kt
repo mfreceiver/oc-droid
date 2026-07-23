@@ -103,6 +103,7 @@ import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
+import cn.vectory.ocdroid.ui.theme.MenuItem
 
 /**
  * §1C: the per-message card wrapping the existing [MessageRow]. Long-press
@@ -292,14 +293,11 @@ internal fun MessageCard(
                 },
             ) {
                 if (canCopy) {
-                    DropdownMenuItem(
+                    MenuItem(
                         text = { Text(stringResource(R.string.message_action_copy)) },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Filled.ContentCopy,
-                                contentDescription = null,
-                            )
-                        },
+                        icon = Icons.Filled.ContentCopy,
+                        // Preserve pre-extract: no explicit icon size (M3 default).
+                        iconModifier = Modifier,
                         onClick = {
                             overflowOpen = false
                             // Default Copy semantics: concatenate every text part
@@ -318,14 +316,10 @@ internal fun MessageCard(
                 // would be a misleading dead-end. Fork + Copy are non-destructive
                 // and stay on every row.
                 if (message.isUser) {
-                    DropdownMenuItem(
+                    MenuItem(
                         text = { Text(stringResource(R.string.message_action_edit_rerun)) },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Filled.Edit,
-                                contentDescription = null,
-                            )
-                        },
+                        icon = Icons.Filled.Edit,
+                        iconModifier = Modifier,
                         // §1C-FIX-②: the menu-item enablement uses the
                         // PURE [canEditAndRerun] predicate. The caller
                         // (ChatMessageContent.kt's MessageCard wrap)
@@ -353,14 +347,10 @@ internal fun MessageCard(
                     )
                 }
                 if (canFork) {
-                    DropdownMenuItem(
+                    MenuItem(
                         text = { Text(stringResource(R.string.message_action_fork)) },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Filled.Edit,
-                                contentDescription = null,
-                            )
-                        },
+                        icon = Icons.Filled.Edit,
+                        iconModifier = Modifier,
                         onClick = {
                             overflowOpen = false
                             onFork(message.id)

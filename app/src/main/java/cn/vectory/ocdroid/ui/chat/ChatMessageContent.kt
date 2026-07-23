@@ -63,6 +63,7 @@ import cn.vectory.ocdroid.ui.filterBeforeRevert
 import cn.vectory.ocdroid.ui.injectMetadataMarkers
 import cn.vectory.ocdroid.ui.isStaleQuestionPart
 import cn.vectory.ocdroid.ui.theme.AppTextStyles
+import cn.vectory.ocdroid.ui.theme.CardWidthScope
 import cn.vectory.ocdroid.util.FLICKER_TAG
 import cn.vectory.ocdroid.util.STREAMING_FLICKER_DEBUG
 import cn.vectory.ocdroid.util.flickerFilterOutCount
@@ -925,8 +926,7 @@ internal fun ChatMessageList(
             item(key = "streaming-reasoning") {
                 // §card-width: responsive 2/3 width (capped 480dp) for the
                 // standalone streaming reasoning card, matching MessageRow's cap.
-                BoxWithConstraints(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    val cardMax = minOf(maxWidth * 2f / 3f, 480.dp)
+                CardWidthScope(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) { cardMax ->
                     ReasoningCard(
                         text = streamingText,
                         title = streamingReasoningPart.toolReason,
@@ -1104,10 +1104,9 @@ internal fun ChatMessageList(
                     }
                 }
                 is RenderBlock.ToolRun -> {
-                    BoxWithConstraints(
+                    CardWidthScope(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
-                    ) {
-                        val cardMax = minOf(maxWidth * 2f / 3f, 480.dp)
+                    ) { cardMax ->
                         Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
                             block.items.forEach { contextual ->
                                 androidx.compose.runtime.key(
@@ -1134,10 +1133,9 @@ internal fun ChatMessageList(
                 is RenderBlock.Fold -> {
                     val folded = block.asFoldedToolRun()
                     val foldKey = foldKey(block.firstPartId)
-                    BoxWithConstraints(
+                    CardWidthScope(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
-                    ) {
-                        val cardMax = minOf(maxWidth * 2f / 3f, 480.dp)
+                    ) { cardMax ->
                         Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
                             if (isCrossMessageFoldExpanded(folded, expandedParts)) {
                                 block.items.forEach { contextual ->
