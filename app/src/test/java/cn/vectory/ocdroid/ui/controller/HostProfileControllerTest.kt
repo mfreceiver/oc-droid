@@ -616,6 +616,27 @@ class HostProfileControllerTest {
         assertEquals("SYSTEM", HttpImageHolder.lastUpdateSslMode)
     }
 
+    @Test
+    fun `selectHostProfile mirrors profile serverUrl into settingsManager for token-stream baseUrl`() {
+        // §bugfix-token-stream: configureRepositoryForProfileRaw must sync
+        // settingsManager.serverUrl = profile.serverUrl so the direct readers that
+        // bypass EffectiveConnectionConfigResolver (TokenStreamClient @ControllerModule:273,
+        // ConnectionHealthProbe, getSavedConnectionSettings) observe the live URL in
+        // Profile mode. Before the fix only the manual configureServerRaw path synced
+        // (via activateManual); the profile path skipped it, leaving settingsManager.serverUrl
+        // stale at default localhost:4096 → token-stream 连 localhost → 指数退避重连风暴.
+        every { store.select("p-B") } returns profileB
+        every { settingsManager.basicAuthPassword("p-B") } returns "secret-b"
+        every { repository.currentSslConfig() } returns SslConfig.SystemDefault
+
+        controller.selectHostProfile("p-B")
+        runPending()
+
+        // profileB.serverUrl ("http://b:4096") mirrored into settingsManager, restoring
+        // the "settingsManager.serverUrl ≡ hostConfig.baseUrl" invariant (ControllerModule:241).
+        verify { settingsManager.serverUrl = profileB.serverUrl }
+    }
+
     // ── duplicateHostProfile ───────────────────────────────────────────────
 
     @Test

@@ -853,6 +853,15 @@ class HostProfileController(
         // §2.5(a): 注入 mTLS 客户端证书材料（profile.mtlsEnabled 时从 ESP 载入）。
         // configure(null) 会 clear 已持材料，所以切到非 mTLS profile 时停止出示证书。
         val clientCert = if (profile.mtlsEnabled) profile.clientCertId?.let { settingsManager.loadClientCertMaterial(it) } else null
+        // §bugfix-token-stream: mirror profile.serverUrl into settingsManager so the
+        // direct readers that bypass EffectiveConnectionConfigResolver
+        // (TokenStreamClient @ ControllerModule:273, ConnectionHealthProbe, getSavedConnectionSettings)
+        // observe the live URL in Profile mode. configureServerRaw (manual path) already
+        // keeps this in sync via activateManual; the profile path skipped it, leaving
+        // settingsManager.serverUrl stale (default localhost:4096) → token-stream 连接风暴.
+        // Restores the "settingsManager.serverUrl ≡ hostConfig.baseUrl" invariant
+        // (ControllerModule.kt:241). 写在 repository.configure 前，使二者同点对齐。
+        settingsManager.serverUrl = profile.serverUrl
         repository.configure(
             profile.serverUrl, profile.basicAuth?.username, password,
             hostPort = hostPortFromUrl(profile.serverUrl),
