@@ -1766,7 +1766,7 @@ class SessionListActionsTest {
         // it folds SlimAggregationOutcome via applyAggregationOutcome. A null
         // routeToken is still written (no silent drop) so the UI can surface
         // the unrouteable entry.
-        every { repository.isSlimMode } returns true
+        every { repository.supportsWatermarkResync } returns true
         val entry = cn.vectory.ocdroid.data.model.SlimapiPermissionEntry(
             id = "p1",
             sessionId = "s1",

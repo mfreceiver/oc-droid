@@ -643,7 +643,7 @@ internal fun launchLoadSessionStatus(
     // UnreadSoakController's Main-thread fields (no suspension, no launch), and
     // the caller runs on appScope (Main.immediate) — no thread hop, so it
     // completes well within the 15s timeout job.
-    if (repository.isSlimMode && trigger == SessionStatusLoadTrigger.SWEEP) {
+    if (repository.usesSlimStatusFanOut && trigger == SessionStatusLoadTrigger.SWEEP) {
         onComplete(true)
         return
     }
@@ -656,7 +656,7 @@ internal fun launchLoadSessionStatus(
     // arrives via the slim digest `status` relay
     // (SessionSyncCoordinator.handleSessionDigest → applySessionStatus).
     // Legacy mode (isSlimMode == false) is byte-for-byte unchanged.
-    if (repository.isSlimMode) {
+    if (repository.usesSlimStatusFanOut) {
         launchLoadSessionStatusSlim(scope, repository, slices, myEpoch, hostAtRequestStart, onComplete)
         return
     }
@@ -1056,7 +1056,7 @@ internal fun launchLoadPendingPermissions(
     effects: SharedEffectBus,
     tag: String,
 ) {
-    if (repository.isSlimMode) {
+    if (repository.supportsWatermarkResync) {
         launchLoadPendingPermissionsSlim(
             scope = scope,
             repository = repository,
@@ -1113,7 +1113,7 @@ internal fun launchLoadPendingPermissions(
                     // §rev-grok fix1 defensive: in slim mode warn on any
                     // final entry lacking a routeToken (no silent fallback
                     // — the slim respond path will be unable to route it).
-                    if (repository.isSlimMode) {
+                    if (repository.supportsWatermarkResync) {
                         merged.filter { it.routeToken.isNullOrBlank() }.forEach { p ->
                             android.util.Log.w(
                                 tag,
