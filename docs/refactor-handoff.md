@@ -77,6 +77,19 @@
 | `rev-5` / `rev-7` | rev-grok | L4b / L4a2 gate |
 | `fix-1` / `fix-2` | fixer-zlm | 6a-1 / L1b（机械） |
 | `rev-1` / `rev-2` | rev-grok | ε / δ gate |
+| `exp-6` | explorer | cluster 18 idle publish recon + D-MB-P recon |
+| `exp-8` | explorer | D-MB-P recon（deferred scope） |
+| `fix-10` | fixer | cluster 6 barrier fold（η Step 1） |
+| `fix-13`（=fix-9） | fixer | L5a ChatScaffold 拆（η Step 2） |
+| `fix-11` | fixer | L5c SessionCard 外提（η Step 2） |
+| `fix-12` | fixer | L5b HostProfileEditorDialog 外提（η Step 2） |
+| `fix-14` | fixer-zlm | cluster 18 publishIdleNotification（θ） |
+| `ora-1` | oracle | cluster 6 三分支 barrier 设计（CD3） |
+| `ora-2` | oracle | L5a ChatScaffold 拆 TDP 设计 |
+| `rev-16` | rev-grok | L5c gate（η Step 2） |
+| `rev-17` | rev-grok | L5b gate（η Step 2） |
+| `rev-18` | rev-grok | L5a gate（η Step 2） |
+| `rev-19` | rev-grok | cluster 18 gate（θ） |
 
 ## 6. 硬约束 / 经验
 

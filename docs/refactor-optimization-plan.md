@@ -127,7 +127,7 @@ internal suspend fun <T> HostProfileController.withHostReconfiguration(
 ---
 
 ## §3 整合执行序（Phase α→θ，R2 最优路径）
-> **进度（v0.13.0 post-release，commits a6521e0→f448318，gated GO）**：α/β/γ/δ/ε/ζ-1/ζ-2 ✅ done；ζ-3/η/θ + 6a-3/5/16 remaining。
+> **进度（v0.13.1 post-release，α→θ 全线完成）**：α/β/γ/δ/ε/ζ-1/ζ-2/ζ-3/η/θ ALL ✅ done。
 ```
 ✅ α  6a 纯 util 速胜（‖ β，zlm≤2）：6a-1 workdirBasename(扩展 WorkdirPaths) / 6a-21 backoff / 6a-23 resolveSslConfig   // done a6521e0（6a-1/6a-21；6a-23 ssl 随 ζ-1 L4c）
 ✅ β  Wave 1′-A：L1b ‖ L1c ‖ L1d                       // 禁折叠 18  // done a6521e0
@@ -136,9 +136,9 @@ internal suspend fun <T> HostProfileController.withHostReconfiguration(
 ✅ ε  Wave 3：L3a′ ‖ L3b → L3c(Step A rollbackBootstrap) → cluster 12(Step B emit 保序)   // done 665cf79（L3a′+L3c+cluster12）；⚠ L3b（SSS 通知剥离 → ForegroundNotificationPublisher）未做，pending
 ✅ ζ-1 Wave 4a：L4a0 → 6a 剩余 UI 工厂 3/5/16 穿插 → L4a1 ‖ L4b(含17) ‖ L4c(含11)   // done 3c9173f（L4a1 TofuRepository ‖ L4b SettingsManager ‖ L4c ConnectionHealthProbe；cluster 11/17 顺带）；⚠ 6a-3/5/16 UI 工厂未穿插，pending
 ✅ ζ-2 Wave 4b：L4a2（ExpandBatchEngine 抽）            // done f448318
-⬜ ζ-3 Wave 4c：L4a3(+7/9/19/22/24 薄 GET 域委托+slim 轴+compat 门面)   // remaining
-⬜ η  Wave 5：cluster 6(withHostReconfiguration) → check.sh → L5b ‖ L5a ‖ L5c   // 6a-1 须先于 L5c   // remaining
-⬜ θ  收尾：cluster 14 独立 / 18 独立 / 20 / 2/8 延后   // remaining
+✅ ζ-3 Wave 4c：L4a3(domain-delegate + type extraction + cluster 9)        // done 4a0a4d1；cluster 7 resolved-by-design / 19 NO-GO / 24 deferred
+✅ η  Wave 5：cluster 6(withHostReconfiguration) → L5b ‖ L5a ‖ L5c        // done 287f476(cluster6) + 0673dfa(L5b‖L5c) + fcab357(L5a)
+✅ θ  收尾：cluster 18 done / 14 done(N1) / 20/2/8 deferred-by-analysis   // done 78081c8(cluster18) + 950d6b3(N1-cluster14)
 ```
 - **硬序**：L1e→6a-4；L1e→L5a；L1a→cluster10；L1b→cluster18；6a-1→L5c；6a-21/23 宜 ≤L4a1；cluster6→L5b；L3b→L3c+12；L4a0→a1→a2→a3。
 - **并行点**：α‖β；1′-A（3）；1′-B（2）；3a′（2）；L4a1‖L4b‖L4c（3）；W5（3）。
@@ -157,7 +157,7 @@ internal suspend fun <T> HostProfileController.withHostReconfiguration(
 ---
 
 ## §5 优先级与放行（v3）
-- **v0.13.0 进度**：α/β/γ/δ/ε/ζ-1/ζ-2 ✅ done（commits a6521e0→f448318，gated GO）。**下一可执行**：ζ-3（L4a3 薄 GET 域委托+slim 轴+compat 门面，顺带 cluster 7/9/19/22/24）→ η（cluster 6→L5b‖L5a‖L5c）→ θ（收尾）。**遗留子项**：ε 内 L3b（SSS 通知剥离→ForegroundNotificationPublisher）pending；ζ-1 内 6a-3/5/16（UI 工厂 CardWidthScope/MenuItem/StatusBanner）未穿插，pending。
-- **按 α→θ 推进**：✅α→✅β→✅γ→✅δ→✅ε→✅ζ-1→✅ζ-2 → ⬜ζ-3→⬜η→⬜θ。
+- **v0.13.1 进度**：α→θ **全线完成**（commits a6521e0→78081c8，all gated GO）。**全部完成** α→θ。所有遗留子项已闭环：L3b ForegroundNotificationPublisher done（N1 950d6b3）；6a-3/5/16 UI 工厂 done（N1 950d6b3）；cluster 7 resolved-by-design / 19 NO-GO / 20/24 deferred-by-analysis。
+- **按 α→θ 推进**：✅α→✅β→✅γ→✅δ→✅ε→✅ζ-1→✅ζ-2→✅ζ-3→✅η→✅θ → **全部完成**。
 - **NO-GO（已从计划移除）**：L3a 删 PollerRuntime、L4a 单 lane 九域、cluster 15 合并、cluster 18 进 L1b。
-- **主线价值序**：✅L1a(同包)→✅L2(修穷举)；✅streaming L3b→L3c(+12)；✅L4a0+Tofu/Expand 动上帝文件；⬜cluster 6→L5b。
+- **主线价值序**：✅L1a(同包)→✅L2(修穷举)；✅streaming L3b→L3c(+12)；✅L4a0+Tofu/Expand 动上帝文件；✅cluster 6→L5b；✅θ 收尾。**α→θ 全线完成**。

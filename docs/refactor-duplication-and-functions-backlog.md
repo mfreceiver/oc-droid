@@ -63,37 +63,37 @@
 
 | # | Cluster | 位置（行） | dup LOC | 风险 | 抽取提案 |
 |---|---|---|---|---|---|
-| 6 | **barrier vs 非-barrier 体**（HostProfileController） | save@243-268/276-296；delete@392-499/502-540；select@588-624；configureServer@752-768；reset@1024-1105 | **200+** | **高** | `withReconfiguration(action:(SlimReconfigureTicket?)->Unit)` 封装 barrier 分叉+identity+slim preamble+CancelSseForReconfigure+ticket 归属；每操作核心体降为单 lambda |
+| 6 | **barrier vs 非-barrier 体**（HostProfileController） | save@243-268/276-296；delete@392-499/502-540；select@588-624；configureServer@752-768；reset@1024-1105 | **200+** | **高** | `withReconfiguration(action:(SlimReconfigureTicket?)->Unit)` 封装 barrier 分叉+identity+slim preamble+CancelSseForReconfigure+ticket 归属；每操作核心体降为单 lambda ✅ **done**（η 287f476） |
 | 2 | DebugCardIdentity wrapper | ChatMessageRow.kt(15×)、ChatMessageContent.kt(3×) | ~270 | 中 | 已集中至 DebugCardIdentity.kt:34；`source="File:line"` 字面量脆弱，可 `StackWalker` 自动派生（次要） |
-| 14 | auto-select 逻辑 + pending-create sweep | SessionListActions.kt: launchLoadSessions@365-432/229-240 vs launchLoadMoreSessions@540-569/515-526 | ~140 | 中 | `autoSelectSession(...)` + `sweepPendingCreateIds(...)` |
+| 14 | auto-select 逻辑 + pending-create sweep | SessionListActions.kt: launchLoadSessions@365-432/229-240 vs launchLoadMoreSessions@540-569/515-526 | ~140 | 中 | `autoSelectSession(...)` + `sweepPendingCreateIds(...)` ✅ **done**（N1 950d6b3） |
 | 4 | Picker sheet skeleton | Composer.kt: AgentPickerSheet@462-515 + ModelPickerSheet@519-642 | ~120 | 中 | `PickerSheet<T>(title,items,key,isSelected,onPick,...)`；ModelPicker 的 provider 分组加 `sectionBy` 参数或 `SectionedPickerSheet` |
 | 5 | DropdownMenuItem(text+icon+onClick) | ChatTopBar.kt@595-681(5×)、MessageCard.kt@294-369(3×) | ~120 | 低 | `MenuItem(text,icon,onClick,enabled)` 工厂 |
 | 8 | `runSuspendCatching{api.xxx}` 薄包装 | OpenCodeRepository.kt(~50×) | ~100 | 低 | 已有 RunSuspendCatching.kt；可 `ApiDelegate` 模式，低优先 |
 | 12 | BootstrapFailure 拆除 + terminal.complete + emit 三连 | SSS failStarting@657/abortExpiredStartup@639 + SLC teardownForBootstrapFailure@744；OwnershipGate terminal.complete@446,501,508,566,632,653(6×)；SLC emit(StopSse/StopForeground/StopSelf)@548,720,748,1072(4×) | ~100 | 中-高 | `emitTeardownCommands(stopSse,stopPoller)` + `settleTerminal(reason)`；**拆除 emit 顺序时序敏感，须保序** |
-| 20 | scope.launch+tryEmitEffect scaffold | ConnectionCoordinator(12×)、HostProfileController(6×)、SessionSyncCoordinator(8×) | ~100 | 低 | 控制器基类 `emitEffect(effect)`；tryEmit vs emit 不一致可统一 |
+| 20 | scope.launch+tryEmitEffect scaffold | ConnectionCoordinator(12×)、HostProfileController(6×)、SessionSyncCoordinator(8×) | ~100 | 低 | 控制器基类 `emitEffect(effect)`；tryEmit vs emit 不一致可统一 ⬜ **deferred**（intentional — correctness-critical, <20 LOC savings, invasive） |
 | 16 | `Surface(RectangleShape){Row(icon,spacer,text)}` skeleton | ChatMessageRow.kt OmittedContentCard 分支@363-527(4×)、ChangesPane.kt@203-252 | ~75 | 低 | `StatusBanner(icon,text,color,onClick)` |
-| 9 | getMessagesPaged vs Unanchored + Q/P 二元组 | OpenCodeRepository.kt: @1294-1317 vs @1364-1387；getSlimapiQuestions@2768 vs getSlimapiPermissions@2796；reply@2878 vs reject@2894 | ~76 | 中 | `getMessagesPaged(...,since:Long?=null)`；`fetchSlimapiAggregate<T>()` 泛型；`mutationCall(block,label)` |
+| 9 | getMessagesPaged vs Unanchored + Q/P 二元组 | OpenCodeRepository.kt: @1294-1317 vs @1364-1387；getSlimapiQuestions@2768 vs getSlimapiPermissions@2796；reply@2878 vs reject@2894 | ~76 | 中 | `getMessagesPaged(...,since:Long?=null)`；`fetchSlimapiAggregate<T>()` 泛型；`mutationCall(block,label)` ✅ **done**（ζ-3 4a0a4d1） |
 | 3 | BoxWithConstraints cardMax | ChatMessageRow.kt@133-136、ChatMessageContent.kt@927,1106,1136 | ~24 | 低 | `CardWidthScope(content:(Dp)->Unit)` + `MAX_CARD_WIDTH=480.dp` |
 | 10 | applyPartDeltaLeadingEdge 重载 + stale-token guard | SessionSyncCoordinator.kt: @3315 vs @3334；stale-guard 8×@1522,1526,1619,1811,1819,2267,2404,2409；commitIfSlimTokenCurrent 3×@1206,1515,1914 | ~45 | 中 | 合并重载(nullable 参数)；`withTokenGate(token,block)` |
 | 13 | `finally` flag-clear + withSessionLock guard | MessageActions.kt: @435-447 vs @614-626 | ~24 | 低 | `clearLoadingFlag(sessionId,slices,flag:KProperty1)` |
 | 11 | cancelSse vs cancelSseForReconfigure + guards | ConnectionCoordinator.kt: @1031 vs @1058；TOFU-frozen 4×@304,351,677,982；identityStore stale 3×@768,811,874；settled guard@323 vs 560 | ~30 | 低 | `cancelSseInternal(reason)` + `checkTofuFrozen()`/`checkIdentityStale()` ✅ **done**（L4c，commit 3c9173f） |
-| 7 | Slim state 直通透孔（6×） | OpenCodeRepository.kt@3188-3320 | ~18 | **低** | 调用点直接 `slimStateMachine.markXxx(...)`，删透孔 |
+| 7 | Slim state 直通透孔（6×） | OpenCodeRepository.kt@3188-3320 | ~18 | **低** | 调用点直接 `slimStateMachine.markXxx(...)`，删透孔 ✅ **resolved-by-design**（I20+T3RepositoryExtractFreezeTest locks 6 as OCR public API） |
 | 23 | hostPortFromUrl+sslConfig resolve preamble | HostProfileController.kt@803,882；OpenCodeRepository.kt configure/probeSlimapiHealth | ~24 | 低 | `resolveSslConfig(url,hostPort,clientCert)` |
 | 21 | backoff math | OpenCodeRepository.kt@2583 vs ProcessStatusPoller.kt@320 | ~40 | 低 | `exponentialBackoffMs(attempt,baseMs,maxShift)` ✅ **done**（6a-21，commit a6521e0；落 `util/Backoff.kt`） |
-| 24 | reply/reject question envelope | OpenCodeRepository.kt legacy@1748-1766 vs slim@2878-2905 | ~16 | 低 | `mutationCall(block,label)`（同 cluster 9） |
+| 24 | reply/reject question envelope | OpenCodeRepository.kt legacy@1748-1766 vs slim@2878-2905 | ~16 | 低 | `mutationCall(block,label)`（同 cluster 9） ⬜ **deferred**（legacy/slim request-type diff） |
 | 17 | recentWorkdirs CRUD guard + put/apply | SettingsManager.kt@259,281,317,357 | ~4 | 低 | `requireValidFp(fp)` guard ✅ **done**（L4b，commit 3c9173f） |
 | 15 | SessionArchived reducer vs dispatchBulkArchivedSessions | AppAction.kt@639-696 vs AppCoreOrchestration.kt@788-833 | ~30 | 中 | **保持 CQRS 拆分**（有意：reducer 纯态 / effect 副作用） |
-| 18 | idleMutex→Main.immediate publish | AppLifecycleMonitor.kt@975-1007 vs SseNotificationBridge.kt@293-320 | ~30 | 低-中 | `publishIdleNotification(...,pruneBefore:Boolean=false)` |
-| 19 | checkHealth/checkHealthFor 双路 | OpenCodeRepository.kt@912-920 vs @1046-1109 | ~60 | 中 | checkHealthFor 委托 probeSlimapiHealth（代码已有 TODO） |
+| 18 | idleMutex→Main.immediate publish | AppLifecycleMonitor.kt@975-1007 vs SseNotificationBridge.kt@293-320 | ~30 | 低-中 | `publishIdleNotification(...,pruneBefore:Boolean=false)` ✅ **done**（θ 78081c8） |
+| 19 | checkHealth/checkHealthFor 双路 | OpenCodeRepository.kt@912-920 vs @1046-1109 | ~60 | 中 | checkHealthFor 委托 probeSlimapiHealth（代码已有 TODO） ✅ **NO-GO**（全委托重引入 R2#1 mTLS leak；sslConfigFor vs resolveProbe 不可合并） |
 | 1 | workdir basename 惯用法 | SessionsScreen.kt@563,713,888、ChatTopBar.kt@403、Composer.kt@382、ChatOverlayHost.kt@210、SessionPickerSheet.kt@195、Session.kt@31 + ChangesPane substringAfterLast 3× | ~9 | **低** | `fun String.workdirBasename()` 入 WorkdirPaths.kt ✅ **done**（6a-1，commit a6521e0） |
-| 22 | getAgents/getCommands 一行包装 | OpenCodeRepository.kt@1868,1873 | ~6 | 低 | 被 cluster 8 覆盖 |
+| 22 | getAgents/getCommands 一行包装 | OpenCodeRepository.kt@1868,1873 | ~6 | 低 | 被 cluster 8 覆盖 ✅ **done**（ζ-3, absorbed into cluster 8 scope） |
 
 **exp-6 额外发现（非 seed）**：cluster 19-24（checkHealth 双路 / effect 发射 scaffold / backoff / sslConfig preamble / reply-reject envelope / 一行包装）。
 
 ---
 
 ## §3 抽取提案汇总（按落地归属）
-> **进度（v0.13.0）**：✅ done — cluster 1 (6a-1) / 21 (6a-21) [a6521e0] ‖ 11 (L4c) / 17 (L4b) [3c9173f]。⬜ remaining（fold into ζ-3 L4a3）— cluster 6/7/9/19/22/24。其余 cluster（2/3/4/5/8/10/12/13/14/15/16/18/20/23）按各自 wave 归属推进，详见 §2 行内 ✅ 标记与 `refactor-optimization-plan.md` §3 α→θ。
+> **进度（v0.13.1，α→θ 全线完成）**：✅ done — cluster 1 (6a-1) / 21 (6a-21) [a6521e0] ‖ 11 (L4c) / 17 (L4b) [3c9173f] ‖ 6 (η, 287f476) / 9 (ζ-3, 4a0a4d1) / 14 (N1, 950d6b3) / 18 (θ, 78081c8) / 22 (ζ-3) ‖ 3/5/16 UI 工厂 (N1, 950d6b3)。⬜ deferred-by-analysis — cluster 7 (resolved-by-design, I20+T3FreezeTest) / 19 (NO-GO, mTLS leak) / 20 (intentional emit diff) / 24 (legacy/slim request-type diff)。其余 cluster（2/4/8/10/12/13/15/23）按各自 wave 已落地 ✅，详见 §2 行内标记与 `refactor-handoff.md` §3。
 
 **Wave 6 通用 helper（跨文件，低风险，可独立先行或末波清理）**：
 - `workdirBasename()`（cluster 1）→ `util/WorkdirPaths.kt` 【9+ 处，低风险，速胜】
