@@ -14,7 +14,7 @@ import org.junit.Test
 /**
  * R8 slim-mode foundation / B2 Opt-A: SlimapiCapabilitiesInterceptor 单测。
  *
- * 契约（见 SlimapiContract / docs/0.11-ux-first-joint-plan.md §6）：
+ * 契约（见 SlimapiContract / docs/specs/slim-mode-api-routing.md）：
  *  - 双门闩：HostConfig.slim == true **AND** 路径以 `/slimapi/` 前缀 → 注入
  *    `X-Slimapi-Capabilities: mid-partial-envelope=1`。
  *  - legacy 模式（slim=false）：原样透传，不注入头（opencode 不识别该头）。

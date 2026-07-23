@@ -29,7 +29,7 @@ import javax.inject.Singleton
  * `name=value` token，name 大小写不敏感、无空白。客户端仅此一项；服务器端负责
  * 解析、去重、冲突检测与关闭行为（本拦截器只负责 emit）。
  *
- * @see docs/0.11-ux-first-joint-plan.md §6 R3-B2-NEGOTIATION + I-R5-CAP-DUPLICATES
+ * @see docs/specs/slim-mode-api-routing.md（能力/版本协商契约）+ SlimapiContract
  */
 @Singleton
 class SlimapiCapabilitiesInterceptor @Inject constructor(

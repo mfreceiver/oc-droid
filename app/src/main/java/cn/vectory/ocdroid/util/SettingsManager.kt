@@ -15,7 +15,7 @@ import javax.inject.Singleton
  * ocdroid's persisted-settings facade.
  *
  * Historically a ~900-line god-object that owned every EncryptedSharedPreferences
- * key directly. L4b (refactor-optimization-plan.md §3 Wave 4) split it into
+ * key directly. L4b split it into
  * per-domain Prefs helpers + a [MigrationHelper]; this class is now a thin
  * composition facade that:
  *  1. Creates the single [EncryptedSharedPreferences] instance (the
