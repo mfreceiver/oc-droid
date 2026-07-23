@@ -624,6 +624,20 @@ class OpenCodeRepository @Inject constructor(
             // successful configure re-arms it. Ticket-ownership guarantees we
             // activate THIS transaction's incarnation, not a superseding one.
             completeSlimReconfigure(ticket)
+            // ι-A (capability read-model): 发布能力 mode 仅在整条 ssl/host/client/readiness
+            // 事务全成功后——与 completeSlimReconfigure 的「readiness 仅每步成功后才发布」
+            // 纪律一致（见上注释）。throw 时 slimConnection 保持先前值（= 仍 live 的旧连接
+            // mode；新 mode 从未 live，故不应发布）。configure() 是 fail-forward（不回滚旧
+            // hostConfig），但能力模型只反映"最近一次成功 live 的 mode"，与 readiness 同语义。
+            //
+            // 受管写点（I8 扩展）：本行是 setSlimConnection 的唯一受管调用方；与 probe
+            // 写点（update/updateSlimapi，由 checkHealthFor / probeSlimapiHealth 尾部调用）
+            // 并列。仍在 configure() @Synchronized monitor 内（I5/I6/I7 不变量保持）。
+            // reconfigure 中途（新栈未确认前）slimConnection 仍报旧 mode = 仍 operative 的
+            // 旧连接；L4+ 无锁读到的始终是"当前仍 live 的 mode"。mode 在此刻 authoritatively
+            // 确立（= hostConfig.slim），不能从 serverCompatProfile 现有字段推导（legacy 模式
+            // 下 slimapi* 全 null；slim 模式首次 health 成功前 slimapi* 也全 null）。
+            serverCompatProfile.setSlimConnection(slim)
         } catch (error: Throwable) {
             // Deliberately do NOT complete: old host cannot be reinstated
             // safely after partial ssl/HostConfig/client mutation. A superseded
