@@ -188,7 +188,7 @@ class OpenCodeRepository @Inject constructor(
     private var restHttp: OkHttpClient = clientFactory.restClient(hostConfig.hostPort)
     private var sseHttp: OkHttpClient = clientFactory.sseClient(hostConfig.hostPort)
     private var retrofit: Retrofit = buildRetrofit(restHttp, hostConfig.baseUrl)
-    private var api: OpenCodeApi = retrofit.create(OpenCodeApi::class.java)
+    @Volatile private var api: OpenCodeApi = retrofit.create(OpenCodeApi::class.java)
     private var sseClient: SSEClient = SSEClient(sseHttp)
 
     /**
@@ -210,7 +210,7 @@ class OpenCodeRepository @Inject constructor(
      */
     private var commandHttp: OkHttpClient = clientFactory.commandClient(hostConfig.hostPort)
     private var commandRetrofit: Retrofit = buildRetrofit(commandHttp, hostConfig.baseUrl)
-    private var commandApi: OpenCodeApi = commandRetrofit.create(OpenCodeApi::class.java)
+    @Volatile private var commandApi: OpenCodeApi = commandRetrofit.create(OpenCodeApi::class.java)
 
     /**
      * T14 (CLIENT_CHANGES "mutation 只发一次，不因超时向 direct 重发"):
@@ -251,7 +251,7 @@ class OpenCodeRepository @Inject constructor(
      */
     private var mutationHttp: OkHttpClient = clientFactory.mutationClient(hostConfig.hostPort)
     private var mutationRetrofit: Retrofit = buildRetrofit(mutationHttp, hostConfig.baseUrl)
-    private var mutationApi: OpenCodeApi = mutationRetrofit.create(OpenCodeApi::class.java)
+    @Volatile private var mutationApi: OpenCodeApi = mutationRetrofit.create(OpenCodeApi::class.java)
 
     /**
      * §model-selection: a SECOND Retrofit instance rooted at
@@ -265,7 +265,7 @@ class OpenCodeRepository @Inject constructor(
      * PromptRequest.model, not switched server-side per session.)
      */
     private var v2Retrofit: Retrofit = buildV2Retrofit(restHttp, hostConfig.baseUrl)
-    private var apiV2: OpenCodeApiV2 = v2Retrofit.create(OpenCodeApiV2::class.java)
+    @Volatile private var apiV2: OpenCodeApiV2 = v2Retrofit.create(OpenCodeApiV2::class.java)
 
     /**
      * Task 11 round-2 (oracle I3 — atomic state mutation boundary): the
@@ -1682,7 +1682,13 @@ class OpenCodeRepository @Inject constructor(
      * legacy (`isSlimMode == false`): byte-for-byte unchanged.
      */
     suspend fun getPendingPermissions(): Result<List<PermissionRequest>> = runSuspendCatching {
-        if (isSlimMode) {
+        // 🟡-1 fix (rev-opus): 读 serverCompatProfile.slimConnection（lazy 发布，
+        // 与 sessionSource/messageSource/setSlimConnection 同 publish point——均在
+        // configure() completeSlimReconfigure 之后），而非裸 isSlimMode（=hostConfig.slim，
+        // eager 在 hostConfig.configure 即写）。使 permissions 路由与 session/message
+        // 路由在 configure 失败/重配窄窗内一致（同读 OLD live mode，不分裂）。
+        // 稳态（configure 成功）slimConnection ≡ isSlimMode，行为不变。
+        if (serverCompatProfile.slimConnection) {
             val aggregation = api.getSlimapiPermissions(directories = null)
             if (aggregation.errors.isNotEmpty()) {
                 DebugLog.w(TAG, "slimapi/permissions partial errors: ${aggregation.errors}")
