@@ -177,14 +177,14 @@ object TokenStreamReducer {
 - **[Stage B]** authoritative caller 决策规则（grok MF-1）：`isAuthoritativeSlimMerge(mode,sid,sessionStatuses,forceAuthoritative)=true iff forceAuthoritative||mode==RESYNC||(session idle 非 busy/retry)`；贯穿 `mergeSlimMessagesIntoChat(authoritative)`/`applySlimColdStartSnapshot(authoritative)`（cold-start 默认 false，resync 触发的 true）。
 - **[Stage B]** part 保留范围收窄（opus MF-A，消除非-token-stream 回归）：`preservedLocal = local.filter { lp.id !in fetchedIds && newOwned[lp.id]==STREAMING }` → `streamOwned` 空时等价原 `partsByMessage+(id to item.parts)` 整体覆盖。
 - **[Stage B]** `MessagesMerged` streamOwned 认知（grok S3/bgpt SF-2）：`MessagesMerged(authoritative)` + `mergeStreamingOverlay`（token-owned streaming part 不被 skeleton 清；authoritative 清对应 overlay）。
-- **[Stage C]** `ResyncReason` 枚举（opus SF-2）：4 reason + `triggersReconnect`（reconnect_no_replay/subscriber_backpressure→重连）；`tokenStreamClient` 补 `TrafficCountingInterceptor`（opus SF-1，流量统计）。
+- **[Stage C]** `ResyncReason` 枚举（opus SF-2）：~~4 reason~~ → **5 reason + UNKNOWN fallback（已 ship）**：`reconnect_no_replay`/`subscriber_backpressure`/`token_memory_limit`/`session_idle`/`session_deleted`；`triggersReconnect=true` 前 3（rev-bgpt A：token_memory_limit 也重连）；`part_too_large` 已删（超限→`truncated:true`）；未知 reason → clear + authoritative `/since`（不静默丢帧，不重连）。`tokenStreamClient` 补 `TrafficCountingInterceptor`（opus SF-1，流量统计）。
 - **[Stage D]** watchdog 首帧前也超时（bgpt MF-2）：独立 watchdog 从 `open()/onOpen()` 起计时，任意 frame 更新 `lastFrameAt`，45s 无帧→cancel；**不复用** `SSEClient` 的 `eventCount==0` 例外（`:292-305`，否则首帧前永久挂起）。
 - **[Stage D]** clear-action generation 守卫（bgpt MF-3）：coordinator 按 `(sid,generation)` 注册 owner；clear effects 带 sid+generation；dispatch 前校验当前 owner（防旧 session 迟到 clear 清掉新 session 同 partId overlay；epoch 已护 frame，此为补 clear-effect）。
 
 **服务端（→ 转 slimapi，其 backstop 印证）**
 - `_disabled_parts` 有界化（bgpt MF-1）：bounded `OrderedDict`+TTL(4096/300s)+prune（现 `drop_part` 永久加 key→绕过 C5 cap 进程级泄漏）。
 - `publish()` 路由补 `session.status`/`session.deleted` → token_hub（opus MF-B）：`_busy_sids`+`_retire_session(sid)`+TTL busy-guard 数据源（§5.3 三个退役触发依赖它，现 §5.2 只路由 part 事件）。
-- `session.idle` 清理时向 token subscriber 发 resync（bgpt SF-3）：新 `session_idle` reason 或客户端把控制面 idle 当 authoritative 触发。
+- `session.idle` 清理时向 token subscriber 发 resync（bgpt SF-3）：**已 ship（客户端侧）**——`session_idle` reason 已在 `ResyncReason` 枚举中（Stage C），客户端 clear+`/since` 处理（不重连，会话 idle 为终态）；服务端侧"主动发 resync"仍为可选 backstop。
 
 ---
 

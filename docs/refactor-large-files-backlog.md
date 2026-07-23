@@ -10,7 +10,7 @@
 
 | 文件 | LOC | 判定 | P | 一句话 |
 |---|---|---|---|---|
-| `data/repository/OpenCodeRepository.kt` | 3953 | **GOD** | P2 | 4 层堆叠：HTTP/SSL/TOFU 客户端栈 / REST 门面 / slim 同步状态机 / TOFU pin |
+| `data/repository/OpenCodeRepository.kt` | 3953 | **GOD** | P2 | 4 层堆叠：HTTP/SSL/TOFU 客户端栈 / REST 门面 / slim 同步状态机 / TOFU pin。**✅ 拆分进行中**：TofuRepository 抽出 (L4a1, commit 3c9173f) ‖ ExpandBatchEngine 抽出 (L4a2, commit f448318)；⬜ L4a3 薄 GET 域委托+slim 轴+compat 门面 remaining |
 | `ui/controller/SessionSyncCoordinator.kt` | 3687 | **GOD** | **P1** | SSE 协调类 + ~900 行纯 reducer 扩展(2794-3687) + 重复 pending-questions 岛 |
 | `ui/chat/ChatMessageContent.kt` | 1399 | 长-内聚（god-函数） | P3 | 单个 ~1100 行 composable |
 | `ui/chat/ChatScaffold.kt` | 1392 | **GOD** | P3 | 48 参 + 373 行 derivedStateOf + 7 VM 接线，编排枢纽非内聚 composable |
@@ -21,9 +21,9 @@
 | `ui/SessionListActions.kt` | 1220 | MIXED | P3 | 9 自由函数大杂烩；`launchLoadSessions` 368 行 |
 | `ui/sessions/SessionsScreen.kt` | 1216 | MIXED | P3 | 屏 + SessionCard + HomeWorkdirRow + helpers 三组合一 |
 | `ui/controller/HostProfileController.kt` | 1110 | 长-内聚 | P3 | 单域；长度来自 **3 层 barrier/非barrier/非active 重复** |
-| `ui/controller/ConnectionCoordinator.kt` | 1075 | **GOD-lite** | P2 | health/testConnection 引擎(292-676, 260行) + 初始加载 + SSE 开关 |
-| `util/SettingsManager.kt` | 1071 | **GOD-config** | P2 | ~17 域共用一个 EncryptedSharedPreferences |
-| `service/SessionStreamingService.kt` | 1007 | **GOD-lite** | P2 | Service 壳 + ~250 行通知构建(711-902，与 service/notify/ 重复) |
+| `ui/controller/ConnectionCoordinator.kt` | 1075 | **GOD-lite** | P2 | health/testConnection 引擎(292-676, 260行) + 初始加载 + SSE 开关。**✅ done**：ConnectionHealthProbe 抽出 + cluster 11 cancelSseInternal 去重 (L4c, commit 3c9173f) |
+| `util/SettingsManager.kt` | 1071 | **GOD-config** | P2 | ~17 域共用一个 EncryptedSharedPreferences。**✅ done**：分域为 8 *Prefs.kt + MigrationHelper，原文件退化为 facade (L4b, commit 3c9173f；cluster 17 requireValidFp 顺带) |
+| `service/SessionStreamingService.kt` | 1007 | **GOD-lite** | P2 | Service 壳 + ~250 行通知构建(711-902，与 service/notify/ 重复)。**部分 done**：BootstrapFailure 两步收敛 (L3c Step A rollbackBootstrap + Step B emit, commit 665cf79)；⬜ L3b（通知构建 → ForegroundNotificationPublisher）pending |
 | `service/streaming/ServiceSseConnectionOwner.kt` | 979 | 长-内聚 | — | 单一 SSE 传输生命周期；resync 合并(782-879) 可抽 |
 | `ui/AppCore.kt` | 934 | 长-内聚 | P3 | DI 根；dispatchEffect 路由(459-903) 可抽 |
 | `ui/AppStateSlices.kt` | 867 | 长-内聚 | P3 | 状态字典；ChatState(194行)/SessionListState(155行) 可拆 |

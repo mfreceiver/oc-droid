@@ -76,16 +76,16 @@
 | 3 | BoxWithConstraints cardMax | ChatMessageRow.kt@133-136、ChatMessageContent.kt@927,1106,1136 | ~24 | 低 | `CardWidthScope(content:(Dp)->Unit)` + `MAX_CARD_WIDTH=480.dp` |
 | 10 | applyPartDeltaLeadingEdge 重载 + stale-token guard | SessionSyncCoordinator.kt: @3315 vs @3334；stale-guard 8×@1522,1526,1619,1811,1819,2267,2404,2409；commitIfSlimTokenCurrent 3×@1206,1515,1914 | ~45 | 中 | 合并重载(nullable 参数)；`withTokenGate(token,block)` |
 | 13 | `finally` flag-clear + withSessionLock guard | MessageActions.kt: @435-447 vs @614-626 | ~24 | 低 | `clearLoadingFlag(sessionId,slices,flag:KProperty1)` |
-| 11 | cancelSse vs cancelSseForReconfigure + guards | ConnectionCoordinator.kt: @1031 vs @1058；TOFU-frozen 4×@304,351,677,982；identityStore stale 3×@768,811,874；settled guard@323 vs 560 | ~30 | 低 | `cancelSseInternal(reason)` + `checkTofuFrozen()`/`checkIdentityStale()` |
+| 11 | cancelSse vs cancelSseForReconfigure + guards | ConnectionCoordinator.kt: @1031 vs @1058；TOFU-frozen 4×@304,351,677,982；identityStore stale 3×@768,811,874；settled guard@323 vs 560 | ~30 | 低 | `cancelSseInternal(reason)` + `checkTofuFrozen()`/`checkIdentityStale()` ✅ **done**（L4c，commit 3c9173f） |
 | 7 | Slim state 直通透孔（6×） | OpenCodeRepository.kt@3188-3320 | ~18 | **低** | 调用点直接 `slimStateMachine.markXxx(...)`，删透孔 |
 | 23 | hostPortFromUrl+sslConfig resolve preamble | HostProfileController.kt@803,882；OpenCodeRepository.kt configure/probeSlimapiHealth | ~24 | 低 | `resolveSslConfig(url,hostPort,clientCert)` |
-| 21 | backoff math | OpenCodeRepository.kt@2583 vs ProcessStatusPoller.kt@320 | ~40 | 低 | `exponentialBackoffMs(attempt,baseMs,maxShift)` |
+| 21 | backoff math | OpenCodeRepository.kt@2583 vs ProcessStatusPoller.kt@320 | ~40 | 低 | `exponentialBackoffMs(attempt,baseMs,maxShift)` ✅ **done**（6a-21，commit a6521e0；落 `util/Backoff.kt`） |
 | 24 | reply/reject question envelope | OpenCodeRepository.kt legacy@1748-1766 vs slim@2878-2905 | ~16 | 低 | `mutationCall(block,label)`（同 cluster 9） |
-| 17 | recentWorkdirs CRUD guard + put/apply | SettingsManager.kt@259,281,317,357 | ~4 | 低 | `requireValidFp(fp)` guard |
+| 17 | recentWorkdirs CRUD guard + put/apply | SettingsManager.kt@259,281,317,357 | ~4 | 低 | `requireValidFp(fp)` guard ✅ **done**（L4b，commit 3c9173f） |
 | 15 | SessionArchived reducer vs dispatchBulkArchivedSessions | AppAction.kt@639-696 vs AppCoreOrchestration.kt@788-833 | ~30 | 中 | **保持 CQRS 拆分**（有意：reducer 纯态 / effect 副作用） |
 | 18 | idleMutex→Main.immediate publish | AppLifecycleMonitor.kt@975-1007 vs SseNotificationBridge.kt@293-320 | ~30 | 低-中 | `publishIdleNotification(...,pruneBefore:Boolean=false)` |
 | 19 | checkHealth/checkHealthFor 双路 | OpenCodeRepository.kt@912-920 vs @1046-1109 | ~60 | 中 | checkHealthFor 委托 probeSlimapiHealth（代码已有 TODO） |
-| 1 | workdir basename 惯用法 | SessionsScreen.kt@563,713,888、ChatTopBar.kt@403、Composer.kt@382、ChatOverlayHost.kt@210、SessionPickerSheet.kt@195、Session.kt@31 + ChangesPane substringAfterLast 3× | ~9 | **低** | `fun String.workdirBasename()` 入 WorkdirPaths.kt |
+| 1 | workdir basename 惯用法 | SessionsScreen.kt@563,713,888、ChatTopBar.kt@403、Composer.kt@382、ChatOverlayHost.kt@210、SessionPickerSheet.kt@195、Session.kt@31 + ChangesPane substringAfterLast 3× | ~9 | **低** | `fun String.workdirBasename()` 入 WorkdirPaths.kt ✅ **done**（6a-1，commit a6521e0） |
 | 22 | getAgents/getCommands 一行包装 | OpenCodeRepository.kt@1868,1873 | ~6 | 低 | 被 cluster 8 覆盖 |
 
 **exp-6 额外发现（非 seed）**：cluster 19-24（checkHealth 双路 / effect 发射 scaffold / backoff / sslConfig preamble / reply-reject envelope / 一行包装）。
@@ -93,6 +93,7 @@
 ---
 
 ## §3 抽取提案汇总（按落地归属）
+> **进度（v0.13.0）**：✅ done — cluster 1 (6a-1) / 21 (6a-21) [a6521e0] ‖ 11 (L4c) / 17 (L4b) [3c9173f]。⬜ remaining（fold into ζ-3 L4a3）— cluster 6/7/9/19/22/24。其余 cluster（2/3/4/5/8/10/12/13/14/15/16/18/20/23）按各自 wave 归属推进，详见 §2 行内 ✅ 标记与 `refactor-optimization-plan.md` §3 α→θ。
 
 **Wave 6 通用 helper（跨文件，低风险，可独立先行或末波清理）**：
 - `workdirBasename()`（cluster 1）→ `util/WorkdirPaths.kt` 【9+ 处，低风险，速胜】
