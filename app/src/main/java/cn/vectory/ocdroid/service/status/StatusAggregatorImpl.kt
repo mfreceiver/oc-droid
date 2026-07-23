@@ -264,9 +264,9 @@ class StatusAggregatorImpl internal constructor(
         // Same Map<String, SessionStatus> shape, so the merge/projection below
         // is unchanged. This is the L2Idle/L3 degraded fallback: on slim SSE
         // loss, ProcessStatusPoller (≤30s) drives this refresh using SLIM
-        // endpoints, NOT legacy. Legacy mode (isSlimMode == false) is
+        // endpoints, NOT legacy. Legacy mode (usesSlimStatusFanOut == false) is
         // byte-for-byte unchanged.
-        val result: Result<StatusFetch> = if (repository.isSlimMode) {
+        val result: Result<StatusFetch> = if (repository.usesSlimStatusFanOut) {
             withContext(Dispatchers.IO) {
                 val merged = mutableMapOf<String, SessionStatus>()
                 val succeeded = mutableSetOf<String>()

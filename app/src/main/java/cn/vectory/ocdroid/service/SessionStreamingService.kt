@@ -353,9 +353,15 @@ class SessionStreamingService : Service() {
             // ReconcileMode.RESYNC for every sid. Round-1 called
             // coldStartSlimSync directly which left performResyncCatchUp
             // as dead code (T11 review I1).
+            // ι-Q3a: 用 supportsTokenStreamResync 替换 isSlimMode。语义：
+            //   supportsTokenStreamResync = slimConnection && slimapiTokenStreamEnabled
+            // 比原 isSlimMode（仅 slim mode）更严（额外要求 sidecar 公告 tokenStream 特性）。
+            // 但 token-stream 协调器自身已 gate on slimapiTokenStreamEnabled，故特性关闭时
+            // 该路径本就 no-op。此前置门用 supportsTokenStreamResync 只是更早跳过，
+            // 可观察行为等价。
             onResync = onResync@{ isStillCurrent ->
                 if (!isStillCurrent()) return@onResync
-                if (!repository.isSlimMode) return@onResync
+                if (!repository.supportsTokenStreamResync) return@onResync
                 val directories = buildList {
                     sharedStateStore.slices.sessionList.value.directorySessions.keys
                         .forEach { add(it) }

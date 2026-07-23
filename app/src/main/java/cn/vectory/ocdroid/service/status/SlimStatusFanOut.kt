@@ -32,7 +32,7 @@ import kotlinx.coroutines.sync.withPermit
  * # T13-C6 (legacy bulk untouched)
  *
  * This use-case is invoked ONLY from slim on-demand paths. The legacy
- * non-slim path (`!repository.isSlimMode`) never reaches this use-case;
+ * non-slim path (`!repository.usesSlimStatusFanOut`) never reaches this use-case;
  * [StatusAggregatorImpl.refresh] stays byte-for-byte unchanged.
  *
  * # Fake-idle cross-check (T13-C5 + round-2 M1)

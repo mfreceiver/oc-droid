@@ -794,7 +794,7 @@ class StatusAggregatorImplTest {
             // GREEN: current impl already routes through getSlimapiSessionsStatus
             // in slim mode (the disconnect fallback path is correct).
             val repo = mockk<OpenCodeRepository>(relaxed = true)
-            every { repo.isSlimMode } returns true
+            every { repo.usesSlimStatusFanOut } returns true
             coEvery { repo.getSlimapiSessionsStatus(any()) } returns Result.success(
                 mapOf("s1" to SessionStatus(type = "busy"))
             )
@@ -827,7 +827,7 @@ class StatusAggregatorImplTest {
         // branch must surface a composite failure so known sessions become
         // Unknown (NOT Idle). GREEN: current impl handles all-fail correctly.
         val repo = mockk<OpenCodeRepository>(relaxed = true)
-        every { repo.isSlimMode } returns true
+        every { repo.usesSlimStatusFanOut } returns true
         coEvery { repo.getSlimapiSessionsStatus(any()) } returns Result.failure(
             java.io.IOException("upstream unavailable")
         )
@@ -868,7 +868,7 @@ class StatusAggregatorImplTest {
             // track per-workdir success/failure and mark failed-workdir
             // sessions Unknown.
             val repo = mockk<OpenCodeRepository>(relaxed = true)
-            every { repo.isSlimMode } returns true
+            every { repo.usesSlimStatusFanOut } returns true
             coEvery { repo.getSlimapiSessionsStatus("/work-a") } returns Result.success(
                 mapOf("s1" to SessionStatus(type = "busy"))
             )
@@ -921,7 +921,7 @@ class StatusAggregatorImplTest {
             // Idle → globalState=AllIdleFresh (the bug). The A-impl rework must
             // mark s2=Unknown so globalState=Unknown.
             val repo = mockk<OpenCodeRepository>(relaxed = true)
-            every { repo.isSlimMode } returns true
+            every { repo.usesSlimStatusFanOut } returns true
             coEvery { repo.getSlimapiSessionsStatus("/work-a") } returns Result.success(emptyMap())
             coEvery { repo.getSlimapiSessionsStatus("/work-b") } returns Result.failure(
                 java.io.IOException("upstream unavailable")
@@ -969,7 +969,7 @@ class StatusAggregatorImplTest {
         // the coverage marker's cold-start guard, not by poisoning entries as
         // Unknown). GREEN.
         val repo = mockk<OpenCodeRepository>(relaxed = true)
-        every { repo.isSlimMode } returns true
+        every { repo.usesSlimStatusFanOut } returns true
         coEvery { repo.getSlimapiSessionsStatus(any()) } returns Result.success(emptyMap())
         val aggregator = newAggregator(repo, clock = { 100L })
 

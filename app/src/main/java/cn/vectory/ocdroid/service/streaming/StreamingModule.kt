@@ -120,9 +120,12 @@ object ProcessStatusPollerModule {
             // sweep (the inner double-check inside runSlimFanOut's mutex
             // catches a switch that landed between the outer check and
             // mutex acquisition).
+            // ι-Q3a: 此 runner 是 slim **status 扇出轮询**（checkSlimSessionsStatuses），
+            // 非 token-stream；故用 usesSlimStatusFanOut（≡ slimConnection）而非
+            // supportsTokenStreamResync。逐字等价（usesSlimStatusFanOut = slimConnection）。
             slimFanOutRunner = runner@{ identity, snapshot ->
                 if (!identityStore.isCurrent(identity)) return@runner null
-                if (!repository.isSlimMode) return@runner null
+                if (!repository.usesSlimStatusFanOut) return@runner null
 
                 val sessionIds = snapshot.sessionsById.keys
 

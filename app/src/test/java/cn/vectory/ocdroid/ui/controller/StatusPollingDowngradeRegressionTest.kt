@@ -103,7 +103,7 @@ class StatusPollingDowngradeRegressionTest {
     }
 
     private fun slimRepository(): OpenCodeRepository = mockk(relaxed = true) {
-        every { isSlimMode } returns true
+        every { usesSlimStatusFanOut } returns true
         // Defensive stubs for ALL three status endpoints. The @Ignore sweep
         // tests below assert these are NEVER called; a stubbed-but-not-called
         // method still satisfies coVerify(exactly = 0).
@@ -113,7 +113,7 @@ class StatusPollingDowngradeRegressionTest {
     }
 
     private fun legacyRepository(): OpenCodeRepository = mockk(relaxed = true) {
-        every { isSlimMode } returns false
+        every { usesSlimStatusFanOut } returns false
         coEvery { getSessionStatus() } returns Result.success(emptyMap())
         coEvery { getActiveSessionIds() } returns Result.success(emptySet())
     }
