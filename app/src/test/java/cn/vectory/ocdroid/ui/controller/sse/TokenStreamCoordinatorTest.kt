@@ -504,39 +504,60 @@ class TokenStreamCoordinatorTest {
     }
 
     @Test
-    fun `resync token_memory_limit clears but does NOT reconnect`() {
-        // §5 C-3: repurposed from part_too_large (removed from the enum — the
-        // server never emits it; over-limit surfaces as truncated:true on the
-        // part snapshot). Uses TOKEN_MEMORY_LIMIT as a stable non-reconnect reason.
+    fun `resync token_memory_limit clears and reconnects via sentinel (rev-bgpt Option A)`() {
+        // §5 rev-bgpt: token_memory_limit now triggers a reconnect (the server
+        // keeps the stream alive after LRU-evicting a part; the client must
+        // reconnect to re-establish snapshot anchors). Mirrors the
+        // RECONNECT_NO_REPLAY reconnect test: the Reconnect effect sets a
+        // sentinel consumed INSIDE flow.collect's post-dispatch check, so the
+        // frame MUST be pumped through the flow (fake.send) — a direct
+        // dispatchEpochFrame sets the sentinel but never fires scheduleReconnect.
+        // §5 C-3 note: this test was repurposed from part_too_large (removed
+        // from the enum) and now asserts the corrected reconnect behavior.
         coordinator.open("s1")
         runPending()
-        val gen = coordinator.genOf("s1")
-        val epoch = coordinator.epochOf("s1")
-        coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", text = "a"))
+        assertEquals(1, fake.openCount.get())
+        // Pump a snapshot through the flow so the part is owned.
+        fake.send(snapshot(partId = "p1", text = "a"))
+        runPending()
+        assertTrue(stateStore.chatFlow.value.streamOwned.containsKey("p1"))
         val baseline = fake.openCount.get()
-        coordinator.dispatchEpochFrame("s1", epoch, gen, TokenStreamFrame.Resync(ResyncReason.TOKEN_MEMORY_LIMIT, "s1"))
-        // Cleared.
+        // Pump the resync through the flow — collect processes it, handleEffect
+        // sets the sentinel, the post-dispatch check throws
+        // TokenStreamReconnectRequested → catch → scheduleReconnect.
+        fake.send(TokenStreamFrame.Resync(ResyncReason.TOKEN_MEMORY_LIMIT, "s1"))
+        runPending()
+        // ClearPartState dispatched synchronously inside dispatchEpochFrame,
+        // before the sentinel check threw.
         assertEquals(0, stateStore.chatFlow.value.streamOwned.size)
         // Fetch triggered.
         assertTrue(sinceFetchCalls.any { it.sid == "s1" && it.auth })
-        // TOKEN_MEMORY_LIMIT does NOT emit a Reconnect effect — verify NO provider
-        // call happened synchronously (we do NOT advance time here because
-        // the watchdog would independently reconnect on its own timeout,
-        // which is unrelated to the reducer's effect decision).
-        assertEquals("token_memory_limit must NOT trigger reconnect", baseline, fake.openCount.get())
+        // The reconnect is now pending in backoff (J2 in delay,
+        // initialBackoffMs=50). Advance past it to land ONE reconnect.
+        scope.advanceTimeBy(60L) // past initialBackoffMs=50
+        runPending()
+        assertTrue(
+            "token_memory_limit must trigger a reconnect (rev-bgpt Option A)",
+            fake.openCount.get() > baseline,
+        )
         coordinator.close("s1")
         runPending()
     }
 
     @Test
     fun `resync with null sessionId infers sid from the open connection (S2)`() {
+        // §5: uses SESSION_IDLE (a clear-only reason) so the test's focus stays
+        // on sid inference with no reconnect complications. (TOKEN_MEMORY_LIMIT
+        // was previously used here but now reconnects, which would muddy the
+        // sid-inference assertion; the reconnect path is covered by the
+        // dedicated token_memory_limit test above.)
         coordinator.open("s1")
         runPending()
         val gen = coordinator.genOf("s1")
         val epoch = coordinator.epochOf("s1")
         // Resync with sessionId == null — coordinator must infer "s1".
-        coordinator.dispatchEpochFrame("s1", epoch, gen, TokenStreamFrame.Resync(ResyncReason.TOKEN_MEMORY_LIMIT, null))
-        // TriggerSinceFetch fired with the inferred sid (this reason does NOT
+        coordinator.dispatchEpochFrame("s1", epoch, gen, TokenStreamFrame.Resync(ResyncReason.SESSION_IDLE, null))
+        // TriggerSinceFetch fired with the inferred sid (SESSION_IDLE does NOT
         // reconnect, so no provider re-open expected).
         assertTrue(
             "TriggerSinceFetch should use the inferred sid s1",

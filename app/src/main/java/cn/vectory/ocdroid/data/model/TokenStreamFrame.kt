@@ -204,10 +204,15 @@ sealed interface TokenStreamFrame {
  * frame.
  *
  * [triggersReconnect] partitions the reasons into two recovery classes:
- *  - `true`  → the transport itself is unusable (no replay buffer); the
- *    consumer MUST close + re-open the SSE connection.
- *  - `false` → only the in-flight part state is lost; clearing + re-fetching
- *    suffices, the socket can stay open.
+ *  - `true`  → the consumer MUST close + re-open the SSE connection. Either
+ *    the transport itself is unusable (RECONNECT_NO_REPLAY /
+ *    SUBSCRIBER_BACKPRESSURE — no replay buffer), OR the server kept the
+ *    stream alive after dropping in-flight part state (TOKEN_MEMORY_LIMIT —
+ *    see its entry: clear+/since alone would orphan subsequent deltas, so a
+ *    client reconnect is required to re-establish snapshot anchors).
+ *  - `false` → clearing + re-fetching suffices, the socket can stay open
+ *    (SESSION_IDLE / SESSION_DELETED — terminal upstream, no more tokens will
+ *    arrive; UNKNOWN — conservative fallback for unrecognized reasons).
  *
  * This is distinct from [SlimapiResyncReason] (legacy `/slimapi/events`
  * digest resync taxonomy); the token-stream reasons are a separate vocabulary.
@@ -220,6 +225,17 @@ enum class ResyncReason(val wire: String) {
     // parts surface as `truncated:true` on the part snapshot, handled in
     // reduceSnapshot). Kept this comment as a tombstone so the wire vocabulary
     // is not accidentally re-added without a producer.
+    //
+    // §5 rev-bgpt (Option A): triggersReconnect = true. The server LRU-evicts
+    // ONE LivePart on this reason but keeps the stream alive — it does NOT
+    // disconnect and does NOT resend handshake snapshots to existing
+    // subscribers (snapshot is only emitted on `attach_subscriber`). Clearing
+    // reducer state + `/since` alone would leave the reducer with no STREAMING
+    // anchor for parts still being generated, so subsequent deltas would be
+    // orphaned and silently dropped (real-time stream dead for the connection's
+    // remaining lifetime). A client reconnect re-runs `attach_subscriber` and
+    // re-establishes the snapshot anchors so post-resync deltas have a buffer
+    // to append to.
     TOKEN_MEMORY_LIMIT("token_memory_limit"),
 
     // §5 C-2: the sidecar also emits these session-lifecycle reasons per the
@@ -252,7 +268,9 @@ enum class ResyncReason(val wire: String) {
     UNKNOWN("");
 
     val triggersReconnect: Boolean
-        get() = this == RECONNECT_NO_REPLAY || this == SUBSCRIBER_BACKPRESSURE
+        get() = this == RECONNECT_NO_REPLAY ||
+            this == SUBSCRIBER_BACKPRESSURE ||
+            this == TOKEN_MEMORY_LIMIT
 
     companion object {
         /**
