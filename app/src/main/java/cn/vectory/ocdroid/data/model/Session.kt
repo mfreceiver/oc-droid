@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.data.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
+import cn.vectory.ocdroid.util.workdirBasename
 
 @Serializable
 data class Session(
@@ -28,7 +29,7 @@ data class Session(
 ) {
     /** Display name for UI: title, or last path segment of directory, or id */
     val displayName: String
-        get() = title ?: directory.split("/").filter { it.isNotEmpty() }.lastOrNull() ?: id
+        get() = title ?: directory.workdirBasename() ?: id
 
     val isArchived: Boolean get() = (time?.archived ?: 0L) > 0L
 

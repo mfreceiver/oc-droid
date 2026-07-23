@@ -3,6 +3,7 @@ package cn.vectory.ocdroid
 import android.app.Application
 import android.content.ComponentCallbacks2
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
+import cn.vectory.ocdroid.di.NotificationChannels
 import cn.vectory.ocdroid.ui.AppCore
 import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.ui.controller.BackgroundUnreadPoller
@@ -51,7 +52,7 @@ class OpenCodeApp : Application() {
         // §18.1/T3b: create notification channels up front (idempotent,
         // wrapped in try/catch inside createChannels). Required before any
         // notify() call, otherwise notifications silently no-op on API 26+.
-        AppLifecycleMonitor.createChannels(this)
+        NotificationChannels.createChannels(this)
         appLifecycleMonitor.registerBackgroundUnreadPoller(backgroundUnreadPoller::poll)
         // R-06: the former warmUpWebViewAfterLaunch() pre-warmed a throwaway
         // WebView on the main thread to prime the WebView singleton's class

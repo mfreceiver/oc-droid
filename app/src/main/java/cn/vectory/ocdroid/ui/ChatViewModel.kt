@@ -118,6 +118,11 @@ class ChatViewModel @Inject constructor(
         // two reads could see different profiles if a switch raced between
         // them). The same `fp` is used for the cache hook, the captured guard,
         // and the provider — all three are consistent by construction.
+        //
+        // §Stage-D2: token-stream busy-open lives in BOTH
+        // [AppCore.loadMessagesForEffect] (the main production path) AND here
+        // (side-door for retry / edit-and-rerun). Both gate via the shared
+        // [shouldOpenTokenStream] predicate — see the open at line ~148.
         val fp = core.currentServerGroupFp()
         launchLoadMessages(
             scope = core.appScope,
@@ -132,6 +137,18 @@ class ChatViewModel @Inject constructor(
             expectedServerGroupFp = fp,
             currentServerGroupFp = core.currentServerGroupFp,
         )
+        // §E3 ChatViewModel.loadMessages side-door open (D2 gate r2 S1): re-apply
+        // the same open gate used in loadMessagesForEffect. Mid-generation retry /
+        // edit-and-rerun that only hits this path also opens the stream (max-1 +
+        // debounce makes any dual-open with loadMessagesForEffect harmless).
+        if (shouldOpenTokenStream(
+                core.serverCompatProfile.slimapiTokenStreamEnabled,
+                core.store.slices.chat.value.currentSessionId,
+                sessionId,
+            )
+        ) {
+            core.tokenStreamCoordinator.open(sessionId, core.settingsManager.currentWorkdir)
+        }
     }
 
     fun loadMessages(sessionId: String) = loadMessages(sessionId, resetLimit = true)

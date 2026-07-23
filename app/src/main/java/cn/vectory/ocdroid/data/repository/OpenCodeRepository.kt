@@ -34,6 +34,7 @@ import cn.vectory.ocdroid.data.repository.http.TrafficCountingInterceptor
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.TrafficLogger
 import cn.vectory.ocdroid.util.TrafficTracker
+import cn.vectory.ocdroid.util.exponentialBackoffMs
 import cn.vectory.ocdroid.util.runSuspendCatching
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -50,6 +51,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
@@ -1005,11 +1007,20 @@ class OpenCodeRepository @Inject constructor(
             ?.mapNotNull { it.safePrimitive()?.intOrNull }
             ?.takeIf { it.size >= 2 }
             ?.let { Pair(it[0], it[1]) }
+        val featuresObj = root["features"]?.safeObject() ?: server?.get("features")?.safeObject()
+        // §Stage-B S1: dual-read tokenStream — accept both a JSON boolean
+        // (booleanOrNull) and a string "true" (content). Pre-fix only the
+        // string form was recognized, so a sidecar emitting a native boolean
+        // (`"tokenStream": true`) was silently treated as false.
+        val tokenStream = featuresObj?.get("tokenStream")?.safePrimitive()?.let { p ->
+            p.booleanOrNull == true || p.content.equals("true", ignoreCase = true)
+        } == true
         return SlimapiHealthPayload(
             sidecarOk = sidecarOk,
             schemaDegraded = schemaDegraded,
             serverApiVersion = apiVersion,
-            acceptedClientVersions = accepted
+            acceptedClientVersions = accepted,
+            features = SlimapiFeatures(tokenStream = tokenStream)
         )
     }
 
@@ -2573,7 +2584,7 @@ class OpenCodeRepository @Inject constructor(
      * §O-A — exponential backoff for per-node retry: 200ms, 400ms with ±30% jitter.
      */
     private fun backoffMs(attempt: Int): Long {
-        val base = EXPAND_BACKOFF_BASE_MS * (1L shl (attempt - 1))
+        val base = exponentialBackoffMs(attempt - 1, EXPAND_BACKOFF_BASE_MS, Int.MAX_VALUE)
         val jitterRange = (base * EXPAND_BACKOFF_JITTER).toLong()
         val jitter = (Math.random() * (2.0 * jitterRange + 1.0)).toLong() - jitterRange
         return (base + jitter).coerceAtLeast(0L)

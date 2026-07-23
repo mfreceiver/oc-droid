@@ -15,6 +15,7 @@ import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
+import cn.vectory.ocdroid.ui.StreamOwnedState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -307,8 +308,18 @@ internal fun launchLoadMessages(
                         }
                         val reasoningFinalized =
                             reasoningOwnerMsgId == null || reasoningOwnerMsgId in fetchedIds
-                        val newStreamingTexts = if (resetLimit && streamingFinalized && overlayFinalized) emptyMap<String, String>() else srcStreamingTexts
-                        val newStreamingReasoning = if (resetLimit && streamingFinalized && reasoningFinalized) null else srcStreamingReasoning
+                        val srcStreamOwned = slices.chat.value.streamOwned
+                        val ownedStreamingKeys = srcStreamOwned.filterValues { it == StreamOwnedState.STREAMING }.keys
+                        val legacyWouldClear = resetLimit && streamingFinalized && overlayFinalized
+                        val authoritative = legacyWouldClear && ownedStreamingKeys.isEmpty()
+                        val newStreamingTexts = when {
+                            authoritative -> emptyMap()
+                            legacyWouldClear -> srcStreamingTexts.filterKeys { it in ownedStreamingKeys }
+                            else -> srcStreamingTexts
+                        }
+                        val newStreamingReasoning =
+                            if (resetLimit && streamingFinalized && reasoningFinalized && ownedStreamingKeys.isEmpty()) null
+                            else srcStreamingReasoning
                         // Only (re)seed the history cursor on a fresh open; a
                         // periodic reload must NOT clobber an existing cursor
                         // (now safe because older history is preserved above).
@@ -359,6 +370,7 @@ internal fun launchLoadMessages(
                                 olderMessagesCursor = newCursor,
                                 hasMoreMessages = newHasMore,
                                 currentModel = newModel,
+                                authoritative = authoritative,
                             )
                         )
                         // §chat-ux-batch T8 (B3): the legacy global←per-session

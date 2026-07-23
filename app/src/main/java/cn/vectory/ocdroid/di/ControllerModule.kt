@@ -3,6 +3,9 @@ package cn.vectory.ocdroid.di
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
+import cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory
+import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
+import cn.vectory.ocdroid.data.api.TokenStreamClient
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.controller.ComposerController
@@ -14,6 +17,7 @@ import cn.vectory.ocdroid.ui.controller.SessionSwitcher
 import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
 import cn.vectory.ocdroid.ui.controller.UnreadSoakController
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
+import cn.vectory.ocdroid.ui.controller.sse.TokenStreamCoordinator
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
 import dagger.Module
@@ -23,6 +27,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import javax.inject.Named
 import javax.inject.Singleton
 
@@ -223,6 +228,62 @@ object ControllerModule {
         reconcileDispatcher = Dispatchers.Default,
     )
 
+    /**
+     * §Stage-D2 §5.8/§5.9: provides the [TokenStreamCoordinator] singleton.
+     *
+     * # streamProvider wiring
+     *
+     * Resolves the LIVE host config at call time (when `open(sid, dir)` is
+     * invoked) from `settingsManager.serverUrl` — NOT from a captured
+     * snapshot. This mirrors how `HostConfig` resolves baseUrl/hostPort at
+     * `configure()` time: `settingsManager.serverUrl` IS the live value that
+     * `hostConfig.baseUrl` mirrors. `hostPortFromUrl(serverUrl)` gives the
+     * `host:port` authority for the TOFU pin lookup (same derivation as
+     * `HostConfig.configure`). A new `TokenStreamClient` is constructed per
+     * call (lightweight wrapper; the `OkHttpClient` is built fresh — no
+     * `cache(tokenStreamClient)` per the Stage-C design note).
+     *
+     * # triggerSinceFetch wiring (S2 — AUTHORITATIVE)
+     *
+     * `auth=true` → [SessionSyncCoordinator.ReconcileMode.RESYNC] (the
+     * resync sweep is authoritative: `isAuthoritativeSlimMerge` returns true
+     * for RESYNC mode → `MessagesMerged(authoritative=true)` → the fetched
+     * content is the final view, clearing any stale streamOwned overlay).
+     * `auth=false` → [SessionSyncCoordinator.ReconcileMode.DIGEST_FOCUS]
+     * (skeleton merge — preserves streamOwned so an in-flight token stream
+     * keeps its ownership).
+     *
+     * Launched on [appScope] because `reconcileSession` is a suspend function
+     * but the coordinator's callback signature is `(sid, auth) -> Unit`.
+     */
+    @Provides
+    @Singleton
+    fun provideTokenStreamCoordinator(
+        @UiApplicationScope appScope: CoroutineScope,
+        store: SharedStateStore,
+        settingsManager: SettingsManager,
+        clientFactory: OkHttpClientFactory,
+        sessionSyncCoordinator: SessionSyncCoordinator,
+    ): TokenStreamCoordinator = TokenStreamCoordinator(
+        scope = appScope,
+        slices = store.slices,
+        streamProvider = { sid, directory ->
+            val baseUrl = settingsManager.serverUrl
+            val hostPort = hostPortFromUrl(baseUrl)
+            TokenStreamClient(clientFactory.tokenStreamClient(hostPort), baseUrl)
+                .connect(sid, directory)
+        },
+        triggerSinceFetch = { sid, auth ->
+            appScope.launch {
+                sessionSyncCoordinator.reconcileSession(
+                    sid,
+                    if (auth) SessionSyncCoordinator.ReconcileMode.RESYNC
+                    else SessionSyncCoordinator.ReconcileMode.DIGEST_FOCUS,
+                )
+            }
+        },
+    )
+
     @Provides
     @Singleton
     fun provideConnectionCoordinator(
@@ -241,6 +302,7 @@ object ControllerModule {
         bootstrapRetryPolicy: cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy,
         appLifecycleMonitor: AppLifecycleMonitor,
         degradedBootstrapTerminator: cn.vectory.ocdroid.service.DegradedBootstrapTerminator,
+        tokenStreamCoordinator: TokenStreamCoordinator,
     ): ConnectionCoordinator = ConnectionCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -267,5 +329,9 @@ object ControllerModule {
         bootstrapRetryPolicy = bootstrapRetryPolicy,
         appLifecycleMonitor = appLifecycleMonitor,
         degradedBootstrapTerminator = degradedBootstrapTerminator,
+        // §Stage-D2: the token-stream coordinator. CC hooks close(sid) on
+        // cancelSse / cancelSseForReconfigure (background / host-switch).
+        // Busy-open is hooked in ChatViewModel.loadMessages.
+        tokenStreamCoordinator = tokenStreamCoordinator,
     )
 }

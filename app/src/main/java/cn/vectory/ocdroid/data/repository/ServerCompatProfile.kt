@@ -98,6 +98,17 @@ class ServerCompatProfile @Inject constructor() {
         private set
 
     /**
+     * §Stage-D2: whether the sidecar's `/slimapi/health` advertised
+     * `features.tokenStream == true`. The token-stream coordinator gates
+     * `open(sid)` on this — false (or unprobed) → zero-regression (no
+     * token stream, existing behavior). Updated by [updateSlimapi] on every
+     * successful health re-check so a capability flip is picked up without
+     * restarting the app.
+     */
+    @Volatile var slimapiTokenStreamEnabled: Boolean = false
+        private set
+
+    /**
      * 解析 opencode `version` 字符串（e.g. `"1.17.13"` 或 `"1.17.13+abc"`）为
      * semver 分量。容错：缺/短/非数字版本将分量重置为 null，永不抛——
      * malformed 响应不能破坏 profile。
@@ -132,6 +143,9 @@ class ServerCompatProfile @Inject constructor() {
         slimapiAcceptedMax = range?.second
         slimapiSidecarOk = payload.sidecarOk
         slimapiSchemaDegraded = payload.schemaDegraded
+        // §Stage-D2: store the tokenStream feature flag so the coordinator's
+        // open/close hooks can gate on it without re-parsing the health body.
+        slimapiTokenStreamEnabled = payload.features.tokenStream
     }
 
     /**
@@ -196,10 +210,15 @@ class ServerCompatProfile @Inject constructor() {
  * - [acceptedClientVersions] 是 [Pair]<min, max>（闭区间）；服务端可配
  *   `OC_SLIMAPI_ACCEPTED_CLIENT_VERSIONS=min,max`。
  */
+data class SlimapiFeatures(
+    val tokenStream: Boolean = false
+)
+
 data class SlimapiHealthPayload(
     val sidecarOk: Boolean?,
     val schemaDegraded: Boolean?,
     val serverApiVersion: Int?,
-    val acceptedClientVersions: Pair<Int, Int>?
+    val acceptedClientVersions: Pair<Int, Int>?,
+    val features: SlimapiFeatures = SlimapiFeatures()
 )
 

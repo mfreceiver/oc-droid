@@ -7,6 +7,7 @@ import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.SseSideEffect
 import cn.vectory.ocdroid.ui.controller.applyMessageTimestampBump
+import cn.vectory.ocdroid.ui.hasActiveTokenStreamOwner
 import cn.vectory.ocdroid.ui.isStreamablePartType
 import cn.vectory.ocdroid.ui.lenientJson
 import cn.vectory.ocdroid.ui.parseMessagePartDeltaEvent
@@ -118,6 +119,13 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
 
     // ── message.part.updated (SSC:1322) ─────────────────────────────────────
     private fun handleMessagePartUpdated(event: SSEEvent) {
+        // §Stage-B §3.10 (opus SF-1): single-owner guard. When a token
+        // stream owns animated parts (streamOwned has a STREAMING entry),
+        // the legacy dual-write path must NOT touch the animated overlay —
+        // the token stream is the single owner. Early-return BEFORE any
+        // state mutation. (Legacy non-token-stream users have an empty
+        // streamOwned → guard never trips → byte-for-byte unchanged.)
+        if (host.slices.chat.value.hasActiveTokenStreamOwner()) return
         val deltaEvent = parseMessagePartDeltaEvent(event) ?: return
         if (deltaEvent.sessionId == host.slices.chat.value.currentSessionId) {
             val msgId = deltaEvent.messageId
@@ -210,6 +218,9 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
 
     // ── message.part.delta (SSC:1511) ───────────────────────────────────────
     private fun handleMessagePartDelta(event: SSEEvent) {
+        // §Stage-B §3.10 (opus SF-1): single-owner guard — see
+        // handleMessagePartUpdated. Early-return before any mutation.
+        if (host.slices.chat.value.hasActiveTokenStreamOwner()) return
         val sessionId = event.payload.getString("sessionID") ?: return
         if (sessionId != host.slices.chat.value.currentSessionId) return
         val msgId = event.payload.getString("messageID") ?: return

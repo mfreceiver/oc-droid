@@ -306,6 +306,72 @@ class OkHttpClientFactory @Inject constructor(
     private fun bareClient(hostPort: String?): OkHttpClient =
         healthClient(hostPort)
 
+    /**
+     * §Stage-C §3.6 (grok S2) + opus SF-1: dedicated OkHttp client for the
+     * per-session token stream (`GET /slimapi/sessions/{sid}/stream`,
+     * consumed by [cn.vectory.ocdroid.data.api.TokenStreamClient]).
+     *
+     * Built from scratch (NOT via [baseBuilder]) so the interceptor chain is
+     * the MINIMAL set the token stream needs, with two deliberate exclusions
+     * from the shared base chain:
+     *
+     *  - **NO [directoryHeaderInterceptor]** — the token stream routes its
+     *    workdir via the `?directory=` query (set by [TokenStreamClient] via
+     *    `HttpUrl.addQueryParameter`). The directory interceptor would ALSO
+     *    mirror an `X-Opencode-Directory` header into the query; since the
+     *    token stream never sets that header, the interceptor is a no-op for
+     *    routing — but excluding it keeps the request minimal and removes any
+     *    header/query interaction surface against the sidecar's strict
+     *    `/slimapi/` path gate (a 400 if the mirrored header/query shape is
+     *    unexpected).
+     *  - **NO HTTP cache** — the token stream is a long-lived, unbounded,
+     *    chunked `text/event-stream`; caching it is nonsensical and the
+     *    DiskLruCache would choke on an never-ending body. Excluding the
+     *    [httpCache] singleton avoids any cache-write hazard.
+     *
+     * What it DOES carry (all from the shared base chain's component set):
+     *  - SSL via the single [applySsl] / [sslConfigFactory.sslConfigFor] entry
+     *    point (TOFU pin / mTLS resolution identical to every other client).
+     *  - [slimapiVersionInterceptor] → injects `X-Slimapi-Version: 1` (the
+     *    path is under `/slimapi/`, so the version gate applies — without it
+     *    the sidecar returns 400 version_required).
+     *  - [authInterceptor] → Basic Auth when the host profile carries creds.
+     *  - [trafficCountingInterceptor] → per-byte accounting for the weak-
+     *    network ledger (the token stream is the highest-bandwidth path; it
+     *    MUST be counted, opus SF-1).
+     *  - DEBUG-only BASIC logging (R-07 log gate), mirroring the base chain.
+     *
+     * Timeouts: `connectTimeout(10s)` + `readTimeout(0)` (SSE long
+     * connection, never time out the idle read) + `retryOnConnectionFailure
+     * (true)` (a GET; a handshake failure is safe to retry — the server has
+     * no replay buffer, so the Stage-D coordinator MUST re-establish anyway,
+     * but a mid-handshake retry is harmless and avoids a spurious failure
+     * surface for transient network blips).
+     *
+     * Stage C deliberately does NOT add the watchdog / reconnect logic here —
+     * the client is a dumb pipe; the Stage-D coordinator wraps the Flow.
+     */
+    fun tokenStreamClient(hostPort: String?): OkHttpClient =
+        OkHttpClient.Builder()
+            .apply {
+                // §tofu R2: TOFU pin / mTLS resolution via the single entry point.
+                applySsl(sslConfigFactory.sslConfigFor(hostPort))
+                // NO cache(tokenStreamClient) — see kdoc above.
+            }
+            .addInterceptor(HttpLoggingInterceptor().apply {
+                // R-07: BASIC in DEBUG (URL only), NONE in release.
+                level = if (BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BASIC
+                    else HttpLoggingInterceptor.Level.NONE
+            })
+            // Deliberately NOT directoryHeaderInterceptor — see kdoc above.
+            .addInterceptor(slimapiVersionInterceptor)
+            .addInterceptor(authInterceptor)
+            .addInterceptor(trafficCountingInterceptor)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+
     companion object {
         /** §16.1(a): HTTP cache size cap (50 MB) per the redesign plan. */
         private const val HTTP_CACHE_SIZE_BYTES = 50L * 1024 * 1024

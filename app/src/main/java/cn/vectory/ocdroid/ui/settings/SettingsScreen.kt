@@ -54,7 +54,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.di.AppLifecycleMonitor
+import cn.vectory.ocdroid.di.NotificationChannels
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
@@ -540,8 +540,8 @@ private fun notificationsEnabled(context: android.content.Context): Boolean {
     val channelImportances = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         val manager = context.getSystemService(NotificationManager::class.java)
         listOf(
-            AppLifecycleMonitor.CHANNEL_DECISIONS,
-            AppLifecycleMonitor.CHANNEL_IDLE,
+            NotificationChannels.CHANNEL_DECISIONS,
+            NotificationChannels.CHANNEL_IDLE,
         ).mapNotNull { manager?.getNotificationChannel(it)?.importance }
     } else {
         emptyList()

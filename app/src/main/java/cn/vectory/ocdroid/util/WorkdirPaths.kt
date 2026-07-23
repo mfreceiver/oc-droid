@@ -103,3 +103,15 @@ internal object WorkdirPaths {
         return if (stripped.isEmpty()) "/" else stripped
     }
 }
+
+/**
+ * Extract the last non-empty segment of a workdir path (the "basename") for
+ * UI display. Returns `null` when the path has no non-empty segments (e.g.,
+ * root `"/"` or empty `""`).
+ *
+ * This is the core computation; callers apply their own fallback/blank-handling
+ * (e.g., `?: original`, `?.let`, `.orEmpty()`, `.ifBlank{}`) to match
+ * the byte-identical behavior of the original inline expressions being replaced.
+ */
+internal fun String.workdirBasename(): String? =
+    split("/").filter { it.isNotEmpty() }.lastOrNull()

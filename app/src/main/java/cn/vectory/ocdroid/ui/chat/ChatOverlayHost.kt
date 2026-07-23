@@ -41,6 +41,7 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.ui.settings.TofuTrustDialog
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
+import cn.vectory.ocdroid.util.workdirBasename
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -207,9 +208,7 @@ fun ChatOverlayHost(
                     .verticalScroll(rememberScrollState()),
             ) {
                 recentWorkdirs.forEach { workdir ->
-                    val basename = workdir.split("/")
-                        .filter { it.isNotEmpty() }
-                        .lastOrNull() ?: workdir
+                    val basename = workdir.workdirBasename() ?: workdir
                     ListItem(
                         headlineContent = { Text(basename) },
                         modifier = Modifier.clickable {

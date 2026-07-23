@@ -381,6 +381,21 @@ data class PendingScrollRequest(
 )
 
 /**
+ * Token-stream ownership state for streaming parts.
+ */
+enum class StreamOwnedState { STREAMING, DONE }
+
+/**
+ * §Stage-B §3.10 (opus SF-1): returns `true` when ANY part is currently
+ * owned by an active token stream (streamOwned contains a STREAMING entry).
+ * Used by the legacy SSE handler's single-owner guard to early-return when
+ * a token stream owns the animated parts (prevents the legacy dual-write
+ * from clobbering the token stream's live overlay).
+ */
+internal fun ChatState.hasActiveTokenStreamOwner(): Boolean =
+    streamOwned.values.any { it == StreamOwnedState.STREAMING }
+
+/**
  * §R-17 batch2: chat-domain state slice (RFC §2.2). Authoritative storage via
  * _chatFlow.update. The highest-frequency domain (SSE streaming deltas mutate
  * streamingPartTexts/messages many times per second). §R-17 batch2: error/success
@@ -392,6 +407,12 @@ data class ChatState(
     val revertCutoffs: Map<String, cn.vectory.ocdroid.data.model.RevertCutoff> = emptyMap(),
     val partsByMessage: Map<String, List<Part>> = emptyMap(),
     val streamingPartTexts: Map<String, String> = emptyMap(),
+    /**
+     * Token-stream ownership state per partId. Tracks whether a part is
+     * currently being streamed (STREAMING) or has completed (DONE).
+     * Cleared by [ClearTokenStreamState] action.
+     */
+    val streamOwned: Map<String, StreamOwnedState> = emptyMap(),
     /**
      * §slimapi-client-v1 §G6 (Task 16): per-part expand state for the
      * "展开省略内容" affordance on skeleton parts. Layered alongside

@@ -637,6 +637,33 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
 }
 
 /**
+ * §token-stream-open-gate: the shared predicate for whether to open the
+ * per-session token stream when loading messages. Returns `true` IFF:
+ *  - the sidecar advertises `features.tokenStream == true`
+ *    ([tokenStreamEnabled], populated from
+ *    [cn.vectory.ocdroid.data.repository.ServerCompatProfile.slimapiTokenStreamEnabled]
+ *    by every successful health probe), AND
+ *  - the loaded session IS the foreground session ([currentSessionId] is the
+ *    ChatState's `currentSessionId` — the tab the user is viewing).
+ *
+ * This is the B-1 "open session mid-generation → live tokens" gate. Extracted
+ * from inline duplication at [AppCore.loadMessagesForEffect] (the main busy-
+ * open path) + [cn.vectory.ocdroid.ui.ChatViewModel.loadMessages] (the side-
+ * door path). Both sites redirect here so the truth table is testable in one
+ * place ([cn.vectory.ocdroid.ui.TokenStreamWiringTest]).
+ *
+ * NOT used for [cn.vectory.ocdroid.ui.controller.ConnectionCoordinator]'s
+ * `resetDegraded` gate (that gates a DIFFERENT action — re-arming the
+ * capability-degrade state — and does not check the foreground-session
+ * condition).
+ */
+internal fun shouldOpenTokenStream(
+    tokenStreamEnabled: Boolean,
+    currentSessionId: String?,
+    targetSessionId: String,
+): Boolean = tokenStreamEnabled && currentSessionId == targetSessionId
+
+/**
  * §R-17 batch3d: dispatch helper. Routes a message-window load through the
  * shared [launchLoadMessages] free function — same impl as
  * [ChatViewModel.loadMessages], callable from [AppCore.dispatchEffect] +
@@ -673,6 +700,24 @@ internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolea
         // (false → anchored /since).
         forceInitialWindow = forceInitialWindow,
     )
+    // §Stage-D2 §5.8 B-1 busy-open: the SHARED load entry for all production
+    // message loads (session switch via SessionSwitcher/VerifyAndHydrate,
+    // cold-start, force-refresh via ChatScaffold LoadMessages effect, SSC
+    // ReloadSession, etc. — all route through ControllerEffect.LoadMessages →
+    // dispatchSessionEffect → HERE). The gate is [shouldOpenTokenStream] —
+    // the shared predicate (also used by ChatViewModel's side-door). The
+    // coordinator's open() is debounced + max-1 (opening this session closes
+    // any prior); if the session is NOT actually streaming, the stream sits
+    // idle and is closed on background / session-switch. Capability gate:
+    // slimapiTokenStreamEnabled == false → zero-regression (existing behavior).
+    if (shouldOpenTokenStream(
+            serverCompatProfile.slimapiTokenStreamEnabled,
+            store.slices.chat.value.currentSessionId,
+            sessionId,
+        )
+    ) {
+        tokenStreamCoordinator.open(sessionId, settingsManager.currentWorkdir)
+    }
 }
 
 /** §R-17 batch3d: dispatch helper for the LoadSessions / RefreshSessions effects. */

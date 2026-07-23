@@ -124,6 +124,15 @@ class AppCore @Inject constructor(
     internal val sessionSyncCoordinator: SessionSyncCoordinator,
     internal val connectionCoordinator: ConnectionCoordinator,
     /**
+     * §Stage-D2: the token-stream coordinator singleton. Injected here so
+     * [ChatViewModel] can reach it for the busy-open hook (B-1), and so
+     * AppCore's [dispatchEffect] can close the token stream on
+     * [ControllerEffect.EvictSession] (covers session.deleted digest +
+     * /since 404 MarkDeleted — both emit EvictSession via
+     * [SessionSyncCoordinator]).
+     */
+    internal val tokenStreamCoordinator: cn.vectory.ocdroid.ui.controller.sse.TokenStreamCoordinator,
+    /**
      * §unread-soak: the foreground sweep that owns the new "unread"
      * population logic (replaces the old instant busy→idle marker). Injected
      * here purely so Hilt constructs the @Singleton early — its init block
@@ -725,6 +734,27 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.EvictSession -> {
+            // §Stage-D2 §5.9: close the token stream for the evicted session.
+            // Covers BOTH paths that emit EvictSession:
+            //  - session.deleted digest (SessionSyncCoordinator ~:1409)
+            //  - /since 404 MarkDeleted (SessionSyncCoordinator ~:1974)
+            // The EvictSession effect is the single funnel for session-gone-
+            // upstream eviction; hooking here avoids coupling SSC to the TSC
+            // (which would create a DI cycle: TSC.triggerSinceFetch calls
+            // SSC.reconcileSession, so SSC cannot inject TSC).
+            tokenStreamCoordinator.close(effect.sessionId)
+            // §Stage-D2 (gate r1 S1): if the evicted session was the CURRENT
+            // chat, clear the token-stream overlay from ChatState too. close()
+            // clears coordinator-internal maps but NOT ChatState's
+            // streamingPartTexts/streamOwned — without this, a deleted/
+            // archived current session can leave a sticky overlay until
+            // SessionSelected wipes it on the next switch.
+            if (store.chatFlow.value.currentSessionId == effect.sessionId) {
+                val ownedKeys = store.chatFlow.value.streamOwned.keys
+                if (ownedKeys.isNotEmpty()) {
+                    store.dispatch(AppAction.ClearTokenStreamState(ownedKeys))
+                }
+            }
             // R-20 Phase 1 (plan §3 矩阵 "用户归档 / 删除 / SSE 归档" 行):
             // synchronous memory clear. Memory first so an immediate switchTo
             // does not re-hydrate the just-evicted window from the LRU.

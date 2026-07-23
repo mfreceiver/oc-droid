@@ -259,6 +259,13 @@ abstract class MainViewModelTestBase {
             hostProfileController,
             sessionSyncCoordinator,
             connectionCoordinator,
+            // §Stage-D2: token-stream coordinator (not exercised by these tests).
+            cn.vectory.ocdroid.ui.controller.sse.TokenStreamCoordinator(
+                scope = appScope,
+                slices = store.slices,
+                streamProvider = { _, _ -> kotlinx.coroutines.flow.emptyFlow() },
+                triggerSinceFetch = { _, _ -> },
+            ),
             unreadSoakController,
             // §review-fix #1: same fp provider every controller uses.
             fpProvider,

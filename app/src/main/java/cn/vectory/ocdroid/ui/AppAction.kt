@@ -7,23 +7,6 @@ import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.ui.chat.ExpandPartsOutcome
-import cn.vectory.ocdroid.ui.controller.applyArchiveEviction
-import cn.vectory.ocdroid.ui.controller.applyArchivedChatClear
-import cn.vectory.ocdroid.ui.controller.applyMessageUpdated
-import cn.vectory.ocdroid.ui.controller.applyPartCreatedPlaceholder
-import cn.vectory.ocdroid.ui.controller.applyPartDeltaLeadingEdge
-import cn.vectory.ocdroid.ui.controller.applyPartFullTextLeadingEdge
-import cn.vectory.ocdroid.ui.controller.appendDeltaBuffer
-import cn.vectory.ocdroid.ui.controller.cleanScrollStateForSubtree
-import cn.vectory.ocdroid.ui.controller.clearAllCoalesceBuffers
-import cn.vectory.ocdroid.ui.controller.clearCoalesceBufferForPart
-import cn.vectory.ocdroid.ui.controller.flushCoalesceBufferForPart
-import cn.vectory.ocdroid.ui.controller.markFlushPending
-import cn.vectory.ocdroid.ui.controller.mergeSlimMessages
-import cn.vectory.ocdroid.ui.controller.allSessionsById
-import cn.vectory.ocdroid.ui.controller.removeSessions
-import cn.vectory.ocdroid.ui.controller.replaceFullTextBuffer
-import cn.vectory.ocdroid.ui.controller.subtreeIds
 
 /**
  * §A5-3 Phase B2: a pure-data sealed hierarchy describing the cross-slice
@@ -323,6 +306,33 @@ internal sealed interface AppAction {
      */
     data object CoalesceBuffersCleared : AppAction
 
+    /** Clear token-stream ownership state for specified partIds. */
+    data class ClearTokenStreamState(val partIds: Set<String>) : AppAction
+
+    /**
+     * §Stage-D1 §3.8 / §5.8: bridge from the [cn.vectory.ocdroid.data.repository.TokenStreamReducer]
+     * working state into [ChatState.streamingPartTexts] + [ChatState.streamOwned].
+     * Emitted by [cn.vectory.ocdroid.ui.controller.sse.TokenStreamCoordinator] for each
+     * snapshot/delta frame after the pure reducer folds it, so the UI's overlay
+     * (the single-owner guard + Stage-A clear) reflects the live token buffer.
+     *
+     *  - [state] == [StreamOwnedState.STREAMING]: the part is animating; its
+     *    text is the live token buffer.
+     *  - [state] == [StreamOwnedState.DONE]: the part finalized; its text is
+     *    the terminal snapshot. The entry persists in `streamingPartTexts`
+     *    until a subsequent [ClearTokenStreamState] / authoritative reload
+     *    clears it (matches the existing legacy streaming-overlay lifecycle).
+     *
+     * Replaces into the maps (NOT append) — the coordinator already joined the
+     * reducer's accumulated text before dispatching, so the value carried here
+     * IS the authoritative accumulated buffer for [partId].
+     */
+    data class TokenStreamPartUpdated(
+        val partId: String,
+        val text: String,
+        val state: StreamOwnedState,
+    ) : AppAction
+
     // ── T1b: conversation-path ownership (messages + partsByMessage) ───────
 
     /**
@@ -335,8 +345,22 @@ internal sealed interface AppAction {
     /**
      * T1b slim reconcile merge (SSC:3307 mergeSlimMessagesIntoChat).
      * Reducer: [mergeSlimMessages] — patch-or-append message + replace parts.
+     *
+     * §Stage-B §3.4: [authoritative] controls the splice/merge contract.
+     * - `false` (default, skeleton/non-authoritative): token-stream-owned
+     *   STREAMING parts are PRESERVED (their streamed text in
+     *   streamingPartTexts is the live source of truth; the server skeleton
+     *   text="" is dropped). This is the safe default for cold-start /
+     *   periodic merges where an in-flight token stream may own animated
+     *   parts.
+     * - `true` (resync / watchdog / forced): the fetched items are the
+     *   authoritative final view — owned STREAMING parts are substituted by
+     *   the fetched content and their ownership state is cleared.
      */
-    data class SlimMessagesMerged(val items: List<MessageWithParts>) : AppAction
+    data class SlimMessagesMerged(
+        val items: List<MessageWithParts>,
+        val authoritative: Boolean = false,
+    ) : AppAction
 
     /**
      * T1b MessageActions:351 full field-set merge. Writes 8 fields in ONE
@@ -344,6 +368,18 @@ internal sealed interface AppAction {
      * streamingPartTexts + streamingReasoningPart + olderMessagesCursor +
      * hasMoreMessages + currentModel). isLoadingMessages is unconditionally
      * false (not carried on the action).
+     *
+     * §Stage-B §3.10 (grok S3 / bgpt SF-2): [authoritative] controls the
+     * streamOwned overlay-clear contract. The overlay-clear decision itself
+     * (streamingPartTexts) is computed at the call site (MessageActions
+     * derives `newStreamingTexts` from resetLimit + streamingFinalized +
+     * overlayFinalized); this flag mirrors that decision for streamOwned:
+     * when `true`, the reducer clears streamOwned entries for the fetched
+     * part ids (the loaded content is authoritative). When `false`
+     * (skeleton / streaming-preserving load), streamOwned is preserved.
+     * Default `false` is additive — existing call sites that don't pass it
+     * preserve streamOwned (byte-for-byte legacy parity when streamOwned
+     * is empty).
      */
     data class MessagesMerged(
         val messages: List<Message>,
@@ -353,6 +389,7 @@ internal sealed interface AppAction {
         val olderMessagesCursor: String?,
         val hasMoreMessages: Boolean,
         val currentModel: Message.ModelInfo?,
+        val authoritative: Boolean = false,
     ) : AppAction
 
     /**
@@ -556,681 +593,48 @@ internal sealed interface AppAction {
  * SessionSyncCoordinator.kt / HostProfileController.kt).
  */
 internal fun reduce(state: StoreState, action: AppAction): StoreState = when (action) {
-    is AppAction.DraftSessionMaterialized -> state.copy(
-        sessionList = state.sessionList.copy(
-            sessions = upsertSession(state.sessionList.sessions, action.session),
-            openSessionIds = action.openSessionIds,
-            // §Q4-strict-sync: a freshly-created session is NOT yet in the
-            // server's authoritative listing. Track its id as pending-create
-            // so the next mergeRefreshedSessionsPreservingLocalActivity keeps
-            // it alive until a REST refresh or SSE session.created confirms it
-            // (or the 30 s sweep drops it). Added atomically in the SAME
-            // dispatch as the session upsert (no torn intermediate).
-            pendingCreateIds = state.sessionList.pendingCreateIds + action.session.id,
-            pendingCreatedAt = state.sessionList.pendingCreatedAt + (action.session.id to action.viewedAt),
-        ),
-        chat = state.chat.copy(
-            currentSessionId = action.session.id,
-        ),
-        unread = state.unread.copy(
-            unreadSessions = state.unread.unreadSessions - action.session.id,
-            lastViewedTime = state.unread.lastViewedTime + (action.session.id to action.viewedAt),
-        ),
-        composer = state.composer.copy(
-            draftWorkdir = null,
-        ),
-    )
-
-    is AppAction.SessionArchived -> {
-        // Apply archive eviction unconditionally (upsert archived + new openIds).
-        // Apply the chat CONTENT clear IFF the archived session IS the current
-        // one — derived from the snapshot, not carried on the action.
-        val isCurrent = state.chat.currentSessionId == action.session.id
-        val newSessionList = state.sessionList.applyArchiveEviction(action.session, action.openSessionIds).first
-        // §Wave5b-Q13 blocker-2 fix: SCROLL-STATE cleanup runs UNCONDITIONALLY
-        // for the archived subtree (chat content remains current-only). For
-        // the current-archived case applyArchivedChatClear already wipes both
-        // fields, so cleanScrollStateForSubtree is a no-op; for non-current
-        // archived ids it cleans a stale pendingScrollRequest (target in
-        // subtree) + parentReturnCheckpoints (key in subtree) without
-        // touching messages / parts / currentSessionId.
-        val newChat = if (isCurrent) state.chat.applyArchivedChatClear().first else state.chat
-        // §task5-lifecycle (final-review fix 1): the archived session's unread
-        // badge + any pending question bound to it MUST NOT survive the archive.
-        // The cleanup is computed over the FULL three-source subtree of the
-        // archived id — defensive against a server that only emits the root
-        // archive event (descendants that did NOT get their own session.updated
-        // event still get cleaned atomically here). Done in the SAME committed
-        // state as the archive itself so collectors never observe an "archived
-        // but still unread" torn state.
-        val archivedId = action.session.id
-        val subtree = subtreeIds(
-            archivedId,
-            state.sessionList.sessions,
-            state.sessionList.directorySessions,
-            state.sessionList.childSessions,
-        )
-        val cleanedQuestions = newSessionList.pendingQuestions.filter { it.sessionId !in subtree }
-        val newUnread = state.unread.removeSessions(subtree)
-        // §Wave5b-Q13 blocker-2: apply UNCONDITIONAL scroll-state cleanup for
-        // the archived subtree (no-op for current-archived — applyArchivedChatClear
-        // above already wiped both fields; substantive for non-current archived
-        // ids that had a stale pendingScrollRequest targeting them or a
-        // parentReturnCheckpoints entry keyed by them).
-        val newChatCleaned = newChat.cleanScrollStateForSubtree(subtree)
-        // §final-gate I-3 (review-final-rev-gpt-20260719081038 §2): prune the
-        // archived subtree's entries from sessionErrorsById atomically in the
-        // same committed state as the archive. Pre-fix the archived sid's
-        // lastError survived forever (T12 only removes entries on explicit
-        // `lastError = Cleared`), producing unbounded retention + a stale
-        // banner if the user later un-archives or the server reuses the id.
-        // The subtree scope mirrors the unread / pendingQuestions cleanup
-        // (defensive against a server that only emits the root archive event
-        // — descendants that did NOT get their own session.updated still get
-        // pruned here). T12's set/remove producer logic is unchanged.
-        val cleanedSessionErrors = state.sessionList.sessionErrorsById.filterKeys { it !in subtree }
-        state.copy(
-            sessionList = newSessionList.copy(
-                pendingQuestions = cleanedQuestions,
-                activeSessionIds = newSessionList.activeSessionIds - subtree,
-                sessionErrorsById = cleanedSessionErrors,
-            ),
-            chat = newChatCleaned,
-            unread = newUnread,
-        )
-    }
-
-    is AppAction.HostStatePurged -> {
-        // §slice-only-preserve: ChatState carries three fields NOT mirrored
-        // to AppState (isCompacting / compactStartedAt / refreshNonce — see
-        // HostProfileController.kt:475-479). [clearSessionData] uses .copy()
-        // on the existing ChatState so they are preserved; only the per-
-        // session chat fields are reset.
-        val (newChat, newSessionList, newUnread) = if (!action.preserveServerGroupData) {
-            // Cross-group (异组 switch / delete active host): full purge of
-            // per-server + per-profile state.
-            // §fix-leak-window (release-gate fix B): clearSessionData also
-            // resets currentModel / olderMessagesCursor / hasMoreMessages /
-            // staleNotice / revertCutoffs / SSE-coalesce buffers, AND sessionList pendingPermissions/pendingQuestions are
-            // cleared — pre-B2 left all of these stale (verified via
-            // `git show e190cce^:.../HostProfileController.kt` purgePerHostState
-            // + `git show e190cce^:.../AppCoreOrchestration.kt`
-            // createSessionInWorkdirForEffect — neither cleared them). This is
-            // a deliberate IMPROVEMENT, not a missed regression.
-            Triple(
-                state.chat.clearSessionData(),
-                state.sessionList.copy(
-                    sessions = emptyList(),
-                    directorySessions = emptyMap(),
-                    openSessionIds = emptyList(),
-                    sessionStatuses = emptyMap(),
-                    activeSessionIds = emptySet(),
-                    sessionTodos = emptyMap(),
-                    sessionDiffs = emptyMap(),
-                    // §gpter-residual: cross-group purge must also drop cached
-                    // child trees and completeness proofs — a root-id collision
-                    // across hosts would otherwise let a stale proof skip new-host
-                    // hydration. Bump the epoch so any in-flight child load
-                    // captured before the switch is dropped fail-closed instead
-                    // of committing the prior host's children here.
-                    childSessions = emptyMap(),
-                    completeRootIds = emptySet(),
-                    completenessEpoch = state.sessionList.completenessEpoch + 1L,
-                    // §fix-leak-window (fix B): pending permission / question
-                    // requests belong to the prior host's sessions — must NOT
-                    // survive a cross-group switch.
-                    pendingPermissions = emptyList(),
-                    pendingQuestions = emptyList(),
-                    // §Q4-strict-sync: cross-group purge must drop pending-
-                    // create ids — they reference the prior host's sessions
-                    // and would ghost into the new host's list.
-                    pendingCreateIds = emptySet(),
-                    pendingCreatedAt = emptyMap(),
-                    // §final-gate I-3 (review-final-rev-gpt-20260719081038 §2):
-                    // cross-group purge must drop the entire sessionErrorsById
-                    // map — entries reference the prior host's sessions and a
-                    // root-id collision on the new host would let T17 render
-                    // the prior host's banner. Mirrors the cross-group reset
-                    // of sessionStatuses / pendingPermissions / pendingQuestions
-                    // above (T12's set/remove logic is unchanged — this is a
-                    // lifecycle cleanup, not a producer-path change).
-                    sessionErrorsById = emptyMap(),
-                    // I-2 v2 §3.3: cross-group purge MUST reset the
-                    // aggregation signals — they reference the prior host's
-                    // aggregation state and a stale "FAILED" would otherwise
-                    // surface on the new host. Defaults to COMPLETE (no signal).
-                    // Tied to I-3's sessionErrorsById cleanup (same lifecycle).
-                    questionAggregationSignal = SlimAggregationSignal(),
-                    permissionAggregationSignal = SlimAggregationSignal(),
-                    // §fix-close-all-residual: re-arm the cold-start
-                    // auto-select for the new host — its first load should
-                    // land the user on a session just like a fresh launch.
-                    hasCompletedInitialLoad = false,
-                ),
-                state.unread.copy(
-                    unreadSessions = emptySet(),
-                    lastViewedTime = emptyMap(),
-                    // §unread-soak: clear the soak map on cross-group purge so
-                    // a stale idleSince entry from the prior host cannot later
-                    // fire an unread badge for a session that no longer exists.
-                    idleSince = emptyMap(),
-                ),
-            )
-        } else {
-            // Same-group switch: per-server data (sessions / unread /
-            // directorySessions / statuses / todos / diffs) preserved. Only
-            // the streaming overlay is cleared (a stale delta from the old
-            // profile's in-flight turn must NOT bleed into the new profile's
-            // view).
-            //
-            // §chat-ux-batch T7 review-fix (I2): a pending agent/model pick
-            // belongs to the PRIOR profile's next send — it must NOT survive
-            // a host/profile transition even within the same server group.
-            // Pre-fix this branch preserved pendingAgent/pendingModel
-            // untouched, so a pick from profile A leaked into profile B's
-            // first send (violates T7's no-cross-transition-carry contract).
-            // Mirrors the cross-group branch's clearSessionData() reset of
-            // these two transient fields.
-            Triple(
-                state.chat.copy(
-                    streamingPartTexts = emptyMap(),
-                    streamingReasoningPart = null,
-                    pendingAgent = null,
-                    pendingModel = null,
-                    // §Wave5b-Q13: a host/profile transition invalidates any
-                    // pending scroll intent + the parent-return backstack
-                    // even within the same server group. The scroll slot
-                    // references a session the user is navigating away from
-                    // (or that may be re-laid-out differently on the new
-                    // profile); the backstack is per-session navigation
-                    // context that has no carry across profiles. Mirrors the
-                    // cross-group branch's clearSessionData() reset.
-                    pendingScrollRequest = null,
-                    parentReturnCheckpoints = emptyMap(),
-                ),
-                // §Q4-strict-sync: clear pendingCreateIds even on same-group
-                // switch (the spec mandates "host switch → clear pending"). A
-                // pending id from profile A is meaningless on profile B even
-                // within the same server group; clearing is safer (no ghost)
-                // and the ids re-populate naturally from the next REST refresh.
-                state.sessionList.copy(
-                    pendingCreateIds = emptySet(),
-                    pendingCreatedAt = emptyMap(),
-                    activeSessionIds = emptySet(),
-                ),
-                state.unread,
-            )
-        }
-        state.copy(
-            chat = newChat,
-            sessionList = newSessionList,
-            unread = newUnread,
-            // Per-profile UX — ALWAYS reset regardless of group.
-            composer = state.composer.copy(draftWorkdir = null),
-            settings = state.settings.copy(availableCommands = emptyList()),
-            connection = state.connection.copy(serverVersion = null),
-        )
-    }
-
-    is AppAction.WorkdirDraftStarted -> state.copy(
-        // §fix-leak-window (release-gate fix B): full per-session clear via
-        // clearSessionData — closes the draft leak window consistently with
-        // the cross-host purge (currentModel / cursor / etc. all reset;
-        // pre-B2 left them stale). The 3 chrome fields are preserved
-        // via .copy() inside clearSessionData.
-        chat = state.chat.clearSessionData(),
-        sessionList = state.sessionList.copy(
-            sessionTodos = emptyMap(),
-        ),
-        composer = state.composer.copy(
-            inputText = "",
-            imageAttachments = emptyList(),
-            // §1B-FIX (I4): also clear fileReferences on draft-create so a
-            // chip from the previous session's draft does not survive the
-            // workdir switch.
-            fileReferences = emptyList(),
-            draftWorkdir = action.workdir,
-        ),
-    )
-
-    is AppAction.ScrollRequested -> state.copy(
-        // §Wave5b-Q13: single-slot overwrite. A newer request ALWAYS supersedes
-        // any prior one — there is no priority / merge logic. The consumer
-        // observes the latest committed slot only (single dispatch = single
-        // emission).
-        chat = state.chat.copy(
-            pendingScrollRequest = PendingScrollRequest(
-                requestId = action.requestId,
-                targetSessionId = action.targetSessionId,
-                behavior = action.behavior,
-            ),
-        ),
-    )
-
-    is AppAction.ScrollConsumed -> {
-        // §Wave5b-Q13: COMPARE-AND-CLEAR. Only the CURRENT intent (matching
-        // requestId) is clearable. A stale consumer's clear (e.g. A's consumer
-        // finishing after B's intent is already live) is a silent no-op so it
-        // cannot wipe the newer intent.
-        val live = state.chat.pendingScrollRequest
-        if (live != null && live.requestId == action.requestId) {
-            state.copy(chat = state.chat.copy(pendingScrollRequest = null))
-        } else {
-            state
-        }
-    }
-
-    is AppAction.ParentCheckpointStored -> state.copy(
-        // §Wave5b-Q13: append the (childId → checkpoint) entry. Preserves any
-        // other entries (a user can be deep in child-of-child-of-child
-        // navigation; each openSubAgent stores its own parent's checkpoint).
-        chat = state.chat.copy(
-            parentReturnCheckpoints = state.chat.parentReturnCheckpoints + (action.childId to action.checkpoint),
-        ),
-    )
-
-    is AppAction.ParentCheckpointConsumed -> state.copy(
-        // §Wave5b-Q13: remove only the matching childId key. No-op if absent
-        // (double-consume / cleared by a host purge between store + consume).
-        chat = state.chat.copy(
-            parentReturnCheckpoints = state.chat.parentReturnCheckpoints - action.childId,
-        ),
-    )
-
-    is AppAction.BulkSessionsRefreshed -> {
-        // FIX-A/C (archive-sync, review-blocker): atomic bulk-refresh commit.
-        // Writes the merged list + pruned openIds + load flags in ONE step.
-        //
-        // gro-2 Blocker 1 (round-2): subtree / unread / pendingQuestions
-        // cleanup now runs UNCONDITIONALLY over ALL archived ids (not just
-        // the current session) — mirroring SessionArchived's unconditional
-        // subtree cleanup. Previously the else-branch (non-current archived)
-        // skipped cleanup entirely, leaking stale unread badges +
-        // pendingQuestions for non-current archived open tabs (inflating
-        // crossSessionPendingCount). The CHAT-CLEAR remains current-only:
-        // only the archived CURRENT session's chat is wiped (non-current
-        // archived ids have no active chat window to clear).
-        val archivedIds = action.sessions
-            .filter { it.isArchived }
-            .map { it.id }
-            .toSet()
-        val currentId = state.chat.currentSessionId
-        val isCurrentArchived = currentId != null && currentId in archivedIds
-        // §Q4-strict-sync: confirmation is based only on ids from the raw REST
-        // response, never action.sessions (which is the merged list and may
-        // contain preserved pending-local sessions). The caller also captures
-        // sweepNow so this pure reducer can apply the independent registration-
-        // timestamp timeout atomically with the merged sessions write.
-        val remainingPendingIds = state.sessionList.pendingCreateIds
-            .minus(action.confirmedServerIds)
-            .filterTo(mutableSetOf()) { pendingId ->
-                val registeredAt = state.sessionList.pendingCreatedAt[pendingId]
-                registeredAt != null &&
-                    action.sweepNow - registeredAt <= MainViewModelTimings.pendingCreateTimeoutMs
-            }
-        val newSessionList = state.sessionList.copy(
-            sessions = action.sessions,
-            openSessionIds = action.openSessionIds,
-            hasMoreSessions = action.hasMoreSessions,
-            isLoadingMoreSessions = false,
-            isRefreshingSessions = false,
-            pendingCreateIds = remainingPendingIds,
-            pendingCreatedAt = state.sessionList.pendingCreatedAt.filterKeys { it in remainingPendingIds },
-            // A bulk refresh is authoritative for structure (archive-sync),
-            // so any cached completeness proof may be stale if SSE dropped
-            // events. Discard proofs and bump the epoch so in-flight hydration
-            // is dropped fail-closed; the next tick re-hydrates fresh trees.
-            completeRootIds = emptySet(),
-            completenessEpoch = state.sessionList.completenessEpoch + 1L,
-            activeSessionIds = state.sessionList.activeSessionIds.intersect(
-                allSessionsById(
-                    action.sessions,
-                    state.sessionList.directorySessions,
-                    state.sessionList.childSessions,
-                ).keys
-            ),
-            // T1c gap fix: bulk refresh (incl. archive-sync early-return path)
-            // is a completed initial load — set the flag atomically so the
-            // separate mutateSessionList patch at SessionListActions is gone.
-            hasCompletedInitialLoad = true,
-        )
-        // Compute the subtree UNION over ALL archived ids. Each archived root
-        // may have descendants that did NOT get their own archive event —
-        // defensive subtree cleanup (mirrors SessionArchived's logic).
-        val allArchivedSubtree = archivedIds.flatMap { archivedId ->
-            subtreeIds(
-                archivedId,
-                action.sessions,
-                newSessionList.directorySessions,
-                newSessionList.childSessions,
-            )
-        }.toSet()
-        val cleanedQuestions = newSessionList.pendingQuestions
-            .filter { it.sessionId !in allArchivedSubtree }
-        val newUnread = state.unread.removeSessions(allArchivedSubtree)
-        // Chat-clear is CURRENT-ONLY (non-current archived ids have no active
-        // chat window). applyArchivedChatClear also wipes pendingScrollRequest
-        // + parentReturnCheckpoints (FIX-B / §Wave5b-Q13).
-        val newChat = if (isCurrentArchived) {
-            state.chat.applyArchivedChatClear().first
-        } else {
-            state.chat
-        }
-        // §Wave5b-Q13 blocker-2: UNCONDITIONAL scroll-state cleanup for the
-        // archived subtree union. For current-archived the prior
-        // applyArchivedChatClear already wiped both fields (no-op here); for
-        // NON-current archived ids this drops a stale pendingScrollRequest
-        // (target in subtree) + parentReturnCheckpoints entries (key in
-        // subtree) without touching chat content.
-        val newChatCleaned = newChat.cleanScrollStateForSubtree(allArchivedSubtree)
-        state.copy(
-            sessionList = newSessionList.copy(pendingQuestions = cleanedQuestions),
-            chat = newChatCleaned,
-            unread = newUnread,
-        )
-    }
-
-    is AppAction.PartExpansionToggled ->
-        state.copy(expandedParts = state.expandedParts + (action.key to action.expanded))
-
-    AppAction.ExpandedPartsCleared ->
-        state.copy(expandedParts = emptyMap())
-
-    // ── T1b streaming reduce (1:1 pure-fn delegates) ───────────────────────
-
-    is AppAction.PartPlaceholderEnsured -> state.copy(
-        chat = state.chat.applyPartCreatedPlaceholder(
-            action.partType, action.partId, action.messageId, action.sessionId,
-        ).first,
-    )
-
-    is AppAction.PartFullTextReceived -> state.copy(
-        // pId = partId (same key used by the SSC leading-edge call site).
-        chat = state.chat.applyPartFullTextLeadingEdge(
-            partId = action.partId,
-            fullText = action.fullText,
-            partType = action.partType,
-            pId = action.partId,
-            msgId = action.messageId,
-            sessionId = action.sessionId,
-        ).first.markFlushPending(action.partId).first,
-    )
-
-    is AppAction.PartDeltaReceived -> state.copy(
-        // 5-arg overload (knownType + msgId + sessionId); NOT the 6-arg
-        // part.updated variant. Matches SSC:1539 + the T1b freeze test.
-        chat = state.chat.applyPartDeltaLeadingEdge(
-            partId = action.partId,
-            delta = action.delta,
-            knownType = action.partType,
-            msgId = action.messageId,
-            sessionId = action.sessionId,
-        ).first.markFlushPending(action.partId).first,
-    )
-
-    is AppAction.FullTextBuffered -> state.copy(
-        chat = state.chat.replaceFullTextBuffer(action.partId, action.text).first,
-    )
-
-    is AppAction.DeltaBuffered -> state.copy(
-        chat = state.chat.appendDeltaBuffer(action.partId, action.delta).first,
-    )
-
-    is AppAction.CoalesceFlushedForPart -> state.copy(
-        chat = state.chat.flushCoalesceBufferForPart(action.partId).first,
-    )
-
-    is AppAction.CoalesceClearedForPart -> state.copy(
-        chat = state.chat.clearCoalesceBufferForPart(action.partId).first,
-    )
-
-    AppAction.CoalesceBuffersCleared -> state.copy(
-        chat = state.chat.clearAllCoalesceBuffers().first,
-    )
-
-    // ── T1b conversation reduce (1:1 pure-fn / field-set delegates) ────────
-
-    is AppAction.MessageUpdatedApplied -> state.copy(
-        chat = state.chat.applyMessageUpdated(action.message).first,
-    )
-
-    is AppAction.SlimMessagesMerged -> state.copy(
-        chat = state.chat.mergeSlimMessages(action.items),
-    )
-
-    is AppAction.MessagesMerged -> state.copy(
-        chat = state.chat.copy(
-            messages = action.messages.chronological(),
-            partsByMessage = action.partsByMessage,
-            isLoadingMessages = false,
-            streamingPartTexts = action.streamingPartTexts,
-            streamingReasoningPart = action.streamingReasoningPart,
-            olderMessagesCursor = action.olderMessagesCursor,
-            hasMoreMessages = action.hasMoreMessages,
-            currentModel = action.currentModel,
-        ),
-    )
-
-    is AppAction.MessagesPrepended -> state.copy(
-        chat = state.chat.copy(
-            messages = action.messages.chronological(),
-            partsByMessage = action.partsByMessage,
-            olderMessagesCursor = action.olderMessagesCursor,
-            hasMoreMessages = action.hasMoreMessages,
-            isLoadingMoreMessages = false,
-        ),
-    )
-
-    is AppAction.ChatWindowHydrated -> state.copy(
-        chat = state.chat.copy(
-            messages = action.messages.chronological(),
-            partsByMessage = action.partsByMessage,
-            olderMessagesCursor = action.olderMessagesCursor,
-            hasMoreMessages = action.hasMoreMessages,
-        ),
-    )
-
-    is AppAction.SessionSelected -> state.copy(
-        // SessionSwitcher.kt:417-472 field set (15 writes) in ONE dispatch.
-        chat = state.chat.copy(
-            currentSessionId = action.sessionId,
-            pendingScrollRequest = action.pendingScrollRequest,
-            messages = emptyList(),
-            partsByMessage = emptyMap(),
-            streamingPartTexts = emptyMap(),
-            streamingReasoningPart = null,
-            partExpandStates = emptyMap(),
-            staleNotice = false,
-            olderMessagesCursor = null,
-            hasMoreMessages = false,
-            isLoadingMessages = false,
-            isLoadingMoreMessages = false,
-            currentModel = null,
-            pendingAgent = null,
-            pendingModel = null,
-        ),
-    )
-
-    AppAction.SlimChatContentCleared -> state.copy(
-        // ClearLocal: messages + partsByMessage ONLY (streaming preserved).
-        chat = state.chat.copy(
-            messages = emptyList(),
-            partsByMessage = emptyMap(),
-        ),
-    )
-
-    // ── T1b residual reduce ────────────────────────────────────────────────
-
-    AppAction.ChatCleared -> state.copy(
-        // 3-field clear only — streaming / cursor / model / staleNotice survive.
-        chat = state.chat.copy(
-            currentSessionId = null,
-            messages = emptyList(),
-            partsByMessage = emptyMap(),
-        ),
-    )
-
-    is AppAction.LastAssistantErrorAttached -> {
-        // SSC:1706-1712 1:1 — attach to last assistant; no-op if absent or
-        // already has an error.
-        val last = state.chat.messages.lastOrNull { it.isAssistant }
-        if (last == null || last.error != null) {
-            state
-        } else {
-            state.copy(
-                chat = state.chat.copy(
-                    messages = state.chat.messages.map { m ->
-                        if (m.id == last.id) m.copy(error = action.error) else m
-                    },
-                ),
-            )
-        }
-    }
-
-    is AppAction.CatchUpMessagesMerged -> state.copy(
-        // CatchUpActions:147-154 4-field merge (not MessagesMerged's 8).
-        chat = state.chat.copy(
-            messages = action.messages.chronological(),
-            partsByMessage = action.partsByMessage,
-            isLoadingMessages = false,
-            staleNotice = false,
-        ),
-    )
-
-    // ── T1b writeChat-bypass reduce ────────────────────────────────────────
-
-    AppAction.ColdStartChatReset -> state.copy(
-        // AppCoreOrchestration:577-590 8-field reset (1:1).
-        chat = state.chat.copy(
-            streamingPartTexts = emptyMap(),
-            streamingReasoningPart = null,
-            staleNotice = false,
-            messages = emptyList(),
-            partsByMessage = emptyMap(),
-            olderMessagesCursor = null,
-            hasMoreMessages = false,
-            isLoadingMoreMessages = false,
-        ),
-    )
-
-    is AppAction.ExpandedPartsContentCommitted -> state.copy(
-        // Strategy 2: pure reconcile against latest chat (CAS via state.update).
-        // Session guard + merge live inside reconcileExpandedPartsContent.
-        chat = state.chat.reconcileExpandedPartsContent(
-            outcome = action.outcome,
-            local = action.local,
-            expectedSessionId = action.expectedSessionId,
-        ),
-    )
-
-    // ── T1c sessionList ownership reduce ───────────────────────────────────
-
-    is AppAction.SessionUpserted -> state.copy(
-        sessionList = state.sessionList.copy(
-            sessions = upsertSession(state.sessionList.sessions, action.session),
-        ),
-    )
-
-    is AppAction.SessionCreatedLocal -> state.copy(
-        sessionList = state.sessionList.copy(
-            sessions = upsertSession(state.sessionList.sessions, action.session),
-            pendingCreateIds = state.sessionList.pendingCreateIds + action.session.id,
-            pendingCreatedAt = state.sessionList.pendingCreatedAt + (action.session.id to action.registeredAt),
-        ),
-    )
-
-    is AppAction.OpenSessionIdsChanged -> state.copy(
-        sessionList = state.sessionList.copy(
-            openSessionIds = action.openSessionIds,
-        ),
-    )
-
-    is AppAction.SessionArchivedLocal -> {
-        val id = action.session.id
-        state.copy(
-            sessionList = state.sessionList.copy(
-                sessions = state.sessionList.sessions.map {
-                    if (it.id == id) action.session else it
-                },
-                directorySessions = state.sessionList.directorySessions.mapValues { (_, list) ->
-                    list.map { if (it.id == id) action.session else it }
-                },
-                childSessions = state.sessionList.childSessions.mapValues { (_, list) ->
-                    list.map { if (it.id == id) action.session else it }
-                },
-                openSessionIds = action.openSessionIds,
-                pendingQuestions = action.pendingQuestions,
-                activeSessionIds = state.sessionList.activeSessionIds - action.activeSessionIdsToRemove,
-            ),
-        )
-    }
-
-    is AppAction.SessionDeletedLocal -> {
-        val ids = action.removedIds
-        state.copy(
-            sessionList = state.sessionList.copy(
-                sessions = state.sessionList.sessions.filter { it.id !in ids },
-                directorySessions = state.sessionList.directorySessions
-                    .mapValues { (_, list) -> list.filter { it.id !in ids } }
-                    .filterValues { it.isNotEmpty() },
-                pendingQuestions = state.sessionList.pendingQuestions.filter { it.sessionId !in ids },
-                activeSessionIds = state.sessionList.activeSessionIds - ids,
-                sessionErrorsById = state.sessionList.sessionErrorsById.filterKeys { it !in ids },
-            ),
-        )
-    }
-
-    is AppAction.SessionStatusPatched -> state.copy(
-        sessionList = state.sessionList.copy(
-            sessions = bumpSessionUpdated(
-                state.sessionList.sessions,
-                action.sessionId,
-                action.updatedTimestamp,
-            ),
-            sessionStatuses = state.sessionList.sessionStatuses + (action.sessionId to action.status),
-        ),
-    )
-
-    is AppAction.SessionsRefreshedLocal -> state.copy(
-        sessionList = state.sessionList.copy(
-            sessions = action.sessions,
-            hasMoreSessions = action.hasMoreSessions,
-            isLoadingMoreSessions = false,
-            isRefreshingSessions = false,
-            pendingCreateIds = action.pendingCreateIds,
-            pendingCreatedAt = action.pendingCreatedAt,
-            completeRootIds = emptySet(),
-            completenessEpoch = state.sessionList.completenessEpoch + 1L,
-            hasCompletedInitialLoad = true,
-        ),
-    )
-
-    is AppAction.SessionsPageAppended -> state.copy(
-        sessionList = state.sessionList.copy(
-            sessions = action.sessions,
-            loadedSessionLimit = action.loadedSessionLimit,
-            hasMoreSessions = action.hasMoreSessions,
-            isLoadingMoreSessions = false,
-            pendingCreateIds = action.pendingCreateIds,
-            pendingCreatedAt = action.pendingCreatedAt,
-            completeRootIds = emptySet(),
-            completenessEpoch = state.sessionList.completenessEpoch + 1L,
-        ),
-    )
-
-    is AppAction.SessionTreeHydrated -> {
-        if (state.sessionList.completenessEpoch != action.epochAtStart) {
-            state // stale hydration → full no-op
-        } else {
-            state.copy(
-                sessionList = state.sessionList.copy(
-                    childSessions = state.sessionList.childSessions + action.childSessionsDelta,
-                    completeRootIds = state.sessionList.completeRootIds + action.completeRootIdsDelta,
-                    sessionStatuses = action.sessionStatuses,
-                ),
-            )
-        }
-    }
+    is AppAction.DraftSessionMaterialized -> reduceDraftSessionMaterialized(state, action)
+    is AppAction.SessionArchived -> reduceSessionArchived(state, action)
+    is AppAction.HostStatePurged -> reduceHostStatePurged(state, action)
+    is AppAction.WorkdirDraftStarted -> reduceWorkdirDraftStarted(state, action)
+    is AppAction.ScrollRequested -> reduceScrollRequested(state, action)
+    is AppAction.ScrollConsumed -> reduceScrollConsumed(state, action)
+    is AppAction.ParentCheckpointStored -> reduceParentCheckpointStored(state, action)
+    is AppAction.ParentCheckpointConsumed -> reduceParentCheckpointConsumed(state, action)
+    is AppAction.BulkSessionsRefreshed -> reduceBulkSessionsRefreshed(state, action)
+    is AppAction.PartExpansionToggled -> reducePartExpansionToggled(state, action)
+    is AppAction.ExpandedPartsCleared -> reduceExpandedPartsCleared(state, action)
+    is AppAction.PartPlaceholderEnsured -> reducePartPlaceholderEnsured(state, action)
+    is AppAction.PartFullTextReceived -> reducePartFullTextReceived(state, action)
+    is AppAction.PartDeltaReceived -> reducePartDeltaReceived(state, action)
+    is AppAction.FullTextBuffered -> reduceFullTextBuffered(state, action)
+    is AppAction.DeltaBuffered -> reduceDeltaBuffered(state, action)
+    is AppAction.CoalesceFlushedForPart -> reduceCoalesceFlushedForPart(state, action)
+    is AppAction.CoalesceClearedForPart -> reduceCoalesceClearedForPart(state, action)
+    is AppAction.CoalesceBuffersCleared -> reduceCoalesceBuffersCleared(state, action)
+    is AppAction.ClearTokenStreamState -> reduceClearTokenStreamState(state, action)
+    is AppAction.TokenStreamPartUpdated -> reduceTokenStreamPartUpdated(state, action)
+    is AppAction.MessageUpdatedApplied -> reduceMessageUpdatedApplied(state, action)
+    is AppAction.SlimMessagesMerged -> reduceSlimMessagesMerged(state, action)
+    is AppAction.MessagesMerged -> reduceMessagesMerged(state, action)
+    is AppAction.MessagesPrepended -> reduceMessagesPrepended(state, action)
+    is AppAction.ChatWindowHydrated -> reduceChatWindowHydrated(state, action)
+    is AppAction.SessionSelected -> reduceSessionSelected(state, action)
+    is AppAction.SlimChatContentCleared -> reduceSlimChatContentCleared(state, action)
+    is AppAction.ChatCleared -> reduceChatCleared(state, action)
+    is AppAction.LastAssistantErrorAttached -> reduceLastAssistantErrorAttached(state, action)
+    is AppAction.CatchUpMessagesMerged -> reduceCatchUpMessagesMerged(state, action)
+    is AppAction.ColdStartChatReset -> reduceColdStartChatReset(state, action)
+    is AppAction.ExpandedPartsContentCommitted -> reduceExpandedPartsContentCommitted(state, action)
+    is AppAction.SessionUpserted -> reduceSessionUpserted(state, action)
+    is AppAction.SessionCreatedLocal -> reduceSessionCreatedLocal(state, action)
+    is AppAction.OpenSessionIdsChanged -> reduceOpenSessionIdsChanged(state, action)
+    is AppAction.SessionArchivedLocal -> reduceSessionArchivedLocal(state, action)
+    is AppAction.SessionDeletedLocal -> reduceSessionDeletedLocal(state, action)
+    is AppAction.SessionStatusPatched -> reduceSessionStatusPatched(state, action)
+    is AppAction.SessionsRefreshedLocal -> reduceSessionsRefreshedLocal(state, action)
+    is AppAction.SessionsPageAppended -> reduceSessionsPageAppended(state, action)
+    is AppAction.SessionTreeHydrated -> reduceSessionTreeHydrated(state, action)
 }
 
 /**
@@ -1252,12 +656,13 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
  * model / cursor from the prior host or session no longer bleeds
  * into the new view. Uses `.copy()` so the 3 chrome fields are preserved.
  */
-private fun ChatState.clearSessionData(): ChatState = copy(
+internal fun ChatState.clearSessionData(): ChatState = copy(
     currentSessionId = null,
     messages = emptyList(),
     revertCutoffs = emptyMap(),
     partsByMessage = emptyMap(),
     streamingPartTexts = emptyMap(),
+    streamOwned = emptyMap(),
     streamingReasoningPart = null,
     // §slimapi-client-v1 §G6 (Task 16 round-2): clear per-part expand states
     // on transcript clear (host purge, archive, draft materialize).

@@ -283,6 +283,7 @@ connection-failure（`IOException`）/ 504 `upstream_timeout` / 503 `upstream_un
 | A10 | `OpenCodeRepository.getPendingPermissions`（迁移到聚合） | `GET /slimapi/permissions?directory=&directory=`（repeated） | 跨 workdir 聚合 permission，每 item 带 `directory`+`routeToken` | 当前走 B 桶 `GET /permission` |
 | A11 | `OpenCodeRepository.connectSSE`（迁移到策展 SSE） | `GET /slimapi/events`（SSE） | 实例级策展 SSE（session.digest debounce 250ms + q/p 直推 + 生命周期帧）；v1-contract §3 | 当前走 B 桶 `GET /global/event` |
 | A12 | 健康检查（自检） | `GET /slimapi/health` + `GET /slimapi/ready` | 版本契约自检 + upstream 可达性 | 当前走 B 桶 `GET /global/health` |
+| **A13** | 新增（per-session token-stream SSE） | `GET /slimapi/sessions/{sid}/stream` | 单 session 逐个 token 片段的 SSE 流，opt-in，`X-Slimapi-Version:1`，无 SSE id/no-replay，帧格式见 `docs/token-stream-dev-plan.md §3.2` | 能力门控 `features.tokenStream` |
 
 ### 4.2 B 桶 — slim-passthrough（透传）
 

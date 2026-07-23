@@ -53,6 +53,7 @@ import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.resolveModelDisplayName
 import cn.vectory.ocdroid.ui.theme.Dimens
+import cn.vectory.ocdroid.util.workdirBasename
 
 internal data class ChatTopBarState(
     val sessions: List<Session>,
@@ -400,9 +401,7 @@ internal fun ChatTopBar(
                 state.draftWorkdir != null -> {
                     // Draft mode: no session yet. Show the workdir basename in
                     // place of a session title.
-                    val draftBasename = state.draftWorkdir.split("/")
-                        .filter { it.isNotEmpty() }.lastOrNull()
-                        ?: state.draftWorkdir
+                    val draftBasename = state.draftWorkdir.workdirBasename() ?: state.draftWorkdir
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.widthIn(max = TITLE_SLOT_MAX_WIDTH)
@@ -689,7 +688,7 @@ private fun ContextMenuCluster(
  * has unit tests (VisiblePickerProvidersTest); keeping it co-located here would
  * have hidden its coverage because ChatTopBarKt is excluded from kover (the
  * rest of this file is @Composable UI requiring ComposeTestRule/androidTest).
- * The new ModelPickerSheet in Composer.kt calls `visiblePickerProviders(...)`
+ * The new ModelPickerSheet in PickerSheets.kt calls `visiblePickerProviders(...)`
  * directly (same package, no import needed).
  *
  * §0.8.2 P2: the host chip / server-status IconButton / ServerManagementDialog

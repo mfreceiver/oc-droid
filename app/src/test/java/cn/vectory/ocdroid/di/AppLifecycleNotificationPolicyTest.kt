@@ -15,7 +15,7 @@ class AppLifecycleNotificationPolicyTest {
 
     @Test
     fun `decisions and idle channels are independently configurable`() {
-        assertNotEquals(AppLifecycleMonitor.CHANNEL_DECISIONS, AppLifecycleMonitor.CHANNEL_IDLE)
+        assertNotEquals(NotificationChannels.CHANNEL_DECISIONS, NotificationChannels.CHANNEL_IDLE)
     }
 
     @Test

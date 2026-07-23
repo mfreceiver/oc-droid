@@ -36,6 +36,7 @@ import cn.vectory.ocdroid.service.status.toSessionBusyStatus
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.MESSAGE_CHRONO
 import cn.vectory.ocdroid.ui.SessionListState
+import cn.vectory.ocdroid.ui.StreamOwnedState
 import cn.vectory.ocdroid.ui.chronological
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
@@ -1527,7 +1528,7 @@ class SessionSyncCoordinator(
                 reconcileSessionLocked(sid, mode, repo, token, uiSnapshot.currentSessionId)
             }
         }
-        applyReconcileResult(result, token, uiSnapshot)
+        applyReconcileResult(result, token, uiSnapshot, mode)
     }
 
     /**
@@ -1594,7 +1595,7 @@ class SessionSyncCoordinator(
             token = token,
             isStillCurrent = { true },
         )
-        return applyReconcileResult(result, token, uiSnapshot)
+        return applyReconcileResult(result, token, uiSnapshot, mode)
     }
 
     /**
@@ -1862,6 +1863,10 @@ class SessionSyncCoordinator(
         // [ResyncUiSnapshot] capture at resync entry stays for future use;
         // the ABI is unchanged.
         snapshot: ResyncUiSnapshot? = null,
+        // §Stage-B §3.4: the reconcile mode threads through to the Reconciled
+        // branch's isAuthoritativeSlimMerge decision (RESYNC is always
+        // authoritative; DIGEST_FOCUS/BACKGROUND consult session status).
+        mode: ReconcileMode = ReconcileMode.DIGEST_BACKGROUND,
     ): ReconcileResult {
         val repo = repository ?: return ReconcileResult.NoRepository(resultSid(result))
 
@@ -1909,7 +1914,7 @@ class SessionSyncCoordinator(
         val committed = withContext(Dispatchers.Main.immediate) {
             repo.commitIfSlimTokenCurrent(token) {
                 val liveSessionId = slices.chat.value.currentSessionId
-                applyCurrentReconcileResult(result, token, liveSessionId)
+                applyCurrentReconcileResult(result, token, liveSessionId, mode)
             }
         }
         return if (committed) result else ReconcileResult.Stale(resultSid(result))
@@ -1936,6 +1941,9 @@ class SessionSyncCoordinator(
         result: ReconcileResult,
         token: OpenCodeRepository.SlimCommitToken,
         liveSessionId: String? = slices.chat.value.currentSessionId,
+        // §Stage-B §3.4: mode threads to the Reconciled branch's
+        // isAuthoritativeSlimMerge decision.
+        mode: ReconcileMode = ReconcileMode.DIGEST_BACKGROUND,
     ) {
         when (result) {
             is ReconcileResult.MarkDeleted -> {
@@ -1989,7 +1997,17 @@ class SessionSyncCoordinator(
 
             is ReconcileResult.Reconciled -> {
                 if (liveSessionId == result.sid) {
-                    mergeSlimMessagesIntoChat(result.items)
+                    // §Stage-B §3.4 (grok MF-1): thread the authoritative
+                    // decision through mergeSlimMessagesIntoChat so an
+                    // actively-streaming token stream's owned parts are
+                    // preserved on a skeleton merge, and cleared on an
+                    // authoritative (resync / idle) merge.
+                    val authoritative = isAuthoritativeSlimMerge(
+                        mode = mode,
+                        sid = result.sid,
+                        sessionStatuses = slices.sessionList.value.sessionStatuses,
+                    )
+                    mergeSlimMessagesIntoChat(result.items, authoritative)
                 }
                 // T11 round-2 (oracle D1 — cache-coupled non-focus resync):
                 // if this Reconciled was for a NON-current session, write
@@ -2260,7 +2278,7 @@ class SessionSyncCoordinator(
                         } else {
                             // Main switch/commit is deliberately outside the
                             // network timeout and outside any worker lock.
-                            applyReconcileResult(result, entryToken, resyncUiSnapshot)
+                            applyReconcileResult(result, entryToken, resyncUiSnapshot, ReconcileMode.RESYNC)
                         }
                         outcomes[sid] = finalResult
                     }
@@ -2411,7 +2429,9 @@ class SessionSyncCoordinator(
                 // C-D3 v2 §3.6: token-gated snapshot fold. If the gate
                 // rejects, the snapshot is dropped and we abort the sweep
                 // (token superseded between cold-start commit and fold).
-                if (!applySlimColdStartSnapshot(snapshot, token)) {
+                // §Stage-B §3.4: resync snapshot is authoritative — fetched
+                // messages are the final view, owned streaming parts cleared.
+                if (!applySlimColdStartSnapshot(snapshot, token, authoritative = true)) {
                     hadFailure = false
                     return emptyMap()
                 }
@@ -2489,12 +2509,44 @@ class SessionSyncCoordinator(
      *
      * T1b: routes through [AppAction.SlimMessagesMerged] → [mergeSlimMessages]
      * (1:1 with the pre-T1b private mutateChat loop).
+     *
+     * §Stage-B §3.4: [authoritative] threads the splice/merge contract — see
+     * [mergeSlimMessages] + [isAuthoritativeSlimMerge].
      */
-    private fun mergeSlimMessagesIntoChat(items: List<MessageWithParts>) {
+    private fun mergeSlimMessagesIntoChat(items: List<MessageWithParts>, authoritative: Boolean = false) {
         if (items.isEmpty()) return
         // T1d P1-2: slim-only state write — fail-fast in legacy mode.
         requireSlimOnlyStateWrite(isSlimMode(), "merge-slim-messages")
-        slices.store.dispatch(cn.vectory.ocdroid.ui.AppAction.SlimMessagesMerged(items))
+        slices.store.dispatch(cn.vectory.ocdroid.ui.AppAction.SlimMessagesMerged(items, authoritative))
+    }
+
+    /**
+     * §Stage-B §3.4 (grok MF-1 caller decision rule): decide whether a slim
+     * reconcile merge should be authoritative (fetched content wins, owned
+     * streaming parts cleared) or skeleton (owned streaming parts preserved).
+     *
+     * Returns `true` (authoritative) when ANY of:
+     *  - [forceAuthoritative] is set (explicit override).
+     *  - [mode] is [ReconcileMode.RESYNC] (the resync sweep is a forced
+     *    catch-up — fetched content is authoritative even if the session
+     *    happens to be busy at merge time).
+     *  - The session's status is unknown (`null`) — fail-safe: treat an
+     *    unknown session as idle/authoritative.
+     *  - The session is idle (`!isBusy && !isRetry`) — no active token
+     *    stream to preserve.
+     *
+     * Returns `false` (skeleton / preserve) ONLY when the session is
+     * actively busy or retrying (an in-flight token stream may own parts
+     * whose streamed text must be preserved).
+     */
+    private fun isAuthoritativeSlimMerge(
+        mode: ReconcileMode,
+        sid: String,
+        sessionStatuses: Map<String, SessionStatus>,
+        forceAuthoritative: Boolean = false,
+    ): Boolean = forceAuthoritative || mode == ReconcileMode.RESYNC || run {
+        val st = sessionStatuses[sid]
+        st == null || (!st.isBusy && !st.isRetry)
     }
 
     /**
@@ -2542,10 +2594,16 @@ class SessionSyncCoordinator(
      * [commitIfSlimTokenCurrent] atomic region so a configure() rotation
      * between cold-start fetch return and slice commit cannot write a
      * stale snapshot under a new host.
+     *
+     * §Stage-B §3.4: [authoritative] controls the messages-merge contract
+     * — default `false` (cold-start skeleton: preserve any in-flight token-
+     * stream owned parts). Resync / watchdog callers pass `true` (the
+     * snapshot's messages are the authoritative final view).
      */
     fun applySlimColdStartSnapshot(
         snapshot: SlimColdStartSnapshot,
         token: OpenCodeRepository.SlimCommitToken,
+        authoritative: Boolean = false,
     ): Boolean {
         // T1d P1-1: same entry guard on the token-taking overload (direct
         // callers / tests must not bypass via token path).
@@ -2662,7 +2720,7 @@ class SessionSyncCoordinator(
 
             val msgs = snapshot.messages
             if (msgs != null) {
-                mergeSlimMessagesIntoChat(msgs)
+                mergeSlimMessagesIntoChat(msgs, authoritative)
             }
 
             // I-2: a whole-call Failure surfaces a toast. Partial
@@ -2701,854 +2759,14 @@ class SessionSyncCoordinator(
 }
 
 /**
- * I-2 v2 §3.5: directory-scoped apply for aggregation outcomes.
- *
- * Returns a [SlimAggregationFold] carrying BOTH the merged items AND
- * the derived [SlimAggregationSignal] (completeness + failedSources
- * + failureMessage) so the caller can update the slice's observable
- * signal alongside the list. The signal is computed via
- * [aggregationSignal] (top-level helper).
- *
- * - [SlimAggregationOutcome.Failure] → keep prior unchanged.
- * - [SlimAggregationOutcome.Success] with `authoritativeDirectories=null`
- *   → complete replacement (including empty).
- * - [SlimAggregationOutcome.Success] / [SlimAggregationOutcome.Partial]
- *   with non-null `authoritativeDirectories` → delete prior only from
- *   directories proven successful; failed/unknown dirs survive.
- *
- * C-D3 v2 §3.5 (defensive filter): fetched entries attributed to
- * directories OUTSIDE the proven-authoritative set are REJECTED.
- * Pre-fix, the directory filter only decided which PRIOR entries to
- * keep — a misbehaving sidecar could ship out-of-scope items and
- * pollute the local cache.
- *
- * Fetched entries win on duplicate IDs.
- *
- * T2 (slimapi v0.2.2 client-adapt): scope-directories gate. When
- * [SlimAggregationOutcome.Success.serverScope] (or
- * [SlimAggregationOutcome.Partial.serverScope]) reports
- * `directories == 0`, the sidecar's allowlist is not yet ready and the
- * (possibly empty) `items` are NOT authoritative — return prior
- * unchanged (same as `Failure`). `directories > 0` means authoritative;
- * `serverScope == null` (pre-0.2.2 sidecar / 503) preserves the original
- * behavior. See task-2-brief.md.
+ * Clears token-stream ownership state for the given [partIds].
+ * If [partIds] is empty, returns [this] unchanged.
+ * Removes matching entries from both [streamingPartTexts] and [streamOwned].
  */
-internal fun <Wire, Ui> applyAggregationOutcome(
-    prior: List<Ui>,
-    outcome: SlimAggregationOutcome<Wire>,
-    wireToUi: (Wire) -> Ui,
-    uiId: (Ui) -> String,
-    uiDirectory: (Ui) -> String?,
-): SlimAggregationFold<Ui> {
-    val signal = aggregationSignal(outcome)
-
-    when (outcome) {
-        is SlimAggregationOutcome.Failure -> {
-            return SlimAggregationFold(
-                items = prior,
-                signal = signal,
-            )
-        }
-
-        is SlimAggregationOutcome.Success -> {
-            // T2: scope not ready → retain prior (do NOT clear stale).
-            if (outcome.serverScope?.directories == 0) {
-                return SlimAggregationFold(
-                    items = prior,
-                    signal = signal,
-                )
-            }
-
-            val scope = outcome.authoritativeDirectories
-
-            val fetched = outcome.items
-                .map(wireToUi)
-                .let { mapped ->
-                    if (scope == null) {
-                        mapped
-                    } else {
-                        // C-D3 v2 §3.5 defensive: reject out-of-scope
-                        // envelope items.
-                        mapped.filter { item -> uiDirectory(item) in scope }
-                    }
-                }
-
-            if (scope == null) {
-                return SlimAggregationFold(
-                    items = fetched.distinctBy(uiId),
-                    signal = signal,
-                )
-            }
-
-            val result = LinkedHashMap<String, Ui>()
-
-            prior.asSequence()
-                .filter { item -> uiDirectory(item) !in scope }
-                .forEach { item -> result[uiId(item)] = item }
-
-            fetched.forEach { item -> result[uiId(item)] = item }
-
-            return SlimAggregationFold(
-                items = result.values.toList(),
-                signal = signal,
-            )
-        }
-
-        is SlimAggregationOutcome.Partial -> {
-            // T2: scope not ready → retain prior (do NOT clear stale).
-            // Mirrors the Success-branch gate.
-            if (outcome.serverScope?.directories == 0) {
-                return SlimAggregationFold(
-                    items = prior,
-                    signal = signal,
-                )
-            }
-
-            val scope = outcome.authoritativeDirectories
-
-            // A Partial item is accepted only from a proven-success
-            // source. Items attributed to failed, unknown, or out-of-
-            // request directories cannot replace local state.
-            val fetched = outcome.items
-                .map(wireToUi)
-                .filter { item -> uiDirectory(item) in scope }
-
-            val result = LinkedHashMap<String, Ui>()
-
-            prior.asSequence()
-                .filter { item -> uiDirectory(item) !in scope }
-                .forEach { item -> result[uiId(item)] = item }
-
-            fetched.forEach { item -> result[uiId(item)] = item }
-
-            return SlimAggregationFold(
-                items = result.values.toList(),
-                signal = signal,
-            )
-        }
-    }
-}
-
-// ── §R-17 batch5 → §R-19 Sprint 3 P2-4: pure state transforms for each SSE event branch ──
-//
-// Each function takes the prior slice value + the event payload and returns
-// `Pair<State, List<SseSideEffect>>` — the new state AND a list of side
-// effects the dispatcher should commit via `applySseSideEffects`. Pure: no
-// effect emits, no coroutine launches, no settings writes. All DebugLog /
-// diagnostic calls live in the dispatcher (the `when` branches above), NOT
-// inside these functions, so the transforms stay pure + testable. Most return
-// `emptyList()` (the transform is pure state-only); the dispatcher adds
-// cross-slice effects (which need context the single-slice function doesn't
-// have) and routes the combined list.
-//
-// §R-19 Sprint 3 P2-4: the signature unification (all return Pair) is the
-// formalization step — the dispatcher's CAS pattern is now uniform across all
-// 11 branches, and the effect sequencing is auditable in one place.
-
-/**
- * session.created → upsert the parsed [Session] into BOTH [SessionListState.sessions]
- * AND every matching [SessionListState.directorySessions] bucket (two-store pattern
- * — see [upsertAndInvalidateTree]). Pure; effects empty (the dispatcher handles
- * parse-failure via ReportNonFatal).
- *
- * §Q4-strict-sync: also removes [session].id from [SessionListState.pendingCreateIds]
- * — the server just confirmed the session exists, so it is no longer "pending".
- * This is the SSE-side confirmation path; the REST refresh (launchLoadSessions)
- * does the same removal idempotently. Idempotent with the 30 s sweep (which is
- * a fallback for ids that never get confirmed).
- */
-internal fun SessionListState.applySessionCreated(session: Session): Pair<SessionListState, List<SseSideEffect>> =
-    upsertAndInvalidateTree(session).copy(
-        pendingCreateIds = pendingCreateIds - session.id,
-        pendingCreatedAt = pendingCreatedAt - session.id,
-    ) to emptyList()
-
-/**
- * session.updated (non-archived) → upsert the parsed [Session] into BOTH
- * [SessionListState.sessions] AND every matching [SessionListState.directorySessions]
- * bucket (two-store pattern — see [upsertAndInvalidateTree]). Pure; effects empty.
- *
- * §Q4-strict-sync: also removes [updated].id from [SessionListState.pendingCreateIds]
- * — a session.updated event proves the server knows about this session, so it
- * is no longer "pending" (even if session.created was missed). Idempotent with
- * applySessionCreated and the REST sweep.
- */
-internal fun SessionListState.applySessionUpsert(updated: Session): Pair<SessionListState, List<SseSideEffect>> =
-    upsertAndInvalidateTree(updated).copy(
-        pendingCreateIds = pendingCreateIds - updated.id,
-        pendingCreatedAt = pendingCreatedAt - updated.id,
-    ) to emptyList()
-
-private fun SessionListState.upsertAndInvalidateTree(session: Session): SessionListState {
-    val updatedSessions = upsertSession(sessions, session)
-    // §title-sync: also propagate the upsert into every directorySessions
-    // bucket (conditional replace — do NOT append to buckets that don't
-    // already contain this session). A session shown from a directory bucket
-    // (SessionsScreen + chat header read the union of stores) otherwise keeps
-    // a stale field (e.g. the server's auto-generated title) until a REST
-    // refresh replaces the bucket. Mirrors applyMessageTimestampBump's
-    // two-store pattern.
-    val updatedDirectorySessions = directorySessions.mapValues { (_, list) ->
-        list.map { s -> if (s.id == session.id) session else s }
-    }
-    val byId = allSessionsById(updatedSessions, updatedDirectorySessions, childSessions)
-    val rootId = rootIdOf(session.id, byId)
+internal fun ChatState.clearTokenStreamState(partIds: Set<String>): ChatState {
+    if (partIds.isEmpty()) return this
     return copy(
-        sessions = updatedSessions,
-        directorySessions = updatedDirectorySessions,
-        // An unresolved parent chain cannot be attributed safely. Invalidate
-        // every completeness proof rather than risk a false "all descendants
-        // idle" result until hydration reconnects the new node to its root.
-        completeRootIds = if (rootId == null) emptySet() else completeRootIds - rootId,
-        // §gpter-blocker: bump the invalidation epoch so any in-flight
-        // hydration (started before this SSE event) drops its result at
-        // commit instead of re-certifying the now-stale root.
-        completenessEpoch = completenessEpoch + 1L,
+        streamingPartTexts = streamingPartTexts - partIds,
+        streamOwned = streamOwned - partIds,
     )
 }
-
-/**
- * §recent-sort-by-message: when a session receives a message, bump its
- * [Session.time.updated] to `max(current, [updated])` so the
- * "recent sessions" surfaces (sortedByDescending { time.updated }) reflect
- * actual message activity rather than just the server-side session metadata
- * timestamp. Mirrors [applyArchiveEviction]'s two-store pattern: BOTH the
- * top-level `sessions` list AND every `directorySessions` bucket are bumped
- * (a session can be present in either / both stores, and both feed the
- * SessionsScreen / SessionPickerSheet recent derivations).
- *
- * Idempotent + monotonic (see [Session.TimeInfo.withUpdatedAtLeast]) — repeated
- * bumps for the same message are a no-op, and out-of-order / replayed events
- * never go backwards. Pure.
- */
-internal fun SessionListState.applyMessageTimestampBump(
-    sessionId: String,
-    updated: Long
-): Pair<SessionListState, List<SseSideEffect>> {
-    if (updated <= 0L) return this to emptyList()
-    val newSessions = sessions.map { s ->
-        if (s.id == sessionId) s.copy(time = s.time.withUpdatedAtLeast(updated)) else s
-    }
-    val newDirectorySessions = directorySessions.mapValues { (_, list) ->
-        list.map { s ->
-            if (s.id == sessionId) s.copy(time = s.time.withUpdatedAtLeast(updated)) else s
-        }
-    }
-    return copy(sessions = newSessions, directorySessions = newDirectorySessions) to emptyList()
-}
-
-/**
- * session.updated (archived) → upsert the session AND rewrite [openSessionIds]
- * to the caller-supplied [newOpenIds] (with the archived id evicted). The
- * caller computes [newOpenIds] + persists it via SettingsManager (a side
- * effect that stays inline). Pure; effects empty.
- */
-internal fun SessionListState.applyArchiveEviction(
-    updated: Session,
-    newOpenIds: List<String>
-): Pair<SessionListState, List<SseSideEffect>> = copy(
-    sessions = upsertSession(sessions, updated),
-    directorySessions = directorySessions.mapValues { (_, list) ->
-        list.map { session -> if (session.id == updated.id) updated else session }
-    },
-    openSessionIds = newOpenIds
-) to emptyList()
-
-/**
- * The chat-side archive clear when the archived session IS the currently-open
- * one: drop currentSessionId + messages + partsByMessage so the chat view
- * falls back to the empty state. Pure; effects empty.
- *
- * FIX-B (review-blocker, groker B3): also clears the unified scroll slot +
- * parent-return backstack (added by WT2 / §Wave5b-Q13). The clearSessionData
- * path already clears them, but this archive-clear path was missed → a
- * pending scroll intent / checkpoint could stick if the session was archived
- * between the intent being set and consumed. Now the slot + backstack are
- * wiped atomically with the rest of the chat clear (one committed state, no
- * torn "session archived but scroll intent still references it").
- */
-internal fun ChatState.applyArchivedChatClear(): Pair<ChatState, List<SseSideEffect>> = copy(
-    currentSessionId = null,
-    messages = emptyList(),
-    partsByMessage = emptyMap(),
-    // §slimapi-client-v1 §G6 (Task 16 round-2): clear per-part expand states
-    // on archived-chat clear. Matches the partsByMessage clear above.
-    partExpandStates = emptyMap(),
-    // FIX-B / §Wave5b-Q13: clear the unified scroll slot + parent-return
-    // backstack — a pending scroll / checkpoint for an archived session is
-    // meaningless.
-    pendingScrollRequest = null,
-    parentReturnCheckpoints = emptyMap(),
-) to emptyList()
-
-/**
- * §Wave5b-Q13 blocker-2 fix (gpter 8.7 FAIL / groker 9.6 PASS): UNCONDITIONAL
- * scroll-state cleanup for an archived subtree. Used by the THREE archive
- * paths ([AppAction.SessionArchived] reducer, [AppAction.BulkSessionsRefreshed]
- * reducer, [launchSetSessionArchived] onSuccess) so a non-current archived
- * session/child can no longer leave stale scroll state behind.
- *
- * Cleans (preserving all chat CONTENT — messages/parts/streaming/etc. — which
- * remains current-only-cleared by [applyArchivedChatClear]):
- *  - [ChatState.pendingScrollRequest] → null IFF its targetSessionId is in
- *    [subtree] (a pending Latest/Restore for an archived session will never
- *    fire correctly; the consumer would skip it on the next switch anyway,
- *    but leaving it risks a stale fire if the user re-opens the same id
- *    later via a fresh create).
- *  - [ChatState.parentReturnCheckpoints] → filter out every entry whose key
- *    (childId) is in [subtree]. A returnToParent from an archived child is
- *    unreachable (the user cannot navigate to an archived session), but the
- *    stale entry would otherwise leak indefinitely in the map.
- *
- * Pure; effects empty. Callers MUST already have computed [subtree] via
- * [subtreeIds] (the SAME three-source union used for unread/questions
- * cleanup) — no second subtree walk here.
- *
- * Idempotent: safe to call when the slot is already null / the map already
- * has no entries in [subtree] (the operations are no-ops in that case).
- * Safe to compose with [applyArchivedChatClear] for the current-archived
- * case: applyArchivedChatClear wipes BOTH fields unconditionally, so a
- * subsequent call to this helper is a no-op.
- */
-internal fun ChatState.cleanScrollStateForSubtree(
-    subtree: Set<String>,
-): ChatState {
-    if (subtree.isEmpty()) return this
-    val cleanSlot = pendingScrollRequest
-        ?.takeUnless { it.targetSessionId in subtree }
-    val cleanCheckpoints = if (parentReturnCheckpoints.isEmpty()) {
-        parentReturnCheckpoints
-    } else {
-        parentReturnCheckpoints.filterKeys { it !in subtree }
-    }
-    // Skip the .copy() allocation entirely if neither field would change
-    // (hot path: archive of an unrelated subtree on a chat with no scroll
-    // state — common during bulk refreshes).
-    if (cleanSlot === pendingScrollRequest && cleanCheckpoints === parentReturnCheckpoints) {
-        return this
-    }
-    return copy(
-        pendingScrollRequest = cleanSlot,
-        parentReturnCheckpoints = cleanCheckpoints,
-    )
-}
-
-/**
- * session.status → upsert the [sessionId] → [status] pair into
- * [SessionListState.sessionStatuses]. Pure; effects empty — the busy-current /
- * idle-current finalization side effects are computed by the dispatcher (they
- * depend on cross-slice state: chat.currentSessionId,
- * chat.streamingPartTexts).
- */
-internal fun SessionListState.applySessionStatus(
-    sessionId: String,
-    status: SessionStatus
-): Pair<SessionListState, List<SseSideEffect>> =
-    copy(sessionStatuses = sessionStatuses + (sessionId to status)) to emptyList()
-
-/**
- * message.updated → patch-if-found / insert-if-absent [updated] into
- * [ChatState.messages]. Returns the new state AND a `found` flag (so the
- * caller can log patch vs. insert without a second O(n) scan). Single O(n)
- * atomic pass — no TOCTOU. Pure.
- *
- * When [found] is false, the new message is inserted in chronological order
- * using [MESSAGE_CHRONO] (binarySearch). Exception: null-created messages
- * (time?.created == null) are always appended at the tail (the list is
- * oldest-first and the new message is the newest — mirrors opencode-web).
- */
-internal fun ChatState.applyMessageUpdated(updated: Message): Pair<ChatState, Boolean> {
-    val idx = messages.indexOfFirst { it.id == updated.id }
-    if (idx >= 0) {
-        // Patch path: message found
-        val old = messages[idx]
-        if (old.time?.created == updated.time?.created) {
-            // Created timestamp unchanged → keep position, just patch content
-            val newMessages = messages.toMutableList().also { it[idx] = updated }
-            return copy(messages = newMessages) to true
-        }
-        // Created timestamp changed → remove old, re-insert chronologically
-        val remaining = messages.toMutableList().also { it.removeAt(idx) }
-        // For null-created, always append at tail (optimistic insert)
-        if (updated.time?.created == null) {
-            return copy(messages = remaining + updated) to true
-        }
-        // Insert using chronological comparator
-        val insertAt = remaining.binarySearch { MESSAGE_CHRONO.compare(it, updated) }
-        val insertIdx = if (insertAt < 0) -(insertAt + 1) else insertAt
-        val newMessages = remaining.toMutableList().also { it.add(insertIdx, updated) }
-        return copy(messages = newMessages) to true
-    } else {
-        // Insert path: message absent
-        // For null-created, always append at tail
-        if (updated.time?.created == null) {
-            return copy(messages = messages + updated) to false
-        }
-        if (messages.isEmpty() || MESSAGE_CHRONO.compare(messages.last(), updated) <= 0) {
-            // Append at end (common case)
-            return copy(messages = messages + updated) to false
-        }
-        // Find insertion point
-        val insertAt = messages.binarySearch { MESSAGE_CHRONO.compare(it, updated) }
-        val insertIdx = if (insertAt < 0) -(insertAt + 1) else insertAt
-        val newMessages = messages.toMutableList().also { it.add(insertIdx, updated) }
-        return copy(messages = newMessages) to false
-    }
-}
-
-/**
- * T1b pure extract of the pre-T1b [SessionSyncCoordinator.mergeSlimMessagesIntoChat]
- * private loop (patch-if-found + insert-if-absent for messages; parts map
- * overwritten per fetched id when parts non-empty). Empty-id items are skipped.
- * Behavior is byte-for-byte identical to the legacy private loop.
- */
-internal fun ChatState.mergeSlimMessages(items: List<MessageWithParts>): ChatState {
-    if (items.isEmpty()) return this
-    // Collect ids of patched items for O(1) exclusion
-    val patchedIds = mutableSetOf<String>()
-    val patched = mutableListOf<Message>()
-    val absent = mutableListOf<Message>()
-    var partsByMessage = this.partsByMessage
-    for (item in items) {
-        val updated = item.info
-        if (updated.id.isEmpty()) continue
-        // Check if this id exists in current messages (O(n) but typically small;
-        // could use index if n grows, but mergeSlimMessages is bounded by chunk size)
-        val existingIdx = messages.indexOfFirst { it.id == updated.id }
-        if (existingIdx >= 0) {
-            patchedIds.add(updated.id)
-            patched.add(updated)
-        } else {
-            absent.add(updated)
-        }
-        if (item.parts.isNotEmpty()) {
-            partsByMessage = partsByMessage + (updated.id to item.parts)
-        }
-    }
-    // Preserve messages not in patchedIds
-    val preserved = messages.filterNot { it.id in patchedIds }
-    // Merge preserved + patched + absent, then chronological sort
-    val merged = (preserved + patched + absent).chronological()
-    return copy(messages = merged, partsByMessage = partsByMessage)
-}
-
-/**
- * message.part.updated (blank reasoning creation / type-correct placeholder) →
- * inject a [Part] of [partType] into [ChatState.partsByMessage][msgId] AND
- * set [ChatState.streamingReasoningPart] when [partType] == "reasoning".
- * Idempotent — once a Part of the correct type exists this is a no-op (caller
- * guards `hasCorrectType`, but this is defensive: it filters out any stale
- * wrong-typed placeholder first). Pure.
- */
-internal fun ChatState.applyPartCreatedPlaceholder(
-    partType: String,
-    partId: String,
-    msgId: String,
-    sessionId: String
-): Pair<ChatState, List<SseSideEffect>> {
-    val base = partsByMessage[msgId]?.filterNot { it.id == partId } ?: emptyList()
-    return copy(
-        streamingReasoningPart = reasoningPartOrNull(partType, partId, msgId, sessionId)
-            ?: streamingReasoningPart,
-        partsByMessage = partsByMessage + (msgId to base + Part(
-            id = partId, messageId = msgId, sessionId = sessionId, type = partType
-        ))
-    ) to emptyList()
-}
-
-/**
- * Leading-edge fullText write: REPLACE [ChatState.streamingPartTexts][partId]
- * with [fullText] (authoritative accumulated text), set
- * [ChatState.streamingReasoningPart] if [partType] == "reasoning", and ensure
- * the placeholder [Part] exists. Pure.
- *
- * Caller follows up with [markFlushPending] + [scheduleDeltaFlush] (the Job
- * scheduling is a side effect that stays on the coordinator).
- */
-internal fun ChatState.applyPartFullTextLeadingEdge(
-    partId: String,
-    fullText: String,
-    partType: String,
-    pId: String,
-    msgId: String,
-    sessionId: String
-): Pair<ChatState, List<SseSideEffect>> = copy(
-    streamingPartTexts = streamingPartTexts + (partId to fullText),
-    streamingReasoningPart = reasoningPartOrNull(
-        partType = partType,
-        partId = pId,
-        messageId = msgId,
-        sessionId = sessionId
-    ) ?: streamingReasoningPart,
-    partsByMessage = ensurePlaceholderPart(partsByMessage, msgId, pId, sessionId, partType)
-) to emptyList()
-
-/**
- * Leading-edge delta write: APPEND [delta] to the prior
- * [ChatState.streamingPartTexts][partId] value, set
- * [ChatState.streamingReasoningPart] if the resolved type is "reasoning", and
- * ensure the placeholder [Part] exists. Pure.
- *
- * Caller follows up with [markFlushPending] + [scheduleDeltaFlush] (the Job
- * scheduling is a side effect that stays on the coordinator).
- */
-internal fun ChatState.applyPartDeltaLeadingEdge(
-    partId: String,
-    delta: String,
-    knownType: String,
-    msgId: String,
-    sessionId: String
-): Pair<ChatState, List<SseSideEffect>> {
-    val previous = streamingPartTexts[partId].orEmpty()
-    return copy(
-        streamingPartTexts = streamingPartTexts + (partId to (previous + delta)),
-        streamingReasoningPart = reasoningPartOrNull(knownType, partId, msgId, sessionId)
-            ?: streamingReasoningPart,
-        partsByMessage = ensurePlaceholderPart(partsByMessage, msgId, partId, sessionId, knownType)
-    ) to emptyList()
-}
-
-/** Variant of [applyPartDeltaLeadingEdge] taking the part.updated partType +
- *  explicit pId (used by the message.part.updated delta branch where the
- *  known-type lookup hasn't run yet). Pure. */
-internal fun ChatState.applyPartDeltaLeadingEdge(
-    partId: String,
-    delta: String,
-    partType: String,
-    pId: String,
-    msgId: String,
-    sessionId: String
-): Pair<ChatState, List<SseSideEffect>> {
-    val previous = streamingPartTexts[partId].orEmpty()
-    return copy(
-        streamingPartTexts = streamingPartTexts + (partId to (previous + delta)),
-        streamingReasoningPart = reasoningPartOrNull(
-            partType = partType,
-            partId = pId,
-            messageId = msgId,
-            sessionId = sessionId
-        ) ?: streamingReasoningPart,
-        partsByMessage = ensurePlaceholderPart(partsByMessage, msgId, pId, sessionId, partType)
-    ) to emptyList()
-}
-
-/**
- * Trailing-coalesce delta APPEND: append [delta] to the slice's
- * [ChatState.deltaBuffer][partId] (the buffer is now a `Map<String, String>`,
- * so the append is a read-modify-write under the slice's CAS `update`).
- * Pure. */
-internal fun ChatState.appendDeltaBuffer(partId: String, delta: String): Pair<ChatState, List<SseSideEffect>> {
-    val current = deltaBuffer[partId].orEmpty()
-    return copy(deltaBuffer = deltaBuffer + (partId to (current + delta))) to emptyList()
-}
-
-/**
- * Trailing-coalesce fullText REPLACE: overwrite [ChatState.fullTextBuffer][partId]
- * with [text] (REPLACE — fullText is the server-authoritative accumulated
- * text; only the latest value per partId matters). Pure.
- */
-internal fun ChatState.replaceFullTextBuffer(partId: String, text: String): Pair<ChatState, List<SseSideEffect>> =
-    copy(fullTextBuffer = fullTextBuffer + (partId to text)) to emptyList()
-
-/**
- * Marks [partId] as having a pending flush (the slice-side mirror of the
- * coordinator's [SessionSyncCoordinator.flushJobs] entry). Set on the
- * leading-edge write so an observer of the slice can detect "deltas still
- * buffered" without needing access to the Job. Pure.
- */
-internal fun ChatState.markFlushPending(partId: String): Pair<ChatState, List<SseSideEffect>> =
-    if (partId in pendingFlushPartIds) this to emptyList()
-    else copy(pendingFlushPartIds = pendingFlushPartIds + partId) to emptyList()
-
-/**
- * Flushes [partId]'s buffered delta/fullText into [ChatState.streamingPartTexts]
- * in a single atomic pure transform, then clears that partId's three coalesce
- * entries ([deltaBuffer] / [fullTextBuffer] / [pendingFlushPartIds]).
- *
- * §Site1-coalesce: a buffered fullText wins (REPLACE) over a buffered delta
- * (APPEND), and is checked FIRST. If the overlay was wiped mid-window
- * (`streamingPartTexts[partId] == null`), both buffers are dropped (stale;
- * re-injecting would render ghost text from the previous session).
- *
- * Mirrors the verbatim semantics of the pre-batch5 imperative
- * `flushDeltaBuffer` (the only change is storage location). Pure.
- */
-internal fun ChatState.flushCoalesceBufferForPart(partId: String): Pair<ChatState, List<SseSideEffect>> {
-    val overlayPresent = streamingPartTexts[partId] != null
-    // REPLACE path: fullText wins outright when the overlay still exists.
-    val bufferedFullText = fullTextBuffer[partId]
-    if (overlayPresent && bufferedFullText != null) {
-        // The authoritative fullText supersedes any concurrent delta
-        // accumulation for this partId; drop the stale buffered delta so
-        // it can't be appended in a later coalesce window.
-        return copy(
-            streamingPartTexts = streamingPartTexts + (partId to bufferedFullText),
-            deltaBuffer = deltaBuffer - partId,
-            fullTextBuffer = fullTextBuffer - partId,
-            pendingFlushPartIds = pendingFlushPartIds - partId
-        ) to emptyList()
-    }
-    // If the overlay was wiped mid-window, drop the buffered fullText (stale).
-    // Otherwise keep fullTextBuffer intact (no fullText buffered for this
-    // partId; the entry was already absent).
-    val fullTextBufferAfter = if (overlayPresent) fullTextBuffer else fullTextBuffer - partId
-    val bufferedDelta = deltaBuffer[partId]
-    if (bufferedDelta.isNullOrEmpty()) {
-        return copy(
-            fullTextBuffer = fullTextBufferAfter - partId,
-            deltaBuffer = deltaBuffer - partId,
-            pendingFlushPartIds = pendingFlushPartIds - partId
-        ) to emptyList()
-    }
-    // Overlay wiped mid-window → drop stale buffered delta (re-injecting
-    // would render ghost text from the previous session).
-    if (!overlayPresent) {
-        return copy(
-            fullTextBuffer = fullTextBufferAfter - partId,
-            deltaBuffer = deltaBuffer - partId,
-            pendingFlushPartIds = pendingFlushPartIds - partId
-        ) to emptyList()
-    }
-    // APPEND path: append the buffered delta to the overlay.
-    val previous = streamingPartTexts[partId].orEmpty()
-    return copy(
-        streamingPartTexts = streamingPartTexts + (partId to (previous + bufferedDelta)),
-        fullTextBuffer = fullTextBufferAfter - partId,
-        deltaBuffer = deltaBuffer - partId,
-        pendingFlushPartIds = pendingFlushPartIds - partId
-    ) to emptyList()
-}
-
-/**
- * Drops [partId]'s three coalesce entries without flushing (the buffers are
- * discarded, NOT applied to streamingPartTexts). The slice-side companion of
- * [SessionSyncCoordinator.cancelDeltaFlush]. Pure.
- */
-internal fun ChatState.clearCoalesceBufferForPart(partId: String): Pair<ChatState, List<SseSideEffect>> = copy(
-    deltaBuffer = deltaBuffer - partId,
-    fullTextBuffer = fullTextBuffer - partId,
-    pendingFlushPartIds = pendingFlushPartIds - partId
-) to emptyList()
-
-/**
- * Drops ALL coalesce entries (deltaBuffer / fullTextBuffer /
- * pendingFlushPartIds). Does NOT touch streamingPartTexts /
- * streamingReasoningPart — the overlay clear is a separate concern (the
- * §闪屏修复 made part.created preserve the overlay; only the buffers are
- * dropped). The slice-side companion of
- * [SessionSyncCoordinator.clearDeltaBuffers]. Pure.
- */
-internal fun ChatState.clearAllCoalesceBuffers(): Pair<ChatState, List<SseSideEffect>> = copy(
-    deltaBuffer = emptyMap(),
-    fullTextBuffer = emptyMap(),
-    pendingFlushPartIds = emptySet()
-) to emptyList()
-
-/**
- * question.asked → append [question] to [SessionListState.pendingQuestions]
- * iff its id is not already present (idempotent). Pure.
- *
- * Cluster A / Phase 2: when a duplicate id arrives WITH a non-null
- * [QuestionRequest.routeToken] and the existing entry has null, upgrade the
- * stored entry (slim SSE may re-deliver with the token after a REST-only
- * insert).
- */
-internal fun SessionListState.applyQuestionAsked(question: QuestionRequest): Pair<SessionListState, List<SseSideEffect>> {
-    val existingIdx = pendingQuestions.indexOfFirst { it.id == question.id }
-    if (existingIdx < 0) {
-        return copy(pendingQuestions = pendingQuestions + question) to emptyList()
-    }
-    val existing = pendingQuestions[existingIdx]
-    if (existing.routeToken.isNullOrBlank() && !question.routeToken.isNullOrBlank()) {
-        val upgraded = pendingQuestions.toMutableList().also { it[existingIdx] = question }
-        return copy(pendingQuestions = upgraded) to emptyList()
-    }
-    return this to emptyList()
-}
-
-/**
- * permission.asked (slim SSE with routeToken) → append/upgrade
- * [SessionListState.pendingPermissions] by id. Pure. Legacy path still
- * relies on [SseSideEffect.LoadPendingPermissions] REST refresh.
- */
-internal fun SessionListState.applyPermissionAsked(permission: PermissionRequest): Pair<SessionListState, List<SseSideEffect>> {
-    val existingIdx = pendingPermissions.indexOfFirst { it.id == permission.id }
-    if (existingIdx < 0) {
-        return copy(pendingPermissions = pendingPermissions + permission) to emptyList()
-    }
-    val existing = pendingPermissions[existingIdx]
-    if (existing.routeToken.isNullOrBlank() && !permission.routeToken.isNullOrBlank()) {
-        val upgraded = pendingPermissions.toMutableList().also { it[existingIdx] = permission }
-        return copy(pendingPermissions = upgraded) to emptyList()
-    }
-    return this to emptyList()
-}
-
-/**
- * Cluster A / Phase 2: map a slimapi aggregate question entry onto the legacy
- * [QuestionRequest] UI model, **preserving [SlimapiQuestionEntry.routeToken]**.
- */
-internal fun SlimapiQuestionEntry.toQuestionRequest(): QuestionRequest =
-    QuestionRequest(
-        id = id,
-        sessionId = sessionId,
-        questions = questions,
-        tool = tool,
-        directory = directory,
-        routeToken = routeToken,
-    )
-
-/**
- * I-2 v2 §3.4: derive an observable [SlimAggregationSignal] from a
- * [SlimAggregationOutcome]. Top-level so both
- * [SessionSyncCoordinator] and [cn.vectory.ocdroid.ui.launchLoadPendingPermissionsSlim]
- * use the SAME implementation.
- */
-internal fun <T> aggregationSignal(
-    outcome: SlimAggregationOutcome<T>,
-): cn.vectory.ocdroid.ui.SlimAggregationSignal = when (outcome) {
-    is SlimAggregationOutcome.Success -> cn.vectory.ocdroid.ui.SlimAggregationSignal(
-        completeness = cn.vectory.ocdroid.ui.SlimAggregationCompleteness.COMPLETE,
-    )
-
-    is SlimAggregationOutcome.Partial -> cn.vectory.ocdroid.ui.SlimAggregationSignal(
-        completeness = cn.vectory.ocdroid.ui.SlimAggregationCompleteness.INCOMPLETE,
-        failedSources = outcome.errors.map { error ->
-            cn.vectory.ocdroid.ui.SlimAggregationFailedSource(
-                directory = error.directory,
-                code = error.code,
-            )
-        },
-    )
-
-    is SlimAggregationOutcome.Failure -> cn.vectory.ocdroid.ui.SlimAggregationSignal(
-        completeness = cn.vectory.ocdroid.ui.SlimAggregationCompleteness.FAILED,
-        failureMessage = outcome.message,
-    )
-}
-
-/**
- * I-2 v2 §3.5: shared model returned by [applyAggregationOutcome].
- * Carries BOTH the merged items AND the derived
- * [cn.vectory.ocdroid.ui.SlimAggregationSignal] so the caller updates
- * the slice's signal atomically with the list.
- */
-internal data class SlimAggregationFold<Ui>(
-    val items: List<Ui>,
-    val signal: cn.vectory.ocdroid.ui.SlimAggregationSignal,
-)
-
-/**
- * Cluster A / Phase 2: parse a `permission.asked` SSE frame into a
- * [PermissionRequest], including optional [PermissionRequest.routeToken]
- * from slim properties. Returns null on malformed payload.
- */
-internal fun parsePermissionAskedEvent(event: SSEEvent): PermissionRequest? {
-    val properties = event.payload.properties ?: return null
-    return runCatching {
-        lenientJson.decodeFromJsonElement<PermissionRequest>(properties)
-    }.getOrNull()
-}
-
-/**
- * question.replied / question.rejected → drop the pending question whose id
- * matches [requestId]. Pure.
- */
-internal fun SessionListState.applyQuestionResolved(requestId: String): Pair<SessionListState, List<SseSideEffect>> =
-    copy(pendingQuestions = pendingQuestions.filter { it.id != requestId }) to emptyList()
-
-/**
- * todo.updated → upsert [todos] under [sessionId] in
- * [SessionListState.sessionTodos]. Pure.
- */
-internal fun SessionListState.applyTodoUpdated(
-    sessionId: String,
-    todos: List<TodoItem>
-): Pair<SessionListState, List<SseSideEffect>> =
-    copy(sessionTodos = sessionTodos + (sessionId to todos)) to emptyList()
-
-/**
- * §issue-1(1): session.diff → 替换 [sessionId] 的文件变更快照。服务端每次发布的是
- * 该会话当前的完整 diff 列表（非增量），故整体替换。Pure。
- */
-internal fun SessionListState.applySessionDiff(
-    sessionId: String,
-    diffs: List<cn.vectory.ocdroid.data.model.FileDiff>
-): Pair<SessionListState, List<SseSideEffect>> =
-    copy(sessionDiffs = sessionDiffs + (sessionId to diffs)) to emptyList()
-
-/**
- * §issue-1(1) REST 预取专用：仅当 [sessionId] 尚无 diff 条目时写入（stale-overwrite
- * 守卫，glmer-S1）。SSE [applySessionDiff] 是权威源、无条件覆盖；REST 仅乐观预取，若
- * SSE 已推过更新则跳过，避免在途 REST 旧结果覆盖更新的 SSE 快照。抽成纯函数以便单测
- * （maxer 复审：覆盖维度）。镜像上游 web client `diff()` 的 `if defined && !force return`。
- */
-internal fun SessionListState.applySessionDiffIfAbsent(
-    sessionId: String,
-    diffs: List<cn.vectory.ocdroid.data.model.FileDiff>
-): Pair<SessionListState, List<SseSideEffect>> =
-    (if (sessionDiffs[sessionId] != null) this
-    else copy(sessionDiffs = sessionDiffs + (sessionId to diffs))) to emptyList()
-
-/**
- * session lifecycle completion (root busy→idle) → mark [sessionId] unread IF
- * it is not the currently-open session. Also used as the REST reconnect
- * backstop. Caller passes [currentSessionId] so this stays pure (no slice
- * read). Pure.
- */
-internal fun UnreadState.applyMarkSessionUnread(
-    sessionId: String,
-    currentSessionId: String?
-): Pair<UnreadState, List<SseSideEffect>> =
-    (if (sessionId == currentSessionId) this
-    else copy(unreadSessions = unreadSessions + sessionId)) to emptyList()
-
-// ── §streaming-render placeholder injection ────────────────
-
-/**
- * Ensures a minimal placeholder [Part] exists in [partsByMessage] for the
- * given [msgId]/[pId] so a `ChatMessageRow.PartView` is composed immediately
- * and consumes the streaming override (`streamingTextOverride ?: part.text`)
- * while SSE deltas accumulate. The placeholder has `text = null`, so the
- * streaming override wins; when the REST reload later fires it replaces
- * `partsByMessage[msgId]` wholesale, overwriting the placeholder with the
- * real Part — no conflict.
- *
- * No-op when [partsByMessage] already has a Part with `id == pId` for [msgId]
- * (the common case once the first placeholder has been inserted, or once the
- * REST reload has brought the real parts in).
- *
- * Type guard: only `text` and `reasoning` parts are streamed through
- * `streamingPartTexts` and rendered by `PartView`'s `TextPart` /
- * `ReasoningCard`. Other part types (`tool`, `patch`, `file`, `step-start`,
- * `step-finish`, …) are NOT streamed this way — injecting a placeholder for
- * them would misroute in `PartView` (e.g. a `type="tool"` placeholder with
- * `tool=null` renders an empty tool card; `step-*` has no render branch and
- * the streaming text would be orphaned). For those types this is a no-op.
- * They get their real `Part` from the REST reload as before.
- */
-internal fun ensurePlaceholderPart(
-    partsByMessage: Map<String, List<Part>>,
-    msgId: String,
-    pId: String,
-    sessionId: String,
-    partType: String
-): Map<String, List<Part>> {
-    // Only text/reasoning parts stream via streamingPartTexts. Skip
-    // placeholder injection for any other type — they would misroute in
-    // PartView and the streaming text would never be consumed.
-    if (partType != "text" && partType != "reasoning") return partsByMessage
-    val existing = partsByMessage[msgId]
-    return when {
-        existing == null -> partsByMessage + (msgId to listOf(Part(id = pId, messageId = msgId, sessionId = sessionId, type = partType)))
-        existing.none { it.id == pId } -> partsByMessage + (msgId to (existing + Part(id = pId, messageId = msgId, sessionId = sessionId, type = partType)))
-        else -> partsByMessage
-    }
-}
-
-/**
- * §R-17 batch5: helper for tests / future state inspectors — is the SSE
- * coalesce window currently open for [partId]? Pure read on [ChatState].
- */
-internal fun ChatState.isFlushPending(partId: String): Boolean =
-    partId in pendingFlushPartIds

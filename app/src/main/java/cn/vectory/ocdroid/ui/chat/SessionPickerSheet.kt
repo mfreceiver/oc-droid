@@ -59,6 +59,7 @@ import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.ui.effectiveBusySessionIds
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.Dimens
+import cn.vectory.ocdroid.util.workdirBasename
 
 /**
  * Lean session switcher sheet (D.4 / WT1). Renders a single scrollable list
@@ -192,7 +193,7 @@ private fun SessionPickerRow(
             )
         },
         supportingContent = {
-            val workdirBase = session.directory.split("/").filter { it.isNotEmpty() }.lastOrNull().orEmpty()
+            val workdirBase = session.directory.workdirBasename().orEmpty()
             val timeText = session.time?.updated?.let { formatTime(it) }.orEmpty()
             Text(
                 text = listOf(workdirBase, timeText).filter { it.isNotBlank() }.joinToString("  •  "),

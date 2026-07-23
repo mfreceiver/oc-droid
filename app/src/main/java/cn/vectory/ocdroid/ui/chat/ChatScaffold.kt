@@ -185,8 +185,8 @@ fun ChatScaffold(
     // their sheet state lives HERE (ChatScaffold) because ChatTopBar only
     // fires the open-callback, and the sheets need slice reads (settingsFlow
     // for agents/providers; chatFlow for currentModel) that ChatScaffold
-    // already subscribes to. The picker composables themselves stay in
-    // Composer.kt (now `internal` so this file can call them).
+    // already subscribes to. The picker composables themselves are defined in
+    // PickerSheets.kt (now `internal` so this file can call them).
     var showAgentPicker by rememberSaveable { mutableStateOf(false) }
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
     var showSessionPicker by rememberSaveable { mutableStateOf(false) }
@@ -665,8 +665,8 @@ fun ChatScaffold(
         // reads (agents / providers / currentModel / disabled models) are
         // sourced below from the already-subscribed settings + chat slices,
         // so opening a sheet does not trigger a fresh subscription. The
-        // AgentPickerSheet / ModelPickerSheet composables stay defined in
-        // Composer.kt (now `internal`).
+        // AgentPickerSheet / ModelPickerSheet composables are defined in
+        // PickerSheets.kt (now `internal`).
         //
         // §dead-onCompact-cleanup: the standalone "Compress" overflow item
         // was removed; compaction is triggered via the ContextUsageDialog's

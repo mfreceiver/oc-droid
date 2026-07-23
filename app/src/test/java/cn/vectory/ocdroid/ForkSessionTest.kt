@@ -196,6 +196,13 @@ class ForkSessionTest {
             hostProfileController,
             sessionSyncCoordinator,
             connectionCoordinator,
+            // §Stage-D2: token-stream coordinator (not exercised by ForkSessionTest).
+            cn.vectory.ocdroid.ui.controller.sse.TokenStreamCoordinator(
+                scope = appScope,
+                slices = store.slices,
+                streamProvider = { _, _ -> kotlinx.coroutines.flow.emptyFlow() },
+                triggerSinceFetch = { _, _ -> },
+            ),
             unreadSoakController,
             // §review-fix #1: fp provider (same as MainViewModelTestBase).
             { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },

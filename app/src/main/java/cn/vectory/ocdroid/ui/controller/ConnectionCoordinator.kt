@@ -172,6 +172,18 @@ class ConnectionCoordinator(
     private val bootstrapRetryPolicy: BootstrapRetryPolicy = BootstrapRetryPolicy(),
     private val appLifecycleMonitor: AppLifecycleMonitor? = null,
     private val degradedBootstrapTerminator: DegradedBootstrapTerminator? = null,
+    /**
+     * §Stage-D2 §5.8/§5.9: the token-stream coordinator. CC hooks
+     * [TokenStreamCoordinator.close] on [cancelSse] (background / ViewModel
+     * onCleared) and [cancelSseForReconfigure] (host / profile switch), and
+     * [TokenStreamCoordinator.resetDegraded] after a successful health probe
+     * that re-confirms `features.tokenStream == true` (re-arms after a
+     * transient sidecar admission-cap state).
+     *
+     * `null` for legacy/test construction — CC falls back to a no-op so tests
+     * that don't exercise the token-stream path keep compiling.
+     */
+    private val tokenStreamCoordinator: cn.vectory.ocdroid.ui.controller.sse.TokenStreamCoordinator? = null,
 ) {
     private var lastHealthCheckTime = 0L
 
@@ -691,6 +703,16 @@ class ConnectionCoordinator(
      * written to the settings slice) is inlined.
      */
     fun loadInitialData() {
+        // §Stage-D2 §5.9: re-arm token-stream capability after a successful
+        // health probe. updateSlimapi already ran inside checkHealth/checkHealthFor,
+        // settling slimapiTokenStreamEnabled. If the feature is on, clear any
+        // stale degrade state for the current session so the token stream can
+        // be opened (a transient cap-8 admission state may have cleared).
+        if (serverCompatProfile.slimapiTokenStreamEnabled) {
+            tokenStreamCoordinator?.let { tsc ->
+                slices.chat.value.currentSessionId?.let { sid -> tsc.resetDegraded(sid) }
+            }
+        }
         // Cross-domain fan-out: orchestrator owns these implementations.
         // §R18 Phase 3 Wave 1 (P1-3 C 类): loadInitialData 五连发顺序敏感 → 保持同步 tryEmitEffect (scope.launch 包裹会破坏顺序)。
         effects.tryEmitEffect(ControllerEffect.LoadSessions)
@@ -1007,6 +1029,12 @@ class ConnectionCoordinator(
      * that doesn't wire it (pre-CP9 build) — the call is a no-op there.
      */
     fun cancelSse() {
+        // §Stage-D2: close the token stream for the current session (background /
+        // ViewModel onCleared / process teardown). The coordinator's close(sid)
+        // cancels the lifecycle job + clears coordinator-internal state.
+        tokenStreamCoordinator?.let { tsc ->
+            slices.chat.value.currentSessionId?.let { sid -> tsc.close(sid) }
+        }
         scope.launch {
             streamingLifecycleCoordinator?.teardownAndAwait(TeardownReason.Disconnect)
         }
@@ -1029,6 +1057,13 @@ class ConnectionCoordinator(
      */
     fun cancelSseForReconfigure() {
         DebugLog.i("SSE", "cancelSse (reconfigure)")
+        // §Stage-D2: close the token stream before the repository reconfigures
+        // for a new host. Without this, the stream bound to the PREVIOUS host
+        // keeps delivering frames into ChatState while the new host's health
+        // probe is in flight.
+        tokenStreamCoordinator?.let { tsc ->
+            slices.chat.value.currentSessionId?.let { sid -> tsc.close(sid) }
+        }
         scope.launch {
             streamingLifecycleCoordinator?.teardownAndAwait(TeardownReason.Reconfigure)
         }

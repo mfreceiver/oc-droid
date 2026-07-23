@@ -691,14 +691,14 @@ class AppLifecycleMonitorTest {
     // ── §7 channel matrix ─────────────────────────────────────────────────
     @Test
     fun `createChannels registers all three channels - decisions HIGH, errors DEFAULT, session_status LOW`() {
-        AppLifecycleMonitor.createChannels(app)
+        NotificationChannels.createChannels(app)
 
         val manager = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channels = manager.notificationChannels.associateBy { it.id }
 
-        assertNotNull("ocdroid.decisions registered", channels[AppLifecycleMonitor.CHANNEL_DECISIONS])
-        assertNotNull("ocdroid.errors registered", channels[AppLifecycleMonitor.CHANNEL_ERRORS])
-        val session = channels[AppLifecycleMonitor.CHANNEL_SESSION_STATUS]
+        assertNotNull("ocdroid.decisions registered", channels[NotificationChannels.CHANNEL_DECISIONS])
+        assertNotNull("ocdroid.errors registered", channels[NotificationChannels.CHANNEL_ERRORS])
+        val session = channels[NotificationChannels.CHANNEL_SESSION_STATUS]
         assertNotNull("ocdroid.session_status registered (CP8)", session)
         assertEquals(
             "§7 channel matrix: session_status is IMPORTANCE_LOW",
@@ -711,12 +711,12 @@ class AppLifecycleMonitorTest {
 
     @Test
     fun `createChannels is idempotent - re-invocation does not duplicate session_status`() {
-        AppLifecycleMonitor.createChannels(app)
-        AppLifecycleMonitor.createChannels(app) // idempotent per platform contract.
+        NotificationChannels.createChannels(app)
+        NotificationChannels.createChannels(app) // idempotent per platform contract.
 
         val manager = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val sessionCount = manager.notificationChannels.count {
-            it.id == AppLifecycleMonitor.CHANNEL_SESSION_STATUS
+            it.id == NotificationChannels.CHANNEL_SESSION_STATUS
         }
         assertEquals("re-create is a no-op (single channel)", 1, sessionCount)
     }

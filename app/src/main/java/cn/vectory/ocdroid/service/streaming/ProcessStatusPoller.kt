@@ -9,6 +9,7 @@ import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.service.status.StatusFanOutSummary
 import cn.vectory.ocdroid.service.status.StatusSnapshot
 import cn.vectory.ocdroid.util.DebugLog
+import cn.vectory.ocdroid.util.exponentialBackoffMs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -368,8 +369,7 @@ class ProcessStatusPoller internal constructor(
         // could pass an out-of-range value explicitly).
         val j = sampled.coerceIn(-0.2f, 0.2f)
         return synchronized(stateLock) {
-            val attempt = backoffAttempt.coerceAtMost(BACKOFF_MAX_SHIFT)
-            val base = BACKOFF_BASE_MS * (1L shl attempt)
+            val base = exponentialBackoffMs(backoffAttempt, BACKOFF_BASE_MS, BACKOFF_MAX_SHIFT)
             val next = SseRecoveryPolicy.applyJitter(base, j)
                 .coerceAtMost(BACKOFF_MAX_MS)
                 .coerceAtLeast(0L)

@@ -14,6 +14,7 @@ import androidx.core.app.ServiceCompat
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
+import cn.vectory.ocdroid.di.NotificationChannels
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.events.SseEventStream
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
@@ -86,8 +87,8 @@ import javax.inject.Inject
  * **Channels**: NOT created here. `AppLifecycleMonitor` owns channel
  * creation for `ocdroid.decisions` / `ocdroid.errors` /
  * `ocdroid.session_status` (CP8 — all three live in
- * [AppLifecycleMonitor.createChannels]); this service references the
- * channel id only via [AppLifecycleMonitor.CHANNEL_SESSION_STATUS]
+ * [NotificationChannels.createChannels]); this service references the
+ * channel id only via [NotificationChannels.CHANNEL_SESSION_STATUS]
  * (single source — no duplicate const here).
  */
 @AndroidEntryPoint
@@ -741,8 +742,8 @@ class SessionStreamingService : Service() {
 
     /**
      * Translates a pure-JVM [NotificationSpec] into a [Notification]. Channel
-     * = [AppLifecycleMonitor.CHANNEL_SESSION_STATUS] (created by
-     * [AppLifecycleMonitor.createChannels] at CP8 alongside the
+     * = [NotificationChannels.CHANNEL_SESSION_STATUS] (created by
+     * [NotificationChannels.createChannels] at CP8 alongside the
      * decisions/errors channels — single source, referenced by id only).
      *
      * §16-U1 「关闭后台」Action wiring + chronometer base conversion
@@ -769,8 +770,8 @@ class SessionStreamingService : Service() {
         // downgrade restriction.
         NotificationCompat.Builder(
             this,
-            if (spec.silent) AppLifecycleMonitor.CHANNEL_SESSION_STATUS_MIN
-            else AppLifecycleMonitor.CHANNEL_SESSION_STATUS
+            if (spec.silent) NotificationChannels.CHANNEL_SESSION_STATUS_MIN
+            else NotificationChannels.CHANNEL_SESSION_STATUS
         )
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(spec.title)

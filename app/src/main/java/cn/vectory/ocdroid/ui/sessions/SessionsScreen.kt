@@ -64,6 +64,7 @@ import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.WorkdirPaths
+import cn.vectory.ocdroid.util.workdirBasename
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -560,9 +561,7 @@ fun SessionsScreen(
             title = stringResource(R.string.sessions_pick_workdir_title),
         ) {
             recentWorkdirs.forEach { workdir ->
-                val basename = workdir.split("/")
-                    .filter { it.isNotEmpty() }
-                    .lastOrNull() ?: workdir
+                val basename = workdir.workdirBasename() ?: workdir
                 ListItem(
                     headlineContent = { Text(basename) },
                     modifier = Modifier.clickable {
@@ -605,9 +604,7 @@ fun SessionsScreen(
     // calls settingsVM.disconnectWorkdir + clears unread for that workdir's
     // sessions + collapses the row.
     pendingDisconnectWorkdir?.let { workdir ->
-        val name = workdir.split("/")
-            .filter { it.isNotEmpty() }
-            .lastOrNull() ?: workdir
+        val name = workdir.workdirBasename() ?: workdir
         AppConfirmDialog(
             title = stringResource(R.string.workdir_disconnect_title),
             body = stringResource(R.string.workdir_disconnect_message) +
@@ -710,7 +707,7 @@ private fun HomeWorkdirRow(
     unreadSessions: Set<String>,
     effectiveBusy: Set<String>,
 ) {
-    val displayName = workdir.split("/").filter { it.isNotEmpty() }.lastOrNull() ?: workdir
+    val displayName = workdir.workdirBasename() ?: workdir
     Column(modifier = Modifier.fillMaxWidth()) {
         ListItem(
             modifier = Modifier.combinedClickable(

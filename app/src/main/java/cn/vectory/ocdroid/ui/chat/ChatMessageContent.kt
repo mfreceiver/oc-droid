@@ -66,6 +66,7 @@ import cn.vectory.ocdroid.ui.theme.AppTextStyles
 import cn.vectory.ocdroid.util.FLICKER_TAG
 import cn.vectory.ocdroid.util.STREAMING_FLICKER_DEBUG
 import cn.vectory.ocdroid.util.flickerFilterOutCount
+import cn.vectory.ocdroid.util.workdirBasename
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.drop
@@ -864,7 +865,7 @@ internal fun ChatMessageList(
         // `workspaceDirectory` 派生自当前 session.directory（见上声明）；
         // null/blank 时不渲染。
         workspaceDirectory?.let { dir ->
-            val workdirBasename = dir.substringAfterLast('/').ifBlank { dir }
+            val workdirBasename = dir.workdirBasename() ?: dir
             if (workdirBasename.isNotBlank()) {
                 BoxWithConstraints(
                     modifier = Modifier
