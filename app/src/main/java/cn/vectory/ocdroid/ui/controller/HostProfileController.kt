@@ -122,6 +122,37 @@ class HostProfileController(
         }
     }
 
+    // ── Reconfigure boundary helpers (cluster 6 barrier folding) ───────────
+
+    /** Single source of truth for the non-barrier reconfigure boundary
+     *  preamble. Order is load-bearing: identity epoch bump → slim incarnation
+     *  rotation → CancelSse. NOT used by [resetLocalDataAndResync] (its
+     *  CancelSse is deliberately deferred until after the local wipe — see
+     *  test @1088). */
+    private fun beginReconfigureBoundary(): OpenCodeRepository.SlimReconfigureTicket {
+        identityStore?.beginReconfigure()
+        val ticket = repository.beginSlimReconfigure()
+        effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
+        return ticket
+    }
+
+    /** CD3 3-branch reconfigure fold. Cold (`needsReconfigure=false`):
+     *  `body(null)`, no CancelSse, no configure. Barrier-active:
+     *  `ctx.slimTicket` + barrier-internal teardown. Non-barrier-active:
+     *  [beginReconfigureBoundary] ticket. */
+    internal suspend fun <T> withHostReconfiguration(
+        needsReconfigure: Boolean,
+        body: suspend (ticket: OpenCodeRepository.SlimReconfigureTicket?) -> T,
+    ): T {
+        if (!needsReconfigure) return body(null)
+        val barrier = reconfigureBarrier
+        return if (barrier != null) {
+            barrier.reconfigure { ctx -> body(ctx.slimTicket) }
+        } else {
+            body(beginReconfigureBoundary())
+        }
+    }
+
     // ── Profile CRUD ───────────────────────────────────────────────────────
 
     /**
@@ -228,99 +259,54 @@ class HostProfileController(
         val needsReconfigure = isActiveHost &&
             (urlChanged || mtlsChanged || slimChanged || basicAuthChanged)
 
-        if (needsReconfigure) {
-            if (reconfigureBarrier != null) {
-                // C-D3 rev-3 round-6: ALL connection-affecting mutations live
-                // INSIDE the barrier. applyClientCertSave (can throw — the
-                // throw escapes the barrier as Result.failure so the dialog
-                // stays open with the error), password writes, orphan clear,
-                // clearModelDataForGroup (when urlChanged), hostProfileStore.save,
-                // configure (with ctx.slimTicket — ticket-ownership), and
-                // refreshHostProfileState — all sequential inside the block.
-                // The barrier guarantees identity.beginReconfigure +
-                // beginSlimReconfigure run BEFORE any of them, so a mid-flight
-                // old-host workflow cannot observe partial new state.
-                reconfigureBarrier.reconfigure { ctx ->
-                    normalized = applyClientCertSave(normalized, clientCertEdit)
-                    if (basicAuthEdited) {
-                        settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
-                    }
-                    if (tunnelEdited) {
-                        settingsManager.setTunnelPassword(normalized.id, tunnelPassword)
-                    }
-                    if (normalized.basicAuth == null) {
-                        settingsManager.setBasicAuthPassword(normalized.id, "")
-                    }
-                    if (urlChanged) {
-                        // §bug5 / R-20 Phase 5: URL changed → drop model data
-                        // so stale disable config does not leak / orphan.
-                        // clearModelDataForGroup is fp-keyed; the profile keeps
-                        // its fp across URL edits.
-                        settingsManager.clearModelDataForGroup(
-                            normalized.serverGroupFp.ifBlank { normalized.id }
-                        )
-                    }
-                    hostProfileStore.save(normalized)
-                    configureRepositoryForProfileRaw(
-                        profile = normalized,
-                        ticket = ctx.slimTicket,
-                    )
-                    refreshHostProfileState()
-                }
-            } else {
-                // C-D3 rev-3 round-6 non-barrier fallback: identity + slim
-                // marker rotate BEFORE any persistence / host mutation, then
-                // the same mutation sequence as the barrier block. The
-                // returned ticket threads into configure (ticket-ownership —
-                // the SAME transaction invalidates + activates).
-                identityStore?.beginReconfigure()
-                val ticket = repository.beginSlimReconfigure()
-                effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
-                normalized = applyClientCertSave(normalized, clientCertEdit)
-                if (basicAuthEdited) {
-                    settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
-                }
-                if (tunnelEdited) {
-                    settingsManager.setTunnelPassword(normalized.id, tunnelPassword)
-                }
-                if (normalized.basicAuth == null) {
-                    settingsManager.setBasicAuthPassword(normalized.id, "")
-                }
-                if (urlChanged) {
-                    settingsManager.clearModelDataForGroup(
-                        normalized.serverGroupFp.ifBlank { normalized.id }
-                    )
-                }
-                hostProfileStore.save(normalized)
-                configureRepositoryForProfileRaw(profile = normalized, ticket = ticket)
-                refreshHostProfileState()
+        withHostReconfiguration(needsReconfigure) { ticket ->
+            // C-D3 rev-3 round-6: ALL connection-affecting mutations live
+            // INSIDE the boundary (barrier or non-barrier). applyClientCertSave
+            // (can throw — the throw escapes the boundary as Result.failure so
+            // the dialog stays open with the error), password writes, orphan
+            // clear, clearModelDataForGroup (when urlChanged), hostProfileStore
+            // .save, configure (with the boundary-owned ticket — ticket-
+            // ownership), and refreshHostProfileState — all sequential inside
+            // the block. The boundary guarantees identity.beginReconfigure +
+            // beginSlimReconfigure run BEFORE any of them, so a mid-flight
+            // old-host workflow cannot observe partial new state.
+            //
+            // Cold path (ticket == null ⟺ !needsReconfigure) skips
+            // clearModelDataForGroup + configure: no live host is mutated, so
+            // there is nothing to invalidate / re-activate. Gating on
+            // ticket != null documents ticket ownership (equivalent to the old
+            // needsReconfigure branch split).
+            normalized = applyClientCertSave(normalized, clientCertEdit)
+            if (basicAuthEdited) {
+                settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
             }
-            // Success path only — emit AFTER the barrier/fallback completes.
-            // If the block threw, runSuspendCatching returns Result.failure and
-            // these emissions are skipped (the dialog stays open with the error).
+            if (tunnelEdited) {
+                settingsManager.setTunnelPassword(normalized.id, tunnelPassword)
+            }
+            if (normalized.basicAuth == null) {
+                settingsManager.setBasicAuthPassword(normalized.id, "")
+            }
+            if (ticket != null && urlChanged) {
+                // §bug5 / R-20 Phase 5: URL changed → drop model data so stale
+                // disable config does not leak / orphan. clearModelDataForGroup
+                // is fp-keyed; the profile keeps its fp across URL edits.
+                settingsManager.clearModelDataForGroup(
+                    normalized.serverGroupFp.ifBlank { normalized.id }
+                )
+            }
+            hostProfileStore.save(normalized)
+            if (ticket != null) {
+                configureRepositoryForProfileRaw(profile = normalized, ticket = ticket)
+            }
+            refreshHostProfileState()
+        }
+        // Success path only — emit AFTER the boundary completes. If the body
+        // threw, runSuspendCatching returns Result.failure and these emissions
+        // are skipped (the dialog stays open with the error).
+        if (needsReconfigure) {
             effects.tryEmitEffect(ControllerEffect.ForceReconnect)
             if (urlChanged) effects.tryEmitEffect(ControllerEffect.HostProfileSwitched)
-            return@runSuspendCatching
         }
-
-        // Non-active or no-change: persistence has no live-host side effect,
-        // run synchronously (no boundary needed). Still suspend because the
-        // signature is uniform with the reconfigure path; the body is non-
-        // suspending but Kotlin's suspend fun contract allows that.
-        normalized = applyClientCertSave(normalized, clientCertEdit)
-        if (basicAuthEdited) {
-            settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
-        }
-        if (tunnelEdited) {
-            settingsManager.setTunnelPassword(normalized.id, tunnelPassword)
-        }
-        // Defense-in-depth (#5): a profile with no basicAuth config should
-        // never retain an orphaned password.
-        if (normalized.basicAuth == null) {
-            settingsManager.setBasicAuthPassword(normalized.id, "")
-        }
-        hostProfileStore.save(normalized)
-        refreshHostProfileState()
     }
 
     /**
@@ -420,14 +406,9 @@ class HostProfileController(
         // boundary (called below) suffices. (A non-current profile delete only
         // refreshes the unchanged current host's clients to drop the deleted
         // profile's cert material.)
-        val ticket: OpenCodeRepository.SlimReconfigureTicket?
-        if (wasCurrent) {
-            identityStore?.beginReconfigure()
-            ticket = repository.beginSlimReconfigure()
-            effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
-        } else {
-            ticket = null
-        }
+        //
+        // Cluster 6: preamble delegated to [beginReconfigureBoundary].
+        val ticket = if (wasCurrent) beginReconfigureBoundary() else null
         hostProfileStore.delete(profileId)
         // §2.7: 清理被删 profile 的 mTLS 客户端证书材料（clientCertId 是 per-profile
         // 私有 UUID，无其它 profile 引用 → 安全 clear，防 ESP 悬空残留）。
@@ -503,11 +484,16 @@ class HostProfileController(
         var wasCurrent = false
         var deletedFp: String? = null
         var remainingInGroup: List<HostProfile> = emptyList()
-        reconfigureBarrier!!.reconfigure { ctx ->
+        // Cluster 6 full fold. NOTE: the barrier body configures
+        // UNCONDITIONALLY with the boundary ticket even when !wasCurrent
+        // (matches old ~L519-522) — do NOT import the non-barrier
+        // wasCurrent-conditional ticket logic here; the captured out-vars
+        // stay outer and post-barrier effects stay at the call site below.
+        withHostReconfiguration(needsReconfigure = true) { ticket ->
             // C-D3 rev-3 round-5: barrier already invalidated identity + slim
             // incarnation before teardown. delete + configure run inside the
-            // boundary; thread ctx.slimTicket into raw configure so the SAME
-            // transaction invalidates + activates (ticket-ownership).
+            // boundary; thread the boundary ticket into raw configure so the
+            // SAME transaction invalidates + activates (ticket-ownership).
             wasCurrent = profileId == slices.host.value.currentHostProfileId
             val deletedProfile = hostProfileStore.profiles().firstOrNull { it.id == profileId }
             deletedFp = deletedProfile?.serverGroupFp
@@ -518,7 +504,7 @@ class HostProfileController(
             deletedProfile?.clientCertId?.let { settingsManager.clearClientCert(it) }
             configureRepositoryForProfileRaw(
                 profile = hostProfileStore.currentProfile(),
-                ticket = ctx.slimTicket,
+                ticket = ticket,
             )
             refreshHostProfileState()
             if (wasCurrent) {
@@ -579,38 +565,25 @@ class HostProfileController(
             // makes post-select currentProfile() read the NEW profile).
             val previousFp = hostProfileStore.currentProfile().serverGroupFp
             // C-D3 rev-3 round-5 (oracle §4.1): read-only target lookup BEFORE
-            // the barrier (so we know sameGroup without performing any
-            // mutation outside the boundary). The ACTIVATE/SELECT mutations
-            // move inside the barrier / after beginSlimReconfigure below.
+            // the boundary (so we know sameGroup without performing any
+            // mutation outside it). The ACTIVATE/SELECT mutations move inside
+            // the boundary below.
             val targetBeforeMutation =
                 hostProfileStore.profiles().firstOrNull { it.id == profileId } ?: return@launch
             val sameGroup = previousFp == targetBeforeMutation.serverGroupFp
-            if (reconfigureBarrier != null) {
-                // Barrier already: identity.beginReconfigure → beginSlimReconfigure
-                // → streaming teardown, then this block (purge + configure).
-                // C-D3 rev-3 round-5: thread ctx.slimTicket into configure so
-                // the SAME transaction both invalidates and activates.
-                reconfigureBarrier.reconfigure { ctx ->
-                    effectiveConnectionConfigResolver?.activateProfile(profileId)
-                    val selected = if (effectiveConnectionConfigResolver != null) {
-                        hostProfileStore.currentProfile()
-                    } else {
-                        hostProfileStore.select(profileId)
-                    }
-                    purgePerHostState(preserveServerGroupData = sameGroup)
-                    configureRepositoryForProfileRaw(profile = selected, ticket = ctx.slimTicket)
-                    refreshHostProfileState()
-                }
-            } else {
-                // C-D3 rev-3 round-5: identity + slim marker MUST rotate BEFORE
-                // HostStatePurged / activateProfile / select / settings purge /
-                // EvictGroup, otherwise an old q/p/digest workflow can still
-                // pass commitIfSlimTokenCurrent and write stale host state into
-                // the purged UI. The returned ticket threads into configure
-                // (ticket-ownership — same transaction invalidates + activates).
-                identityStore?.beginReconfigure()
-                val ticket = repository.beginSlimReconfigure()
-                effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
+            // Cluster 6 full fold. selectHostProfile ALWAYS reconfigures (it is
+            // a host switch) → needsReconfigure = true → ticket is always
+            // non-null (barrier ctx.slimTicket OR beginReconfigureBoundary()).
+            //
+            // EvictGroup split-placement is INTENTIONAL — the body can't tell
+            // barrier from non-barrier via the ticket, so it gates on the
+            // field: non-barrier fires EvictGroup INSIDE the body (between
+            // purge and configure, matches old ~L621) so the test @817
+            // ordering `cancelIdx < evictIdx < reconnectIdx` holds; barrier
+            // fires EvictGroup AFTER the helper returns (matches old ~L625-
+            // 633) so the barrier's atomic teardown is not interleaved with
+            // effect emission. Do NOT move EvictGroup wholesale.
+            withHostReconfiguration(needsReconfigure = true) { ticket ->
                 effectiveConnectionConfigResolver?.activateProfile(profileId)
                 val selected = if (effectiveConnectionConfigResolver != null) {
                     hostProfileStore.currentProfile()
@@ -618,7 +591,11 @@ class HostProfileController(
                     hostProfileStore.select(profileId)
                 }
                 purgePerHostState(preserveServerGroupData = sameGroup)
-                if (!sameGroup) effects.emitEffect(ControllerEffect.EvictGroup(previousFp))
+                // Non-barrier EvictGroup placement (matches old ~L621):
+                // between purge and configure.
+                if (reconfigureBarrier == null && !sameGroup) {
+                    effects.emitEffect(ControllerEffect.EvictGroup(previousFp))
+                }
                 configureRepositoryForProfileRaw(profile = selected, ticket = ticket)
                 refreshHostProfileState()
             }
@@ -627,7 +604,8 @@ class HostProfileController(
                 // for previousFp only; the new group (targetFp, now current)
                 // keeps its cache. Routed through the effect bus so AppCore's
                 // dispatchHostEffect handler runs both halves atomically-ish
-                // (memory sync, persistent async).
+                // (memory sync, persistent async). Barrier placement (matches
+                // old ~L625-633): AFTER the helper returns.
                 // §R18 Phase 3 Wave 1 (P1-3 A 类): scope.launch suspend context → suspend emitEffect.
                 effects.emitEffect(ControllerEffect.EvictGroup(previousFp))
             }
@@ -759,12 +737,10 @@ class HostProfileController(
                 }
             }
         }
-        identityStore?.beginReconfigure()
-        // C-D3 rev-3 round-5: rotate slim marker before settings/HostConfig
-        // mutation; thread the returned ticket through to configure.
-        val ticket = repository.beginSlimReconfigure()
-        effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
-        configureServerRaw(url, username, password, ticket = ticket)
+        // Cluster 6 partial fold: non-barrier path stays SYNCHRONOUS (tests
+        // rely on it). Preamble delegated to [beginReconfigureBoundary]; the
+        // returned ticket threads into configure (ticket-ownership).
+        configureServerRaw(url, username, password, ticket = beginReconfigureBoundary())
         return null
     }
 
@@ -842,26 +818,22 @@ class HostProfileController(
             scope.launch { configureRepositoryForProfileAwait(profile) }
             return
         }
-        identityStore?.beginReconfigure()
-        // C-D3 rev-3 round-5: rotate slim marker before configure / any host
-        // mutation. The returned ticket threads into configure so this same
-        // transaction activates the not-ready incarnation (ticket-ownership).
-        val ticket = repository.beginSlimReconfigure()
-        effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
-        configureRepositoryForProfileRaw(profile, ticket = ticket)
+        // Cluster 6 partial fold: sync entry stays synchronous. Preamble
+        // delegated to [beginReconfigureBoundary]; the returned ticket threads
+        // into configure so this same transaction activates the not-ready
+        // incarnation (ticket-ownership).
+        configureRepositoryForProfileRaw(profile, ticket = beginReconfigureBoundary())
     }
 
     private suspend fun configureRepositoryForProfileAwait(profile: HostProfile) {
-        val barrier = reconfigureBarrier
-        if (barrier != null) {
-            // C-D3 rev-3 round-5: barrier creates the slim ticket before
-            // teardown; thread it through the raw configure so the SAME
-            // transaction both invalidates and activates (ticket-ownership).
-            barrier.reconfigure { ctx ->
-                configureRepositoryForProfileRaw(profile, ticket = ctx.slimTicket)
-            }
-        } else {
-            configureRepositoryForProfile(profile)
+        // Cluster 6 full fold: the prior else-branch (barrier == null) called
+        // back into the sync [configureRepositoryForProfile] entry, which is
+        // semantically identical to the helper's non-barrier branch
+        // (beginReconfigureBoundary → raw). In practice this Await path is
+        // only reached with a barrier (the sync entry dispatches it), but the
+        // fold preserves both branches.
+        withHostReconfiguration(needsReconfigure = true) { ticket ->
+            configureRepositoryForProfileRaw(profile, ticket = ticket)
         }
     }
 
@@ -1036,6 +1008,15 @@ class HostProfileController(
         // full-data reset is a reconfigure (the SSE collector + all in-memory
         // caches are torn down); the epoch bump ensures any in-flight
         // collector / directory fetch from the pre-reset state is dropped.
+        //
+        // Cluster 6: intentionally does NOT use [beginReconfigureBoundary] /
+        // [withHostReconfiguration]. Its CancelSseForReconfigure fires BELOW
+        // (step 4) AFTER clearAllLocalData / trafficTracker.reset /
+        // ClearSessionWindowCache — the helper emits CancelSse immediately,
+        // which would break the test @1088 ordering
+        // `clearCacheIdx < cancelSseIdx < coldStartIdx`. It also never calls
+        // configure() (the ticket is a dummy) and emits ColdStartReconnect
+        // (not ForceReconnect). Keep byte-identical.
         identityStore?.beginReconfigure()
         // C-D3 rev-3: slim marker before local purge / slice reset.
         repository.beginSlimReconfigure()
