@@ -189,7 +189,7 @@ class OpenCodeRepository @Inject constructor(
     private var sseHttp: OkHttpClient = clientFactory.sseClient(hostConfig.hostPort)
     private var retrofit: Retrofit = buildRetrofit(restHttp, hostConfig.baseUrl)
     @Volatile private var api: OpenCodeApi = retrofit.create(OpenCodeApi::class.java)
-    private var sseClient: SSEClient = SSEClient(sseHttp)
+    @Volatile private var sseClient: SSEClient = SSEClient(sseHttp)  // 🟡-2 sibling: rebuildClients(@Synchronized) 写 / connectSSE lock-free 读 → @Volatile 保可见性(同 api 家族)
 
     /**
      * §grouping-rewrite item 4: dedicated OkHttp client + Retrofit instance
