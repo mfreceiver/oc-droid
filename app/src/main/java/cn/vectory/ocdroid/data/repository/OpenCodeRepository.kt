@@ -59,66 +59,7 @@ import java.security.cert.X509Certificate
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/**
- * One page of cursor-paginated messages. [nextCursor] is the opaque V1 cursor
- * (`X-Next-Cursor` response header) to pass as `before` for the next older
- * page; null means no more history.
- */
-data class MessagesPage(
-    val items: List<MessageWithParts>,
-    val nextCursor: String?
-)
-
-/**
- * §slim-v1-paging (Task 5 / G5 cursor): the slimapi `/messages` and
- * `/messages/{sid}/since/{ts}` endpoints accept a server-side `?limit`.
- * Each fetch returns ONE bounded page; v1 now surfaces the sidecar's
- * `X-Next-Cursor` response header so the caller can decide whether to
- * follow via the `?before=<opaque>` query (T5 flipped the earlier
- * "single-page; no cursor follow" decision — see [getMessagesPaged] slim
- * branch + [getSlimapiMessagesPage]).
- *
- * Pinned to 200 (the value the contract §3 resync pseudocode calls out
- * for the no-bookmark cold-start skeleton walk: "GET /slimapi/messages/
- * {sid}?mode=skeleton&limit=200; 按cursor分页拉至本地历史边界"). Sits in
- * one place so cold-start, resync, and the digest-triggered incremental
- * fetch all agree.
- */
-internal const val SLIMAPI_DEFAULT_PAGE_LIMIT = 200
-
-/**
- * §slim-v1-paging (Task 5 / G5 cursor): the upper bound on the total
- * number of message skeletons the cold-start cursor-follow
- * ([coldStartSlimSync] no-bookmark branch via [drainSlimapiMessagesBounded])
- * will aggregate per session before stopping — even if the sidecar keeps
- * returning `X-Next-Cursor`. Guards against an unbounded history pull on
- * a fresh client (a session with thousands of messages would otherwise
- * stall the cold-start sync behind a long cursor walk).
- *
- * **Honest sourcing note (rev-gpt MINOR #1):** 250 is an INDEPENDENT
- * cold-start budget decision — the max unique items cold-start will pull
- * via cursor-follow before stopping. It is NOT a cache-retention cap and
- * NOT a "product-recognized local history budget": the actual UI history
- * strategies live in [cn.vectory.ocdroid.ui.ViewModelSupport] and are
- * unrelated numerically (initial page = 40, history page = 30, full-load
- * limit = 500, catch-up = 10/5 — see `ViewModelSupport.kt:67,87,94,100-
- * 107`). No authoritative retention constant exists in the repo; this is
- * the closest applicable budget for the cold-start path.
- *
- * The NUMERIC value 250 is aligned with
- * [cn.vectory.ocdroid.ui.RevertCutoffCoordinator.MAX_PAGES] (5) ×
- * [cn.vectory.ocdroid.ui.RevertCutoffCoordinator.PAGE_SIZE] (50) purely
- * for cross-component consistency — that walk is the only other multi-
- * page cursor drain in the codebase (`RevertCutoffCoordinator.kt:35-48`)
- * and happens to use the same 5×50=250 budget shape, so reusing the
- * number keeps the two cursor-walk budgets readable as one family. If a
- * future task introduces a real local-history retention constant, this
- * value should be re-sourced to that constant.
- *
- * See [SLIMAPI_DEFAULT_PAGE_LIMIT] (200) for the per-page size; the
- * bound implies a 2-page cold-start follow worst case (200 + 50).
- */
-internal const val SLIMAPI_LOCAL_HISTORY_BOUND = 250
+// MessagesPage, SLIMAPI_DEFAULT_PAGE_LIMIT, SLIMAPI_LOCAL_HISTORY_BOUND moved to MessagesPage.kt
 
 /**
  * OpenCode server facade. R-18 collapsed the OkHttp / SSL / interceptor
@@ -788,6 +729,12 @@ class OpenCodeRepository @Inject constructor(
         retryAfterHeaderToMs = { retryAfterHeaderToMs(it) },
     )
 
+    /**
+     * §L4a3: thin GET delegate — instantiated with [apiProvider] lambda
+     * that reads the live [api] reference so host switches take effect.
+     */
+    private val slimGetRepository = SlimGetRepository(apiProvider = { api })
+
     // ── §tofu R2: capture probe + decision application ──────────────────────
 
     /**
@@ -1171,7 +1118,8 @@ class OpenCodeRepository @Inject constructor(
      * Fetches a single session by ID. Used to resolve a child/sub-agent session
      * that may not be present in the cached [getSessions] list.
      */
-    suspend fun getSession(sessionId: String): Result<Session> = runSuspendCatching { api.getSession(sessionId) }
+    suspend fun getSession(sessionId: String): Result<Session> =
+        slimGetRepository.getSession(sessionId)
 
     // §R18 Final 终审 fix (gpter): directory now explicit (was relying on the
     // removed global currentDirectory fallback). Callers pass currentWorkdir /
@@ -1192,13 +1140,11 @@ class OpenCodeRepository @Inject constructor(
         api.deleteSession(sessionId)
     }
 
-    suspend fun getSessionStatus(): Result<Map<String, SessionStatus>> = runSuspendCatching {
-        api.getSessionStatus()
-    }
+    suspend fun getSessionStatus(): Result<Map<String, SessionStatus>> =
+        slimGetRepository.getSessionStatus()
 
-    suspend fun getActiveSessionIds(): Result<Set<String>> = runSuspendCatching {
-        api.getActiveSessions().data.keys
-    }
+    suspend fun getActiveSessionIds(): Result<Set<String>> =
+        slimGetRepository.getActiveSessionIds()
 
     /**
      * T-R1 (slimapi R1) — BULK slim cold-start status fetch. The slim-mode
@@ -1233,9 +1179,8 @@ class OpenCodeRepository @Inject constructor(
      * Fetches the child (sub-agent) sessions spawned by [sessionId], typically
      * via the `task` tool.
      */
-    suspend fun getChildren(sessionId: String): Result<List<Session>> = runSuspendCatching {
-        api.getChildren(sessionId)
-    }
+    suspend fun getChildren(sessionId: String): Result<List<Session>> =
+        slimGetRepository.getChildren(sessionId)
 
     suspend fun getMessages(sessionId: String, limit: Int? = null): Result<List<MessageWithParts>> =
         runSuspendCatching {
@@ -1275,25 +1220,8 @@ class OpenCodeRepository @Inject constructor(
         limit: Int? = null,
         before: String? = null,
         token: SlimCommitToken = captureSlimCommitToken(),
-    ): Result<MessagesPage> = runSuspendCatching {
-        if (isSlimMode) {
-            val since = slimStateMachine.getSlimSessionState(sessionId)?.updatedAt ?: 0L
-            val response = api.getSlimapiMessagesSince(sessionId, since, limit, before)
-            if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
-            val items = response.body() ?: emptyList()
-            if (!bumpSlimBookmarkFromItems(sessionId, items, token)) {
-                throw StaleSlimCommitException()
-            }
-            val nextCursor = response.headers()["X-Next-Cursor"]
-            MessagesPage(items = items, nextCursor = nextCursor)
-        } else {
-            val response = api.getMessages(sessionId, limit, before)
-            if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
-            val items = response.body() ?: emptyList()
-            val nextCursor = response.headers()["X-Next-Cursor"]
-            MessagesPage(items = items, nextCursor = nextCursor)
-        }
-    }
+    ): Result<MessagesPage> =
+        getMessagesPagedImpl(sessionId, limit, before, token, anchored = true)
 
     /**
      * §empty-window-fix: UNANCHORED slim initial-window fetch — same contract
@@ -1345,11 +1273,34 @@ class OpenCodeRepository @Inject constructor(
         limit: Int? = null,
         before: String? = null,
         token: SlimCommitToken = captureSlimCommitToken(),
+    ): Result<MessagesPage> =
+        getMessagesPagedImpl(sessionId, limit, before, token, anchored = false)
+
+    /**
+     * Shared implementation for [getMessagesPaged] and
+     * [getMessagesPagedUnanchored]. [anchored] selects the slim watermark:
+     * `true` reads the cached slim SSE watermark ([getMessagesPaged]); `false`
+     * forces `since=0L` ([getMessagesPagedUnanchored]). `isSlimMode` is read
+     * exactly once here and the watermark lookup lives inside the
+     * [runSuspendCatching] block, so a watermark-read failure stays in the
+     * `Result.failure` channel and there is no reconfigure race between the
+     * public wrapper and the impl. Bookmark bumping, response cursor reading,
+     * and the legacy branch are identical between the two public methods.
+     */
+    private suspend fun getMessagesPagedImpl(
+        sessionId: String,
+        limit: Int?,
+        before: String?,
+        token: SlimCommitToken,
+        anchored: Boolean,
     ): Result<MessagesPage> = runSuspendCatching {
         if (isSlimMode) {
-            // §empty-window-fix: since=0L — fetch ALL messages regardless of
-            // the cached slim watermark. This is the unanchored semantic.
-            val response = api.getSlimapiMessagesSince(sessionId, 0L, limit, before)
+            val since = if (anchored) {
+                slimStateMachine.getSlimSessionState(sessionId)?.updatedAt ?: 0L
+            } else {
+                0L
+            }
+            val response = api.getSlimapiMessagesSince(sessionId, since, limit, before)
             if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
             val items = response.body() ?: emptyList()
             if (!bumpSlimBookmarkFromItems(sessionId, items, token)) {
@@ -1365,6 +1316,8 @@ class OpenCodeRepository @Inject constructor(
             MessagesPage(items = items, nextCursor = nextCursor)
         }
     }
+
+
 
     /**
      * §Phase1B lightweight tail probe: fetches only the single newest message
@@ -1844,12 +1797,14 @@ class OpenCodeRepository @Inject constructor(
         }
     }
 
-    suspend fun getAgents(): Result<List<AgentInfo>> = runSuspendCatching { api.getAgents() }
+    suspend fun getAgents(): Result<List<AgentInfo>> =
+        slimGetRepository.getAgents()
 
     /**
      * Lists the server-defined slash commands.
      */
-    suspend fun getCommands(): Result<List<CommandInfo>> = runSuspendCatching { api.getCommands() }
+    suspend fun getCommands(): Result<List<CommandInfo>> =
+        slimGetRepository.getCommands()
 
     /**
      * Executes a slash command against [sessionId]. §R18 Phase 2-E step 1:
@@ -1881,13 +1836,11 @@ class OpenCodeRepository @Inject constructor(
         }
     }
 
-    suspend fun getSessionDiff(sessionId: String): Result<List<FileDiff>> = runSuspendCatching {
-        api.getSessionDiff(sessionId)
-    }
+    suspend fun getSessionDiff(sessionId: String): Result<List<FileDiff>> =
+        slimGetRepository.getSessionDiff(sessionId)
 
-    suspend fun getSessionTodos(sessionId: String): Result<List<TodoItem>> = runSuspendCatching {
-        api.getSessionTodos(sessionId)
-    }
+    suspend fun getSessionTodos(sessionId: String): Result<List<TodoItem>> =
+        slimGetRepository.getSessionTodos(sessionId)
 
     /**
      * §R-17 batch4 / §R18 Phase 2-E step 2: lists files under [directory]
@@ -1895,52 +1848,41 @@ class OpenCodeRepository @Inject constructor(
      * EXPLICITLY to the server via `?directory` + the `X-Opencode-Skip-Dir`
      * marker on the API method (no global state involved).
      */
-    suspend fun getFileTree(directory: String, path: String? = null): Result<List<FileNode>> = runSuspendCatching {
-        api.getFileTree(path ?: "", directory)
-    }
+    suspend fun getFileTree(directory: String, path: String? = null): Result<List<FileNode>> =
+        slimGetRepository.getFileTree(directory, path)
 
     /**
      * Lists the contents of an arbitrary [directory] (independent of the
      * currently selected session's workdir). Used by the directory picker.
      */
-    suspend fun getFileTreeForDirectory(
-        directory: String,
-        path: String? = null
-    ): Result<List<FileNode>> = runSuspendCatching {
-        api.getFileTreeForDirectory(directory, path ?: "")
-    }
+    suspend fun getFileTreeForDirectory(directory: String, path: String? = null): Result<List<FileNode>> =
+        slimGetRepository.getFileTreeForDirectory(directory, path)
 
     /** §R-17 batch4: see [getFileTree] for the explicit-directory rationale. */
-    suspend fun getFileContent(directory: String, path: String): Result<FileContent> = runSuspendCatching {
-        api.getFileContent(path, directory)
-    }
+    suspend fun getFileContent(directory: String, path: String): Result<FileContent> =
+        slimGetRepository.getFileContent(directory, path)
 
     /** §R-17 batch4: see [getFileTree] for the explicit-directory rationale. */
-    suspend fun getFileStatus(directory: String): Result<List<FileStatusEntry>> = runSuspendCatching {
-        api.getFileStatus(directory)
-    }
+    suspend fun getFileStatus(directory: String): Result<List<FileStatusEntry>> =
+        slimGetRepository.getFileStatus(directory)
 
     // §vcs-section: read-only VCS façade for the Settings → Working directory
     // section. Thin wrappers mirroring the file* directory-scoped pattern
     // (§R-17 batch4): the directory is supplied EXPLICITLY by the caller; no
     // global workdir state. VcsInfo / VcsStatusEntry live in data.model; the
     // diff endpoint reuses the existing FileDiff shape (same as /session/{id}/diff).
-    suspend fun getVcs(directory: String?): Result<VcsInfo> = runSuspendCatching {
-        api.getVcs(directory)
-    }
+    suspend fun getVcs(directory: String?): Result<VcsInfo> =
+        slimGetRepository.getVcs(directory)
 
-    suspend fun getVcsStatus(directory: String?): Result<List<VcsStatusEntry>> = runSuspendCatching {
-        api.getVcsStatus(directory)
-    }
+    suspend fun getVcsStatus(directory: String?): Result<List<VcsStatusEntry>> =
+        slimGetRepository.getVcsStatus(directory)
 
-    suspend fun getVcsDiff(mode: String, directory: String?): Result<List<FileDiff>> = runSuspendCatching {
-        api.getVcsDiff(mode, directory)
-    }
+    suspend fun getVcsDiff(mode: String, directory: String?): Result<List<FileDiff>> =
+        slimGetRepository.getVcsDiff(mode, directory)
 
     /** §R-17 batch4: see [getFileTree] for the explicit-directory rationale. */
-    suspend fun findFile(directory: String, query: String, limit: Int = 50): Result<List<String>> = runSuspendCatching {
-        api.findFile(query, limit, directory)
-    }
+    suspend fun findFile(directory: String, query: String, limit: Int = 50): Result<List<String>> =
+        slimGetRepository.findFile(directory, query, limit)
 
     /**
      * §R18 Phase 2-E step 1: SSE feed now takes an explicit [directory] so
@@ -2280,6 +2222,36 @@ class OpenCodeRepository @Inject constructor(
     }
 
     /**
+     * Private generic helper for aggregating cross-directory slimapi questions/
+     * permissions. Encapsulates the common pattern: fetch via [apiCall],
+     * check token, log per-directory errors, and fold into
+     * [SlimAggregationOutcome] via [aggregationOutcome].
+     */
+    private suspend fun <T> getSlimapiAggregation(
+        directories: List<String>?,
+        token: SlimCommitToken,
+        apiCall: suspend (List<String>?) -> Triple<List<T>, List<SlimapiAggregationError>, SlimapiScope?>,
+        directoryOf: (T) -> String?,
+        logTag: String,
+    ): Result<SlimAggregationOutcome<T>> = runSuspendCatching {
+        val (items, errors, scope) = apiCall(directories)
+
+        requireSlimTokenCurrent(token)
+
+        if (errors.isNotEmpty()) {
+            DebugLog.w(TAG, "$logTag partial errors: $errors")
+        }
+
+        aggregationOutcome(
+            items = items,
+            errors = errors,
+            requestedDirectories = directories,
+            directoryOf = directoryOf,
+            serverScope = scope,
+        )
+    }
+
+    /**
      * Cluster A: cross-directory pending questions aggregate
      * (`/slimapi/questions`). Each entry carries `directory` + `routeToken`.
      *
@@ -2292,26 +2264,17 @@ class OpenCodeRepository @Inject constructor(
     suspend fun getSlimapiQuestions(
         directories: List<String>? = null,
         token: SlimCommitToken,
-    ): Result<SlimAggregationOutcome<SlimapiQuestionEntry>> = runSuspendCatching {
-        val aggregation = api.getSlimapiQuestions(directories)
-
-        requireSlimTokenCurrent(token)
-
-        if (aggregation.errors.isNotEmpty()) {
-            DebugLog.w(
-                TAG,
-                "slimapi/questions partial errors: ${aggregation.errors}",
-            )
-        }
-
-        aggregationOutcome(
-            items = aggregation.items,
-            errors = aggregation.errors,
-            requestedDirectories = directories,
-            directoryOf = SlimapiQuestionEntry::directory,
-            serverScope = aggregation.scope,
+    ): Result<SlimAggregationOutcome<SlimapiQuestionEntry>> =
+        getSlimapiAggregation(
+            directories = directories,
+            token = token,
+            apiCall = { dirs ->
+                val agg = api.getSlimapiQuestions(dirs)
+                Triple(agg.items, agg.errors, agg.scope)
+            },
+            directoryOf = { it: SlimapiQuestionEntry -> it.directory },
+            logTag = "slimapi/questions",
         )
-    }
 
     /**
      * Cluster A: cross-directory pending permissions aggregate. Same shape
@@ -2320,79 +2283,19 @@ class OpenCodeRepository @Inject constructor(
     suspend fun getSlimapiPermissions(
         directories: List<String>? = null,
         token: SlimCommitToken,
-    ): Result<SlimAggregationOutcome<SlimapiPermissionEntry>> = runSuspendCatching {
-        val aggregation = api.getSlimapiPermissions(directories)
-
-        requireSlimTokenCurrent(token)
-
-        if (aggregation.errors.isNotEmpty()) {
-            DebugLog.w(
-                TAG,
-                "slimapi/permissions partial errors: ${aggregation.errors}",
-            )
-        }
-
-        aggregationOutcome(
-            items = aggregation.items,
-            errors = aggregation.errors,
-            requestedDirectories = directories,
-            directoryOf = SlimapiPermissionEntry::directory,
-            serverScope = aggregation.scope,
+    ): Result<SlimAggregationOutcome<SlimapiPermissionEntry>> =
+        getSlimapiAggregation(
+            directories = directories,
+            token = token,
+            apiCall = { dirs ->
+                val agg = api.getSlimapiPermissions(dirs)
+                Triple(agg.items, agg.errors, agg.scope)
+            },
+            directoryOf = { it: SlimapiPermissionEntry -> it.directory },
+            logTag = "slimapi/permissions",
         )
-    }
 
-    /**
-     * I-2: fold per-source aggregation envelope into a typed outcome.
-     * [requestedDirectories] is the directory list passed to the API call.
-     *
-     * T2 (slimapi v0.2.2): [serverScope] is the envelope's `scope:{directories:N}`
-     * carried through into [SlimAggregationOutcome.Success] /
-     * [SlimAggregationOutcome.Partial] so the caller can gate on
-     * `directories==0` (sidecar allowlist not ready). Default null
-     * preserves the original behavior for non-slim / pre-0.2.2 callers.
-     */
-    private fun <T> aggregationOutcome(
-        items: List<T>,
-        errors: List<SlimapiAggregationError>,
-        requestedDirectories: List<String>?,
-        directoryOf: (T) -> String?,
-        serverScope: SlimapiScope? = null,
-    ): SlimAggregationOutcome<T> {
-        val requested = requestedDirectories?.toSet()
-
-        if (errors.isEmpty()) {
-            return SlimAggregationOutcome.Success(
-                items = items,
-                authoritativeDirectories = requested,
-                serverScope = serverScope,
-            )
-        }
-
-        val failedDirectories = errors.mapNotNull { it.directory }.toSet()
-        val hasUnknownFailedDirectory = errors.any { it.directory == null }
-
-        val itemDirectories = items.mapNotNull(directoryOf).toSet()
-
-        val successfulDirectories = when {
-            // Cannot safely infer which requested directory failed. Only directories
-            // represented by returned items are proven successful.
-            hasUnknownFailedDirectory -> itemDirectories
-
-            // Requested scope is known: every requested directory not in errors
-            // completed, including successful-empty directories.
-            requested != null -> requested - failedDirectories
-
-            // Scope unknown: only item-bearing directories are provably successful.
-            else -> itemDirectories - failedDirectories
-        }
-
-        return SlimAggregationOutcome.Partial(
-            items = items,
-            errors = errors,
-            authoritativeDirectories = successfulDirectories,
-            serverScope = serverScope,
-        )
-    }
+    // aggregationOutcome moved to SlimAggregationOutcome.kt
 
     /**
      * Cluster A: reply to a slimapi-routed question. Body carries answers +
@@ -2938,29 +2841,7 @@ class OpenCodeRepository @Inject constructor(
      *
      * See [drainSlimapiMessagesBoundedOutcome] for the full rationale.
      */
-    /**
-     * Outcome of a bounded cursor-walk drain.
-     *
-     *  - [Success]: drained cleanly (cursor-null, item-bound, or page-count cap).
-     *  - [Partial]: mid-walk transport/page failure. Items are partial aggregate;
-     *    caller should keep dirty / retry.
-     *  - [Degraded]: loop detected (same cursor returned OR zero-new-items page)
-     *    — the server is misbehaving but partial aggregate is still useful.
-     *    Caller should keep dirty / retry, same as Partial.
-     */
-    private sealed interface SlimDrainOutcome {
-        val items: List<MessageWithParts>
-        data class Success(override val items: List<MessageWithParts>) : SlimDrainOutcome
-        data class Partial(
-            override val items: List<MessageWithParts>,
-            val cause: Throwable,
-        ) : SlimDrainOutcome
-        /** Loop or zero-progress page. Treated same as [Partial] by callers. */
-        data class Degraded(
-            override val items: List<MessageWithParts>,
-            val cause: Throwable,
-        ) : SlimDrainOutcome
-    }
+    // SlimDrainOutcome moved to MessagesPage.kt
 
     /**
      * T11 round-3 (oracle I2): the drain body, returning a typed outcome.
@@ -3224,13 +3105,6 @@ class OpenCodeRepository @Inject constructor(
     class SlimCursorPartialException(cause: Throwable) :
         java.io.IOException("slim cursor drain terminated mid-walk: ${cause.message}", cause)
 
-    /**
-     * G-F1: loop detected during cursor-walk drain. The server returned the
-     * same cursor again or a page with zero new message IDs. Carried as
-     * the [cause] inside [SlimDrainOutcome.Degraded] / [Partial].
-     */
-    class SlimDrainLoopException(message: String) : java.io.IOException(message)
-
     companion object {
         /**
          * Default server URL. Mirrored from [HostConfig.DEFAULT_SERVER] so
@@ -3271,98 +3145,7 @@ class OpenCodeRepository @Inject constructor(
     fun invalidateThinRouteCache() = expandBatchEngine.invalidateThinRouteCache()
 }
 
-/**
- * Cluster A: per-call cold-start / resync snapshot returned by
- * [OpenCodeRepository.coldStartSlimSync]. The four pieces are independent
- * (one failing does NOT poison the others).
- *
- * # T11 round-2 (oracle D2 — typed null/empty outcomes)
- *
- * Each metadata piece (`sessions` / `questions` / `permissions`) is
- * **nullable** to distinguish:
- *
- *  - `null` — fetch FAILED (transport / HTTP / decode). Caller MUST keep
- *    the prior list (cannot tell "server returned empty authoritative
- *    list" from "we couldn't reach the server").
- *  - `emptyList()` — fetch SUCCEEDED and returned no entries. Caller
- *    SHOULD replace the prior list with empty (the server authoritative
- *    view is "nothing here").
- *  - non-empty list — fetch succeeded; replace prior list.
- *
- * Pre-T11-round-2 all three pieces were non-nullable `List<...>` with
- * `emptyList()` collapsing both "failed" and "succeeded-empty" — making
- * it impossible for [SessionSyncCoordinator.applySlimColdStartSnapshot]
- * to know whether to replace the local cache with empty (clearing stale
- * rows) or preserve it (server unreachable). The nullable shape fixes
- * this and is required for production-live resync (oracle D2).
- *
- * `messages` keeps its existing nullable semantics: `null` = no
- * `openSessionId` was supplied (no fetch attempted); `emptyList()` =
- * fetched OK; etc. This is unchanged.
- */
-
-// ── I-2: directory-aware partial aggregation ─────────────────────────────
-
-/**
- * Typed aggregation outcome for cross-directory q/p fetches.
- *
- * - [Failure] — transport/HTTP/decode failure; preserve all prior state.
- * - [Success] — replace authoritative scope. [authoritativeDirectories] null
- *   means globally authoritative; non-null scopes replacement.
- * - [Partial] — replace only directories proven successful; preserve
- *   failed/unknown-directory prior values.
- */
-sealed interface SlimAggregationOutcome<out T> {
-    /**
-     * C-D3 v2 §3.2 / I-2: transport/HTTP/decode failure; preserve all
-     * prior state. Carries an optional [message] so the UI can surface
-     * a failure toast/banner via [aggregationSignal].
-     */
-    data class Failure(
-        val message: String? = null,
-    ) : SlimAggregationOutcome<Nothing>
-
-    data class Success<T>(
-        val items: List<T>,
-        val authoritativeDirectories: Set<String>?,
-        /**
-         * T2 (slimapi v0.2.2): the sidecar readiness scope carried by the
-         * envelope (`scope:{directories:N}`). Null = old sidecar / 503 →
-         * original behavior. `directories==0` = not ready → caller retains
-         * prior. `directories>0` = authoritative.
-         */
-        val serverScope: SlimapiScope? = null,
-    ) : SlimAggregationOutcome<T>
-
-    data class Partial<T>(
-        val items: List<T>,
-        val errors: List<SlimapiAggregationError>,
-        val authoritativeDirectories: Set<String>,
-        /**
-         * T2 (slimapi v0.2.2): same readiness contract as
-         * [Success.serverScope]. A Partial can also carry the scope from a
-         * 200-with-errors response (sidecar shipped `errors[]` AND a
-         * `scope`); the gating logic in `applyAggregationOutcome` applies
-         * the same `directories==0` retain-prior rule.
-         */
-        val serverScope: SlimapiScope? = null,
-    ) : SlimAggregationOutcome<T>
-}
-
-data class SlimColdStartSnapshot(
-    /** Null = fetch failed (keep prior). Empty = authoritative-empty (replace). */
-    val sessions: List<Session>?,
-    /** I-2: typed aggregation outcome replaces nullable list. */
-    val questions: SlimAggregationOutcome<SlimapiQuestionEntry>,
-    /** I-2: typed aggregation outcome replaces nullable list. */
-    val permissions: SlimAggregationOutcome<SlimapiPermissionEntry>,
-    /** Null iff no openSessionId was requested; empty list iff fetched OK. */
-    val messages: List<MessageWithParts>?,
-    /** rev-F: three-header discovery meta absent on pre-rev-F sidecars. */
-    val complete: Boolean? = null,
-    val discoveryDirectories: Int? = null,
-    val discoveryReady: Boolean? = null,
-)
+// SlimAggregationOutcome, SlimColdStartSnapshot moved to their own files
 
 /**
  * R8 slim-mode foundation: type-safe accessors for the tolerant
@@ -3375,36 +3158,4 @@ private fun JsonElement.safeObject(): JsonObject? = this as? JsonObject
 private fun JsonElement.safeArray(): JsonArray? = this as? JsonArray
 private fun JsonElement.safePrimitive(): JsonPrimitive? = this as? JsonPrimitive
 
-/**
- * §slim-reconcile-lane-repo (B2 T4) / §rev-grok fix1: adapt a
- * [SlimapiPermissionEntry] (the slimapi aggregate shape = legacy fields +
- * slimapi-only `directory` + `routeToken`) to the legacy [PermissionRequest]
- * model that the UI / VM consumers expect.
- *
- * **Preserves [SlimapiPermissionEntry.routeToken]** (Phase 3b): the slimapi
- * respond path ([OpenCodeRepository.respondSlimapiPermission]) requires the
- * sidecar HMAC to validate the response POST (§2/B2). The upper-layer
- * [ChatScaffold] reads [PermissionRequest.routeToken] off the
- * `pendingPermissions` entry and forwards it to
- * [OrchestratorViewModel.respondPermission]; if this mapping drops the
- * token, the slim respond falls back to the legacy endpoint and the
- * sidecar rejects / misroutes the response. (`directory` stays dropped —
- * the sidecar re-injects it from the token, and the upper layer's
- * session-set already implies it.)
- *
- * Hoisted top-level so the mapping is unit-testable in isolation (see
- * [OpenCodeRepositorySlimapiEndpointsTest]`getPendingPermissions slim mode
- * maps entries to PermissionRequest`).
- */
-internal fun SlimapiPermissionEntry.toPermissionRequest(): PermissionRequest =
-    PermissionRequest(
-        id = id,
-        sessionId = sessionId,
-        permission = permission,
-        patterns = patterns,
-        metadata = metadata,
-        always = always,
-        tool = tool,
-        directory = directory,
-        routeToken = routeToken,
-    )
+// SlimapiPermissionEntry.toPermissionRequest() moved to SlimAggregationOutcome.kt
