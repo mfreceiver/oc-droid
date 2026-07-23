@@ -186,9 +186,27 @@ internal class SlimSessionSource(private val apiProvider: () -> OpenCodeApi) : S
 
 ---
 
+## §ι-0 基线 checklist（ora-3 → 启动闸门，端口工作 ι-Q3/ι-2 前须逐项落地）
+
+改造方已逐项验证 ora-3 诊断为真（P0-1 复合接口 / P0-2 三链 / P0-3 五分支 / P0-4 cluster19 / P2-10 SSE 命中）。§6 命中表行号 + §10 ora-3 待办在此合并为**单一启动闸门**：ι-0 完成前**禁**动端口代码。每项须落地为**可复验产物**（grep 输出 / diff / 断言），非口头确认。
+
+| # | 基线项 | 落地动作（可复验） | 验收 |
+|---|---|---|---|
+| **B1** | 重扫 `isSlimMode` 提取目标集 | `rg -n 'if \(isSlimMode' OpenCodeRepository.kt` 重定位 4 分支（ora-3 读到 getSessions:1083 / getSessionsForDirectory:1107 / getMessagesPagedImpl:1297 / getPendingPermissions:1657）+ health checkHealth:838 | 行号漂移已重定位；确认恰 5 处，无新增遗漏 |
+| **B2** | 重扫 L4+ 命中表 | `rg -n 'isSlimMode\|slimMode\(\)'` 全仓；补 ora-3 SSE 三处 `SseDispatchHost.kt:88` / `SlimSseHandler.kt:70` / `ControllerModule.kt:226`；标 `ConnectionBootstrapEngine`/`EffectiveConnectionConfigResolver` = **KDoc-only（非命中）** | 以 ι-0 当时代码重基线；命中表行号刷新（现表基于 ora-3 时点） |
+| **B3** | 操作化冻结约束 | 记：§3a `OpenCodeApi::class.java.name` 字面 FQN → **必用复合接口** `interface OpenCodeApi : StandardApi, SlimApi`，`.create(OpenCodeApi)` 走承继；§4c `slimStateLock` 字段**留 OCR 声明**、注入共享、永不搬走；§1 forwarder 条款预授权门面；~40 pinned 方法清单（含全部 `markSlim*`/`completeSlimReconfigure`/`coldStartSlimSync`/`expandMessagesFullBatch`/`requireSlimTokenCurrent`） | 冻结测试基线跑绿一次留存；约束逐条对映 §8 守护清单 |
+| **B4** | delegate 折叠清单 | `SlimGetRepository`（16 legacy GET）→ 并入 `Standard*` 实现；`ExpandBatchEngine`（apiProvider 重读）→ 作 `SlimMessageSource` 协作者 | 折叠映射表落定；确认**不产生第三种重叠形态** |
+| **B5** | 确认 3 链 Retrofit 拓扑 | `api`(rest) / `commandApi` / `mutationApi`(**slim POST 走此**) + `apiV2`；复合接口 create 计划 = 每链 2 次 `retrofit.create`（共 **6 次**） | 拓扑图 + create 计划落定（对映 OCR:190/213/254/268 + rebuild 531-545） |
+| **B6** | 文档化共享态协作者模型 | `Slim*Source` 共享**同一** `SlimSseStateMachine` + `slimStateLock`（注入，非独立策略对象）；最坏例 `getMessagesPagedImpl`（bookmark 读写 + I15 token threading + 嵌套 FQN `StaleSlimCommitException`） | 协作者注入图落定；最坏例的 token/锁/异常穿透路径逐一标注「不动」 |
+| **B7** | 能力模型基线 | 核 `ServerCompatProfile` 已有 `features.tokenStream`/`sidecarOk`/`schemaDegraded`/版本范围 + I8 写点（:116/:139） | 确认 Q3 语义查询**扩展既有**即可，**不新增** `ConnectionCapabilities`（YAGNI） |
+
+**闸门**：B1–B7 全部产出可复验产物 + `./scripts/check.sh` 基线绿后，ι-Q3 方可启动。B1/B2 行号以 ι-0 执行时点为准（本 doc 现有行号均为 ora-3 读取时点快照）。
+
+---
+
 ## §10 与既有产物接线 / 待办
 
-- **上游依赖**：ι 假设 α→θ 已落地（**v0.13.1**），基于 `isSlimMode` **现状 5 分支**定义端口边界。ι-0 重扫真实基线 + 纳入 `ora-3` 诊断结论。
+- **上游依赖**：ι 假设 α→θ 已落地（**v0.13.1**），基于 `isSlimMode` **现状 5 分支**定义端口边界。ι-0 基线闸门（**§ι-0 B1–B7**）已将 `ora-3` 诊断结论 + §6 行号 rescan 合并为可复验启动条件——端口工作前须逐项落地。
 - **勿重做**：`SlimGetRepository`/`TofuRepository`/`ExpandBatchEngine`/`ConnectionHealthProbe` 已外提——ι 形式化端口、**折叠**（§4.5），不重抽。
 - **SSE 参照系定性**：`ui/controller/sse/` 是"机制性 mode 分派"参照（3 handler + `slimMode()`），**非 mode-blind 典范**——ι 的 mode-blind 目标只针对 L4+ 业务分支。
 - **relay 附带**：本修订 + 状态组「完整后续待办 §A–F」一并转改造方整合。
