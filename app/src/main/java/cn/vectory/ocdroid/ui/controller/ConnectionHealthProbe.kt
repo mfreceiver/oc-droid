@@ -285,7 +285,8 @@ internal class ConnectionHealthProbe(
                                     isConnected = true,
                                     serverVersion = health.version,
                                     isConnecting = false,
-                                    connectionPhase = ConnectionPhase.Connected
+                                    connectionPhase = ConnectionPhase.Connected,
+                                    isSlimActive = serverCompatProfile.slimConnection,
                                 )
                             }
                             // CP1 (notify Phase-0): bind the connection identity
@@ -509,6 +510,7 @@ internal class ConnectionHealthProbe(
                                         isConnecting = false,
                                         serverVersion = outcome.health.version,
                                         connectionPhase = ConnectionPhase.Connected,
+                                        isSlimActive = serverCompatProfile.slimConnection,
                                     )
                                 }
                                 // remove-message-persistence Task 5: the

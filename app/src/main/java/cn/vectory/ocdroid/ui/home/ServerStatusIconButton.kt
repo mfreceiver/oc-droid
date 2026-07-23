@@ -1,10 +1,12 @@
 // ServerStatusIconButton.kt — top-bar server-status affordance for the home
 // hub (home-hub T2). Renders an IconButton (Icons.Default.Dns) wrapped in a BadgedBox whose
-// small status dot mirrors the historical tag-0.7.6 ChatTopBar behaviour:
-//   connected    → SemanticColors.stateSuccessFg()
-//   connecting   → SemanticColors.stateInfoFg()
-//   idle         → no dot
-//   else         → colorScheme.error (Disconnected / Reconnecting / Awaiting…)
+// small status dot mirrors the historical tag-0.7.6 ChatTopBar behaviour with
+// a three-colour scheme for the connection + slim mode:
+//   connected + slimActive  → SemanticColors.stateSlimFg()    (blue)
+//   connected + !slimActive → SemanticColors.stateSuccessFg() (green)
+//   connecting              → SemanticColors.stateInfoFg()    (amber/info)
+//   idle                    → no dot
+//   else                    → colorScheme.error (red)
 //
 // On click the composable opens the shared [ServerManagementDialog] (the popup
 // that was relocated out of ChatTopBar in §0.8.2 P2 and had no consumer since).
@@ -48,12 +50,13 @@ import cn.vectory.ocdroid.ui.theme.SemanticColors
  * Home-hub top-bar server-status affordance.
  *
  * Renders `IconButton(Icons.Default.Dns)` inside a [BadgedBox] with a small
- * status dot whose colour derives from the connection phase:
- *  - [isConnected] → [SemanticColors.stateSuccessFg]
- *  - [isConnecting] → [SemanticColors.stateInfoFg]
+ * status dot whose colour derives from the connection phase and slim mode:
+ *  - [isConnected] + [slimActive] → [SemanticColors.stateSlimFg] (blue, slim mode active)
+ *  - [isConnected] + !slimActive → [SemanticColors.stateSuccessFg] (green, standard mode)
+ *  - [isConnecting] → [SemanticColors.stateInfoFg] (amber/info, probe in flight)
  *  - [isIdle] → no dot (nothing rendered, mirroring the v0.7.6 `Idle` branch)
  *  - otherwise → [MaterialTheme.colorScheme.error] (Disconnected /
- *    Reconnecting / AwaitingTofuTrust).
+ *    Reconnecting / AwaitingTofuTrust)
  *
  * On click the composable opens [ServerManagementDialog], forwarding every
  * connection / host field + [onNavigateToSettings] (the dialog's own
@@ -62,6 +65,8 @@ import cn.vectory.ocdroid.ui.theme.SemanticColors
  * ChatScaffold performs for ChatTopBarState.
  *
  * @param isConnected          true when the connection is healthy.
+ * @param slimActive           true when slim mode is the active live mode
+ *                              (serverCompatProfile.slimConnection mirror).
  * @param isConnecting         true while a connect probe is in flight.
  * @param isIdle               true when the phase is [ConnectionPhase.Idle]
  *                              (no dot rendered).
@@ -80,6 +85,7 @@ import cn.vectory.ocdroid.ui.theme.SemanticColors
 @Composable
 internal fun ServerStatusIconButton(
     isConnected: Boolean,
+    slimActive: Boolean,
     isConnecting: Boolean,
     isIdle: Boolean,
     hostProfiles: List<HostProfile>,
@@ -99,10 +105,14 @@ internal fun ServerStatusIconButton(
     // hangs. Single-tap still opens the server dialog (no behaviour change).
     var showDebugLog by remember { mutableStateOf(false) }
 
-    // Dot colour resolution — matches the v0.7.6 ChatTopBar branches:
-    // connected wins over connecting (a healthy link is not "connecting"),
-    // Idle renders nothing, every other phase falls through to error.
+    // Dot colour resolution — three-colour scheme:
+    // connected + slimActive → blue (slim mode active)
+    // connected + !slimActive → green (standard mode)
+    // connecting → amber/info (probe in flight, transient)
+    // idle → no dot
+    // everything else → red (Disconnected / Reconnecting / Awaiting…)
     val dotColor: Color? = when {
+        isConnected && slimActive -> SemanticColors.stateSlimFg()
         isConnected -> SemanticColors.stateSuccessFg()
         isConnecting -> SemanticColors.stateInfoFg()
         isIdle -> null

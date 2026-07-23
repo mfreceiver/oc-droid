@@ -309,6 +309,7 @@ fun SessionsScreen(
                         // Idle / empty host list when the VMs are not wired.
                         ServerStatusIconButton(
                             isConnected = connection.isConnected,
+                            slimActive = connection.isSlimActive,
                             isConnecting = connection.isConnecting,
                             isIdle = connection.connectionPhase is ConnectionPhase.Idle,
                             hostProfiles = host.hostProfiles,

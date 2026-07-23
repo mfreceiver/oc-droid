@@ -196,7 +196,8 @@ class ConnectionViewModel @Inject constructor(
                             SlimapiContract.SLIMAPI_CLIENT_VERSION,
                             scpMin,
                             scpMax,
-                        )
+                        ),
+                        isSlimActive = serverCompatProfile.slimConnection,
                     )
                 }
                 onResult(
@@ -207,7 +208,12 @@ class ConnectionViewModel @Inject constructor(
                 return@launch
             }
             // 清 stale：兼容 / legacy / 服务端未公告 accepted_client_versions。
-            store.mutateConnection { it.copy(slimapiVersionIncompatible = null) }
+            store.mutateConnection {
+                it.copy(
+                    slimapiVersionIncompatible = null,
+                    isSlimActive = serverCompatProfile.slimConnection,
+                )
+            }
             result
                 .onSuccess { health ->
                     if (health.healthy) {

@@ -44,6 +44,11 @@ object SemanticColors {
     fun stateWarningFg(): Color =
         if (LocalIsDarkTheme.current) Color(0xFFFFB74D) else Color(0xFF8A5A00)
 
+    /** Slim 模式活跃状态前景（连接成功 + slim 模式启用）。 */
+    @Composable @ReadOnlyComposable
+    fun stateSlimFg(): Color =
+        if (LocalIsDarkTheme.current) Color(0xFF64B5F6) else Color(0xFF1565C0)
+
     // ── agent / workdir 身份区分（hash → 16 色调色板，固定单值）───────────────
     val agentPalette: List<Color> = listOf(
         Color(0xFF6CB4EE), Color(0xFFE8A838), Color(0xFF66BB6A), Color(0xFFAB7FD0),

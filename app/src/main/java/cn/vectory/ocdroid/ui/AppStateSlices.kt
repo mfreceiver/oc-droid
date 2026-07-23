@@ -171,6 +171,15 @@ data class ConnectionState(
      * 不兼容时标记连接不可用，不静默报健康。
      */
     val slimapiVersionIncompatible: Triple<Int, Int, Int>? = null,
+    /**
+     * 镜像 [cn.vectory.ocdroid.data.repository.ServerCompatProfile.slimConnection]——
+     * `true` = 当前连接的 live mode 为 slim（省流模式）。供 ServerStatusIconButton
+     * 区分绿（标准服 / slim 服的非 slim 模式）与蓝（slim 模式活跃）。
+     *
+     * 写入时机：connect 成功写入 `isConnected=true` 的同时设置；断连时由红遮蔽
+     * 但仍保持语义一致。默认 `false` 不破坏既有收集者。
+     */
+    val isSlimActive: Boolean = false,
 )
 
 /**
