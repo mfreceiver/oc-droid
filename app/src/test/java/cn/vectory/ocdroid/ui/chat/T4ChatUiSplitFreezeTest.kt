@@ -192,7 +192,7 @@ class T4ChatUiSplitFreezeTest {
     fun `T4 overlay discipline - chat shell overlays stay A_B_C layers per ui-style-spec`() {
         // GREEN documentation freeze. The T4 split will move overlays out of
         // ChatScaffold's tail (lines ~1411-1512) into a ChatOverlayHost. Every
-        // overlay surface MUST remain on its mandated layer (docs/ui-style-spec.md
+        // overlay surface MUST remain on its mandated layer (docs/specs/ui-style-spec.md
         // three-layer rule) — the extraction is mechanical relocation, NOT a
         // licence to invent ad-hoc popup surfaces. Shared primitives from
         // ui/theme/ (AppBottomSheet / AppConfirmDialog / AppFormDialog /

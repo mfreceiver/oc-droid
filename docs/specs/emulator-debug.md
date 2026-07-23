@@ -1,7 +1,7 @@
 # 模拟器调试指南
 
 > 本文说明在本机用 **Android 模拟器**（headless / 无窗口）进行调试与集成测试的标准流程。
-> 生命周期统一通过 `scripts/emulator.sh` 管理；构建/签名规则见 `docs/build-apk.md`。
+> 生命周期统一通过 `scripts/emulator.sh` 管理；构建/签名规则见 `docs/specs/build-apk.md`。
 > 设备安全规定见 `AGENTS.md`：**仅用模拟器，不在物理真机上跑测试或安装 debug 构建**（除非用户明确要求）。
 
 ---

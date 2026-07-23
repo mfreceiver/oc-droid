@@ -39,7 +39,7 @@ App 已对 `*.ts.net` 域名配置 HTTP 豁免，无需额外设置。
 
 ### mTLS 双向认证（stunnel）
 
-通过 stunnel 在公网入口强制 mTLS：只有持有「由你的私有 CA 签发的客户端证书」的设备能完成 TLS 握手——**无证书设备在握手阶段即被拒**（一个 HTTP 字节都发不出去）。mTLS 之上再叠 basic auth 作第二层。完整服务端配置（CA/服务端/客户端证书生成、stunnel 配置、轮换）见 [`docs/mtls-setup-guide.md`](./docs/mtls-setup-guide.md)。
+通过 stunnel 在公网入口强制 mTLS：只有持有「由你的私有 CA 签发的客户端证书」的设备能完成 TLS 握手——**无证书设备在握手阶段即被拒**（一个 HTTP 字节都发不出去）。mTLS 之上再叠 basic auth 作第二层。完整服务端配置（CA/服务端/客户端证书生成、stunnel 配置、轮换）见 [`docs/specs/mtls-setup-guide.md`](./docs/specs/mtls-setup-guide.md)。
 
 App（v0.6.6+）以**剪贴板粘贴 base64** 导入：「客户端证书」槽粘「无口令 PKCS12 的 base64」，「CA 证书」槽粘「CA 证书 DER 的 base64」。在服务器上（生成证书的目录，如 `/etc/stunnel/`）各跑一条命令，复制输出粘进 App 对应槽：
 
@@ -58,7 +58,7 @@ openssl x509 -in ca-cert.pem -outform DER | base64 -w0
 
 ## 构建
 
-> 构建命令、签名、发版的**权威说明**见 [`docs/build-apk.md`](./docs/build-apk.md)；规则见 `.opencode/policies/build-signing.md`。本节只给速查。
+> 构建命令、签名、发版的**权威说明**见 [`docs/specs/build-apk.md`](./docs/specs/build-apk.md)；规则见 `.opencode/policies/build-signing.md`。本节只给速查。
 
 ```bash
 source ./scripts/env.sh          # 导出本机 JDK/SDK 环境（终端默认找不到 Java）

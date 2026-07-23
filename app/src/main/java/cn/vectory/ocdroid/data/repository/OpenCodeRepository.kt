@@ -909,7 +909,7 @@ class OpenCodeRepository @Inject constructor(
      * 落库。容错：缺字段 / 类型不符 → 对应字段为 null（[ServerCompatProfile.isSlimapiClientAccepted]
      * 在 null 时 fail-closed）。
      *
-     * 形状参考 docs/slim-mode-api-routing.md §3.2：
+     * 形状参考 docs/specs/slim-mode-api-routing.md §3.2：
      * ```json
      * { "sidecar": {"ok": true, "version": "0.1.0"},
      *   "schema":   {"degraded": false},

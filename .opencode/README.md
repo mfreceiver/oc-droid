@@ -7,7 +7,7 @@
 | 任务 | 入口 | 相关 policy / 文档 |
 |---|---|---|
 | 改动后校验（替代 LSP） | `./scripts/check.sh` | `policies/build-signing.md` |
-| 发版（出包 + tag） | `./scripts/release.sh <patch\|minor\|major>` | `policies/build-signing.md`、`policies/versioning.md`、`docs/build-apk.md` §6 |
+| 发版（出包 + tag） | `./scripts/release.sh <patch\|minor\|major>` | `policies/build-signing.md`、`policies/versioning.md`、`docs/specs/build-apk.md` §6 |
 | bump 版本号 | `./scripts/release.sh` 内部调用（禁止手改） | `policies/versioning.md` |
 | 构建环境 export | `source ./scripts/env.sh` | `policies/build-signing.md` |
 | 发版前评审 | 写入 `.opencode/runs/reviews/<date>/<reviewer>_<scope>.json` | `policies/review-gate.md`、`templates/review-report.json` |

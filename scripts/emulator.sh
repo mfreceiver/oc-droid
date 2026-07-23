@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/emulator.sh — Android 模拟器生命周期管理（多用户共享）
-# 详见 docs/emulator-debug.md。
+# 详见 docs/specs/emulator-debug.md。
 #
 # 用法:
 #   ./scripts/emulator.sh status     # 查看运行状态（退出码 0=运行中, 1=未运行, 2=异常）

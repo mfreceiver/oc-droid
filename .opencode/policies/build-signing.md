@@ -1,6 +1,6 @@
 # Build & Signing Policy
 
-ocdroid 构建、签名、发版流程的**唯一权威来源**。脚本实现见 `scripts/`，操作细节见 `docs/build-apk.md`。
+ocdroid 构建、签名、发版流程的**唯一权威来源**。脚本实现见 `scripts/`，操作细节见 `docs/specs/build-apk.md`。
 
 ## 构建环境
 

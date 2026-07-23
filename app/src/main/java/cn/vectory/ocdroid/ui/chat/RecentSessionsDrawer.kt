@@ -44,7 +44,7 @@ import cn.vectory.ocdroid.ui.theme.Dimens
  *    affordance (`IconButton(Add)` → [onStartNewSession] — mirrors the
  *    SessionsScreen new-session FAB / header action);
  *  - a `LazyColumn` of recent sessions rendered via M3 [ListItem] +
- *    [Dimens] tokens (per `docs/ui-style-spec.md` §2 — rows MUST use the
+ *    [Dimens] tokens (per `docs/specs/ui-style-spec.md` §2 — rows MUST use the
  *    shared `ListItem` primitive, spacing MUST use `Dimens`, no scattered
  *    `dp` literals).
  *

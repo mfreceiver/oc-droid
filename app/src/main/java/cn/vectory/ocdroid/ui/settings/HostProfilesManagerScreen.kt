@@ -153,7 +153,7 @@ internal fun HostProfilesManagerScreen(
             // §setux #5: 已配置服务器列表项间距压缩——ListItem 自带 padding，
             // 再叠 8dp Spacer 过松；降到 2dp 让列表更紧凑。
             // §WT5: header now uses AppSectionHeader (titleSmall + onSurfaceVariant,
-            // canonical per docs/ui-style-spec.md §2). HostProfileRow itself is
+            // canonical per docs/specs/ui-style-spec.md §2). HostProfileRow itself is
             // untouched — its RadioButton+Edit affordances stay distinct.
             AppSectionHeader(text = stringResource(R.string.host_profiles_title))
             profiles.forEach { profile ->

@@ -1,6 +1,6 @@
 // ChatOverlayHost.kt — T4 extract: parity overlays hoisted out of ChatScaffold.
 // Pure mechanical extraction, zero behavioral/visual change. All overlays
-// remain on their mandated A/B/C layers per docs/ui-style-spec.md, using
+// remain on their mandated A/B/C layers per docs/specs/ui-style-spec.md, using
 // shared primitives (AppBottomSheet / AlertDialog family).
 //
 // State hoisting: ChatScaffold owns show* booleans and passes them (value

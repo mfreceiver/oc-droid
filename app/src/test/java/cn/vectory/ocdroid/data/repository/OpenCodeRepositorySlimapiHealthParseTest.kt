@@ -11,7 +11,7 @@ import org.junit.Test
  * R8 slim-mode foundation / C3 fix: OpenCodeRepository.parseSlimapiHealth
  * 容错解析单测。验证 `GET /slimapi/health` 响应 body 的抽取——
  *
- *  - 标准形状（参考 docs/slim-mode-api-routing.md §3.2 + design-v2 §9）正确抽取
+ *  - 标准形状（参考 docs/specs/slim-mode-api-routing.md §3.2 + design-v2 §9）正确抽取
  *    sidecar.ok / schema.degraded / server.api_version / accepted_client_versions。
  *  - 缺字段 / 类型不符 → 对应字段 null（[ServerCompatProfile.isSlimapiClientAccepted]
  *    fail-closed）。

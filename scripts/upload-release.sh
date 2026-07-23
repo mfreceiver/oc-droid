@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/upload-release.sh — 用 curl Gitea REST API 上传 release APK + notes。
-# 替代 tea CLI（tea 语法/超时问题）。详见 docs/build-apk.md §发版上传。
+# 替代 tea CLI（tea 语法/超时问题）。详见 docs/specs/build-apk.md §发版上传。
 #
 # 用法: ./scripts/upload-release.sh <versionName>
 # 前提:

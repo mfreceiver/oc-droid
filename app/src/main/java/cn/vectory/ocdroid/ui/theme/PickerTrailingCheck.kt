@@ -20,7 +20,7 @@ import androidx.compose.ui.Modifier
 // **始终渲染**（未选中时是同尺寸 `Spacer`）——保证 Check 出现/消失时左侧文本
 // 宽度不跳动、各行左对齐齐平。
 //
-// 选中态标准（与 `docs/ui-style-spec.md` §2 绑定）：
+// 选中态标准（与 `docs/specs/ui-style-spec.md` §2 绑定）：
 //  - 选中 = `Icons.Filled.Check` + `Dimens.iconSm`(18dp) + `colorScheme.primary`；
 //  - 未选中 = 同尺寸 `Spacer`，无 tint；
 //  - 无 per-item 选中底色（避免视觉噪点）。

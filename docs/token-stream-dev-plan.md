@@ -1,7 +1,7 @@
 # ocdroid × oc-slimapi · Token 批式 SSE 集成 — 开发计划与报告
 
 > **单一权威计划+报告文档**。每阶段更新 §8 状态日志。
-> 技术散文见 [`docs/token-stream-client-design.md`](./token-stream-client-design.md)（§5 为 v2，**已被本计划 §3 v3 契约取代**用于实施与门控）。
+> v2 技术散文已并入本计划 §3 v3 契约（原 `docs/token-stream-client-design.md` 随特性发版清理），用于实施与门控。
 > 门控模型：**每阶段单评委 9.5**（rev-grok → 不可用 rev-bgpt → 仍不可用 rev-gpt）；不满须附可采纳方案+Kotlin 代码。
 > ⚠️ **D-MB-P 翻转（v0.13.2，commit `da47fe3`）**：本文 §3/Stage C 所述 `token_memory_limit`→`triggersReconnect=true`（rev-bgpt Option A）**已被翻转**为 `false`，改走 same-connection re-anchor（clear+/since，依赖服务端 MB-P-S1 向既有 subscriber 重发）。历史契约记录保留；现状见 [`docs/refactor-handoff.md`](./refactor-handoff.md) §2.1。
 
@@ -197,7 +197,7 @@ object TokenStreamReducer {
 | **B** | 拼接：mergeSlimMessages(authoritative)+SlimMessagesMerged 贯穿(M3/Q3) + MessagesMerged streamOwned 认知(S3) + single-owner guard(M4) | SessionSyncCoordinator, AppAction, MessageActions, SharedConversationSseHandler | **fixer**（复杂） |
 | **C** | 传输 client(M7/S2) + TokenStreamFrame + reducer effect 模式(Q8) + epoch(M6) | TokenStreamClient(new), OkHttpClientFactory, TokenStreamFrame(new), TokenStreamReducer(new) | **fixer** |
 | **D** | 生命周期 coordinator：watchdog(M2)+session.deleted(M5)+503+debounce + busy-open UX(B-1)+placeholder(Q5)+display key | TokenStreamCoordinator(new), ConnectionCoordinator, ChatViewModel, MessageCard | **fixer** |
-| **E** | routing A-list 补行 + 集成测试（emulator） | docs/slim-mode-api-routing.md, tests | fixer-zlm |
+| **E** | routing A-list 补行 + 集成测试（emulator） | docs/specs/slim-mode-api-routing.md, tests | fixer-zlm |
 
 每 Stage 完成后 `./scripts/check.sh` 必过 → 单评委门控 9.5 → PASS 才进下一 Stage。
 
@@ -265,7 +265,7 @@ object TokenStreamReducer {
 - S3 `ChatViewModel.kt:122-129` kdoc 陈旧（D2 移除 open 后 E3 又加回 side-door，kdoc 未同步）——2 行注释修正。
 
 **手工 smoke-test（live-emulator E2E，deferred——需 live 生成会话+模拟器共享资源）**：
-详细的 5 个衰退场景定义、前置条件、执行步骤与期望结果已迁移至独立文档 [`docs/token-stream-smoke-test.md`](./token-stream-smoke-test.md)。该文档同时包含模拟器环境准备与清理指令，是执行手动验收测试的单一权威来源。
+详细的 5 个手工衰退场景（原 `docs/token-stream-smoke-test.md`，已随特性发版清理）覆盖 busy-open / watchdog 半开 / session.deleted / 快速会话切换 / features=false 能力门控；模拟器环境准备与清理见 `docs/specs/emulator-debug.md`。
 
 **双边状态**：ocdroid client **完成**；ocdroid 侧已备联合终审。待 slimapi 服务端阶段完成后做联合 final review。
 | — | Stage E（routing A-list + PartPlaceholderEnsured from bridge + 集成测试） | — | pending |

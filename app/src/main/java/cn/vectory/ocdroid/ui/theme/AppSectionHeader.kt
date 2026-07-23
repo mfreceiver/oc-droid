@@ -44,7 +44,7 @@ import androidx.compose.ui.Modifier
  * 渲染 `MaterialTheme.typography.titleSmall` + `colorScheme.onSurfaceVariant` +
  * `padding(horizontal = Dimens.spacing4 /*16dp*/, vertical = Dimens.spacing2 /*8dp*/)`。
  * 可选 `trailing` 槽用于在右侧放一个动作（如「管理」按钮）。详细背景与样式
- * 选择见文件头注释与 `docs/ui-style-spec.md` §2。
+ * 选择见文件头注释与 `docs/specs/ui-style-spec.md` §2。
  *
  * 用法（无 trailing）：
  * ```

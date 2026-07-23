@@ -116,7 +116,7 @@ android {
 
     signingConfigs {
         create("release") {
-            // Credentials live in gitignored local.properties (see docs/build-apk.md).
+            // Credentials live in gitignored local.properties (see docs/specs/build-apk.md).
             if (releaseKeystoreAvailable) {
                 storeFile = file(releaseStoreFilePath)
                 storePassword = releaseProps.getProperty("release.storePassword", "")

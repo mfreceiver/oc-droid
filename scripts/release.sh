@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/release.sh — ocdroid 发版唯一入口（打 semver tag）。
-# 详见 .opencode/policies/versioning.md 与 docs/build-apk.md §6。
+# 详见 .opencode/policies/versioning.md 与 docs/specs/build-apk.md §6。
 #
 # 用法: ./scripts/release.sh <patch|minor|major> [--allow-dirty]
 #
@@ -147,7 +147,7 @@ echo "✅ 仓库发版准备完成: $VERSION (tag $TAG)"
 echo "  APK:   $APK_DST"
 echo "  Notes: $NOTE_FILE"
 echo ""
-echo "确认无误后执行（详见 docs/build-apk.md §6.3）:"
+echo "确认无误后执行（详见 docs/specs/build-apk.md §6.3）:"
 echo "  git push origin main && git push origin $TAG"
 echo "  ./scripts/upload-release.sh $VERSION   # curl Gitea API: 建/找 release + 上传 APK + 更新 notes"
 echo "════════════════════════════════════════════════════════════"

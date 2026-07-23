@@ -92,7 +92,7 @@ data class SlimapiPermissionEntry(
  * a "1 directory unavailable" warning if metrics show it's actionable.
  *
  * **Contract**: oc-slimapi/docs/v1-contract.md §2 + design-v2 §1.7 + the
- * routing doc `docs/slim-mode-api-routing.md` line 273 already pin this
+ * routing doc `docs/specs/slim-mode-api-routing.md` line 273 already pin this
  * envelope — this client shape MUST mirror the sidecar's `_aggregate` output.
  */
 /**
@@ -134,7 +134,7 @@ data class SlimapiScope(
  * a "1 directory unavailable" warning if metrics show it's actionable.
  *
  * **Contract**: oc-slimapi/docs/v1-contract.md §2 + design-v2 §1.7 + the
- * routing doc `docs/slim-mode-api-routing.md` line 273 already pin this
+ * routing doc `docs/specs/slim-mode-api-routing.md` line 273 already pin this
  * envelope — this client shape MUST mirror the sidecar's `_aggregate` output.
  *
  * **scope** (v0.2.2 additive): see [SlimapiScope]. Absent on pre-0.2.2

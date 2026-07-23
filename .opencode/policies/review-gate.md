@@ -10,7 +10,7 @@
 
 ## 特定改动的测试门控（必做）
 
-`./scripts/check.sh --full` 不含插桩测试（connectedDebugAndroidTest 需模拟器，是本机共享资源，见 `docs/emulator-debug.md` 纪律）。但以下改动**必须**在发版前用模拟器跑一次对应 connectedDebugAndroidTest 类作为门控（`./scripts/emulator.sh status` 确认空闲 → `start` → 跑 → `stop`）：
+`./scripts/check.sh --full` 不含插桩测试（connectedDebugAndroidTest 需模拟器，是本机共享资源，见 `docs/specs/emulator-debug.md` 纪律）。但以下改动**必须**在发版前用模拟器跑一次对应 connectedDebugAndroidTest 类作为门控（`./scripts/emulator.sh status` 确认空闲 → `start` → 跑 → `stop`）：
 
 | 改动范围 | 必跑门控类 | 理由 |
 |---|---|---|

@@ -418,7 +418,7 @@ internal fun AboutSection() {
 // §WT5: the local `SectionHeader(title: String)` composable that used to live
 // here has been deleted. All settings call sites now use the canonical shared
 // primitive `cn.vectory.ocdroid.ui.theme.AppSectionHeader` (titleSmall +
-// onSurfaceVariant + Dimens.padding, see docs/ui-style-spec.md §2). Same-
+// onSurfaceVariant + Dimens.padding, see docs/specs/ui-style-spec.md §2). Same-
 // package callers that were migrated alongside this lane:
 //  - SettingsSections.kt (AppearanceSection / TrafficSection / DangerZoneSection / AboutSection)
 //  - SettingsScreen.kt (Notifications / Storage / About sub-routes)

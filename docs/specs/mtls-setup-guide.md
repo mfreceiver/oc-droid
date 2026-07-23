@@ -1,7 +1,7 @@
 # ocdroid mTLS 服务端配置与证书导入指南
 
 > 实操指南：在 opencode 服务器上配置 stunnel mTLS、生成签名证书对、把客户端证书导入 ocdroid App。
-> 设计 rationale 见 `docs/mtls-tunnel-plan.md`。本指南面向支持**剪贴板 base64 导入**的 ocdroid 版本（v0.6.6+）。旧版「粘贴 PEM 文本」流程（v0.6.4–0.6.5）已废弃——服务端现直接产出 base64（无口令 PKCS12 + CA DER）。
+> 本指南面向支持**剪贴板 base64 导入**的 ocdroid 版本（v0.6.6+）。旧版「粘贴 PEM 文本」流程（v0.6.4–0.6.5）已废弃——服务端现直接产出 base64（无口令 PKCS12 + CA DER）。
 
 ## 0. 架构一句话
 

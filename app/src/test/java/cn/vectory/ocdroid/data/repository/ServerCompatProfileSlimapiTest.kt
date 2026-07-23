@@ -17,7 +17,7 @@ import org.junit.Test
  *  - opencode semver 字段（version/major/minor/patch）与 slim 字段独立——
  *    updateSlimapi 不污染 opencode 字段，update(value) 不污染 slim 字段。
  *
- * 契约参考 docs/slim-mode-api-routing.md §3.2 + design-v2 §9。
+ * 契约参考 docs/specs/slim-mode-api-routing.md §3.2 + design-v2 §9。
  */
 class ServerCompatProfileSlimapiTest {
 

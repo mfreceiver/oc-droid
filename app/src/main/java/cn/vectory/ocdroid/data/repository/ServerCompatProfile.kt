@@ -195,7 +195,7 @@ class ServerCompatProfile @Inject constructor() {
  * （剥原始 JsonObject 解析细节）。由 [cn.vectory.ocdroid.data.repository.OpenCodeRepository]
  * 解析后传入 [ServerCompatProfile.updateSlimapi]。
  *
- * 形状参考 INTERFACE_MAP §4 / docs/slim-mode-api-routing.md §3.2：
+ * 形状参考 INTERFACE_MAP §4 / docs/specs/slim-mode-api-routing.md §3.2：
  * ```json
  * {
  *   "sidecar": { "ok": true, "version": "0.1.0" },

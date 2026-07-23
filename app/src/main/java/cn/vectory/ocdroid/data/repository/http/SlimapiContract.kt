@@ -10,7 +10,7 @@ package cn.vectory.ocdroid.data.repository.http
  * 同模式）。
  *
  * **版本来源**：客户端硬编码 1，与 oc-slimapi 当前 SERVER_API_VERSION=1 +
- * ACCEPTED_CLIENT_VERSIONS=(1,1) 对齐（见 docs/slim-mode-api-routing.md §3）。
+ * ACCEPTED_CLIENT_VERSIONS=(1,1) 对齐（见 docs/specs/slim-mode-api-routing.md §3）。
  * 未来 slimapi bump major 时同步本常量；旧客户端打新 sidecar 会触发
  * 400 version_incompatible，由 M2 自检的版本区间检查预先标记。
  *

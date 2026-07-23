@@ -14,7 +14,7 @@ import org.junit.Test
 /**
  * R8 slim-mode foundation / M1: SlimapiVersionInterceptor 单测。
  *
- * 契约（见 SlimapiContract / docs/slim-mode-api-routing.md §3）：
+ * 契约（见 SlimapiContract / docs/specs/slim-mode-api-routing.md §3）：
  *  - 双门闩：HostConfig.slim == true **AND** path 以 `/slimapi/` 前缀 → 注入
  *    `X-Slimapi-Version: <SLIMAPI_CLIENT_VERSION>`。
  *  - legacy 模式（slim=false）：原样透传，不注入头（opencode 不识别该头）。
@@ -230,7 +230,7 @@ class SlimapiVersionInterceptorTest {
     @Test
     fun `slimapi client version is the documented value`() {
         // Pinning the value here forces a deliberate test update when bumped;
-        // docs/slim-mode-api-routing.md §3 documents this as `1`.
+        // docs/specs/slim-mode-api-routing.md §3 documents this as `1`.
         assertEquals(1, SlimapiContract.SLIMAPI_CLIENT_VERSION)
     }
 
