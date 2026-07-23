@@ -19,6 +19,7 @@
   - `287f476` — η cluster 6：withHostReconfiguration barrier fold（CD3 三分支 preamble 折叠，~120→~25 LOC）
   - `0673dfa` — η Step 2 L5b ‖ L5c：HostProfileEditorDialog + SessionCard 外提（pure move + kover excludes）
   - `fcab357` — η Step 2 L5a：ChatScaffold 拆 T rememberChatTopBarState ‖ D ChatDrawerHost ‖ P ChatSessionPager
+  - `78081c8` — θ cluster 18：publishIdleNotification 抽取（ALM ‖ SseNotificationBridge idle publish dedup）
 
 ## 2. 双边 §5（slimapi token-stream）— 已闭环
 
@@ -28,7 +29,7 @@
 - **延后（post-release，非阻塞）**：C-4（doc 对齐，本轮做）· V-B（stunnel 运维 idle 断实证）· token_hub 拆包。
 - slimapi 主会话：`ses_075953166ffeUULAsWATEcjoS8`（cross-session via `session_send`；用户协调）。
 
-## 3. 剩余 refactor（plan v3 α→θ）
+## 3. refactor（plan v3 α→θ）— ✅ 全部完成（α…θ 全绿；7/19/20/coldStartSlimSync/2/8 deferred-by-analysis）
 
 ### ζ-3 L4a3 — ✅ 安全 scope 收官（commits `950d6b3` N1 / `4a0a4d1` ζ-3）
 **已落地**（domain-delegate 起步 + 类型外提 + cluster 9）：
@@ -53,7 +54,10 @@
   - **L5c**（`0673dfa`）：SessionCard + SessionStatusDot + formatTime 外提；rev-grok 10.0 GO。侦察 exp-5 / 实现 fix-11。
   - **L5a**（`fcab357`）：ChatScaffold 1392→~853 行；T `rememberChatTopBarState`（**State<T> 句柄非值，避 derivedStateOf 静默 stale 陷阱**）‖ D `ChatDrawerHost` ‖ P `ChatSessionPager`；rev-grok 9.8 GO（4 invariant 全 PASS，invariant 1 逐读核验全 `.value`）。设计 ora-2 / 实现 fix-13 / 侦察 exp-3。
 - 每子步 `check.sh --full` 绿（compile + 单测 + lint + koverVerify）。η 全 wave gate ≥9.7。
-### θ — 收尾波（**当前下一步**）：cluster 18（publishIdleNotification，post-L1b 独立）∥ cluster 20（emitEffect 基类，末波）；cluster 14 已在 N1 做；2/8 延后低优先。
+### θ — ✅ 收官（cluster 18 done；20/2/8 deferred-by-analysis）
+- **cluster 18 ✅**（`78081c8`，rev-grok 9.6 GO）：`publishIdleNotification(...)` 抽取 → `di/IdleNotificationPublisher.kt`，统一 ALM ‖ SseNotificationBridge idle publish。helper `suspend` 无硬编码 dispatcher（ALM 包 `withContext(Main.immediate)`、bridge 直调，保 T5-review I2-R TOCTOU）；claim→fg-gate→notify→complete→persist→release；ALM 全日志经回调；idleMutex 单例共享；prune 未并入。recon exp-6 / 实现 fix-14 / `tag` 死参移除。
+- **cluster 20 ⬜ deferred**（exp-7 分析）：`tryEmit`/`emit` 不一致**有意且 correctness-critical**（A=suspend emit / B=single tryEmit / C=multi-FIFO tryEmit），统一破坏其一；无共享基类（3 独立类，仅 SSC 实现 SseDispatchHost）；净节省 <20 LOC（"重复"是完整一行调用，无共享控制流）；invasive（3 controller + Hilt + SseDispatchHost）。**不值得做**。
+- **cluster 14 ✅**（N1 `950d6b3`）；**cluster 2/8 ⬜ 延后**（低优先：DebugCardIdentity source 自动化 / ApiDelegate）。
 
 ## 4. 关键产物
 
