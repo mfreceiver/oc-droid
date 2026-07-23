@@ -353,15 +353,17 @@ class SessionStreamingService : Service() {
             // ReconcileMode.RESYNC for every sid. Round-1 called
             // coldStartSlimSync directly which left performResyncCatchUp
             // as dead code (T11 review I1).
-            // ι-Q3a: 用 supportsTokenStreamResync 替换 isSlimMode。语义：
-            //   supportsTokenStreamResync = slimConnection && slimapiTokenStreamEnabled
-            // 比原 isSlimMode（仅 slim mode）更严（额外要求 sidecar 公告 tokenStream 特性）。
-            // 但 token-stream 协调器自身已 gate on slimapiTokenStreamEnabled，故特性关闭时
-            // 该路径本就 no-op。此前置门用 supportsTokenStreamResync 只是更早跳过，
-            // 可观察行为等价。
+            // ι-Q3a: 用 supportsWatermarkResync 替换 isSlimMode。此 onResync 接
+            // SessionSyncCoordinator.performSlimResync（见上注释 :347-355）——slim SSE
+            // cold-start + watermark catch-up（coldStartSlimSync + performResyncCatchUp），
+            // 与 TokenStreamCoordinator / slimapiTokenStreamEnabled 无关。故门用
+            // supportsWatermarkResync（≡ slimConnection，与 performSlimResync 内部门一致），
+            // 非 supportsTokenStreamResync（后者额外要求 tokenStream 特性，会在 slim +
+            // 特性未探/未公告时误杀整段 resync）。逐字等价（=slimConnection=原 isSlimMode）。
+            // [rev-grok NO-GO 5.0→修复：原误用 supportsTokenStreamResync]
             onResync = onResync@{ isStillCurrent ->
                 if (!isStillCurrent()) return@onResync
-                if (!repository.supportsTokenStreamResync) return@onResync
+                if (!repository.supportsWatermarkResync) return@onResync
                 val directories = buildList {
                     sharedStateStore.slices.sessionList.value.directorySessions.keys
                         .forEach { add(it) }
