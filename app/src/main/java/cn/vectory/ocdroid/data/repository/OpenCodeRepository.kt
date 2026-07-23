@@ -648,6 +648,22 @@ class OpenCodeRepository @Inject constructor(
             // 保持先前 live source，与 slimConnection 不脱节）。api 已重建；
             // lambda 捕获 this，每次调用读最新 api（复用 SlimGetRepository 模式）。
             sessionSource = if (slim) SlimSessionSource({ api }) else StandardSessionSource({ api })
+            // ι-P2: rebuild message source to match the new connection mode.
+            // 与 sessionSource 同纪律：仅在 completeSlimReconfigure 之后（事务全成功）
+            // 才发布新 mode 的 source；throw 时 messageSource 保持先前 live source。
+            // SlimMessageSource 经注入的**纯函数 lambda** 访问共享态——
+            //   • slimSessionUpdatedAt = { sid -> slimStateMachine.getSlimSessionState(sid)?.updatedAt ?: 0L }
+            //     （只读 watermark，不暴露状态机对象给端口实现）
+            //   • bumpBookmark = { sid, items, tok -> bumpSlimBookmarkFromItems(sid, items, tok) }
+            //     （回调 OCR 自身 private 方法，内部 synchronized(slimStateLock)）
+            // → **锁与 bookmark 状态不离开 OCR**（I5 保持）；SlimMessageSource 不持锁 /
+            //   不持 slimStateMachine 对象。SlimCommitToken / StaleSlimCommitException
+            //   仍嵌套于 OCR（I15 token threading 透传 + freeze 嵌套 FQN 不变）。
+            messageSource = if (slim) SlimMessageSource(
+                apiProvider = { api },
+                slimSessionUpdatedAt = { sid -> slimStateMachine.getSlimSessionState(sid)?.updatedAt ?: 0L },
+                bumpBookmark = { sid, items, tok -> bumpSlimBookmarkFromItems(sid, items, tok) },
+            ) else StandardMessageSource({ api })
             // ι-A (capability read-model): 发布能力 mode 仅在整条 ssl/host/client/readiness
             // 事务全成功后——与 completeSlimReconfigure 的「readiness 仅每步成功后才发布」
             // 纪律一致（见上注释）。throw 时 slimConnection 保持先前值（= 仍 live 的旧连接
@@ -778,6 +794,15 @@ class OpenCodeRepository @Inject constructor(
      * 默认 [StandardSessionSource]（legacy）与未 configure 行为一致。
      */
     private var sessionSource: SessionSource = StandardSessionSource({ api })
+
+    /**
+     * ι-P2: message 域端口—Standard 或 Slim 双实现,由 [configure] 在 client 重建后选束。
+     * 默认 [StandardMessageSource]（legacy）与未 configure 行为一致。
+     * [SlimMessageSource] 经注入 lambda 访问共享态（slimSessionUpdatedAt 只读
+     * watermark + bumpBookmark 回调 OCR.bumpSlimBookmarkFromItems）——锁与 bookmark
+     * 状态留 OCR（I5 保持），SlimMessageSource 不持锁 / 不持状态机对象。
+     */
+    private var messageSource: MessageSource = StandardMessageSource({ api })
 
     // ── §tofu R2: capture probe + decision application ──────────────────────
 
@@ -1309,14 +1334,20 @@ class OpenCodeRepository @Inject constructor(
 
     /**
      * Shared implementation for [getMessagesPaged] and
-     * [getMessagesPagedUnanchored]. [anchored] selects the slim watermark:
-     * `true` reads the cached slim SSE watermark ([getMessagesPaged]); `false`
-     * forces `since=0L` ([getMessagesPagedUnanchored]). `isSlimMode` is read
-     * exactly once here and the watermark lookup lives inside the
-     * [runSuspendCatching] block, so a watermark-read failure stays in the
-     * `Result.failure` channel and there is no reconfigure race between the
-     * public wrapper and the impl. Bookmark bumping, response cursor reading,
-     * and the legacy branch are identical between the two public methods.
+     * [getMessagesPagedUnanchored]. ι-P2: now a thin forwarder to the
+     * [messageSource] port (Standard / Slim 双实现，由 [configure] 选束）。
+     * [anchored] selects the slim watermark: `true` reads the cached slim SSE
+     * watermark ([getMessagesPaged]); `false` forces `since=0L`
+     * ([getMessagesPagedUnanchored]). The watermark lookup + bookmark bump +
+     * response cursor reading all live inside the [MessageSource]
+     * implementation's [runSuspendCatching] block, so a watermark-read or
+     * bookmark-bump failure stays in the `Result.failure` channel and there is
+     * no reconfigure race between the public wrapper and the impl. Token
+     * threading (I15) and bookmark / lock ownership (I5) are preserved verbatim
+     * via the injected lambdas on [SlimMessageSource] — the slim branch's
+     * `isSlimMode` check is now expressed as the source selection in
+     * [configure], read exactly once per host switch under the same
+     * `@Synchronized` monitor.
      */
     private suspend fun getMessagesPagedImpl(
         sessionId: String,
@@ -1324,29 +1355,8 @@ class OpenCodeRepository @Inject constructor(
         before: String?,
         token: SlimCommitToken,
         anchored: Boolean,
-    ): Result<MessagesPage> = runSuspendCatching {
-        if (isSlimMode) {
-            val since = if (anchored) {
-                slimStateMachine.getSlimSessionState(sessionId)?.updatedAt ?: 0L
-            } else {
-                0L
-            }
-            val response = api.getSlimapiMessagesSince(sessionId, since, limit, before)
-            if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
-            val items = response.body() ?: emptyList()
-            if (!bumpSlimBookmarkFromItems(sessionId, items, token)) {
-                throw StaleSlimCommitException()
-            }
-            val nextCursor = response.headers()["X-Next-Cursor"]
-            MessagesPage(items = items, nextCursor = nextCursor)
-        } else {
-            val response = api.getMessages(sessionId, limit, before)
-            if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
-            val items = response.body() ?: emptyList()
-            val nextCursor = response.headers()["X-Next-Cursor"]
-            MessagesPage(items = items, nextCursor = nextCursor)
-        }
-    }
+    ): Result<MessagesPage> =
+        messageSource.getMessagesPaged(sessionId, limit, before, token, anchored)
 
 
 
