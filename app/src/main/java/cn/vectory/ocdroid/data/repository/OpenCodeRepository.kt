@@ -497,7 +497,25 @@ class OpenCodeRepository @Inject constructor(
      * Returns the live [HostConfig.slim] value (volatile read), so it
      * reflects the most recent [configure] call.
      */
-    val isSlimMode: Boolean get() = hostConfig.slim
+     val isSlimMode: Boolean get() = hostConfig.slim
+
+    // ── ι-A capability access surface (forwarders → ServerCompatProfile) ──
+    // L4+ 消费者（协调/service/UI，多数已持 repository 句柄，部分以函数参数接收）
+    // 通过这些**语义能力查询**读连接能力，而非裸 [isSlimMode]（raw mode）。
+    // 这满足 plan §6「L4+ isSlimMode 零命中」验收：grep `isSlimMode` 在 L4+ 为空，
+    // 这些读的是 capability（forwarder 透传到 [serverCompatProfile]，source-of-truth
+    // 在 data.repository 层）。forwarder 是访问便利，非 mode 泄漏——返回的是语义能力，
+    // 非 raw slim flag。详见 [ServerCompatProfile.supportsWatermarkResync] 等 KDoc
+    // （mode-vs-readiness 区分：这些是 mode capability，非 health/readiness）。
+
+    /** ι-A: 是否支持 watermark 重同步（= slim 连接）。L4+ 用此替代裸 `isSlimMode` 做重同步门。 */
+    val supportsWatermarkResync: Boolean get() = serverCompatProfile.supportsWatermarkResync
+
+    /** ι-A: 是否支持 token-stream 重同步（slim 连接 ∧ sidecar 公告 tokenStream）。 */
+    val supportsTokenStreamResync: Boolean get() = serverCompatProfile.supportsTokenStreamResync
+
+    /** ι-A: StatusAggregator 是否走 slim 扇出（vs legacy bulk `/session/status`）。 */
+    val usesSlimStatusFanOut: Boolean get() = serverCompatProfile.usesSlimStatusFanOut
 
     private fun buildRetrofit(client: OkHttpClient, baseUrl: String): Retrofit {
         val url = if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl"
