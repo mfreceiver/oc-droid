@@ -4,6 +4,7 @@
 > 评审史：round1 三评委 FAIL（grok 8.6 / gpt 6.2 / opus 8.6）；round2 两评委 FAIL（grok 9.1 / gpt 8.4，架构认可，残留=片段正确性+action plumbing，均附可采纳代码→已折入 dev-plan §3）。
 > 对应服务端：`oc-slimapi/docs/design-token-stream.md`（v3）；handoff：`oc-slimapi/docs/ocdroid-token-stream-handoff.md`。
 > 性质：**加性**（新端点 + 新帧 + health 加性字段），opt-in，**省流默认零回归**，不 bump `X-Slimapi-Version`。
+> ⚠️ **D-MB-P 翻转（v0.13.2，commit `da47fe3`）**：本文 §5/reason 表所述 `token_memory_limit`→`Reconnect`（rev-bgpt Option A）**已被翻转**——现 `triggersReconnect=false`，改走 same-connection re-anchor（依赖服务端 MB-P-S1）。历史设计记录保留；现状见 [`docs/refactor-handoff.md`](./refactor-handoff.md) §2.1。
 
 ---
 

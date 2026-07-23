@@ -3,6 +3,7 @@
 > **单一权威计划+报告文档**。每阶段更新 §8 状态日志。
 > 技术散文见 [`docs/token-stream-client-design.md`](./token-stream-client-design.md)（§5 为 v2，**已被本计划 §3 v3 契约取代**用于实施与门控）。
 > 门控模型：**每阶段单评委 9.5**（rev-grok → 不可用 rev-bgpt → 仍不可用 rev-gpt）；不满须附可采纳方案+Kotlin 代码。
+> ⚠️ **D-MB-P 翻转（v0.13.2，commit `da47fe3`）**：本文 §3/Stage C 所述 `token_memory_limit`→`triggersReconnect=true`（rev-bgpt Option A）**已被翻转**为 `false`，改走 same-connection re-anchor（clear+/since，依赖服务端 MB-P-S1 向既有 subscriber 重发）。历史契约记录保留；现状见 [`docs/refactor-handoff.md`](./refactor-handoff.md) §2.1。
 
 ---
 
