@@ -792,7 +792,13 @@ class OpenCodeRepository @Inject constructor(
     /**
      * ι-P1: session 域端口—Standard 或 Slim 双实现,由 [configure] 在 client 重建后选束。
      * 默认 [StandardSessionSource]（legacy）与未 configure 行为一致。
+     *
+     * ι-4: @Volatile — 此为并发路由位([configure] @Synchronized monitor 内写,
+     * [getSessions]/[getSessionsForDirectory] 无锁读);volatile 保证 reader 线程
+     * 可见最新选束,接替原 isSlimMode(读 hostConfig._slim @Volatile)的并发路由职责。
+     * (rev-4/rev-10 stage 收尾加固)
      */
+    @Volatile
     private var sessionSource: SessionSource = StandardSessionSource({ api })
 
     /**
@@ -801,7 +807,11 @@ class OpenCodeRepository @Inject constructor(
      * [SlimMessageSource] 经注入 lambda 访问共享态（slimSessionUpdatedAt 只读
      * watermark + bumpBookmark 回调 OCR.bumpSlimBookmarkFromItems）——锁与 bookmark
      * 状态留 OCR（I5 保持），SlimMessageSource 不持锁 / 不持状态机对象。
+     *
+     * ι-4: @Volatile — 同 [sessionSource]，并发路由位（configure monitor 内写、
+     * [getMessagesPaged] 等无锁读），volatile 保证 reader 可见最新选束。
      */
+    @Volatile
     private var messageSource: MessageSource = StandardMessageSource({ api })
 
     // ── §tofu R2: capture probe + decision application ──────────────────────
@@ -1107,29 +1117,6 @@ class OpenCodeRepository @Inject constructor(
                 }
             }
         }
-    }
-
-    /**
-     * T3-M1 (final review D4): shared slim-branch observability helper for
-     * the session-list endpoints. Mirrors the inline `.recoverCatching`
-     * pattern in [getSlimapiSessions] — parse the sidecar's coded envelope
-     * (`{"code":"upstream_unavailable"} / upstream_http_<N> / etc.`), emit a
-     * warn-level log for observability, and let the caller rethrow the
-     * original exception (no wrapper type, no Result-shape change). Non-
-     * HttpException throwables (e.g. IOException) have no Response to read
-     * and skip the parse/log silently.
-     *
-     * Used by [getSessions] + [getSessionsForDirectory] slim branches so
-     * production session-list loads get the same code log as
-     * [getSlimapiSessions] (closes the T3 architecture-fork log gap noted
-     * in task-3 review #1). Legacy `api.getSessions` branches are NOT
-     * routed through this helper (no slim envelope on that path).
-     */
-    private fun logSlimapiSessionsCodeIfPresent(e: Throwable) {
-        if (e !is retrofit2.HttpException) return
-        val resp = e.response() ?: return
-        val code = parseErrorCode(resp) ?: return
-        DebugLog.w(TAG, "slimapi sessions failed: $code")
     }
 
     /**
