@@ -1,10 +1,10 @@
 # Phase ι — 双 API 变体：域端口 + 双实现（legacy / slim 策略化）
 
-> 生成：2026-07-23。**修订 R2（2026-07-23，据 Phase ι 报告作者 relay 回复 P0–P2 + 冻结测试/OCR 实读核对）**。
+> 生成：2026-07-23。**修订 R3（2026-07-23，据 R2 + 并发开发路径重构：§7 DAG 双轨并行 + §9.2 合流纪律）**。R2 = 报告作者 relay P0–P2 + 冻结测试/OCR 实读核对。
 > 定位：**θ/ζ-3 已落地（v0.13.1）** 之上的独立**结构相**——引入接口/实现拆分，非纯行为保持，须单独 gate。
 > 前置：`docs/refactor-optimization-plan.md`（α→θ 权威序）+ `docs/refactor-handoff.md`（L4a0 不变量 I5–I20）+ `app/src/test/.../T3RepositoryExtractFreezeTest.kt`（冻结公共面，authoritative）。
-> 核心结论（作者 relay 底线）：**ι 未过时**——Q1 端口层确未做且被 freeze §1 转发条款预授权；**Q3 是最有价值的剩余件**。但计划需前提刷新（P0）、不变量/delegate 纳入（P1）、**重排序以 Q3 打头 + 降级 Q2**（P2）。
-> 决策修订：**Q1 = 域端口+双实现（共享态协作者拆分，非独立策略对象）**；**Q3 优先、独立、打头**；**Q2 = 复合接口 `OpenCodeApi : StandardApi, SlimApi`（仅审计性，放最后或入 backlog）**。
+> 核心结论：**ι 未过时**——Q1 端口层被 freeze §1 转发条款预授权；Q3 是高价值剩余件。**R3 关键优化**：Q3（L4+ 收敛）与 PORT（域端口）写域不相交，经地基波 ι-A 后**双轨全程并行**（G1 并发组 5 lane 同飞），OCR 单写者 + `check.sh` 中心串行为唯一瓶颈。
+> 决策：**Q1 = 域端口+双实现（共享态协作者拆分，非独立策略对象）**；**ι-A 地基（能力读模型）→ Q3‖PORT 并行 → Q2 殿后**；**Q2 = 复合接口 `OpenCodeApi : StandardApi, SlimApi`（仅审计性）**。
 
 ---
 
@@ -150,17 +150,78 @@ internal class SlimSessionSource(private val apiProvider: () -> OpenCodeApi) : S
 
 ---
 
-## §7 波次表（P2-11 重排序：Q3 打头，Q2 降级殿后）
+## §7 开发计划与并发路径（R3：DAG + 双轨并行）
 
-| 子波 | 项 | 写域（白名单，P1-8 扁平同包） | fixer | 风险 | 依赖 |
-|---|---|---|---|---|---|
-| **ι-0** | 前置诊断：`ora-3` 结论纳入 + 重扫基线 + 逐方法「可二分/留门面」+ 锁归属图（I5 单锁） | doc | — | — | v0.13.1 |
-| **ι-Q3** | **L4+ `isSlimMode` 收敛（打头，剩余价值大头，不依赖其它）**：ServerCompatProfile 语义查询扩展 + §6 命中表清零 | `ServerCompatProfile.kt`（只读扩展）+ §6 各 L4 文件 | fixer | 中 | ι-0 |
-| **ι-2** | L2 域端口 + 双实现（**缩到 session + message**；status/interaction 按边际价值再判）+ delegate 折叠（§4.5） | `data/repository/*Source.kt`（**扁平同包 `data.repository`，禁子包**）+ OCR 门面 1-line 委托 | fixer（共享态协作者） | 中-高 | ι-Q3 |
-| **ι-Q2**（可选/backlog） | 复合接口 `OpenCodeApi : StandardApi, SlimApi` + slim 法/DTO 迁 `SlimApi`（**仅审计性**，3 链 create 更新） | `data/api/{OpenCodeApi,StandardApi,SlimApi}.kt` + OCR 3 链装配 | zlm（机械） | 低-中 | ι-2 |
-| **ι-4** | 收尾：冻结测试全绿复验 + 白名单越界 diff 审 | 复验 | zlm | 低 | ι-Q2 |
+### 7.1 并发架构原理（为什么能并行）
 
-**排序理由（P2-11）**：Q3（L4+ 收敛）占剩余价值大头且**不依赖** Q2/端口。端口今天即可包**单一复合 `OpenCodeApi`**（Standard impl 调 legacy 法、Slim impl 调 slimapi 法），故 Q2 物理拆分仅审计性 → **放最后或入 backlog**。ι-2 与 ι-Q2 **解耦**。鉴于仅剩 4 分支点，ι-2 缩至 session+message，status/interaction 边际价值再判。
+关键洞察 —— **两大主轨在共享地基之后写域不相交，可全程并行**：
+
+- **Track Q3（L4+ 收敛）**：只写 **L4+ 文件**（SSC / StatusAggregator / SessionListActions / SSS / StreamingModule / ControllerModule），对 OCR **只读**（读能力查询）。
+- **Track PORT（域端口）**：只写 **OCR 内部 + 新 `*Source.kt`**，**不碰 L4+**。
+
+两轨唯一交点 = **能力读模型**（`ServerCompatProfile` 派生查询）。把它前置为**地基波 ι-A**（唯一需要小改 OCR 暴露能力访问器的点），ι-A 合并后两轨 fork，此后**零写域重叠**。
+
+**串行瓶颈（硬约束）**：
+1. **OCR 单写者** —— PORT 轨内各域端口都改 OCR 门面（1-line 委托），故 PORT 轨**内部串行**（session→message→…），但整轨与 Q3 并行。
+2. **`check.sh` 中心串行** —— Gradle 共享 build dir，禁并行；即便 lane 在各自 worktree 开发，**reconcile+gate 必须排队过闸**（见 §9.2）。
+
+### 7.2 依赖 DAG
+
+```
+ι-0 (诊断/基线, 串行, 只读)
+      │  B1–B7 产物齐 + check.sh 绿
+      ▼
+ι-A (地基波: 能力读模型 = ServerCompatProfile 派生查询 [+ OCR 最小能力访问器])
+      │  合并后 fork —— 此下两轨写域不相交, 全程并行
+      ├────────────────────────────┬───────────────────────────────┐
+      ▼                            ▼                               (worktree 隔离)
+ ═══ Track Q3 (L4+, OCR 只读) ═══   ═══ Track PORT (OCR 内部, 串行) ═══
+ ι-Q3a  service/streaming          ι-P1  session 域端口
+        (SSS onResync + StreamingModule runner              (SessionSource + Standard/Slim*Source
+         → features.tokenStream)                             + 折叠 SlimGetRepository→Standard*
+ ι-Q3b  coordinator + DI                                     + OCR getSessions/getSessionsForDirectory 委托)
+        (SSC isSlimMode thunk + ControllerModule:226)              │  (OCR 单写者 → 串行)
+ ι-Q3c  UI actions                                                 ▼
+        (SessionListActions SWEEP 门 → capability)          ι-P2  message 域端口 (最坏例)
+ ι-Q3d  status                                                    (MessageSource + Standard/Slim*Source
+        (StatusAggregatorImpl + SlimStatusFanOut → capability)     + 折叠 ExpandBatchEngine→SlimMessageSource
+   (Q3a–d 写域两两不相交 → 4 lane 并行)                            + 共享注入 slimStateLock/StateMachine
+      │                                                            + I15 token 穿透 + getMessagesPagedImpl 委托)
+      └────────────────────────────┬───────────────────────────────┘
+                                    ▼
+                             ι-Q2 (复合接口, 殿后, OCR 单写者→串行于 PORT 后)
+                             interface OpenCodeApi : StandardApi, SlimApi
+                             slim 法/DTO 迁 SlimApi; 3 链×2=6 次 create 更新
+                                    │
+                                    ▼
+                             ι-4 (收尾: 冻结测试全绿复验 + 白名单越界 diff 审 + 门面瘦身)
+```
+
+### 7.3 波次表
+
+| 波 | 轨 | 项 | 写域（白名单，扁平同包） | fixer | 风险 | 依赖 | 并发组 |
+|---|---|---|---|---|---|---|---|
+| **ι-0** | — | 诊断/基线（§ι-0 B1–B7，只读） | doc | — | — | v0.13.1 | 串行 |
+| **ι-A** | 地基 | 能力读模型：`ServerCompatProfile` 派生语义查询（`supportsWatermarkResync`/`supportsTokenStreamResync`/`supportsBulkStatus`）[+ OCR 最小能力访问器暴露] | `ServerCompatProfile.kt` + OCR（仅新增访问器，不动 ~40 pinned） | fixer | 中 | ι-0 | 串行（fork 前） |
+| **ι-Q3a** | Q3 | service/streaming 收敛 | `service/SessionStreamingService.kt` + `service/streaming/StreamingModule.kt` | fixer | 中 | ι-A | **G1 并行** |
+| **ι-Q3b** | Q3 | coordinator + DI thunk 收敛 | `ui/controller/SessionSyncCoordinator.kt` + `di/ControllerModule.kt` | fixer | 中 | ι-A | **G1 并行** |
+| **ι-Q3c** | Q3 | UI actions 收敛 | `ui/SessionListActions.kt` | fixer | 中 | ι-A | **G1 并行** |
+| **ι-Q3d** | Q3 | status 收敛 | `service/status/StatusAggregatorImpl.kt` + `service/status/SlimStatusFanOut.kt` | fixer | 中 | ι-A | **G1 并行** |
+| **ι-P1** | PORT | session 域端口 + 折叠 `SlimGetRepository` | 新 `data/repository/SessionSource.kt`(+`Standard`/`Slim`) + OCR(getSessions:1083/getSessionsForDirectory:1107 委托) | fixer | 中 | ι-A | **G1 并行**（PORT 轨串行头） |
+| **ι-P2** | PORT | message 域端口（最坏例）+ 折叠 `ExpandBatchEngine` | 新 `data/repository/MessageSource.kt`(+`Standard`/`Slim`) + OCR(getMessagesPagedImpl:1297 委托) | fixer（共享态协作者） | 高 | ι-P1 | PORT 串行（承 P1） |
+| **ι-Q2** | 殿后 | 复合接口 `OpenCodeApi:StandardApi,SlimApi` + slim 法/DTO 迁 | `data/api/{OpenCodeApi,StandardApi,SlimApi}.kt` + OCR 3 链装配 | zlm（机械） | 低-中 | ι-P2 + G1 全绿 | 串行 |
+| **ι-4** | 殿后 | 收尾复验 + 白名单审 | 复验 | zlm | 低 | ι-Q2 | 串行 |
+
+### 7.4 并发点与关键路径
+
+- **G1 并发组（fork 后主并行窗口）**：`{ι-Q3a, ι-Q3b, ι-Q3c, ι-Q3d}`（Q3 四 lane）**‖** `{ι-P1→ι-P2}`（PORT 串行链）。共 **5 条 lane 同时在飞**（4 Q3 + 1 PORT 头）。
+- **关键路径**：`ι-0 → ι-A → ι-P1 → ι-P2 → ι-Q2 → ι-4`（PORT 轨最长，含最坏例 ι-P2）。Q3 四 lane 均在此路径**并行阴影内**完成，不加长总工期。
+- **写域不重叠证明**：Q3 轨文件 ∩ PORT 轨文件 = ∅（Q3 = L4+ service/ui/di；PORT = data/repository + OCR 内部方法）；`ServerCompatProfile` 由 ι-A 独占写、fork 后 Q3 只读、PORT 不碰 → 无竞争。
+- **status/interaction 归属澄清**：Q3d 用 capability **改 StatusAggregator 的分支读取**（status 域**不端口化**，边际价值低）；`getPendingPermissions:1657` + `checkHealth:838` 是 **OCR 内部分支**（非 L4+ 命中），留门面，**不入 Q3 亦不入 ι-P1/P2**（interaction/health 端口化 = 未来 backlog）。
+
+### 7.5 排序理由
+
+Q3（L4+ 收敛）与 PORT（端口化）**解耦并行**是本 R3 的核心优化：二者剩余价值独立、写域不相交，无需 P2-11 的"Q3 严格打头再串 ι-2"。地基波 ι-A 抽出后，Q3 拿能力查询、PORT 动 OCR 内部，互不阻塞。Q2 物理 API 拆分仅审计性，且 OCR 单写者 → 殿后串行于 PORT 之后。
 
 ---
 
@@ -177,18 +238,29 @@ internal class SlimSessionSource(private val apiProvider: () -> OpenCodeApi) : S
 
 ---
 
-## §9 每波验证
+## §9 验证与并发合流纪律
 
-- 每子波 `source ./scripts/env.sh && ./scripts/check.sh`（compile + 单测全绿）。**中心串行，禁并行 Gradle**；`NoSuchFileException` flake → `--rerun-tasks`。
-- ι-Q3：`ServerCompatProfile` 现有测 + L4 单测全绿；补 `slim ↔ features.*` 真值映射测；grep「L4+ 零命中」（除 §6 豁免）为客观验收。
-- ι-2：slim/legacy 双路测全绿；补端口多态派发测（同端口注入 Standard/Slim，断言路由）；`getMessagesPagedImpl` 共享态并发测（bookmark/token）不回归。
-- ι-Q2：`OpenCodeRepositorySlimapiEndpointsTest` + 冻结测试（FQN）全绿即门。纯 JVM，不用模拟器。
+### 9.1 每波验证
+- 每子波 reconcile 后 `source ./scripts/env.sh && ./scripts/check.sh`（compile + 单测全绿）。`NoSuchFileException`(in-progress-results.bin) flake → `--rerun-tasks`。
+- **ι-A**：`ServerCompatProfile` 现有测全绿；补 `slim ↔ features.*` 派生查询真值映射测；能力访问器单测。
+- **Q3 各 lane**：对应 L4 单测全绿；补 capability 分支替换后的行为等价测；lane 合并后 grep「L4+ 零命中」（除 §6 豁免）为客观验收。
+- **ι-P1/P2**：slim/legacy 双路测全绿；补端口多态派发测（同端口注入 Standard/Slim，断言路由）；**ι-P2 补 `getMessagesPagedImpl` 共享态并发测**（bookmark 读写 + I15 token threading + `StaleSlimCommitException` 嵌套 FQN 不回归）。
+- **ι-Q2**：`OpenCodeRepositorySlimapiEndpointsTest` + 冻结测试（FQN）全绿即门。
+- **每波末必跑 `T3RepositoryExtractFreezeTest`**（~40 pinned + FQN + `slimStateLock` 字段）——任一子波转 RED 即回退该 lane。纯 JVM，不用模拟器。
+
+### 9.2 并发合流纪律（worktree + 串行闸门）
+- **lane 隔离**：G1 并发组各 lane 在**独立 git worktree** 开发（参考仓库 `.slim/worktrees/` 惯例），互不干扰源树。
+- **`check.sh` 中心串行闸门**：Gradle 共享 build dir **禁并行**。各 lane 并行编码，但 **reconcile→check.sh→merge 必须排队**逐个过闸；过闸期间其它 lane 只编码不 gate。
+- **reconcile 顺序（G1 内）**：先合 **Q3 四 lane**（写域彼此不相交，OCR 只读，冲突面最小）→ 再合 **PORT 链**（ι-P1→ι-P2，动 OCR）。PORT 后合可让其 rebase 到已收敛的 L4+ 之上，OCR 门面委托与 L4+ 调用点一次对齐。
+- **每 lane reconcile 前 diff 验白名单**：`git diff --stat` 确认写文件不越 §7.3 白名单；越界即打回。
+- **合流后总 gate**：G1 全部合并 → 跑一次全量 `check.sh` + 冻结测试 → 再进 ι-Q2。
+- **回退粒度**：lane = 最小回退单元；某 lane gate RED 且短期不可修，则单独还原该 lane 的 worktree 分支，不阻塞其它已绿 lane 合并。
 
 ---
 
-## §ι-0 基线 checklist（ora-3 → 启动闸门，端口工作 ι-Q3/ι-2 前须逐项落地）
+## §ι-0 基线 checklist（ora-3 → 启动闸门，地基波 ι-A 及后续 Q3/PORT 前须逐项落地）
 
-改造方已逐项验证 ora-3 诊断为真（P0-1 复合接口 / P0-2 三链 / P0-3 五分支 / P0-4 cluster19 / P2-10 SSE 命中）。§6 命中表行号 + §10 ora-3 待办在此合并为**单一启动闸门**：ι-0 完成前**禁**动端口代码。每项须落地为**可复验产物**（grep 输出 / diff / 断言），非口头确认。
+改造方已逐项验证 ora-3 诊断为真（P0-1 复合接口 / P0-2 三链 / P0-3 五分支 / P0-4 cluster19 / P2-10 SSE 命中）。§6 命中表行号 + §10 ora-3 待办在此合并为**单一启动闸门**：ι-0 完成前**禁**动任何代码波（含 ι-A）。每项须落地为**可复验产物**（grep 输出 / diff / 断言），非口头确认。B2 命中表刷新须区分 **G1 并发组归属**（Q3a/b/c/d 各自文件集），为并行 lane 白名单打底。
 
 | # | 基线项 | 落地动作（可复验） | 验收 |
 |---|---|---|---|
@@ -200,7 +272,7 @@ internal class SlimSessionSource(private val apiProvider: () -> OpenCodeApi) : S
 | **B6** | 文档化共享态协作者模型 | `Slim*Source` 共享**同一** `SlimSseStateMachine` + `slimStateLock`（注入，非独立策略对象）；最坏例 `getMessagesPagedImpl`（bookmark 读写 + I15 token threading + 嵌套 FQN `StaleSlimCommitException`） | 协作者注入图落定；最坏例的 token/锁/异常穿透路径逐一标注「不动」 |
 | **B7** | 能力模型基线 | 核 `ServerCompatProfile` 已有 `features.tokenStream`/`sidecarOk`/`schemaDegraded`/版本范围 + I8 写点（:116/:139） | 确认 Q3 语义查询**扩展既有**即可，**不新增** `ConnectionCapabilities`（YAGNI） |
 
-**闸门**：B1–B7 全部产出可复验产物 + `./scripts/check.sh` 基线绿后，ι-Q3 方可启动。B1/B2 行号以 ι-0 执行时点为准（本 doc 现有行号均为 ora-3 读取时点快照）。
+**闸门**：B1–B7 全部产出可复验产物 + `./scripts/check.sh` 基线绿后，地基波 **ι-A** 方可启动（ι-A 合并后 Q3‖PORT 双轨 fork，见 §7.2）。B1/B2 行号以 ι-0 执行时点为准（本 doc 现有行号均为 ora-3 读取时点快照）。
 
 ---
 
