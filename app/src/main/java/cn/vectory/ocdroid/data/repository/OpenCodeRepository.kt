@@ -642,6 +642,12 @@ class OpenCodeRepository @Inject constructor(
             // successful configure re-arms it. Ticket-ownership guarantees we
             // activate THIS transaction's incarnation, not a superseding one.
             completeSlimReconfigure(ticket)
+            // ι-P1: rebuild session source to match the new connection mode.
+            // 放在 completeSlimReconfigure 之后（与 ι-A setSlimConnection 同纪律：
+            // 仅在整条事务全成功后才发布新 mode 的 source；throw 时 sessionSource
+            // 保持先前 live source，与 slimConnection 不脱节）。api 已重建；
+            // lambda 捕获 this，每次调用读最新 api（复用 SlimGetRepository 模式）。
+            sessionSource = if (slim) SlimSessionSource({ api }) else StandardSessionSource({ api })
             // ι-A (capability read-model): 发布能力 mode 仅在整条 ssl/host/client/readiness
             // 事务全成功后——与 completeSlimReconfigure 的「readiness 仅每步成功后才发布」
             // 纪律一致（见上注释）。throw 时 slimConnection 保持先前值（= 仍 live 的旧连接
@@ -766,6 +772,12 @@ class OpenCodeRepository @Inject constructor(
      * that reads the live [api] reference so host switches take effect.
      */
     private val slimGetRepository = SlimGetRepository(apiProvider = { api })
+
+    /**
+     * ι-P1: session 域端口—Standard 或 Slim 双实现,由 [configure] 在 client 重建后选束。
+     * 默认 [StandardSessionSource]（legacy）与未 configure 行为一致。
+     */
+    private var sessionSource: SessionSource = StandardSessionSource({ api })
 
     // ── §tofu R2: capture probe + decision application ──────────────────────
 
@@ -1112,12 +1124,7 @@ class OpenCodeRepository @Inject constructor(
      * branch is left untouched (no slim envelope on that path).
      */
     suspend fun getSessions(limit: Int? = null): Result<List<Session>> =
-        if (isSlimMode) {
-            getSlimapiSessions(directories = null, roots = null, limit = limit)
-                .mapCatching { page -> page.sessions }
-        } else {
-            runSuspendCatching { api.getSessions(limit) }
-        }
+        sessionSource.getSessions(limit)
 
     /**
      * Fetches the root sessions whose [Session.directory] exactly matches
@@ -1136,15 +1143,7 @@ class OpenCodeRepository @Inject constructor(
      * [getSlimapiSessions]; legacy branch untouched.
      */
     suspend fun getSessionsForDirectory(directory: String, limit: Int? = null): Result<List<Session>> =
-        if (isSlimMode) {
-            getSlimapiSessions(
-                directories = listOf(directory),
-                roots = true,
-                limit = limit,
-            ).mapCatching { page -> page.sessions }
-        } else {
-            runSuspendCatching { api.getSessions(limit = limit, directory = directory, roots = true) }
-        }
+        sessionSource.getSessionsForDirectory(directory, limit)
 
     /**
      * Fetches a single session by ID. Used to resolve a child/sub-agent session
@@ -2195,63 +2194,8 @@ class OpenCodeRepository @Inject constructor(
         roots: Boolean? = null,
         limit: Int? = null,
         search: String? = null
-    ): Result<SlimSessionsPage> = runSuspendCatching {
-        val resp = api.getSlimapiSessions(directories, roots, limit, search)
-        if (!resp.isSuccessful) {
-            // Treat non-2xx responses as failures: log the error code and throw
-            // so the runSuspendCatching block returns Result.failure and the
-            // 3-state contract (coldStartSlimSync's .getOrNull() → null) holds.
-            val code = parseErrorCode(resp)
-            if (code != null) {
-                DebugLog.w(TAG, "slimapi sessions failed: $code")
-            }
-            // Throw an HttpException so the recoverCatching block also fires
-            // (it will log the code and rethrow). This preserves the existing
-            // "result.exceptionOrNull() is HttpException" contract.
-            throw retrofit2.HttpException(resp)
-        }
-        val sessions = resp.body() ?: emptyList()
-        val headers = resp.headers()
-        SlimSessionsPage(
-            sessions = sessions,
-            complete = headers?.get("X-Complete")?.toBooleanStrictOrNull(),
-            discoveryDirectories = headers?.get("X-Discovery-Directories")?.toIntOrNull(),
-            discoveryReady = headers?.get("X-Discovery-Ready")?.toBooleanStrictOrNull(),
-        )
-    }.recoverCatching { e ->
-        // Task 3 (slimapi v0.2.2): /sessions failure bodies now carry the
-        // sidecar's coded envelope ({"code":"upstream_unavailable"} /
-        // upstream_http_<N> / etc.) instead of FastAPI-default {"detail":…}.
-        // Correctness-wise the upstream "non-200 = failure" path already
-        // worked; this branch makes the failure OBSERVABLE (warn-level log
-        // carrying the parsed code, mirroring the existing
-        // getSlimapiSessionStatusOutcome / expandBatchInternal catch sites
-        // that already use [parseErrorCode]) WITHOUT changing the public
-        // Result shape — the original exception is rethrown so
-        // `result.exceptionOrNull() is HttpException` still holds and
-        // coldStartSlimSync's `.getOrNull()` → null (3-state) is preserved.
-        //
-        // Grill-confirmed (YAGNI): a dedicated SlimapiHttpException(code,
-        // cause) carrier type is NOT introduced — no caller of this method
-        // does `as? HttpException` specialization, so a carrier type
-        // carrying a code nobody consumes would be over-design. The code
-        // is logged for observability and the original exception is
-        // propagated verbatim.
-        //
-        // Non-HttpException throwables (e.g. IOException on transport
-        // failure) have no Response to read and skip this branch — they
-        // pass through unchanged.
-        if (e is retrofit2.HttpException) {
-            val resp = e.response()
-            if (resp != null) {
-                val code = parseErrorCode(resp)
-                if (code != null) {
-                    DebugLog.w(TAG, "slimapi sessions failed: $code")
-                }
-            }
-        }
-        throw e
-    }
+    ): Result<SlimSessionsPage> =
+        getSlimapiSessionsDelegate(api, directories, roots, limit, search)
 
     /**
      * Private generic helper for aggregating cross-directory slimapi questions/
