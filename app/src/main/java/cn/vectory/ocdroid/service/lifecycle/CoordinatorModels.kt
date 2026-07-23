@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.service.lifecycle
 
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
+import cn.vectory.ocdroid.service.streaming.SourceActivation
 
 /**
  * The layered lifecycle state (FGS spec §4.1). See
@@ -118,4 +119,66 @@ sealed interface LifecycleCommand {
         val identity: ConnectionIdentity,
         val requestId: Long,
     ) : LifecycleCommand
+}
+
+/**
+ * D5 (#3) — the result of committing (or refusing to commit) a source
+ * activation. Returned by [StreamingLifecycleCoordinator.onActivationAck]
+ * so the controller can react to the commit decision (e.g. call
+ * `onBootstrapFailure` for a [BootstrapRejected]) WITHOUT a fire-and-forget
+ * callback. The network op already completed when [onActivationAck] is
+ * called — the only suspend work inside is command emission (no REST/REST
+ * under the mutex).
+ */
+sealed interface ActivationCommitResult {
+    /**
+     * The SSE transport committed into a running L1/L2 layer (Bootstrap or
+     * L2IdleExit). The coordinator has already called
+     * [cn.vectory.ocdroid.service.StreamingOwnershipGate.markReady] for a
+     * current-identity Bootstrap Ready (ownership Stage 2 promotion) — the
+     * controller MUST NOT call it again.
+     */
+    data class SseCommitted(
+        val identity: ConnectionIdentity,
+    ) : ActivationCommitResult
+
+    /**
+     * A current Bootstrap SSE activation resolved to
+     * [SourceActivation.Rejected.TransportTimeout] or
+     * [SourceActivation.Rejected.Exhausted]. The coordinator has NOT
+     * promoted ownership (Starting is still held). The controller SHOULD
+     * call `onBootstrapFailure(identity)` to roll back.
+     */
+    data class BootstrapRejected(
+        val identity: ConnectionIdentity,
+        val rejection: SourceActivation.Rejected,
+    ) : ActivationCommitResult
+
+    /** A supplemental process poller committed ([EnsurePoller] acked Ready). */
+    data object PollerCommitted : ActivationCommitResult
+
+    /** The activation acked for a superseded handoff; the prior source was retained. */
+    data object Superseded : ActivationCommitResult
+
+    /** A primary StartPoller / StartSse commit retained the old source (Rejected). */
+    data object RetainedOldSource : ActivationCommitResult
+}
+
+/**
+ * D5 (#2) — the real supplemental / primary process-poller runtime state
+ * machine (replaces the prior `supplementalPollerActive: Boolean` fiction).
+ * Under the lifecycle mutex; identity-bound + acknowledged + idempotent.
+ */
+sealed interface PollerRuntime {
+    data object Stopped : PollerRuntime
+    data class Starting(
+        val identity: ConnectionIdentity,
+        val requestId: Long,
+        val purpose: Purpose,
+    ) : PollerRuntime
+    data class Running(
+        val identity: ConnectionIdentity,
+        val purpose: Purpose,
+    ) : PollerRuntime
+    enum class Purpose { Primary, Supplemental }
 }

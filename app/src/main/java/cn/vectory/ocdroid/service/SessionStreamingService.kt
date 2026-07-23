@@ -631,52 +631,92 @@ class SessionStreamingService : Service() {
     }
 
     /**
-     * D5-3 (#4 seam) — terminal abort for a launcher attempt that was accepted
-     * at Stage 1 but expired before Stage 2. The gate invokes this callback
-     * outside its lock; keep it non-suspending and launch the awaitable
-     * teardown on the Service scope. [bootstrapAbortIssued] makes the path
-     * idempotent when an expiry callback and another terminal failure race.
+     * Wave-3 L3c — the two bootstrap-failure rollback paths merged into a
+     * single entry keyed by [BootstrapRollbackKind]. The two paths share
+     * only the final `coordinator.teardownAndAwait(BootstrapFailure)` call;
+     * they DIFFER semantically:
+     *  - **Timeout**: cancels [bootstrapJob] + is idempotent via
+     *    [bootstrapAbortIssued] (Timeout-path-ONLY guard). Does NOT perform
+     *    ownership rollback — the launcher already expired the attempt
+     *    (no Starting owner to release on this Service side).
+     *  - **Failed**: performs the full D4-B B1 rollback —
+     *    `ownershipGate.failStarting` (refuse waiters + release Starting),
+     *    disconnect/join the SSE attempt, write shared connection state
+     *    Disconnected — THEN teardown. Does NOT touch [bootstrapAbortIssued]
+     *    (preserve prior behavior).
+     *
+     * **CRITICAL invariant**: the Timeout branch MUST NOT call
+     * `failStarting` / ownership rollback; the Failed branch MUST NOT touch
+     * [bootstrapAbortIssued]. Merging the entry must not merge the
+     * side-effects.
      */
-    private fun abortExpiredStartup() {
-        bootstrapJob?.cancel()
-        bootstrapJob = null
-        if (bootstrapAbortIssued) return
-        bootstrapAbortIssued = true
-        scope.launch {
-            coordinator.teardownAndAwait(TeardownReason.BootstrapFailure)
+    private enum class BootstrapRollbackKind { Timeout, Failed }
+
+    private fun rollbackBootstrap(kind: BootstrapRollbackKind, identity: ConnectionIdentity?) {
+        when (kind) {
+            BootstrapRollbackKind.Timeout -> {
+                // D5-3 (#4 seam) — terminal abort for a launcher attempt that
+                // was accepted at Stage 1 but expired before Stage 2. The gate
+                // invokes this callback outside its lock; keep it
+                // non-suspending and launch the awaitable teardown on the
+                // Service scope. [bootstrapAbortIssued] makes the path
+                // idempotent when an expiry callback and another terminal
+                // failure race. NO ownership rollback here.
+                bootstrapJob?.cancel()
+                bootstrapJob = null
+                if (bootstrapAbortIssued) return
+                bootstrapAbortIssued = true
+                scope.launch {
+                    coordinator.teardownAndAwait(TeardownReason.BootstrapFailure)
+                }
+            }
+            BootstrapRollbackKind.Failed -> {
+                // D4-B B1 mandatory rollback — bootstrap exhaustion / transport
+                // rejection / stale identity. Performs the full 6-step rollback:
+                // (1) complete ownership waiters w/ refusal, (2) release Starting
+                // ownership, (3) write shared connection state Disconnected,
+                // (4) cancel/join any SSE attempt, (5) stop foreground + StopSelf
+                // via the coordinator's BootstrapFailure teardown, (6) `stopSelf()`.
+                // Does NOT touch bootstrapAbortIssued (preserve prior behavior).
+                scope.launch {
+                    val extracted = ownershipGate.failStarting(
+                        identity,
+                        OwnershipRefusal.BootstrapFailed,
+                    )
+                    // (4) cancel/join any SSE attempt via the extracted owner callback.
+                    extracted?.disconnectAndJoin?.invoke(false)
+                    extracted?.abortStartup?.invoke()
+                    // (3) write shared connection state Disconnected.
+                    sharedStateStore.mutateConnection {
+                        it.copy(
+                            isConnected = false,
+                            isConnecting = false,
+                            connectionPhase = cn.vectory.ocdroid.ui.ConnectionPhase.Disconnected,
+                        )
+                    }
+                    // (5-6) coordinator BootstrapFailure teardown: force L3 +
+                    // StopSse + StopForeground + StopPoller + StopSelf.
+                    coordinator.teardownAndAwait(TeardownReason.BootstrapFailure)
+                }
+            }
         }
     }
 
     /**
-     * D4-B B1 mandatory rollback — bootstrap exhaustion / transport rejection
-     * / stale identity. Performs the full 6-step rollback:
-     * (1) complete ownership waiters w/ refusal, (2) release Starting
-     * ownership, (3) write shared connection state Disconnected,
-     * (4) cancel/join any SSE attempt, (5) stop foreground + StopSelf via
-     * the coordinator's BootstrapFailure teardown, (6) `stopSelf()`.
+     * Timeout-path rollback: launcher expiry / stale identity. Thin wrapper
+     * over [rollbackBootstrap] (kept for external call sites + doc
+     * references). NO ownership rollback; idempotent via [bootstrapAbortIssued].
      */
-    private fun failStarting(identity: ConnectionIdentity?) {
-        scope.launch {
-            val extracted = ownershipGate.failStarting(
-                identity,
-                OwnershipRefusal.BootstrapFailed,
-            )
-            // (4) cancel/join any SSE attempt via the extracted owner callback.
-            extracted?.disconnectAndJoin?.invoke(false)
-            extracted?.abortStartup?.invoke()
-            // (3) write shared connection state Disconnected.
-            sharedStateStore.mutateConnection {
-                it.copy(
-                    isConnected = false,
-                    isConnecting = false,
-                    connectionPhase = cn.vectory.ocdroid.ui.ConnectionPhase.Disconnected,
-                )
-            }
-            // (5-6) coordinator BootstrapFailure teardown: force L3 +
-            // StopSse + StopForeground + StopPoller + StopSelf.
-            coordinator.teardownAndAwait(TeardownReason.BootstrapFailure)
-        }
-    }
+    private fun abortExpiredStartup() = rollbackBootstrap(BootstrapRollbackKind.Timeout, null)
+
+    /**
+     * Failed-path rollback: bootstrap exhaustion / transport rejection /
+     * stale identity. Thin wrapper over [rollbackBootstrap] — performs the
+     * full B1 ownership rollback THEN teardown. Does NOT touch
+     * [bootstrapAbortIssued] (preserve prior behavior).
+     */
+    private fun failStarting(identity: ConnectionIdentity?) =
+        rollbackBootstrap(BootstrapRollbackKind.Failed, identity)
 
     /**
      * FGS spec §4.1 dataSync platform time-limit callback (API 34+,

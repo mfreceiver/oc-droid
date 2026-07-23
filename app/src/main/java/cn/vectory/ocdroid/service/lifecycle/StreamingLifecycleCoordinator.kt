@@ -38,68 +38,6 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * D5 (#3) — the result of committing (or refusing to commit) a source
- * activation. Returned by [StreamingLifecycleCoordinator.onActivationAck]
- * so the controller can react to the commit decision (e.g. call
- * `onBootstrapFailure` for a [BootstrapRejected]) WITHOUT a fire-and-forget
- * callback. The network op already completed when [onActivationAck] is
- * called — the only suspend work inside is command emission (no REST/REST
- * under the mutex).
- */
-sealed interface ActivationCommitResult {
-    /**
-     * The SSE transport committed into a running L1/L2 layer (Bootstrap or
-     * L2IdleExit). The coordinator has already called
-     * [cn.vectory.ocdroid.service.StreamingOwnershipGate.markReady] for a
-     * current-identity Bootstrap Ready (ownership Stage 2 promotion) — the
-     * controller MUST NOT call it again.
-     */
-    data class SseCommitted(
-        val identity: ConnectionIdentity,
-    ) : ActivationCommitResult
-
-    /**
-     * A current Bootstrap SSE activation resolved to
-     * [SourceActivation.Rejected.TransportTimeout] or
-     * [SourceActivation.Rejected.Exhausted]. The coordinator has NOT
-     * promoted ownership (Starting is still held). The controller SHOULD
-     * call `onBootstrapFailure(identity)` to roll back.
-     */
-    data class BootstrapRejected(
-        val identity: ConnectionIdentity,
-        val rejection: SourceActivation.Rejected,
-    ) : ActivationCommitResult
-
-    /** A supplemental process poller committed ([EnsurePoller] acked Ready). */
-    data object PollerCommitted : ActivationCommitResult
-
-    /** The activation acked for a superseded handoff; the prior source was retained. */
-    data object Superseded : ActivationCommitResult
-
-    /** A primary StartPoller / StartSse commit retained the old source (Rejected). */
-    data object RetainedOldSource : ActivationCommitResult
-}
-
-/**
- * D5 (#2) — the real supplemental / primary process-poller runtime state
- * machine (replaces the prior `supplementalPollerActive: Boolean` fiction).
- * Under the lifecycle mutex; identity-bound + acknowledged + idempotent.
- */
-sealed interface PollerRuntime {
-    data object Stopped : PollerRuntime
-    data class Starting(
-        val identity: ConnectionIdentity,
-        val requestId: Long,
-        val purpose: Purpose,
-    ) : PollerRuntime
-    data class Running(
-        val identity: ConnectionIdentity,
-        val purpose: Purpose,
-    ) : PollerRuntime
-    enum class Purpose { Primary, Supplemental }
-}
-
-/**
  * Phase 0 / dev-design P0.3 — the FGS §4 L1/L2/L3 state machine.
  *
  * Single serial (Mutex-guarded) state machine that drives the
@@ -215,6 +153,24 @@ class StreamingLifecycleCoordinator @Inject constructor(
      * [GlobalBusyState.Unknown] NEVER authorizes idle teardown while a
      * Supplemental poller is Running (the status authority is not yet
      * definitive).
+     *
+     * **Dual-plane note (docs only)**: this field is the **control-plane**
+     * half of the poller lifecycle — it tracks the acknowledgeable
+     * handshake (requestId-bound [PollerRuntime.Starting] →
+     * [PollerRuntime.Running]) the coordinator drives under [mutex] so a
+     * stale / superseded ack is rejected. The matching **data-plane** half
+     * lives in [cn.vectory.ocdroid.service.streaming.ProcessStatusPoller]
+     * — specifically its `loopJob` field, the actual polling coroutine that
+     * fires the §3 status refreshes every
+     * [cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.DEFAULT_INTERVAL_MS].
+     * The two planes are decoupled by design: the control-plane decides
+     * WHETHER a poller should be running + whether its activation committed
+     * (this field); the data-plane performs the polling (`loopJob`). A
+     * lifecycle teardown retires the control-plane via
+     * [stopPollerIfActiveLocked] (emits [LifecycleCommand.StopPoller] +
+     * flips to [PollerRuntime.Stopped]); the controller's command collector
+     * then reaches the data-plane by routing that StopPoller command to the
+     * poller.
      */
     private var pollerRuntime: PollerRuntime = PollerRuntime.Stopped
 
@@ -734,7 +690,7 @@ class StreamingLifecycleCoordinator @Inject constructor(
      * EVEN WHEN the lifecycle layer is already L3 (a live placeholder
      * Service holding Starting ownership must be fully torn down: the
      * ordinary `L3 → return` short-circuit in [teardownLocked] is INVALID
-     * for this reason). Emits StopSse + StopForeground + StopPoller +
+     * for this reason). Emits StopSse + StopPoller + StopForeground +
      * StopSelf + sets L3 unconditionally.
      *
      * Does NOT call [StreamingOwnershipGate.disconnectAndRelease] — the
@@ -745,13 +701,35 @@ class StreamingLifecycleCoordinator @Inject constructor(
         mutex.withLock {
             cancelDebounce()
             cancelPendingHandoff()
-            emit(StopSse)
-            stopPollerIfActiveLocked()
-            emit(StopForeground)
-            emit(StopSelf)
+            emitBootstrapFailureTeardownCommands()
             _layer.value = Layer.L3
         }
         layer.first { it == Layer.L3 }
+    }
+
+    /**
+     * Wave-3 L3c — the BootstrapFailure teardown command emit sequence.
+     *
+     * Order is SPECIFIC to BootstrapFailure and DIFFERS from the reconfigure
+     * teardown (which emits `StopPoller → StopSse → StopForeground → StopSelf`
+     * — see [teardownForReconfigure]). DO NOT unify the two sequences:
+     *
+     *   StopSse → stopPollerIfActiveLocked (StopPoller once if active)
+     *         → StopForeground → StopSelf
+     *
+     * The BootstrapFailure invariant is that the SSE source is closed BEFORE
+     * the poller retirement (a placeholder Service holding Starting ownership
+     * has its SSE attempt cancelled first; the poller is best-effort cleanup
+     * gated on [pollerRuntime] via [stopPollerIfActiveLocked]).
+     *
+     * MUST be called under [mutex] (uses [stopPollerIfActiveLocked] which
+     * reads/writes [pollerRuntime]).
+     */
+    private suspend fun emitBootstrapFailureTeardownCommands() {
+        emit(StopSse)
+        stopPollerIfActiveLocked()
+        emit(StopForeground)
+        emit(StopSelf)
     }
 
     /**

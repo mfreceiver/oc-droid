@@ -123,6 +123,20 @@ class ProcessStatusPoller internal constructor(
      * Read/written only from the [startAndAwaitFirstPoll] / [stop] calls
      * (serial — these are driven by the controller's command collector on
      * the Service Main scope, OR by the [ApplicationScope] in tests).
+     *
+     * **Dual-plane note (docs only)**: this field is the **data-plane**
+     * half of the poller lifecycle — the actual polling coroutine that
+     * fires the §3 status refresh loop every [DEFAULT_INTERVAL_MS]. Its
+     * **control-plane** counterpart is the `pollerRuntime` field on
+     * [cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator]
+     * (a [cn.vectory.ocdroid.service.lifecycle.PollerRuntime] state
+     * machine) which tracks the acknowledgeable handshake
+     * (requestId-tracked Starting → Running) and decides WHETHER a poller
+     * should be running. The two planes are decoupled: the control-plane
+     * emits the [cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StartPoller]
+     * / [cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.EnsurePoller]
+     * / [cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StopPoller]
+     * commands; the controller routes them to this data-plane.
      */
     private var loopJob: Job? = null
     private val mutex = Mutex()
