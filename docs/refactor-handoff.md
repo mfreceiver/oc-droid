@@ -1,12 +1,13 @@
 # ocdroid Refactor + Bilateral Handoff
 
-> 状态快照：**v0.13.0 已发版**（2026-07-23）。本文件是下一会话/agent 的入口：记录已落地、剩余任务、关键产物、可复用 session、与硬约束。
+> 状态快照：**v0.13.1 已发版**（2026-07-23，α→θ 全绿）。**D-MB-P flip 代码就绪但 v0.13.2 发版被服务端依赖阻塞（见 §2.1，勿误发）**。本文件是下一会话/agent 的入口。
 
 ---
 
 ## 1. 已发版
 
 - **v0.13.0**（tag 在 `f448318`）：token-stream 客户端特性 + 双边 §5 修复。minor bump（新用户可见功能）。APK + notes 已上传 Gitea（release 548）。
+- **v0.13.1**（tag 在 `82ba808`，release 549）：refactor plan α→θ 全绿（N1 / ζ-3 / η cluster6+L5a/L5b/L5c / θ cluster18），行为保持型 patch。
 - 提交链（main，均 gated rev-grok 9.5–9.8）：
   - `a6521e0` — α→δ：6a utils + L1b AppLifecycleMonitor + L1c SLC + L1d OwnershipGate + L1a SSC + L1e Composer + L2 AppAction
   - `665cf79` — ε：L3a′ PollerRuntime 类型统一 + L3c BootstrapFailure 两步收敛
@@ -28,6 +29,15 @@
 - Wire 契约（客户端 authoritative）：5 reason（`reconnect_no_replay`/`subscriber_backpressure`/`token_memory_limit`/`session_idle`/`session_deleted`）+ UNKNOWN fallback；`triggersReconnect=true` 仅前 3；不发 part_too_large（超限→`truncated:true`）；lever1 done=marker；lever2 gzip 客户端默认透明；health `features.tokenStream` dual-read fail-closed。
 - **延后（post-release，非阻塞）**：C-4（doc 对齐，本轮做）· V-B（stunnel 运维 idle 断实证）· token_hub 拆包。
 - slimapi 主会话：`ses_075953166ffeUULAsWATEcjoS8`（cross-session via `session_send`；用户协调）。
+
+### 2.1 D-MB-P `TOKEN_MEMORY_LIMIT` flip — ✅ 代码就绪 / ⛔ v0.13.2 发版被服务端依赖阻塞
+
+- **flip 已实现 + 门控 GO**（rev-20 9.8）：`ResyncReason.triggersReconnect` 去掉 `TOKEN_MEMORY_LIMIT`（现 `true` 仅 `RECONNECT_NO_REPLAY`+`SUBSCRIBER_BACKPRESSURE`）；token_memory_limit 改走 **same-connection re-anchor**（clear overlay + `/since`，与 `SESSION_IDLE` 同 client 路径，无新逻辑）；KDoc 更新（MB-P-S1 前置 + rollback）；3 测试翻转（Frame/Reducer/Coordinator）。
+- **⛔ v0.13.2 绝不能单独发**：flip 安全性依赖服务端 MB-P-S1（向**既有 subscriber** 重发 current key）。服务端最新**发版** = v0.5.0；S-2（main `7a1861a`）/ O1（main `c21ca3b`）/ MB-P-S1（**dev `3e4b3b7`，未合 main**）**全部未 tag 未发**。生产 v0.5.0 无同流重发 → flip 单发 = **delta orphan / 实时流死亡**（即旧注释 `TokenStreamFrame.kt:229-238` 所述旧行为）。
+- **发版前置**：等 slimapi 发含 S-2+O1+MB-P-S1 的服务端版本 → 通知 ocdroid 服务端 tag → ocdroid lockstep 发 v0.13.2。
+- **rollback**：`triggersReconnect` getter 加回 `|| this == TOKEN_MEMORY_LIMIT`（1 行）——对服务端零副作用（重连模型下服务端同流重发冗余但无害）。
+- **联调**（服务端就绪后）：>32 text part（count cap）验 S-2 既有 sub 重发 + 无 reconnect + 其它 part 续流；byte-cap / debug-env 验 MB-P-S1 current-key nodrop（small→真 snapshot / large→truncated）。已请 slimapi 加 `OC_SLIMAPI_TOKEN_STREAM_DEBUG_LIVE_BUDGET_BYTES` debug env 便低数据量验 a/b。
+- slimapi D-MB-P 确认 Q1-Q5 全 ✅（current key 向既有 sub 重发 = S-2+MB-P-S1；truncated 走原流同 `sub.put` 通道；flip 客户端独立无服务端 gate；回滚零副作用）。
 
 ## 3. refactor（plan v3 α→θ）— ✅ 全部完成（α…θ 全绿；7/19/20/coldStartSlimSync/2/8 deferred-by-analysis）
 

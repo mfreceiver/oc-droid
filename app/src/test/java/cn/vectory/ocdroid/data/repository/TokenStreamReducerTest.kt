@@ -284,12 +284,12 @@ class TokenStreamReducerTest {
     }
 
     @Test
-    fun `resync token_memory_limit clears sid parts, fetches authoritatively, AND reconnects (rev-bgpt Option A)`() {
-        // §5 rev-bgpt: the server LRU-evicts ONE LivePart on token_memory_limit
-        // but keeps the stream alive (no disconnect, no re-handshake). The
-        // reducer MUST emit Reconnect so the client re-runs attach_subscriber
-        // and re-establishes snapshot anchors — otherwise subsequent deltas have
-        // no STREAMING buffer and are silently dropped.
+    fun `resync token_memory_limit clears sid parts, fetches authoritatively, no reconnect (D-MB-P)`() {
+        // D-MB-P: the server LRU-evicts ONE LivePart on token_memory_limit but
+        // keeps the stream alive AND (MB-P-S1, slimapi 3e4b3b7) RE-EMITS
+        // surviving-part snapshots to EXISTING subscribers, so a same-connection
+        // re-anchor (clear + /since + accept re-emitted snapshots) is sufficient.
+        // No Reconnect effect — mirrors SESSION_IDLE/SESSION_DELETED/UNKNOWN.
         val state = TokenStreamReducer.reduce(
             TokenStreamReducerState(),
             snapshot(partId = "p1", sessionId = "s1", text = "a"),
@@ -304,12 +304,8 @@ class TokenStreamReducerTest {
         assertTrue(effects.any { it is TokenStreamCoordinatorEffect.ClearPartState })
         val trigger = effects.filterIsInstance<TokenStreamCoordinatorEffect.TriggerSinceFetch>().single()
         assertTrue(trigger.authoritative)
-        // NEW behavior under test (rev-bgpt Option A): token_memory_limit now
-        // emits a Reconnect(sid) — the third effect in the resync set.
-        assertEquals(
-            "s1",
-            effects.filterIsInstance<TokenStreamCoordinatorEffect.Reconnect>().single().sessionId,
-        )
+        // D-MB-P: NO Reconnect — same-connection re-anchor.
+        assertFalse(effects.any { it is TokenStreamCoordinatorEffect.Reconnect })
     }
 
     // ── §5 C-2: session_idle / session_deleted / unknown-reason fallback ───
@@ -434,10 +430,11 @@ class TokenStreamReducerTest {
     @Test
     fun `resync reconnect flags`() {
         // Parametrized across the whole enum: the reducer's Reconnect effect
-        // must mirror ResyncReason.triggersReconnect exactly. §5 rev-bgpt:
-        // TOKEN_MEMORY_LIMIT is now in the reconnect set (Option A), so three
-        // reasons reconnect (reconnect_no_replay / subscriber_backpressure /
-        // token_memory_limit); session_idle / session_deleted / UNKNOWN do not.
+        // must mirror ResyncReason.triggersReconnect exactly. D-MB-P:
+        // TOKEN_MEMORY_LIMIT is no longer in the reconnect set (same-connection
+        // re-anchor), so only TWO reasons reconnect (reconnect_no_replay /
+        // subscriber_backpressure); token_memory_limit / session_idle /
+        // session_deleted / UNKNOWN do not.
         ResyncReason.entries.forEach { reason ->
             val state = TokenStreamReducer.reduce(
                 TokenStreamReducerState(),

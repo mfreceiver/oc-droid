@@ -504,16 +504,18 @@ class TokenStreamCoordinatorTest {
     }
 
     @Test
-    fun `resync token_memory_limit clears and reconnects via sentinel (rev-bgpt Option A)`() {
-        // §5 rev-bgpt: token_memory_limit now triggers a reconnect (the server
-        // keeps the stream alive after LRU-evicting a part; the client must
-        // reconnect to re-establish snapshot anchors). Mirrors the
-        // RECONNECT_NO_REPLAY reconnect test: the Reconnect effect sets a
-        // sentinel consumed INSIDE flow.collect's post-dispatch check, so the
-        // frame MUST be pumped through the flow (fake.send) — a direct
-        // dispatchEpochFrame sets the sentinel but never fires scheduleReconnect.
+    fun `resync token_memory_limit clears and re-anchors on the SAME connection, no reconnect (D-MB-P)`() {
+        // D-MB-P: token_memory_limit no longer triggers a reconnect. The server
+        // (MB-P-S1, slimapi 3e4b3b7) keeps the stream alive AND re-emits
+        // surviving-part snapshots to EXISTING subscribers, so a same-connection
+        // re-anchor suffices: ClearPartState + TriggerSinceFetch(auth) + accept
+        // server-re-emitted snapshots. Pump the resync THROUGH the flow so we
+        // also assert the MF-1 reconnect sentinel is NOT set (a sentinel set
+        // here would throw TokenStreamReconnectRequested → scheduleReconnect on
+        // the post-dispatch path; we verify the openCount stays put).
         // §5 C-3 note: this test was repurposed from part_too_large (removed
-        // from the enum) and now asserts the corrected reconnect behavior.
+        // from the enum), then rev-bgpt Option A (reconnect), and now D-MB-P
+        // (same-connection re-anchor).
         coordinator.open("s1")
         runPending()
         assertEquals(1, fake.openCount.get())
@@ -522,24 +524,32 @@ class TokenStreamCoordinatorTest {
         runPending()
         assertTrue(stateStore.chatFlow.value.streamOwned.containsKey("p1"))
         val baseline = fake.openCount.get()
-        // Pump the resync through the flow — collect processes it, handleEffect
-        // sets the sentinel, the post-dispatch check throws
-        // TokenStreamReconnectRequested → catch → scheduleReconnect.
+        // Pump the resync through the flow — collect processes it; because
+        // triggersReconnect is now false, handleEffect does NOT set the
+        // reconnect sentinel, so the post-dispatch check does NOT throw and
+        // scheduleReconnect is NEVER called.
         fake.send(TokenStreamFrame.Resync(ResyncReason.TOKEN_MEMORY_LIMIT, "s1"))
         runPending()
-        // ClearPartState dispatched synchronously inside dispatchEpochFrame,
-        // before the sentinel check threw.
+        // ClearPartState dispatched synchronously inside dispatchEpochFrame.
         assertEquals(0, stateStore.chatFlow.value.streamOwned.size)
-        // Fetch triggered.
+        // TriggerSinceFetch(auth=true) emitted (the /since re-anchor).
         assertTrue(sinceFetchCalls.any { it.sid == "s1" && it.auth })
-        // The reconnect is now pending in backoff (J2 in delay,
-        // initialBackoffMs=50). Advance past it to land ONE reconnect.
-        scope.advanceTimeBy(60L) // past initialBackoffMs=50
+        // The stream is still open on the SAME connection: no reconnect
+        // scheduled, so the live collector is still active and advancing
+        // past the backoff window does NOT bump openCount.
+        assertEquals("collector still live on the same connection", 1, fake.liveCollectors.get())
+        scope.advanceTimeBy(60L) // past initialBackoffMs=50 — would land a reconnect if scheduled
         runPending()
-        assertTrue(
-            "token_memory_limit must trigger a reconnect (rev-bgpt Option A)",
-            fake.openCount.get() > baseline,
+        assertEquals(
+            "token_memory_limit must NOT trigger a reconnect (D-MB-P) — openCount unchanged",
+            baseline,
+            fake.openCount.get(),
         )
+        // The same connection is still serving frames — pump a fresh snapshot
+        // and confirm it lands (the re-anchor accepted the server's re-emit).
+        fake.send(snapshot(partId = "p1", text = "re-emitted"))
+        runPending()
+        assertEquals("re-emitted", stateStore.chatFlow.value.streamingPartTexts["p1"])
         coordinator.close("s1")
         runPending()
     }
@@ -548,8 +558,8 @@ class TokenStreamCoordinatorTest {
     fun `resync with null sessionId infers sid from the open connection (S2)`() {
         // §5: uses SESSION_IDLE (a clear-only reason) so the test's focus stays
         // on sid inference with no reconnect complications. (TOKEN_MEMORY_LIMIT
-        // was previously used here but now reconnects, which would muddy the
-        // sid-inference assertion; the reconnect path is covered by the
+        // was previously used here but is now also a same-connection re-anchor
+        // under D-MB-P; the reconnect-vs-not distinction is covered by the
         // dedicated token_memory_limit test above.)
         coordinator.open("s1")
         runPending()

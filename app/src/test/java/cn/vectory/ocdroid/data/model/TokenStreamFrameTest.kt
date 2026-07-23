@@ -235,14 +235,15 @@ class TokenStreamFrameTest {
     }
 
     @Test
-    fun `triggersReconnect true for reconnect_no_replay subscriber_backpressure and token_memory_limit`() {
+    fun `triggersReconnect true only for reconnect_no_replay and subscriber_backpressure`() {
         assertTrue(ResyncReason.RECONNECT_NO_REPLAY.triggersReconnect)
         assertTrue(ResyncReason.SUBSCRIBER_BACKPRESSURE.triggersReconnect)
-        // §5 rev-bgpt (Option A): token_memory_limit now triggersReconnect — the
-        // server keeps the stream alive after LRU-evicting a part, so the client
-        // must reconnect to re-establish snapshot anchors (clear+/since alone
-        // would orphan subsequent deltas).
-        assertTrue(ResyncReason.TOKEN_MEMORY_LIMIT.triggersReconnect)
+        // D-MB-P: token_memory_limit now does a SAME-CONNECTION re-anchor
+        // (clear + /since + accept server-re-emitted snapshots), NO reconnect.
+        // Depends on slimapi server-side MB-P-S1 (slimapi 3e4b3b7) re-emitting
+        // surviving-part snapshots to EXISTING subscribers on memory-limit,
+        // closing the orphan-delta gap that previously forced a reconnect.
+        assertEquals(false, ResyncReason.TOKEN_MEMORY_LIMIT.triggersReconnect)
         // §5 C-2: the session-lifecycle reasons + UNKNOWN fallback stay clear-only.
         assertEquals(false, ResyncReason.SESSION_IDLE.triggersReconnect)
         assertEquals(false, ResyncReason.SESSION_DELETED.triggersReconnect)
