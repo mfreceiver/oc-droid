@@ -26,10 +26,7 @@ import cn.vectory.ocdroid.data.repository.http.InMemoryTofuPinStore
 import cn.vectory.ocdroid.data.repository.http.SlimapiVersionInterceptor
 import cn.vectory.ocdroid.data.repository.http.SlimapiDebugInterceptor
 import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
-import cn.vectory.ocdroid.data.repository.http.classifyValidation
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
-import cn.vectory.ocdroid.data.repository.http.spkiSha256Hex
-import cn.vectory.ocdroid.data.repository.http.CaptureTrustManager
 import cn.vectory.ocdroid.data.repository.http.TrafficCountingInterceptor
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.TrafficLogger
@@ -64,12 +61,8 @@ import okhttp3.MediaType.Companion.toMediaType
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import retrofit2.Retrofit
 import java.io.IOException
-import java.io.ByteArrayInputStream
-import java.security.KeyStore
-import java.security.SecureRandom
 import java.util.Base64
 import java.security.cert.X509Certificate
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
@@ -77,9 +70,6 @@ import kotlin.math.ceil
 import kotlin.math.log2
 import javax.inject.Inject
 import javax.inject.Singleton
-import javax.net.ssl.KeyManagerFactory
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManager
 
 /**
  * One page of cursor-paginated messages. [nextCursor] is the opaque V1 cursor
@@ -729,6 +719,42 @@ class OpenCodeRepository @Inject constructor(
      */
     val lastClientCertError: String? get() = sslConfigFactory.lastClientCertError
 
+    /**
+     * §L4a1 (plan v3, Wave ζ): the extracted TOFU concern (capture probe +
+     * decision application + pin read/clear), behavior-preserving extraction
+     * out of this repository. The four public TOFU methods below are now thin
+     * delegates to this instance so every existing caller
+     * (ConnectionCoordinator / ConnectionBootstrapEngine / all tests)
+     * resolves unchanged.
+     *
+     * **I4** — constructed with the SAME [tofuStore] passed to
+     * [sslConfigFactory], so pin writes here are immediately visible to the
+     * pin lookup in `SslConfigFactory.sslConfigFor`.
+     *
+     * **I9 / I7** — [TofuRepository] receives an [TofuRepository]`-wired`
+     * `onTofuApplied` callback that calls this class's `@Synchronized`
+     * [rebuildClients] **synchronously** (no coroutine dispatch) guarded by
+     * `hostConfig.hostPort == hostPort` (original L857 semantics), so the pin
+     * takes effect on the next SSL handshake and the rebuild stays serialized
+     * with [configure]. [applyTofuDecision] is also `@Synchronized` on this
+     * monitor — the delegate holds this monitor across write+rebuild, fully
+     * preserving the original mutual exclusion with [configure] /
+     * [currentSslConfig] (reentrant into [rebuildClients]).
+     */
+    private val tofuRepository = TofuRepository(
+        tofuStore = tofuStore,
+        onTofuApplied = { hostPort ->
+            // §I9: synchronous rebuild ONLY for the currently-configured host
+            // (original OCR L857 guard). rebuildClients() is itself
+            // @Synchronized on this monitor; since applyTofuDecision's
+            // delegate is also @Synchronized on this monitor, the call is
+            // reentrant and pin-then-rebuild is atomic w.r.t. configure().
+            if (hostConfig.hostPort == hostPort) {
+                rebuildClients()
+            }
+        }
+    )
+
     // ── §tofu R2: capture probe + decision application ──────────────────────
 
     /**
@@ -744,134 +770,53 @@ class OpenCodeRepository @Inject constructor(
     )
 
     /**
-     * §tofu R2: one-shot TLS handshake probe that RECORDS the server's leaf
-     * cert chain for the trust prompt. Used by the connection coordinator
-     * when [checkHealth] / [checkHealthFor] fails with an SSL/cert error and
-     * no pin yet exists for [hostPort] — i.e. the user has never trusted this
-     * endpoint.
+     * §tofu R2 / §L4a1: one-shot TLS handshake probe — DELEGATES to
+     * [tofuRepository.captureServerCert] (extracted verbatim, including its
+     * OWN one-shot OkHttpClient that is side-effect-free w.r.t. the live
+     * REST/SSE/command clients — I3 holds). Kept on OCR's public surface so
+     * every existing caller (ConnectionCoordinator /
+     * ConnectionBootstrapEngine / tests) resolves unchanged — the compat
+     * layer L4a3 will later formalize.
      *
-     * Builds its OWN one-shot OkHttpClient (does NOT touch the live mTLS
-     * cache nor the held client-cert state — mirrors [SslConfigFactory.resolveProbe]'s
-     * non-polluting contract): a [CaptureTrustManager] records the chain, the
-     * optional [clientCert] is presented via a fresh KeyManager (so an mTLS
-     * server that requires client auth still completes the handshake far
-     * enough to present its chain), and a permissive hostnameVerifier lets
-     * the handshake complete for self-signed certs whose SAN doesn't match.
-     *
-     * Returns null on total failure (unreachable host, no cert presented,
-     * UI-thread cancellation) — the coordinator surfaces the original
-     * SSLHandshakeException in that case.
+     * Result type [TofuCaptureResult] STAYS nested here (I20: ~10 callers
+     * reference `OpenCodeRepository.TofuCaptureResult`; Kotlin forbids member
+     * typealiases, so the nested type is kept verbatim).
      */
     suspend fun captureServerCert(
         baseUrl: String,
         hostPort: String,
         clientCert: ClientCertMaterial? = null,
-        /**
-         * R8 slim-mode foundation / C2 fix: slim=true 时探 `{baseUrl}/slimapi/health`
-         * （带 `X-Slimapi-Version` 头）；slim=false（默认）保持 legacy
-         * `/global/health`。captureTrustManager 仅记录 TLS 握手 chain——path
-         * 选择不影响捕获的 leaf，但路径正确性确保 sidecar 自身（而非经
-         * catch-all 透传到的 opencode）的 leaf 被记录。
-         */
         slim: Boolean = false
-    ): TofuCaptureResult? = withContext(Dispatchers.IO) {
-        val capture = CaptureTrustManager()
-        // Build the one-shot SSLContext: CaptureTrustManager (records) +
-        // optional KeyManagers from the supplied p12 (mTLS client auth).
-        val keyManagers = clientCert?.let { material ->
-            runCatching {
-                val p12 = KeyStore.getInstance("PKCS12").apply {
-                    load(ByteArrayInputStream(material.p12Bytes), material.p12Password)
-                }
-                val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-                    .apply { init(p12, material.p12Password) }
-                kmf.keyManagers
-            }.getOrNull()
-        }
-        val ctx = SSLContext.getInstance("TLS").apply {
-            init(keyManagers, arrayOf<TrustManager>(capture), SecureRandom())
-        }
-        val oneShot = OkHttpClient.Builder()
-            .sslSocketFactory(ctx.socketFactory, capture)
-            // §tofu R2: pin即身份 — capture 阶段放行 hostnameVerifier，使自签证书
-            // （SAN 常不匹配）也能完成握手并暴露 leaf。安全由随后 SPKI pin 保证。
-            .hostnameVerifier { _, _ -> true }
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(8, TimeUnit.SECONDS)
-            .build()
-        // R8 slim-mode foundation / C2 fix: slim=true → /slimapi/health（带版本头）;
-        // slim=false → /global/health（行为字节级不变）。capture 不在乎 path 的 HTTP
-        // 语义——它只想要 leaf；但 path 正确性保证 leaf 是 sidecar 自己的，而非经
-        // catch-all 反代暴露的 upstream。
-        val healthPath = if (slim) SlimapiContract.SLIMAPI_HEALTH_PATH
-            else SlimapiContract.LEGACY_HEALTH_PATH
-        val normalizedUrl = (if (baseUrl.startsWith("http")) baseUrl else "https://$baseUrl")
-            .trimEnd('/') + healthPath
-        val requestBuilder = Request.Builder()
-            .url(normalizedUrl)
-            .header(HttpHeaders.SKIP_DIR_HEADER, "1")
-        if (slim) {
-            requestBuilder.header(
-                SlimapiContract.X_SLIMAPI_VERSION,
-                SlimapiContract.SLIMAPI_CLIENT_VERSION.toString()
-            )
-        }
-        // Surface the leaf + classification regardless of whether the GET
-        // itself succeeded — a 4xx/5xx after a completed handshake STILL
-        // captured the chain (the handshake happens before any HTTP
-        // exchange). Only total handshake/connection failures return null.
-        runCatching {
-            oneShot.newCall(requestBuilder.build()).execute().use { /* drain */ }
-        }
-        val chain = capture.capturedChain
-        if (chain.isNullOrEmpty()) return@withContext null
-        val leaf = chain.first()
-        val spki = leaf.spkiSha256Hex()
-        val host = hostPort.substringBefore(':')
-        val validation = classifyValidation(chain, host)
-        TofuCaptureResult(hostPort = hostPort, leaf = leaf, spkiHex = spki, validation = validation)
-    }
+    ): TofuCaptureResult? =
+        tofuRepository.captureServerCert(baseUrl, hostPort, clientCert, slim)
 
     /**
-     * §tofu R2: applies the UI's [TofuDecision] for [hostPort] to the injected
-     * [TofuPinStore]. After [TofuDecision.AcceptOnce] / [TofuDecision.Trust]
-     * the next [checkHealth] resolves a TofuPinned SSL config and the
-     * handshake succeeds; [TofuDecision.Cancel] writes nothing (the user
-     * declined — the in-flight connect is settled false by the coordinator).
-     *
-     * The decision is keyed by [hostPort] so two profiles reaching the same
-     * endpoint share the trust state (known_hosts model — grill Q4=a).
+     * §tofu R2 / §L4a1: applies the UI's [TofuDecision] — DELEGATES to
+     * [tofuRepository.applyTofuDecision]. `@Synchronized` on THIS monitor is
+     * RETAINED so the pin-then-rebuild sequence stays mutually exclusive with
+     * [configure] / [currentSslConfig] / [rebuildClients] (I7 — full original
+     * OCR-level serialization preserved, not merely the callback path). The
+     * synchronous rebuild (I9) fires inside the delegate via the
+     * `onTofuApplied` callback wired into [tofuRepository], which re-checks
+     * `hostConfig.hostPort == hostPort` (original L857 guard) and calls this
+     * class's [rebuildClients] — reentrant under this same held monitor.
      */
     @Synchronized
-    fun applyTofuDecision(hostPort: String, decision: TofuDecision) {
-        when (decision) {
-            is TofuDecision.AcceptOnce -> tofuStore.acceptSession(hostPort, decision.spki)
-            is TofuDecision.Trust -> tofuStore.trustPersistent(hostPort, decision.spki)
-            TofuDecision.Cancel -> { /* no-op — user declined */ }
-        }
-        // §tofu R2 round-1 fix (cgpt/opuser/groker 一致 blocker): live OkHttp 客户端在
-        // configure()/rebuildClients() 时按【决策前】的 SSL 配置(SystemDefault)快照构建，
-        // socket factory 构建后不可变——只写 pin 不重建则重试仍走 SystemDefault 握手失败，
-        // 而此时 pin 已存在→不再弹窗→重试耗尽→Disconnected（Accept/Trust 成死路）。故对
-        // 当前后 host 重建客户端，使 sslConfigFor(hostPort) 重新解析为 TofuPinned 再重试。
-        if (decision !is TofuDecision.Cancel && hostConfig.hostPort == hostPort) {
-            rebuildClients()
-        }
-    }
+    fun applyTofuDecision(hostPort: String, decision: TofuDecision) =
+        tofuRepository.applyTofuDecision(hostPort, decision)
 
     /**
-     * §tofu R2: query the current pinned SPKI for [hostPort] (persistent OR
-     * session tier). Used by the coordinator's "should I prompt?" guard so
-     * we never re-prompt an endpoint the user has already trusted.
+     * §tofu R2 / §L4a1: query the current pinned SPKI for [hostPort] —
+     * DELEGATES to [tofuRepository.pinnedSpkiFor] (reads the SAME shared
+     * [tofuStore] that [sslConfigFactory] reads during SSL negotiation — I4).
      */
-    fun pinnedSpkiFor(hostPort: String): String? = tofuStore.pinnedSpki(hostPort)
+    fun pinnedSpkiFor(hostPort: String): String? = tofuRepository.pinnedSpkiFor(hostPort)
 
     /**
-     * §tofu R2: forget the pin for [hostPort] (both tiers). Re-prompt is
-     * forced on the next connect. Used by the host management UI's "forget
-     * trust" affordance.
+     * §tofu R2 / §L4a1: forget the pin for [hostPort] — DELEGATES to
+     * [tofuRepository.clearTofuPin].
      */
-    fun clearTofuPin(hostPort: String) = tofuStore.clear(hostPort)
+    fun clearTofuPin(hostPort: String) = tofuRepository.clearTofuPin(hostPort)
 
     // §R18 Phase 2-E step 2: the deprecated setCurrentDirectory /
     // getCurrentDirectory forwarding helpers were removed. Non-file routes
