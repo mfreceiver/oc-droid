@@ -19,15 +19,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -36,7 +33,6 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -46,7 +42,6 @@ import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -164,14 +159,30 @@ fun ChatScaffold(
     // feed the top-bar / status overlay / model picker / agent picker /
     // session-picker sheet / snackbar host — every consumer is downstream of
     // these flows exactly as before.
-    val connection by chatVM.connectionFlow.collectAsStateWithLifecycle()
-    val traffic by connectionVM.trafficFlow.collectAsStateWithLifecycle()
-    val composer by composerVM.composerFlow.collectAsStateWithLifecycle()
-    val settings by orchestratorVM.settingsFlow.collectAsStateWithLifecycle()
-    val chat by chatVM.chatFlow.collectAsStateWithLifecycle()
-    val sessionList by chatVM.sessionListFlow.collectAsStateWithLifecycle()
-    val unread by chatVM.unreadFlow.collectAsStateWithLifecycle()
-    val host by orchestratorVM.hostFlow.collectAsStateWithLifecycle()
+    //
+    // §L5a (UI god-file split): each slice now ALSO keeps its State handle
+    // (alongside the `by` delegate the rest of this composable reads). The
+    // handle is passed to `rememberChatTopBarState` (ChatTopBar.kt) so the
+    // derivedStateOf body reads `.value` on the same snapshot — that is what
+    // carries the snapshot-tracking inside the derived lambda (see the
+    // CORRECTNESS note on `rememberChatTopBarState`). One subscription per
+    // slice; the `by` delegate and the handle read the SAME State instance.
+    val connectionState = chatVM.connectionFlow.collectAsStateWithLifecycle()
+    val connection by connectionState
+    val trafficState = connectionVM.trafficFlow.collectAsStateWithLifecycle()
+    val traffic by trafficState
+    val composerState = composerVM.composerFlow.collectAsStateWithLifecycle()
+    val composer by composerState
+    val settingsState = orchestratorVM.settingsFlow.collectAsStateWithLifecycle()
+    val settings by settingsState
+    val chatState = chatVM.chatFlow.collectAsStateWithLifecycle()
+    val chat by chatState
+    val sessionListState = chatVM.sessionListFlow.collectAsStateWithLifecycle()
+    val sessionList by sessionListState
+    val unreadState = chatVM.unreadFlow.collectAsStateWithLifecycle()
+    val unread by unreadState
+    val hostState = orchestratorVM.hostFlow.collectAsStateWithLifecycle()
+    val host by hostState
     val recentWorkdirs by settingsVM.recentWorkdirs.collectAsStateWithLifecycle()
 
     // ── Chrome-only state (new for Phase 1B) ─────────────────────────────
@@ -200,12 +211,17 @@ fun ChatScaffold(
     var showContextDialog by remember { mutableStateOf(false) }
     // §drawer-new-session: workdir picker for the drawer header "new session"
     // button when ≥2 workdirs are connected (mirrors SessionsScreen's flow).
+    // §L5a: owned HERE (ChatScaffold) because ChatOverlayHost reads it
+    // directly (the AppBottomSheet is gated on it). The drawer's
+    // `onStartNewSessionInDrawer` ≥2-workdir branch SETS it via the
+    // `onShowWorkdirPicker` callback passed to ChatDrawerHost; the workdir
+    // picker AppBottomSheet itself is rendered by ChatOverlayHost.
     var pendingWorkdirPick by rememberSaveable { mutableStateOf(false) }
-    // §drawer-new-session: briefly locks all drawer interaction (rows, back,
-    // new-session) while the drawer is closing before the workdir picker shows —
-    // prevents a selectSession-vs-picker race if the user taps again during the
-    // close animation. `remember` (not Saveable) so a config change resets it.
-    var drawerInteractionLocked by remember { mutableStateOf(false) }
+    // §L5a (UI god-file split): `drawerInteractionLocked` MOVED into
+    // ChatDrawerHost (every read/write of it lives in the drawer tree — the
+    // two write sites in `onStartNewSessionInDrawer` and the one read site in
+    // RecentSessionsDrawer's `interactionsEnabled`). No reference to it
+    // remains in ChatScaffold.
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -309,7 +325,13 @@ fun ChatScaffold(
     val curRevertMessageId = if (curSession != null) curSession.revert?.messageId else curCutoff?.messageId
     val curSessionStatus = currentSessionStatus(sessionList.sessionStatuses, chat.currentSessionId)
     val computedContextUsage = computeContextUsage(chat.messages, settings.providers)
-    var cachedContextUsage by remember { mutableStateOf(computedContextUsage) }
+    // §L5a: cache `cachedContextUsage` behind a State handle so the
+    // rememberChatTopBarState lambda can read `.value` on it (snapshot-tracking
+    // contract). The `by` delegate below stays — ChatScaffold's other reads
+    // (the ChatOverlayHost cachedContextUsage = … arg) continue to read the
+    // same snapshot.
+    val cachedContextUsageState = remember { mutableStateOf(computedContextUsage) }
+    var cachedContextUsage by cachedContextUsageState
     computedContextUsage?.let { cachedContextUsage = it }
     // §chat-ux-batch T7 (B2): per-session sticky display + selection source.
     // The pickers and the top-bar BOTH read `pending ?: session ?: infer` so
@@ -555,102 +577,27 @@ fun ChatScaffold(
     // derivedStateOf lambda (Compose forbids @Composable invocations
     // inside non-composable lambdas like derivedStateOf).
     val noHostFallback = stringResource(R.string.chat_no_host_fallback)
-    // §fix-menu-stale (9.5 review gate): effectiveAgent/effectiveModel are
-    // plain `remember` vals recomputed when pending/session/messages change.
-    // This derivedStateOf is memoized by `remember(noHostFallback)`, so WITHOUT
-    // these keys its lambda would capture their FIRST-composition values — the
-    // overflow menu's Agent/Model items would freeze while the picker sheets
-    // (which read effective* directly) stay fresh ("menu shows mimo, picker
-    // checks glm"). Adding them as keys recreates the derivedStateOf when they
-    // change, so the menu reflects "what the next send will be".
-    // INVARIANT: relies on Message.ModelInfo staying a `data class` (value
-    // equality keeps this key stable across recompositions that leave the model
-    // unchanged — without it the top bar would thrash on every streamed token).
-    val topBarState by remember(noHostFallback, effectiveAgent, effectiveModel) {
-        derivedStateOf {
-            val curHostProfile = currentHostProfile(host.hostProfiles, host.currentHostProfileId)
-            // §nav-redesign (2026-07-13): populate openSessions for the restored
-            // SessionTabStrip (second row under ChatTopBar). openSessionIds is
-            // root-only + capped at 8 by the session domain, but we defend at
-            // the consumer too: a stale/legacy child id persisted in
-            // openSessionIds must never render as a top-level tab. Associate-by
-            // once for O(1) resolution (8 ids × ~500 sessions otherwise O(n×m)).
-            //
-            // §Q14 (title union): resolve curSession through the UNION store
-            // (root + directorySessions + childSessions) so a sub-agent /
-            // cross-workdir current session produces its real title instead of
-            // degrading to the app name. The same map backs parentSessionTitle
-            // (parent may itself be a non-root directory/child session) and
-            // openSessions. topBarSessions appends curSession when it is not
-            // already in the root list so ChatTopBar's `state.sessions.find
-            // { it.id == currentSessionId }` (ChatTopBar.kt) hits for child
-            // sessions too — the SessionTabStrip still filters parentId==null
-            // below, so a child is never rendered as a top-level tab.
-            val sessionsById = allSessionsById(
-                sessionList.sessions,
-                sessionList.directorySessions,
-                sessionList.childSessions,
-            )
-            val curSession = chat.currentSessionId?.let { sessionsById[it] }
-            val topBarSessions = if (curSession != null && sessionList.sessions.none { it.id == curSession.id }) {
-                sessionList.sessions + curSession
-            } else {
-                sessionList.sessions
-            }
-            val openSessions = sessionList.openSessionIds
-                .mapNotNull { sessionsById[it] }
-                .filter { it.parentId == null && !it.isArchived }
-            ChatTopBarState(
-                sessions = topBarSessions,
-                currentSessionId = chat.currentSessionId,
-                sessionStatuses = sessionList.sessionStatuses,
-                hasMoreSessions = sessionList.hasMoreSessions,
-                isLoadingMoreSessions = sessionList.isLoadingMoreSessions,
-                isRefreshingSessions = sessionList.isRefreshingSessions,
-                expandedSessionIds = sessionList.expandedSessionIds,
-                agents = settings.agents.filter { it.isVisible },
-                // §chat-ux-batch T7 (B2) + T8 (B3): display source = effective
-                // agent (pending ?: infer ?: null). The legacy global
-                // `SettingsState.selectedAgentName` field was deleted in T8;
-                // the parameter is renamed `currentAgentName` to avoid the
-                // false-positive grep on the deleted field name.
-                currentAgentName = effectiveAgent,
-                contextUsage = cachedContextUsage,
-                sessionTodos = sessionList.sessionTodos[chat.currentSessionId ?: ""] ?: emptyList(),
-                hostName = curHostProfile?.name ?: noHostFallback,
-                isConnected = connection.isConnected,
-                isConnecting = connection.isConnecting,
-                connectionPhase = connection.connectionPhase,
-                hostProfiles = host.hostProfiles,
-                currentHostProfileId = host.currentHostProfileId,
-                tunnelActivationState = connection.tunnelActivationState,
-                showTunnelAuth = (curHostProfile?.tunnelPasswordId != null),
-                unreadSessions = unread.unreadSessions,
-                questionSessionIds = questionRootIds(sessionList.pendingQuestions, sessionsById),
-                draftWorkdir = composer.draftWorkdir,
-                parentSessionId = curSession?.parentId,
-                parentSessionTitle = curSession?.parentId?.let { pid ->
-                    sessionsById[pid]?.displayName
-                },
-                trafficSent = traffic.trafficSent,
-                trafficReceived = traffic.trafficReceived,
-                serverVersion = connection.serverVersion,
-                providers = settings.providers,
-                disabledModels = settings.disabledModels,
-                // §chat-ux-batch T7 (B2): display source = effectiveModel
-                // (pending ?: infer ?: null) for the picker / top-bar.
-                // ChatState.currentModel is intentionally RETAINED (T8-C2)
-                // as the load/compact mirror consumed by
-                // ChatViewModel.compactSession() — NOT deleted.
-                currentModel = effectiveModel,
-                // §nav-redesign: consumed by the restored SessionTabStrip
-                // (rendered as the TopAppBar's second row, directly after
-                // ChatTopBar in the column below). Empty list short-circuits
-                // inside SessionTabStrip (PrimaryScrollableTabRow guard).
-                openSessions = openSessions,
-            )
-        }
-    }
+    // §L5a (UI god-file split): the derivedStateOf body now lives in
+    // `rememberChatTopBarState` (ChatTopBar.kt). Slice State handles (not
+    // values) are passed so the snapshot-tracking contract holds — see the
+    // CORRECTNESS note there. The remember keys stay EXACTLY
+    // `(noHostFallback, effectiveAgent, effectiveModel)` (effective* stay
+    // value-params AND keys; slices are NOT keys — derivedStateOf tracks
+    // them via the `.value` reads inside the lambda).
+    val topBarState by rememberChatTopBarState(
+        sessionListState = sessionListState,
+        chatState = chatState,
+        settingsState = settingsState,
+        connectionState = connectionState,
+        hostState = hostState,
+        unreadState = unreadState,
+        trafficState = trafficState,
+        composerState = composerState,
+        cachedContextUsageState = cachedContextUsageState,
+        effectiveAgent = effectiveAgent,
+        effectiveModel = effectiveModel,
+        noHostFallback = noHostFallback,
+    )
     // §Q11 (2026-07-16): chat.currentSessionId is a remember key because the
     // onForceRefresh lambda below captures it to emit LoadMessages(sid) —
     // without it the lambda would hold a stale id across a session switch.
@@ -758,82 +705,26 @@ fun ChatScaffold(
             .filter { (size, hasDraft) -> size == 0 && !hasDraft }
             .collect { currentOnBackToHome() }
     }
-    val pagerEngaged = openSessions.size >= 2 &&
-        topBarState.parentSessionId == null &&
-        chat.currentSessionId != null
-    val initialPage = remember(openSessions, chat.currentSessionId) {
-        if (chat.currentSessionId != null) {
-            openSessions.indexOfFirst { it.id == chat.currentSessionId }
-                .coerceAtLeast(0)
-        } else 0
-    }
-    val pagerState = rememberPagerState(
-        initialPage = initialPage,
-        pageCount = { openSessions.size.coerceAtLeast(1) },
-    )
+    // §L5a (UI god-file split): the pager setup block (pagerEngaged /
+    // initialPage / pagerState / both bidirectional-sync LaunchedEffects /
+    // the rememberUpdatedState pair) MOVED INTO ChatSessionPager
+    // (ChatSessionPager.kt) — verbatim, with `chat.currentSessionId` /
+    // `topBarState.parentSessionId` references remapped to the
+    // ChatSessionPager params. `pagerEngaged` is now a LOCAL inside
+    // ChatSessionPager (single definition site); the old ChatScaffold local
+    // is deleted. The render branch below calls ChatSessionPager when
+    // chat.currentSessionId != null; the ChatEmptyState branch (different
+    // concern) STAYS here.
 
-    // §new1: bidirectional sync — currentSessionId → pager.
-    // When the session changes externally (tab tap, Sessions screen,
-    // SessionPickerSheet, back gesture), scroll the pager to match without
-    // animation. Skipped when the pager is not engaged (single-session /
-    // sub-agent fallback) or the new id is not in openSessions (e.g. a
-    // sub-agent selection while still rendered through the fallback path).
-    LaunchedEffect(chat.currentSessionId, openSessions) {
-        if (!pagerEngaged) return@LaunchedEffect
-        val idx = openSessions.indexOfFirst { it.id == chat.currentSessionId }
-        if (idx in 0 until openSessions.size && idx != pagerState.currentPage) {
-            pagerState.scrollToPage(idx)
-        }
-    }
-    // §new1: bidirectional sync — pager → currentSessionId.
-    // When the user swipes and the pager settles on a new page, select that
-    // session. Guarded to skip: (a) the initial emit (currentSessionId
-    // already matches the page), (b) pages that no longer exist
-    // (openSessions shrank mid-swipe), and (c) draft mode (currentSessionId
-    // == null — let the user finish composing before the pager steals
-    // focus). rememberUpdatedState lets this long-lived collector read the
-    // freshest openSessions / currentSessionId without restarting on every
-    // list mutation (a restart would re-emit settledPage and oscillate tabs
-    // during the close transition — v0.7.6 hit that as the "flicker-fix").
-    //
-    // §edge-noop: per spec, first/last page do NOT wrap and do NOT jump to
-    // a parent — there is no edge-swipe special-casing here (settledPage is
-    // only emitted on a real settle within bounds).
-    val openSessionsLatest by rememberUpdatedState(openSessions)
-    val currentSessionIdLatest by rememberUpdatedState(chat.currentSessionId)
-    LaunchedEffect(pagerState, pagerEngaged) {
-        if (!pagerEngaged) return@LaunchedEffect
-        snapshotFlow { pagerState.settledPage }
-            .distinctUntilChanged()
-            .collect { page ->
-                val sessions = openSessionsLatest
-                // §review-fix (groker M1): close/reorder race guard. On a
-                // tab close, openSessions shrinks and closeSession() drives
-                // its own next-selection. If we react to a settle here while
-                // cur is no longer in the list (or page is now out of bounds),
-                // we'd race closeSession and land on the "shifted-up" tab.
-                // So only switch when cur is STILL open, the target id differs,
-                // and the page is valid against the freshest list.
-                val session = sessions.getOrNull(page) ?: return@collect
-                val cur = currentSessionIdLatest
-                val curStillOpen = cur != null && sessions.any { it.id == cur }
-                if (curStillOpen && session.id != cur &&
-                    page == pagerState.currentPage && page < sessions.size
-                ) {
-                    sessionVM.selectSession(session.id)
-                }
-            }
-    }
-
-    // §home-hub T4 (C2): wrap the chat body in ModalNavigationDrawer. The
-    // drawer is tablet-only by construction: the hamburger (Menu) button that
-    // opens it renders ONLY on `isWide` form factors (ChatTopBar
-    // navigationIcon branch). Phone has no Menu and no open gesture (see
-    // gesturesEnabled below), so the drawer stays unreachable there (phone
-    // uses ArrowBack → onBackToHome). Always wrapping (rather than
-    // conditionally composing the Column twice) keeps the body a single tree —
-    // the drawer content is cheap (a LazyColumn of recent root sessions) and
-    // stays invisible/closed on phone.
+    // §home-hub T4 (C2): wrap the chat body in ModalNavigationDrawer (now via
+    // ChatDrawerHost — §L5a). The drawer is tablet-only by construction: the
+    // hamburger (Menu) button that opens it renders ONLY on `isWide` form
+    // factors (ChatTopBar navigationIcon branch). Phone has no Menu and no
+    // open gesture (see gesturesEnabled inside ChatDrawerHost), so the drawer
+    // stays unreachable there (phone uses ArrowBack → onBackToHome). Always
+    // wrapping (rather than conditionally composing the Column twice) keeps
+    // the body a single tree — the drawer content is cheap (a LazyColumn of
+    // recent root sessions) and stays invisible/closed on phone.
     //
     // §opuser IMPORTANT-2: the drawer's recent-session list MUST mirror the
     // home page §2a "Recently Session" projection (req 5: tablet drawer =
@@ -845,6 +736,10 @@ fun ChatScaffold(
     // directorySessions.values.flatten(), distinctBy id, filtered
     // parentId==null && !isArchived, sorted by time.updated desc, no cap
     // (home §2a applies none; the LazyColumn handles scrolling).
+    //
+    // §L5a: this derivation STAYS in ChatScaffold (reads sessionList.sessions
+    // / .directorySessions, which ChatScaffold already subscribes to); the
+    // resulting List<Session> is passed as a plain value to ChatDrawerHost.
     val recentSessionsForDrawer = remember(
         sessionList.sessions,
         sessionList.directorySessions,
@@ -854,112 +749,25 @@ fun ChatScaffold(
             .filter { it.parentId == null && !it.isArchived }
             .sortedByDescending { it.time?.updated ?: 0L }
     }
-    // §drawer-new-session: reuses SessionsScreen's new-session flow. 0 workdirs
-    // → button explicitly disabled via isStartNewSessionEnabled (no-op guard
-    // kept defensively); 1 → lock + close drawer, then create the draft; ≥2 →
-    // lock + close drawer, THEN show the project-picker AppBottomSheet
-    // (awaited so the ModalBottomSheet does not overlap the closing
-    // ModalNavigationDrawer). BOTH close paths lock all drawer interaction
-    // during the close animation (prevents a selectSession-vs-picker / -create
-    // race); the lock releases in a finally so it survives a cancelled close.
-    // No onSwitchToChat() — already in Chat; createSessionInWorkdir clears chat
-    // + composer into draft mode for the workdir.
-    val onStartNewSessionInDrawer: () -> Unit = remember(
-        recentWorkdirs,
-        sessionVM,
-        scope,
-        drawerState,
-        closeDrawerAction,
-    ) {
-        {
-            when {
-                recentWorkdirs.isEmpty() -> Unit
-                recentWorkdirs.size == 1 -> {
-                    // Capture the single workdir synchronously at tap time.
-                    // recentWorkdirs is a state delegate re-read on each access,
-                    // so evaluating .single() AFTER the ~300ms drawer-close
-                    // animation could see a list that changed mid-flight (a
-                    // workdir disconnected meanwhile, or the list became empty /
-                    // multi → NoSuchElementException). The captured value is the
-                    // one the user actually acted on; createSessionInWorkdir is
-                    // idempotent-tolerant of a since-disconnected path (no crash).
-                    val workdir = recentWorkdirs.single()
-                    drawerInteractionLocked = true
-                    scope.launch {
-                        try {
-                            drawerState.close()
-                            sessionVM.createSessionInWorkdir(workdir)
-                        } finally {
-                            drawerInteractionLocked = false
-                        }
-                    }
-                }
-                else -> {
-                    // Lock drawer interaction immediately so the user cannot tap a
-                    // recent-session row / back button during the close animation
-                    // (prevents a selectSession-vs-picker race). The picker is shown
-                    // only after the drawer finishes closing (no modal-over-modal).
-                    // finally guarantees the lock releases even if close() is
-                    // cancelled mid-animation; on cancel the picker (inside try)
-                    // stays hidden.
-                    drawerInteractionLocked = true
-                    scope.launch {
-                        try {
-                            drawerState.close()
-                            pendingWorkdirPick = true
-                        } finally {
-                            drawerInteractionLocked = false
-                        }
-                    }
-                }
-            }
-        }
-    }
-    ModalNavigationDrawer(
+    // §L5a (UI god-file split): the ModalNavigationDrawer wrapper + its
+    // drawer-local state (drawerInteractionLocked + onStartNewSessionInDrawer)
+    // MOVED into ChatDrawerHost (ChatDrawerHost.kt). The chat body Column
+    // below is the trailing `content` lambda — verbatim, every local
+    // ChatScaffold read inside it is still in scope. The `closeDrawerAction`
+    // + `drawerState` STAY owned here (the drawer-close BackHandler @455-457
+    // composes AFTER the parent/root handlers and reads drawerState.isOpen;
+    // `onShowWorkdirPicker = { pendingWorkdirPick = true }` keeps
+    // pendingWorkdirPick owned+consumed in ChatScaffold (ChatOverlayHost
+    // reads it directly).
+    ChatDrawerHost(
         drawerState = drawerState,
-        // §fix-drawer-scrim-dismiss + §fix-edge-swipe-conflict:
-        // M3 ModalNavigationDrawer (material3 1.4.0 / composeBom 2025.12.00)
-        // wires Scrim tap-to-dismiss as:
-        //   onClose = { if (gesturesEnabled && confirmStateChange(Closed)) close() }
-        // and Scrim always installs pointerInput+detectTapGestures when open
-        // (NavigationDrawer.kt Scrim), so a content-level tap overlay CANNOT
-        // receive scrim taps (Scrim is drawn ABOVE content). Constant
-        // gesturesEnabled=false therefore both killed edge-open AND made
-        // blank-area taps no-ops. Gate gestures on isOpen instead:
-        //   - closed → false: no edge-swipe-to-open (HorizontalPager safe);
-        //     drawer opens ONLY via hamburger (Menu).
-        //   - open → true: Scrim tap + a11y dismiss + drag-to-close work.
-        // BackHandler / row-select / new-session close paths are unchanged.
-        gesturesEnabled = drawerState.isOpen,
-        drawerContent = {
-            RecentSessionsDrawer(
-                // §opuser IMPORTANT-2: recent root non-archived sessions
-                // (sessions + directorySessions merged, distinctBy id,
-                // sorted by time.updated desc) — same projection as the home
-                // page §2a Recently section. Tap = selectSession (stay in Chat).
-                sessions = recentSessionsForDrawer,
-                onSelect = { sessionId ->
-                    sessionVM.selectSession(sessionId)
-                    // §T4-C2: close the drawer after selecting so the user
-                    // lands on the chosen conversation (stay in Chat, do NOT
-                    // navigate away). selectSession is synchronous on the
-                    // slice; the close animation runs concurrently.
-                    closeDrawerAction()
-                },
-                onBackToHome = {
-                    closeDrawerAction()
-                    onBackToHome()
-                },
-                onStartNewSession = onStartNewSessionInDrawer,
-                isStartNewSessionEnabled = recentWorkdirs.isNotEmpty(),
-                interactionsEnabled = !drawerInteractionLocked,
-                // §T17 slimapi v1 §6.1: pass the canonical per-session error
-                // store straight through to the drawer rows. The row's
-                // shouldShowSessionErrorIndicator helper looks up by session
-                // id; absence (sid not in the map / recovered) → no indicator.
-                sessionErrorsById = sessionList.sessionErrorsById,
-            )
-        },
+        sessions = recentSessionsForDrawer,
+        recentWorkdirs = recentWorkdirs,
+        sessionErrorsById = sessionList.sessionErrorsById,
+        sessionVM = sessionVM,
+        closeDrawerAction = closeDrawerAction,
+        onBackToHome = onBackToHome,
+        onShowWorkdirPicker = { pendingWorkdirPick = true },
     ) {
     Column(modifier = Modifier.fillMaxSize()) {
         ChatTopBar(
@@ -1031,123 +839,40 @@ fun ChatScaffold(
                         .weight(1f)
                         .fillMaxWidth()
                 ) {
-                    // §new1 (2026-07-13): HorizontalPager restored for the
-                    // multi-root-session case (page set = topBarState.openSessions,
-                    // identical to the SessionTabStrip above). Single root,
-                    // sub-agent (parent != null), and "no session" cases bypass
-                    // the pager:
-                    //   - ≥2 root sessions + root current → HorizontalPager
-                    //     (each page composes a ChatMessageList only when it is
-                    //      the current page; adjacent pages render an empty Box
-                    //      — no v0.7.6 CircularProgressIndicator guard per spec,
-                    //      no perf hit from pre-rendering neighbours' message
-                    //      lists. `key = { session.id }` preserves scroll across
-                    //      page-slot reuse on tab reorder.)
-                    //   - exactly 1 open session, or parent != null sub-agent
-                    //     → single ChatMessageList (v0.7.6 fallback parity)
-                    //   - no currentSessionId + not draft → ChatEmptyState
-                    //     (with the new "no tab" Sessions deep-link, §new2)
-                    //   - draft (no session yet but workdir chosen) → blank
-                    //     (composer is the foreground surface)
+                    // §L5a (UI god-file split): the HorizontalPager + both
+                    // ChatMessageList call sites (in-pager + single-root /
+                    // sub-agent fallback) MOVED INTO ChatSessionPager. This
+                    // call site gates on chat.currentSessionId != null and
+                    // delegates the pager-engaged / single-list decision to
+                    // ChatSessionPager (belt-and-braces: ChatSessionPager
+                    // re-checks currentSessionId != null inside its first
+                    // branch — kept verbatim per spec). The ChatEmptyState
+                    // branch (different concern — connection-empty surface)
+                    // STAYS here.
                     //
-                    // §streaming-parity: ChatMessageList subscribes to chatFlow
-                    // and reads `chatState.currentSessionId` for ALL its slicing
-                    // (messages / parts / streaming / scroll memory). Wrapping it
-                    // in HorizontalPager does NOT change that subscription — the
-                    // active page's ChatMessageList still drives off the same
-                    // chatFlow emission, so streaming / SSE token deltas /
-                    // scroll-anchoring behave identically to the pre-pager
-                    // single-list path. Non-current pages simply don't compose
-                    // a ChatMessageList (empty Box), so they cost nothing.
+                    // §streaming-parity: ChatMessageList (composed inside
+                    // ChatSessionPager) subscribes to chatFlow and reads
+                    // `chatState.currentSessionId` for ALL its slicing
+                    // (messages / parts / streaming / scroll memory). The
+                    // extraction does NOT change that subscription — the
+                    // active page's ChatMessageList still drives off the
+                    // same chatFlow emission, so streaming / SSE token
+                    // deltas / scroll-anchoring behave identically.
                     val isDraft = composer.draftWorkdir != null && chat.currentSessionId == null
-                    if (chat.currentSessionId != null && pagerEngaged) {
-                        HorizontalPager(
-                            state = pagerState,
-                            modifier = Modifier.fillMaxSize(),
-                            // §flicker-fix: key each page composable by session
-                            // id so the pager does NOT reuse a page slot for a
-                            // different session on reorder. Without this, a
-                            // close-X that removes session at index 0 would
-                            // otherwise have the next-page slot keep the prior
-                            // session's LazyListState scroll offset for one frame.
-                            key = { page -> openSessions.getOrNull(page)?.id ?: "page-$page" },
-                        ) { page ->
-                            val session = openSessions.getOrNull(page)
-                            if (session != null && session.id == chat.currentSessionId) {
-                                // §1C: wire the message-row overflow callbacks.
-                                // The three callbacks are the ONLY non-default
-                                // destructives in the chat surface — every one
-                                // routes to an existing domain method:
-                                //   Copy      → system clipboard
-                                //   Edit&rerun→ chatVM.editFromMessage
-                                //   Fork      → sessionVM.forkSession(id, id)
-                                ChatMessageList(
-                                    chatVM = chatVM,
-                                    composerVM = composerVM,
-                                    sessionVM = sessionVM,
-                                    orchestratorVM = orchestratorVM,
-                                    onFileClick = onChatFileClick,
-                                    onOpenChanges = onOpenGitChanges,
-                                    onTabVisibilityChange = { /* no second-row strip */ },
-                                    savedPositions = savedPositions,
-                                    accessOrder = accessOrder,
-                                    onCopyMessage = { _, text ->
-                                        copyToSystemClipboard(context, text)
-                                    },
-                                    onEditAndRerun = { messageId ->
-                                        chatVM.editFromMessage(messageId)
-                                    },
-                                    onFork = { messageId ->
-                                        sessionVM.forkSession(
-                                            sessionId = chat.currentSessionId!!,
-                                            messageId = messageId,
-                                        )
-                                    },
-                                    isCurrentSessionSending = isCurrentSessionSending,
-                                )
-                            } else {
-                                // §new1: non-current page — render nothing.
-                                // Per spec, no v0.7.6 CircularProgressIndicator
-                                // guard is required (we do NOT pre-render
-                                // adjacent sessions' message lists; ChatMessageList
-                                // is composed only for the page matching
-                                // chat.currentSessionId). The empty Box costs
-                                // effectively zero and the next settle flips
-                                // this branch to the real ChatMessageList via
-                                // the pager→selectSession sync above.
-                                Box(modifier = Modifier.fillMaxSize())
-                            }
-                        }
-                    } else if (chat.currentSessionId != null) {
-                        // §new1: single root, sub-agent, or pager not engaged —
-                        // render the message list directly (v0.7.6 fallback
-                        // parity). The conditions inside ChatMessageList are
-                        // unchanged from the pre-pager path; this is the SAME
-                        // composable the multi-page branch above renders per
-                        // page, so streaming / scroll / parity contracts hold.
-                        ChatMessageList(
+                    if (chat.currentSessionId != null) {
+                        ChatSessionPager(
+                            openSessions = openSessions,
+                            currentSessionId = chat.currentSessionId,
+                            parentSessionId = topBarState.parentSessionId,
+                            isCurrentSessionSending = isCurrentSessionSending,
+                            savedPositions = savedPositions,
+                            accessOrder = accessOrder,
+                            onFileClick = onChatFileClick,
+                            onOpenChanges = onOpenGitChanges,
                             chatVM = chatVM,
                             composerVM = composerVM,
                             sessionVM = sessionVM,
                             orchestratorVM = orchestratorVM,
-                            onFileClick = onChatFileClick,
-                            onOpenChanges = onOpenGitChanges,
-                            onTabVisibilityChange = { /* no second-row strip */ },
-                            savedPositions = savedPositions,
-                            accessOrder = accessOrder,
-                            onCopyMessage = { _, text ->
-                                copyToSystemClipboard(context, text)
-                            },
-                            onEditAndRerun = { messageId ->
-                                chatVM.editFromMessage(messageId)
-                            },
-                            onFork = { messageId ->
-                                sessionVM.forkSession(
-                                    sessionId = chat.currentSessionId!!,
-                                    messageId = messageId,
-                                )
-                            },
-                            isCurrentSessionSending = isCurrentSessionSending,
                         )
                     } else if (!isDraft) {
                         ChatEmptyState(
@@ -1314,7 +1039,7 @@ fun ChatScaffold(
         // message Surface above uses weight(1f), so it claims the full
         // vertical space and the Composer sits flush below).
     }
-    } // §home-hub T4: end ModalNavigationDrawer content lambda.
+    } // §L5a: end ChatDrawerHost content lambda (was ModalNavigationDrawer).
 
     // ── Phase 1B sheets / overflows / dialogs (new) ──────────────────────
     ChatOverlayHost(

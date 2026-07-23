@@ -28,6 +28,8 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,9 +50,20 @@ import cn.vectory.ocdroid.data.model.ProvidersResponse
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.TodoItem
-import cn.vectory.ocdroid.ui.ContextUsage
+import cn.vectory.ocdroid.ui.ChatState
+import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.ConnectionPhase
+import cn.vectory.ocdroid.ui.ConnectionState
+import cn.vectory.ocdroid.ui.ContextUsage
+import cn.vectory.ocdroid.ui.HostState
+import cn.vectory.ocdroid.ui.SessionListState
+import cn.vectory.ocdroid.ui.SettingsState
+import cn.vectory.ocdroid.ui.TrafficState
+import cn.vectory.ocdroid.ui.UnreadState
 import cn.vectory.ocdroid.ui.TunnelActivationState
+import cn.vectory.ocdroid.ui.controller.allSessionsById
+import cn.vectory.ocdroid.ui.controller.questionRootIds
+import cn.vectory.ocdroid.ui.currentHostProfile
 import cn.vectory.ocdroid.ui.resolveModelDisplayName
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.theme.MenuItem
@@ -137,6 +150,157 @@ internal data class ChatTopBarState(
      */
     val currentModel: Message.ModelInfo? = null,
 )
+
+/**
+ * §L5a (UI god-file split): derives the [ChatTopBarState] from the same six +
+ * three slices ChatScaffold subscribes to. Extracted verbatim from the
+ * `derivedStateOf` block that used to live inline in ChatScaffold (only the
+ * slice-delegate reads are rewritten to `.value` reads on the passed [State]
+ * handles).
+ *
+ * §CORRECTNESS (L5a oracle trap): the slices are passed as [State] HANDLES,
+ * NOT values, and the `.value` reads happen INSIDE the [derivedStateOf]
+ * lambda. That is what lets the snapshot system track those reads and
+ * re-invalidate the derived value when a slice field changes. Passing slice
+ * VALUES as parameters would evaluate the arguments in the *recomposition*
+ * scope (so the snapshot would track them at the call site, not inside the
+ * derived lambda) while the `remember` keys below do NOT include the
+ * slices — the top bar would freeze on the first composition for
+ * connection / traffic / unread / todo / session-list-only changes.
+ *
+ * The [remember] keys are intentionally EXACTLY `(noHostFallback,
+ * effectiveAgent, effectiveModel)`. [effectiveAgent] / [effectiveModel] stay
+ * value-params AND keys (their freshness mechanism): the lambda captures
+ * them as plain values, so without the key the derivedStateOf would remember
+ * its first-composition snapshot of them. The slice `.value` reads do NOT
+ * need to be keys because [derivedStateOf] tracks them via the snapshot
+ * system (adding them as keys would thrash memoization on every token /
+ * keystroke that flips a slice field). `noHostFallback` is a [String] that
+ * can never change at runtime; it stays a key purely to mirror the prior
+ * inline behaviour (harmless).
+ *
+ * [cachedContextUsageState] is a [State] (read inside the lambda) — same
+ * invariant: it MUST NOT be a `remember` key, otherwise recomputing the
+ * derivedStateOf on every context-usage update would defeat the purpose.
+ *
+ * @param sessionListState  State handle for `chatVM.sessionListFlow`.
+ * @param chatState         State handle for `chatVM.chatFlow`.
+ * @param settingsState     State handle for `orchestratorVM.settingsFlow`.
+ * @param connectionState   State handle for `chatVM.connectionFlow`.
+ * @param hostState         State handle for `orchestratorVM.hostFlow`.
+ * @param unreadState       State handle for `chatVM.unreadFlow`.
+ * @param trafficState      State handle for `connectionVM.trafficFlow`.
+ * @param composerState     State handle for `composerVM.composerFlow`.
+ * @param cachedContextUsageState State handle for the caller's
+ *   `cachedContextUsage` (a `mutableStateOf<ContextUsage?>`).
+ * @param effectiveAgent    pre-derived `String?` (pendingAgent ?: session ?:
+ *   infer) — passed as a VALUE because the caller already `remember`s it
+ *   against the right keys.
+ * @param effectiveModel    pre-derived `Message.ModelInfo?` (same pattern).
+ * @param noHostFallback    localised "No host" fallback string.
+ */
+@Composable
+internal fun rememberChatTopBarState(
+    sessionListState: State<SessionListState>,
+    chatState: State<ChatState>,
+    settingsState: State<SettingsState>,
+    connectionState: State<ConnectionState>,
+    hostState: State<HostState>,
+    unreadState: State<UnreadState>,
+    trafficState: State<TrafficState>,
+    composerState: State<ComposerState>,
+    cachedContextUsageState: State<ContextUsage?>,
+    effectiveAgent: String?,
+    effectiveModel: Message.ModelInfo?,
+    noHostFallback: String,
+): State<ChatTopBarState> = remember(noHostFallback, effectiveAgent, effectiveModel) {
+    derivedStateOf {
+        val curHostProfile = currentHostProfile(
+            hostState.value.hostProfiles,
+            hostState.value.currentHostProfileId,
+        )
+        // §nav-redesign (2026-07-13): populate openSessions for the restored
+        // SessionTabStrip (second row under ChatTopBar). openSessionIds is
+        // root-only + capped at 8 by the session domain, but we defend at
+        // the consumer too: a stale/legacy child id persisted in
+        // openSessionIds must never render as a top-level tab. Associate-by
+        // once for O(1) resolution (8 ids × ~500 sessions otherwise O(n×m)).
+        //
+        // §Q14 (title union): resolve curSession through the UNION store
+        // (root + directorySessions + childSessions) so a sub-agent /
+        // cross-workdir current session produces its real title instead of
+        // degrading to the app name. The same map backs parentSessionTitle
+        // (parent may itself be a non-root directory/child session) and
+        // openSessions. topBarSessions appends curSession when it is not
+        // already in the root list so ChatTopBar's `state.sessions.find
+        // { it.id == currentSessionId }` (ChatTopBar.kt) hits for child
+        // sessions too — the SessionTabStrip still filters parentId==null
+        // below, so a child is never rendered as a top-level tab.
+        val sessionsById = allSessionsById(
+            sessionListState.value.sessions,
+            sessionListState.value.directorySessions,
+            sessionListState.value.childSessions,
+        )
+        val curSession = chatState.value.currentSessionId?.let { sessionsById[it] }
+        val topBarSessions = if (curSession != null && sessionListState.value.sessions.none { it.id == curSession.id }) {
+            sessionListState.value.sessions + curSession
+        } else {
+            sessionListState.value.sessions
+        }
+        val openSessions = sessionListState.value.openSessionIds
+            .mapNotNull { sessionsById[it] }
+            .filter { it.parentId == null && !it.isArchived }
+        ChatTopBarState(
+            sessions = topBarSessions,
+            currentSessionId = chatState.value.currentSessionId,
+            sessionStatuses = sessionListState.value.sessionStatuses,
+            hasMoreSessions = sessionListState.value.hasMoreSessions,
+            isLoadingMoreSessions = sessionListState.value.isLoadingMoreSessions,
+            isRefreshingSessions = sessionListState.value.isRefreshingSessions,
+            expandedSessionIds = sessionListState.value.expandedSessionIds,
+            agents = settingsState.value.agents.filter { it.isVisible },
+            // §chat-ux-batch T7 (B2) + T8 (B3): display source = effective
+            // agent (pending ?: infer ?: null). The legacy global
+            // `SettingsState.selectedAgentName` field was deleted in T8;
+            // the parameter is renamed `currentAgentName` to avoid the
+            // false-positive grep on the deleted field name.
+            currentAgentName = effectiveAgent,
+            contextUsage = cachedContextUsageState.value,
+            sessionTodos = sessionListState.value.sessionTodos[chatState.value.currentSessionId ?: ""] ?: emptyList(),
+            hostName = curHostProfile?.name ?: noHostFallback,
+            isConnected = connectionState.value.isConnected,
+            isConnecting = connectionState.value.isConnecting,
+            connectionPhase = connectionState.value.connectionPhase,
+            hostProfiles = hostState.value.hostProfiles,
+            currentHostProfileId = hostState.value.currentHostProfileId,
+            tunnelActivationState = connectionState.value.tunnelActivationState,
+            showTunnelAuth = (curHostProfile?.tunnelPasswordId != null),
+            unreadSessions = unreadState.value.unreadSessions,
+            questionSessionIds = questionRootIds(sessionListState.value.pendingQuestions, sessionsById),
+            draftWorkdir = composerState.value.draftWorkdir,
+            parentSessionId = curSession?.parentId,
+            parentSessionTitle = curSession?.parentId?.let { pid ->
+                sessionsById[pid]?.displayName
+            },
+            trafficSent = trafficState.value.trafficSent,
+            trafficReceived = trafficState.value.trafficReceived,
+            serverVersion = connectionState.value.serverVersion,
+            providers = settingsState.value.providers,
+            disabledModels = settingsState.value.disabledModels,
+            // §chat-ux-batch T7 (B2): display source = effectiveModel
+            // (pending ?: infer ?: null) for the picker / top-bar.
+            // ChatState.currentModel is intentionally RETAINED (T8-C2)
+            // as the load/compact mirror consumed by
+            // ChatViewModel.compactSession() — NOT deleted.
+            currentModel = effectiveModel,
+            // §nav-redesign: consumed by the restored SessionTabStrip
+            // (rendered as the TopAppBar's second row, directly after
+            // ChatTopBar in the column below). Empty list short-circuits
+            // inside SessionTabStrip (PrimaryScrollableTabRow guard).
+            openSessions = openSessions,
+        )
+    }
+}
 
 internal data class ChatTopBarActions(
     val onSelectSession: (String) -> Unit,
