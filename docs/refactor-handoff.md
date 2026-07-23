@@ -17,6 +17,8 @@
   - `950d6b3` — N1：6a UI 工厂 3/5/16 ‖ L3b ForegroundNotificationPublisher ‖ θ-14 autoSelect/sweepPendingCreateIds（post-release 遗留子项收口）
   - `4a0a4d1` — ζ-3 首子步：SlimGetRepository 薄 GET 委托 ‖ 类型外提 ‖ cluster 9 合并（domain-delegate + compat-facade 起步）
   - `287f476` — η cluster 6：withHostReconfiguration barrier fold（CD3 三分支 preamble 折叠，~120→~25 LOC）
+  - `0673dfa` — η Step 2 L5b ‖ L5c：HostProfileEditorDialog + SessionCard 外提（pure move + kover excludes）
+  - `fcab357` — η Step 2 L5a：ChatScaffold 拆 T rememberChatTopBarState ‖ D ChatDrawerHost ‖ P ChatSessionPager
 
 ## 2. 双边 §5（slimapi token-stream）— 已闭环
 
@@ -44,10 +46,14 @@
 **不变量参考（L4a0，未触动，留备查）**：I5 slimStateLock 实例共享 / I6 configure() 原子事务 / I7 @Synchronized 序列化 / I8 serverCompatProfile 写点 / I15 coldStartSlimSync token threading / I20 公共 FQN / rev-4 双监视器锁序。详见 §4 exp-1。
 
 ### 6a UI 工厂（3/5/16）— 低风险穿插（plan line 136，ζ-3 前可做）
-### η — cluster 6 → L5b（`withHostReconfiguration` 三分支契约；cluster 6 须 6 绿再拆）
-- **Step 1 ✅** cluster 6 barrier fold（`287f476`，rev-grok 9.7 GO + check.sh 绿）：`beginReconfigureBoundary()` + `withHostReconfiguration(needsReconfigure,body)` suspend 三分支 fold；7 站点折叠，`resetLocalDataAndResync` 排除（deferred CancelSse）。设计 ora-1 / 实现 fix-10 / 侦察 exp-2。
-- **Step 2 ⬜** L5b ‖ L5a ‖ L5c（UI 文件拆，须 cluster 6 绿后）— **当前下一步**
-### θ — 收尾波
+### η — cluster 6 → L5b ‖ L5a ‖ L5c — ✅ 全绿收官
+- **Step 1 ✅** cluster 6 barrier fold（`287f476`，rev-grok 9.7 GO）：`beginReconfigureBoundary()` + `withHostReconfiguration(needsReconfigure,body)` suspend 三分支 fold；7 站点折叠，`resetLocalDataAndResync` 排除（deferred CancelSse）。设计 ora-1 / 实现 fix-10 / 侦察 exp-2。
+- **Step 2 ✅** L5b ‖ L5a ‖ L5c（UI god-file 拆，均同包 internal）：
+  - **L5b**（`0673dfa`）：HostProfileEditorDialog + CompactCert* + CaStage 外提；rev-grok 9.4 条件GO（pure-move 全 PASS，kover exclude 补→`--full`绿）。侦察 exp-4 / 实现 fix-12。
+  - **L5c**（`0673dfa`）：SessionCard + SessionStatusDot + formatTime 外提；rev-grok 10.0 GO。侦察 exp-5 / 实现 fix-11。
+  - **L5a**（`fcab357`）：ChatScaffold 1392→~853 行；T `rememberChatTopBarState`（**State<T> 句柄非值，避 derivedStateOf 静默 stale 陷阱**）‖ D `ChatDrawerHost` ‖ P `ChatSessionPager`；rev-grok 9.8 GO（4 invariant 全 PASS，invariant 1 逐读核验全 `.value`）。设计 ora-2 / 实现 fix-13 / 侦察 exp-3。
+- 每子步 `check.sh --full` 绿（compile + 单测 + lint + koverVerify）。η 全 wave gate ≥9.7。
+### θ — 收尾波（**当前下一步**）：cluster 18（publishIdleNotification，post-L1b 独立）∥ cluster 20（emitEffect 基类，末波）；cluster 14 已在 N1 做；2/8 延后低优先。
 
 ## 4. 关键产物
 
