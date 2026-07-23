@@ -167,7 +167,7 @@ class SlimGoldenPathIntegrationTest {
             settingsManager = settingsManager,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            isSlimMode = { true },
+            supportsWatermarkResync = { true },
             repository = repository,
         )
 
@@ -686,7 +686,7 @@ class SlimGoldenPathIntegrationTest {
                 settingsManager = settingsManager,
                 effects = effects,
                 currentServerGroupFp = { "test-fp" },
-                isSlimMode = { true },
+                supportsWatermarkResync = { true },
                 repository = spiedRepo,
             )
 

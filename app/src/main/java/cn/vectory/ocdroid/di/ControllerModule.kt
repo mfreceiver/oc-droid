@@ -219,11 +219,13 @@ object ControllerModule {
         // sessionId→workdir via SessionTree.allSessionsById, builds the
         // composite key, and calls applySseStatus with clock()).
         statusAggregatorInput = statusAggregatorInput,
-        // Cluster A / Phase 2: runtime slim provider + repository for
-        // session.digest / slim questions / cold-start snapshot fold.
-        // isSlimMode is a thunk so host-profile switches that flip
-        // repository.isSlimMode are observed without reconstructing SSC.
-        isSlimMode = { repository.isSlimMode },
+        // Cluster A / Phase 2: runtime watermark-resync capability + repository
+        // for session.digest / slim questions / cold-start snapshot fold.
+        // supportsWatermarkResync is a thunk so host-profile switches that flip
+        // repository.supportsWatermarkResync are observed without reconstructing
+        // SSC. ι-Q3b: reads the OCR forwarder (ι-A) in place of the prior raw
+        // mode flag — byte-for-byte equal today (both = slimConnection/slim mode).
+        supportsWatermarkResync = { repository.supportsWatermarkResync },
         repository = repository,
         reconcileDispatcher = Dispatchers.Default,
     )

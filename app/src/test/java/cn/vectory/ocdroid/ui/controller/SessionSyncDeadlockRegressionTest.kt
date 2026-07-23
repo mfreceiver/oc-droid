@@ -132,7 +132,7 @@ class SessionSyncDeadlockRegressionTest {
         settingsManager = settingsManager,
         effects = effects,
         currentServerGroupFp = { "test-fp" },
-        isSlimMode = { true },
+        supportsWatermarkResync = { true },
         repository = repo,
         reconcileDispatcher = workerDispatcher,
     )

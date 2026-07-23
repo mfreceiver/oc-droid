@@ -155,7 +155,7 @@ class SessionSyncCoordinatorResyncTest {
             settingsManager = settingsManager,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            isSlimMode = { slimMode },
+            supportsWatermarkResync = { slimMode },
             repository = repository,
             reconcileDispatcher = UnconfinedTestDispatcher(),
         )
@@ -769,7 +769,7 @@ class SessionSyncCoordinatorResyncTest {
             settingsManager = settingsManager,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            isSlimMode = { true },
+            supportsWatermarkResync = { true },
             repository = repository,
             reconcileDispatcher = worker,
         )
@@ -817,7 +817,7 @@ class SessionSyncCoordinatorResyncTest {
             settingsManager = settingsManager,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            isSlimMode = { true },
+            supportsWatermarkResync = { true },
             repository = repository,
             reconcileDispatcher = worker,
         )
@@ -878,7 +878,7 @@ class SessionSyncCoordinatorResyncTest {
             settingsManager = settingsManager,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            isSlimMode = { true },
+            supportsWatermarkResync = { true },
             repository = repository,
             reconcileDispatcher = worker,
         )

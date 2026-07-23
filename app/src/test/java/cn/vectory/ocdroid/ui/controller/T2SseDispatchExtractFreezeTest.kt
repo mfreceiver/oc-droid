@@ -146,7 +146,7 @@ class T2SseDispatchExtractFreezeTest {
             settingsManager = settingsManager,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            isSlimMode = { false },
+            supportsWatermarkResync = { false },
             repository = repository,
             reconcileDispatcher = UnconfinedTestDispatcher(),
         )
@@ -159,7 +159,7 @@ class T2SseDispatchExtractFreezeTest {
             settingsManager = settingsManager,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            isSlimMode = { true },
+            supportsWatermarkResync = { true },
             repository = repository,
             reconcileDispatcher = UnconfinedTestDispatcher(),
         )

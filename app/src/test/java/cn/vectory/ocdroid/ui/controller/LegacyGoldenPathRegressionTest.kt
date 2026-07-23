@@ -97,7 +97,7 @@ class LegacyGoldenPathRegressionTest : MainViewModelTestBase() {
     }
 
     /**
-     * Legacy coordinator (`isSlimMode = { false }`) with the inherited
+     * Legacy coordinator (`supportsWatermarkResync = { false }`) with the inherited
      * `repository` mock wired INTO the SSC. Used by P0-2/3/4/5/6.
      *
      * P0-4 (reconcileSession) and P0-5 (applySlimColdStartSnapshot) NEED a
@@ -118,7 +118,7 @@ class LegacyGoldenPathRegressionTest : MainViewModelTestBase() {
             settingsManager = settingsManager,
             effects = legacyEffects,
             currentServerGroupFp = { "test-fp" },
-            isSlimMode = { false },
+            supportsWatermarkResync = { false },
             repository = repository,
             reconcileDispatcher = UnconfinedTestDispatcher(),
         )

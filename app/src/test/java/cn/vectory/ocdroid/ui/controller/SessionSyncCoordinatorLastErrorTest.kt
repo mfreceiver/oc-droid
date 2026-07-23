@@ -121,7 +121,7 @@ class SessionSyncCoordinatorLastErrorTest {
             settingsManager = settingsManager,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            isSlimMode = { slimMode },
+            supportsWatermarkResync = { slimMode },
             repository = repository,
             reconcileDispatcher = UnconfinedTestDispatcher(),
         )

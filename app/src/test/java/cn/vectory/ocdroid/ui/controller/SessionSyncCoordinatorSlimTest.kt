@@ -115,7 +115,7 @@ class SessionSyncCoordinatorSlimTest {
             settingsManager = settingsManager,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            isSlimMode = { slimMode },
+            supportsWatermarkResync = { slimMode },
             repository = repository,
             reconcileDispatcher = UnconfinedTestDispatcher(),
         )
@@ -850,7 +850,7 @@ class SessionSyncCoordinatorSlimTest {
                 settingsManager = settingsManager,
                 effects = effects,
                 currentServerGroupFp = { "test-fp" },
-                isSlimMode = { true },
+                supportsWatermarkResync = { true },
                 repository = realRepo,
             )
             c.loadPendingQuestionsAllWorkdirs(realRepo)
@@ -941,7 +941,7 @@ class SessionSyncCoordinatorSlimTest {
                 settingsManager = settingsManager,
                 effects = effects,
                 currentServerGroupFp = { "test-fp" },
-                isSlimMode = { true },
+                supportsWatermarkResync = { true },
                 repository = realRepo,
             )
             c.loadPendingQuestionsAllWorkdirs(realRepo)

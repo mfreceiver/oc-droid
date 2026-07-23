@@ -178,13 +178,25 @@ class SessionSyncCoordinator(
      */
     internal val clock: () -> Long = { clockOverride?.invoke() ?: System.currentTimeMillis() },
     /**
-     * Cluster A / Phase 2 (slim SSE): runtime slim-mode provider. Read on
-     * every use (do NOT cache) so a host-profile switch that flips
-     * [OpenCodeRepository.isSlimMode] is observed without reconstructing
-     * this coordinator. Default `false` keeps legacy/test constructions
-     * byte-identical.
+     * Cluster A / Phase 2 (slim SSE): runtime watermark-resync capability
+     * provider. Read on every use (do NOT cache) so a host-profile switch
+     * that flips [OpenCodeRepository.supportsWatermarkResync] is observed
+     * without reconstructing this coordinator. Default `false` keeps
+     * legacy/test constructions byte-identical.
+     *
+     * **ι-Q3b rename — behavior equivalence**: this thunk was renamed from
+     * the prior raw mode-flag thunk to the capability name
+     * [supportsWatermarkResync]; the two are byte-for-byte equal today —
+     * both resolve to `slimConnection` / slim mode (see
+     * [cn.vectory.ocdroid.data.repository.ServerCompatProfile.supportsWatermarkResync],
+     * which is `= slimConnection`). The rename only clears the prior
+     * raw-mode literal from L4+ to satisfy plan §6 grep acceptance
+     * (「L4+ raw-slim-flag 零命中」); no reconcile/watermark gate logic
+     * changed — only which named boolean is read. The [slimMode] override
+     * below keeps its name (SseDispatchHost interface contract, §6
+     * SSE-mechanism exemption) and only re-routes its read to this thunk.
      */
-    private val isSlimMode: () -> Boolean = { false },
+    private val supportsWatermarkResync: () -> Boolean = { false },
     /**
      * Cluster A / Phase 2 (slim SSE): repository used by the `session.digest`
      * branch ([applySlimDigest] + [OpenCodeRepository.getSlimapiMessagesSince])
@@ -1055,7 +1067,7 @@ class SessionSyncCoordinator(
             .incrementAndGet()
     }
     override fun sseClock(): Long = clock()
-    override fun slimMode(): Boolean = isSlimMode()
+    override fun slimMode(): Boolean = supportsWatermarkResync()
     override fun isFlushActiveForPart(partId: String): Boolean = flushJobs[partId]?.isActive == true
     override fun handleSessionDigest(event: SSEEvent) { handleSessionDigestImpl(event) }
 
@@ -1088,7 +1100,7 @@ class SessionSyncCoordinator(
         // Cluster A / Phase 2 (P2.3): slim mode aggregates cross-directory
         // pending questions in ONE `/slimapi/questions` call (routeToken
         // preserved). Legacy keeps the multi-workdir fan-out below.
-        if (isSlimMode()) {
+        if (supportsWatermarkResync()) {
             loadPendingQuestionsSlim(repository)
             return
         }
@@ -1570,7 +1582,7 @@ class SessionSyncCoordinator(
      *
      * # Idle/non-slim guard
      *
-     * When [repository] is null OR [isSlimMode] is false, this is a no-op
+     * When [repository] is null OR [supportsWatermarkResync] is false, this is a no-op
      * ([ReconcileResult.NoRepository]). The legacy non-slim path is
      * byte-for-byte unchanged (digest is recognized but not reconciled).
      *
@@ -1580,7 +1592,7 @@ class SessionSyncCoordinator(
      */
     internal suspend fun reconcileSession(sid: String, mode: ReconcileMode): ReconcileResult {
         val repo = repository ?: return ReconcileResult.NoRepository(sid)
-        if (!isSlimMode()) return ReconcileResult.NoRepository(sid)
+        if (!supportsWatermarkResync()) return ReconcileResult.NoRepository(sid)
         val uiSnapshot = ResyncUiSnapshot(slices.chat.value.currentSessionId)
 
         // C-D3 v2 §1.8: public workflow entry captures once before its
@@ -1661,7 +1673,7 @@ class SessionSyncCoordinator(
         // stripe) ALSO short-circuits for legacy non-slim mode. The
         // legacy non-slim path is byte-for-byte unchanged: digest is
         // recognized but no probe / fetch / state mutation lands.
-        if (!isSlimMode()) return ReconcileResult.NoRepository(sid)
+        if (!supportsWatermarkResync()) return ReconcileResult.NoRepository(sid)
         val state = repo.getSlimSessionState(sid) ?: SlimSessionState(sessionId = sid)
         val probe = repo.probeLatestSlim(sid)
         // ── probe failure branches (uniform across all modes) ────────────
@@ -1982,7 +1994,7 @@ class SessionSyncCoordinator(
                 // T1d P1-3: slim-only ClearLocal path — fail-fast in legacy
                 // mode before any chat wipe (structural; normal legacy never
                 // reaches ClearLocal because reconcile early-returns).
-                requireSlimOnlyStateWrite(isSlimMode(), "clear-local")
+                requireSlimOnlyStateWrite(supportsWatermarkResync(), "clear-local")
 
                 if (liveSessionId == sid) {
                     // T1b: content-only wipe (messages + partsByMessage);
@@ -2219,7 +2231,7 @@ class SessionSyncCoordinator(
         resyncUiSnapshot: ResyncUiSnapshot,
     ): Map<String, ReconcileResult> {
         val repo = repository ?: return emptyMap()
-        if (!isSlimMode() || catchUpSet.isEmpty()) return emptyMap()
+        if (!supportsWatermarkResync() || catchUpSet.isEmpty()) return emptyMap()
 
         // C-D3 v2 §1.11: prefer the orchestrator-supplied token; fall
         // back to a fresh capture for the legacy single-call surface.
@@ -2346,7 +2358,7 @@ class SessionSyncCoordinator(
         bypassIntervalCheck: Boolean = false,
     ): Map<String, ReconcileResult> {
         val repo = repository ?: return emptyMap()
-        if (!isSlimMode()) return emptyMap()
+        if (!supportsWatermarkResync()) return emptyMap()
 
         // Cadence guard: if the cadence declines (stale gen / too soon / in-flight),
         // skip the sweep entirely (caller may still have the partial/single-flight
@@ -2516,7 +2528,7 @@ class SessionSyncCoordinator(
     private fun mergeSlimMessagesIntoChat(items: List<MessageWithParts>, authoritative: Boolean = false) {
         if (items.isEmpty()) return
         // T1d P1-2: slim-only state write — fail-fast in legacy mode.
-        requireSlimOnlyStateWrite(isSlimMode(), "merge-slim-messages")
+        requireSlimOnlyStateWrite(supportsWatermarkResync(), "merge-slim-messages")
         slices.store.dispatch(cn.vectory.ocdroid.ui.AppAction.SlimMessagesMerged(items, authoritative))
     }
 
@@ -2574,7 +2586,7 @@ class SessionSyncCoordinator(
      */
     fun applySlimColdStartSnapshot(snapshot: SlimColdStartSnapshot): Boolean {
         // T1d P1-1: fail-fast before any repo / token / fold work when not slim.
-        requireSlimOnlyStateWrite(isSlimMode(), "cold-start-snapshot")
+        requireSlimOnlyStateWrite(supportsWatermarkResync(), "cold-start-snapshot")
         val repo = repository ?: return false
 
         // C-D3 v2 §3.6: token-gated snapshot fold. The token is captured
@@ -2607,7 +2619,7 @@ class SessionSyncCoordinator(
     ): Boolean {
         // T1d P1-1: same entry guard on the token-taking overload (direct
         // callers / tests must not bypass via token path).
-        requireSlimOnlyStateWrite(isSlimMode(), "cold-start-snapshot")
+        requireSlimOnlyStateWrite(supportsWatermarkResync(), "cold-start-snapshot")
         val repo = repository ?: return false
 
         return repo.commitIfSlimTokenCurrent(token) {

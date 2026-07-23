@@ -143,7 +143,7 @@ class T1dSlimOnlyStateWriteOwnershipTest {
             settingsManager = settingsManager,
             effects = cn.vectory.ocdroid.ui.SharedEffectBus(),
             currentServerGroupFp = { "test-fp" },
-            isSlimMode = { false }, // LEGACY mode
+            supportsWatermarkResync = { false }, // LEGACY mode
             repository = repository,
         )
 

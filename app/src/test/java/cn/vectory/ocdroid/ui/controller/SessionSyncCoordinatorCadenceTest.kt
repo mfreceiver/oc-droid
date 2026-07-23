@@ -107,7 +107,7 @@ class SessionSyncCoordinatorCadenceTest {
             settingsManager = settingsManager,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            isSlimMode = { true },
+            supportsWatermarkResync = { true },
             repository = repository,
             reconcileDispatcher = UnconfinedTestDispatcher(),
         ).also { c ->
@@ -300,7 +300,7 @@ class SessionSyncCoordinatorCadenceTest {
             settingsManager = settingsManager,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            isSlimMode = { true },
+            supportsWatermarkResync = { true },
             repository = repository,
             reconcileDispatcher = StandardTestDispatcher(coordScope.testScheduler),
         ).also { it.resyncClockMsForTest = { testClockMs } }
@@ -347,7 +347,7 @@ class SessionSyncCoordinatorCadenceTest {
             settingsManager = settingsManager,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            isSlimMode = { true },
+            supportsWatermarkResync = { true },
             repository = repository,
             reconcileDispatcher = StandardTestDispatcher(coordScope.testScheduler),
         ).also { it.resyncClockMsForTest = { testClockMs } }
