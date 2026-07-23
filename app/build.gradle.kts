@@ -288,6 +288,10 @@ kover {
                     // ui.sessions (Composable)
                     "cn.vectory.ocdroid.ui.sessions.SessionsScreenKt",
                     "cn.vectory.ocdroid.ui.sessions.DirectoryPickerKt",
+                    // L5c: SessionCard split out of SessionsScreenKt — internal
+                    // @Composable + private helpers (SessionStatusDot, formatTime);
+                    // no public testable type. Parent-file coverage-parity.
+                    "cn.vectory.ocdroid.ui.sessions.SessionCardKt",
                     // §round-B: ui.workspace Composable-heavy surfaces (the
                     // pure helpers in WorkspaceVcsHelpersKt remain in the
                     // coverage set — same extraction pattern as SessionsScreen).
@@ -303,6 +307,12 @@ kover {
                     "cn.vectory.ocdroid.ui.settings.ModelManagementSectionKt",
                     "cn.vectory.ocdroid.ui.settings.DebugLogSectionKt",
                     "cn.vectory.ocdroid.ui.settings.HostProfilesManagerScreenKt",
+                    // L5b: HostProfileEditorDialog split out of
+                    // HostProfilesManagerScreenKt — Composable-heavy dialog +
+                    // private cert-row helpers. CaStage (public sealed) moved
+                    // with it from the (already-excluded) Screen file, so this
+                    // maintains the parent's coverage-parity.
+                    "cn.vectory.ocdroid.ui.settings.HostProfileEditorDialogKt",
                     "cn.vectory.ocdroid.ui.chat.TodoListPanelKt",
                     // §coverage-config (round 2): additional pure @Composable UI
                     // surfaces that were missing from the original exclude set

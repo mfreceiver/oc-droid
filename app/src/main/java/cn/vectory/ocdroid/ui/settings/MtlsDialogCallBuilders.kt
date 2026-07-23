@@ -29,7 +29,7 @@ import kotlinx.coroutines.withContext
  * Same package as [HostProfilesManagerScreen] / [MtlsDialogCallBuildersTest],
  * so the `internal` symbols are visible to both the dialog (call site) and
  * the unit tests (no import needed). `CaStage` lives in
- * [HostProfilesManagerScreen] (used by the dialog) and is referenced by the
+ * [HostProfileEditorDialog] (used by the dialog) and is referenced by the
  * data classes here via same-package access.
  */
 
