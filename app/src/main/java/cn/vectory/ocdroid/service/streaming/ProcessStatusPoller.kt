@@ -600,7 +600,7 @@ class ProcessStatusPoller internal constructor(
          * T13-C4 backoff base delay in ms (jitter ±20%); doubles per
          * retry: 200 / 400 / 800 / 1600 / 3200 / 6400 / 12800 / 25600 →
          * capped at [BACKOFF_MAX_MS]. Mirrors
-         * [cn.vectory.ocdroid.data.repository.OpenCodeRepository.EXPAND_BACKOFF_BASE_MS]
+         * [cn.vectory.ocdroid.data.repository.ExpandBatchEngine.EXPAND_BACKOFF_BASE_MS]
          * for cross-feature consistency.
          */
         const val BACKOFF_BASE_MS = 200L
