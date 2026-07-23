@@ -13,8 +13,8 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
+import cn.vectory.ocdroid.di.publishIdleNotification
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
@@ -290,34 +290,16 @@ internal class SseNotificationBridge internal constructor(
         // (`question.asked`) path is intentionally NOT under this lock —
         // decision dedup is in-memory only and has no deferred
         // side-effects.
-        idleMutex.withLock {
-            // T5-C4a + T5-review I1: same atomic-claim contract as the question
-            // branch. The poller's idleSnapshot shares this set; the key
-            // includes idleSince so a new idle cycle on the same root
-            // re-notifies (matches the poller's behavior).
-            val token = idleDedup.claim(alert.key) ?: return@withLock
-            try {
-                // T5-review I2: FINAL foreground boundary — see [handleQuestionAsked].
-                if (isInForeground()) return@withLock
-                val posted = notifier.notifyIdle(
-                    rootId = alert.rootId,
-                    title = alert.title,
-                    key = alert.key,
-                )
-                if (posted) {
-                    idleDedup.complete(alert.key, token)
-                    // Bug-1-fix-B: persist the completed idle key via the ALM
-                    // seam so it survives process death. Without this the key
-                    // would be lost on restart (only self-healing ≤30s later
-                    // via the poller's post-prune save). Best-effort; the ALM
-                    // wrapper swallows any persistence failure. NOT invoked on
-                    // the decision path — decision dedup is in-memory only.
-                    onIdlePosted(alert.key)
-                }
-            } finally {
-                idleDedup.release(alert.key, token)
-            }
-        }
+        // T5-re-review I2-R core extracted to [publishIdleNotification]; no
+        // withContext wrapper — the bridge collector is already on Main.
+        publishIdleNotification(
+            dedup = idleDedup,
+            notifier = notifier,
+            mutex = idleMutex,
+            alert = alert,
+            isInForeground = { isInForeground() },
+            onPersist = { onIdlePosted(it) },
+        )
     }
 
     companion object {

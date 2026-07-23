@@ -526,43 +526,30 @@ class AppLifecycleMonitor @Inject constructor(
         // above stays OUTSIDE the lock — no claim has been taken yet, so a
         // stale observation cannot clobber anything. See [idleMutex] for the
         // full deadlock / ordering analysis.
-        idleMutex.withLock {
-            val token = idleNotificationSnapshot.claim(alert.key) ?: run {
-                Log.d(TAG, "idle claim LOST key=${alert.key} (already in dedup)")
-                return@withLock
-            }
-            try {
-                withContext(Dispatchers.Main.immediate) {
-                    if (_isInForeground.value) {
-                        Log.d(TAG, "idle notify SUPPRESSED (foreground) key=${alert.key}")
-                        return@withContext
-                    }
-                    val notified = notifier.notifyIdle(alert.rootId, alert.title, alert.key)
-                    if (notified) {
-                        val completed = idleNotificationSnapshot.complete(alert.key, token)
-                        Log.d(
-                            TAG,
-                            "idle notify POSTED key=${alert.key} complete=$completed fg=${_isInForeground.value}",
-                        )
-                        // Bug-1-fix-C/race: persist the new Posted entry via the
-                        // additive mirror API (never a full-snapshot rewrite).
-                        // The prior `saveIdleKeys(snapshotPosted().keys)` was
-                        // called from BOTH this Main.immediate path AND the
-                        // Default post-prune path; two racing full-snapshot
-                        // writes could transiently drop a key, and each save
-                        // allocated + serialized the full set. addPostedIdle
-                        // mutates a single shared mirror under a lock — the
-                        // disk write is the exact delta. Best-effort; never
-                        // throws into the publish boundary.
-                        runCatching { dedupStore.addPostedIdle(alert.key) }
-                            .onFailure { Log.w(TAG, "Failed to persist idle dedup after notify key=${alert.key}", it) }
-                    } else {
-                        Log.d(TAG, "idle notify FAILED (permission denied) key=${alert.key}")
-                    }
-                }
-            } finally {
-                idleNotificationSnapshot.release(alert.key, token)
-            }
+        // T5-re-review I2-R core extracted to [publishIdleNotification]; the
+        // withContext(Main.immediate) wrapper is ALM-specific — the helper is
+        // suspend with no hardcoded dispatcher.
+        withContext(Dispatchers.Main.immediate) {
+            publishIdleNotification(
+                dedup = idleNotificationSnapshot,
+                notifier = notifier,
+                mutex = idleMutex,
+                alert = alert,
+                isInForeground = { _isInForeground.value },
+                onPersist = { key ->
+                    // Bug-1-fix-C/race: persist the new Posted entry via the
+                    // additive mirror API (never a full-snapshot rewrite).
+                    // Best-effort; never throws into the publish boundary.
+                    runCatching { dedupStore.addPostedIdle(key) }
+                        .onFailure { Log.w(TAG, "Failed to persist idle dedup after notify key=$key", it) }
+                },
+                onSuppressed = { Log.d(TAG, "idle notify SUPPRESSED (foreground) key=$it") },
+                onPosted = { key, completed ->
+                    Log.d(TAG, "idle notify POSTED key=$key complete=$completed fg=${_isInForeground.value}")
+                },
+                onFailed = { Log.d(TAG, "idle notify FAILED (permission denied) key=$it") },
+                onClaimLost = { Log.d(TAG, "idle claim LOST key=$it (already in dedup)") },
+            )
         }
     }
 
