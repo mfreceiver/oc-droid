@@ -14,6 +14,9 @@
   - `d4b22da` — 双边 C-1/C-2/C-3（token-stream）
   - `1986567` — 双边 token_memory_limit reconnect（联合终审 Option A）
   - `f448318` — ζ-2：L4a2 ExpandBatchEngine
+  - `950d6b3` — N1：6a UI 工厂 3/5/16 ‖ L3b ForegroundNotificationPublisher ‖ θ-14 autoSelect/sweepPendingCreateIds（post-release 遗留子项收口）
+  - `4a0a4d1` — ζ-3 首子步：SlimGetRepository 薄 GET 委托 ‖ 类型外提 ‖ cluster 9 合并（domain-delegate + compat-facade 起步）
+  - `287f476` — η cluster 6：withHostReconfiguration barrier fold（CD3 三分支 preamble 折叠，~120→~25 LOC）
 
 ## 2. 双边 §5（slimapi token-stream）— 已闭环
 
@@ -25,19 +28,25 @@
 
 ## 3. 剩余 refactor（plan v3 α→θ）
 
-### ζ-3 L4a3 — 最高风险，串行收尾（下一步）
-OCR domain-delegate + compat-facade + cluster **7**（slim 6 透孔删）· **9/22/24**（repository 重复）· **19**（checkHealth 双路委托）。原文件留 ~100 行 compat 门面。
-**必须保**（L4a0 不变量，详见 §4 exp-1）：
-- **I5** `slimStateLock` 实例共享（不能复制；domain-delegate 与 facade 同一锁）
-- **I6** `configure()` 原子事务（ticket→sslConfigFactory.configureClientCert→hostConfig.configure→rebuildClients→completeSlimReconfigure 不得拆）
-- **I7** `@Synchronized` monitor 序列化（configure ↔ currentSslConfig ↔ applyTofuDecision ↔ rebuildClients）
-- **I8** `serverCompatProfile` 写点（probeSlimapiHealth/checkHealthFor 尾部）
-- **I15** `coldStartSlimSync` token threading（外层 capture、内层 require）
-- **I20** 公共类型 FQN 向后兼容（`SlimColdStartSnapshot`/`SlimAggregationOutcome`/`TofuCaptureResult`/`SlimCommitToken` 等——发 typealias 或保留原位）
-- **rev-4 双监视器锁序约束**：TofuRepository 自带 `@Synchronized`；若 L4a3 暴露 TofuRepository 且允许不经 OCR 直调 → 反向锁序死锁。须文档化「必须先持 OCR monitor」或去 Tofu 侧锁。
+### ζ-3 L4a3 — ✅ 安全 scope 收官（commits `950d6b3` N1 / `4a0a4d1` ζ-3）
+**已落地**（domain-delegate 起步 + 类型外提 + cluster 9）：
+- 类型外提：`MessagesPage` / `SlimAggregationOutcome` / `SlimColdStartSnapshot`（保公共 FQN，I20）
+- `SlimGetRepository`：16 纯 GET wrapper 委托；`OpenCodeRepository.SlimCursorPartialException` FQN 兼容
+- cluster 9：`getMessagesPaged/Unanchored → getMessagesPagedImpl(anchored)`、Q/P → `getSlimapiAggregation` 泛型；单次 `isSlimMode` + watermark 在 `runSuspendCatching` 内（rev-grok 9.3 NO-GO→9.7 GO）
+- 每子步 rev-grok ≥9.7 GO + check.sh 绿
+
+**scope 修正（backlog 陈旧，勿重新争论）**：
+- **cluster 7**（slim 6 透孔删）= **resolved-by-design**：`T3RepositoryExtractFreezeTest@107-138` 锁死 6 个 `markSlim*`/`completeSlimReconfigure` 为 OCR 公共 API（注释："MUST remain accessible from outside the repo"）；生产 SSC + 6 测试 mock 经 `repo.` 调用。**保留为门面即正确**。
+- **cluster 19**（checkHealth 双路委托）= **全委托 NO-GO**：`probeSlimapiHealth` 用 `sslConfigFor`（held mTLS），`checkHealthFor` 用 `resolveProbe`（纯参）防 R2#1 mTLS 泄漏；全委托重引入泄漏。仅共享尾部（parseSlimapiHealth + I8 写点 + HealthResponse）可抽，~15 LOC 边际，**未做**。
+- **coldStartSlimSync 抽取** = **冻结测试约束/边际**：方法本身（freeze@141）+ `requireSlimTokenCurrent`（freeze@121）均锁 OCR，抽取只能 facade 式回调，净解耦有限且碰 I5/I15；**延后**。
+- **原「OCR 留 ~100 行门面」目标被冻结测试取代**（~40 公共方法 `hasMethod()` 锁定；冻结测试本为防 L4a3 过度抽取而设）。
+
+**不变量参考（L4a0，未触动，留备查）**：I5 slimStateLock 实例共享 / I6 configure() 原子事务 / I7 @Synchronized 序列化 / I8 serverCompatProfile 写点 / I15 coldStartSlimSync token threading / I20 公共 FQN / rev-4 双监视器锁序。详见 §4 exp-1。
 
 ### 6a UI 工厂（3/5/16）— 低风险穿插（plan line 136，ζ-3 前可做）
 ### η — cluster 6 → L5b（`withHostReconfiguration` 三分支契约；cluster 6 须 6 绿再拆）
+- **Step 1 ✅** cluster 6 barrier fold（`287f476`，rev-grok 9.7 GO + check.sh 绿）：`beginReconfigureBoundary()` + `withHostReconfiguration(needsReconfigure,body)` suspend 三分支 fold；7 站点折叠，`resetLocalDataAndResync` 排除（deferred CancelSse）。设计 ora-1 / 实现 fix-10 / 侦察 exp-2。
+- **Step 2 ⬜** L5b ‖ L5a ‖ L5c（UI 文件拆，须 cluster 6 绿后）— **当前下一步**
 ### θ — 收尾波
 
 ## 4. 关键产物
