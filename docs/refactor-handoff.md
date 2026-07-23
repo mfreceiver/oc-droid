@@ -30,11 +30,11 @@
 - **延后（post-release，非阻塞）**：C-4（doc 对齐，本轮做）· V-B（stunnel 运维 idle 断实证）· token_hub 拆包。
 - slimapi 主会话：`ses_075953166ffeUULAsWATEcjoS8`（cross-session via `session_send`；用户协调）。
 
-### 2.1 D-MB-P `TOKEN_MEMORY_LIMIT` flip — ✅ 代码就绪 / ⛔ v0.13.2 发版被服务端依赖阻塞
+### 2.1 D-MB-P `TOKEN_MEMORY_LIMIT` flip — ✅ v0.13.2 含 flip 发版（用户协调服务端同步）/ ⚠️ orphan-delta 窗口待服务端闭合
 
 - **flip 已实现 + 门控 GO**（rev-20 9.8）：`ResyncReason.triggersReconnect` 去掉 `TOKEN_MEMORY_LIMIT`（现 `true` 仅 `RECONNECT_NO_REPLAY`+`SUBSCRIBER_BACKPRESSURE`）；token_memory_limit 改走 **same-connection re-anchor**（clear overlay + `/since`，与 `SESSION_IDLE` 同 client 路径，无新逻辑）；KDoc 更新（MB-P-S1 前置 + rollback）；3 测试翻转（Frame/Reducer/Coordinator）。
-- **⛔ v0.13.2 绝不能单独发**：flip 安全性依赖服务端 MB-P-S1（向**既有 subscriber** 重发 current key）。服务端最新**发版** = v0.5.0；S-2（main `7a1861a`）/ O1（main `c21ca3b`）/ MB-P-S1（**dev `3e4b3b7`，未合 main**）**全部未 tag 未发**。生产 v0.5.0 无同流重发 → flip 单发 = **delta orphan / 实时流死亡**（即旧注释 `TokenStreamFrame.kt:229-238` 所述旧行为）。
-- **发版前置**：等 slimapi 发含 S-2+O1+MB-P-S1 的服务端版本 → 通知 ocdroid 服务端 tag → ocdroid lockstep 发 v0.13.2。
+- **⚠️ orphan-delta 窗口（用户承担服务端同步）**：v0.13.2 含 flip 已发版（用户决定，已 flag 风险）。flip 安全性依赖服务端 MB-P-S1（向**既有 subscriber** 重发 current key）。服务端最新**发版** = v0.5.0；S-2（main `7a1861a`）/ O1（main `c21ca3b`）/ MB-P-S1（**dev `3e4b3b7`，未合 main**）**全部未 tag 未发**。生产 v0.5.0 无同流重发 → v0.13.2 用户打 v0.5.0 服务端 = **delta orphan / 实时流死亡**（旧注释 `TokenStreamFrame.kt:229-238` 所述旧行为）。**用户承诺协调 slimapi 服务端同步（发 S-2+O1+MB-P-S1）闭合此窗口**——APK 装机用户驱动，服务端须早于或同步于 v0.13.2 公开可用。
+- **服务端同步（用户协调）**：v0.13.2 已发；等 slimapi 发含 S-2+O1+MB-P-S1 的服务端版本（用户协调时机）→ 通知 ocdroid 服务端 tag 对齐。若服务端延迟致现场 orphan-delta，rollback = 加回 `TOKEN_MEMORY_LIMIT` 到 `triggersReconnect`（1 行，见下）。
 - **rollback**：`triggersReconnect` getter 加回 `|| this == TOKEN_MEMORY_LIMIT`（1 行）——对服务端零副作用（重连模型下服务端同流重发冗余但无害）。
 - **联调**（服务端就绪后）：>32 text part（count cap）验 S-2 既有 sub 重发 + 无 reconnect + 其它 part 续流；byte-cap / debug-env 验 MB-P-S1 current-key nodrop（small→真 snapshot / large→truncated）。已请 slimapi 加 `OC_SLIMAPI_TOKEN_STREAM_DEBUG_LIVE_BUDGET_BYTES` debug env 便低数据量验 a/b。
 - slimapi D-MB-P 确认 Q1-Q5 全 ✅（current key 向既有 sub 重发 = S-2+MB-P-S1；truncated 走原流同 `sub.put` 通道；flip 客户端独立无服务端 gate；回滚零副作用）。
