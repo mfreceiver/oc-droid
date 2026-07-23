@@ -70,8 +70,9 @@ echo "no" | avdmanager create avd -n ocdroid \
 |---|---|---|
 | `status` | 查看运行状态 | 0=运行中，1=未运行，2=异常（残留/脚本外启动） |
 | `start` | 启动并等待开机完成 | 0=成功；1=拒绝/失败 |
-| `stop` | 关闭 + 清理（adb emu kill → 强杀兜底 → 清 lockfile → adb kill-server） | 0 |
+| `stop` | 关闭 + 清理（adb emu kill → 强杀兜底 → 清 lockfile → scrcpy-lan → adb kill-server） | 0 |
 | `restart` | stop 后重新 start | 同 start |
+| `scrcpy start\|stop\|status` | LAN scrcpy 镜像：暴露 `15555` 给局域网内远端 scrcpy 客户端（opt-in） | 0/1 |
 
 环境变量：
 
@@ -80,6 +81,9 @@ echo "no" | avdmanager create avd -n ocdroid \
 | `OCDROID_AVD` | `ocdroid` | AVD 名称 |
 | `EMU_LOG` | `/tmp/emulator.log` | 启动日志 |
 | `BOOT_TIMEOUT` | `180` | 等待开机秒数 |
+| `SCRCPY_LAN_PORT` | `15555` | LAN scrcpy 监听端口（客户端连此端口） |
+| `SCRCPY_FWD_PORT` | `55556` | 主机内部 forward 端口 → guest adbd `5555` |
+| `SCRCPY_ADBD_PORT` | `5555` | guest adbd 网络端口 |
 
 ---
 
@@ -122,6 +126,29 @@ adb shell dumpsys activity <pkg> # Activity 栈
 adb bugreport /tmp/bug.zip       # 完整诊断包
 ```
 
+### 4.4 LAN scrcpy 镜像（远端查看 / 协助操控）
+
+模拟器是 headless（无窗口）。若需在**局域网内的另一台机器**（如 Windows）实时查看画面并用鼠标键盘操控（例如协助调试），用 `scrcpy` 子命令把模拟器经 LAN 暴露：
+
+```bash
+./scripts/emulator.sh start        # 先确保模拟器运行
+./scripts/emulator.sh scrcpy start # 开启 LAN 监听 15555
+./scripts/emulator.sh scrcpy status# 查看监听状态 + 本机 IP + 客户端命令
+./scripts/emulator.sh scrcpy stop  # 用完关闭（stop 模拟器也会一并清）
+```
+
+**链路**：客户端 `adb connect <本机IP>:15555` → `socat 0.0.0.0:15555` → `127.0.0.1:55556` → `adb forward` → guest adbd `:5555`（network adb）。关键：客户端**用自己的 adb server**，故 scrcpy 的 `adb reverse` 正确指向客户端本机 → 原生可用；且 guest adbd 双传输并存，**本地 `emulator-5554` 不受影响，可同时 adb 调试**。
+
+**远端客户端（装了 scrcpy 的机器）执行**（IP 由 `scrcpy status` 给出）：
+```bash
+adb connect 192.168.x.x:15555
+adb devices                 # 应看到 192.168.x.x:15555  device
+scrcpy -s 192.168.x.x:15555
+```
+
+> **版本**：客户端 adb 与本机 adb server 版本需一致（`adb version`），否则 scrcpy 可能报 `state=offline`。
+> **安全**：`15555` 一旦开启即对**整个局域网**开放模拟器控制权——仅可信网络使用，用完务必 `scrcpy stop`（或 `stop` 模拟器）。前置依赖 `socat`（`sudo apt install socat`）。
+
 ---
 
 ## 5. 常见问题
@@ -134,6 +161,8 @@ adb bugreport /tmp/bug.zip       # 完整诊断包
 | `/dev/kvm` 权限拒绝 | 脚本已自动 `sg kvm` 兜底；根治需重新登录或重启 |
 | 端口 5554/5555 被占 | `stop` 会清理 adb server；仍异常：`pkill -f qemu-system-x86_64` |
 | 模拟器卡死 | `stop`（含强杀兜底）；必要时 `pkill -9 -f qemu-system-x86_64` |
+| `scrcpy start` 报未装 socat | `sudo apt install socat`（scrcpy-lan 前置依赖） |
+| 远端 scrcpy 报 `state=offline` | 客户端 adb 版本与本机不一致；对齐 `adb version`（见 §4.4） |
 
 ---
 

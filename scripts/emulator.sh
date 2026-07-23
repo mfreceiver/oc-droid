@@ -7,12 +7,16 @@
 #   ./scripts/emulator.sh start      # 启动（若已在运行则拒绝，防止抢占他人会话）
 #   ./scripts/emulator.sh stop       # 关闭并清理（adb emu kill + 清 lockfile）
 #   ./scripts/emulator.sh restart    # stop && start
+#   ./scripts/emulator.sh scrcpy start|stop|status
+#                                    # LAN scrcpy 镜像：暴露 15555 给局域网内的远端
+#                                    # scrcpy 客户端（如 Windows）。opt-in，非默认。
 #
 # 标准流程（每个用户/会话）:
 #   1. status  → 确认「未运行」（=没人在用）
 #   2. start   → 启动
 #   3. 跑测试 / adb 调试
-#   4. stop    → 用完必关，清理环境
+#   4. (可选) scrcpy start → 开 LAN 镜像给远端查看/协助
+#   5. stop    → 用完必关，清理环境（scrcpy 监听随 stop 一并清）
 #
 # 多用户协调：通过 lockfile（/tmp/ocdroid-emulator.lock，含 PID/启动时间/所有者）
 # 标识当前占用者；start 前检查，stop 时清除。模拟器是本机共享资源。
@@ -27,6 +31,18 @@ AVD_NAME="${OCDROID_AVD:-ocdroid}"
 LOCKFILE="/tmp/ocdroid-emulator.lock"
 EMU_LOG="${EMU_LOG:-/tmp/emulator.log}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-180}"   # 等待开机秒数
+
+# ---- LAN scrcpy 镜像（端口 15555）----
+# 把模拟器经 LAN 暴露给远端 scrcpy 客户端（如局域网 Windows）。
+# 链路：客户端 adb connect <本机IP>:15555
+#       -> socat 0.0.0.0:15555 -> 127.0.0.1:55556
+#       -> adb forward -> guest adbd :5555（network adb，与本地 emulator-5554 并存）。
+# 客户端用自己的 adb server，故 scrcpy 的 adb reverse 正确指向客户端本机 → 原生可用，
+# 且不抢占本地 emulator-5554 传输（adbd 双传输并存）。
+SCRCPY_LAN_PORT="${SCRCPY_LAN_PORT:-15555}"   # LAN 监听端口（客户端连这个）
+SCRCPY_FWD_PORT="${SCRCPY_FWD_PORT:-55556}"   # 主机内部 forward 端口 -> guest:5555
+SCRCPY_ADBD_PORT="${SCRCPY_ADBD_PORT:-5555}"  # guest adbd 网络端口
+SCRCPY_LOCK="/tmp/ocdroid-scrcpy-lan.lock"    # socat 主进程 PID
 
 # 模拟器启动参数：headless、无快照（保证干净状态）、软 GPU（无显示器也能跑）
 EMU_ARGS=(
@@ -162,6 +178,11 @@ cmd_stop() {
 
   # 清理：kill 残留 qemu/emulator 子进程 + adb server（避免端口占用残留）
   pkill -f "qemu-system-x86_64.*$AVD_NAME" 2>/dev/null || true
+  # scrcpy-lan 一并清理（避免模拟器关了却仍暴露 15555）
+  local spid; spid="$(scrcpy_lan_pid)"
+  [[ -n "$spid" ]] && kill "$spid" 2>/dev/null || true
+  "$adb" forward --remove "tcp:${SCRCPY_FWD_PORT}" 2>/dev/null || true
+  rm -f "$SCRCPY_LOCK"
   rm -f "$LOCKFILE"
   "$adb" kill-server 2>/dev/null || true
   echo "✅ 已清理"
@@ -173,6 +194,91 @@ cmd_restart() {
   cmd_start
 }
 
+# ---- LAN scrcpy 镜像辅助 ----
+
+# 本机非 loopback 的 IPv4（供客户端连接）
+lan_ips() {
+  ip -4 addr show 2>/dev/null \
+    | grep -oP 'inet \K[0-9.]+' | grep -v '^127\.' || true
+}
+
+# 15555 是否在监听
+scrcpy_lan_listening() {
+  ss -ltn 2>/dev/null | grep -q ":${SCRCPY_LAN_PORT}\b"
+}
+
+# 读取 socat 主进程 PID（lockfile 优先并校验存活，回退按端口查）
+scrcpy_lan_pid() {
+  local p=""
+  if [[ -f "$SCRCPY_LOCK" ]]; then
+    p="$(head -1 "$SCRCPY_LOCK" 2>/dev/null || true)"
+    if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then echo "$p"; return 0; fi
+  fi
+  ss -ltnp 2>/dev/null | grep ":${SCRCPY_LAN_PORT}" | grep -oP 'pid=\K[0-9]+' | head -1 || true
+}
+
+cmd_scrcpy() {
+  local act="${1:-status}"
+  local adb="$ANDROID_HOME/platform-tools/adb"
+  case "$act" in
+    start)
+      adb_has_device || { echo "❌ 模拟器未运行，先 ./scripts/emulator.sh start" >&2; exit 1; }
+      command -v socat >/dev/null 2>&1 || { echo "❌ 未安装 socat：sudo apt install socat" >&2; exit 1; }
+      if scrcpy_lan_listening; then
+        echo "○ ${SCRCPY_LAN_PORT} 已在监听（socat pid=$(scrcpy_lan_pid)）"
+      else
+        echo "▶ 开启 guest network adbd (:${SCRCPY_ADBD_PORT}) ..."
+        "$adb" tcpip "$SCRCPY_ADBD_PORT" >/dev/null 2>&1 || true
+        sleep 2
+        echo "▶ 建立主机 forward ${SCRCPY_FWD_PORT} -> guest:${SCRCPY_ADBD_PORT} ..."
+        "$adb" forward "tcp:${SCRCPY_FWD_PORT}" "tcp:${SCRCPY_ADBD_PORT}" >/dev/null
+        echo "▶ 启动 LAN 监听 0.0.0.0:${SCRCPY_LAN_PORT} -> 127.0.0.1:${SCRCPY_FWD_PORT} ..."
+        nohup socat "TCP-LISTEN:${SCRCPY_LAN_PORT},bind=0.0.0.0,reuseaddr,fork" \
+          "TCP:127.0.0.1:${SCRCPY_FWD_PORT}" >/dev/null 2>&1 &
+        local spid=$!
+        disown 2>/dev/null || true
+        echo "$spid" > "$SCRCPY_LOCK"
+        sleep 1
+        scrcpy_lan_listening || { echo "❌ socat 启动失败（端口 ${SCRCPY_LAN_PORT} 被占？）" >&2; exit 1; }
+        echo "✅ 已监听 0.0.0.0:${SCRCPY_LAN_PORT} (socat pid=$spid)"
+      fi
+      echo ""
+      echo "客户端（局域网内装了 scrcpy 的机器）执行："
+      local ip
+      for ip in $(lan_ips); do
+        echo "  adb connect ${ip}:${SCRCPY_LAN_PORT} && scrcpy -s ${ip}:${SCRCPY_LAN_PORT}"
+      done
+      echo ""
+      echo "⚠ ${SCRCPY_LAN_PORT} 对整个局域网开放控制权；用完务必 ./scripts/emulator.sh scrcpy stop"
+      ;;
+    stop)
+      local pid; pid="$(scrcpy_lan_pid)"
+      if [[ -n "$pid" ]]; then
+        kill "$pid" 2>/dev/null || true
+        echo "▶ 已停 socat pid=$pid"
+      else
+        echo "○ ${SCRCPY_LAN_PORT} 未在监听"
+      fi
+      "$adb" forward --remove "tcp:${SCRCPY_FWD_PORT}" 2>/dev/null || true
+      rm -f "$SCRCPY_LOCK"
+      echo "✅ scrcpy-lan 已关闭（forward 已清；guest tcpip 随模拟器关闭自动复位）"
+      ;;
+    status)
+      if scrcpy_lan_listening; then
+        echo "▶ scrcpy-lan 运行中：0.0.0.0:${SCRCPY_LAN_PORT} (socat pid=$(scrcpy_lan_pid))"
+        echo "  客户端：adb connect <本机IP>:${SCRCPY_LAN_PORT} && scrcpy -s <本机IP>:${SCRCPY_LAN_PORT}"
+        lan_ips | sed 's/^/  本机IP: /'
+      else
+        echo "○ scrcpy-lan 未开启（./scripts/emulator.sh scrcpy start）"
+      fi
+      ;;
+    *)
+      echo "用法: emulator.sh scrcpy {start|stop|status}" >&2
+      exit 64
+      ;;
+  esac
+}
+
 # ---- 入口 ----
 
 case "${1:-}" in
@@ -180,7 +286,8 @@ case "${1:-}" in
   start)   cmd_start ;;
   stop)    cmd_stop ;;
   restart) cmd_restart ;;
+  scrcpy)  cmd_scrcpy "${2:-status}" ;;
   *)
-    echo "用法: emulator.sh {status|start|stop|restart}" >&2
+    echo "用法: emulator.sh {status|start|stop|restart|scrcpy start|stop|status}" >&2
     exit 64 ;;
 esac
