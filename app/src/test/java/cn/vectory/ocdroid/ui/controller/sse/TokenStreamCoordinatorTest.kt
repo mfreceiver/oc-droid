@@ -504,23 +504,26 @@ class TokenStreamCoordinatorTest {
     }
 
     @Test
-    fun `resync part_too_large clears but does NOT reconnect`() {
+    fun `resync token_memory_limit clears but does NOT reconnect`() {
+        // §5 C-3: repurposed from part_too_large (removed from the enum — the
+        // server never emits it; over-limit surfaces as truncated:true on the
+        // part snapshot). Uses TOKEN_MEMORY_LIMIT as a stable non-reconnect reason.
         coordinator.open("s1")
         runPending()
         val gen = coordinator.genOf("s1")
         val epoch = coordinator.epochOf("s1")
         coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", text = "a"))
         val baseline = fake.openCount.get()
-        coordinator.dispatchEpochFrame("s1", epoch, gen, TokenStreamFrame.Resync(ResyncReason.PART_TOO_LARGE, "s1"))
+        coordinator.dispatchEpochFrame("s1", epoch, gen, TokenStreamFrame.Resync(ResyncReason.TOKEN_MEMORY_LIMIT, "s1"))
         // Cleared.
         assertEquals(0, stateStore.chatFlow.value.streamOwned.size)
         // Fetch triggered.
         assertTrue(sinceFetchCalls.any { it.sid == "s1" && it.auth })
-        // PART_TOO_LARGE does NOT emit a Reconnect effect — verify NO provider
+        // TOKEN_MEMORY_LIMIT does NOT emit a Reconnect effect — verify NO provider
         // call happened synchronously (we do NOT advance time here because
         // the watchdog would independently reconnect on its own timeout,
         // which is unrelated to the reducer's effect decision).
-        assertEquals("part_too_large must NOT trigger reconnect", baseline, fake.openCount.get())
+        assertEquals("token_memory_limit must NOT trigger reconnect", baseline, fake.openCount.get())
         coordinator.close("s1")
         runPending()
     }
@@ -532,9 +535,9 @@ class TokenStreamCoordinatorTest {
         val gen = coordinator.genOf("s1")
         val epoch = coordinator.epochOf("s1")
         // Resync with sessionId == null — coordinator must infer "s1".
-        coordinator.dispatchEpochFrame("s1", epoch, gen, TokenStreamFrame.Resync(ResyncReason.PART_TOO_LARGE, null))
-        // TriggerSinceFetch fired with the inferred sid (the partToLarge
-        // reason does NOT reconnect, so no provider re-open expected).
+        coordinator.dispatchEpochFrame("s1", epoch, gen, TokenStreamFrame.Resync(ResyncReason.TOKEN_MEMORY_LIMIT, null))
+        // TriggerSinceFetch fired with the inferred sid (this reason does NOT
+        // reconnect, so no provider re-open expected).
         assertTrue(
             "TriggerSinceFetch should use the inferred sid s1",
             sinceFetchCalls.any { it.sid == "s1" && it.auth },

@@ -122,10 +122,29 @@ class TokenStreamFrameTest {
 
         val noSid = TokenStreamFrame.parse(
             "resync",
-            """{"reason":"part_too_large"}""",
+            """{"reason":"token_memory_limit"}""",
         ) as TokenStreamFrame.Resync
-        assertEquals(ResyncReason.PART_TOO_LARGE, noSid.reason)
+        assertEquals(ResyncReason.TOKEN_MEMORY_LIMIT, noSid.reason)
         assertNull(noSid.sessionId)
+    }
+
+    @Test
+    fun `resync maps session_idle and session_deleted reasons`() {
+        // §5 C-2: the sidecar emits session_idle / session_deleted per the
+        // bilateral wire contract; both must parse to the typed enum.
+        val idle = TokenStreamFrame.parse(
+            "resync",
+            """{"reason":"session_idle","sessionID":"s7"}""",
+        ) as TokenStreamFrame.Resync
+        assertEquals(ResyncReason.SESSION_IDLE, idle.reason)
+        assertEquals("s7", idle.sessionId)
+
+        val deleted = TokenStreamFrame.parse(
+            "resync",
+            """{"reason":"session_deleted","sessionID":"s7"}""",
+        ) as TokenStreamFrame.Resync
+        assertEquals(ResyncReason.SESSION_DELETED, deleted.reason)
+        assertEquals("s7", deleted.sessionId)
     }
 
     // ── forward compatibility: unknown / malformed → null ────────────────
@@ -173,10 +192,14 @@ class TokenStreamFrameTest {
     }
 
     @Test
-    fun `resync with unknown reason wire value yields null`() {
-        assertNull(
-            TokenStreamFrame.parse("resync", """{"reason":"some_future_reason"}"""),
-        )
+    fun `resync with unknown reason wire value yields UNKNOWN fallback not null`() {
+        // §5 C-2: an UNRECOGNIZED reason no longer drops the frame. It is
+        // mapped to ResyncReason.UNKNOWN so the reducer routes it through the
+        // conservative clear + `/since` fallback (no reconnect, no silent drop).
+        val frame = TokenStreamFrame.parse("resync", """{"reason":"some_future_reason"}""")
+            as TokenStreamFrame.Resync
+        assertEquals(ResyncReason.UNKNOWN, frame.reason)
+        assertNull(frame.sessionId)
     }
 
     @Test
@@ -194,21 +217,31 @@ class TokenStreamFrameTest {
     fun `resync reason wire values round-trip via fromWire`() {
         assertEquals(ResyncReason.RECONNECT_NO_REPLAY, ResyncReason.fromWire("reconnect_no_replay"))
         assertEquals(ResyncReason.SUBSCRIBER_BACKPRESSURE, ResyncReason.fromWire("subscriber_backpressure"))
-        assertEquals(ResyncReason.PART_TOO_LARGE, ResyncReason.fromWire("part_too_large"))
         assertEquals(ResyncReason.TOKEN_MEMORY_LIMIT, ResyncReason.fromWire("token_memory_limit"))
+        // §5 C-2: newly-recognized session-lifecycle reasons.
+        assertEquals(ResyncReason.SESSION_IDLE, ResyncReason.fromWire("session_idle"))
+        assertEquals(ResyncReason.SESSION_DELETED, ResyncReason.fromWire("session_deleted"))
     }
 
     @Test
-    fun `resync reason fromWire unknown and null yield null`() {
-        assertNull(ResyncReason.fromWire("nope"))
+    fun `resync reason fromWire null yields null and unknown yields UNKNOWN fallback`() {
+        // §5 C-2: null (missing reason field) is still null (malformed → drop).
         assertNull(ResyncReason.fromWire(null))
+        // §5 C-2: an UNRECOGNIZED reason maps to the UNKNOWN fallback sentinel
+        // (frame NOT dropped; routed via conservative clear + `/since`).
+        assertEquals(ResyncReason.UNKNOWN, ResyncReason.fromWire("nope"))
+        assertEquals(ResyncReason.UNKNOWN, ResyncReason.fromWire("some_future_reason"))
+        assertEquals(ResyncReason.UNKNOWN, ResyncReason.fromWire("session_idle_typo"))
     }
 
     @Test
     fun `triggersReconnect only true for reconnect_no_replay and subscriber_backpressure`() {
         assertTrue(ResyncReason.RECONNECT_NO_REPLAY.triggersReconnect)
         assertTrue(ResyncReason.SUBSCRIBER_BACKPRESSURE.triggersReconnect)
-        assertEquals(false, ResyncReason.PART_TOO_LARGE.triggersReconnect)
         assertEquals(false, ResyncReason.TOKEN_MEMORY_LIMIT.triggersReconnect)
+        // §5 C-2: the new session-lifecycle reasons + UNKNOWN fallback never reconnect.
+        assertEquals(false, ResyncReason.SESSION_IDLE.triggersReconnect)
+        assertEquals(false, ResyncReason.SESSION_DELETED.triggersReconnect)
+        assertEquals(false, ResyncReason.UNKNOWN.triggersReconnect)
     }
 }

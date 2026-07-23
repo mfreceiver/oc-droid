@@ -89,8 +89,12 @@ data class TokenStreamReducerState(
  *    A fresh snapshot for a part already in the map overwrites its text +
  *    state (the server is re-establishing the authoritative prefix; the
  *    token stream trusts snapshot over accumulated deltas).
- *  - `snapshot(done=true)` → DONE; REPLACE final text. No further deltas are
- *    accepted for this part (late deltas are dropped, see [reduceDelta]).
+ *  - `snapshot(done=true)` → DONE. If `text` is present it REPLACES the
+ *    buffer; if `text` is null/absent the accumulated buffer is KEPT (avoids
+ *    blanking the part before the authoritative `/since` reconcile — bilateral
+ *    §5 C-1). No further deltas are accepted for this part (late deltas are
+ *    dropped, see [reduceDelta]); emits zero effects (authoritative text
+ *    arrives via the digest/`/since` path).
  *  - `snapshot(truncated=true)` → clear that part from the reducer state +
  *    [ClearPartState]({partId}) + [TriggerSinceFetch](sid, authoritative=true).
  *    `truncated` takes priority over `done` (a truncated part is by definition
@@ -151,11 +155,26 @@ object TokenStreamReducer {
             return cleared to effects
         }
         if (frame.done) {
+            // §5 C-1: a done snapshot may omit text (`text:null`, status-only
+            // terminal). Overwriting the buffer with "" here would propagate
+            // through bridgePartToChatState → TokenStreamPartUpdated(text="")
+            // → StreamingBufferFieldsReducer sets streamingPartTexts[partId]=""
+            // and the UI's `streamingTextOverride ?: part.text` would render a
+            // BLANK window (the non-null "" override shadows the real part
+            // text) until an authoritative /since reconcile arrives. So when
+            // text is null, KEEP the accumulated buffer (or "" if the part had
+            // no prior snapshot — nothing to preserve). When text is non-null,
+            // it is the authoritative final value → use it (existing behavior).
+            // The part still transitions to DONE; NO TriggerSinceFetch is
+            // emitted here (option A — keep buffer; the existing digest/`/since`
+            // reconcile path supplies authoritative text, NOT auto-fetch).
+            val existing = state.parts[frame.partId]
+            val terminalText = frame.text ?: existing?.text ?: ""
             val terminal = TokenPartAcc(
                 sessionId = frame.sessionId,
                 messageId = frame.messageId,
                 partId = frame.partId,
-                text = frame.text ?: "",
+                text = terminalText,
                 state = TokenPartStreamState.DONE,
             )
             return state.copy(parts = state.parts + (frame.partId to terminal)) to emptyList()

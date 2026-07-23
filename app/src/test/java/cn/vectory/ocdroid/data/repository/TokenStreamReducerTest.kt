@@ -117,6 +117,57 @@ class TokenStreamReducerTest {
         assertTrue(effects.isEmpty())
     }
 
+    // ── §5 C-1: done:true with null text keeps accumulated buffer ──────────
+
+    @Test
+    fun `done snapshot with null text keeps accumulated buffer and transitions to DONE`() {
+        // Seed a streaming part with accumulated text via snapshot + deltas.
+        var state = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            snapshot(text = "hel"),
+        ).first
+        state = TokenStreamReducer.reduce(state, delta(text = "lo")).first
+        assertEquals("hello", state.parts["p1"]?.text)
+
+        // Terminal snapshot with text:null must NOT overwrite the buffer with "".
+        val (next, effects) = TokenStreamReducer.reduce(state, snapshot(text = null, done = true))
+
+        val acc = next.parts["p1"]
+        assertEquals("accumulated text must be preserved on done+null text", "hello", acc?.text)
+        assertEquals(TokenPartStreamState.DONE, acc?.state)
+        // §5 C-1 option A: NO TriggerSinceFetch on done (buffer kept, not auto-fetch).
+        assertTrue("done must not emit any effects", effects.isEmpty())
+    }
+
+    @Test
+    fun `done snapshot with null text and no prior buffer yields empty DONE`() {
+        // No prior snapshot — done+null text on a fresh part: "" is correct
+        // (there was nothing to preserve). Still DONE, no effects.
+        val (state, effects) = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            snapshot(text = null, done = true),
+        )
+        assertEquals("", state.parts["p1"]?.text)
+        assertEquals(TokenPartStreamState.DONE, state.parts["p1"]?.state)
+        assertTrue(effects.isEmpty())
+    }
+
+    @Test
+    fun `done snapshot with non-null text still replaces the buffer (C-1 preserves existing behavior)`() {
+        // Regression guard: done with explicit text remains authoritative.
+        var state = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            snapshot(text = "partial"),
+        ).first
+        state = TokenStreamReducer.reduce(state, delta(text = "+")).first
+        assertEquals("partial+", state.parts["p1"]?.text)
+
+        val (next, effects) = TokenStreamReducer.reduce(state, snapshot(text = "FINAL", done = true))
+        assertEquals("FINAL", next.parts["p1"]?.text)
+        assertEquals(TokenPartStreamState.DONE, next.parts["p1"]?.state)
+        assertTrue(effects.isEmpty())
+    }
+
     // ── truncated → clear + ClearPartState + TriggerSinceFetch ───────────
 
     @Test
@@ -233,7 +284,7 @@ class TokenStreamReducerTest {
     }
 
     @Test
-    fun `resync part_too_large clears sid parts but does NOT reconnect`() {
+    fun `resync token_memory_limit clears sid parts but does NOT reconnect`() {
         var state = TokenStreamReducer.reduce(
             TokenStreamReducerState(),
             snapshot(partId = "p1", sessionId = "s1", text = "a"),
@@ -241,8 +292,95 @@ class TokenStreamReducerTest {
 
         val (next, effects) = TokenStreamReducer.reduce(
             state,
-            TokenStreamFrame.Resync(ResyncReason.PART_TOO_LARGE, "s1"),
+            TokenStreamFrame.Resync(ResyncReason.TOKEN_MEMORY_LIMIT, "s1"),
         )
+
+        assertNull(next.parts["p1"])
+        assertTrue(effects.any { it is TokenStreamCoordinatorEffect.ClearPartState })
+        assertTrue(effects.any { it is TokenStreamCoordinatorEffect.TriggerSinceFetch })
+        assertFalse(effects.any { it is TokenStreamCoordinatorEffect.Reconnect })
+    }
+
+    // ── §5 C-2: session_idle / session_deleted / unknown-reason fallback ───
+
+    @Test
+    fun `resync session_idle clears sid parts, fetches authoritatively, no reconnect`() {
+        val state = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            snapshot(partId = "p1", sessionId = "s1", text = "a"),
+        ).first
+
+        val (next, effects) = TokenStreamReducer.reduce(
+            state,
+            TokenStreamFrame.Resync(ResyncReason.SESSION_IDLE, "s1"),
+        )
+
+        assertNull(next.parts["p1"])
+        assertTrue(effects.any { it is TokenStreamCoordinatorEffect.ClearPartState })
+        assertTrue(effects.any { it is TokenStreamCoordinatorEffect.TriggerSinceFetch })
+        assertFalse(effects.any { it is TokenStreamCoordinatorEffect.Reconnect })
+    }
+
+    @Test
+    fun `resync session_deleted takes conservative clear_plus_since fallback (no eviction hook in reducer layer)`() {
+        // §5 C-2: the reducer is pure data/repository code and CANNOT reach the
+        // UI-layer EvictSession hook (AppCore.kt ~:736, emitted by
+        // SessionSyncCoordinator). session_deleted therefore takes the same
+        // conservative fallback as session_idle HERE: clear + `/since`, no
+        // reconnect. The UI-layer digest path drives the actual session
+        // eviction independently.
+        val state = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            snapshot(partId = "p1", sessionId = "s1", text = "a"),
+        ).first
+
+        val (next, effects) = TokenStreamReducer.reduce(
+            state,
+            TokenStreamFrame.Resync(ResyncReason.SESSION_DELETED, "s1"),
+        )
+
+        assertNull(next.parts["p1"])
+        assertTrue(effects.any { it is TokenStreamCoordinatorEffect.ClearPartState })
+        assertTrue(effects.any { it is TokenStreamCoordinatorEffect.TriggerSinceFetch })
+        assertFalse(effects.any { it is TokenStreamCoordinatorEffect.Reconnect })
+    }
+
+    @Test
+    fun `resync UNKNOWN reason does NOT drop the frame and takes conservative clear_plus_since fallback`() {
+        // §5 C-2: an unrecognized reason is mapped to ResyncReason.UNKNOWN by
+        // fromWire (frame NOT dropped). The reducer routes it through the same
+        // clear + authoritative `/since` path as known non-reconnect reasons,
+        // with NO reconnect.
+        val state = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            snapshot(partId = "p1", sessionId = "s1", text = "a"),
+        ).first
+
+        val (next, effects) = TokenStreamReducer.reduce(
+            state,
+            TokenStreamFrame.Resync(ResyncReason.UNKNOWN, "s1"),
+        )
+
+        assertNull(next.parts["p1"])
+        assertTrue(effects.any { it is TokenStreamCoordinatorEffect.ClearPartState })
+        val trigger = effects.filterIsInstance<TokenStreamCoordinatorEffect.TriggerSinceFetch>().single()
+        assertTrue(trigger.authoritative)
+        assertFalse(effects.any { it is TokenStreamCoordinatorEffect.Reconnect })
+    }
+
+    @Test
+    fun `resync with unrecognized reason wire round-trips end-to-end to clear_plus_since fallback`() {
+        // Full parse → reduce round-trip: a server emitting a brand-new reason
+        // string must not silently lose the frame (no silent drop, no reconnect).
+        val parsed = TokenStreamFrame.parse("resync", """{"reason":"brand_new_future_reason","sessionID":"s1"}""")
+            as TokenStreamFrame.Resync
+        assertEquals(ResyncReason.UNKNOWN, parsed.reason)
+
+        val state = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            snapshot(partId = "p1", sessionId = "s1", text = "a"),
+        ).first
+        val (next, effects) = TokenStreamReducer.reduce(state, parsed)
 
         assertNull(next.parts["p1"])
         assertTrue(effects.any { it is TokenStreamCoordinatorEffect.ClearPartState })

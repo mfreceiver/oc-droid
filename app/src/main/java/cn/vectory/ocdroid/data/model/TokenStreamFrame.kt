@@ -108,8 +108,13 @@ sealed interface TokenStreamFrame {
          *  - unknown `event:` string (forward compatibility);
          *  - malformed JSON / non-object root (skip, never throw);
          *  - a recognized event missing a required field (drop, the transport
-         *    cannot act on a partial frame);
-         *  - an unrecognized `resync.reason` wire value (unknown reason).
+         *    cannot act on a partial frame).
+         *
+         * NOTE (§5 C-2): an UNRECOGNIZED `resync.reason` wire value is NOT
+         * dropped — it is mapped to [ResyncReason.UNKNOWN] and routed through
+         * the conservative clear + authoritative `/since` fallback so the
+         * frame is never silently lost. Only a missing/`null` `reason` field
+         * (malformed) drops a `resync` frame.
          *
          * @param event the SSE `event:` field value (OkHttp `onEvent(type=…)`),
          *   null when the frame had no `event:` line.
@@ -154,6 +159,11 @@ sealed interface TokenStreamFrame {
                 }
 
                 EVENT_RESYNC -> {
+                    // §5 C-2: an UNRECOGNIZED reason no longer drops the frame.
+                    // [ResyncReason.fromWire] maps unknown → UNKNOWN (routed via
+                    // the conservative clear + `/since` fallback, no reconnect).
+                    // The `?: return null` now fires ONLY for a missing/`null`
+                    // reason field (malformed frame → drop, preserved).
                     val reason = ResyncReason.fromWire(root.str("reason")) ?: return null
                     Resync(reason = reason, sessionId = root.str("sessionID"))
                 }
@@ -205,16 +215,58 @@ sealed interface TokenStreamFrame {
 enum class ResyncReason(val wire: String) {
     RECONNECT_NO_REPLAY("reconnect_no_replay"),
     SUBSCRIBER_BACKPRESSURE("subscriber_backpressure"),
-    PART_TOO_LARGE("part_too_large"),
-    TOKEN_MEMORY_LIMIT("token_memory_limit");
+
+    // §5 C-3: PART_TOO_LARGE removed — the server never emits it (over-limit
+    // parts surface as `truncated:true` on the part snapshot, handled in
+    // reduceSnapshot). Kept this comment as a tombstone so the wire vocabulary
+    // is not accidentally re-added without a producer.
+    TOKEN_MEMORY_LIMIT("token_memory_limit"),
+
+    // §5 C-2: the sidecar also emits these session-lifecycle reasons per the
+    // bilateral wire contract. Neither triggers a reconnect — the socket is
+    // fine, only the session's in-flight part state is gone upstream.
+    /** Session went idle upstream; clear in-flight state + authoritative `/since`. */
+    SESSION_IDLE("session_idle"),
+
+    /**
+     * Session was deleted upstream. §5 C-2: the reducer CANNOT reach the
+     * UI-layer [cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession]
+     * hook (AppCore.kt ~:736 — that effect is emitted by SessionSyncCoordinator
+     * on `session.deleted` digest / `/since` 404-MarkDeleted, in the UI layer;
+     * the reducer is pure data/repository code emitting only
+     * [TokenStreamCoordinatorEffect]). So `session_deleted` takes the SAME
+     * conservative fallback as [SESSION_IDLE] here (clear + `/since`, no
+     * reconnect); the actual session eviction is driven separately by the
+     * `/slimapi/events` digest path that also fires on session.deleted.
+     */
+    SESSION_DELETED("session_deleted"),
+
+    /**
+     * §5 C-2 fallback sentinel: an UNRECOGNIZED reason wire value. The parser
+     * maps any unknown reason here instead of dropping the frame, so an
+     * unrecognized reason flows through the conservative clear + authoritative
+     * `/since` reconcile path (no reconnect — [triggersReconnect] is false).
+     * Constructed by [fromWire]; it has no wire string of its own (empty) and
+     * is excluded from the wire-string reverse lookup.
+     */
+    UNKNOWN("");
 
     val triggersReconnect: Boolean
         get() = this == RECONNECT_NO_REPLAY || this == SUBSCRIBER_BACKPRESSURE
 
     companion object {
-        /** Null-safe reverse lookup; unknown wire value → null (forward-compat). */
-        fun fromWire(s: String?): ResyncReason? = s?.let { wire ->
-            entries.firstOrNull { it.wire == wire }
+        /**
+         * Reverse lookup. §5 C-2:
+         *  - `null` input (missing / JSON-null `reason` field) → `null`
+         *    (malformed resync frame; the parser drops it — preserved).
+         *  - a KNOWN wire value → the matching enum entry.
+         *  - an UNRECOGNIZED wire value → [UNKNOWN] (conservative fallback so
+         *    the frame is NOT silently dropped; the reducer routes it via
+         *    clear + authoritative `/since`, no reconnect).
+         */
+        fun fromWire(s: String?): ResyncReason? {
+            if (s == null) return null
+            return entries.firstOrNull { it != UNKNOWN && it.wire == s } ?: UNKNOWN
         }
     }
 }
