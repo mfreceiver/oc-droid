@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.data.repository.http
 
 import cn.vectory.ocdroid.BuildConfig
 import okhttp3.Cache
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import java.io.File
@@ -196,6 +197,19 @@ class OkHttpClientFactory @Inject constructor(
      * `retryOnConnectionFailure(false)`. The retry flag is the WHOLE POINT
      * of this client — never set it back to true here.
      *
+     * §stale-conn-eviction: a DEDICATED short-keep-alive `ConnectionPool`
+     * (2 idle / 15 s) instead of OkHttp's default (5 / 5 min). The default
+     * outlives the server's / stunnel's idle-close timeout, so the pool
+     * handed back a connection the peer had already half-closed → the POST
+     * was sent, the server processed it, then the response read hit
+     * `unexpected end of stream`. Because `retryOnConnectionFailure(false)`
+     * (above) deliberately does NOT replay the POST (anti-double-submit,
+     * T14), that failure surfaced straight to the caller. Evicting idle
+     * mutation connections after 15 s makes reuse of a peer-closed socket
+     * near-impossible, fixing the root cause with zero double-submit risk.
+     * Scoped to this client only — [sseClient] (long-lived) / [restClient]
+     * (idempotent GET, safe auto-retry) / [commandClient] keep the default.
+     *
      * **Routing table** (single source of truth):
      *  - GET (every `api.getX` / `apiV2.getX`) → [restClient] (retry=true).
      *  - POST `executeCommand` → [commandClient] (300 s + retry=false; T14-C3).
@@ -206,6 +220,8 @@ class OkHttpClientFactory @Inject constructor(
             .addInterceptor(responseSizeGuardInterceptor)
             .readTimeout(30, TimeUnit.SECONDS)
             .retryOnConnectionFailure(false)
+            // §stale-conn-eviction: short-keepalive pool — see KDoc above.
+            .connectionPool(ConnectionPool(2, 15, TimeUnit.SECONDS))
             .build()
 
     /**
