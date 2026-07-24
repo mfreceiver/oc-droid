@@ -3,11 +3,11 @@ package cn.vectory.ocdroid.di
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
-import cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.data.api.TokenStreamClient
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
+import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.controller.ComposerController
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.ForegroundCatchUpController
@@ -103,6 +103,16 @@ object ControllerModule {
         store = store,
         settingsManager = settingsManager,
         effects = effectBus,
+        sseEffectivelyOff = {
+            // §defect-A-1A: SSE is effectively OFF when the debug toggle refuses
+            // it OR the connection is terminally down (retry exhausted / network
+            // lost). Transient phases (Connecting/Reconnecting/Connected) will
+            // deliver server.connected soon, so they are NOT "off".
+            settingsManager.sseDisabled || run {
+                val phase = store.connectionFlow.value.connectionPhase
+                phase is ConnectionPhase.SseDisabled || phase is ConnectionPhase.Disconnected
+            }
+        },
     )
 
     /**
@@ -265,7 +275,15 @@ object ControllerModule {
     fun provideTokenStreamCoordinator(
         @UiApplicationScope appScope: CoroutineScope,
         store: SharedStateStore,
-        clientFactory: OkHttpClientFactory,
+        // §tokenstream-mtls-fix: was `clientFactory: OkHttpClientFactory` — the Hilt
+        // singleton whose own SslConfigFactory never received configureClientCert, so
+        // its sslConfigFor() fell back to SystemDefault → "Trust anchor not found"
+        // under mTLS + slim. The repository owns the mTLS-loaded clientFactory (same
+        // one REST/SSE use); route the token stream through it via the new
+        // [OpenCodeRepository.tokenStreamClient]. (The @Singleton OkHttpClientFactory /
+        // SslConfigFactory bindings are now orphaned here — left in place for the
+        // Option A follow-up that unifies ownership; do NOT delete.)
+        repository: OpenCodeRepository,
         sessionSyncCoordinator: SessionSyncCoordinator,
         effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver,
         settingsManager: cn.vectory.ocdroid.util.SettingsManager,
@@ -295,7 +313,10 @@ object ControllerModule {
             val baseUrl = effectiveConnectionConfigResolver.resolve()?.url
                 ?: error("token-stream open($sid) with no effective connection config — no active endpoint")
             val hostPort = hostPortFromUrl(baseUrl)
-            TokenStreamClient(clientFactory.tokenStreamClient(hostPort), baseUrl)
+            // §tokenstream-mtls-fix: repository.tokenStreamClient delegates to the
+            // repository's own clientFactory → its mTLS-loaded sslConfigFactory →
+            // sslConfigFor returns MutualTLS (not SystemDefault) → private CA trusted.
+            TokenStreamClient(repository.tokenStreamClient(hostPort), baseUrl)
                 .connect(sid, directory)
         },
         triggerSinceFetch = { sid, auth ->

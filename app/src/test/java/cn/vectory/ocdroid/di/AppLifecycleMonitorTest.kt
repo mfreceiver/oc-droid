@@ -8,6 +8,8 @@ import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.ui.SharedEffectBus
+import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.controller.IdleUnreadAlert
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.coEvery
@@ -775,6 +777,12 @@ class AppLifecycleMonitorTest {
                         repository = realRepo,
                         settingsManager = mockk(relaxed = true),
                         identityStore = identityStore,
+                        // §defect-A-1B: new deps — real instances. currentSessionId
+                        // is null in this test's store, so the freshness probe
+                        // early-returns and the existing mid-flight-reconfigure
+                        // assertion is unaffected.
+                        store = SharedStateStore(),
+                        effectBus = SharedEffectBus(),
                     )
                     // Default `_isInForeground = false` (CP8) → background →
                     // poll path is eligible. No need to flip foreground.
@@ -868,6 +876,10 @@ class AppLifecycleMonitorTest {
         repository = mockk<OpenCodeRepository>(relaxed = true),
         settingsManager = mockk<SettingsManager>(relaxed = true),
         identityStore = mockk(relaxed = true),
+        // §defect-A-1B: real store + effect bus. currentSessionId is null in
+        // these lifecycle-callback tests, so the freshness probe early-returns.
+        store = SharedStateStore(),
+        effectBus = SharedEffectBus(),
     )
 }
 

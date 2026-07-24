@@ -249,11 +249,16 @@ class SettingsManager @Inject constructor(
 
     /**
      * §omitted-content-card-gate: runtime toggle for the in-chat
-     * "展开省略内容" (OmittedContentCard) affordance. Default OFF — the card
-     * is hidden because all three of its forms proved net-negative value.
-     * The underlying expand machinery is intentionally KEPT (see
-     * [cn.vectory.ocdroid.ui.chat.PartExpandState] / [cn.vectory.ocdroid.data.repository.OpenCodeRepository.expandMessagesFullBatch]);
-     * flip this ON to re-expose the UI outlet for evaluation.
+     * "展开省略内容" (OmittedContentCard) affordance. Default ON (delegates
+     * to [DebugPrefs.omittedContentCardEnabled]) — single-user slim mode:
+     * tool output is sidecar-stripped on the list/since skeleton, so the
+     * affordance on `hasFull` parts is the user's primary way to expand
+     * that stripped content. RETAINED as a hidden debug escape hatch: set
+     * it OFF (ESP key `omitted_content_card=false`) to force-hide the
+     * affordance globally. No in-app Settings UI switch ships this; flip
+     * via the ESP key. The underlying expand machinery is intentionally KEPT
+     * (see [cn.vectory.ocdroid.ui.chat.PartExpandState] /
+     * [cn.vectory.ocdroid.data.repository.OpenCodeRepository.expandMessagesFullBatch]).
      */
     var omittedContentCardEnabled: Boolean
         get() = debugPrefs.omittedContentCardEnabled

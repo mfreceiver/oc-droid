@@ -15,6 +15,9 @@ import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.runSuspendCatching
+import cn.vectory.ocdroid.ui.SharedEffectBus
+import cn.vectory.ocdroid.ui.SharedStateStore
+import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.IdleUnreadAlert
 import cn.vectory.ocdroid.ui.controller.UnreadPollResult
 import kotlinx.coroutines.CoroutineScope
@@ -65,6 +68,21 @@ class AppLifecycleMonitor @Inject constructor(
      * against this store (and [OpenCodeRepository] slim token) before notify.
      */
     private val identityStore: ConnectionIdentityStore,
+    /**
+     * §defect-A-1B: the active-session slice. The background freshness probe
+     * reads [SharedStateStore.chatFlow] to learn the current session id + the
+     * locally-known message ids, so it can tell whether the server's newest id
+     * is already present. @Singleton (provided by Hilt, zero DI cycle).
+     */
+    private val store: SharedStateStore,
+    /**
+     * §defect-A-1B: when the probe detects a server id not present locally,
+     * it emits [ControllerEffect.CatchUpAfterDisconnect] (the SAME effect the
+     * foreground medium-tier emits) so AppCore's effect loop drains
+     * `/since/{watermark}` + merges via the existing pipeline. @Singleton
+     * (provided by Hilt, zero DI cycle).
+     */
+    private val effectBus: SharedEffectBus,
 ) {
     /**
      * §4.3 foreground truth-source.
@@ -415,6 +433,62 @@ class AppLifecycleMonitor @Inject constructor(
                 questions.forEach { handlePendingQuestion(it, slimToken, identityAtEntry) }
             }
             .onFailure { Log.w(TAG, "Background poll getPendingQuestions failed", it) }
+
+        // §defect-A-1B: background freshness probe for the active session. When
+        // SSE is unavailable, server.connected never arrives, so a user who
+        // backgrounded 15s–5min and returns sees stale content. This probe keeps
+        // the active session's slice ≤30s fresh by triggering the REST catch-up
+        // when the server's newest message id is not yet known locally. It
+        // reuses the entry-captured [slimToken] + [identityAtEntry] fences and
+        // the lifecycle generation so a foreground return mid-probe lets the
+        // fg/SSE path take over instead of double-firing. The emit is the SAME
+        // [ControllerEffect.CatchUpAfterDisconnect] the foreground medium-tier
+        // emits; AppCore's effect loop handles it regardless of fg/bg.
+        //
+        // `probeSid` + `genAtProbe` are captured into outer scope so the
+        // `.onSuccess { }` fence (which runs AFTER the network suspension) can
+        // compare them against the post-network state. Lambda early-returns
+        // yield `null` so [runSuspendCatching] infers `String?` cleanly.
+        var probeSid: String? = null
+        var genAtProbe = currentLifecycleGeneration()
+        runSuspendCatching<String?> {
+            if (!isBackgroundPollStillCurrent(slimToken, identityAtEntry)) return@runSuspendCatching null
+            val chat = store.chatFlow.value
+            val sid = chat.currentSessionId ?: return@runSuspendCatching null
+            // mutual exclusion: don't stack a catch-up on an in-progress load.
+            if (chat.isLoadingMessages) return@runSuspendCatching null
+            probeSid = sid
+            genAtProbe = currentLifecycleGeneration()
+            if (repository.isSlimMode) {
+                repository.probeLatestSlim(sid).messageID
+            } else {
+                repository.probeLatestMessageId(sid).getOrNull()
+            }
+        }.onSuccess { serverLatest ->
+            // Re-check every fence AFTER the network suspension: the slice,
+            // the host/token, the foreground flag, and the generation must all
+            // still match what the probe started under.
+            val sid = probeSid
+            if (sid == null) return@onSuccess
+            if (serverLatest == null) return@onSuccess
+            if (_isInForeground.value) return@onSuccess
+            if (!isBackgroundPollStillCurrent(slimToken, identityAtEntry)) return@onSuccess
+            if (currentLifecycleGeneration() != genAtProbe) return@onSuccess
+            val chat = store.chatFlow.value
+            if (chat.currentSessionId != sid) return@onSuccess
+            val knownIds = chat.messages.mapTo(HashSet()) { it.id }
+            if (shouldTriggerBackgroundCatchUp(
+                    serverLatest,
+                    knownIds,
+                    chat.isLoadingMessages,
+                    _isInForeground.value,
+                    currentLifecycleGeneration() != genAtProbe,
+                )
+            ) {
+                DebugLog.d(TAG, "bg freshness probe: new server latest=$serverLatest not local → catch-up $sid")
+                effectBus.tryEmitEffect(ControllerEffect.CatchUpAfterDisconnect(sid))
+            }
+        }.onFailure { Log.w(TAG, "Background freshness probe failed", it) }
 
         // Re-check foreground before and after network work. A poll that began
         // in background must not emit sound/vibration after the Activity starts.

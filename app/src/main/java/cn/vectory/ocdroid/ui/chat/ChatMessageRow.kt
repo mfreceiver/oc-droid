@@ -298,14 +298,13 @@ internal fun MessageRow(
         // This is an inline card (NOT a DropdownMenu / BottomSheet / AlertDialog),
         // so it is Layer A-adjacent per ui-style-spec.md (T16-C2).
         //
-        // §omitted-content-card-gate: the entire OmittedContentCard outlet is
-        // gated behind [omittedContentCardEnabled] (default OFF). In practice
-        // all three forms proved net-negative value (permanently-hung card
-        // under subagent task parts; unclickable "生成中…" skeleton during
-        // streaming; expand calls that failed because G6
-        // `/slimapi/messages/{sid}/full` is unreliable / skeleton part ids are
-        // transient → orphan/residual/Failed). The underlying machinery is
-        // KEPT for future re-enablement; flip the flag ON to evaluate.
+        // §omitted-content-card-gate: the OmittedContentCard outlet is gated
+        // behind [omittedContentCardEnabled] (default ON). Single-user slim
+        // mode: the sidecar now strips tool output from the list/since
+        // skeleton, so the `hasFull` affordance is the primary way to see
+        // expanded tool output. The flag is RETAINED as a debug force-off
+        // escape hatch (ESP key `omitted_content_card=false`) to globally
+        // hide the affordance for triage. The underlying machinery is KEPT.
         // (Read unconditionally then branch — Compose forbids composable
         // calls inside a short-circuiting `&&` condition.)
         val omittedCardEnabled = rememberOmittedContentCardEnabled()
@@ -344,10 +343,11 @@ internal fun MessageRow(
 // ── §G6 omitted-content affordance ────────────────────────────────────
 
 // §omitted-content-card-gate: reads the [SettingsManager.omittedContentCardEnabled]
-// flag (default OFF) via the same EntryPoint-injection pattern as
-// [rememberDebugCardIdentityEnabled] in DebugCardIdentity.kt. When OFF, the
-// OmittedContentCard outlet is not rendered at all. The underlying expand
-// machinery is intentionally retained for future re-enablement.
+// flag (default ON — §defect-B-2A; single-user slim mode shows hasFull affordances
+// by default) via the same EntryPoint-injection pattern as
+// [rememberDebugCardIdentityEnabled] in DebugCardIdentity.kt. Setting it OFF (debug
+// ESP) is the global force-off escape hatch — the OmittedContentCard outlet is then
+// not rendered. The underlying expand machinery is retained regardless.
 @EntryPoint
 @InstallIn(SingletonComponent::class)
 interface OmittedContentCardSettingsEntryPoint {

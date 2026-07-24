@@ -29,8 +29,12 @@ import kotlinx.coroutines.launch
  *
  * Tiers (bucketed by how long the app was backgrounded, [backgroundedAtMs]):
  *  - `<15s`   → throttle (suppress SSE reconnect catch-up; rely on the live feed)
- *  - `15s–5min` → let the SSE reconnect's `server.connected` drive a gap aware
- *    catch-up (single entry point — no double-trigger)
+ *  - `15s–5min` → medium tier; two variants depending on SSE availability
+ *    ([sseEffectivelyOff], §defect-A-1A):
+ *      • SSE effectively OFF (debug toggle / terminally disconnected) → fire
+ *        REST catch-up NOW (a `server.connected` frame may never arrive).
+ *      • SSE will deliver soon → let the SSE reconnect's `server.connected`
+ *        drive a gap-aware catch-up (single entry point — no double-trigger)
  *  - `>5min`  → global cold-start reload of the current session + stale banner;
  *    suppress the reconnect catch-up (cold-start already loaded)
  *
@@ -65,6 +69,14 @@ class ForegroundCatchUpController(
     // deterministically testable without depending on wall-clock latency in
     // the unit test harness. Defaults to System::currentTimeMillis in production.
     private val clock: () -> Long = { System.currentTimeMillis() },
+    /**
+     * §defect-A-1A: true when SSE will NOT deliver a `server.connected` frame
+     * in any useful timeframe, so the medium tier must REST-catch-up now
+     * instead of waiting. Defaults to `{ false }` to keep unit tests that don't
+     * care about SSE availability byte-identical. Production wires the real
+     * predicate in [cn.vectory.ocdroid.di.ControllerModule].
+     */
+    private val sseEffectivelyOff: () -> Boolean = { false },
 ) {
     /**
      * Guards the very first [AppLifecycleMonitor.isInForeground] emission.
@@ -142,23 +154,32 @@ class ForegroundCatchUpController(
             effects.tryEmitEffect(ControllerEffect.ForceReconnect)
             val now = clock()
             val bgGapMs = if (backgroundedAtMs > 0L) now - backgroundedAtMs else Long.MAX_VALUE
-            when {
-                bgGapMs < FOREGROUND_RELOAD_MIN_INTERVAL_MS -> {
+            when (decideForegroundReturn(bgGapMs, sseEffectivelyOff())) {
+                ForegroundReturnAction.Throttle -> {
                     // Throttled: suppress the SSE reconnect's catch-up too.
                     suppressNextConnectCatchUp = true
                 }
-                bgGapMs <= LONG_ABSENCE_THRESHOLD_MS -> {
-                    // Medium absence: let server.connected drive the catch-up
-                    // (single entry point). Just stamp the load timestamp.
+                ForegroundReturnAction.CatchUpOnSseConnect -> {
+                    // Medium absence, SSE will deliver: let server.connected
+                    // drive the catch-up (single entry point). Just stamp load ts.
                     lastLoadAtMs = now
                 }
-                else -> {
+                ForegroundReturnAction.CatchUpNow -> {
+                    // §defect-A-1A: SSE effectively OFF — server.connected may
+                    // never arrive. Fire the REST catch-up NOW and suppress the
+                    // (possibly-later) connect catch-up so we don't double-trigger.
+                    lastLoadAtMs = now
+                    suppressNextConnectCatchUp = true
+                    currentSessionId()?.let {
+                        effects.tryEmitEffect(ControllerEffect.CatchUpAfterDisconnect(it))
+                    }
+                }
+                ForegroundReturnAction.ColdStart -> {
                     // Long absence: cold-start the current session + stale banner.
                     // Suppress the reconnect catch-up — cold-start already loaded.
                     lastLoadAtMs = now
                     suppressNextConnectCatchUp = true
                     currentSessionId()?.let {
-                        // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
                         effects.tryEmitEffect(ControllerEffect.GlobalColdStartRefresh(it))
                     }
                     setStaleNotice()

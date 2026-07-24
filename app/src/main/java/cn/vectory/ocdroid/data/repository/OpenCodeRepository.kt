@@ -711,6 +711,28 @@ class OpenCodeRepository @Inject constructor(
     fun isMutualTlsActive(): Boolean = currentSslConfig() is SslConfig.MutualTLS
 
     /**
+     * §tokenstream-mtls-fix: build a token-stream OkHttp client via THIS repository's
+     * [clientFactory] (whose [sslConfigFactory] holds the mTLS material loaded by
+     * [configure]), so the token-stream SSE trusts the same server CA as REST/SSE.
+     *
+     * Before this, the token stream was wired (in [cn.vectory.ocdroid.di.ControllerModule]
+     * .provideTokenStreamCoordinator) to the Hilt-singleton [OkHttpClientFactory], whose
+     * own [SslConfigFactory] never received [configureClientCert] → [sslConfigFor] fell
+     * back to [SslConfig.SystemDefault] → "Trust anchor for certification path not
+     * found" under mTLS + slim (REST/SSE worked because they read THIS factory).
+     *
+     * Delegates to [OkHttpClientFactory.tokenStreamClient]; [sslConfigFactory] is read
+     * live on each call (a fresh [OkHttpClient] is built per open), so a post-configure
+     * open always picks up the current mTLS / host state — the same live-host-config
+     * invariant the DI provider already honours by resolving the URL at open time.
+     *
+     * Additive public method — does NOT change the constructor (the
+     * [T3RepositoryExtractFreezeTest] JVM-arity freeze stays GREEN).
+     */
+    fun tokenStreamClient(hostPort: String?): OkHttpClient =
+        clientFactory.tokenStreamClient(hostPort)
+
+    /**
      * §fix-3 (gro-1#2/gpt-2#2/max-1 M1): 转发 [SslConfigFactory.lastClientCertError]。
      * 非空 = 最近一次 [configure] 注入的客户端证书材料试构建失败（p12 损坏 / CA 无法
      * 解析）→ mTLS 已降级回 SystemDefault，profile 仍宣称 mtlsEnabled。controller/UI
@@ -1013,12 +1035,26 @@ class OpenCodeRepository @Inject constructor(
         val tokenStream = featuresObj?.get("tokenStream")?.safePrimitive()?.let { p ->
             p.booleanOrNull == true || p.content.equals("true", ignoreCase = true)
         } == true
+        // §defect-B-2C: diagnostic-only dual-read of thresholdedSkeleton /
+        // skeletonInlineOutputMaxBytes. Same tolerant discipline as tokenStream —
+        // missing/wrong-typed fields fall back to defaults. NOT wired into any
+        // behaviour or compat gate (single-user; sidecar default-on).
+        val thresholdedSkeleton = featuresObj?.get("thresholdedSkeleton")?.safePrimitive()?.let { p ->
+            p.booleanOrNull == true || p.content.equals("true", ignoreCase = true)
+        } == true
+        val skeletonInlineOutputMaxBytes = featuresObj?.get("skeletonInlineOutputMaxBytes")?.safePrimitive()?.let { p ->
+            p.intOrNull
+        }
         return SlimapiHealthPayload(
             sidecarOk = sidecarOk,
             schemaDegraded = schemaDegraded,
             serverApiVersion = apiVersion,
             acceptedClientVersions = accepted,
-            features = SlimapiFeatures(tokenStream = tokenStream)
+            features = SlimapiFeatures(
+                tokenStream = tokenStream,
+                thresholdedSkeleton = thresholdedSkeleton,
+                skeletonInlineOutputMaxBytes = skeletonInlineOutputMaxBytes,
+            )
         )
     }
 
@@ -2129,11 +2165,11 @@ class OpenCodeRepository @Inject constructor(
      * unchanged. Per-call `api` + `hostPort` are supplied to the engine via
      * providers (I3 / hostPort-live) — see [expandBatchEngine].
      *
-     * TODO(§omitted-content-card-gate): the UI outlet that consumes this
-     * (OmittedContentCard) is default-OFF (SettingsManager.omittedContentCardEnabled
-     * = false). This function + [mergeFullBatchIntoLocal] are intentionally KEPT
-     * (NOT dead code) — they are referenced by unit tests. Re-enable or delete
-     * once G6 `/slimapi/messages/{sid}/full` (or a sidecar equivalent) is reliable.
+     * §omitted-content-card-gate: the UI outlet that consumes this
+     * (OmittedContentCard) is default-ON (SettingsManager.omittedContentCardEnabled
+     * = true; Defect B part 2A). This function + [mergeFullBatchIntoLocal] are
+     * live code — referenced by unit tests. The toggle is retained as a debug
+     * force-off escape hatch (ESP key `omitted_content_card=false`).
      */
     suspend fun expandMessagesFullBatch(
         sessionId: String,

@@ -123,6 +123,39 @@ class SettingsManagerTest {
         assertTrue("flag persisted across SettingsManager recreation", recreated.sseDisabled)
     }
 
+    // ───────────────── §omitted-content-card-gate (Defect B part 2A) ─────────────────
+
+    @Test
+    fun `omittedContentCardEnabled defaults to true`() {
+        // §omitted-content-card-gate (Defect B part 2A): the inline
+        // "展开省略内容" (OmittedContentCard) affordance is default-ON for
+        // single-user slim mode (tool output is sidecar-stripped on the
+        // list/since skeleton; the affordance on `hasFull` parts is the
+        // user's primary way to expand that stripped content). The flag is
+        // retained as a debug force-off escape hatch (ESP key
+        // `omitted_content_card=false`). Fresh ESP must return true.
+        assertTrue(settings.omittedContentCardEnabled)
+        // Sanity: the adjacent debug toggle's default is unchanged by this
+        // flip (sseDisabled stays OFF — production SSE path intact; also
+        // pinned by `sseDisabled defaults to false` above).
+        assertFalse(settings.sseDisabled)
+    }
+
+    @Test
+    fun `omittedContentCardEnabled round trip and survives recreation`() {
+        // The escape hatch must be writable so a debug user can force-hide
+        // the affordance, and must persist across cold start (mirrors the
+        // sseDisabled contract).
+        settings.omittedContentCardEnabled = false
+        assertFalse(settings.omittedContentCardEnabled)
+        settings.omittedContentCardEnabled = true
+        assertTrue(settings.omittedContentCardEnabled)
+        // Persists across SettingsManager recreation (cold start).
+        settings.omittedContentCardEnabled = false
+        val recreated = SettingsManager(ApplicationProvider.getApplicationContext())
+        assertFalse("force-off persists across SettingsManager recreation", recreated.omittedContentCardEnabled)
+    }
+
     // ───── recentWorkdirs：项目记忆与冷启动恢复（§recent-workdirs）─────
     // R-20 Phase 5: per-serverGroupFp storage. Tests pass a fixed fp ("g1")
     // so the per-fp slot is exercised the same way the legacy global slot was.

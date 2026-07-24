@@ -52,12 +52,12 @@ import cn.vectory.ocdroid.util.runSuspendCatching
  * [cn.vectory.ocdroid.data.repository.ExpandOutcome] /
  * [cn.vectory.ocdroid.data.repository.StatusOutcome].
  *
- * TODO(§omitted-content-card-gate): the UI outlet (OmittedContentCard)
- * is default-OFF (SettingsManager.omittedContentCardEnabled = false). This
- * sealed interface + its transition table are intentionally KEPT (NOT
- * dead code) — they are referenced by unit tests and by
- * [ExpandPartsUseCase]. Re-enable or delete once G6
- * `/slimapi/messages/{sid}/full` (or a sidecar equivalent) is reliable.
+ * §omitted-content-card-gate: the UI outlet (OmittedContentCard)
+ * is default-ON (SettingsManager.omittedContentCardEnabled = true; Defect B
+ * part 2A). This sealed interface + its transition table are live code —
+ * referenced by unit tests and by [ExpandPartsUseCase]. The toggle is
+ * retained as a debug force-off escape hatch (ESP key
+ * `omitted_content_card=false`).
  */
 sealed interface PartExpandState {
     /** Initial / reset. Affordance visible. */
@@ -193,11 +193,11 @@ data class ExpandPartsOutcome(
  *
  * @param repository T3's `expandMessagesFullBatch` is consume-only.
  *
- * TODO(§omitted-content-card-gate): the UI outlet that drives this usecase
- * (OmittedContentCard) is default-OFF (SettingsManager.omittedContentCardEnabled
- * = false). This usecase is intentionally KEPT (NOT dead code) — it is covered
- * by unit tests and wired through the chat ViewModel. Re-enable or delete once
- * G6 `/slimapi/messages/{sid}/full` (or a sidecar equivalent) is reliable.
+ * §omitted-content-card-gate: the UI outlet that drives this usecase
+ * (OmittedContentCard) is default-ON (SettingsManager.omittedContentCardEnabled
+ * = true; Defect B part 2A). This usecase is live code — covered by unit
+ * tests and wired through the chat ViewModel. The toggle is retained as a
+ * debug force-off escape hatch (ESP key `omitted_content_card=false`).
  */
 class ExpandPartsUseCase(
     private val repository: OpenCodeRepository,

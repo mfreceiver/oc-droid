@@ -373,6 +373,19 @@ internal fun launchLoadMessages(
                                 authoritative = authoritative,
                             )
                         )
+                        // §defect-B-2B: auto-expand omitted tool output for the
+                        // freshly loaded messages (bounded to the most-recent
+                        // window, streaming-guarded, single-flight per load).
+                        // Launches into the same scope; its own CAS guards
+                        // (session+fp+streaming+isLoading) no-op if the session
+                        // switched / went streaming before the launch resumes.
+                        launchAutoExpandOmittedParts(
+                            scope = scope,
+                            repository = repository,
+                            store = slices.store,
+                            sessionId = sessionId,
+                            currentServerGroupFp = currentServerGroupFp,
+                        )
                         // §chat-ux-batch T8 (B3): the legacy global←per-session
                         // selectedAgentName backfill (sync the settings slice
                         // from SettingsManager.getAgentForSession) was deleted

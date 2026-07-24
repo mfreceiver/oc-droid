@@ -8,6 +8,7 @@
 | 文件 | 作用 |
 |---|---|
 | `architecture.md` | **代码框架规范**（分层 / 双 API 变体共存 / 端口模式 / 能力读模型 / 不变量 / 包约定）—— 新增/重构代码须读 |
+| `decomposition-guidelines.md` | **模块拆分与门面演化准则**（冻结契约 / provider-lambda 注入 / 单一归属 / 单向 DAG / 何时拆何时不拆 / UI 域规则）—— 拆分 god 类须读 |
 | `build-apk.md` | 本地构建 / 签名 / 发版完整指南（本机路径、命令、Gitea 上传） |
 | `emulator-debug.md` | 模拟器调试指南（启停流程、adb、集成测试） |
 | `mtls-setup-guide.md` | mTLS（stunnel）服务端配置与客户端证书导入指南 |

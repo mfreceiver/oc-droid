@@ -4,6 +4,7 @@ import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
+import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
@@ -104,14 +105,18 @@ class ForegroundCatchUpControllerTest {
     }
 
     /** Builds a controller wired to [foregroundFlow] + [effects] + [nowMs]. */
-    private fun makeController(scope: CoroutineScope): ForegroundCatchUpController =
+    private fun makeController(
+        scope: CoroutineScope,
+        sseEffectivelyOff: () -> Boolean = { false },
+    ): ForegroundCatchUpController =
         ForegroundCatchUpController(
             appLifecycleMonitor = stubMonitor(),
             scope = scope,
             store = store,
             settingsManager = settingsManager,
             effects = effects,
-            clock = { nowMs }
+            clock = { nowMs },
+            sseEffectivelyOff = sseEffectivelyOff,
         )
 
     // ── first-emission guard ───────────────────────────────────────────────
@@ -216,6 +221,133 @@ class ForegroundCatchUpControllerTest {
         controller.onServerConnected() // first connect: sets sseHasConnectedOnce
         controller.onServerConnected() // reconnect: should catch up
         assertEquals(1, collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>().size)
+    }
+
+    // ── §defect-A-1A: SSE-off medium variant ───────────────────────────────
+
+    @Test
+    fun `medium absence with SSE effectively off fires immediate catch-up and suppresses the later connect catch-up`() = withCollectedEffects { controllerScope, collected ->
+        // §defect-A-1A: when SSE will NOT deliver server.connected in any
+        // useful timeframe (debug toggle / terminal disconnect), a 15s–5min
+        // foreground return must REST-catch-up IMMEDIATELY and suppress the
+        // (possibly-later) connect catch-up so we don't double-trigger.
+        // currentSessionId must be set BEFORE the foreground return so the
+        // immediate effect can target it.
+        store.mutateChat { it.copy(currentSessionId = "session-A1A") }
+        val controller = makeController(controllerScope, sseEffectivelyOff = { true })
+        controller.onForegroundChanged(true) // baseline
+        nowMs = 1_000
+        controller.onForegroundChanged(false) // background @1000
+        nowMs = 1_000 + 20_000 // 20s — medium tier
+
+        controller.onForegroundChanged(true)
+
+        // Exactly ONE CatchUpAfterDisconnect fires immediately on the
+        // foreground return, BEFORE any onServerConnected.
+        val immediate = collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>()
+        assertEquals("immediate REST catch-up on fg return", 1, immediate.size)
+        assertEquals("session-A1A", immediate.single().sessionId)
+        assertTrue("no GlobalColdStartRefresh for medium tier", collected.filterIsInstance<ControllerEffect.GlobalColdStartRefresh>().isEmpty())
+
+        // The FIRST server.connected (the connect the foreground ForceReconnect
+        // would drive) must be SUPPRESSED — its catch-up would double-trigger
+        // against the immediate REST catch-up that already fired above.
+        // (onServerConnected consumes the suppress flag on this call.)
+        controller.onServerConnected()
+        assertEquals(
+            "first server.connected suppressed — no double catch-up vs the immediate REST catch-up",
+            1,
+            collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>().size
+        )
+        // A SECOND connect is a GENUINE reconnect (a new network-drop recovery,
+        // not the same gap) — the suppress flag is consumed once per the
+        // unchanged onServerConnected contract, so this legitimately catches
+        // up. This is correct behaviour: the suppress only guards the ONE
+        // connect that would have double-triggered with the immediate catch-up.
+        controller.onServerConnected()
+        assertEquals(
+            "genuine reconnect catches up (suppress consumed once — not a double of the immediate gap)",
+            2,
+            collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>().size
+        )
+    }
+
+    @Test
+    fun `medium absence with SSE available still waits for server connected`() = withCollectedEffects { controllerScope, collected ->
+        // §defect-A-1A: the SSE-ON regression guard — when SSE WILL deliver,
+        // the medium tier still defers to server.connected (no immediate
+        // REST catch-up on the foreground return). This restates the legacy
+        // medium-tier contract via the decision path so it isn't silently
+        // regressed by the §defect-A-1A change.
+        val controller = makeController(controllerScope, sseEffectivelyOff = { false })
+        controller.onForegroundChanged(true) // baseline
+        nowMs = 1_000
+        controller.onForegroundChanged(false) // background @1000
+        nowMs = 1_000 + 20_000 // 20s — medium tier
+
+        controller.onForegroundChanged(true)
+
+        assertTrue(
+            "no immediate REST catch-up when SSE is available",
+            collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>().isEmpty()
+        )
+        // server.connected twice (first + reconnect) → exactly one catch-up.
+        store.mutateChat { it.copy(currentSessionId = "session-SSE") }
+        controller.onServerConnected() // first
+        controller.onServerConnected() // reconnect → catch up
+        assertEquals(1, collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>().size)
+    }
+
+    @Test
+    fun `Disconnected phase yields CatchUpNow, Reconnecting yields CatchUpOnSseConnect`() = withCollectedEffects { controllerScope, collected ->
+        // §defect-A-1A: the sseEffectivelyOff predicate is driven from a
+        // mutable phase holder so we exercise the production-derived
+        // discriminant (Disconnected = OFF → immediate; Reconnecting = NOT
+        // OFF → wait). This mirrors how ControllerModule.wire builds the
+        // predicate from store.connectionFlow.value.connectionPhase.
+        var phase: ConnectionPhase = ConnectionPhase.Disconnected
+        val controller = makeController(controllerScope, sseEffectivelyOff = { phase is ConnectionPhase.Disconnected })
+
+        // ── Disconnected → immediate catch-up ───────────────────────────────
+        store.mutateChat { it.copy(currentSessionId = "session-disc") }
+        controller.onForegroundChanged(true) // baseline
+        nowMs = 1_000
+        controller.onForegroundChanged(false)
+        nowMs = 1_000 + 20_000 // 20s — medium tier
+
+        controller.onForegroundChanged(true)
+
+        assertEquals(
+            "Disconnected phase → immediate REST catch-up",
+            1,
+            collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>().size
+        )
+
+        // ── Reconnecting → defer to server.connected ────────────────────────
+        // Reset collected list for the second scenario by filtering to the
+        // effects emitted AFTER this point: we drive a fresh bg/fg cycle and
+        // assert the COUNT of catch-ups does NOT increase until onServerConnected.
+        val beforeReconnecting = collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>().size
+        phase = ConnectionPhase.Reconnecting
+        store.mutateChat { it.copy(currentSessionId = "session-recon") }
+        nowMs = 1_000
+        controller.onForegroundChanged(false)
+        nowMs = 1_000 + 20_000 // 20s — medium tier, SSE reconnecting
+
+        controller.onForegroundChanged(true)
+
+        assertEquals(
+            "Reconnecting phase → NO immediate REST catch-up (waits for connect)",
+            beforeReconnecting,
+            collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>().size
+        )
+        controller.onServerConnected() // first
+        controller.onServerConnected() // reconnect → catch up
+        assertEquals(
+            "Reconnecting phase → server.connected drives the catch-up",
+            beforeReconnecting + 1,
+            collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>().size
+        )
     }
 
     // ── >5min tier (cold-start + stale) ────────────────────────────────────

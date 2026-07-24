@@ -43,19 +43,18 @@ internal class DebugPrefs(
 
     /**
      * §omitted-content-card-gate: runtime toggle for the in-chat
-     * "展开省略内容" (OmittedContentCard) affordance. Default OFF — the card
-     * is hidden behind [SettingsManager.omittedContentCardEnabled] because in
-     * practice all three of its forms proved net-negative value (a card
-     * permanently hung under subagent task parts; an unclickable "生成中…"
-     * skeleton during streaming; and expand calls that failed because G6
-     * `/slimapi/messages/{sid}/full` is unreliable / skeleton part ids are
-     * transient → orphan/residual/Failed). The underlying machinery
-     * (`PartExpandState` / `ExpandPartsUseCase` / `expandMessagesFullBatch`)
-     * is intentionally KEPT (NOT deleted) pending a reliable G6/sidecar
-     * version; flip this ON to re-expose the UI outlet for evaluation.
+     * "展开省略内容" (OmittedContentCard) affordance. Default ON — this is a
+     * single-user slim-mode product: tool output is sidecar-stripped on the
+     * list/since skeleton, so the affordance on `hasFull` parts is the user's
+     * primary way to expand that stripped content. The toggle is RETAINED as
+     * a hidden debug escape hatch: set it OFF (ESP key
+     * [KEY_OMITTED_CONTENT_CARD] = `omitted_content_card=false`) to
+     * force-hide the affordance globally for evaluation/triage. The
+     * underlying machinery (`PartExpandState` / `ExpandPartsUseCase` /
+     * `expandMessagesFullBatch`) is intentionally KEPT (NOT deleted).
      */
     var omittedContentCardEnabled: Boolean
-        get() = encryptedPrefs.getBoolean(KEY_OMITTED_CONTENT_CARD, false)
+        get() = encryptedPrefs.getBoolean(KEY_OMITTED_CONTENT_CARD, true)
         set(value) = encryptedPrefs.edit().putBoolean(KEY_OMITTED_CONTENT_CARD, value).apply()
 
     /**
@@ -81,7 +80,7 @@ internal class DebugPrefs(
         /** §streaming-state-sync-diag: ESP key for [debugLogVerboseEnabled]. Default false. */
         internal const val KEY_DEBUG_LOG_VERBOSE = "debug_log_verbose"
         internal const val KEY_DEBUG_CARD_IDENTITY = "debug_card_identity"
-        /** §omitted-content-card-gate: ESP key for [omittedContentCardEnabled]. Default false. */
+        /** §omitted-content-card-gate: ESP key for [omittedContentCardEnabled]. Default true. */
         internal const val KEY_OMITTED_CONTENT_CARD = "omitted_content_card"
         /** §sse-disabled-debug-toggle: ESP key for [sseDisabled]. Default false. */
         internal const val KEY_SSE_DISABLED = "sse_disabled"

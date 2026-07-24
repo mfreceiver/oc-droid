@@ -244,4 +244,86 @@ class OpenCodeRepositorySlimapiHealthParseTest {
         val payload = repository.parseSlimapiHealth(body)
         assertNull(payload.schemaDegraded)
     }
+
+    // §defect-B-2C: diagnostic-only fields on SlimapiFeatures. These are NOT
+    // behaviour gates — they're populated for diagnostic readout/logging. The
+    // three cases below pin the tolerant parse contract:
+    //   1. present + well-typed → parsed verbatim;
+    //   2. absent → safe defaults (false / null), no crash;
+    //   3. wrong-typed → tolerant fallback (bool only on literal bool/"true";
+    //      int only on literal int, else null), no crash.
+
+    @Test
+    fun `parses thresholdedSkeleton and skeletonInlineOutputMaxBytes when present`() {
+        val body = """
+            {
+              "sidecar":  { "ok": true },
+              "schema":   { "degraded": false },
+              "server":   { "api_version": 1, "accepted_client_versions": [1, 1] },
+              "features": {
+                "tokenStream": true,
+                "thresholdedSkeleton": true,
+                "skeletonInlineOutputMaxBytes": 4096
+              }
+            }
+        """.trimIndent()
+
+        val payload = repository.parseSlimapiHealth(body)
+
+        assertEquals(true, payload.features.tokenStream)
+        assertEquals(true, payload.features.thresholdedSkeleton)
+        assertEquals(4096, payload.features.skeletonInlineOutputMaxBytes)
+    }
+
+    @Test
+    fun `diagnostic skeleton fields default safely when absent`() {
+        // Only tokenStream advertised — the B-2C diagnostic fields must fall
+        // back to (false / null) without breaking the rest of the parse.
+        val body = """
+            {
+              "sidecar":  { "ok": true },
+              "schema":   { "degraded": false },
+              "server":   { "api_version": 1, "accepted_client_versions": [1, 1] },
+              "features": { "tokenStream": true }
+            }
+        """.trimIndent()
+
+        val payload = repository.parseSlimapiHealth(body)
+
+        assertEquals(true, payload.features.tokenStream)
+        assertEquals(false, payload.features.thresholdedSkeleton)
+        assertNull(payload.features.skeletonInlineOutputMaxBytes)
+        // Other fields still parsed independently.
+        assertEquals(true, payload.sidecarOk)
+        assertEquals(1, payload.serverApiVersion)
+    }
+
+    @Test
+    fun `diagnostic skeleton fields tolerate wrong types`() {
+        // Wrong types: thresholdedSkeleton is the string "yes" (NOT "true"),
+        // skeletonInlineOutputMaxBytes is a bool. Must NOT crash, and must fall
+        // back: bool only true on literal bool / case-insensitive "true"; int
+        // field null on anything non-int.
+        val body = """
+            {
+              "sidecar":  { "ok": true },
+              "schema":   { "degraded": false },
+              "server":   { "api_version": 1, "accepted_client_versions": [1, 1] },
+              "features": {
+                "tokenStream": "true",
+                "thresholdedSkeleton": "yes",
+                "skeletonInlineOutputMaxBytes": true
+              }
+            }
+        """.trimIndent()
+
+        val payload = repository.parseSlimapiHealth(body)
+
+        // tokenStream still parses from the string "true" (dual-read contract).
+        assertEquals(true, payload.features.tokenStream)
+        // "yes" is not literal bool/"true" → false.
+        assertEquals(false, payload.features.thresholdedSkeleton)
+        // bool where int expected → null.
+        assertNull(payload.features.skeletonInlineOutputMaxBytes)
+    }
 }

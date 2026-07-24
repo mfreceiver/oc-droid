@@ -329,7 +329,14 @@ class ServerCompatProfile @Inject constructor() {
  *   `OC_SLIMAPI_ACCEPTED_CLIENT_VERSIONS=min,max`。
  */
 data class SlimapiFeatures(
-    val tokenStream: Boolean = false
+    val tokenStream: Boolean = false,
+    /** §defect-B-2C: diagnostic — sidecar/server indicates list/since skeleton
+     *  output is thresholded (inline output stripped above a size limit). NOT
+     *  a behaviour gate (single-user; sidecar default-on). For logging/diag. */
+    val thresholdedSkeleton: Boolean = false,
+    /** §defect-B-2C: diagnostic — the byte threshold above which inline tool
+     *  output is omitted from skeleton responses, when known. Nullable. */
+    val skeletonInlineOutputMaxBytes: Int? = null,
 )
 
 data class SlimapiHealthPayload(
