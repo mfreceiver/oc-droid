@@ -1,0 +1,16 @@
+{
+  "agent": "oracle",
+  "scope": "release",
+  "date": "2026-07-12",
+  "reviewed_commit": "53c2e67",
+  "version_target": "0.8.3",
+  "verdict": "pass",
+  "score": 9.7,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "Full local-data reset clears the persisted locale preference and resets UI to SYSTEM without immediately re-applying SYSTEM through AppLocaleController; displayed language may stay forced until Activity recreation/process restart. Deferred post-release.",
+    "Displayed cache size measures only cached_message.parts payload bytes, not total cache/database storage; 'Message cache' may under-report actual disk usage. Deferred post-release.",
+    "Git workdir switching falls back to the active Chat session when the selected workdir has no session, potentially mixing session-scoped diffs with another project's working tree. Deferred post-release."
+  ],
+  "notes": "Final re-review after two release-blocking fixes. Round-1 raised 2 blockers (cross-server cache eviction in orphan sweep; 'Clear cache' understating resetLocalDataAndResync destructive scope). Both resolved: (1) CacheMaintenanceCoordinator.kt:52-56,124-137 injects @Named(\"currentServerGroupFp\") and gates alive-set enumeration/sweep/mark/stamp to the connected fp only — non-connected groups now run fp-scoped LRU/age eviction only and return Incomplete with zero counts; verified by CacheMaintenanceCoordinatorTest.kt:425-458 (RED→GREEN). Per-group UI sweep (SettingsViewModel.kt:138-142, CacheManagementSection.kt:176-257) restricted to online && connected group. (2) SettingsSections.kt:280-332 relabels action 'Reset local data'/重置本地数据 and metric 'Message cache'/消息缓存占用; confirmation dialog enumerates full scope (drafts, model/agent prefs, current session/workdir, nav/UI state, theme, language, traffic counters, cached messages, re-sync, irreversible) in both locales; resetLocalDataAndResync behavior unchanged. check.sh --full passes (zero MissingTranslation); SettingsSectionsInstrumentedTest 5/5; StreamingMarkdownZeroShrinkTest 8/8. Navigation/reselect, Chat preview isolation, locale persistence, Compose lifecycle/insets, resources, and accessibility reviewed clean."
+}

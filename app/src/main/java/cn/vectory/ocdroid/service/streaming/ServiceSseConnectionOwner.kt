@@ -180,9 +180,22 @@ class ServiceSseConnectionOwner(
      * accepted [connect]; the gap-dirty emission uses it to keep
      * [gapEmittedForGen] scoped to ONE outage per generation (a successful
      * frame resets the gap flag; the next failure starts a NEW outage).
+     *
+     * §breathing-indicator (TOCTOU fix): SEEDED from the @Singleton store's
+     * [SharedStateStore.sseConnectedGeneration] at construction. The counter is
+     * per-owner-INSTANCE (it resets to 0 for a recreated Service), but the
+     * monotonic CAS on [SharedStateStore.mutateSseConnected] is GLOBAL (the
+     * store is process-lifetime). Without seeding, a recreated owner's
+     * generations (1, 2, …) would all be LOWER than the prior owner's teardown
+     * stamp, so the CAS would reject the new owner's EVERY write — including
+     * its own legitimate first-frame `true` — breaking service-recreation
+     * survival. Seeding continues the counter monotonically from the persisted
+     * stamp, so the new owner's generations always win the CAS. Harmless to the
+     * gap/exhaustion/closing/resync protocols (they only need WITHIN-owner
+     * monotonicity, which the seeded counter preserves).
      */
     @Volatile
-    private var transportGenerationCounter: Long = 0L
+    private var transportGenerationCounter: Long = sharedStateStore.sseConnectedGeneration
 
     /**
      * D5 (#1) — CRITICAL post-Ready outage recovery marker. The D4-B
@@ -214,6 +227,62 @@ class ServiceSseConnectionOwner(
         // Compare-and-set keeps the marker scoped to the intended generation
         // — a newer generation that already bumped past it is unaffected.
         if (transportGenerationCounter == generation) closingGeneration = generation
+    }
+
+    /**
+     * §breathing-indicator (item ①): the OBSERVABLE SSE-transport-up signal.
+     * `true` iff the live collector has proven transport delivery with at least
+     * one valid current-identity frame AND has not since torn down.
+     *
+     * Exposed as the SAME [StateFlow] the [SharedStateStore] holds (not a
+     * private mirror) so the flag SURVIVES service recreation: the owner is
+     * service-instance-scoped + nullable, but the store is `@Singleton`, so a
+     * torn-down + rebuilt [SessionStreamingService] reads/writes the SAME
+     * field. The UI observes [sharedStateStore].[SharedStateStore.sseConnectedFlow]
+     * process-lifetime; this property exists so callers that already hold the
+     * owner (the Service shell) can read transport state off it directly.
+     *
+     * INDEPENDENT of [cn.vectory.ocdroid.ui.ConnectionState.isConnected]: that
+     * field is HEALTH-settle (REST baseline); this field is TRANSPORT delivery
+     * (a frame reached the owner). The two flip independently — a transient
+     * SSE outage flips this false while health may still read connected.
+     *
+     * Updated ONLY through the generation-checked [setSseConnected] helper.
+     */
+    val isSseConnected: kotlinx.coroutines.flow.StateFlow<Boolean>
+        get() = sharedStateStore.sseConnectedFlow
+
+    /**
+     * §breathing-indicator (item ①): the SINGLE write path for [isSseConnected].
+     * Delegates to [SharedStateStore.mutateSseConnected], whose MONOTONIC
+     * generation-stamped CAS is the AUTHORITATIVE guard: a write commits ONLY
+     * IF its [generation] is `>=` the stored `sseConnectedGeneration`.
+     *
+     * TOCTOU fix: the pre-CAS version did `if (isCurrentTransport(generation))
+     * mutateSseConnected { ... }` — the check (reads `transportGenerationCounter`)
+     * and the write (commits to the store) were NON-atomic, so a stale collector
+     * could pass the check and then commit `true` AFTER a concurrent
+     * disconnect/reconfigure bumped the generation in between. The CAS collapses
+     * check + write into ONE atomic transition, so a stale LOWER-generation
+     * write loses the CAS regardless of when it races. No extra lock is needed
+     * (cannot deadlock with [connectMutex] — the CAS is lock-free).
+     *
+     * The upstream `isCurrentTransport(identity, generation)` guards in
+     * [onSuccessfulFrame] / [onCollectionException] stay as cheap early-returns
+     * for the common stale-collector case; the CAS is the atomic backstop that
+     * wins the races those guards cannot (the collector is single-threaded on
+     * its scope dispatcher, but a teardown on another path can interleave
+     * between the upstream guard and this call).
+     *
+     * @param value the candidate `isSseConnected` value.
+     * @param generation the transport generation this write belongs to:
+     *   - frame / outage / exhaustion → the collector's own generation (so a
+     *     same-gen recovered frame can re-assert true after an outage);
+     *   - reconfigure supersession / disconnect / shutdown → the BUMPED (new)
+     *     generation (so a stale prior-gen collector loses the CAS).
+     */
+    private fun setSseConnected(value: Boolean, generation: Long) {
+        sharedStateStore.mutateSseConnected(value, generation)
     }
 
     /**
@@ -336,7 +405,28 @@ class ServiceSseConnectionOwner(
         // generation here — the bump below allocates a fresh, non-closing
         // generation. Matching-by-generation means the new generation does
         // NOT inherit the prior marker.
+        // §breathing-indicator (purge-clear defensive): a host purge (or any
+        // external stamp advancement on the @Singleton store) may have pushed
+        // [SharedStateStore.sseConnectedGeneration] past this owner's per-
+        // instance counter (the counter is seeded once at construction; a
+        // purge that did NOT go through owner-disconnect advances the store
+        // stamp without bumping the counter). Re-seed to the max so the
+        // supersession stamp below (counter + 1) wins the monotonic CAS even
+        // after multiple purges without a reconnect in between. Runs under
+        // connectMutex — no race with another of THIS owner's connects.
+        if (transportGenerationCounter < sharedStateStore.sseConnectedGeneration) {
+            transportGenerationCounter = sharedStateStore.sseConnectedGeneration
+        }
         markClosing(transportGenerationCounter)
+        // §breathing-indicator (TOCTOU fix): stamp the NEW generation
+        // (`transportGenerationCounter + 1` == the post-bump value the `++`
+        // below produces) so a stale PRIOR-gen collector's
+        // setSseConnected(true, priorGen) loses the monotonic CAS
+        // (priorGen < priorGen+1) even if it races this teardown. The CAS
+        // commits this stamp atomically — no window between the check and the
+        // write. (Pre-CAS this stamped the prior gen, so a racing prior-gen
+        // frame could resurrect `true` after teardown — the bgpt TOCTOU.)
+        setSseConnected(false, transportGenerationCounter + 1)
         sseJob?.cancel()
         sseJob = null
         transportTimeoutJob?.cancel()
@@ -498,6 +588,10 @@ class ServiceSseConnectionOwner(
                     exhaustedReportedForGen != generation
                 ) {
                     exhaustedReportedForGen = generation
+                    // §breathing-indicator: terminal exhaustion = the transport
+                    // is permanently down for this generation. Drop the SSE-up
+                    // flag (a new connect / reconfigure re-arms it).
+                    setSseConnected(false, generation)
                     // Write the shared connection state to disconnected/degraded.
                     sharedStateStore.mutateConnection {
                         it.copy(
@@ -561,6 +655,12 @@ class ServiceSseConnectionOwner(
         readiness: CompletableDeferred<SourceActivation>,
     ) {
         if (!isCurrentTransport(identity, generation)) return
+        // §breathing-indicator: a valid current-identity frame proves transport
+        // delivery → SSE is connected. Set on EVERY such frame (first-frame
+        // readiness AND a post-Ready recovered frame after a retry gap) so the
+        // breathing resumes the instant the stream recovers. Idempotent +
+        // generation-checked inside [setSseConnected].
+        setSseConnected(true, generation)
         // Publish into the process-wide stream — the bridge (subscribed
         // eagerly from AppCore) routes through the §2 epoch guard + §11
         // dual-channel + re-emits each validated frame as OnSseEvent for
@@ -681,6 +781,11 @@ class ServiceSseConnectionOwner(
         if (!isCurrentTransport(identity, generation)) {
             return
         }
+        // §breathing-indicator: a collection-level failure is a transport gap
+        // (the stream broke). Drop the SSE-up flag so the breathing stops
+        // during the inter-retry gap — the UI must not lie that the stream is
+        // alive while a retry is pending. A recovered frame re-asserts true.
+        setSseConnected(false, generation)
         sharedEffectBus.tryEmitUiEvent(
             UiEvent.Error(
                 R.string.error_sse_failed,
@@ -900,6 +1005,13 @@ class ServiceSseConnectionOwner(
             // the collector's outage path).
             val closingGen = transportGenerationCounter
             markClosing(closingGen)
+            // §breathing-indicator (TOCTOU fix): stamp the NEW generation
+            // (`closingGen + 1` == the post-bump value `transportGenerationCounter
+            // += 1` produces below) so a stale gen-closingGen collector's
+            // setSseConnected(true, closingGen) loses the monotonic CAS and
+            // cannot resurrect `true` after an intentional disconnect. The CAS
+            // commits atomically — no check-then-write window.
+            setSseConnected(false, closingGen + 1)
             val job = sseJob
             sseJob = null
             transportTimeoutJob?.cancel()
@@ -927,8 +1039,15 @@ class ServiceSseConnectionOwner(
         // D5 (#1): mark closing BEFORE the cancel so a collector whose flow
         // is breaking at this exact moment exits silently (shutdown is an
         // intentional closing path — no false transport-outage signal).
-        markClosing(transportGenerationCounter)
-        transportGenerationCounter += 1
+        val shuttingDownGen = transportGenerationCounter
+        markClosing(shuttingDownGen)
+        // §breathing-indicator (TOCTOU fix): stamp the NEW generation
+        // (`shuttingDownGen + 1` == the post-bump value below) so a stale
+        // gen-shuttingDownGen collector loses the monotonic CAS and cannot
+        // resurrect `true` after service destruction. The store survives (it is
+        // @Singleton) and the UI observes the drop process-lifetime.
+        setSseConnected(false, shuttingDownGen + 1)
+        transportGenerationCounter = shuttingDownGen + 1
         sseJob?.cancel()
         sseJob = null
         transportTimeoutJob?.cancel()

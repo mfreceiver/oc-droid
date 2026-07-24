@@ -8,6 +8,7 @@ import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
 import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
+import androidx.compose.runtime.Stable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -15,6 +16,18 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 
+// §ui-stream A1/point-5: @Stable (NOT @Immutable) is an honest aid for the
+// Compose compiler. Message is a data class whose instances are constructed
+// once (deserialised from JSON) and never mutated in place; two .equals()
+// instances are interchangeable for rendering. The List / JsonObject fields
+// make @Immutable a lie (those interfaces do not guarantee immutability),
+// but @Stable only promises "if two instances are .equals() they are
+// interchangeable" — which holds here. This annotation alone does NOT fix
+// the streaming Map broadcast (that is fixed by baking per-row streaming
+// text into RenderBlock); it is the stability aid that lets the Compose
+// runtime skip a Conversation item whose block is value-equal to the
+// previous frame once the chat-wide Map is no longer captured by the row.
+@Stable
 @Serializable
 data class Message(
     val id: String,
@@ -191,6 +204,10 @@ data class ComposerImageAttachment(
     }
 }
 
+// §ui-stream A1/point-5: same honest @Stable reasoning as Message above.
+// Part instances are deserialised once and never mutated; the List/JsonObject
+// fields rule out @Immutable but not @Stable.
+@Stable
 @Serializable
 data class Part(
     val id: String,

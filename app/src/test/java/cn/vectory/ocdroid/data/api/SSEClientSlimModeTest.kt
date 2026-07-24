@@ -445,6 +445,74 @@ class SSEClientSlimModeTest {
         assertEquals("server.heartbeat", events[1].payload.type)
     }
 
+    // ── Companion Json config verification ──────────────────────────────────
+    //
+    // These tests assert that parseSseEvent honours the companion's Json
+    // config (ignoreUnknownKeys, isLenient, coerceInputValues). The C5 fix
+    // changed the legacy envelope branch from decodeFromString (re-parse)
+    // to decodeFromJsonElement (reuses the already-parsed root) — these
+    // regressions prove the SAME config is still applied.
+
+    @Test
+    fun `legacy envelope ignores unknown top-level keys via companion Json config`() = runBlocking {
+        // Legacy envelope with an extra unknown field at the top level.
+        // ignoreUnknownKeys MUST be active; otherwise this would throw.
+        val payload = """{"extra":"ignored","payload":{"type":"server.connected","properties":{"sessionID":"s1"}}}"""
+        server.enqueue(sseResponse(dataFrame(payload)))
+
+        val event = withTimeout(5_000) {
+            sse.connect(server.url("/").toString().trimEnd('/'), slimMode = false)
+                .first { it.isSuccess }
+                .getOrThrow()
+        }
+
+        assertEquals("server.connected", event.payload.type)
+        assertEquals("s1", event.payload.getString("sessionID"))
+    }
+
+    @Test
+    fun `flat frame ignores unknown keys via companion Json config`() = runBlocking {
+        // q/p flat frame with an extra unknown field. ignoreUnknownKeys must
+        // let it through without crashing.
+        val payload = """{"directory":"/w","type":"question.asked","extra":"ignored","properties":{"q":"a"}}"""
+        server.enqueue(sseResponse(dataFrame(payload)))
+
+        val event = withTimeout(5_000) {
+            sse.connect(server.url("/").toString().trimEnd('/'), slimMode = true)
+                .first { it.isSuccess }
+                .getOrThrow()
+        }
+
+        assertEquals("question.asked", event.payload.type)
+        assertEquals("/w", event.directory)
+        assertEquals("a", event.payload.getString("q"))
+    }
+
+    @Test
+    fun `event-typed frame ignores unknown keys in data via companion Json config`() = runBlocking {
+        // Sidecar-native event: typed frame with extra unknown fields in data.
+        // ignoreUnknownKeys must let the full data object become properties.
+        val frame = typedFrame(
+            eventType = "session.digest",
+            data = """{"sessionID":"s1","updatedAt":1000,"extra":"ignored","anotherUnknown":42}"""
+        )
+        server.enqueue(sseResponse(frame))
+
+        val event = withTimeout(5_000) {
+            sse.connect(server.url("/").toString().trimEnd('/'), slimMode = true)
+                .first { it.isSuccess }
+                .getOrThrow()
+        }
+
+        assertEquals("session.digest", event.payload.type)
+        assertEquals("s1", event.payload.getString("sessionID"))
+        assertEquals("1000", event.payload.getString("updatedAt"))
+        // The extra keys ended up in properties (B1 synthesis) — verify they
+        // are reachable, proving the JsonObject wasn't rejected by a strict
+        // deserializer somewhere in the pipeline.
+        assertEquals("ignored", event.payload.getString("extra"))
+    }
+
     @Test
     fun `B1 fix - legacy global event path still uses payload wrapping`() = runBlocking {
         // Regression guard: the legacy /global/event path emits frames with

@@ -230,6 +230,23 @@ internal fun reduceHostStatePurged(state: StoreState, action: AppAction.HostStat
         composer = state.composer.copy(draftWorkdir = null),
         settings = state.settings.copy(availableCommands = emptyList()),
         connection = state.connection.copy(serverVersion = null),
+        // §breathing-indicator (purge-clear defensive): a host purge (cross OR
+        // same group) invalidates the SSE transport for the prior host — the
+        // breath flag MUST NOT survive as stale-true for a host that no longer
+        // exists. Clears to false AND advances [StoreState.sseConnectedGeneration]
+        // (`state.sseConnectedGeneration + 1L`, computed from THIS dispatch's
+        // CAS-loop snapshot — atomic, see [SharedStateStore.dispatch]'s
+        // `state.update { reduce(it, action) }`). A stale collector carrying the
+        // pre-purge generation then loses the monotonic CAS
+        // ([SharedStateStore.mutateSseConnected]: `prePurgeGen < advanced`) and
+        // cannot resurrect `true`. The owner's normal teardown
+        // ([cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner.disconnect] /
+        // cancelForShutdown) stays the primary clear path; this is the
+        // defensive backstop for a purge that does NOT go through owner-disconnect.
+        // INDEPENDENT of [cn.vectory.ocdroid.ui.ConnectionState.isConnected]
+        // (health-settle) — this only clears the transport-up breath flag.
+        isSseConnected = false,
+        sseConnectedGeneration = state.sseConnectedGeneration + 1L,
     )
 }
 

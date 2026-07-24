@@ -94,6 +94,18 @@ internal class ConnectionHealthProbe(
     // are byte-identical to the pre-extraction coordinator.
     private val loadInitialData: () -> Unit,
     private val startSSE: () -> Unit,
+    /**
+     * §resolver-single-source-of-truth (RESOLVER lane ②): the authority for the
+     * effective connection URL. The legacy probe used to read
+     * `settingsManager.serverUrl` directly for (a) the identity `endpointFp`
+     * bind on a healthy connect and (b) the TOFU host:port + captureServerCert
+     * baseUrl. Both now go through `resolve()?.url` so identity + TOFU move
+     * lockstep with the URL the engine/configure path used. `null` for
+     * legacy/test construction that doesn't wire the resolver — the probe then
+     * treats a null resolve() as an explicit fail (no stale fallback), see the
+     * two call sites below.
+     */
+    private val effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver? = null,
 ) {
     private var lastHealthCheckTime = 0L
 
@@ -272,6 +284,19 @@ internal class ConnectionHealthProbe(
                             it.copy(connectionPhase = ConnectionPhase.ReconnectingAttempt(attempt, maxAttempts))
                         }
                     }
+                    // §toctou-resolver-snapshot (RESOLVER lane ②, bgpt phase-gate):
+                    // capture the connection-identity generation BEFORE the
+                    // checkHealth SUSPEND point. Every host/profile reconfigure
+                    // calls ConnectionIdentityStore.beginReconfigure() SYNCHRONOUSLY
+                    // (before repository.configure), which bumps currentEpoch() and
+                    // nulls the old identity. If the generation advances while
+                    // checkHealth is suspended (a host switch interleaved), the
+                    // resolved snapshot captured below is OBSOLETE and the success
+                    // path MUST abort — see the guard before writeConnection{Connected}.
+                    // Mirrors the engine-path isCurrent(identity) recheck in
+                    // testConnectionWithEngine (~L499). null when identityStore is
+                    // absent (legacy/test construction — no generation to guard).
+                    val probeEpoch = identityStore?.currentEpoch()
                     val healthResult = repository.checkHealth()
                     if (healthResult.isSuccess) {
                         val health = healthResult.getOrNull()
@@ -280,6 +305,109 @@ internal class ConnectionHealthProbe(
                             // version before any consumer (initial-data loaders, SSE)
                             // runs, so capability flags are settled for this connect.
                             serverCompatProfile.update(health.version)
+                            // §resolver-single-source-of-truth (RESOLVER lane ②):
+                            // identity endpointFp MUST move WITH the url. REST/
+                            // SSE reached this host via the resolver URL (the
+                            // engine/configure path resolves through
+                            // EffectiveConnectionConfigResolver); if identity
+                            // stayed pinned to settingsManager.serverUrl, a
+                            // profile/host switch would leave the epoch/identity
+                            // guards keyed to the OLD url → stale directory-fetch
+                            // + SSE guards misfire.
+                            //
+                            // null = EXPLICIT FAIL (resolver WIRED): a null
+                            // resolve() means "no valid active endpoint" mid-
+                            // probe. Binding a stale identity here is exactly what
+                            // resurrects the token-stream-storm bug (the mirror
+                            // write at HostProfileController.kt:881 exists BECAUSE
+                            // direct readers bypassed the resolver), so we do NOT
+                            // fall back to settingsManager.serverUrl. The probe is
+                            // treated as superseded — settle false WITHOUT writing
+                            // Connected — and the in-flight reconfigure re-drives
+                            // it under the new identity. Mirrors the engine-path
+                            // stale-identity recheck in testConnectionWithEngine
+                            // (~L499).
+                            //
+                            // ORDERING: the check runs BEFORE the writeConnection
+                            // {Connected} below so a null resolve never leaves the
+                            // slice in a transient Connected-then-defer state.
+                            //
+                            // Legacy/test (resolver ABSENT): this whole legacy
+                            // testConnection branch is only reached when
+                            // connectionBootstrapEngine==null — a test/legacy
+                            // condition (production ALWAYS wires the engine, which
+                            // resolves through the resolver independently of this
+                            // probe body). When the resolver is ALSO absent we
+                            // preserve the historical settingsManager.serverUrl
+                            // read so legacy constructions (incl. the shared
+                            // MainViewModelTestBase harness) keep working byte-
+                            // for-byte. The `?: settingsManager.serverUrl` below
+                            // is therefore DEAD CODE in production (resolver is
+                            // always wired → either resolvedEndpoint.url or the
+                            // explicit-fail defer above).
+                            val resolvedEndpoint = effectiveConnectionConfigResolver?.resolve()
+                            if (effectiveConnectionConfigResolver != null && resolvedEndpoint == null) {
+                                DebugLog.i(TAG, "testConnection: identity bind skipped — resolver returned no effective connection; probe superseded")
+                                settled = true
+                                onSettled?.invoke(false)
+                                return@launch
+                            }
+                            // §toctou-resolver-snapshot DEFINITIVE fix (bgpt
+                            // phase-gate): the epoch-CAS in
+                            // ConnectionIdentityStore.bindIfCurrent is the SINGLE
+                            // atomic gate between resolve and the commit. The
+                            // probe captured probeEpoch before checkHealth;
+                            // bindIfCurrent commits the identity ONLY IF
+                            // currentEpoch() still == probeEpoch (no reconfigure
+                            // superseded the snapshot) — and that epoch-CHECK +
+                            // identity-COMMIT run under ONE synchronized critical
+                            // section mutually exclusive with beginReconfigure,
+                            // so a host switch can NEVER slip between the check
+                            // and the commit. This closes the window the prior
+                            // non-atomic probeEpoch-guard left open (a reconfigure
+                            // between that guard and the bind could persist a
+                            // stale URL).
+                            //
+                            // BIND-BEFORE-COMMIT: the identity is bound FIRST; the
+                            // Connected slice is committed ONLY when the identity
+                            // atomically committed at the captured epoch. So the
+                            // connection's Connected state + identity can NEVER
+                            // persist a URL inconsistent with the current epoch —
+                            // no post-check window exists. If the CAS rejects
+                            // (superseded), defer: settle false, NO Connected,
+                            // identity NOT persisted; the new generation's probe
+                            // re-runs under the new URL.
+                            //
+                            // Legacy/test (identityStore ABSENT): no CAS — skip
+                            // the bind (the old identityStore?.bind was a no-op
+                            // for a null receiver anyway) and fall through to
+                            // writeConnection, preserving byte-identical legacy
+                            // behaviour. The `?: settingsManager.serverUrl` arm
+                            // stays dead code in production (resolver wired).
+                            val identity = identityStore
+                            if (identity != null && probeEpoch != null) {
+                                val bound = identity.bindIfCurrent(
+                                    serverGroupFp = currentServerGroupFp(),
+                                    normalizedWorkdir = settingsManager.currentWorkdir ?: "",
+                                    endpointFp = resolvedEndpoint?.url ?: settingsManager.serverUrl,
+                                    expectedEpoch = probeEpoch,
+                                )
+                                if (bound == null) {
+                                    DebugLog.i(
+                                        TAG,
+                                        "testConnection: probe superseded — epoch-CAS bind rejected (generation advanced $probeEpoch → ${identity.currentEpoch()}); aborting commit (no Connected, identity not persisted)",
+                                    )
+                                    settled = true
+                                    onSettled?.invoke(false)
+                                    return@launch
+                                }
+                            }
+                            // Identity atomically bound at the captured epoch (or
+                            // legacy/test path with no identityStore). NOW commit
+                            // Connected — loadInitialData's directory fan-out +
+                            // launchSseCollection's collector read the just-bound
+                            // identity (FGS spec §2 step 5: bind new collector to
+                            // new identity).
                             writeConnection {
                                 it.copy(
                                     isConnected = true,
@@ -289,19 +417,6 @@ internal class ConnectionHealthProbe(
                                     isSlimActive = serverCompatProfile.slimConnection,
                                 )
                             }
-                            // CP1 (notify Phase-0): bind the connection identity
-                            // at the current epoch so loadInitialData's directory
-                            // fan-out AND launchSseCollection's collector share
-                            // the SAME identity guard. FGS spec §2 step 5: bind
-                            // new collector to new identity. The epoch was
-                            // settled by beginReconfigure (called synchronously
-                            // at the HostProfileController barrier) or is 0 on
-                            // the very first cold start.
-                            identityStore?.bind(
-                                serverGroupFp = currentServerGroupFp(),
-                                normalizedWorkdir = settingsManager.currentWorkdir ?: "",
-                                endpointFp = settingsManager.serverUrl,
-                            )
                             loadInitialData()
                             startSSE()
                             // remove-message-persistence Task 5: the daily
@@ -343,9 +458,32 @@ internal class ConnectionHealthProbe(
                         // SSLHandshakeException + SSLPeerUnverifiedException——OkHttp 把
                         // 主机名不匹配报成后者），使任何 TLS 校验失败都进 TOFU（全口径，grill Q2=a）。
                         .firstOrNull { it is SSLException || it is CertificateException }
-                    val baseUrl = settingsManager.serverUrl
-                    val hostPort = hostPortFromUrl(baseUrl)
-                    if (rootCause != null && hostPort != null &&
+                    // §resolver-single-source-of-truth (RESOLVER lane ②): TOFU
+                    // host:port identity MUST move WITH the url. If REST uses the
+                    // resolver URL but the TOFU pin lookup stayed on
+                    // settingsManager.serverUrl, the pin would be keyed to the
+                    // wrong host:port and the epoch/identity guards misfire.
+                    //
+                    // Resolver WIRED + null resolve() = EXPLICIT FAIL: no valid
+                    // endpoint → resolvedUrl/hostPort null → the `hostPort != null`
+                    // guard below skips TOFU capture and falls through to the
+                    // normal connection-failure path (the original SSL error
+                    // surfaces as Disconnected + UiEvent.Error). NOT a stale
+                    // fallback.
+                    //
+                    // Resolver ABSENT (legacy/test — see the :303 comment): this
+                    // branch is unreachable in production; preserve the historical
+                    // settingsManager.serverUrl read so legacy harnesses stay
+                    // byte-identical. Production always wires the resolver, so the
+                    // `else settingsManager.serverUrl` arm is dead code there.
+                    val resolver = effectiveConnectionConfigResolver
+                    val resolvedUrl: String? = if (resolver != null) {
+                        resolver.resolve()?.url
+                    } else {
+                        settingsManager.serverUrl
+                    }
+                    val hostPort = resolvedUrl?.let { hostPortFromUrl(it) }
+                    if (rootCause != null && hostPort != null && resolvedUrl != null &&
                         repository.pinnedSpkiFor(hostPort) == null &&
                         !hasPendingTofuDecision() &&
                         // §tofu fix: mTLS 主机不进 TOFU——mTLS 优先级会忽略 TOFU pin，
@@ -359,7 +497,7 @@ internal class ConnectionHealthProbe(
                         // CP2: delegated to [tofu] (ConnectionBootstrapCoordinator).
                         tofu.setPendingTofu(hostPort)
                         try {
-                            val capture = repository.captureServerCert(baseUrl, hostPort, clientCert = null)
+                            val capture = repository.captureServerCert(resolvedUrl, hostPort, clientCert = null)
                             if (capture != null) {
                                 // Enter pending-trust: SUSPEND the retry loop on a
                                 // CompletableDeferred that [resolveTofuTrust] completes.

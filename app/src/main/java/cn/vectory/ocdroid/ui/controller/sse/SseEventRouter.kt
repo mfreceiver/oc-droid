@@ -27,6 +27,13 @@ class SseEventRouter(
     private val slim: SlimSseHandler,
 ) {
     /**
+     * The three per-domain handlers in priority order. Allocated once at
+     * construction (not per-[route] frame) to avoid unnecessary list
+     * allocation on every event.
+     */
+    private val handlers = listOf(shared, legacy, slim)
+
+    /**
      * The set of event types that are explicitly recognized but require no
      * processing. These are returned early from [route] so they don't fall
      * through to the unrecognized counter.
@@ -54,7 +61,6 @@ class SseEventRouter(
         if (type in explicitNoOps) return
 
         // Find the first handler that supports this type.
-        val handlers = listOf(shared, legacy, slim)
         val handler = handlers.firstOrNull { it.supports(type) }
         if (handler != null) {
             handler.handle(event)

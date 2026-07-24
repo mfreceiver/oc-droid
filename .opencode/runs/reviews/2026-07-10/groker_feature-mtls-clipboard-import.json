@@ -1,0 +1,22 @@
+{
+  "agent": "groker",
+  "scope": "feature-mtls-clipboard-import",
+  "date": "2026-07-10",
+  "reviewed_commit": "269ef94",
+  "version_target": "0.6.6",
+  "round": 1,
+  "verdict": "pass-with-fixes",
+  "score": 8.8,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "sanitizeBase64 does not strip PEM header words (BEGIN/CERTIFICATE survive as base64 letters) — pasted-PEM contract is false; pure-base64 path OK",
+    "clientCertSummary runs PKCS12 KDF on the Compose main thread during composition (jank/ANR risk, re-runs on recomposition)",
+    "testConnection ignores basicAuthEnabled toggle — can probe with hidden stored basic-auth creds while UI shows section disabled",
+    "client-slot remove on re-entry is misleading (sets stagedP12=null + UI Empty but hasMaterial stays true → Save re-loads old p12)",
+    "CertImportSlot Imported-state Delete not disabled during isConverting (paste/remove race)",
+    "hardcoded zh roleLabels + success color 0xFF4CAF50 (i18n/theme hygiene)",
+    "loadClientP12OrNull accepts >=1 key entry; buildMutualTlsConfig requires exactly 1 (multi-key p12 imports OK then fails at Test/Save)",
+    "test gaps: no pasted-PEM positive case, no section-off→save/test credential-semantics test"
+  ],
+  "notes": "Round-1. Main path (base64 PKCS12/CA clipboard import + untouched storage/TLS layer + release-silenced flicker) correct and root-cause-accurate (old PEM-text flow broke on PEM-header spaces truncating CA → caBytes=null → trust anchor not found). No blocking issue found, but score below 9.5 gate due to the listed implementation/contract gaps. Fixes dispatched."
+}

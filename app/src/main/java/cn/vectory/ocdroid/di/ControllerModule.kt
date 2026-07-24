@@ -236,14 +236,16 @@ object ControllerModule {
      * # streamProvider wiring
      *
      * Resolves the LIVE host config at call time (when `open(sid, dir)` is
-     * invoked) from `settingsManager.serverUrl` — NOT from a captured
-     * snapshot. This mirrors how `HostConfig` resolves baseUrl/hostPort at
-     * `configure()` time: `settingsManager.serverUrl` IS the live value that
-     * `hostConfig.baseUrl` mirrors. `hostPortFromUrl(serverUrl)` gives the
+     * invoked) from `EffectiveConnectionConfigResolver.resolve()` — NOT from a
+     * captured snapshot, and NOT from a direct `settingsManager.serverUrl`
+     * read (RESOLVER lane ②: the resolver is the single authority for the
+     * effective connection URL). `hostPortFromUrl(resolvedUrl)` gives the
      * `host:port` authority for the TOFU pin lookup (same derivation as
-     * `HostConfig.configure`). A new `TokenStreamClient` is constructed per
-     * call (lightweight wrapper; the `OkHttpClient` is built fresh — no
-     * `cache(tokenStreamClient)` per the Stage-C design note).
+     * `HostConfig.configure` + ConnectionBootstrapEngine). A new
+     * `TokenStreamClient` is constructed per call (lightweight wrapper; the
+     * `OkHttpClient` is built fresh — no `cache(tokenStreamClient)` per the
+     * Stage-C design note). A null resolve() throws (explicit fail — see the
+     * lambda comment); it does NOT fall back to stale settings.
      *
      * # triggerSinceFetch wiring (S2 — AUTHORITATIVE)
      *
@@ -263,14 +265,34 @@ object ControllerModule {
     fun provideTokenStreamCoordinator(
         @UiApplicationScope appScope: CoroutineScope,
         store: SharedStateStore,
-        settingsManager: SettingsManager,
         clientFactory: OkHttpClientFactory,
         sessionSyncCoordinator: SessionSyncCoordinator,
+        effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver,
     ): TokenStreamCoordinator = TokenStreamCoordinator(
         scope = appScope,
         slices = store.slices,
         streamProvider = { sid, directory ->
-            val baseUrl = settingsManager.serverUrl
+            // §resolver-single-source-of-truth (RESOLVER lane ②): the token-
+            // stream baseUrl MUST come from the EffectiveConnectionConfigResolver
+            // (the single authority for the effective connection URL), NOT from a
+            // direct settingsManager.serverUrl read. resolve() is called HERE, at
+            // open(sid,dir) time (NOT captured at DI construction), so a
+            // profile/host switch takes effect on the NEXT stream open — a new
+            // TokenStreamClient is built per call against the CURRENT resolver
+            // value (the live-host-config invariant the old comment documented).
+            //
+            // null = EXPLICIT FAIL: a null resolve() means "no valid active
+            // endpoint". We throw instead of falling back to a stale
+            // settingsManager.serverUrl — a stale fallback is exactly what
+            // resurrected the token-stream-connection-storm bug (the mirror
+            // write at HostProfileController.kt:864 exists BECAUSE direct
+            // readers used to bypass the resolver). The synchronous throw is
+            // caught by TokenStreamCoordinator.open()'s defence-in-depth net
+            // (TokenStreamCoordinator.kt ~L285) → onStreamFailure → bounded
+            // exponential-backoff reconnect, which self-heals once a valid
+            // config reappears (post host switch). No silent storm.
+            val baseUrl = effectiveConnectionConfigResolver.resolve()?.url
+                ?: error("token-stream open($sid) with no effective connection config — no active endpoint")
             val hostPort = hostPortFromUrl(baseUrl)
             TokenStreamClient(clientFactory.tokenStreamClient(hostPort), baseUrl)
                 .connect(sid, directory)
@@ -305,6 +327,7 @@ object ControllerModule {
         appLifecycleMonitor: AppLifecycleMonitor,
         degradedBootstrapTerminator: cn.vectory.ocdroid.service.DegradedBootstrapTerminator,
         tokenStreamCoordinator: TokenStreamCoordinator,
+        effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver,
     ): ConnectionCoordinator = ConnectionCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -335,5 +358,10 @@ object ControllerModule {
         // cancelSse / cancelSseForReconfigure (background / host-switch).
         // Busy-open is hooked in ChatViewModel.loadMessages.
         tokenStreamCoordinator = tokenStreamCoordinator,
+        // RESOLVER lane ②: forwarded to ConnectionHealthProbe so its legacy
+        // testConnection path (identity endpointFp + TOFU host:port) resolves
+        // the URL through the single authority, matching the engine + token-
+        // stream factory.
+        effectiveConnectionConfigResolver = effectiveConnectionConfigResolver,
     )
 }

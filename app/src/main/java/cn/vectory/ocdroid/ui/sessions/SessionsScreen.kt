@@ -136,6 +136,13 @@ fun SessionsScreen(
     val hostFallback = remember { MutableStateFlow(HostState()) }
     val connection by (connectionVM?.connectionFlow ?: connectionFallback)
         .collectAsStateWithLifecycle()
+    // §breathing-indicator (item ①): SSE-transport-up flag, sourced from the
+    // @Singleton store (survives service recreation). Falls back to false
+    // when connectionVM is not wired, matching the Idle-degrade behaviour of
+    // the connection/host fallbacks above.
+    val sseConnectedFallback = remember { MutableStateFlow(false) }
+    val isSseConnected by (connectionVM?.sseConnectedFlow ?: sseConnectedFallback)
+        .collectAsStateWithLifecycle()
     val host by (hostVM?.hostFlow ?: hostFallback).collectAsStateWithLifecycle()
     val curHostProfile = currentHostProfile(host.hostProfiles, host.currentHostProfileId)
 
@@ -312,6 +319,10 @@ fun SessionsScreen(
                             slimActive = connection.isSlimActive,
                             isConnecting = connection.isConnecting,
                             isIdle = connection.connectionPhase is ConnectionPhase.Idle,
+                            // §breathing-indicator: drives the calm breathing
+                            // pulse on the status dot while the SSE transport
+                            // is live (a valid frame reached the owner).
+                            isSseConnected = isSseConnected,
                             hostProfiles = host.hostProfiles,
                             currentHostProfileId = host.currentHostProfileId,
                             tunnelActivationState = connection.tunnelActivationState,

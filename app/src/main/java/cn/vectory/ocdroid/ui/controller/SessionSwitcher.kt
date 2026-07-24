@@ -391,6 +391,12 @@ class SessionSwitcher(
         val fp = currentServerGroupFp()
         if (oldSessionId != null) {
             settingsManager.setDraftText(fp, oldSessionId, currentInputText)
+            // §C1: flush the outgoing session's draft IMMEDIATELY so it is
+            // durable BEFORE the new session loads. Without this the debounced
+            // write could be coalesced/lost when the new session's own draft
+            // edits begin (or on a crash mid-transition) → the user's unsent
+            // text for the tab they just left would not survive the switch.
+            settingsManager.flushDraftText()
         }
         // §R18 Phase 2-F: chatFlow.currentSessionId (set in the chat.update
         // below) is the sole runtime source; the AppCore collector persists

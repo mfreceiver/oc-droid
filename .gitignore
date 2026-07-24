@@ -45,7 +45,11 @@ google-services.json
 *.swp
 *.swo
 *~
-.opencode/
+# Ignore everything under .opencode/, then re-include only runs/reviews/ via negation chain
+.opencode/*
+!.opencode/runs/
+.opencode/runs/*
+!.opencode/runs/reviews/
 
 # omni-orch orchestrator internal reports (governance artifacts, not ocdroid source)
 .omni-orch/

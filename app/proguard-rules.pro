@@ -46,6 +46,13 @@
 # Retrofit API interface: keep generic return-type signatures so Retrofit reflection
 # sees ParameterizedType (List<Session>, Map<...>) instead of raw Class.
 -keep interface cn.vectory.ocdroid.data.api.OpenCodeApi { *; }
+# §API-split (③): OpenCodeApi now composes StandardApi + SlimApi (its own body is empty;
+# the 46 endpoint methods live on the parents). Keep the parents explicitly so R8 never
+# strips a method that is only reflectively reached via Retrofit's proxy dispatch.
+# Additive defense-in-depth; today all endpoints are also retained via direct api.xxx()
+# call edges, so this changes nothing for the current build but protects future endpoints.
+-keep interface cn.vectory.ocdroid.data.api.StandardApi { *; }
+-keep interface cn.vectory.ocdroid.data.api.SlimApi { *; }
 
 # kotlinx.serialization: keep serializer() reflection (R8 9-compatible form;
 # the official -if/-keep templates with "**$*" are rejected by this R8 version).

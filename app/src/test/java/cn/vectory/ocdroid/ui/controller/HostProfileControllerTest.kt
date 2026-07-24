@@ -310,16 +310,72 @@ class HostProfileControllerTest {
     }
 
     @Test
-    fun `getSavedConnectionSettings reads settingsManager and coerces nulls to blank`() {
-        every { settingsManager.serverUrl } returns "http://x:1234"
-        every { settingsManager.username } returns null
-        every { settingsManager.password } returns "secret"
+    fun `getSavedConnectionSettings reads the resolver URL and credentials in profile mode`() {
+        // §resolver-single-source-of-truth (RESOLVER lane ②): the connection
+        // form is now pre-filled from EffectiveConnectionConfigResolver, NOT a
+        // direct settingsManager read. The main fixture keeps the resolver null
+        // (so the select/configure branches stay on their legacy path), so this
+        // test builds a controller WITH a resolver stub.
+        val resolver = mockk<cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver>()
+        every { resolver.resolve() } returns cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfig(
+            source = cn.vectory.ocdroid.service.streaming.EffectiveConnectionSource.Profile,
+            profileId = "p-A",
+            serverGroupFp = "g-A",
+            url = "https://profile.example",
+            username = "alice",
+            password = "secret",
+            workdir = "/work",
+            tunnelPasswordId = null,
+            tunnelPassword = null,
+            clientCertId = null,
+            mtlsEnabled = false,
+            slim = false,
+        )
+        val controllerWithResolver = HostProfileController(
+            scope = scope,
+            slices = slices,
+            hostProfileStore = store,
+            repository = repository,
+            settingsManager = settingsManager,
+            trafficTracker = trafficTracker,
+            effects = effects,
+            currentServerGroupFp = { "test-fp" },
+            effectiveConnectionConfigResolver = resolver,
+        )
 
-        val settings = controller.getSavedConnectionSettings()
+        val settings = controllerWithResolver.getSavedConnectionSettings()
 
-        assertEquals("http://x:1234", settings.serverUrl)
-        assertEquals("null username coerced to blank", "", settings.username)
+        assertEquals("https://profile.example", settings.serverUrl)
+        assertEquals("alice", settings.username)
         assertEquals("secret", settings.password)
+    }
+
+    @Test
+    fun `getSavedConnectionSettings returns blanks and never falls back to stale settingsManager on null resolve`() {
+        // §resolver null = EXPLICIT FAIL: a null resolve() returns a BLANK form,
+        // NOT a stale settingsManager.serverUrl fallback. Stub a non-blank stale
+        // value to prove the fallback path is dead (falling back is exactly the
+        // dual-source-of-truth this lane eliminates).
+        val resolver = mockk<cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver>()
+        every { resolver.resolve() } returns null
+        val controllerWithResolver = HostProfileController(
+            scope = scope,
+            slices = slices,
+            hostProfileStore = store,
+            repository = repository,
+            settingsManager = settingsManager,
+            trafficTracker = trafficTracker,
+            effects = effects,
+            currentServerGroupFp = { "test-fp" },
+            effectiveConnectionConfigResolver = resolver,
+        )
+        every { settingsManager.serverUrl } returns "http://stale-should-not-leak:4096"
+
+        val settings = controllerWithResolver.getSavedConnectionSettings()
+
+        assertEquals("blank url on null resolve (no stale fallback)", "", settings.serverUrl)
+        assertEquals("", settings.username)
+        assertEquals("", settings.password)
     }
 
     // ── refreshHostProfileState ────────────────────────────────────────────

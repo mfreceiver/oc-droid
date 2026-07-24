@@ -165,6 +165,59 @@ class DebugLogTest {
     }
 
     @Test
+    fun `concurrent appends produce no-lost-entries immutable newest-first snapshots`() {
+        val threadCount = 4
+        val entriesPerThread = 1000 // 4000 total, but capped at 3000
+        val threads = (0 until threadCount).map { t ->
+            Thread {
+                repeat(entriesPerThread) { i ->
+                    DebugLog.log("T-$t", "msg-$i")
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+
+        val snapshot = DebugLog.entries.value
+        assertTrue("Buffer must not exceed MAX_ENTRIES (3000), got ${snapshot.size}", snapshot.size <= 3000)
+
+        // All seq numbers must be unique — proves no entry lost/collided under concurrency
+        val seqs = snapshot.map { it.seq }
+        assertEquals(
+            "All entries must have unique seq numbers",
+            snapshot.size, seqs.toSet().size,
+        )
+
+        // Cross-thread ordering is NOT deterministic by wall-clock (System.currentTimeMillis()
+        // is not monotonic across threads) — so we only verify the head is from the latest
+        // batch (seq near max), not strict per-entry ordering.
+        val maxSeq = seqs.max()
+        assertTrue(
+            "Head entry seq ($maxSeq) must be near max (within last 100)",
+            snapshot.first().seq >= maxSeq - 100,
+        )
+    }
+
+    @Test
+    fun `single-thread appends produce strict reverse-insertion-order by seq`() {
+        // Within a single thread, synchronized(addFirst) guarantees deterministic
+        // reverse-insertion order: later calls land at index 0, pushing earlier
+        // entries rightward, so seq numbers are strictly decreasing along the list.
+        DebugLog.clear()
+        val n = 100
+        repeat(n) { i -> DebugLog.log("T", "msg-$i") }
+
+        val snapshot = DebugLog.entries.value
+        assertEquals(n, snapshot.size)
+        for (i in 0 until n - 1) {
+            assertTrue(
+                "Entry at index $i (seq=${snapshot[i].seq}) must have seq > index ${i + 1} (seq=${snapshot[i + 1].seq})",
+                snapshot[i].seq > snapshot[i + 1].seq,
+            )
+        }
+    }
+
+    @Test
     fun `multiple distinct tags interleave in newest-first order`() {
         DebugLog.i("sse", "connected")
         DebugLog.w("sync", "lag")

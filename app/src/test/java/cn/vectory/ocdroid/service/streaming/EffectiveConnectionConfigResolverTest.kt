@@ -7,6 +7,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class EffectiveConnectionConfigResolverTest {
@@ -181,5 +182,55 @@ class EffectiveConnectionConfigResolverTest {
         assertEquals(true, resolved.slim)
         assertEquals(true, resolved.mtlsEnabled)
         assertEquals("cert-1", resolved.clientCertId)
+    }
+
+    // ── RESOLVER lane ②: null-result (explicit-fail) contract ───────────
+    // resolve() returns null = "no valid active endpoint". Every direct reader
+    // (token-stream factory, ConnectionHealthProbe identity/TOFU,
+    // getSavedConnectionSettings) treats null as an explicit fail (throw /
+    // defer / blank form) and MUST NOT fall back to stale settingsManager. These
+    // cases pin the conditions under which resolve() yields null so a future
+    // change cannot silently turn a null into a blank-URL config.
+
+    @Test
+    fun `profile source with a blank profile URL returns null`() {
+        val settings = mockk<SettingsManager>(relaxed = true)
+        val profiles = mockk<HostProfileStore>()
+        every { settings.effectiveConnectionSourceMarker } returns EffectiveConnectionSource.Profile.name
+        every { settings.currentWorkdir } returns "/work"
+        every { profiles.currentProfile() } returns profile.copy(serverUrl = "   ")
+
+        val resolved = DefaultEffectiveConnectionConfigResolver(settings, profiles).resolve()
+
+        assertNull("blank profile URL must resolve to null (no valid endpoint)", resolved)
+    }
+
+    @Test
+    fun `manual source with a blank serverUrl returns null`() {
+        val settings = mockk<SettingsManager>(relaxed = true)
+        val profiles = mockk<HostProfileStore>()
+        every { settings.effectiveConnectionSourceMarker } returns EffectiveConnectionSource.Manual.name
+        every { settings.serverUrl } returns "   "
+        every { settings.username } returns null
+        every { settings.password } returns null
+        every { settings.currentWorkdir } returns "/work"
+        every { profiles.currentProfile() } returns profile
+
+        val resolved = DefaultEffectiveConnectionConfigResolver(settings, profiles).resolve()
+
+        assertNull("blank manual URL must resolve to null (no valid endpoint)", resolved)
+    }
+
+    @Test
+    fun `profile source with no current profile returns null`() {
+        val settings = mockk<SettingsManager>(relaxed = true)
+        val profiles = mockk<HostProfileStore>()
+        every { settings.effectiveConnectionSourceMarker } returns EffectiveConnectionSource.Profile.name
+        every { settings.currentWorkdir } returns "/work"
+        every { profiles.currentProfile() } throws IllegalStateException("no profiles persisted")
+
+        val resolved = DefaultEffectiveConnectionConfigResolver(settings, profiles).resolve()
+
+        assertNull("missing current profile must resolve to null", resolved)
     }
 }

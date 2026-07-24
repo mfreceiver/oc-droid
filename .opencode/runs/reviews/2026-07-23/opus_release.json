@@ -1,0 +1,36 @@
+{
+  "agent": "opus",
+  "scope": "release",
+  "date": "2026-07-23",
+  "reviewed_commit": "2147aa7",
+  "version_target": "0.13.3",
+  "verdict": "pass",
+  "score": 9.6,
+  "phase": "ι — 双 API 变体域端口+双实现 (legacy/slim 策略化)",
+  "commit_range": "219c357..2147aa7 (9 commits: ι-A 能力读模型+forwarders / ι-P1 session 端口 / ι-Q3a·b·c·d L4+收敛 / ι-P2 message 端口 / ι-4 收尾加固)",
+  "gate_history": {
+    "ι-A": "rev-bgpt 9.7 GO (初评 8.8 NO-GO → blocker 修复后复审)",
+    "ι-P1": "rev-grok 9.6 GO",
+    "ι-Q3a": "rev-grok 9.7 GO (初评 5.0 NO-GO — onResync 误绑 supportsTokenStreamResync → 修复为 supportsWatermarkResync)",
+    "ι-Q3b": "rev-grok 9.6 GO",
+    "ι-Q3c": "rev-grok 9.6 GO",
+    "ι-Q3d": "rev-grok 9.6 GO",
+    "ι-P2": "rev-grok 9.6 GO",
+    "G1_stage2": "rev-bgpt 9.6 GO (集成评审)"
+  },
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "🟡-1 partial-failure read-model 微分歧: configure 在 hostConfig.configure 成功后、source/slimConnection 发布前 throw 时, isSlimMode(=hostConfig.slim)=NEW 而 {sessionSource,messageSource,slimConnection}=OLD;getPendingPermissions(读 isSlimMode)与 getSessions/getMessages(读 source)在此窄窗路由分歧。窗口极窄(并发 supersede/rebuild 抛)、自愈、无数据完整性影响(readiness=false 门住 token commit,bumpBookmark token 检查门住 bookmark 写),且 getSessions/getMessages 改读 OLD source 实际比 ι 前 eager-NEW 更正确。建议 post-release 把 getPendingPermissions 也收敛到 source/capability 模式。",
+    "🟡-2 pre-existing 无栅栏 api 读: api/commandApi/mutationApi 为 plain var,@Synchronized rebuildClients 写、多处 lock-free 直读;ARM 弱内存模型下 host 切换后理论上可见陈旧 client。此为 ι 之前既有行为,ι 未改其并发契约(ι-4 给 sessionSource/messageSource 加 @Volatile 反而为 getSessions/getMessages 提供了栅栏,可见性只增不减)。建议 backlog 评估给三 api 补 @Volatile。",
+    "ι-Q2(复合接口拆分 OpenCodeApi:StandardApi,SlimApi)defer 到 backlog:仅审计性、计划 §4.6/§7.5 明允,不影响行为/兼容。"
+  ],
+  "invariants_verified": {
+    "I5_slimStateLock_single": "PASS — P2 SlimMessageSource 经纯函数 lambda 回调 OCR.bumpSlimBookmarkFromItems(锁内),不持锁/不持状态机对象",
+    "I6_I7_configure_atomic": "PASS — sessionSource/messageSource/setSlimConnection 选束均在 completeSlimReconfigure 后、同 @Synchronized monitor",
+    "I8_serverCompatProfile_write_point": "PASS — setSlimConnection 是 slimConnection 唯一受管写点(configure),与 probe 写点并列",
+    "I15_token_threading": "PASS — SlimCommitToken 经 wrapper→impl→SlimMessageSource.bumpBookmark 透传,stale→StaleSlimCommitException(嵌套 FQN 不动)",
+    "I20_freeze": "PASS — ~40 pinned 公共方法 + slimStateLock 字段 + 嵌套 FQN(SlimCommitToken/StaleSlimCommitException/SlimReconfigureTicket/SupersededSlimReconfigureException) + OpenCodeApi/SSEClient/SlimapiContract/HostConfig FQN 全保",
+    "section6_L4_zero_hit": "PASS — rg isSlimMode 在 ui/service/di 仅剩注释 + SSE 机制豁免(SseDispatchHost.slimMode/SlimSseHandler.host.slimMode/SSC.slimMode override 已收敛为能力查询)"
+  },
+  "notes": "Phase ι 作为连贯整体在架构分层(L0传输通用/L1wire专有/L2域端口+双实现/L3 OCR冻结门面/L4+模式盲)、跨 lane 不变量、§6 零命中、freeze 守护四维度均经静态核验通过。ι 是纯数据层重构(无 Compose 布局/Settings UI/StreamingMarkdown 改动),connectedDebugAndroidTest 必跑门控类不适用,check.sh(JVM)即充分。行为保持型,版本 patch bump。终审无 shell,check.sh GREEN 依据 gate 历史 + 编排者末次 check.sh(HEAD 2147aa7 GREEN)闭环。"
+}

@@ -24,6 +24,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -56,7 +57,15 @@ import cn.vectory.ocdroid.ui.theme.StatusBanner
  * contiguous tool run. Built in a pure-data phase (no @Composable calls) so a
  * local helper fun can buffer context tools; emitted afterwards in @Composable
  * context. See [MessageRow].
+ *
+ * §ui-stream A1: @Stable (honest — every variant is a data class built once by
+ * classifyToolRun and never mutated). Lets the Compose runtime skip a
+ * ToolRun/Fold item whose render items are value-equal to the previous frame
+ * (i.e. a non-streaming tool run during a text token delta), since
+ * renderToolItem now takes the per-item baked streaming text
+ * (ToolRenderItem.ThinkingPart.streamingText) and never the chat-wide Map.
  */
+@Stable
 internal sealed class ToolRenderItem {
     data class ContextGroup(val parts: List<Part>) : ToolRenderItem()
     data class SubAgent(val part: Part) : ToolRenderItem()

@@ -192,6 +192,16 @@ class ConnectionCoordinator(
      * that don't exercise the token-stream path keep compiling.
      */
     private val tokenStreamCoordinator: cn.vectory.ocdroid.ui.controller.sse.TokenStreamCoordinator? = null,
+    /**
+     * §resolver-single-source-of-truth (RESOLVER lane ②): the authority for the
+     * effective connection URL. Forwarded to [healthProbe] so its legacy
+     * testConnection path (identity endpointFp bind + TOFU host:port) resolves
+     * the URL the SAME way the engine path + token-stream factory do — the
+     * resolver is the single source of truth, NOT settingsManager.serverUrl.
+     * `null` for legacy/test construction (the probe then explicit-fails on a
+     * null resolve instead of falling back to stale settings).
+     */
+    private val effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver? = null,
 ) {
     /**
      * L4c (Wave ζ): the health-probe concern (testConnection /
@@ -223,6 +233,7 @@ class ConnectionCoordinator(
         appLifecycleMonitor = appLifecycleMonitor,
         loadInitialData = ::loadInitialData,
         startSSE = ::startSSE,
+        effectiveConnectionConfigResolver = effectiveConnectionConfigResolver,
     )
 
     /**

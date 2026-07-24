@@ -104,11 +104,28 @@ class HostProfileController(
 
     fun currentHostProfile(): HostProfile = hostProfileStore.currentProfile()
 
-    fun getSavedConnectionSettings(): ConnectionFormSettings = ConnectionFormSettings(
-        serverUrl = settingsManager.serverUrl,
-        username = settingsManager.username ?: "",
-        password = settingsManager.password ?: ""
-    )
+    /**
+     * §resolver-single-source-of-truth (RESOLVER lane ②): pre-fills the
+     * connection form (login dialog) from the EffectiveConnectionConfigResolver
+     * — the single authority for the effective connection URL/credentials —
+     * NOT from a direct settingsManager read.
+     *
+     * null = EXPLICIT FAIL: a null resolve() (no resolver wired, or no valid
+     * active endpoint) returns a BLANK form (serverUrl/username/password = ""),
+     * NOT a stale settingsManager.serverUrl fallback. A blank form is the
+     * correct UX for "no active endpoint configured" (fresh install / host
+     * mid-switch) and avoids surfacing a stale URL the user could accidentally
+     * re-submit. This is the form-context equivalent of the token-stream /
+     * health-probe explicit-fail (those throw / defer; the form shows blanks).
+     */
+    fun getSavedConnectionSettings(): ConnectionFormSettings {
+        val config = effectiveConnectionConfigResolver?.resolve()
+        return ConnectionFormSettings(
+            serverUrl = config?.url ?: "",
+            username = config?.username ?: "",
+            password = config?.password ?: ""
+        )
+    }
 
     // ── State sync helper ──────────────────────────────────────────────────
 
@@ -853,14 +870,23 @@ class HostProfileController(
         // §2.5(a): 注入 mTLS 客户端证书材料（profile.mtlsEnabled 时从 ESP 载入）。
         // configure(null) 会 clear 已持材料，所以切到非 mTLS profile 时停止出示证书。
         val clientCert = if (profile.mtlsEnabled) profile.clientCertId?.let { settingsManager.loadClientCertMaterial(it) } else null
-        // §bugfix-token-stream: mirror profile.serverUrl into settingsManager so the
-        // direct readers that bypass EffectiveConnectionConfigResolver
-        // (TokenStreamClient @ ControllerModule:273, ConnectionHealthProbe, getSavedConnectionSettings)
-        // observe the live URL in Profile mode. configureServerRaw (manual path) already
-        // keeps this in sync via activateManual; the profile path skipped it, leaving
-        // settingsManager.serverUrl stale (default localhost:4096) → token-stream 连接风暴.
-        // Restores the "settingsManager.serverUrl ≡ hostConfig.baseUrl" invariant
-        // (ControllerModule.kt:241). 写在 repository.configure 前，使二者同点对齐。
+        // §bugfix-token-stream / RESOLVER lane ②: mirror profile.serverUrl into
+        // settingsManager as a harmless WRITE-THROUGH CACHE. The three primary
+        // direct readers (TokenStreamClient factory @ ControllerModule,
+        // ConnectionHealthProbe identity/TOFU, getSavedConnectionSettings) have
+        // been MIGRATED to EffectiveConnectionConfigResolver.resolve() — they no
+        // longer read settingsManager.serverUrl. The mirror is KEPT because:
+        //  (a) remaining legacy readers still consult settingsManager.serverUrl
+        //      (HostProfileStore.migrateLegacySettings seed; configureServerRaw's
+        //      `oldUrl` change-detection at :775), and
+        //  (b) it is the endorsed safe choice during the staged migration
+        //      (constraint #5: "if unsure, LEAVE the mirror") — it can only be
+        //      removed once EVERY reader is migrated + tests are green.
+        // It is now belt-and-braces: in Profile mode it keeps
+        // settingsManager.serverUrl ≡ the resolver's URL, so any not-yet-migrated
+        // reader observes the live value. Written before repository.configure so
+        // both align at the same point. configureServerRaw (manual path) keeps it
+        // in sync via activateManual.
         settingsManager.serverUrl = profile.serverUrl
         repository.configure(
             profile.serverUrl, profile.basicAuth?.username, password,

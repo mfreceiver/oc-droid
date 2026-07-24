@@ -1,0 +1,17 @@
+{
+  "agent": "gpter",
+  "scope": "feature-mtls-clipboard-import",
+  "date": "2026-07-10",
+  "reviewed_commit": "8ad7f72",
+  "version_target": "0.6.6",
+  "round": 4,
+  "verdict": "pass",
+  "score": 9.6,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "cross-store crash-atomicity: after mTLS validation passes, the multi-step persist (mTLS → Basic pw → Tunnel pw → profile save) is still not a full crash-transaction (pre-existing architectural limit, NOT the round-3 deterministic partial-commit bug which is fixed)",
+    "corrupted cert material on a NON-active profile: save may fail with the error shown mainly on the outer screen, not prominently in the dialog (edge case: corrupted-data recovery UX)",
+    "one tautological test assertion (assertSame(r.stagedP12, r.stagedP12)) — should capture the input var and assert same-instance; does not affect the conclusion"
+  ],
+  "notes": "Round-4. Round-3 blocker (saveHostProfile write-ordering) CONFIRMED CLOSED: applyClientCertSave (throwable mTLS validate+persist) now runs before Basic/Tunnel writes — all mTLS failure modes throw before any credential write; no deterministic partial commit. Reorder does not pre/miss-trigger reconfigure+ForceReconnect (still last). Pure-fn extraction verified behavior-preserving (buildSaveCall/buildTestCall positional args + section-off credential clearing + effectivePasswordEdited + selectedGroup + profileIdSnap/pwEditedSnap for basicAuth-off all match inline; onSave Function11 / onTestConnection Function14 unchanged). clientCleared predicate + Save-disable + Error gate (mtlsEnabled-scoped) all correct. 49+5 tests have real assertions covering the state machine (not coverage padding). check.sh --full green (kover 62.73%/71.99%), emulator 6/6. PASS 9.6."
+}

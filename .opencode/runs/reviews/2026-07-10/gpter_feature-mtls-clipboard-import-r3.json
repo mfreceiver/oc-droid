@@ -1,0 +1,20 @@
+{
+  "agent": "gpter",
+  "scope": "feature-mtls-clipboard-import",
+  "date": "2026-07-10",
+  "reviewed_commit": "db2be84",
+  "version_target": "0.6.6",
+  "round": 3,
+  "verdict": "block",
+  "score": 9.0,
+  "blocking_issues": [
+    "saveHostProfile writes Basic/Tunnel passwords to ESP BEFORE applyClientCertSave (which can throw on mTLS validation), so a failing save leaves credentials partially committed (cross-storage inconsistency). Pre-existing but the clientCleared reject path now reliably reaches it."
+  ],
+  "non_blocking_issues": [
+    "mTLS missing-cert rejection not surfaced in the open dialog (error set on underlying screen; user sees Save 'do nothing')",
+    "clientCleared core state machine lacks tests (summary tests don't cover it)",
+    "hardcoded success color 0xFF4CAF50",
+    "English tunnel subtitle 'Intranet penetration' is awkward"
+  ],
+  "notes": "Round-3. B1 (re-toggle) CONFIRMED CLOSED via clientCleared (traced: remove→re-toggle-without-paste→hasMaterial=false→resolveClientCert null→reject, no silent old-p12 reuse; clientCleared resets only on successful paste). Error gate scoping, exactly-one-key alignment, i18n, ChatMessageContent cleanup all verified correct. Async summary no new races. New blocker is the pre-existing saveHostProfile write-ordering atomicity (now reachable via the reject path). Round-4 dispatched: orchestrator reordered applyClientCertSave before password writes; des-4 adds Save-disable-when-no-material + in-dialog reason, extracts mtlsHasMaterial pure fn + test, fixes color + copy."
+}

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -39,6 +40,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,6 +68,7 @@ import java.io.File
 import kotlin.math.max
 import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private enum class MarkdownPreviewMode {
@@ -91,6 +94,8 @@ internal fun FilePreviewPane(
     onClose: () -> Unit
 ) {
     val context = LocalContext.current
+    // §F5-ZLM (C4): coroutine scope for share launch（onClick → suspend share）。
+    val scope = rememberCoroutineScope()
     val content = fileContent.content.orEmpty()
     val previewKind = remember(path, fileContent.isBinary) {
         FilePreviewUtils.previewContentKind(path, fileContent.isBinary)
@@ -186,12 +191,26 @@ internal fun FilePreviewPane(
                 if (previewKind == FilePreviewUtils.PreviewContentKind.MARKDOWN ||
                     previewKind == FilePreviewUtils.PreviewContentKind.TEXT
                 ) {
-                    IconButton(onClick = { shareFileContent(context, path, fileContent) }) {
+                    IconButton(onClick = {
+                        scope.launch {
+                            runCatching { shareFileContent(context, path, fileContent) }
+                                .onFailure { e ->
+                                    Toast.makeText(context, "${e.message}", Toast.LENGTH_SHORT).show()
+                                }
+                        }
+                    }) {
                         Icon(Icons.Default.Share, contentDescription = stringResource(R.string.files_share))
                     }
                 }
                 if (imagePayload != null) {
-                    IconButton(onClick = { shareImage(context, path, imagePayload.bytes) }) {
+                    IconButton(onClick = {
+                        scope.launch {
+                            runCatching { shareImage(context, path, imagePayload.bytes) }
+                                .onFailure { e ->
+                                    Toast.makeText(context, "${e.message}", Toast.LENGTH_SHORT).show()
+                                }
+                        }
+                    }) {
                         Icon(Icons.Default.Share, contentDescription = stringResource(R.string.files_share))
                     }
                 }
@@ -487,11 +506,14 @@ private fun ImageDecodePlaceholder() {
     }
 }
 
-private fun shareImage(context: Context, path: String, bytes: ByteArray) {
+private suspend fun shareImage(context: Context, path: String, bytes: ByteArray) {
     val sharedDir = File(context.cacheDir, "shared").apply { mkdirs() }
     val fileName = path.substringAfterLast('/').ifBlank { "image" }
     val shareFile = File(sharedDir, fileName)
-    shareFile.writeBytes(bytes)
+    // §F5-ZLM (C4): 写盘切 IO 线程。
+    withContext(Dispatchers.IO) {
+        shareFile.writeBytes(bytes)
+    }
 
     val uri = FileProvider.getUriForFile(
         context,
@@ -505,7 +527,10 @@ private fun shareImage(context: Context, path: String, bytes: ByteArray) {
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
 
-    context.startActivity(
-        Intent.createChooser(intent, "Share image").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    )
+    // §F5-ZLM (C4): 系统分享切回 Main 线程。
+    withContext(Dispatchers.Main) {
+        context.startActivity(
+            Intent.createChooser(intent, "Share image").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
 }

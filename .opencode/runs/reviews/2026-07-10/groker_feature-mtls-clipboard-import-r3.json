@@ -1,0 +1,16 @@
+{
+  "agent": "groker",
+  "scope": "feature-mtls-clipboard-import",
+  "date": "2026-07-10",
+  "reviewed_commit": "db2be84",
+  "version_target": "0.6.6",
+  "round": 3,
+  "verdict": "pass",
+  "score": 9.6,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "hardcoded success color 0xFF4CAF50 in CertImportSlot",
+    "a comment still references the pre-fix 'fake delete' framing (doc lag; implementation correct)"
+  ],
+  "notes": "Round-3. All round-2 residuals closed: clientCleared flag fully closes the re-toggle edge (all 7 paths A-G traced — remove→save clears via Disable; remove→re-toggle-without-paste→hasMaterial=false→resolveClientCert null→save rejected; fresh paste resets clientCleared=false). Default-locale i18n→en. ChatMessageContent:577 cleaned. exactly-one-key aligned (incl secret-key). Summary branch tests added. Storage/TLS chain untouched. PASS 9.6."
+}

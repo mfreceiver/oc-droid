@@ -446,6 +446,11 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
     // §streaming-state-sync-diag: optimistic sendingSessionIds set at send time.
     DebugLog.i("SendDiag", "optimistic sendingSessionIds set sid=$sessionId")
     settingsManager.setDraftText(currentServerGroupFp(), sessionId, "")
+    // §C1: flush the draft clear so it is durable BEFORE the send launches —
+    // a crash / background right after Send must not leave the now-empty
+    // composer's cleared draft unwritten (the debounce could otherwise keep
+    // the prior text pending and restore it on resume).
+    settingsManager.flushDraftText()
     // §1B-FIX (I4): clear inputText, imageAttachments AND fileReferences
     // when the user hits Send — chips must not leak to the next prompt.
     // The `text` + `attachments` locals above already captured the values
@@ -508,6 +513,10 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
             // relied on SSE + the targeted message reload — same shape now.
             onSuccess = {
                 settingsManager.setDraftText(currentServerGroupFp(), sessionId, "")
+                // §C1: flush the durable clear now that the send succeeded —
+                // the composer is confirmed empty for this session and any
+                // pending debounced clear must land on disk immediately.
+                settingsManager.flushDraftText()
                 // §1B-FIX (I4): onSuccess is a no-op for fileReferences
                 // because line 412-413 already cleared inputText +
                 // imageAttachments + fileReferences when the user hit

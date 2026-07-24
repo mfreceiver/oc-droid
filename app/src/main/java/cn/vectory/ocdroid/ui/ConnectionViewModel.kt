@@ -81,6 +81,19 @@ class ConnectionViewModel @Inject constructor(
     val settingsFlow get() = store.settingsFlow
     val hostFlow get() = store.hostFlow
 
+    /**
+     * §breathing-indicator (item ①): SSE-transport-up flag. Delegates to the
+     * store projection (the owner writes it generation-checked; the store is
+     * @Singleton so it survives service recreation). Drives the breathing
+     * pulse on [cn.vectory.ocdroid.ui.home.ServerStatusIconButton] — a calm
+     * pulse = the event stream is alive; static = disconnected.
+     *
+     * INDEPENDENT of [connectionFlow] (`isConnected` = health-settle); the two
+     * flip independently (a transient SSE outage flips this false while health
+     * may still read connected).
+     */
+    val sseConnectedFlow get() = store.sseConnectedFlow
+
     /** §P2-6: traffic slice read accessor (moved from [OrchestratorViewModel]).
      *  Same authoritative slice every other VM exposes (all delegate to
      *  [SharedStateStore]); kept here so SettingsScreen + ChatScreen read

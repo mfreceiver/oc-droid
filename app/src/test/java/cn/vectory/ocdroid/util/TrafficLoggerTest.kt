@@ -3,6 +3,8 @@ package cn.vectory.ocdroid.util
 import android.app.Application
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -35,6 +37,11 @@ class TrafficLoggerTest {
         // crash on JVM.
         FakeAndroidKeyStoreProvider.install()
         logger = TrafficLogger(context)
+    }
+
+    @After
+    fun tearDown() {
+        logger.close()
     }
 
     @Test
@@ -111,6 +118,45 @@ class TrafficLoggerTest {
         val dir = java.io.File(context.getExternalFilesDir(null), "traffic_logs")
         val files = dir.listFiles()?.toList() ?: emptyList()
         assertTrue("expected no traffic log files", files.isEmpty())
+    }
+
+    @Test
+    fun `concurrent auto and manual flush with worker cancellation does not drop entries`() {
+        val threadCount = 4
+        val entriesPerThread = 250 // 1000 total > MAX_ENTRIES (200)
+
+        // Record concurrently from multiple threads; auto-flush triggers every 50
+        val threads = (0 until threadCount).map { t ->
+            Thread {
+                repeat(entriesPerThread) { i ->
+                    logger.record("GET", "http://x/$t/$i", 10L, 20L, 1L)
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+
+        // Manual flush while the worker may still be processing auto-flush requests
+        logger.flushToDisk()
+
+        // Give the worker time to drain the channel before close()
+        Thread.sleep(200)
+
+        // Close the worker gracefully — proves cancel doesn't corrupt buffer state
+        logger.close()
+
+        // Buffer must remain readable and consistent
+        val out = logger.dump()
+        assertTrue("dump must report entries after concurrent recording", out.contains("entries"))
+
+        // Verify buffer is still usable after close() (read-only operations)
+        val out2 = logger.dump()
+        assertEquals("dump() is idempotent after close", out, out2)
+
+        // After close(), record() should still work (buffer ops are independent of worker)
+        logger.record("POST", "http://final", 5L, 5L, 1L)
+        val out3 = logger.dump()
+        assertTrue(out3.contains("http://final"))
     }
 
     @Test

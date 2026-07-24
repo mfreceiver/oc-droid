@@ -12,6 +12,13 @@ import java.util.Date
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
 
 /**
  * Per-request traffic debug log: endpoint URL, HTTP method, timestamp, sent bytes,
@@ -23,6 +30,7 @@ import javax.inject.Singleton
  * this logger is the detailed per-request breakdown for debugging where the 69MB
  * in 5 minutes actually comes from.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 @Singleton
 class TrafficLogger @Inject
 constructor(@param:ApplicationContext private val context: Context) {
@@ -30,6 +38,18 @@ constructor(@param:ApplicationContext private val context: Context) {
     private val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private var sequence = 0L
     private var unflushedEntries = 0
+
+    /** Single reusable flush worker — replaces per-call thread spawns. */
+    private val flushScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val flushChannel = Channel<Unit>(Channel.CONFLATED)
+
+    init {
+        flushScope.launch {
+            for (_msg in flushChannel) {
+                flushToDiskSync()
+            }
+        }
+    }
 
     fun record(method: String, url: String, sent: Long, received: Long, elapsedMs: Long) {
         synchronized(buffer) {
@@ -48,15 +68,21 @@ constructor(@param:ApplicationContext private val context: Context) {
             unflushedEntries++
             if (unflushedEntries >= AUTO_FLUSH_EVERY) {
                 unflushedEntries = 0
-                // Flush on a background thread to avoid blocking the interceptor
-                Thread({ flushToDiskSync() }, "traffic-flush").start()
+                // Offer a flush to the shared worker (non-blocking, never under buffer lock)
+                flushChannel.trySend(Unit)
             }
         }
     }
 
     /** Write the current buffer to a plain-text file under the app's external files dir. */
     fun flushToDisk() {
-        Thread({ flushToDiskSync() }, "traffic-flush").start()
+        flushChannel.trySend(Unit)
+    }
+
+    /** Cancel the background flush worker. Safe to call multiple times; idempotent. */
+    fun close() {
+        flushChannel.close()
+        flushScope.cancel()
     }
 
     private fun flushToDiskSync() {

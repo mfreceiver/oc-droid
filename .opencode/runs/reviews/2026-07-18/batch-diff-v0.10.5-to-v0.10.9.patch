@@ -1,0 +1,627 @@
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/AppAction.kt b/app/src/main/java/cn/vectory/ocdroid/ui/AppAction.kt
+index d22c408..cfa805e 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/AppAction.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/AppAction.kt
+@@ -363,6 +363,10 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
+                     // and would ghost into the new host's list.
+                     pendingCreateIds = emptySet(),
+                     pendingCreatedAt = emptyMap(),
++                    // §fix-close-all-residual: re-arm the cold-start
++                    // auto-select for the new host — its first load should
++                    // land the user on a session just like a fresh launch.
++                    hasCompletedInitialLoad = false,
+                 ),
+                 state.unread.copy(
+                     unreadSessions = emptySet(),
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/AppStateSlices.kt b/app/src/main/java/cn/vectory/ocdroid/ui/AppStateSlices.kt
+index 1227e09..ad06a91 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/AppStateSlices.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/AppStateSlices.kt
+@@ -561,6 +561,22 @@ data class SessionListState(
+      * lockstep with [pendingCreateIds].
+      */
+     val pendingCreatedAt: Map<String, Long> = emptyMap(),
++    /**
++     * §fix-close-all-residual: gates the cold-start auto-select in
++     * [launchLoadSessions] (the `currentSessionId == null → select first
++     * session` branch). The auto-select is meant to land the user on a
++     * session when the app cold-starts with no restored currentSessionId —
++     * NOT to override a deliberate "user closed every tab" empty state.
++     * Pre-fix, every session-list refresh (SSE reconnect / foreground
++     * catch-up / pull-to-refresh) re-fired the auto-select when
++     * currentSessionId was null, so closing all tabs → currentSessionId
++     * cleared → next refresh deterministically re-selected the first server
++     * session (e.g. a stale "StreamingSvcLauncher AckTimeout bootstrap
++     * abort" error session sitting at the head of the list), producing the
++     * residual chat with no tab. Flipped to true on the first successful
++     * [launchLoadSessions] commit; reset on cross-group host purge.
++     */
++    val hasCompletedInitialLoad: Boolean = false,
+ )
+ 
+ /**
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/SessionListActions.kt b/app/src/main/java/cn/vectory/ocdroid/ui/SessionListActions.kt
+index c942841..70ce903 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/SessionListActions.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/SessionListActions.kt
+@@ -177,6 +177,13 @@ internal fun launchLoadSessions(
+                 val currentSessionList = slices.sessionList.value
+                 val currentSessions = currentSessionList.sessions
+                 val currentOpenIds = currentSessionList.openSessionIds
++                // §fix-close-all-residual: capture the pre-load cold-start flag.
++                // The auto-select below must fire ONLY on the first load (true
++                // cold start), not on every refresh — otherwise closing all
++                // tabs (currentSessionId → null) gets overridden on the next
++                // refresh and the first server session (often a stale error
++                // session) is resurrected as a tab-less residual chat.
++                val isInitialColdStart = !currentSessionList.hasCompletedInitialLoad
+                 // §Q4-strict-sync: capture pendingCreateIds for the merge
+                 // (preserve local-only ids that are still pending-create).
+                 val currentPendingCreateIds = currentSessionList.pendingCreateIds
+@@ -286,6 +293,10 @@ internal fun launchLoadSessions(
+                         // epoch so in-flight hydrations drop (fail-closed).
+                         completeRootIds = emptySet(),
+                         completenessEpoch = it.completenessEpoch + 1L,
++                        // §fix-close-all-residual: this load has completed —
++                        // subsequent refreshes must NOT re-fire the cold-start
++                        // auto-select (see isInitialColdStart capture above).
++                        hasCompletedInitialLoad = true,
+                     )
+                 }
+                 // Persist a BOUNDED session-metadata cache so the next cold
+@@ -363,7 +374,18 @@ internal fun launchLoadSessions(
+                     // NOT resurrect it as current. If ALL candidates are
+                     // archived (or the list is empty), fall through to the
+                     // chat-clear — never select an archived session.
+-                    currentSessionId == null && slices.composer.value.draftWorkdir == null -> {
++                    //
++                    // §fix-close-all-residual: the auto-select is ALSO gated on
++                    // [isInitialColdStart] — it must only land the user on a
++                    // session during true cold start. Once the first load has
++                    // completed, a null currentSessionId means the user
++                    // deliberately closed every tab (or otherwise emptied the
++                    // chat), and the empty state is the correct outcome —
++                    // silently re-selecting the first server session would
++                    // resurrect a tab-less residual chat.
++                    currentSessionId == null &&
++                        slices.composer.value.draftWorkdir == null &&
++                        isInitialColdStart -> {
+                         val candidate = refreshedSessions.firstOrNull { !it.isArchived }
+                         if (candidate != null) {
+                             onSelectSession(candidate.id)
+@@ -371,6 +393,14 @@ internal fun launchLoadSessions(
+                             slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
+                         }
+                     }
++                    // §fix-close-all-residual: null currentSessionId on a NON-
++                    // initial refresh (user closed all tabs) — keep the empty
++                    // state instead of auto-selecting. currentSessionId stays
++                    // null; ChatScaffold renders the empty-state hint.
++                    currentSessionId == null &&
++                        slices.composer.value.draftWorkdir == null -> {
++                        slices.mutateChat { c -> c.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
++                    }
+                     // currentId is set: keep it. Even when the session is
+                     // temporarily absent from the refreshed list (e.g. just
+                     // created, or a directory session), tolerate it — reload
+@@ -454,6 +484,13 @@ internal fun launchLoadMoreSessions(
+                 val currentSessionList = slices.sessionList.value
+                 val currentSessions = currentSessionList.sessions
+                 val currentOpenIds = currentSessionList.openSessionIds
++                // §fix-close-all-residual: mirror the launchLoadSessions cold-
++                // start gate (see there). loadMore is user-scroll-triggered so
++                // this auto-select is effectively dead post-fix (initial load
++                // already completed before the user can scroll), but gate it
++                // symmetrically so a future trigger change can't resurrect the
++                // close-all-tabs residual via this path.
++                val isInitialColdStart = !currentSessionList.hasCompletedInitialLoad
+                 // §Q4-strict-sync: capture pendingCreateIds for the merge + sweep.
+                 val currentPendingCreateIds = currentSessionList.pendingCreateIds
+                 val currentPendingCreatedAt = currentSessionList.pendingCreatedAt
+@@ -506,7 +543,14 @@ internal fun launchLoadMoreSessions(
+                     // branch is currently dead (loadMore is only triggered by
+                     // user scroll, not initial load), but the guard keeps the
+                     // two paths symmetric if the trigger ever changes.
+-                    currentId == null && slices.composer.value.draftWorkdir == null && refreshedSessions.isNotEmpty() -> onSelectSession(refreshedSessions.first().id)
++                    //
++                    // §fix-close-all-residual: also gated on isInitialColdStart
++                    // — a non-initial load must not resurrect a session after
++                    // the user closed every tab.
++                    currentId == null &&
++                        slices.composer.value.draftWorkdir == null &&
++                        refreshedSessions.isNotEmpty() &&
++                        isInitialColdStart -> onSelectSession(refreshedSessions.first().id)
+                     // A non-null currentId is never silently replaced by
+                     // refreshedSessions.first(): tolerate the session even when
+                     // it is temporarily absent from the refreshed list. #10.
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/SessionViewModel.kt b/app/src/main/java/cn/vectory/ocdroid/ui/SessionViewModel.kt
+index bc20f0b..9f17c9a 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/SessionViewModel.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/SessionViewModel.kt
+@@ -15,6 +15,7 @@ import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
+ import cn.vectory.ocdroid.ui.controller.SessionSwitcher
+ import cn.vectory.ocdroid.ui.controller.allSessionsById
+ import cn.vectory.ocdroid.ui.controller.removeSessions
++import cn.vectory.ocdroid.ui.controller.rootIdOf
+ import cn.vectory.ocdroid.util.SettingsManager
+ import cn.vectory.ocdroid.util.WorkdirPaths
+ import cn.vectory.ocdroid.util.runSuspendCatching
+@@ -201,30 +202,66 @@ class SessionViewModel @Inject constructor(
+     }
+ 
+     fun closeSession(sessionId: String) {
+-        val isCurrent = store.chatFlow.value.currentSessionId == sessionId
+-        if (isCurrent) {
++        // §fix-close-subagent: the close-X only renders on the selected tab,
++        // and the tab strip's effectiveSelectedId falls back to the ROOT when
++        // the current session is a sub-agent (child). So the user CAN close a
++        // root tab while currentSessionId points at one of its descendants.
++        // The pre-fix `isCurrent = currentSessionId == sessionId` check missed
++        // that case (childId != rootId → isCurrent=false) and left
++        // currentSessionId pointing at a now-orphaned child, so the chat body
++        // kept rendering after every tab was closed. `closingCurrentTree`
++        // treats "closing the root of the current session's tree" the same as
++        // "closing the current session itself".
++        //
++        // rootIdOf fails closed (returns null on unknown id / parentId cycle /
++        // cold-start where the child isn't in childSessions yet): in that case
++        // isDescendant=false and we fall back to the strict isCurrent check
++        // (preserving the original behaviour for the unresolvable edge).
++        val curId = store.chatFlow.value.currentSessionId
++        val isCurrent = curId == sessionId
++        val isDescendant = if (curId != null && !isCurrent) {
++            val sl = store.sessionListFlow.value
++            val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
++            rootIdOf(curId, sessionsById) == sessionId
++        } else {
++            false
++        }
++        val closingCurrentTree = isCurrent || isDescendant
++        if (closingCurrentTree && curId != null) {
+             // glm-3 🟡#1: single-read fp.
+             val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+-            settingsManager.setDraftText(fp, sessionId, store.composerFlow.value.inputText)
++            // §fix-close-subagent: persist the draft under the ACTUAL current
++            // session id (curId), not the closed tab's root id. The user was
++            // editing in the child's context, so the draft belongs to curId;
++            // keying it on the root would lose / mis-restore it.
++            settingsManager.setDraftText(fp, curId, store.composerFlow.value.inputText)
+         }
+         val updated = settingsManager.openSessionIds.filter { it != sessionId }
+         settingsManager.openSessionIds = updated
+         val nextId = updated.lastOrNull()
+         store.mutateSessionList { it.copy(openSessionIds = updated) }
+         store.mutateUnread { it.copy(unreadSessions = it.unreadSessions - sessionId) }
+-        if (isCurrent && nextId == null) {
++        if (closingCurrentTree && nextId == null) {
+             // §R18 Phase 2-F: chatFlow is the sole runtime source; the
+             // chat.update below clears currentSessionId. The AppCore collector
+-            // drops null, so no manual SettingsManager write.
++            // drops null, so no manual SettingsManager write here.
+             store.mutateChat { it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap()) }
++            // §fix-close-all-residual: ALSO clear the PERSISTED
++            // currentSessionId. The AppCore persistence collector uses
++            // filterNotNull(), so the null transition above is NOT auto-
++            // persisted — without this explicit clear, the old id stays in
++            // SettingsManager and applySavedSettings re-seeds chatFlow with
++            // it on the next cold start, resurrecting a session the user
++            // closed all tabs on (the "OpenCode 项目自动关联…" residual).
++            settingsManager.currentSessionId = null
+         }
+-        if (isCurrent && nextId == null) {
++        if (closingCurrentTree && nextId == null) {
+             // §1B-FIX (I4): closing the last session must also clear
+             // fileReferences + imageAttachments — the chips must not leak
+             // to the empty state.
+             store.mutateComposer { it.copy(inputText = "", imageAttachments = emptyList(), fileReferences = emptyList()) }
+         }
+-        if (isCurrent && nextId != null) {
++        if (closingCurrentTree && nextId != null) {
+             selectSession(nextId)
+         }
+     }
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/chat/ChatScaffold.kt b/app/src/main/java/cn/vectory/ocdroid/ui/chat/ChatScaffold.kt
+index adc9e38..48817d5 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/chat/ChatScaffold.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/chat/ChatScaffold.kt
+@@ -92,6 +92,8 @@ import cn.vectory.ocdroid.ui.visibleMessages
+ import cn.vectory.ocdroid.ui.settings.TofuTrustDialog
+ import cn.vectory.ocdroid.ui.theme.AppBottomSheet
+ import kotlinx.coroutines.flow.distinctUntilChanged
++import kotlinx.coroutines.flow.drop
++import kotlinx.coroutines.flow.filter
+ import kotlinx.coroutines.launch
+ 
+ /**
+@@ -734,6 +736,24 @@ fun ChatScaffold(
+     // ChatEmptyState branch (with the new Sessions deep-link, §new2) handles
+     // the surface.
+     val openSessions = topBarState.openSessions
++    // §fix-close-all-to-home: when the user closes the last open tab
++    // (openSessions transitions to empty) AND there is no in-progress draft,
++    // navigate to the home hub (Sessions) instead of lingering on an empty
++    // Chat body. Paired with closeSession's persisted-currentSessionId clear
++    // (SessionViewModel) so neither the runtime nor the persisted id can
++    // resurrect a residual chat.
++    //
++    // drop(1) skips the initial emission so entering Chat with no tabs (rare
++    // — cold start lands on Sessions) does not spuriously fire. The draft
++    // guard keeps a user mid-composition (draftWorkdir set) on Chat even if
++    // they closed every existing tab — their draft is the active work.
++    LaunchedEffect(onBackToHome) {
++        snapshotFlow { openSessions.size to (composer.draftWorkdir != null) }
++            .distinctUntilChanged()
++            .drop(1)
++            .filter { (size, hasDraft) -> size == 0 && !hasDraft }
++            .collect { onBackToHome() }
++    }
+     val pagerEngaged = openSessions.size >= 2 &&
+         topBarState.parentSessionId == null &&
+         chat.currentSessionId != null
+@@ -893,7 +913,10 @@ fun ChatScaffold(
+     }
+     ModalNavigationDrawer(
+         drawerState = drawerState,
+-        gesturesEnabled = isWide,
++        // §fix-edge-swipe-conflict: disabled to prevent edge-swipe from
++        // conflicting with HorizontalPager tab-switching gestures. The
++        // drawer is now opened ONLY via the hamburger (Menu) button.
++        gesturesEnabled = false,
+         drawerContent = {
+             RecentSessionsDrawer(
+                 // §opuser IMPORTANT-2: recent root non-archived sessions
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/chat/Composer.kt b/app/src/main/java/cn/vectory/ocdroid/ui/chat/Composer.kt
+index 1fa75d3..12084a5 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/chat/Composer.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/chat/Composer.kt
+@@ -62,6 +62,7 @@ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.graphics.RectangleShape
+ import androidx.compose.ui.graphics.SolidColor
++import androidx.compose.ui.platform.LocalConfiguration
+ import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.unit.dp
+ import androidx.lifecycle.compose.collectAsStateWithLifecycle
+@@ -472,7 +473,13 @@ internal fun AgentPickerSheet(
+         onDismissRequest = onDismiss,
+         title = stringResource(R.string.chat_switch_agent),
+     ) {
+-        LazyColumn(modifier = Modifier.fillMaxWidth()) {
++        // §fix-sheet-remeasure-jump: same height cap as ModelPickerSheet —
++        // structurally identical LazyColumn picker; bound it so a long agent
++        // list cannot trigger the same remeasure-driven sheet jump.
++        val pickerMaxHeight = (LocalConfiguration.current.screenHeightDp * 0.8f).dp
++        LazyColumn(modifier = Modifier
++            .fillMaxWidth()
++            .heightIn(max = pickerMaxHeight)) {
+             // 默认 agent（选中 = null）。
+             item(key = "__default__") {
+                 val isSelected = currentAgentName == null
+@@ -528,6 +535,17 @@ internal fun ModelPickerSheet(
+     // 底 4dp（与 Agent 标题节奏对称）；trailing 槽统一 Filled Check（替代
+     // Outlined Memory）。
+     val catalog = visiblePickerProviders(providers, disabledModels)
++    // §fix-sheet-remeasure-jump: cap the picker list at ~80% of the screen
++    // height. Instrumented repro (contentHeight 1975↔2103px on a 2400px screen
++    // ≈ 82-88%) confirmed the LazyColumn's intrinsic height rides close to the
++    // sheet's fully-expanded anchor and fluctuates as items scroll/recycle,
++    // which couples back into ModalBottomSheet's layout and produces the
++    // visible "height反复跳动" during a real-finger drag. Bounding the list
++    // height breaks that feedback loop — the LazyColumn scrolls internally
++    // against a stable bounded constraint instead of remeasuring the sheet.
++    // Local to the picker per SheetRecipe's "调用方封顶" contract (the recipe
++    // itself deliberately does NOT impose a fixed cap).
++    val pickerMaxHeight = (LocalConfiguration.current.screenHeightDp * 0.8f).dp
+     AppBottomSheet(
+         onDismissRequest = onDismiss,
+         title = stringResource(R.string.chat_model_picker_title),
+@@ -542,7 +560,9 @@ internal fun ModelPickerSheet(
+         // (non-empty) branch, so an empty catalog rendered ONLY the empty
+         // message — T7-C4 requires 默认 to always be available + highlighted
+         // when the effective model is null.
+-        LazyColumn(modifier = Modifier.fillMaxWidth()) {
++        LazyColumn(modifier = Modifier
++            .fillMaxWidth()
++            .heightIn(max = pickerMaxHeight)) {
+             // §chat-ux-batch T7 (B2): top "默认" item — selected when the
+             // effective model (pending ?: infer ?: null) is null. Routes
+             // to onClear (ComposerViewModel.clearSessionModel), which
+diff --git a/app/src/main/java/cn/vectory/ocdroid/ui/controller/ForegroundCatchUpController.kt b/app/src/main/java/cn/vectory/ocdroid/ui/controller/ForegroundCatchUpController.kt
+index a6f355c..a8610fc 100644
+--- a/app/src/main/java/cn/vectory/ocdroid/ui/controller/ForegroundCatchUpController.kt
++++ b/app/src/main/java/cn/vectory/ocdroid/ui/controller/ForegroundCatchUpController.kt
+@@ -20,10 +20,12 @@ import kotlinx.coroutines.launch
+  * **Migration (batch 3b)**: the [ForegroundCatchUpCallbacks] interface was
+  * eliminated. The 4 cross-domain signals (forceReconnect /
+  * globalColdStartRefresh / cancelSse / catchUpAfterDisconnect) now emit
+- * [ControllerEffect]s on [effects] (rule B). The 3 same-domain operations
+- * (setStaleNotice / clearDraft / currentSessionId) now run inline against the
+- * injected [chatFlow] / [composerFlow] / [settingsManager] (rule A — they
+- * only touch state the controller can reach directly).
++ * [ControllerEffect]s on [effects] (rule B). The same-domain operations
++ * (setStaleNotice / currentSessionId) now run inline against the injected
++ * [chatFlow] / [composerFlow] / [settingsManager] (rule A — they only touch
++ * state the controller can reach directly). The former `clearDraft` inline
++ * helper was removed (§fix-draft-bg-preserve) — the ON_STOP branch no longer
++ * discards an in-progress draft; see [onForegroundChanged].
+  *
+  * Tiers (bucketed by how long the app was backgrounded, [backgroundedAtMs]):
+  *  - `<15s`   → throttle (suppress SSE reconnect catch-up; rely on the live feed)
+@@ -114,9 +116,10 @@ class ForegroundCatchUpController(
+      * most once per [FOREGROUND_RELOAD_MIN_INTERVAL_MS] — wipe stale streaming
+      * buffers and reload the current session (the wipe+reload are coupled).
+      *
+-     * On **enter background** (ON_STOP): clear the in-progress draft +
+-     * stamp [backgroundedAtMs] so the foreground-return tier bucketing
+-     * works. CP9 §E23-E25: NO LONGER emits `ControllerEffect.CancelSse`
++     * On **enter background** (ON_STOP): stamp [backgroundedAtMs] so the
++     * foreground-return tier bucketing works. The in-progress draft is
++     * PRESERVED (§fix-draft-bg-preserve) — it is cleared only on explicit
++     * exit (navigate away from Chat / switch session / first send). CP9 §E23-E25: NO LONGER emits `ControllerEffect.CancelSse`
+      * (the coordinator decides whether SSE stays alive — busy/unknown from
+      * L1 → L2Active retains the live feed; idle fg→bg → L3 teardown;
+      * L2-active idle after debounce → L2-idle). The gap-dirty signal on
+@@ -162,11 +165,19 @@ class ForegroundCatchUpController(
+                 }
+             }
+         } else {
+-            // Discard any in-progress draft so a backgrounded draft does not
+-            // leak into the next foreground cycle. CP9 §E24: keep
++            // §fix-draft-bg-preserve: ON_STOP no longer clears the in-progress
++            // draft. The previous clearDraft() here discarded draftWorkdir +
++            // inputText + attachments on every background transition, so a
++            // user who typed into a new-session draft and briefly switched
++            // apps lost their text on return. The draft is in-memory and is
++            // already cleared on the user's EXPLICIT exit paths — navigating
++            // away from Chat (AppShell clearDraftIfActive), switching session
++            // (SessionSwitcher clears draftWorkdir), or the first send
++            // (materializeDraftSession consumes it) — so leaving it in memory
++            // across a bg/fg cycle matches the user's mental model ("keep it
++            // until I actively leave the draft"). CP9 §E24: keep
+             // [backgroundedAtMs] stamping (the foreground-return tier
+             // bucketing still needs it).
+-            clearDraft()
+             backgroundedAtMs = clock()
+             // CP9 §E23: DELETE the `DebugLog.i("SSE", "cancelSse (background)")`
+             // + `effects.tryEmitEffect(ControllerEffect.CancelSse)` pair. The
+@@ -216,26 +227,6 @@ class ForegroundCatchUpController(
+         store.mutateChat { it.copy(staleNotice = true) }
+     }
+ 
+-    /**
+-     * Inline (rule A) — drops an in-progress draft before tearing down SSE so
+-     * a backgrounded draft does not leak into the next foreground cycle.
+-     * Mirrors [ComposerController.clearDraftIfActive]. Eliminated in batch 3b.
+-     */
+-    private fun clearDraft() {
+-        if (store.composerFlow.value.draftWorkdir == null || store.chatFlow.value.currentSessionId != null) return
+-        settingsManager.currentWorkdir = null
+-        // §1B-FIX (I4): also clear fileReferences — chips must not leak
+-        // to the next session.
+-        store.mutateComposer {
+-            it.copy(
+-                draftWorkdir = null,
+-                inputText = "",
+-                imageAttachments = emptyList(),
+-                fileReferences = emptyList(),
+-            )
+-        }
+-    }
+-
+     /**
+      * Inline (rule A) — reads currentSessionId directly from [SharedStateStore.chatFlow].
+      * Eliminated in batch 3b.
+diff --git a/app/src/test/java/cn/vectory/ocdroid/SessionViewModelPassThroughTest.kt b/app/src/test/java/cn/vectory/ocdroid/SessionViewModelPassThroughTest.kt
+index 5b17194..d4f4ef0 100644
+--- a/app/src/test/java/cn/vectory/ocdroid/SessionViewModelPassThroughTest.kt
++++ b/app/src/test/java/cn/vectory/ocdroid/SessionViewModelPassThroughTest.kt
+@@ -131,6 +131,26 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
+         assertEquals("", core.composerFlow.value.inputText)
+     }
+ 
++    @Test
++    fun `closeSession last tab clears the persisted currentSessionId`() = runTest {
++        // §fix-close-all-residual: the AppCore persistence collector uses
++        // filterNotNull(), so the chat.currentSessionId → null transition is
++        // NOT auto-persisted. closeSession must explicitly clear
++        // settingsManager.currentSessionId, otherwise applySavedSettings
++        // re-seeds chatFlow with the stale id on the next cold start and
++        // resurrects a session the user closed all tabs on.
++        every { settingsManager.openSessionIds } returns listOf("s1")
++        val core = createCore()
++        val vm = SessionViewModel(core)
++        core.writeChat { it.copy(currentSessionId = "s1") }
++        core.writeSessionList { it.copy(openSessionIds = listOf("s1")) }
++
++        vm.closeSession("s1")
++        advanceUntilIdle()
++
++        verify { settingsManager.currentSessionId = null }
++    }
++
+     @Test
+     fun `closeSession current session saves current draft text first`() = runTest {
+         every { settingsManager.openSessionIds } returns listOf("s1")
+@@ -146,6 +166,80 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
+         verify { settingsManager.setDraftText(any(), "s1", "draft text") }
+     }
+ 
++    // §fix-close-subagent regression coverage: the close-X only renders on the
++    // selected tab, and the tab strip's effectiveSelectedId falls back to the
++    // root when current is a sub-agent. So the user can close a root tab while
++    // currentSessionId points at one of its descendants. Pre-fix, isCurrent
++    // (curId == sessionId) was false in that case → currentSessionId was never
++    // cleared → the chat body kept rendering after every tab was closed (the
++    // "关光 tab 仍显示 chat" residual bug).
++
++    @Test
++    fun `closeSession sub-agent current closes root tree and clears chat`() = runTest {
++        val root = Session(id = "root-1", directory = "/proj")
++        val child = Session(id = "child-1", directory = "/proj", parentId = "root-1")
++        every { settingsManager.openSessionIds } returns listOf("root-1")
++        val core = createCore()
++        val vm = SessionViewModel(core)
++        core.writeChat {
++            it.copy(
++                currentSessionId = "child-1",
++                messages = listOf(cn.vectory.ocdroid.data.model.Message(id = "m", role = "user")),
++            )
++        }
++        core.writeSessionList { it.copy(sessions = listOf(root, child), openSessionIds = listOf("root-1")) }
++
++        vm.closeSession("root-1")
++        advanceUntilIdle()
++
++        // Closing the only root while viewing its child must clear the chat
++        // (pre-fix: child stayed current with no open tab → residual chat).
++        assertNull(core.chatFlow.value.currentSessionId)
++        assertTrue(core.chatFlow.value.messages.isEmpty())
++        assertEquals("", core.composerFlow.value.inputText)
++        assertTrue(core.sessionListFlow.value.openSessionIds.isEmpty())
++    }
++
++    @Test
++    fun `closeSession sub-agent current with another root open selects next`() = runTest {
++        val root1 = Session(id = "root-1", directory = "/proj")
++        val root2 = Session(id = "root-2", directory = "/proj")
++        val child = Session(id = "child-1", directory = "/proj", parentId = "root-1")
++        every { settingsManager.openSessionIds } returns listOf("root-1", "root-2")
++        val core = createCore()
++        val vm = SessionViewModel(core)
++        core.writeChat { it.copy(currentSessionId = "child-1") }
++        core.writeSessionList {
++            it.copy(sessions = listOf(root1, root2, child), openSessionIds = listOf("root-1", "root-2"))
++        }
++
++        vm.closeSession("root-1")
++        advanceUntilIdle()
++
++        // root-1 (child's tree) closed, root-2 remains → switch to root-2.
++        assertEquals(listOf("root-2"), core.sessionListFlow.value.openSessionIds)
++        assertEquals("root-2", core.chatFlow.value.currentSessionId)
++    }
++
++    @Test
++    fun `closeSession sub-agent current saves draft under child id not root`() = runTest {
++        val root = Session(id = "root-1", directory = "/proj")
++        val child = Session(id = "child-1", directory = "/proj", parentId = "root-1")
++        every { settingsManager.openSessionIds } returns listOf("root-1")
++        val core = createCore()
++        val vm = SessionViewModel(core)
++        core.writeChat { it.copy(currentSessionId = "child-1") }
++        core.writeComposer { it.copy(inputText = "draft in child") }
++        core.writeSessionList { it.copy(sessions = listOf(root, child), openSessionIds = listOf("root-1")) }
++
++        vm.closeSession("root-1")
++        advanceUntilIdle()
++
++        // Draft is keyed on curId (child-1 — the actual editing context), NOT
++        // the closed root id. Keying on root would mis-restore / lose the draft.
++        verify { settingsManager.setDraftText(any(), "child-1", "draft in child") }
++    }
++
+     @Test
+     fun `toggleSessionExpanded adds id when absent`() = runTest {
+         val core = createCore()
+diff --git a/app/src/test/java/cn/vectory/ocdroid/ui/SessionListActionsTest.kt b/app/src/test/java/cn/vectory/ocdroid/ui/SessionListActionsTest.kt
+index df35dff..f927608 100644
+--- a/app/src/test/java/cn/vectory/ocdroid/ui/SessionListActionsTest.kt
++++ b/app/src/test/java/cn/vectory/ocdroid/ui/SessionListActionsTest.kt
+@@ -409,6 +409,45 @@ class SessionListActionsTest {
+         assertNull(selected)
+     }
+ 
++    // ── §fix-close-all-residual: cold-start auto-select must NOT refire ──────
++    // The auto-select lands the user on a session during TRUE cold start only.
++    // Once the first load has completed, a null currentSessionId means the user
++    // closed every tab — a refresh must keep the empty state instead of
++    // resurrecting the first server session (which produced the stable
++    // "StreamingSvcLauncher AckTimeout bootstrap abort" residual).
++
++    @Test
++    fun `fix-close-all-residual - second load after close-all does not auto-select`() = runTest {
++        val sessions = listOf(Session(id = "first", directory = "/x"))
++        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
++        // Simulate "initial load already happened" (the normal pre-condition
++        // before the user can close tabs): the flag is true, currentSessionId
++        // is null (user just closed the last tab), no draft.
++        store.mutateSessionList { it.copy(hasCompletedInitialLoad = true) }
++        var selected: String? = null
++
++        launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
++        advanceUntilIdle()
++
++        assertNull("must NOT auto-select after close-all-tabs", selected)
++        assertNull("chat stays cleared (empty state)", slices.chat.value.currentSessionId)
++    }
++
++    @Test
++    fun `fix-close-all-residual - first load with null current still auto-selects`() = runTest {
++        // Regression guard: the cold-start auto-select itself must still work
++        // on the FIRST load (hasCompletedInitialLoad = false). This is the
++        // legitimate "land the user on a session" path the gate preserves.
++        val sessions = listOf(Session(id = "first", directory = "/x"))
++        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
++        var selected: String? = null
++
++        launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
++        advanceUntilIdle()
++
++        assertEquals("cold start still auto-selects first", "first", selected)
++    }
++
+     @Test
+     fun `launchLoadSessions with current session calls onLoadMessages and onLoadSessionStatus`() = runTest {
+         val sessions = listOf(Session(id = "s1", directory = "/x"))
+diff --git a/app/src/test/java/cn/vectory/ocdroid/ui/controller/ForegroundCatchUpControllerTest.kt b/app/src/test/java/cn/vectory/ocdroid/ui/controller/ForegroundCatchUpControllerTest.kt
+index 4e3b944..017bbf9 100644
+--- a/app/src/test/java/cn/vectory/ocdroid/ui/controller/ForegroundCatchUpControllerTest.kt
++++ b/app/src/test/java/cn/vectory/ocdroid/ui/controller/ForegroundCatchUpControllerTest.kt
+@@ -129,25 +129,36 @@ class ForegroundCatchUpControllerTest {
+     // ── background tier ────────────────────────────────────────────────────
+ 
+     @Test
+-    fun `background transition clears draft and stamps backgroundedAtMs but does NOT emit CancelSse`() = withCollectedEffects { controllerScope, collected ->
+-        // CP9 §E23-E25 + §F30: the background branch NO LONGER emits
+-        // ControllerEffect.CancelSse — the lifecycle coordinator decides
+-        // whether SSE survives the bg transition (busy/unknown → keep;
+-        // idle → teardown via the Service's own disconnect()). The test
+-        // asserts ONLY: draft cleared + backgroundedAtMs stamped (the
++    fun `background transition preserves in-progress draft and stamps backgroundedAtMs but does NOT emit CancelSse`() = withCollectedEffects { controllerScope, collected ->
++        // §fix-draft-bg-preserve: ON_STOP no longer clears the in-progress
++        // draft — a user who typed into a new-session draft and briefly
++        // switched apps must NOT lose their text on return. The draft is
++        // cleared only on explicit exit (navigate away from Chat / switch
++        // session / first send). CP9 §E23-E25 + §F30: the background branch
++        // NO LONGER emits ControllerEffect.CancelSse — the lifecycle
++        // coordinator decides whether SSE survives the bg transition. The
++        // test asserts: draft PRESERVED + backgroundedAtMs stamped (the
+         // foreground-return tier bucketing still needs it) + NO CancelSse.
+         val controller = makeController(controllerScope)
+         controller.onForegroundChanged(true) // consume the baseline emission
+         nowMs = 1_000
+-        // Set up an in-progress draft so clearDraft actually does work.
+-        store.mutateComposer { it.copy(draftWorkdir = "/tmp/proj") }
++        // Set up an in-progress draft (new-session draft: draftWorkdir set,
++        // no currentSessionId yet) with typed text + an attachment.
++        store.mutateComposer {
++            it.copy(
++                draftWorkdir = "/tmp/proj",
++                inputText = "half-typed draft",
++                imageAttachments = emptyList(),
++                fileReferences = emptyList(),
++            )
++        }
+         store.mutateChat { it.copy(currentSessionId = null) }
+ 
+         controller.onForegroundChanged(false)
+ 
+-        // clearDraft inline path ran: workdir cleared, input text emptied.
+-        assertEquals(null, composerFlow.value.draftWorkdir)
+-        assertEquals("", composerFlow.value.inputText)
++        // Draft PRESERVED across the bg transition (the fix).
++        assertEquals("/tmp/proj", composerFlow.value.draftWorkdir)
++        assertEquals("half-typed draft", composerFlow.value.inputText)
+         // backgroundedAtMs stamped (the foreground-return tier bucketing
+         // still needs it — verified indirectly by the <15s / 15s–5min / >5min
+         // tier tests below which all read backgroundedAtMs via nowMs deltas).

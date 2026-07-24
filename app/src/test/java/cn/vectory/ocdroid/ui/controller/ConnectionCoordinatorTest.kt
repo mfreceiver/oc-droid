@@ -135,6 +135,11 @@ class ConnectionCoordinatorTest {
             // the HostReconfigured epoch bump which still fires).
             streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = null,
+            // RESOLVER lane ②: resolver deliberately NOT wired on the shared
+            // fixture — the legacy testConnection path then uses the gated
+            // fallback (settingsManager.serverUrl), keeping every existing
+            // success/failure-path test byte-identical. Tests that exercise the
+            // resolver path construct their own coordinator with a resolver.
         )
         // Defaults: no directory fetch on loadInitialData (so the directory
         // coroutine — whose relaxed Result<List<Session>> mock would otherwise
@@ -305,6 +310,224 @@ class ConnectionCoordinatorTest {
         runPending()
 
         assertTrue("healthy connect emits no error event", recordedEvents.filterIsInstance<UiEvent.Error>().isEmpty())
+    }
+
+    // ── RESOLVER lane ②: identity endpointFp + null explicit-fail ──────────
+
+    @Test
+    fun `testConnection binds identity endpointFp from the resolver URL, not settingsManager`() {
+        // §resolver-single-source-of-truth: when the resolver is WIRED, the
+        // legacy testConnection success path must bind the resolver's URL as
+        // endpointFp (NOT settingsManager.serverUrl). This is the identity-
+        // moves-with-url invariant: if identity stayed on settingsManager, a
+        // profile/host switch would leave the epoch/identity guards keyed to
+        // the OLD url. The shared fixture keeps the resolver absent (gated
+        // fallback → settingsManager), so this test builds a coordinator WITH
+        // a resolver (mirrors the d3/d4 engine-test pattern).
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
+        val resolver = mockk<cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver>()
+        every { resolver.resolve() } returns cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfig(
+            source = cn.vectory.ocdroid.service.streaming.EffectiveConnectionSource.Manual,
+            profileId = null,
+            serverGroupFp = "test-fp",
+            url = "http://resolver-authority:1234",
+            username = null,
+            password = null,
+            workdir = "",
+            tunnelPasswordId = null,
+            tunnelPassword = null,
+            clientCertId = null,
+            mtlsEnabled = false,
+            slim = false,
+        )
+        val cc = ConnectionCoordinator(
+            scope, slices, repository, settingsManager, effects,
+            cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            streamingServiceLauncher = launcher,
+            effectiveConnectionConfigResolver = resolver,
+        )
+
+        cc.testConnection()
+        runPending()
+
+        assertTrue(connectionFlow.value.isConnected)
+        assertEquals(
+            "identity endpointFp must be the resolver URL (not settingsManager.serverUrl)",
+            "http://resolver-authority:1234",
+            identityStore.currentIdentity.value?.endpointFp,
+        )
+    }
+
+    @Test
+    fun `testConnection defers and never writes Connected when resolver returns no effective connection`() {
+        // §resolver null = EXPLICIT FAIL (resolver WIRED): a null resolve() on
+        // the success path means "no valid active endpoint" (host mid-switch).
+        // The probe must NOT fall back to a stale settingsManager.serverUrl
+        // (that resurrects the token-stream storm). It defers — settles false,
+        // writes no Connected — and the in-flight reconfigure re-drives it.
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
+        val resolver = mockk<cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver>()
+        every { resolver.resolve() } returns null
+        val cc = ConnectionCoordinator(
+            scope, slices, repository, settingsManager, effects,
+            cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            streamingServiceLauncher = launcher,
+            effectiveConnectionConfigResolver = resolver,
+        )
+
+        var settled: Boolean? = null
+        cc.testConnection(onSettled = { settled = it })
+        runPending()
+
+        assertEquals("onSettled must fire false (probe superseded)", false, settled)
+        assertFalse("must NOT write Connected on a null resolve", connectionFlow.value.isConnected)
+        assertFalse(
+            "connectionPhase must not reach Connected",
+            connectionFlow.value.connectionPhase is ConnectionPhase.Connected,
+        )
+    }
+
+    @Test
+    fun `testConnection aborts commit when a reconfigure advances the generation during checkHealth`() {
+        // §toctou-resolver-snapshot (bgpt phase-gate): a host/profile switch that
+        // bumps ConnectionIdentityStore's generation WHILE checkHealth is
+        // suspended must NOT let the probe commit Connected or bind identity
+        // from the (now-obsolete) resolver snapshot. The probe captures the
+        // generation before checkHealth; if it advanced by the time the success
+        // path runs, the probe defers (settle false, no Connected, no bind) — the
+        // new generation's probe re-runs under the new URL. This is the
+        // single-snapshot + barrier-guard fix for the resolve→commit→bind TOCTOU.
+        //
+        // The interleave is simulated by making checkHealth's answers block call
+        // beginReconfigure() (the synchronous generation bump every real
+        // HostProfileController reconfigure path performs before repository.configure).
+        val resolver = mockk<cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver>()
+        every { resolver.resolve() } returns cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfig(
+            source = cn.vectory.ocdroid.service.streaming.EffectiveConnectionSource.Manual,
+            profileId = null,
+            serverGroupFp = "test-fp",
+            url = "http://obsolete-host:1234",
+            username = null,
+            password = null,
+            workdir = "",
+            tunnelPasswordId = null,
+            tunnelPassword = null,
+            clientCertId = null,
+            mtlsEnabled = false,
+            slim = false,
+        )
+        coEvery { repository.checkHealth() } answers {
+            // Host switch fires while checkHealth is suspended — bumps the
+            // generation the probe captured before the call.
+            identityStore.beginReconfigure()
+            Result.success(HealthResponse(healthy = true, version = "1.0"))
+        }
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
+        val cc = ConnectionCoordinator(
+            scope, slices, repository, settingsManager, effects,
+            cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            streamingServiceLauncher = launcher,
+            effectiveConnectionConfigResolver = resolver,
+        )
+
+        var settled: Boolean? = null
+        cc.testConnection(onSettled = { settled = it })
+        runPending()
+
+        assertEquals("onSettled must fire false (probe superseded by reconfigure)", false, settled)
+        assertFalse(
+            "must NOT commit Connected when the generation advanced during checkHealth",
+            connectionFlow.value.isConnected,
+        )
+        assertFalse(
+            "connectionPhase must not reach Connected",
+            connectionFlow.value.connectionPhase is ConnectionPhase.Connected,
+        )
+        // The obsolete resolver URL must NOT have leaked into the identity.
+        // beginReconfigure nulls the old identity; the aborted probe never re-binds,
+        // so currentIdentity stays null (endpointFp != the obsolete URL).
+        assertFalse(
+            "obsolete resolver URL must not be bound as endpointFp; actual=${identityStore.currentIdentity.value?.endpointFp}",
+            "http://obsolete-host:1234" == identityStore.currentIdentity.value?.endpointFp,
+        )
+    }
+
+    @Test
+    fun `testConnection rejects the bind when a reconfigure fires between resolve and bind (epoch-CAS gate)`() {
+        // §toctou-resolver-snapshot DEFINITIVE fix (bgpt phase-gate): the prior
+        // non-atomic epoch-guard could still let a reconfigure slip between the
+        // guard and the subsequent bind (the window bgpt held the lane on). The
+        // fix moves the epoch-CHECK into bindIfCurrent itself, under one
+        // synchronized critical section with the identity commit. This test
+        // exercises the POST-check window: the reconfigure (epoch bump) is
+        // injected AFTER resolve returns the obsolete snapshot but BEFORE the
+        // bindIfCurrent call — so it proves the CAS rejects a stale-epoch bind
+        // even when the snapshot was taken against the current (pre-switch) host.
+        //
+        // We model the interleave by making resolve()'s answers block call
+        // beginReconfigure() (resolve is the last step before bindIfCurrent on
+        // the main dispatcher, so a host switch that lands at that instant bumps
+        // the generation the probe captured before checkHealth).
+        val resolver = mockk<cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver>()
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
+        every { resolver.resolve() } answers {
+            // Host switch lands AFTER resolve captured the obsolete URL but
+            // BEFORE bindIfCurrent — bumps the generation.
+            identityStore.beginReconfigure()
+            cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfig(
+                source = cn.vectory.ocdroid.service.streaming.EffectiveConnectionSource.Manual,
+                profileId = null,
+                serverGroupFp = "test-fp",
+                url = "http://stale-snapshot:9999",
+                username = null,
+                password = null,
+                workdir = "",
+                tunnelPasswordId = null,
+                tunnelPassword = null,
+                clientCertId = null,
+                mtlsEnabled = false,
+                slim = false,
+            )
+        }
+        val cc = ConnectionCoordinator(
+            scope, slices, repository, settingsManager, effects,
+            cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            streamingServiceLauncher = launcher,
+            effectiveConnectionConfigResolver = resolver,
+        )
+
+        var settled: Boolean? = null
+        cc.testConnection(onSettled = { settled = it })
+        runPending()
+
+        // The epoch-CAS bind MUST be rejected (probeEpoch E0 != currentEpoch E1),
+        // so: no Connected committed, no stale URL persisted.
+        assertEquals("onSettled must fire false (CAS rejected the superseded bind)", false, settled)
+        assertFalse(
+            "must NOT commit Connected when the CAS rejected the bind",
+            connectionFlow.value.isConnected,
+        )
+        assertFalse(
+            "connectionPhase must not reach Connected",
+            connectionFlow.value.connectionPhase is ConnectionPhase.Connected,
+        )
+        assertFalse(
+            "stale resolver URL must not be bound as endpointFp; actual=${identityStore.currentIdentity.value?.endpointFp}",
+            "http://stale-snapshot:9999" == identityStore.currentIdentity.value?.endpointFp,
+        )
     }
 
     // ── R-20 Phase 3: daily cache sweep hook on healthy connect ─────────────

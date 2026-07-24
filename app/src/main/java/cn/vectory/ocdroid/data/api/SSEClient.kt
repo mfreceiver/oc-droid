@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.decodeFromJsonElement
 
 /**
  * Raised after the SSE reconnection budget ([SSEClient.MAX_RETRY_ATTEMPTS]) is
@@ -360,9 +361,11 @@ class SSEClient(
         // Fast path (1): legacy `{payload:{type, properties}}` envelope.
         val payloadObj = root["payload"] as? JsonObject
         if (payloadObj != null) {
-            // Delegates to kotlinx.serialization; honours ignoreUnknownKeys
-            // + isLenient + coerceInputValues from the companion Json.
-            return json.decodeFromString<SSEEvent>(data)
+            // Delegates to kotlinx.serialization; reuses the already-parsed
+            // `root` JsonObject (single-parse) while honouring the same
+            // companion Json config (ignoreUnknownKeys + isLenient +
+            // coerceInputValues).
+            return json.decodeFromJsonElement<SSEEvent>(root)
         }
 
         // Flat path (2): sidecar q/p — `{directory?, type, properties?}`.

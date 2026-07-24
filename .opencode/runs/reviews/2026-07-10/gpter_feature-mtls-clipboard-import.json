@@ -1,0 +1,25 @@
+{
+  "agent": "gpter",
+  "scope": "feature-mtls-clipboard-import",
+  "date": "2026-07-10",
+  "reviewed_commit": "269ef94",
+  "version_target": "0.6.6",
+  "round": 1,
+  "verdict": "block",
+  "score": 7.4,
+  "blocking_issues": [
+    "Client-cert remove is fake on existing profiles: stagedP12=null + UI Empty but hasMaterial (initial.clientCertId!=null) stays true → Save re-loads old p12 from ESP; null is ambiguous (unchanged vs removed), reintroducing the very ambiguity CaStage eliminated for CA",
+    "CA paste failure can retain a stale caStage (e.g. prior Clear) and Save commits it → silent private-CA removal → platform-CA downgrade; UI shows import-failed but trust boundary changes",
+    "clientCertSummary() executes PKCS12 load/KDF synchronously on the Compose main thread during composition and re-runs on recomposition → jank/ANR; contradicts loadClientP12OrNull's own off-main requirement"
+  ],
+  "non_blocking_issues": [
+    "sanitizeBase64 does not strip PEM header words — 'tolerant of pasted-PEM' contract false",
+    "P12 import validation (>=1 key) weaker than TLS build (exactly 1 key)",
+    "Basic Auth toggle off: testConnection can still send hidden stored credentials",
+    "Critical UI state-machine tests missing (remove→save, error→save, status/intent sync, section-off test creds, multi-key reject, re-entry summary)",
+    "Default-locale strings.xml has Chinese entries; roleLabels hardcoded zh",
+    "CertImportSlot success color hardcoded 0xFF4CAF50",
+    "ChatMessageContent.kt:577 sessionId != null is a redundant always-true condition (pre-existing)"
+  ],
+  "notes": "Round-1. Storage/TLS main chain confirmed intact (resolveClientCert/saveClientCert/buildMutualTlsConfig behavior unchanged; save still pre-builds via buildMutualTlsConfig so bad material can't land). on-save re-validation confirmed present. Existing passworded p12 re-entry + untouched-save still works. Private key never logged/rendered; clipboard read only on tap. Flicker logs all under STREAMING_FLICKER_DEBUG gate (BuildConfig.DEBUG, release silent). Blocked on the 3 listed UI state/intent/thread issues — fixes dispatched."
+}

@@ -6,7 +6,9 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import cn.vectory.ocdroid.data.model.SessionCacheEntry
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
+import cn.vectory.ocdroid.di.ApplicationScope
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -54,6 +56,12 @@ import javax.inject.Singleton
 @Singleton
 class SettingsManager @Inject constructor(
     @param:ApplicationContext private val context: Context,
+    /** §C1: coroutine scope for draft-text debounce. Non-null in prod
+     *  (Hilt @ApplicationScope = Dispatchers.Default, process-lifetime);
+     *  null in unit tests / non-Hilt construction → [SessionPrefs] writes
+     *  immediately, preserving the pre-C1 round-trip semantics the existing
+     *  SettingsManagerTest cases rely on (set → read back synchronously). */
+    @ApplicationScope private val appScope: CoroutineScope?,
 ) {
     private val masterKey = MasterKey.Builder(context)
         .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
@@ -71,11 +79,21 @@ class SettingsManager @Inject constructor(
     private val navigationPrefs = NavigationPrefs(encryptedPrefs)
     private val workdirPrefs = WorkdirPrefs(encryptedPrefs)
     private val appearancePrefs = AppearancePrefs(encryptedPrefs)
-    private val sessionPrefs = SessionPrefs(encryptedPrefs)
+    /** §C1: passes [appScope] for draft-text debounce (null in tests → immediate). */
+    private val sessionPrefs = SessionPrefs(encryptedPrefs, appScope)
     private val debugPrefs = DebugPrefs(encryptedPrefs)
     private val trafficPrefs = TrafficPrefs(encryptedPrefs)
     private val modelPrefs = ModelPrefs(encryptedPrefs)
     private val migrationHelper = MigrationHelper(encryptedPrefs)
+
+    /**
+     * §C1: secondary constructor for unit tests / non-Hilt construction.
+     * Passes a null debounce scope → [SessionPrefs] writes immediately (no
+     * coalescing), so existing round-trip tests that set a draft and read it
+     * back synchronously keep working without flushing. Prod debounced writes
+     * go through the primary constructor's non-null @ApplicationScope.
+     */
+    internal constructor(context: Context) : this(context, null)
 
     // ── Connection / ESP-secret domain (ConnectionPrefs) ────────────────────
 
@@ -244,6 +262,15 @@ class SettingsManager @Inject constructor(
 
     fun setDraftText(serverGroupFp: String, sessionId: String, text: String) =
         sessionPrefs.setDraftText(serverGroupFp, sessionId, text)
+
+    /**
+     * §C1: cancels any pending debounce and writes the latest pending draft
+     * to ESP immediately. Call from transition / durability paths (session
+     * switch, tab close, send-clear, app background) so the draft mutation
+     * lands before the transition proceeds. No-op when there is no pending
+     * write.
+     */
+    fun flushDraftText() = sessionPrefs.flushDraftText()
 
     // ── Traffic domain (TrafficPrefs) ───────────────────────────────────────
 

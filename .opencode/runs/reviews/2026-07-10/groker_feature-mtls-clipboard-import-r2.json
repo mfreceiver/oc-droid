@@ -1,0 +1,17 @@
+{
+  "agent": "groker",
+  "scope": "feature-mtls-clipboard-import",
+  "date": "2026-07-10",
+  "reviewed_commit": "2729f45",
+  "version_target": "0.6.6",
+  "round": 2,
+  "verdict": "pass",
+  "score": 9.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "re-toggle mTLS after client remove (without paste) restores stored p12 — multi-step UX edge, not data corruption; optional clientCleared hardening",
+    "hardcoded success color 0xFF4CAF50 in CertImportSlot",
+    "default-locale section titles (Basic Auth/Tunnel) still zh in values/strings.xml"
+  ],
+  "notes": "Round-2. All 8 round-1 issues verified GENUINELY fixed (not cosmetic): PEM armor-stripping, off-main summaries (produceState+Default), test honors basicAuthEnabled, remove→Disable clears ESP, remove gated by isConverting, roleLabel i18n, exactly-one key. No new races found (async-seed vs user-edit guarded by clientEdited/caEdited; hasCertError clears on resolve). Storage/TLS chain still untouched. PASS at 9.5."
+}

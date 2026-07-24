@@ -156,8 +156,8 @@ class FilesViewModel @Inject constructor(
     /**
      * §F5: 长按文件分享。文件在远端服务器——先 getFileContent 取内容（文本=UTF-8
      * 字符串、二进制=base64），再落盘 + 系统分享（见 [shareFileContent]，覆盖所有
-     * 格式）。§kimo-B5: 落盘/解码切到 Dispatchers.IO 避免主线程写盘/ANR；整段
-     * runCatching 兜底 IOException/SecurityException，失败仅记日志（长按是次要路径，
+     * 格式）。§kimo-B5 + §F5-ZLM: 落盘/解码切到 Dispatchers.IO 避免主线程写盘/ANR；
+     * try/catch 兜底 IOException/SecurityException，失败仅记日志（长按是次要路径，
      * 不崩溃优于弹窗）。
      */
     fun shareFile(file: FileNode) {
@@ -166,9 +166,14 @@ class FilesViewModel @Inject constructor(
         viewModelScope.launch {
             repository.getFileContent(dir, relPath)
                 .onSuccess { content ->
-                    withContext(Dispatchers.IO) {
-                        runCatching { shareFileContent(appContext, relPath, content) }
-                            .onFailure { Log.w("FilesViewModel", "shareFile failed: ${it.message}") }
+                    // §F5-ZLM (C4): shareFileContent 现为 suspend，内部已用
+                    // withContext(Dispatchers.IO) 写盘 + withContext(Main) 启动 chooser，
+                    // 故此处不再套外层 IO 调度（消除冗余嵌套）；try/catch 兜底，
+                    // 行为不变（IO failure 仅记日志）。
+                    try {
+                        shareFileContent(appContext, relPath, content)
+                    } catch (e: Exception) {
+                        Log.w("FilesViewModel", "shareFile failed: ${e.message}")
                     }
                 }
                 .onFailure { Log.w("FilesViewModel", "shareFile fetch failed: ${it.message}") }

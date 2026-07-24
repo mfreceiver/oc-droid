@@ -1,0 +1,15 @@
+{
+  "agent": "observer",
+  "scope": "release",
+  "date": "2026-07-12",
+  "reviewed_commit": "53c2e67",
+  "version_target": "0.8.3",
+  "verdict": "pass",
+  "score": 8.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "Appearance font/display-size slider thumb is a thin vertical line; a larger circular thumb would improve touch ergonomics. Cosmetic only.",
+    "Storage Cache Management 'Clear lost sessions' disabled state (no server connection) is correct but could surface why more prominently if multiple server groups exist. Minor."
+  ],
+  "notes": "Runtime visual validation on emulator-5554 (Debug build). Screenshots: home/nav, Settings slim list, Storage (Clear Data → Cache Management), Appearance language selector, Storage after Block-2 fix (Reset local data + Message cache label), reset confirmation dialog. All five icon-only bottom-nav tabs render and switch without crash; insets clean, no clipping/overlap. Settings landing is slim (no back/dividers/subtitles, 5 entries). Q8 Storage order Clear Data then Cache Management verified; Clear Data is flat/non-tinted with metric + Reset local data on one row. Reset dialog enumerates all 10 destructive-scope items + irreversibility in EN (title 'Clear all local data?'). Appearance language segmented control (System/中文/English) renders. Block-1/Block-2 fixes confirmed visually. Limitations: service-backed flows (server connect, live orphan sweep, actual cache clear, locale live-switch effect) unverifiable due to localhost-reconnecting state — deferred to post-release runtime testing with credentials."
+}

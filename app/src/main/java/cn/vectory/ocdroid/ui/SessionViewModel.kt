@@ -236,6 +236,12 @@ class SessionViewModel @Inject constructor(
             // editing in the child's context, so the draft belongs to curId;
             // keying it on the root would lose / mis-restore it.
             settingsManager.setDraftText(fp, curId, store.composerFlow.value.inputText)
+            // §C1: flush the closing session's draft so it is durable BEFORE
+            // the tab strip updates / a sibling session becomes current. The
+            // closing tab's composer is about to be torn down; a pending
+            // debounced write could otherwise be coalesced away by the next
+            // session's edits or lost on a crash → draft loss for the closed tab.
+            settingsManager.flushDraftText()
         }
         // §fix-close-all-slice-source: openSessionIds AUTHORITATIVE source is
         // the session-list slice (same as SessionSwitcher.append). Pre-fix

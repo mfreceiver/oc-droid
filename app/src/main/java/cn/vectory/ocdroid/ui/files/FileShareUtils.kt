@@ -6,6 +6,8 @@ import android.util.Base64
 import androidx.core.content.FileProvider
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.FileContent
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -17,7 +19,7 @@ import java.io.File
  * 覆盖所有文件格式：md/文本直写 UTF-8；二进制 base64 解码后写原始字节。
  * 用于 md 预览页分享按钮 + 文件浏览页长按分享。
  */
-internal fun shareFileContent(context: Context, path: String, content: FileContent) {
+internal suspend fun shareFileContent(context: Context, path: String, content: FileContent) {
     // §gpter-B1/kimo: 仅 null 返回——空文本文件（content=""）是合法的 0 字节文件，
     // 应写出空文件并分享；只有完全无内容（null）才放弃。
     val text = content.content ?: return
@@ -31,7 +33,10 @@ internal fun shareFileContent(context: Context, path: String, content: FileConte
     } else {
         text.toByteArray(Charsets.UTF_8)
     }
-    shareFile.writeBytes(bytes)
+    // §F5-ZLM (C4): 写盘切 IO 线程，避免主线程 ANR。File.writeBytes 是阻塞 IO。
+    withContext(Dispatchers.IO) {
+        shareFile.writeBytes(bytes)
+    }
 
     val uri = FileProvider.getUriForFile(
         context,
@@ -43,10 +48,13 @@ internal fun shareFileContent(context: Context, path: String, content: FileConte
         putExtra(Intent.EXTRA_STREAM, uri)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
-    context.startActivity(
-        Intent.createChooser(intent, context.getString(R.string.files_share))
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    )
+    // §F5-ZLM (C4): 系统分享 chooser/startActivity 必须回到 Main 线程。
+    withContext(Dispatchers.Main) {
+        context.startActivity(
+            Intent.createChooser(intent, context.getString(R.string.files_share))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
 }
 
 /** 按 path/类型推断分享 MIME。 */

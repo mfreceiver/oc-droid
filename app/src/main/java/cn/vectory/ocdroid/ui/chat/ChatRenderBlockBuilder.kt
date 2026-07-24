@@ -1,17 +1,49 @@
 package cn.vectory.ocdroid.ui.chat
 
+import androidx.compose.runtime.Stable
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 
-/** One stable LazyColumn item in the flattened chat timeline. */
+// §ui-stream A1: @Stable on the sealed interface is honest — every variant
+// is a data class built once in buildRenderBlocks and never mutated in
+// place; two .equals() blocks are interchangeable for rendering. This lets
+// the Compose runtime skip an itemsIndexed item whose block is value-equal
+// to the previous frame (i.e. a NON-streaming row during a token delta),
+// once the chat-wide streamingPartTexts Map is no longer captured by the row
+// content lambda. See ChatMessageContent.kt §ui-stream for the full data-flow.
+@Stable
 internal sealed interface RenderBlock {
     val id: String
 
+    /**
+     * §ui-stream A1: a single conversation turn rendered via MessageCard.
+     *
+     * New fields baked here (instead of captured from the chat-wide Map by
+     * the row content lambda) so that a token delta only invalidates the
+     * streaming message's own block:
+     *  - [streamingPartTexts]: the per-block slice of
+     *    ChatState.streamingPartTexts (only entries whose key is a part id
+     *    in THIS block). MessageCard/MessageRow read this instead of the
+     *    chat-wide Map. For a non-streaming row this is an empty map; for
+     *    the streaming row it carries the live partial text.
+     *  - [isMessageStreaming]: the §omitted-streaming flag previously
+     *    computed inline in the itemsIndexed lambda (which read the
+     *    chat-wide Map). Computed here via [computeMessageStreaming] so the
+     *    lambda no longer captures the Map for this check.
+     *
+     * renderBlocks as a whole is STILL keyed on the full streamingPartTexts
+     * (it bakes the live text for ToolRun/Fold ThinkingParts), so it rebuilds
+     * every token — but the rebuild produces value-EQUAL Conversation blocks
+     * for non-streaming rows, which @Stable + the removed Map capture lets
+     * Compose skip.
+     */
     data class Conversation(
         val message: Message,
         val parts: List<Part>,
         val showMessageDecoration: Boolean = false,
         val isDecorationOnly: Boolean = false,
+        val streamingPartTexts: Map<String, String> = emptyMap(),
+        val isMessageStreaming: Boolean = false,
         override val id: String
     ) : RenderBlock
 
@@ -34,6 +66,7 @@ internal sealed interface RenderBlock {
 }
 
 /** A classified tool item plus the message context required by its card renderer. */
+@Stable
 internal data class MessageToolRenderItem(
     val message: Message,
     val item: ToolRenderItem
@@ -62,11 +95,50 @@ internal fun buildRenderBlocks(
     streamingPartTexts: Map<String, String>,
     staleQuestionPartKeys: Set<String>,
     streamingReasoningPartId: String?,
+    // §ui-stream A1: the message id of the active streaming reasoning part,
+    // so [computeMessageStreaming] can mirror the original
+    // `streamingReasoningPart?.messageId == message.id` check without the
+    // builder needing the whole Part. Null when no reasoning stream is active.
+    streamingReasoningMessageId: String? = null,
     sessionIsRunning: Boolean
 ): List<RenderBlock> {
     val blocks = mutableListOf<RenderBlock>()
     val pendingFold = mutableListOf<MessageToolRenderItem>()
     var pendingFirstPartId: String? = null
+
+    // §ui-stream A1: central Conversation-block factory. Bakes the per-block
+    // streaming-text slice + isMessageStreaming so the itemsIndexed row
+    // content lambda never needs to capture the chat-wide streamingPartTexts
+    // Map. showMessageDecoration is assigned later by the mapIndexed pass
+    // (via .copy), so it keeps its default false here.
+    fun conversation(
+        message: Message,
+        parts: List<Part>,
+        id: String,
+        isDecorationOnly: Boolean = false
+    ): RenderBlock.Conversation {
+        val blockStreamingTexts: Map<String, String> = if (streamingPartTexts.isEmpty() || parts.isEmpty()) {
+            emptyMap()
+        } else {
+            buildMap {
+                parts.forEach { p -> streamingPartTexts[p.id]?.let { put(p.id, it) } }
+            }
+        }
+        return RenderBlock.Conversation(
+            message = message,
+            parts = parts,
+            isDecorationOnly = isDecorationOnly,
+            streamingPartTexts = blockStreamingTexts,
+            isMessageStreaming = computeMessageStreaming(
+                parts = parts,
+                streamingPartTexts = streamingPartTexts,
+                streamingReasoningMessageId = streamingReasoningMessageId,
+                message = message,
+                sessionIsRunning = sessionIsRunning
+            ),
+            id = id
+        )
+    }
 
     fun flushFold() {
         val anchor = pendingFirstPartId
@@ -104,7 +176,7 @@ internal fun buildRenderBlocks(
         // Metadata markers are always hard seams.
         if (message.role in cn.vectory.ocdroid.ui.METADATA_MARKER_ROLES) {
             flushFold()
-            blocks += RenderBlock.Conversation(
+            blocks += conversation(
                 message = message,
                 parts = parts,
                 id = "conversation|${message.id}|empty"
@@ -118,7 +190,7 @@ internal fun buildRenderBlocks(
         // turns remain real seams.
         if (parts.isEmpty()) {
             if (message.isUser || !sessionIsRunning) flushFold()
-            blocks += RenderBlock.Conversation(
+            blocks += conversation(
                 message = message,
                 parts = parts,
                 id = "conversation|${message.id}|empty"
@@ -131,7 +203,7 @@ internal fun buildRenderBlocks(
             if (conversationParts.isEmpty()) return
             flushFold()
             val snapshot = conversationParts.toList()
-            blocks += RenderBlock.Conversation(
+            blocks += conversation(
                 message = message,
                 parts = snapshot,
                 id = "conversation|${message.id}|${snapshot.first().id}"
@@ -141,7 +213,7 @@ internal fun buildRenderBlocks(
 
         if (message.isUser) {
             flushFold()
-            blocks += RenderBlock.Conversation(
+            blocks += conversation(
                 message = message,
                 parts = parts.filterNot { it.id == streamingReasoningPartId },
                 id = "conversation|${message.id}|user"
@@ -159,7 +231,7 @@ internal fun buildRenderBlocks(
             } else if (part.isSubAgentTask) {
                 flushConversation()
                 flushFold()
-                blocks += RenderBlock.Conversation(
+                blocks += conversation(
                     message = message,
                     parts = listOf(part),
                     id = "conversation|${message.id}|${part.id}"
@@ -202,7 +274,7 @@ internal fun buildRenderBlocks(
             // order and prevent tool runs on either side from folding
             // across the visual seam.
             flushFold()
-            blocks += RenderBlock.Conversation(
+            blocks += conversation(
                 message = message,
                 parts = emptyList(),
                 isDecorationOnly = true,
@@ -236,6 +308,53 @@ internal fun renderBlockTopPaddingDp(block: RenderBlock, index: Int): Int = when
     index == 0 -> 0
     block is RenderBlock.Conversation && block.message.isUser -> 16
     else -> 4
+}
+
+/**
+ * Terminal part display states: parts in these states are considered complete
+ * (not in-flight). Used by [computeMessageStreaming] to filter out completed
+ * tool/patch parts from the streaming check.
+ *
+ * §ui-stream A1: moved verbatim from ChatMessageContent.kt — the
+ * isMessageStreaming computation (formerly inline in the itemsIndexed row
+ * lambda, reading the chat-wide streamingPartTexts Map) is now baked into
+ * RenderBlock.Conversation by [buildRenderBlocks] via this pure helper, so the
+ * row lambda no longer captures the Map for this check.
+ */
+internal val TERMINAL_PART_STATES = setOf("completed", "done", "error")
+
+/**
+ * §ui-stream A1: PURE replication of the per-message streaming flag that was
+ * formerly computed inline inside the itemsIndexed row content lambda in
+ * ChatMessageContent.kt (lines ~1059-1066). Extracted here so
+ * [buildRenderBlocks] can bake it into RenderBlock.Conversation.isMessageStreaming,
+ * removing the chat-wide streamingPartTexts Map capture from the row lambda.
+ *
+ * The logic is byte-identical to the inline version it replaces:
+ *  - any of this block's parts is actively streaming (id in streamingPartTexts), OR
+ *  - the active streaming reasoning part belongs to this message, OR
+ *  - this is a non-user message in a running session whose parts are empty OR
+ *    contain a text/reasoning part OR a non-terminal tool/patch part.
+ *
+ * Drives the §omitted-streaming affordance (OmittedContentCard shows a
+ * non-clickable "生成中…" skeleton while true). Pure (no Compose/state/time) so
+ * it is JVM-testable without a harness.
+ */
+internal fun computeMessageStreaming(
+    parts: List<Part>,
+    streamingPartTexts: Map<String, String>,
+    streamingReasoningMessageId: String?,
+    message: Message,
+    sessionIsRunning: Boolean
+): Boolean {
+    val hasActiveToolOrPatch = parts.any { p ->
+        (p.isTool || p.isPatch) && p.stateDisplay?.lowercase() !in TERMINAL_PART_STATES
+    }
+    return parts.any { it.id in streamingPartTexts } ||
+        streamingReasoningMessageId == message.id ||
+        (!message.isUser && sessionIsRunning &&
+            (parts.isEmpty() || parts.any { it.isText || it.isReasoning } ||
+                hasActiveToolOrPatch))
 }
 
 private fun RenderBlock.containsMessage(messageId: String): Boolean = when (this) {

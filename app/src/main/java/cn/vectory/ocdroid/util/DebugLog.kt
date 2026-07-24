@@ -4,7 +4,6 @@ import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 
 /**
  * In-memory, non-persistent debug log ring buffer for live diagnostics.
@@ -19,7 +18,7 @@ import kotlinx.coroutines.flow.update
  * - Newest-first ([Entry] at index 0 is the most recent) so the viewer shows
  *   the latest line at the top without needing to auto-scroll.
  * - Capped at [MAX_ENTRIES] entries (oldest dropped).
- * - Thread-safe via [MutableStateFlow.update].
+ * - Thread-safe via `synchronized(deque)`.
  * - Each [log] also forwards to `android.util.Log` (Logcat) for adb parity.
  * - NOT gated on BuildConfig.DEBUG.
  *
@@ -71,6 +70,9 @@ object DebugLog {
      *  same millisecond during high-frequency streams). */
     private val seqCounter = java.util.concurrent.atomic.AtomicLong(0L)
 
+    /** Ring buffer backing store — avoids per-`log` List allocation. */
+    private val deque = ArrayDeque<Entry>(MAX_ENTRIES)
+
     private val _entries = MutableStateFlow<List<Entry>>(emptyList())
 
     /** Newest-first observable log. Subscribe in Compose via collectAsStateWithLifecycle. */
@@ -85,8 +87,11 @@ object DebugLog {
             level = level,
             message = message
         )
-        _entries.update { current ->
-            (listOf(entry) + current).take(MAX_ENTRIES)
+        synchronized(deque) {
+            if (deque.size >= MAX_ENTRIES) deque.removeLast()
+            deque.addFirst(entry)
+            // Emit an immutable snapshot — never publish the mutable deque.
+            _entries.value = deque.toList()
         }
         // Logcat parity (best-effort; never let logging itself throw).
         runCatching {
@@ -118,6 +123,9 @@ object DebugLog {
 
     /** Clear all entries (in-memory only). */
     fun clear() {
-        _entries.value = emptyList()
+        synchronized(deque) {
+            deque.clear()
+            _entries.value = emptyList()
+        }
     }
 }

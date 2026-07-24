@@ -1,0 +1,15 @@
+{
+  "agent": "gpter",
+  "scope": "fix-sheet-keyline",
+  "date": "2026-07-15",
+  "reviewed_commit": "12ada6e",
+  "version_target": null,
+  "verdict": "pass",
+  "score": 8.0,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "[F1 撤销] 第三波 F1（标记前强制重判 status）经评审 block：① commit 阶段未限制到 pending 候选交集（A 已 pending、B 等待期新候选未 refresh 被误标）；② 下 tick≠refresh 完成信号（无 epoch/回调，REST 慢于 2s 或失败时基于陈旧 all-idle 快照 commit，F1 强制重判失效）。已 git checkout 恢复 UnreadSoakController+Test 到 d57937b（F3 版本），待重新设计 refresh 完成信号（statusEpoch / 回调 / store version）后重做。F1 边际价值中低（F2 reconnect 全量刷 + F3 有新消息门已覆盖核心未读场景）。",
+    "[F1 non-blocking 备查] hasUnknownCompleteDescendant 分支每 tick 无条件 refresh，长期 unknown 可能刷新风暴——随 F1 一并撤销移除，记录供 F1 重设计时参考。"
+  ],
+  "notes": "§12 AppBottomSheet sheet 对齐方案A 通过。reviewer 基于 d57937b 工作树（F1+§12 同评）评审，verdict=block 仅因 F1；§12 部分 pass。§12 判定：8dp content wrapper（Dimens.spacing2 horizontal）对 11 处 AppBottomSheet 调用点产生正确 24dp keyline（ListItem 内置 16+8=24；自定义 Row/Column 已有 16+8=24），TodoListPanel 既有 32dp 三重 padding 消除（删 outer spacing4），empty 态 8+16=24，footer 独立 16dp 非错位。F1 撤销后 commit §12 = 12ada6e（6 files +17/-9）。check.sh 全绿（编译 + 全单测）。合并 main 待另一 agent chat-ux-batch 发版 0.2.0 后（零文件重叠，rebase 顺滑）。"
+}

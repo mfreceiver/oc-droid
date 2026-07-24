@@ -1,0 +1,17 @@
+{
+  "agent": "glmer",
+  "scope": "fix-analysis-fixes",
+  "date": "2026-07-15",
+  "reviewed_commit": "d57937b",
+  "version_target": null,
+  "verdict": "pass-with-fixes",
+  "score": 8.2,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "[D8b][RESOLVED] RefreshCacheListing effect 接线与时序不变量原零测试 → 已补：HostProfileControllerTest 扩展 reset chain（RefreshCacheListing count==1 + 时序 coldStartIdx<refreshIdx）+ 新增 barrier 路径测试（refreshIdx<coldStartIdx FIFO）；SettingsViewModelTest 新增 effect→refreshCacheListing re-read 测试（防 SharedFlow 无 replay 丢失：先 advance 订阅再 emit）。",
+    "[F3][RESOLVED] hasNewMessages 跨时钟域（Session.time.updated=服务端 msgCreated via applyMessageTimestampBump@SessionSyncCoordinator:727/784；lastViewedTime=客户端 System.currentTimeMillis）→ 已在 UnreadSoak.kt F3 谓词注释文档化 clock-domain 假设；显著偏移下罕见 under-badge，被 soak+notViewedSinceIdle 合取 + current-session 旁路幅。",
+    "[Meta][RESOLVED] worktree 改动原未提交（HEAD==base）→ 已 commit d57937b on omos/analysis-fixes（12 files, +374/-31）。",
+    "[Lane-C][WONTFIX] heightIn(min=24.dp) 残留散落 dp 字面量 → 不改：Dimens 无语义匹配的高度 token（spacing6=24dp 是间距 token，touchTargetMin=48dp 是点击目标），复用会语义污染；且 min=24.dp 为既有非新增。"
+  ],
+  "notes": "零重叠子集（§11 Composer / §8a AppConfirmDialog / §8b RefreshCacheListing effect / F2 核验零改动 / F3 未读新消息契约）。worktree omos/analysis-fixes base main(1edcb1e)，与并发 chat-ux-batch(0.2.0) 零文件重叠。reviewer 基于 worktree 工作树评审（初评 reviewed_commit=base，commit 后更新为 d57937b）。F3 谓词边界全对（null-updated 排除 / viewed-null→0L / 严格 > / 子树含孙节点扫描），9 新单测 + 既有/集成 fixture 正确 opt-in time.updated；F2 核验 LoadSessionStatus handler 真 REST 全量刷已就位（SseSyncState:299 + :320）；D8b 接线正确（两 emit 点在 clearAll+deleteDatabase 之后，SharedFlow 广播，AppCore claim return true 抑制 assertExactlyOneHandled，SettingsVM 与 reset 触发者同 SettingsStorageRoute 恒同活）。check.sh 全绿（编译 + 全单测）。重叠子集（§6/§7/§13/§14/活跃计数）待 0.2.0 发版后基于干净 main 做；第三波（F1 两阶段 / §12 双重 padding）推后。"
+}

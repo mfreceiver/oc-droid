@@ -344,6 +344,15 @@ class AppLifecycleMonitor @Inject constructor(
      * subsequent backgrounding.
      */
     private fun onEnterBackground() {
+        // §C1: flush any pending debounced draft write so the user's unsent
+        // text survives the app going to background / process reclaim. The
+        // debounce (500ms) may have a pending mutation at the moment of
+        // backgrounding; flushing here makes it durable. Best-effort: ESP
+        // .apply() schedules async disk IO; this covers the common case
+        // (process alive but backgrounded) — process death is out of scope
+        // per the C1 constraints.
+        runCatching { settingsManager.flushDraftText() }
+            .onFailure { Log.w(TAG, "Failed to flush pending draft on background", it) }
         startBackgroundPolling()
     }
 

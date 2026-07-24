@@ -1,0 +1,14 @@
+{
+  "agent": "gpter",
+  "scope": "fix-overlap-batch2",
+  "date": "2026-07-15",
+  "reviewed_commit": "5f8d5d8",
+  "version_target": null,
+  "verdict": "pass",
+  "score": 9.2,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "[§13] workdir sheet 用 eager forEach（recentWorkdirs 上限 30），当前数量小可接受；未来列表变大建议改 LazyColumn。"
+  ],
+  "notes": "重叠子集第二批（§6/§7/§13/§14）全 pass。§6 强制刷新：ClearSessionWindowCache 先于 ColdStartReconnect 顺序正确（防重连探针重载陈旧 LRU）；tryEmitEffect 同步发送与既有模式一致，AppCore 构造期 UNDISPATCHED 注册 collector 正常 UI 点击不丢消息（缓冲 256 + 计数/日志）；coldStartReconnect TOFU 冻结无需节流；onForceRefresh 默认{} 兼容既有测试。§13 workdir sheet：AppBottomSheet title String? 迁移正确，content 8dp + ListItem 16dp = 24dp keyline（§12 基线），onDismissRequest 遮罩/下滑 dismiss UX 合理。§14 模型开关：HostViewModel mirror ComposerViewModel:93-122 一致（prefs 写 + mutateSettings 同步 settingsFlow），currentHostProfile() 非空消除旧 currentFp 静默 return，HostSettingsManagerEntryPoint/rememberSettingsManager 死代码清理彻底，LocalContext/Context 仍供 clipboard 段使用，Switch 读 settingsFlow.disabledModels 即时响应。§7 i18n：todo_completed_count %1$d/%2$d 参数顺序 (completed, total) 正确，values+zh 齐备。check.sh 全绿（编译 + 全单测）。合并 origin/main b3afe68→5f8d5d8（ff push）。剩余：活跃计数功能（依赖 F1 重设计）+ F1（refresh 完成信号，待重设计）。"
+}

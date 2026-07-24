@@ -48,6 +48,23 @@ class ConnectionIdentityStore @Inject constructor() {
     private val _currentIdentity = MutableStateFlow<ConnectionIdentity?>(null)
 
     /**
+     * §toctou-resolver-snapshot DEFINITIVE fix (bgpt phase-gate): the monitor
+     * that serializes the WRITE side of the reconfigure protocol. [beginReconfigure]
+     * (epoch bump + identity null) and [bindIfCurrent] (epoch-CAS check + identity
+     * commit) both hold this lock, so a host reconfigure can NEVER interleave
+     * between the CAS epoch-check and the identity commit — the bind either
+     * commits at the captured epoch or is a no-op (returns null), atomically.
+     *
+     * Reads ([currentEpoch], [currentIdentity], [isCurrent]) do NOT need the lock:
+     * the [AtomicLong]/[AtomicReference]/[StateFlow] provide happens-before
+     * visibility, and the write side's lock only guarantees the multi-step
+     * (bump+null / check+commit) atomicity. Fields stay atomic so lock-free
+     * readers observe a consistent-enough view (epoch is monotonic; once bumped,
+     * [isCurrent] fails regardless of the identity-null step's progress).
+     */
+    private val lock = Any()
+
+    /**
      * The current bound identity, or null when no identity is established
      * (cold start before the first [bind], or after [beginReconfigure] but
      * before the next [bind]).
@@ -82,10 +99,15 @@ class ConnectionIdentityStore @Inject constructor() {
      * `HostReconfigured(newEpoch)`).
      */
     fun beginReconfigure(): Long {
-        val newEpoch = currentEpochAtomic.incrementAndGet()
-        currentIdentityAtomic.set(null)
-        _currentIdentity.value = null
-        return newEpoch
+        // §toctou-resolver-snapshot: hold [lock] so the epoch bump + identity
+        // null are atomic w.r.t. [bindIfCurrent]'s CAS — a concurrent bind can
+        // never commit at the OLD epoch once the bump has begun.
+        synchronized(lock) {
+            val newEpoch = currentEpochAtomic.incrementAndGet()
+            currentIdentityAtomic.set(null)
+            _currentIdentity.value = null
+            return newEpoch
+        }
     }
 
     /**
@@ -93,14 +115,65 @@ class ConnectionIdentityStore @Inject constructor() {
      * `repository.configure()` has settled the new host/profile/workdir.
      * Returns the newly bound identity so the caller can capture it directly
      * (avoiding a re-read race between bind + capture).
+     *
+     * UNCONDITIONAL bind (always commits at the current epoch). Used by callers
+     * that have their OWN staleness guard — e.g. [ConnectionBootstrapEngine]
+     * (whose `testConnectionWithEngine` re-checks [isCurrent] after the full
+     * bootstrap) and tests setting up an identity precondition. Synchronized on
+     * [lock] so it is mutually exclusive with [beginReconfigure] / [bindIfCurrent].
      */
     fun bind(
         serverGroupFp: String,
         normalizedWorkdir: String,
         endpointFp: String,
+    ): ConnectionIdentity = synchronized(lock) {
+        commitIdentity(serverGroupFp, normalizedWorkdir, endpointFp, currentEpochAtomic.get())
+    }
+
+    /**
+     * §toctou-resolver-snapshot DEFINITIVE fix (bgpt phase-gate): the atomic
+     * epoch-CAS bind. Commits [currentIdentity] ONLY IF `currentEpoch() ==
+     * [expectedEpoch]` — i.e. NO host/profile reconfigure has bumped the
+     * generation since the caller captured its snapshot. Returns the committed
+     * identity, or **null** if superseded (the epoch advanced → the caller's
+     * resolved URL is OBSOLETE and MUST NOT be persisted).
+     *
+     * The epoch-check AND the identity commit run under a SINGLE [synchronized]
+     * ([lock]) critical section that is mutually exclusive with
+     * [beginReconfigure], so a reconfigure can NEVER slip between the check and
+     * the commit. This makes [bindIfCurrent] the single atomic gate: the
+     * connection's `Connected` state + identity can NEVER persist a URL
+     * inconsistent with the current epoch.
+     *
+     * Callers (e.g. [ConnectionHealthProbe]) capture `expectedEpoch` before their
+     * suspend point (checkHealth), then call this AFTER resolving; if it returns
+     * null they abort (settle false, no `Connected`) — the new generation's probe
+     * re-runs under the new URL.
+     */
+    fun bindIfCurrent(
+        serverGroupFp: String,
+        normalizedWorkdir: String,
+        endpointFp: String,
+        expectedEpoch: Long,
+    ): ConnectionIdentity? = synchronized(lock) {
+        if (currentEpochAtomic.get() != expectedEpoch) return null
+        commitIdentity(serverGroupFp, normalizedWorkdir, endpointFp, expectedEpoch)
+    }
+
+    /**
+     * Shared write helper (callers MUST already hold [lock]): builds the
+     * [ConnectionIdentity] at [epoch], publishes it to both the atomic reference
+     * (lock-free readers) and the [StateFlow] (Compose/collector observers), and
+     * returns it.
+     */
+    private fun commitIdentity(
+        serverGroupFp: String,
+        normalizedWorkdir: String,
+        endpointFp: String,
+        epoch: Long,
     ): ConnectionIdentity {
         val identity = ConnectionIdentity(
-            epoch = currentEpochAtomic.get(),
+            epoch = epoch,
             serverGroupFp = serverGroupFp,
             normalizedWorkdir = normalizedWorkdir,
             endpointFp = endpointFp,

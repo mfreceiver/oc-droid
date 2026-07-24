@@ -24,6 +24,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * §Stage-D1 unit tests for [TokenStreamCoordinator]. Drives the engine with a
@@ -168,6 +169,85 @@ class TokenStreamCoordinatorTest {
         val bChannel = fake.currentChannel
         assertNotNull(bChannel)
         assertTrue("B channel must be distinct from A", aChannel !== bChannel)
+    }
+
+    // ── RESOLVER lane ②: call-time URL liveness + null explicit-fail ────────
+
+    /**
+     * RESOLVER lane ②: the production streamProvider reads
+     * `resolver.resolve()?.url` at EACH invocation (call-time, NOT captured at
+     * DI construction). A host switch (resolver returns a new config) therefore
+     * takes effect on the very next open — the prior stream is torn down (max-1)
+     * and the new one targets the new URL, with no overlapping collectors (no
+     * connection storm). This is the constraint that a profile/host switch
+     * takes effect immediately on the token stream.
+     */
+    @Test
+    fun `host switch takes effect on the next open - provider reads URL call-time, no storm`() {
+        val currentUrl = AtomicReference("http://host-a:4096")
+        val seenUrls = mutableListOf<String>()
+        val liveCollectors = AtomicInteger(0)
+        val maxLiveCollectors = AtomicInteger(0)
+        val urlProvider: (String, String?) -> Flow<TokenStreamFrame> = { _, _ ->
+            seenUrls += currentUrl.get()
+            flow {
+                liveCollectors.incrementAndGet()
+                maxLiveCollectors.updateAndGet { cur -> maxOf(cur, liveCollectors.get()) }
+                try { /* idle: no frames emitted */ } finally { liveCollectors.decrementAndGet() }
+            }
+        }
+        val c = buildCoordinator(streamProvider = urlProvider, triggerSinceFetch = { _, _ -> })
+
+        c.open("s1")
+        runPending()
+        assertEquals(listOf("http://host-a:4096"), seenUrls)
+
+        // Host switch: the resolver now returns host-b. The host-a stream is
+        // still open; a fresh open() supersedes it and the provider reads the
+        // NEW url at invocation time (call-time liveness).
+        currentUrl.set("http://host-b:4096")
+        c.open("s1")
+        runPending()
+        assertEquals(
+            "second open must read the switched URL (call-time liveness — no captured-at-construction URL)",
+            listOf("http://host-a:4096", "http://host-b:4096"),
+            seenUrls,
+        )
+        // max-1 invariant (no storm): never two concurrent collectors across
+        // the switch.
+        assertEquals(
+            "no overlapping collectors during host switch",
+            1,
+            maxLiveCollectors.get(),
+        )
+        c.close("s1")
+        runPending()
+    }
+
+    /**
+     * RESOLVER lane ②: when resolve() returns null, the production streamProvider
+     * throws (explicit fail — `resolve()?.url ?: error(...)`, NO stale fallback
+     * to settingsManager.serverUrl). The synchronous throw is caught by open()'s
+     * defence-in-depth net (~TokenStreamCoordinator.kt:285) → onStreamFailure →
+     * bounded reconnect; it does NOT crash, does NOT silently fall back, and
+     * does NOT create overlapping collectors.
+     */
+    @Test
+    fun `provider throwing on null effective config is handled - explicit fail, no storm`() {
+        val openCount = AtomicInteger(0)
+        val nullConfigProvider: (String, String?) -> Flow<TokenStreamFrame> = { _, _ ->
+            openCount.incrementAndGet()
+            // Mirrors the production guard in ControllerModule.provideTokenStreamCoordinator.
+            error("token-stream open with no effective connection config — no active endpoint")
+        }
+        val c = buildCoordinator(streamProvider = nullConfigProvider, triggerSinceFetch = { _, _ -> })
+        c.open("s1")
+        runPending() // runCurrent — the backoff reconnect does NOT advance here
+        // Exactly one provider call: the throw was caught (no crash, no storm of
+        // immediate retries within the synchronous runPending window).
+        assertEquals("explicit-fail throw handled exactly once", 1, openCount.get())
+        c.close("s1")
+        runPending()
     }
 
     // ── debounce on rapid open(sid) ───────────────────────────────────────

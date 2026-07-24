@@ -1,0 +1,22 @@
+{
+  "agent": "gpter",
+  "scope": "feature-mtls-clipboard-import",
+  "date": "2026-07-10",
+  "reviewed_commit": "2729f45",
+  "version_target": "0.6.6",
+  "round": 2,
+  "verdict": "block",
+  "score": 8.8,
+  "blocking_issues": [
+    "B1 only partially fixed: client remove→re-enable-mTLS-without-paste→Save still silently reloads old p12 (hasMaterial stays true via initial.clientCertId); lacks explicit client Clear intent"
+  ],
+  "non_blocking_issues": [
+    "Error gate too broad: hasCertError blocks Save even when mTLS is OFF (hidden error locks save; mTLS-off should be a safe exit)",
+    "exactly-one-key import check still mismatches buildMutualTlsConfig for secret-key entries (import counts only chain-bearing; build counts all isKeyEntry)",
+    "no state-machine tests for the round-2 fixes (remove→save disable, remove→retoggle, Clear→paste-fail blocks, error→re-paste restores, async-seed no-clobber, mTLS-off error handling, summary off-main)",
+    "default values/strings.xml still has Chinese err/section strings (role already en)",
+    "hardcoded success color 0xFF4CAF50",
+    "ChatMessageContent.kt:577 redundant always-true sessionId != null condition"
+  ],
+  "notes": "Round-2. B2 (CA stale-Clear commit) and B3 (main-thread KDF) verified GENUINELY fixed. B1 direct path (remove→save) fixed (Disable clears ESP) but the re-toggle edge remains. CertBase64 PEM armor-stripping verified correct (handles oneline form, IGNORE_CASE, pure-base64 unaffected). Round-3 fixes dispatched: clientCleared flag (close B1 re-toggle), hasCertError scoped to mtlsEnabled, exactly-one-key aligned to count all isKeyEntry, default-locale i18n→en, ChatMessageContent:577 cleanup."
+}

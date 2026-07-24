@@ -784,12 +784,6 @@ class OpenCodeRepository @Inject constructor(
     )
 
     /**
-     * §L4a3: thin GET delegate — instantiated with [apiProvider] lambda
-     * that reads the live [api] reference so host switches take effect.
-     */
-    private val slimGetRepository = SlimGetRepository(apiProvider = { api })
-
-    /**
      * ι-P1: session 域端口—Standard 或 Slim 双实现,由 [configure] 在 client 重建后选束。
      * 默认 [StandardSessionSource]（legacy）与未 configure 行为一致。
      *
@@ -1162,7 +1156,7 @@ class OpenCodeRepository @Inject constructor(
      * that may not be present in the cached [getSessions] list.
      */
     suspend fun getSession(sessionId: String): Result<Session> =
-        slimGetRepository.getSession(sessionId)
+        runSuspendCatching { api.getSession(sessionId) }
 
     // §R18 Final 终审 fix (gpter): directory now explicit (was relying on the
     // removed global currentDirectory fallback). Callers pass currentWorkdir /
@@ -1184,10 +1178,10 @@ class OpenCodeRepository @Inject constructor(
     }
 
     suspend fun getSessionStatus(): Result<Map<String, SessionStatus>> =
-        slimGetRepository.getSessionStatus()
+        runSuspendCatching { api.getSessionStatus() }
 
     suspend fun getActiveSessionIds(): Result<Set<String>> =
-        slimGetRepository.getActiveSessionIds()
+        runSuspendCatching { api.getActiveSessions().data.keys }
 
     /**
      * T-R1 (slimapi R1) — BULK slim cold-start status fetch. The slim-mode
@@ -1223,7 +1217,7 @@ class OpenCodeRepository @Inject constructor(
      * via the `task` tool.
      */
     suspend fun getChildren(sessionId: String): Result<List<Session>> =
-        slimGetRepository.getChildren(sessionId)
+        runSuspendCatching { api.getChildren(sessionId) }
 
     suspend fun getMessages(sessionId: String, limit: Int? = null): Result<List<MessageWithParts>> =
         runSuspendCatching {
@@ -1832,13 +1826,13 @@ class OpenCodeRepository @Inject constructor(
     }
 
     suspend fun getAgents(): Result<List<AgentInfo>> =
-        slimGetRepository.getAgents()
+        runSuspendCatching { api.getAgents() }
 
     /**
      * Lists the server-defined slash commands.
      */
     suspend fun getCommands(): Result<List<CommandInfo>> =
-        slimGetRepository.getCommands()
+        runSuspendCatching { api.getCommands() }
 
     /**
      * Executes a slash command against [sessionId]. §R18 Phase 2-E step 1:
@@ -1871,10 +1865,10 @@ class OpenCodeRepository @Inject constructor(
     }
 
     suspend fun getSessionDiff(sessionId: String): Result<List<FileDiff>> =
-        slimGetRepository.getSessionDiff(sessionId)
+        runSuspendCatching { api.getSessionDiff(sessionId) }
 
     suspend fun getSessionTodos(sessionId: String): Result<List<TodoItem>> =
-        slimGetRepository.getSessionTodos(sessionId)
+        runSuspendCatching { api.getSessionTodos(sessionId) }
 
     /**
      * §R-17 batch4 / §R18 Phase 2-E step 2: lists files under [directory]
@@ -1883,22 +1877,22 @@ class OpenCodeRepository @Inject constructor(
      * marker on the API method (no global state involved).
      */
     suspend fun getFileTree(directory: String, path: String? = null): Result<List<FileNode>> =
-        slimGetRepository.getFileTree(directory, path)
+        runSuspendCatching { api.getFileTree(path ?: "", directory) }
 
     /**
      * Lists the contents of an arbitrary [directory] (independent of the
      * currently selected session's workdir). Used by the directory picker.
      */
     suspend fun getFileTreeForDirectory(directory: String, path: String? = null): Result<List<FileNode>> =
-        slimGetRepository.getFileTreeForDirectory(directory, path)
+        runSuspendCatching { api.getFileTreeForDirectory(directory, path ?: "") }
 
     /** §R-17 batch4: see [getFileTree] for the explicit-directory rationale. */
     suspend fun getFileContent(directory: String, path: String): Result<FileContent> =
-        slimGetRepository.getFileContent(directory, path)
+        runSuspendCatching { api.getFileContent(path, directory) }
 
     /** §R-17 batch4: see [getFileTree] for the explicit-directory rationale. */
     suspend fun getFileStatus(directory: String): Result<List<FileStatusEntry>> =
-        slimGetRepository.getFileStatus(directory)
+        runSuspendCatching { api.getFileStatus(directory) }
 
     // §vcs-section: read-only VCS façade for the Settings → Working directory
     // section. Thin wrappers mirroring the file* directory-scoped pattern
@@ -1906,17 +1900,17 @@ class OpenCodeRepository @Inject constructor(
     // global workdir state. VcsInfo / VcsStatusEntry live in data.model; the
     // diff endpoint reuses the existing FileDiff shape (same as /session/{id}/diff).
     suspend fun getVcs(directory: String?): Result<VcsInfo> =
-        slimGetRepository.getVcs(directory)
+        runSuspendCatching { api.getVcs(directory) }
 
     suspend fun getVcsStatus(directory: String?): Result<List<VcsStatusEntry>> =
-        slimGetRepository.getVcsStatus(directory)
+        runSuspendCatching { api.getVcsStatus(directory) }
 
     suspend fun getVcsDiff(mode: String, directory: String?): Result<List<FileDiff>> =
-        slimGetRepository.getVcsDiff(mode, directory)
+        runSuspendCatching { api.getVcsDiff(mode, directory) }
 
     /** §R-17 batch4: see [getFileTree] for the explicit-directory rationale. */
     suspend fun findFile(directory: String, query: String, limit: Int = 50): Result<List<String>> =
-        slimGetRepository.findFile(directory, query, limit)
+        runSuspendCatching { api.findFile(query, limit, directory) }
 
     /**
      * §R18 Phase 2-E step 1: SSE feed now takes an explicit [directory] so

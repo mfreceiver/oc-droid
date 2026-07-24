@@ -13,7 +13,7 @@ set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
 MODE="${1:-default}"
-GRADLE="./gradlew --no-daemon"
+GRADLE="./gradlew"; [[ "${OC_GRADLE_DAEMON:-0}" == "1" ]] || GRADLE="./gradlew --no-daemon"
 
 echo "==> compileDebugKotlin"
 $GRADLE compileDebugKotlin

@@ -195,6 +195,15 @@ internal fun ChatMessageList(
     val partsByMessage: Map<String, List<Part>> = chatState.partsByMessage
     val streamingPartTexts: Map<String, String> = chatState.streamingPartTexts
     val streamingReasoningPart: Part? = chatState.streamingReasoningPart
+    // §ui-stream A1: hoist the chat-wide "is any text streaming" boolean OUT
+    // of the itemsIndexed row content lambda. The canEditAndRerun destructive
+    // gate (in the Conversation branch below) previously read
+    // `streamingPartTexts.isNotEmpty()` inline, which captured the whole
+    // (unstable, fresh-reference-every-token) Map into the row lambda and
+    // invalidated EVERY visible row per token. A Boolean is stable: during
+    // active streaming it stays `true` across token deltas (no invalidation),
+    // flipping only at stream start/stop (one recomposition each).
+    val chatHasStreamingText: Boolean = streamingPartTexts.isNotEmpty()
     // §slimapi-client-v1 §G6 (Task 16): per-part expand state for the
     // "展开省略内容" affordance. Read from the same chat slice as
     // streamingPartTexts; passed through to MessageCard → MessageRow.
@@ -640,17 +649,26 @@ internal fun ChatMessageList(
 
     // 消息结构计算提到 LazyColumn body 之外。
     //
-    // remember 覆盖 messages/partsByMessage/streamingReasoningPart/sessionIsRunning
-    // 不变的情况；但 streamingPartTexts 在 SSE 流式时每 ~100ms 变化（SessionSync
-    // 每次 emit 新 Map），仍会触发 reversedMessages 重建。这是预期的——重建是 O(n)
-    // 单遍 filterNot，100 条消息下 ~10-20μs，远低于 LazyColumn item 渲染成本，可
-    // 忽略（评审 maxer/gpter 实测确认）。
+    // §ui-stream A3: the remember key for reversedMessages is narrowed from
+    // the full `streamingPartTexts` Map to `streamingPartTexts.keys`. The body
+    // below only checks MEMBERSHIP (`it.id in streamingPartTexts`), never
+    // values — verified by reading every branch. A token delta changes the
+    // Map's VALUES ~every 100ms but not its keys, so this membership-only
+    // derivation is now stable across token deltas: reversedMessages (and the
+    // Message instances it holds) keep the SAME references while a part is
+    // streaming, which is what lets the downstream renderBlocks rebuild produce
+    // value-equal Conversation blocks for non-streaming rows (see the
+    // @Stable RenderBlock + the per-block baked streaming text in
+    // ChatRenderBlockBuilder.kt). Membership changes (a part starts/stops
+    // streaming) still recompute, preserving the §flicker-fix placeholder-
+    // window behavior exactly. Mirrors the correct pattern already used by the
+    // LaunchedEffect at the contentVersion scroll key (~L595).
     //
     // remove-message-persistence Task 4: the non-contiguous gap path
     // (a sealed Entry ADT with interleaved divider variants) was removed.
     // The render list now iterates `messages` directly (reverse + filter
     // for reverseLayout display).
-    val reversedMessages = remember(messages, partsByMessage, streamingPartTexts, streamingReasoningPart, sessionIsRunning) {
+    val reversedMessages = remember(messages, partsByMessage, streamingPartTexts.keys, streamingReasoningPart, sessionIsRunning) {
         messages.reversed().filterNot { msg ->
             val msgParts = partsByMessage[msg.id].orEmpty()
             // §streaming-flicker-diagnosis §3.1 (locked, always-on): a
@@ -711,6 +729,11 @@ internal fun ChatMessageList(
             streamingPartTexts = streamingPartTexts,
             staleQuestionPartKeys = staleQuestionPartKeys,
             streamingReasoningPartId = streamingReasoningPart?.id,
+            // §ui-stream A1: the active streaming reasoning part's message id,
+            // so buildRenderBlocks can bake isMessageStreaming into each
+            // Conversation block (computeMessageStreaming) without the row
+            // lambda re-reading the chat-wide Map for this check.
+            streamingReasoningMessageId = streamingReasoningPart?.messageId,
             sessionIsRunning = sessionIsRunning
         ).asReversed()
     }
@@ -962,7 +985,19 @@ internal fun ChatMessageList(
         // （供消息导航 FAB 复用）。remove-message-persistence Task 4: the gap
         // divider branch (RenderBlock.Gap) was deleted; the items() block now
         // handles message rows only.
-        itemsIndexed(renderBlocks, key = { _, block -> block.id }) { index, block ->
+        itemsIndexed(
+            renderBlocks,
+            key = { _, block -> block.id },
+            // §ui-stream A2: contentType lets LazyColumn reuse an item's
+            // composition slot ONLY with another item of the same variant
+            // (Conversation / ToolRun / Fold). Without it, a slot that
+            // previously held (say) a compact Conversation row could be
+            // reused for a multi-item ToolRun on a structural change,
+            // forcing a full re-inflation of a different layout. The
+            // KClass is a stable, hashable Any — the three variants never
+            // collide. key stays block.id (stable per-part anchor).
+            contentType = { _, block -> block::class },
+        ) { index, block ->
             Box(modifier = Modifier.fillMaxWidth().padding(top = renderBlockTopPaddingDp(block, index).dp)) {
             when (block) {
                 is RenderBlock.Conversation -> {
@@ -1048,26 +1083,37 @@ internal fun ChatMessageList(
                                     sessionIsBusy = currentSessionStatus?.isBusy == true,
                                     sessionIsRetry = currentSessionStatus?.isRetry == true,
                                     isSending = isCurrentSessionSending,
-                                    hasStreamingText = streamingPartTexts.isNotEmpty(),
+                                    // §ui-stream A1: read the hoisted chat-wide
+                                    // boolean (a stable capture) instead of
+                                    // streamingPartTexts.isNotEmpty() inline,
+                                    // so the row lambda no longer captures the
+                                    // whole (unstable, fresh-every-token) Map.
+                                    hasStreamingText = chatHasStreamingText,
                                     hasStreamingReasoning = streamingReasoningPart != null,
                                 )
                             )
-                            // §omitted-streaming: per-message streaming check for the
-                            // omitted-content affordance. Mirrors the canonical
-                            // isStreamingMsg derivation in reversedMessages (line ~665)
-                            // so the affordance disables during active streaming.
-                            val hasActiveToolOrPatch = msgParts.any { p ->
-                                (p.isTool || p.isPatch) && p.stateDisplay?.lowercase() !in TERMINAL_PART_STATES
-                            }
-                            val isMessageStreaming = msgParts.any { it.id in streamingPartTexts } ||
-                                streamingReasoningPart?.messageId == message.id ||
-                                (!message.isUser && sessionIsRunning &&
-                                    (msgParts.isEmpty() || msgParts.any { it.isText || it.isReasoning } ||
-                                        hasActiveToolOrPatch))
+                            // §ui-stream A1: the §omitted-streaming flag is now
+                            // BAKED into the block by buildRenderBlocks
+                            // (computeMessageStreaming) so this row lambda does
+                            // not read streamingPartTexts for this check. The
+                            // computation is byte-identical to the former inline
+                            // version (parts-membership in streamingPartTexts OR
+                            // streaming-reasoning owns this message OR non-user
+                            // running session with empty/text/reasoning/non-
+                            // terminal-tool parts) — see computeMessageStreaming.
+                            val isMessageStreaming = block.isMessageStreaming
                             MessageCard(
                                 message = message,
                                 parts = msgParts,
-                                streamingPartTexts = streamingPartTexts,
+                                // §ui-stream A1: pass the per-BLOCK streaming-
+                                // text slice baked into the Conversation block
+                                // (only entries for THIS block's parts), NOT the
+                                // chat-wide Map. A token delta now changes only
+                                // the streaming message's own block value; non-
+                                // streaming rows pass an unchanged empty map
+                                // sourced from a @Stable block (no Map capture
+                                // invalidates the row lambda).
+                                streamingPartTexts = block.streamingPartTexts,
                                 streamingReasoningPartId = streamingReasoningPart?.id,
                                 repository = repository,
                                 workspaceDirectory = workspaceDirectory,
@@ -1318,12 +1364,10 @@ private fun InFlightEmptyLoading(modifier: Modifier = Modifier) {
  */
 private const val MAX_SAVED_SESSIONS = 30
 
-/**
- * Terminal part display states: parts in these states are considered complete
- * (not in-flight). Used by [isMessageStreaming] to filter out completed
- * tool/patch parts from the streaming check.
- */
-private val TERMINAL_PART_STATES = setOf("completed", "done", "error")
+// §ui-stream A1: TERMINAL_PART_STATES moved to ChatRenderBlockBuilder.kt
+// (internal) — it is now consumed by computeMessageStreaming there (baked
+// into RenderBlock.Conversation.isMessageStreaming), no longer referenced
+// anywhere in this file.
 
 // ── §Wave5b-Q13: pure helpers for the Restore consumer (lifted out of the
 //     @Composable body so they are JVM-testable without Robolectric). ──────

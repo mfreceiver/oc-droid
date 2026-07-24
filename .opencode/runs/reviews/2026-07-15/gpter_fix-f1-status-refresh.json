@@ -1,0 +1,15 @@
+{
+  "agent": "gpter",
+  "scope": "fix-f1-status-refresh",
+  "date": "2026-07-15",
+  "reviewed_commit": "4da2288",
+  "version_target": null,
+  "verdict": "pass",
+  "score": 8.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "[测试覆盖] F1 UnreadSoakControllerTest 的 oracle 11 场景多为签名/tick-count 适配，未直接覆盖：交集 commit / B 候选回填 / failure-timeout-enqueue backoff / host-background invalidate / unknown single-flight / 防重复标记。",
+    "[测试覆盖] SessionListActions callback 测试覆盖 map 相等/merge 序/failure/supersede，未覆盖 enqueue 失败 / cancellation / callback 异常 / CAS-retry race（applied flag 修复后建议补 CAS-retry race 用例）。"
+  ],
+  "notes": "F1 按 oracle 机制 b（请求绑定完成回调）实现。初评 block 6.5（applied flag CAS race：transform 内设外部 flag，CAS 重试污染→superseded 误报 true）。修复：transform lambda 首行重置 applied=false（mutateSessionList 用 StateFlow.update，CAS 冲突重试 lambda），最终值反映最后一次 CAS 尝试。其余 correctness 全 pass：callback 时序正常路径正确（map 相等 true / failure-superseded false / 不重复 / callback 在 CAS 外）；commit 交集门正确（readyRoots ∩ 当前候选，等待期新候选排除）；viewed stamp 过滤正确（nonMarkViewedRoots + committedRoots，候选不提前消费）；CAS 安全（unread transform 内无网络/effect/callback）；防风暴（单飞 + 15s/30s/30s backoff + unknown cooldown）；边界（host/requestId/background/late callback/failure/timeout 全 fail-closed）；poller 标记路径正确恢复（无 gate 直接 applyMarkSessionUnread）。check.sh 全绿。合并 origin/main 5f8d5d8→4da2288（ff push）。活跃计数功能现已解锁（badge 不再依赖陈旧 status）。"
+}

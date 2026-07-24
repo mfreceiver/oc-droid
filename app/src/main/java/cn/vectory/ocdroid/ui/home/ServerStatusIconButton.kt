@@ -22,6 +22,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material3.BadgedBox
@@ -36,6 +41,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.stringResource
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
@@ -58,6 +64,14 @@ import cn.vectory.ocdroid.ui.theme.SemanticColors
  *  - otherwise → [MaterialTheme.colorScheme.error] (Disconnected /
  *    Reconnecting / AwaitingTofuTrust)
  *
+ * §breathing-indicator (item ①): when [isSseConnected] is true AND the dot is
+ * in a connected colour (green/blue), the dot gently BREATHES (alpha + a tiny
+ * scale pulse) to signal the SSE event stream is live. No pulse on amber/red/
+ * idle, and no pulse when SSE is down — the three-colour semantics stay fully
+ * intact; the breathing is ADDITIVE on the connected states only. The pulse
+ * is intentionally calm (slow tween, reverse repeat) — a designer will review
+ * the feel separately.
+ *
  * On click the composable opens [ServerManagementDialog], forwarding every
  * connection / host field + [onNavigateToSettings] (the dialog's own
  * Settings IconButton consumes it). Callers (SessionsScreen home page) source
@@ -70,6 +84,12 @@ import cn.vectory.ocdroid.ui.theme.SemanticColors
  * @param isConnecting         true while a connect probe is in flight.
  * @param isIdle               true when the phase is [ConnectionPhase.Idle]
  *                              (no dot rendered).
+ * @param isSseConnected       §breathing-indicator: true when the SSE
+ *                              transport has proven delivery (a valid frame
+ *                              reached [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner]).
+ *                              Drives the breathing pulse on the connected
+ *                              dot. INDEPENDENT of [isConnected] (which is
+ *                              health-settle); the two can differ transiently.
  * @param hostProfiles         configured host profiles (dialog list).
  * @param currentHostProfileId the active host profile id (dialog highlight).
  * @param tunnelActivationState tunnel-activation slice (dialog button state).
@@ -88,6 +108,7 @@ internal fun ServerStatusIconButton(
     slimActive: Boolean,
     isConnecting: Boolean,
     isIdle: Boolean,
+    isSseConnected: Boolean,
     hostProfiles: List<HostProfile>,
     currentHostProfileId: String?,
     tunnelActivationState: TunnelActivationState,
@@ -119,6 +140,41 @@ internal fun ServerStatusIconButton(
         else -> MaterialTheme.colorScheme.error
     }
 
+    // §breathing-indicator (item ①): the dot breathes ONLY while the SSE
+    // transport is live AND the dot is in a connected (green/blue) state.
+    // Gating on `isConnected && isSseConnected` keeps the breathing off the
+    // amber/red/idle dots and off whenever SSE is down — so the three-colour
+    // semantics stay fully intact and the pulse is a pure ADDITIVE "stream
+    // alive" cue. rememberInfiniteTransition is created unconditionally
+    // (Compose rule: composable calls must not be conditional); the breathing
+    // values are simply not applied when [breathe] is false.
+    //
+    // §ui-style-spec §2: no scattered dp/numeric literals for the animation —
+    // the durations + ranges live in the file-level SseBreathSpec object below
+    // (animation constants, not dp dimensions).
+    val breathe = isConnected && isSseConnected
+    val breathTransition = rememberInfiniteTransition(label = "sseBreath")
+    val breathAlpha by breathTransition.animateFloat(
+        initialValue = SseBreathSpec.ALPHA_MIN,
+        targetValue = SseBreathSpec.ALPHA_MAX,
+        animationSpec = infiniteRepeatable(
+            animation = tween(SseBreathSpec.DURATION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "sseBreathAlpha",
+    )
+    val breathScale by breathTransition.animateFloat(
+        initialValue = SseBreathSpec.SCALE_MIN,
+        targetValue = SseBreathSpec.SCALE_MAX,
+        animationSpec = infiniteRepeatable(
+            animation = tween(SseBreathSpec.DURATION_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "sseBreathScale",
+    )
+    val dotAlpha = if (breathe) breathAlpha else 1f
+    val dotScale = if (breathe) breathScale else 1f
+
     BadgedBox(
         modifier = modifier,
         badge = {
@@ -138,6 +194,16 @@ internal fun ServerStatusIconButton(
                         // token (no 8dp icon-size token; spacing2 = 8dp matches
                         // the SessionStatusDot / unread-dot primitives).
                         .size(Dimens.spacing2)
+                        // §breathing-indicator: apply the calm alpha + scale
+                        // pulse via graphicsLayer so the dot's colour stays the
+                        // resolved three-colour value (no colour mutation). When
+                        // [breathe] is false both read 1f → identity transform,
+                        // so non-SSE-connected states render statically.
+                        .graphicsLayer {
+                            alpha = dotAlpha
+                            scaleX = dotScale
+                            scaleY = dotScale
+                        }
                         .background(color = dotColor, shape = CircleShape)
                 )
             }
@@ -192,4 +258,29 @@ internal fun ServerStatusIconButton(
             DebugLogSection(hideHeader = true)
         }
     }
+}
+
+/**
+ * §breathing-indicator (item ①): breathing-pulse constants for the SSE-
+ * connected status dot. Intentionally CALM (slow tween + reverse repeat) so
+ * the pulse reads as "stream alive" without being distracting. A designer
+ * will separately review the feel; these are a spec-compliant basic pulse.
+ *
+ * Kept as a private file-level object (not `Dimens`, which is for dp/sp
+ * geometry tokens) — these are animation timings + float ranges, not
+ * dimensions. §ui-style-spec §2's "no scattered literals" rule applies to dp
+ * geometry; animation constants live next to the animation they drive.
+ */
+private object SseBreathSpec {
+    /** One half-cycle duration (initialValue → targetValue). Reverse repeat
+     *  doubles the visible period, so a full breathe-in+breathe-out is 2×this. */
+    const val DURATION_MS: Int = 1_600
+    /** Min alpha during the pulse (dot dims to ~65%). */
+    const val ALPHA_MIN: Float = 0.65f
+    /** Max alpha (full opacity). */
+    const val ALPHA_MAX: Float = 1f
+    /** Min scale (dot shrinks to 90% — a subtle "inhale"). */
+    const val SCALE_MIN: Float = 0.9f
+    /** Max scale (resting size). */
+    const val SCALE_MAX: Float = 1f
 }

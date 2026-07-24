@@ -1,0 +1,13 @@
+{
+  "agent": "groker",
+  "scope": "feature-mtls-clipboard-import",
+  "date": "2026-07-10",
+  "reviewed_commit": "8ad7f72",
+  "version_target": "0.6.6",
+  "round": 4,
+  "verdict": "pass",
+  "score": 9.6,
+  "blocking_issues": [],
+  "non_blocking_issues": [],
+  "notes": "Round-4. saveHostProfile reorder verified side-effect-free (mTLS validation throws BEFORE any Basic/Tunnel password write across all failure modes: no-material, bad p12, wrong password, wrong key-entry count, bad CA/TrustManager). Disable/Update success paths + post-save reconfigure/reconnect ordering intact (reorder does NOT break active-host TLS/mTLS hot-swap). Save-disable when mtlsEnabled && !hasMaterial + inline reason verified (no legitimate save blocked). Pure-fn extraction (8ad7f72) behavior-preserving (buildSaveCall/buildTestCall/decode*/apply*/seed*/summarize*/dialogHasCertError/mtlsHasMaterial match inline logic; onSave Function11 / onTestConnection Function14 unchanged). Round-3 non-blockers (hardcoded color → primary; tunnel copy) fixed. check.sh --full green (kover 62.73%/71.99%), emulator 6/6. CLEAN PASS."
+}

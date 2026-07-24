@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -91,6 +92,32 @@ class SharedStateStore @Inject constructor() {
      *  Not part of the [SliceFlows] bundle. */
     val navFlow: StateFlow<NavState> = DerivedStateFlow(state) { it.nav }
 
+    /**
+     * §breathing-indicator (item ①): SSE-transport-up projection over the
+     * aggregate [state.isSseConnected]. The UI drives the breathing pulse off
+     * this flow. Like [navFlow] it is NOT part of the [SliceFlows] bundle
+     * (it is not a domain slice — it is a transport-liveness flag owned by
+     * [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner]).
+     *
+     * Lag-free [DerivedStateFlow]: `.value` reads synchronously from the
+     * aggregate, so the owner's write + the UI's read observe the same tick.
+     */
+    val sseConnectedFlow: StateFlow<Boolean> = DerivedStateFlow(state) { it.isSseConnected }
+
+    /**
+     * §breathing-indicator (item ①, TOCTOU fix): the last generation that
+     * committed [sseConnectedFlow]. Read accessor used by
+     * [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner] to SEED
+     * its transport-generation counter at construction — so a recreated owner
+     * (new Service instance, fresh counter field) continues monotonically from
+     * where the prior owner's teardown stamped the @Singleton store. Without
+     * this seed, the new owner's counter would start at 0 and the monotonic CAS
+     * would reject ALL of its writes (its generations < the persisted stamp),
+     * breaking service-recreation survival (the owner is instance-scoped +
+     * nullable; the store is process-lifetime).
+     */
+    val sseConnectedGeneration: Long get() = state.value.sseConnectedGeneration
+
     // ── Per-slice write helpers (each funnels through the single aggregate). ──
     // SAME public signatures as pre-B1 — callers (AppCore.writeXxx /
     // SliceFlows.mutateXxx / every test) resolve UNCHANGED. Each is
@@ -126,6 +153,45 @@ class SharedStateStore @Inject constructor() {
     /** §A5-3 B1: CAS write of the nav slice. */
     fun mutateNav(transform: (NavState) -> NavState) =
         state.update { it.copy(nav = transform(it.nav)) }
+    /**
+     * §breathing-indicator (item ①, TOCTOU fix): MONOTONIC generation-stamped
+     * CAS write of the SSE-transport-up flag. The candidate [generation] wins
+     * ONLY IF `generation >= current.sseConnectedGeneration` (newest generation
+     * wins); a stale LOWER-generation write is atomically rejected.
+     *
+     * Atomicity: this is a SINGLE `state.update { }` CAS (kotlinx's compare-
+     * and-set retry loop), so the generation validation and the value write
+     * commit as ONE atomic transition — there is no window for a concurrent
+     * disconnect/reconfigure to bump the transport generation BETWEEN the check
+     * and the write (the check-then-write TOCTOU that the pre-CAS
+     * `setSseConnected` had). The CAS serializes concurrent writers by
+     * generation, no extra lock (cannot deadlock with `connectMutex`).
+     *
+     * Routed through the single aggregate (one committed state per dispatcher
+     * tick) so a write + a concurrent [dispatch] never tear.
+     *
+     * @param value the candidate `isSseConnected` value.
+     * @param generation the transport generation the write belongs to. A
+     *   generation-transition teardown passes the BUMPED (new) generation so a
+     *   stale prior-gen collector loses the CAS; a same-gen outage/recovery
+     *   passes the collector's own generation.
+     * @return `true` if the write committed (candidate gen won the CAS).
+     */
+    fun mutateSseConnected(value: Boolean, generation: Long): Boolean {
+        val newState = state.updateAndGet { current ->
+            if (generation >= current.sseConnectedGeneration) {
+                current.copy(isSseConnected = value, sseConnectedGeneration = generation)
+            } else {
+                // Stale lower-generation write — atomically rejected. A
+                // superseded collector cannot resurrect isSseConnected=true.
+                current
+            }
+        }
+        // The write committed iff the resulting stamp matches the candidate
+        // generation (a rejected write leaves the higher stored stamp untouched,
+        // so newState.sseConnectedGeneration != generation).
+        return newState.sseConnectedGeneration == generation && newState.isSseConnected == value
+    }
 
     /**
      * §A5-3 Phase B2: commit an [AppAction] against the aggregate as ONE
