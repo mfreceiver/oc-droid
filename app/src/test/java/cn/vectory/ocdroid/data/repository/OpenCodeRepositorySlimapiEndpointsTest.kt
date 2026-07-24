@@ -972,6 +972,47 @@ class OpenCodeRepositorySlimapiEndpointsTest {
     }
 
     @Test
+    fun `single-full fallback retries 503 up to budget then per-id failure`() = runBlocking {
+        // fetchSingleFullWithRetry: batch probe 404 thin_route → fall back to single
+        // /full/{mid}; the single path retries 503 up to the budget (EXPAND_MAX_503_RETRIES
+        // = 3 retries / 4 total attempts) before surfacing the message as a PER-ID
+        // failure (NOT a whole-call Failed — siblings would still render). Pins the
+        // single path's budget alignment with the batch drivePartition loop.
+        server.enqueue(jsonResponse("""{"code":"thin_route_not_found"}""", 404))
+        repeat(4) { server.enqueue(jsonResponse("""{"code":"transform_busy"}""", 503).setHeader("Retry-After", "1")) }
+
+        val outcome = repository.expandMessagesFullBatch("sess-1", listOf("m1"))
+
+        assertTrue("Ok (per-id failure, not whole-call Failed): $outcome", outcome is ExpandOutcome.Ok)
+        val ok = outcome as ExpandOutcome.Ok
+        assertTrue("m1 surfaced as per-id failure: ${ok.failures.map { it.messageId }}",
+            ok.failures.any { it.messageId == "m1" })
+        assertFalse("usedBatch=false on fallback path", ok.usedBatch)
+        // 1 batch probe (404) + 4 single-full attempts (1 initial + 3 retries) = 5.
+        assertEquals("1 batch probe + 4 single attempts (1 initial + 3 retries)", 5, server.requestCount)
+    }
+
+    @Test
+    fun `single-full fallback recovers when a 503 retry succeeds`() = runBlocking {
+        // fetchSingleFullWithRetry (recovery sibling): first single /full/{mid} 503,
+        // retry succeeds → Ok with the message loaded. Pins that the single retry
+        // path produces Ok (not just per-id failure) and honors Retry-After.
+        server.enqueue(jsonResponse("""{"code":"thin_route_not_found"}""", 404))
+        server.enqueue(jsonResponse("""{"code":"transform_busy"}""", 503).setHeader("Retry-After", "1"))
+        val m1 = MessageWithParts(info = Message(id = "m1", role = "user"))
+        server.enqueue(jsonResponse(json.encodeToString(m1)))
+
+        val outcome = repository.expandMessagesFullBatch("sess-1", listOf("m1"))
+
+        assertTrue("Ok after one 503 retry: $outcome", outcome is ExpandOutcome.Ok)
+        val ok = outcome as ExpandOutcome.Ok
+        assertTrue("m1 loaded: ${ok.items.map { it.info.id }}", ok.items.any { it.info.id == "m1" })
+        assertFalse("usedBatch=false on fallback path", ok.usedBatch)
+        // 1 batch probe (404) + 2 single attempts (1 initial 503 + 1 retry success) = 3.
+        assertEquals("1 batch probe + 2 single attempts (503 then success)", 3, server.requestCount)
+    }
+
+    @Test
     fun `expand other 404 yields Failed and does NOT fall back to single fulls`() = runBlocking {
         // T3-C3 (sibling): 404 with any non-session / non-thin-route code
         // is a programming error or unmapped path — MUST NOT trigger the
@@ -1179,6 +1220,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         assertEquals("sess-1", failed.sessionId)
         assertNull("code is null on exhausted: ${failed.code}", failed.code)
         assertTrue("exhausted = true on exhausted", failed.exhausted)
+        assertEquals("4 total attempts (1 initial + 3 retries) on exhaustion", 4, server.requestCount)
     }
 
     @Test

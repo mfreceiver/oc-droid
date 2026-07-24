@@ -97,17 +97,17 @@ class OpenCodeRepositoryExpandBudgetTest {
         assertTrue("wallClockMs bounded (< 2000)", repository.lastExpandBudgetCounters!!.wallClockMs < 2_000L)
     }
 
-    // ── #4: per-node HTTP attempts ≤ 3 (2×503 then success → exactly 3) ────
+    // ── #4: per-node HTTP attempts ≤ 4 (3×503 then success → exactly 4) ────
     @Test
-    fun `per-node HTTP attempts ≤ 3`() = runBlocking {
-        repeat(2) { server.enqueue(jsonResponse("""{}""", 503)) }
+    fun `per-node HTTP attempts ≤ 4`() = runBlocking {
+        repeat(3) { server.enqueue(jsonResponse("""{}""", 503)) }
         server.enqueue(jsonResponse("""{"items":[${item("m1")}],"errors":[]}"""))
         val outcome = repository.expandMessagesFullBatch("sess-1", listOf("m1"))
         assertTrue("Ok outcome — got $outcome", outcome is ExpandOutcome.Ok)
         val ok = outcome as ExpandOutcome.Ok
         assertTrue("m1 loaded", ok.items.any { it.info.id == "m1" })
-        assertEquals("requestCount == 3 (1 initial + 2 retries)", 3, server.requestCount)
-        assertEquals("totalHttpAttempts == 3", 3, repository.lastExpandBudgetCounters!!.totalHttpAttempts)
+        assertEquals("requestCount == 4 (1 initial + 3 retries)", 4, server.requestCount)
+        assertEquals("totalHttpAttempts == 4", 4, repository.lastExpandBudgetCounters!!.totalHttpAttempts)
     }
 
     // ── #5: B2 response matrix — all 6 rows (single server, cumulative count) ─
@@ -166,12 +166,12 @@ class OpenCodeRepositoryExpandBudgetTest {
         assertEquals("(e) exactly 2 requests (m1 not retried)", rc + 2, server.requestCount)
         rc = server.requestCount
 
-        // (f) all RequestError → top-level 503 → batch retry budget (3) then exhausted
-        repeat(3) { server.enqueue(jsonResponse("""{"code":"upstream_unavailable"}""", 503).setHeader("Retry-After", "1")) }
+        // (f) all RequestError → top-level 503 → batch retry budget (3 retries / 4 attempts) then exhausted
+        repeat(4) { server.enqueue(jsonResponse("""{"code":"upstream_unavailable"}""", 503).setHeader("Retry-After", "1")) }
         outcome = repository.expandMessagesFullBatch("sess-1", listOf("m1"))
         assertTrue("(f) Failed (exhausted) — got $outcome", outcome is ExpandOutcome.Failed)
         assertTrue("(f) exhausted marker", (outcome as ExpandOutcome.Failed).exhausted)
-        assertEquals("(f) exactly 3 requests", rc + 3, server.requestCount)
+        assertEquals("(f) exactly 4 requests (1 initial + 3 retries)", rc + 4, server.requestCount)
     }
 
     // ── #6: mid-retryable bounded retry ONLY those mids ───────────────────

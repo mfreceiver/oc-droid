@@ -6,7 +6,6 @@ import cn.vectory.ocdroid.data.model.SlimapiMessageFullBatch
 import cn.vectory.ocdroid.data.repository.http.SlimapiErrorCodes
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.exponentialBackoffMs
-import cn.vectory.ocdroid.util.runSuspendCatching
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
@@ -248,7 +247,7 @@ internal class ExpandBatchEngine(
         val itemsMap = HashMap<String, MessageWithParts>()
         val terminalFailures = mutableListOf<ExpandOutcome.MessageFailure>()
         val unknownFailures = mutableListOf<ExpandOutcome.MessageFailure>()
-        while (attempts < 3) {
+        while (attempts <= EXPAND_MAX_503_RETRIES) {
             if (java.lang.System.currentTimeMillis() > deadline) {
                 return exhaustedOutcome(sessionId, ids)
             }
@@ -279,16 +278,14 @@ internal class ExpandBatchEngine(
                 requestSemaphore.release()
                 concurrentRequests.decrementAndGet()
                 counters.totalHttpAttempts++
-                attempts++
                 DebugLog.w(TAG, "drivePartition IOException ids=$ids sid=$sessionId " +
-                    "cause=${e.javaClass.simpleName}: ${e.message}")
-                if (attempts < 3) {
-                    val delayMs = backoffMs(attempts)
-                    delay(delayMs)
-                    continue
-                } else {
-                    return exhaustedOutcome(sessionId, ids)
-                }
+                    "cause=${e.javaClass.simpleName}: ${e.message} — not retried (§5.4)")
+                // §5 G6 / §5.4: transport failure (no HTTP status) is NOT retried —
+                // matches the pre-extraction OCR behavior and routing spec §5.4
+                // (retrying a possibly-already-received request risks duplicate
+                // server-side conversion work). Surface as Failed(null); the UI's
+                // retry affordance handles recovery (no silent double-send).
+                return ExpandOutcome.Failed(sessionId, null)
             } catch (e: Exception) {
                 requestSemaphore.release()
                 concurrentRequests.decrementAndGet()
@@ -345,7 +342,7 @@ internal class ExpandBatchEngine(
                     // If there are retryable failures, retry them in-place
                     if (retryableFailures.isNotEmpty()) {
                         // If we still have attempts left, retry only the retryable mids
-                        if (attempts < 3) {
+                        if (attempts <= EXPAND_MAX_503_RETRIES) {
                             currentIds = retryableFailures.map { it.messageId }
                             continue
                         } else {
@@ -444,7 +441,7 @@ internal class ExpandBatchEngine(
                     // Read Retry-After header
                     val retryAfterMs = retryAfterHeaderToMs(resp.headers()["Retry-After"])
                     val delayMs = if (retryAfterMs > 0L) retryAfterMs else backoffMs(attempts)
-                    if (attempts < 3) {
+                    if (attempts <= EXPAND_MAX_503_RETRIES) {
                         delay(delayMs)
                         continue  // retry the SAME node ids (not a fan-out)
                     } else {
@@ -560,7 +557,7 @@ internal class ExpandBatchEngine(
                     if (existing === newDeferred) {
                         // We won — make the call and complete the deferred
                         try {
-                            val result = runSuspendCatching { apiProvider().getSlimapiMessageFull(sessionId, id) }
+                            val result = fetchSingleFullWithRetry(sessionId, id)
                             newDeferred.complete(result)
                             id to result
                         } finally {
@@ -582,6 +579,46 @@ internal class ExpandBatchEngine(
             }
         }
         ExpandOutcome.Ok(items = items, failures = failures, usedBatch = false)
+    }
+
+    /**
+     * §5 G6 / oc-slimapi v0.10.0 — single-message `/full/{mid}` fetch with bounded
+     * 503 (`transform_busy`) retry, aligning with the batch path in [drivePartition]:
+     * ≤ [EXPAND_MAX_503_RETRIES] retries (4 total attempts), `Retry-After` header preferred, otherwise
+     * exponential [backoffMs]. Used by [fallbackSingleFull] (the batch-exhausted
+     * single-message fallback) so a conversion-pool 503 is retried transparently
+     * instead of failing the message on first hit.
+     *
+     * `getSlimapiMessageFull` returns [MessageWithParts] directly and throws
+     * [retrofit2.HttpException] on non-2xx, so the 503 is detected off the
+     * exception (unlike the batch path, which reads `retrofit2.Response.code()`).
+     * Non-retryable errors and exhausted 503s land as [Result.failure], preserving
+     * the caller's per-id failure handling exactly as the prior single
+     * `runSuspendCatching` call (the message is marked failed; the rest render).
+     */
+    private suspend fun fetchSingleFullWithRetry(
+        sessionId: String,
+        id: String,
+    ): Result<MessageWithParts> {
+        var attempts = 0
+        while (true) {
+            attempts++
+            try {
+                return Result.success(apiProvider().getSlimapiMessageFull(sessionId, id))
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: retrofit2.HttpException) {
+                if (e.code() == 503 && attempts <= EXPAND_MAX_503_RETRIES) {
+                    val retryAfterMs = retryAfterHeaderToMs(e.response()?.headers()?.get("Retry-After"))
+                    val delayMs = if (retryAfterMs > 0L) retryAfterMs else backoffMs(attempts)
+                    delay(delayMs)
+                    continue
+                }
+                return Result.failure(e)
+            } catch (e: Throwable) {
+                return Result.failure(e)
+            }
+        }
     }
 
     /**
@@ -611,7 +648,10 @@ internal class ExpandBatchEngine(
         /** §5 G6: max ids per batch call (server rejects more with 400 invalid_ids). */
         internal const val EXPAND_BATCH_MAX_IDS = 20
 
-        /** §5 G6: max 503 retries before surfacing as Failed (4 total attempts). */
+        /** §5 G6: max 503 RETRIES (3) before surfacing as Failed = 4 total attempts
+         *  (1 initial + 3 retries). [drivePartition] and [fetchSingleFullWithRetry]
+         *  retry while `attempts <= EXPAND_MAX_503_RETRIES` (attempts counts total
+         *  calls, bumped after each; the 4th consecutive 503 exhausts). */
         internal const val EXPAND_MAX_503_RETRIES = 3
 
         /** §5 G6: base backoff delay in ms (jitter ±30%); doubles per retry. */

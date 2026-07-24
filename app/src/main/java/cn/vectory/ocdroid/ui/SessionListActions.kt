@@ -14,6 +14,7 @@ import cn.vectory.ocdroid.ui.controller.aggregationSignal
 import cn.vectory.ocdroid.ui.controller.applySessionDiffIfAbsent
 import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.ui.controller.normalizeAuthoritativeStatusSnapshot
+import cn.vectory.ocdroid.ui.controller.StatusPollOrchestrator
 import cn.vectory.ocdroid.ui.controller.loadCompleteSessionTrees
 import cn.vectory.ocdroid.ui.controller.rootIdOf
 import cn.vectory.ocdroid.data.model.PermissionRequest
@@ -30,9 +31,6 @@ import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.WorkdirPaths
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -591,10 +589,14 @@ internal fun launchLoadMoreSessions(
     }
 }
 
-// §single-flight/epoch (groker🟡 v0.7.5): 并发触发(重连 + switchTo + loadSessions)时,
-// 每次发起递增 epoch; REST 返回时若 epoch 已被更新请求超越则丢弃本结果——避免后完成者
-// 把先完成者的 REST 写入误判为"SSE 在途变化"而保留(并发粘 busy 边角)。
-private val statusLoadEpoch = java.util.concurrent.atomic.AtomicLong(0)
+// §single-flight/epoch (groker🟡 v0.7.5): statusLoadEpoch moved to
+// [StatusPollOrchestrator] (god-file-decomposition P7, single-owner rule). The
+// slim SWEEP short-circuit + incrementAndGet ordering landmine is preserved
+// verbatim there. This file retains only the thin free-function delegates.
+// §single-flight/epoch (groker🟡 v0.7.5) — legacy comment preserved for context:
+// 并发触发(重连 + switchTo + loadSessions)时, 每次发起递增 epoch; REST 返回时若 epoch 已被
+// 更新请求超越则丢弃本结果——避免后完成者把先完成者的 REST 写入误判为"SSE 在途变化"
+// 而保留(并发粘 busy 边角)。
 
 // FIX-D (gpter #2, review-blocker): single-flight epoch for the session-LIST
 // load (launchLoadSessions). Mirrors [statusLoadEpoch]'s pattern: concurrent
@@ -628,245 +630,13 @@ internal fun launchLoadSessionStatus(
     slices: SliceFlows,
     trigger: SessionStatusLoadTrigger = SessionStatusLoadTrigger.SWEEP,
     onComplete: (Boolean) -> Unit = {},
-) {
-    // 🔴 T-R1 方案A EPOCH ORDER (critical landmine): the slim SWEEP short-circuit
-    // MUST happen BEFORE statusLoadEpoch.incrementAndGet(). The 4s foreground
-    // sweep (UnreadSoakController.ACTIVE_REFRESH_INTERVAL_MS →
-    // requestStatusRefresh → ControllerEffect.LoadSessionStatusWithCompletion →
-    // here with trigger=SWEEP) is a no-op for status REST in slim connected
-    // mode. If this no-op bumped the epoch FIRST, every 4s sweep bump would
-    // supersede an in-flight COLD_START bulk, and the cold-start's epoch guard
-    // below (myEpoch != statusLoadEpoch.get()) would discard its result — the
-    // cold-start snapshot would be silently dropped forever.
-    //
-    // onComplete(true) is synchronous-safe: the sweep callback only touches
-    // UnreadSoakController's Main-thread fields (no suspension, no launch), and
-    // the caller runs on appScope (Main.immediate) — no thread hop, so it
-    // completes well within the 15s timeout job.
-    if (repository.usesSlimStatusFanOut && trigger == SessionStatusLoadTrigger.SWEEP) {
-        onComplete(true)
-        return
-    }
-    val myEpoch = statusLoadEpoch.incrementAndGet()
-    val hostAtRequestStart = slices.host.value.currentHostProfileId
-    // T-R1 (slimapi R1) 方案A: in slim mode the only path that reaches here is
-    // COLD_START (the SWEEP no-op returned above). It routes through the slim
-    // bulk cold-start fetch (one call per workdir) and MUST NOT hit the legacy
-    // /session/status + /api/session/active endpoints. Steady-state status
-    // arrives via the slim digest `status` relay
-    // (SessionSyncCoordinator.handleSessionDigest → applySessionStatus).
-    // Legacy mode (isSlimMode == false) is byte-for-byte unchanged.
-    if (repository.usesSlimStatusFanOut) {
-        launchLoadSessionStatusSlim(scope, repository, slices, myEpoch, hostAtRequestStart, onComplete)
-        return
-    }
-    scope.launch {
-        var completionCalled = false
-        fun complete(success: Boolean) {
-            if (!completionCalled) {
-                completionCalled = true
-                onComplete(success)
-            }
-        }
-        try {
-            // §sse-rest-race: REST 发起前快照本地 status, onSuccess 时识别"REST 在途期间
-            // 被 SSE 更新过的 session"——旧 REST 快照不得覆盖较新的 SSE 值。
-            val localBefore = slices.sessionList.value.sessionStatuses
-            // §verbose-diag-flood: capture the current-session id + its prior
-            // status BEFORE the mutate so the post-mutate verbose log can do a
-            // single scoped + deduped comparison (current-session only + actual
-            // transition only). Reading these outside the mutate lambda avoids
-            // double-logging on StateFlow CAS retries (the lambda can run more
-            // than once).
-            val diagCurrentSid = slices.chat.value.currentSessionId
-            val diagPriorStatus = diagCurrentSid?.let { slices.sessionList.value.sessionStatuses[it] }
-            val statusResult = repository.getSessionStatus()
-            val activeResult = repository.getActiveSessionIds()
-            val statuses = statusResult.getOrNull()
-            var applied = false
-            slices.mutateSessionList { sl ->
-                // StateFlow.update may retry this transform after a CAS
-                // collision. Report the result of the final attempt only.
-                applied = false
-                // The status epoch and host identity jointly fence both REST
-                // responses. A host switch explicitly clears activeSessionIds;
-                // an old-host response must never repopulate that snapshot.
-                if (myEpoch != statusLoadEpoch.get() ||
-                    slices.host.value.currentHostProfileId != hostAtRequestStart
-                ) {
-                    DebugLog.d("Sync", "launchLoadSessionStatus: stale epoch/host, discarding snapshot")
-                    return@mutateSessionList sl
-                }
-                val authoritativeIds = allSessionsById(
-                    sl.sessions,
-                    sl.directorySessions,
-                    sl.childSessions,
-                ).keys
-                val nextStatuses = if (statuses != null) {
-                    val normalized = normalizeAuthoritativeStatusSnapshot(statuses, authoritativeIds)
-                    mergeStatusSnapshot(localBefore, sl.sessionStatuses, normalized)
-                } else {
-                    sl.sessionStatuses
-                }
-                // Fail-closed: a failed active fetch retains the previous
-                // snapshot. Both branches intersect the current tree so a
-                // deleted/archived session cannot remain active forever.
-                val nextActiveIds = activeResult.getOrNull()
-                    ?.intersect(authoritativeIds)
-                    ?: sl.activeSessionIds.intersect(authoritativeIds)
-                applied = true
-                sl.copy(
-                    sessionStatuses = nextStatuses,
-                    activeSessionIds = nextActiveIds,
-                )
-            }
-            // §streaming-state-sync-diag (runtime-gated, scoped+dedup):
-            // attribute the optimistic-busy overwrite to the poller (vs SSE /
-            // digest / optimistic-onSuccess). Scope to the current (open)
-            // session AND log only on actual transition — the prior code
-            // logged EVERY status entry for EVERY session on EVERY poll cycle
-            // (idle→idle dominated the flood at ~500/sec). At most ONE line
-            // per poll cycle now, and only when the current session's status
-            // actually transitioned.
-            if (applied && cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled && diagCurrentSid != null) {
-                val diagNewStatus = slices.sessionList.value.sessionStatuses[diagCurrentSid]
-                if (diagNewStatus != diagPriorStatus) {
-                    cn.vectory.ocdroid.util.DebugLog.d(
-                        "StatusDiag",
-                        "poller status write sid=$diagCurrentSid oldType=${diagPriorStatus?.type} newType=${diagNewStatus?.type}",
-                    )
-                }
-            }
-            statusResult
-                .onSuccess {
-                // §unread-soak: the REST status snapshot NO LONGER marks unread
-                // on the "busy→absent" edge. The [UnreadSoakController] sweep +
-                // pure [evaluateUnread] evaluator own the marking now — they
-                // consume the freshly-merged sessionStatuses (below) on the
-                // next foreground tick. The epoch-guarded merge still runs so
-                // the evaluator sees authoritative idle/busy state.
-                complete(applied)
-            }
-                .onFailure { error ->
-                reportNonFatalIssue("MainViewModel", "Failed to load session status", error)
-                complete(false)
-            }
-            activeResult.onFailure { error ->
-                DebugLog.w("Sync", "Failed to load active sessions; retaining prior snapshot: ${error.message}")
-            }
-        } catch (cancellation: kotlinx.coroutines.CancellationException) {
-            complete(false)
-            throw cancellation
-        } catch (_: Throwable) {
-            complete(false)
-        }
-    }
-}
-
-/**
- * T-R1 (slimapi R1) — slim-mode foreground status cold-start. Replaces the
- * legacy `/session/status` + `/api/session/active` fan-out that
- * [launchLoadSessionStatus] performs in legacy mode.
- *
- * In slim mode the steady-state status source is the slim digest `status`
- * relay ([SessionSyncCoordinator.handleSessionDigest] → [applySessionStatus]);
- * this helper provides the COLD-START snapshot (and a periodic correction on
- * each foreground sweep) by issuing one bulk
- * `GET /slimapi/sessions/status?directory=X` per known workdir (the sidecar
- * requires a single directory per call — see [OpenCodeApi.getSlimapiSessionsStatus])
- * and folding the merged map into [SessionListState.sessionStatuses] via the
- * same [normalizeAuthoritativeStatusSnapshot] + [mergeStatusSnapshot] discipline
- * the legacy path uses.
- *
- * Active-session ids are NOT polled here — slim activity is owned by the
- * digest relay + slim reconcile. The prior [SessionListState.activeSessionIds]
- * snapshot is preserved (intersected against the authoritative tree so a
- * deleted/archived session cannot remain active forever, matching the legacy
- * fail-closed semantics). The legacy `/api/session/active` endpoint is never
- * hit (T-R1 contract).
- *
- * No known directories yet (before the session list loads) → no-op success
- * (the digest relay + later sweeps cover status once sessions arrive).
- */
-private fun launchLoadSessionStatusSlim(
-    scope: CoroutineScope,
-    repository: OpenCodeRepository,
-    slices: SliceFlows,
-    myEpoch: Long,
-    hostAtRequestStart: String?,
-    onComplete: (Boolean) -> Unit,
-) {
-    scope.launch {
-        var completionCalled = false
-        fun complete(success: Boolean) {
-            if (!completionCalled) {
-                completionCalled = true
-                onComplete(success)
-            }
-        }
-        try {
-            // §sse-rest-race: REST 发起前快照本地 status (mirrors the legacy path).
-            val localBefore = slices.sessionList.value.sessionStatuses
-            val sl = slices.sessionList.value
-            val authoritative = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
-            // Derive the distinct workdirs to query (sidecar requires one
-            // directory per call). Empty before the session list loads.
-            val directories = authoritative.values
-                .mapNotNull { it.directory.takeIf { d -> d.isNotBlank() } }
-                .toSet()
-            if (directories.isEmpty()) {
-                complete(true)
-                return@launch
-            }
-            // Concurrent per-directory bulk fetch (bounded by the directory
-            // count, which is small — typically 1–3). Each failure is tolerated
-            // (the digest relay is the steady-state source); we fold whatever
-            // succeeded into one merged map.
-            val merged: Map<String, SessionStatus> = coroutineScope {
-                val results = directories.map { dir ->
-                    async { repository.getSlimapiSessionsStatus(dir) }
-                }.awaitAll()
-                val acc = mutableMapOf<String, SessionStatus>()
-                for (result in results) {
-                    result.getOrNull()?.let { acc.putAll(it) }
-                }
-                acc
-            }
-            var applied = false
-            slices.mutateSessionList { current ->
-                applied = false
-                if (myEpoch != statusLoadEpoch.get() ||
-                    slices.host.value.currentHostProfileId != hostAtRequestStart
-                ) {
-                    DebugLog.d("Sync", "launchLoadSessionStatusSlim: stale epoch/host, discarding snapshot")
-                    return@mutateSessionList current
-                }
-                val authoritativeIds = allSessionsById(
-                    current.sessions,
-                    current.directorySessions,
-                    current.childSessions,
-                ).keys
-                val normalized = normalizeAuthoritativeStatusSnapshot(merged, authoritativeIds)
-                val nextStatuses = mergeStatusSnapshot(localBefore, current.sessionStatuses, normalized)
-                applied = true
-                current.copy(
-                    sessionStatuses = nextStatuses,
-                    // Slim activity is digest-relay-owned: preserve the prior
-                    // activeSessionIds snapshot, fail-closed-intersected against
-                    // the authoritative tree (a deleted/archived session cannot
-                    // remain active forever — mirrors the legacy semantics).
-                    activeSessionIds = current.activeSessionIds.intersect(authoritativeIds),
-                )
-            }
-            complete(applied)
-        } catch (cancellation: kotlinx.coroutines.CancellationException) {
-            complete(false)
-            throw cancellation
-        } catch (_: Throwable) {
-            complete(false)
-        }
-    }
-}
+) = StatusPollOrchestrator.launchLoadSessionStatus(
+    scope = scope,
+    repository = repository,
+    slices = slices,
+    trigger = trigger,
+    onComplete = onComplete,
+)
 
 /**
  * §sse-rest-race 纯函数 (groker🟡 v0.7.5): 合并 REST 权威快照与本地状态。
@@ -875,18 +645,21 @@ private fun launchLoadSessionStatusSlim(
  * - 保护 REST 在途期间被 SSE 更新的 session: localAfter[id] != localBefore[id] → 保留
  *   SSE 新值, 避免慢 REST 旧快照覆盖较新 idle/busy。
  * 抽为纯函数便于表驱动矩阵单测。
+ *
+ * god-file-decomposition P7: body moved to [StatusPollOrchestrator.mergeStatusSnapshot];
+ * this top-level free function is a thin delegate (F8: signature unchanged) so
+ * [SessionTreeHydrator] + the internal [launchLoadChildSessions] caller keep
+ * working unchanged.
  */
 internal fun mergeStatusSnapshot(
     localBefore: Map<String, SessionStatus>,
     localAfter: Map<String, SessionStatus>,
     restSnapshot: Map<String, SessionStatus>
-): Map<String, SessionStatus> {
-    val result = restSnapshot.toMutableMap()
-    for ((id, after) in localAfter) {
-        if (localBefore[id] != after) result[id] = after
-    }
-    return result
-}
+): Map<String, SessionStatus> = StatusPollOrchestrator.mergeStatusSnapshot(
+    localBefore = localBefore,
+    localAfter = localAfter,
+    restSnapshot = restSnapshot,
+)
 
 /**
  * §issue-1(1): 打开会话时拉取该会话的文件变更快照（GET /session/{id}/diff，

@@ -495,7 +495,7 @@ api.getSlimapiMessagesFullBatch(
 | 200（成功，部分或全部） | 按 `messageId+partId` **替换**真实 part；若 local part 为 `thin_placeholder_*` → **message-level 整消息替换** parts；`errors[]` 内 mid 留 skeleton + Failed |
 | 404 `thin_route_not_found` | **回退**（旧实例）：逐条调 A6（`/full/{mid}`）；residual 按逐条结果分类 |
 | 413 `response_too_large` / 413 `message_too_large` | **halve**：messageId 列表对半递归 batch；halve 到单条时退化为 A6 |
-| 503 `transform_busy`（带 `Retry-After`）/ 503 `upstream_unavailable` | **指数 backoff**：`Retry-After` 或默认退避，上限 3 次；耗尽后 Failed / 回退策略见实现 |
+| 503 `transform_busy`（带 `Retry-After`）/ 503 `upstream_unavailable` | **指数 backoff**：`Retry-After` 或默认退避，上限 3 次重试（共 4 次请求）；耗尽后 Failed / 回退策略见实现 |
 | 504 / timeout | **不重试**，直接报错给 UI |
 | 网络异常（`IOException`） | **不重试**（与 §3.5 一致——双发风险） |
 
@@ -503,6 +503,26 @@ api.getSlimapiMessagesFullBatch(
 "展开失败，点击重试" affordance；不得静默丢弃。
 
 > **现网（G6 已部署）**：首调通常 200 envelope；fallback 仅作旧实例兼容。
+
+> **oc-slimapi v0.10.0 wire 变化（未发版；发版后以 `oc-slimapi/CHANGELOG.md ## [0.10.0]` 为准）**
+> ——所有 `mode=full` 路径（list `?mode=full`、单条 `/full/{mid}`、batch `/full?ids=`）
+> 在服务端剥离 `state.metadata.diagnostics`（opencode edit/write 写入的 LSP 诊断图）。
+> ocdroid 从不消费该字段（`Message.kt#parsePartState` 反序列化时已无条件删除），
+> 故功能零影响，纯下行流量 + parse/heap 节省。向后兼容，**不 bump `X-Slimapi-Version`**（仍 1）：
+>
+> - `diagnostics` 从 /full 响应消失；其余字段（output/text/files/metadata 其它键）原样，
+>   /full「完整 part」语义不变。**ocdroid 无需改动**。
+> - 三路 `mode=full` 现可能返回 **503 `transform_busy` + `Retry-After`**（转换池饱和，
+>   与 skeleton 路径一致）。ocdroid 重试覆盖现状：
+>   - batch G6 `/full?ids=`：`ExpandBatchEngine` 主循环——最多 4 次请求（首次 + 3 次重试），已有。
+>   - skeleton / sessions：已有 `transform_busy` 重试。
+>   - **单条 `/full/{mid}`（batch 回退 `fallbackSingleFull`）**：已加 `fetchSingleFullWithRetry`
+>     （对齐 batch：最多 4 次请求＝首次 + 3 次重试，Retry-After 优先否则指数 backoff）。
+>     与 batch 一致，对**任意 503** 进入重试（`/full` 实际只会返回 `transform_busy` / `upstream_unavailable`，
+>     均可重试）。`OCR.getSlimapiMessageFull`
+>     （Cluster A，仅测试调用）未加——生产 expand 不经它。
+> - /full 响应头改为 sidecar 拥有（`Content-Type`/`Content-Encoding`/`Vary`）；
+>   list-full 仍透传上游 `Link` 头（分页契约不变）。畸形 shape 兼容不变。
 
 ### 5.5 G4 — SSE 帧透传矩阵（thin / catch-all / 不支持）
 

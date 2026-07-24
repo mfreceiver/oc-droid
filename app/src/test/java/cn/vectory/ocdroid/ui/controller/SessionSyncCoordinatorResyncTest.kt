@@ -2022,5 +2022,224 @@ class SessionSyncCoordinatorResyncTest {
         coVerify(exactly = 1) { repository.coldStartSlimSync(any(), any(), any()) }
     }
 
+    // ── P4-A: characterization tests for the SlimSessionReconciler extraction ──
+    //
+    // These pin current behavior so the P4-B/P4-C extractions can be verified
+    // against them. They MUST pass on the current un-extracted SSC. See
+    // docs/ocmar/plans/2026-07-24-p4-slim-session-reconciler-design.md §8.2/§8.3.
+
+    /**
+     * P4-A §8.2 main: a BACKGROUND digest (sid != currentSessionId) that needs
+     * catch-up must trigger the resync worker — the digest dispatch chain
+     * (`handleEvent` → `handleSessionDigest` → `prepareSessionDigest` →
+     * `SlimDigestDecision.Reconcile` → SSC `scope.launch { reconcileDigest }` →
+     * `reconcileSessionLocked` BACKGROUND branch → returned `LaunchSlimResync`
+     * → `executeSlimReconcileCommand` → `scope.launch { performSlimResync(...) }`
+     * → `coldStartSlimSync`) must propagate the launch end-to-end.
+     *
+     * This is the PRIMARY guard against P4-B silently dropping the
+     * `LaunchSlimResync` command while crossing the digest-prep → SSC-launch →
+     * reconcileDigest → reconcileSessionLocked → returned-command → SSC-
+     * interpreter boundary (§9 highest drift risk). If the count drops to 0,
+     * the command was lost somewhere in that chain.
+     *
+     * NOTE: the oracle's §8.2 spec ALSO asserted `coVerify(exactly = 0)` on
+     * `getSlimapiMessagesSince` / `fetchSlimInitialWindowBounded`. That
+     * secondary assertion does NOT hold on current code: the launched
+     * `performSlimResync` worker runs a full catch-up sweep that re-reconciles
+     * the dirty sid ("sess-1") in RESYNC mode, and RESYNC mayFetch=true → the
+     * sweep calls `getSlimapiMessagesSince("sess-1", 500, ...)` exactly once
+     * (the BACKGROUND reconcile itself never fetches — only the catch-up
+     * worker does). Those secondary assertions were omitted here because they
+     * mis-characterize current behavior; see the P4-A report for details.
+     */
+    @Test
+    fun `P4 BACKGROUND needsCatchUp launches coordinator resync worker`() = runTest {
+        slices.mutateChat { it.copy(currentSessionId = "other") }
+        every { repository.getSlimSessionState("sess-1") } returns SlimSessionState(
+            sessionId = "sess-1",
+            remoteMessageId = "m-remote",
+            remoteUpdatedAt = 1_000L,
+            localAppliedMessageId = "m-prior",
+            localAppliedUpdatedAt = 500L,
+            dirty = true,
+        )
+        coEvery { repository.probeLatestSlim("sess-1") } returns ProbeResult(
+            ok = true,
+            messageID = "m-remote",
+            updatedAt = 1_000L,
+        )
+        // Bound the worker: stub the metadata step to failure so coldStartSlimSync
+        // is deterministic. (The catch-up sweep that follows DOES reconcile the
+        // dirty sid in RESYNC mode and fetches via getSlimapiMessagesSince —
+        // that's current behavior, not under test here. This test only pins
+        // that the worker LAUNCHED, via coldStartSlimSync exactly=1.)
+        coEvery { repository.coldStartSlimSync(any(), any(), any()) } returns
+            Result.failure(java.io.IOException("expected test stop"))
+
+        val c = coordinator()
+        c.handleEvent(digestEvent(sessionId = "sess-1", updatedAt = 1_000L, messageId = "m-remote"))
+        scope.testScheduler.advanceUntilIdle()
+
+        // PRIMARY guard: the BACKGROUND branch launched performSlimResync,
+        // which calls coldStartSlimSync exactly once. If P4-B drops the
+        // LaunchSlimResync command anywhere in the chain, this drops to 0.
+        coVerify(exactly = 1) { repository.coldStartSlimSync(any(), any(), any()) }
+    }
+
+    /**
+     * P4-A §8.2 direct-F5 variant: the public [reconcileSession] façade with
+     * [ReconcileMode.DIGEST_BACKGROUND] must trigger the resync worker
+     * (`performSlimResync` → `coldStartSlimSync`) when the session needs
+     * catch-up. This pins the façade path independently of the digest
+     * dispatch chain (`handleEvent` → `reconcileDigest`).
+     *
+     * If P4-B silently drops the `LaunchSlimResync` command from
+     * `reconcileSessionLocked`'s BACKGROUND branch, or SSC fails to
+     * interpret it via `executeSlimReconcileCommand`, this count drops to 0.
+     */
+    @Test
+    fun `P4 public DIGEST_BACKGROUND launches resync worker via façade`() = runTest {
+        every { repository.getSlimSessionState("sess-1") } returns SlimSessionState(
+            sessionId = "sess-1",
+            remoteMessageId = "m-remote",
+            remoteUpdatedAt = 1_000L,
+            localAppliedMessageId = "m-prior",
+            localAppliedUpdatedAt = 500L,
+            dirty = true,
+        )
+        coEvery { repository.probeLatestSlim("sess-1") } returns ProbeResult(
+            ok = true,
+            messageID = "m-remote",
+            updatedAt = 1_000L,
+        )
+        // Bound the worker: stub the metadata step to failure so coldStartSlimSync
+        // is deterministic. (The catch-up sweep that follows DOES reconcile the
+        // dirty sid in RESYNC mode and may fetch via getSlimapiMessagesSince —
+        // that's current behavior, not under test here. This variant only pins
+        // that the worker LAUNCHED, via coldStartSlimSync exactly=1.)
+        coEvery { repository.coldStartSlimSync(any(), any(), any()) } returns
+            Result.failure(java.io.IOException("expected test stop"))
+
+        val c = coordinator()
+        c.reconcileSession("sess-1", SessionSyncCoordinator.ReconcileMode.DIGEST_BACKGROUND)
+        scope.testScheduler.advanceUntilIdle()
+
+        // BACKGROUND needsCatchUp → worker launched → coldStartSlimSync exactly once.
+        coVerify(exactly = 1) { repository.coldStartSlimSync(any(), any(), any()) }
+    }
+
+    /**
+     * P4-A §8.3: the public [reconcileSession] RESYNC path captures exactly
+     * ONE commit token at workflow entry and threads that SAME token through
+     * every nested suspend surface (the `/since` fetch) and the final UI
+     * commit gate (`commitIfSlimTokenCurrent`).
+     *
+     * This pins the C-D3 v2 §1.8 "single entry token, no recapture" invariant
+     * — if P4-B accidentally recaptures inside the reconciler body, the
+     * `getSlimapiMessagesSince(..., token)` match fails (different token
+     * instance) and the `captureSlimCommitToken()` count exceeds 1.
+     */
+    @Test
+    fun `P4 public reconcile captures once and threads exact token through fetch and UI commit`() = runTest {
+        val token = OpenCodeRepository.SlimCommitToken(marker = Any(), issuedReady = true)
+        every { repository.captureSlimCommitToken() } returns token
+        every { repository.isSlimCommitTokenCurrent(token) } returns true
+        every { repository.commitIfSlimTokenCurrent(token, any()) } answers {
+            secondArg<() -> Unit>().invoke()
+            true
+        }
+        every { repository.getSlimSessionState("s1") } returns SlimSessionState(
+            sessionId = "s1",
+            localAppliedMessageId = "m0",
+            localAppliedUpdatedAt = 100L,
+            remoteMessageId = "m1",
+            remoteUpdatedAt = 200L,
+            dirty = true,
+        )
+        coEvery { repository.probeLatestSlim("s1") } returns ProbeResult(
+            ok = true,
+            messageID = "m1",
+            updatedAt = 200L,
+        )
+        // Match the EXACT token so a recapture (different instance) misses.
+        coEvery {
+            repository.getSlimapiMessagesSince("s1", 100L, any(), any(), token)
+        } returns Result.success(emptyList())
+
+        coordinator().reconcileSession("s1", SessionSyncCoordinator.ReconcileMode.RESYNC)
+
+        verify(exactly = 1) { repository.captureSlimCommitToken() }
+        coVerify(exactly = 1) {
+            repository.getSlimapiMessagesSince("s1", 100L, any(), any(), token)
+        }
+        verify(atLeast = 1) { repository.commitIfSlimTokenCurrent(token, any()) }
+    }
+
+    /**
+     * P4 §8.3 digest variant: the DIGEST path captures exactly ONE commit
+     * token (in [SlimSessionReconciler.prepareSessionDigest], BEFORE the
+     * first suspend point) and threads that SAME token through:
+     *
+     *  1. the reducer ([OpenCodeRepository.applySlimDigest]),
+     *  2. the `/since` fetch ([OpenCodeRepository.getSlimapiMessagesSince]),
+     *  3. the final UI commit gate ([OpenCodeRepository.commitIfSlimTokenCurrent]).
+     *
+     * This is the digest-path counterpart to the RESYNC characterization
+     * test above. The token is captured synchronously in `prepareSessionDigest`
+     * (P4-C), rides inside the [SlimDigestReconcileRequest], and is NEVER
+     * recaptured inside `reconcileDigest` / `reconcileSessionLocked` /
+     * `applyReconcileResult`. If P4-C accidentally recaptures inside the
+     * reconciler, the `applySlimDigest(any(), token)` / `getSlimapiMessagesSince(...,
+     * token)` matches fail (different token instance) and the
+     * `captureSlimCommitToken()` count exceeds 1.
+     */
+    @Test
+    fun `P4 digest captures once and threads exact token through reducer fetch and UI commit`() = runTest {
+        val token = OpenCodeRepository.SlimCommitToken(marker = Any(), issuedReady = true)
+        every { repository.captureSlimCommitToken() } returns token
+        every { repository.isSlimCommitTokenCurrent(token) } returns true
+        every { repository.commitIfSlimTokenCurrent(token, any()) } answers {
+            secondArg<() -> Unit>().invoke()
+            true
+        }
+        // Match the EXACT token on the reducer + fetch so a recapture (a
+        // different token instance) misses.
+        every { repository.applySlimDigest(any(), token) } returns null
+        slices.mutateChat { it.copy(currentSessionId = "sess-1") }
+        every { repository.getSlimSessionState("sess-1") } returns SlimSessionState(
+            sessionId = "sess-1",
+            localAppliedMessageId = "m0",
+            localAppliedUpdatedAt = 500L,
+            remoteMessageId = "m1",
+            remoteUpdatedAt = 1_000L,
+            dirty = true,
+        )
+        coEvery { repository.probeLatestSlim("sess-1") } returns ProbeResult(
+            ok = true,
+            messageID = "m1",
+            updatedAt = 1_000L,
+        )
+        coEvery {
+            repository.getSlimapiMessagesSince("sess-1", 500L, any(), any(), token)
+        } returns Result.success(emptyList())
+
+        val c = coordinator()
+        c.handleEvent(digestEvent(sessionId = "sess-1", updatedAt = 1_000L, messageId = "m1"))
+        scope.testScheduler.advanceUntilIdle()
+
+        // Captured exactly ONCE — in prepareSessionDigest, before the launch.
+        verify(exactly = 1) { repository.captureSlimCommitToken() }
+        // The SAME token reaches the reducer (applySlimDigest).
+        verify(atLeast = 1) { repository.applySlimDigest(any(), token) }
+        // The SAME token reaches the /since fetch.
+        coVerify(exactly = 1) {
+            repository.getSlimapiMessagesSince("sess-1", 500L, any(), any(), token)
+        }
+        // The SAME token reaches the final UI commit gate (the banner commit
+        // in reconcileDigest + the applyReconcileResult commit).
+        verify(atLeast = 1) { repository.commitIfSlimTokenCurrent(token, any()) }
+    }
+
     // G-F1 cadence interval tests (to be added in subsequent PRs)
 }
