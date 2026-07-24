@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -42,6 +43,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.isThinPlaceholder
 import cn.vectory.ocdroid.ui.theme.CardWidthScope
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.theme.StatusBanner
@@ -280,7 +282,10 @@ internal fun MessageRow(
                     expandedParts = expandedParts,
                     onToggleExpand = onToggleExpand,
                     cardMax = cardMax,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    partExpandState = (part.messageId ?: message.id)
+                        .let { PartKey(it, part.id) }
+                        .let { partExpandStates[it] } ?: PartExpandState.Idle,
                 )
                 i += 1
             }
@@ -651,12 +656,30 @@ internal fun PartView(
     // §card-width: responsive card max width (2/3 screen, capped 480dp) from
     // the caller's BoxWithConstraints. Defaults to the legacy fixed cap so
     // unscoped callers (tests/preview) still compile.
-    cardMax: Dp = MAX_CARD_WIDTH
+    cardMax: Dp = MAX_CARD_WIDTH,
+    // 该 part 的展开状态；默认 Idle。仅用于 thin_placeholder 占位条的门控
+    // （仅 Idle 时渲染加载条；Loading/Failed 等交给下方 OmittedContentCard）。
+    partExpandState: PartExpandState = PartExpandState.Idle,
 ) {
     val expandKey = "${messageId}|${part.id}"
     when {
         part.isText -> {
-            val textContent = streamingTextOverride ?: part.text ?: ""
+            // §thin-placeholder-loading: non-SSE (REST-only) mode injects a
+            // thin_placeholder_* skeleton part whose .text is a dead placeholder
+            // line (e.g. "[内容已折叠，点开查看]"). Render it as a loading bar
+            // instead — the real expand entry remains OmittedContentCard below.
+            if (part.isThinPlaceholder()) {
+                // 仅 Idle 时显示「加载中」占位条；Loading/Failed/Exhausted/Loaded
+                // 时不渲染（下方 OmittedContentCard 会显示 spinner / 错误重试 / 隐藏），
+                // 避免双 spinner 和「加载中」掩盖失败状态。绝不能回退渲染 part.text
+                // 的死板占位文案。
+                if (partExpandState is PartExpandState.Idle) {
+                    DebugCardIdentity(name = "ThinPlaceholderLoadingBar", source = "PartView:656", part = part) {
+                        ThinPlaceholderLoadingBar(modifier = modifier)
+                    }
+                }
+            } else {
+                val textContent = streamingTextOverride ?: part.text ?: ""
             // Detect background subagent task completion blocks injected as
             // user-role text messages by the server (ops.prompt with <task> XML).
             // Restricted to user messages: the server only injects these as
@@ -694,6 +717,7 @@ internal fun PartView(
                     )
                 }
             }
+            } // §thin-placeholder-loading: close else
         }
         part.isImageAttachment -> DebugCardIdentity(name = "ImageFilePart", source = "PartView:676", part = part) {
             ImageFilePart(part, modifier)
@@ -726,6 +750,45 @@ internal fun PartView(
         // [writeParts]). Keeping this branch would risk silently sending a
         // future reclassification straight into the single-file PatchCard and
         // dropping the MultiFilePatchAccordion path for multi-file patches.
+    }
+}
+
+/**
+ * §thin-placeholder-loading: 非 SSE (REST-only) 模式下，server 注入的
+ * thin_placeholder_* 骨架 part 的 .text 是一段死板占位文案（如「[内容已折叠，
+ * 点开查看]」）。这里不再渲染那段文案，改为一条带加载动画的「加载中」占位条，
+ * 视觉对齐 [ReasoningCard] 的「思考中」行（Psychology 图标 + labelSmall 文本 +
+ * 14dp / strokeWidth 2dp 的 CircularProgressIndicator）。纯展示、不可点击——
+ * 真正的展开入口仍由 [OmittedContentCard] 在下方提供（part 的 hasFull + omitted）。
+ *
+ * **仅在该 part 的 `PartExpandState == Idle` 时渲染；Loading / Failed /
+ * Exhausted / Loaded 时不渲染**（交由 [OmittedContentCard] 接管——它本就
+ * 自带 spinner / 错误重试 / 隐藏逻辑），以免双 spinner 或加载态掩盖失败。
+ */
+@Composable
+private fun ThinPlaceholderLoadingBar(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier.padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            Icons.Default.Psychology,
+            contentDescription = null,
+            modifier = Modifier.size(14.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = stringResource(R.string.chat_loading),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        CircularProgressIndicator(
+            modifier = Modifier.size(14.dp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            strokeWidth = 2.dp
+        )
     }
 }
 
