@@ -26,6 +26,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Palette
@@ -170,6 +171,7 @@ private fun settingsSections(): List<SettingsSectionEntry> = listOf(
     SettingsSectionEntry(NavRoute.settingsHostsRoute, R.string.setux_settings_hosts_entry, R.string.settings_section_hosts_subtitle, Icons.Default.Dns),
     SettingsSectionEntry(NavRoute.settingsAppearanceRoute, R.string.settings_section_appearance, R.string.settings_section_appearance_subtitle, Icons.Default.Palette),
     SettingsSectionEntry(NavRoute.settingsNotificationsRoute, R.string.settings_section_notifications, R.string.settings_section_notifications_subtitle, Icons.Default.Notifications),
+    SettingsSectionEntry(NavRoute.settingsDebugRoute, R.string.settings_section_debug, 0, Icons.Default.BugReport),
     SettingsSectionEntry(NavRoute.settingsAboutRoute, R.string.settings_section_about, R.string.settings_section_about_subtitle, Icons.Default.Info),
 )
 
@@ -487,15 +489,11 @@ fun SettingsNotificationsRoute(onBack: () -> Unit) {
 }
 
 /**
- * settings/about — wraps [AboutSection] + [DebugLogSection]. The "Debug"
- * header (formerly a top-level Settings group) now lives here, with debug-log
- * as the only entry (the diagnostic panels moved to Connections in an earlier
- * release, and the cache-management popup was removed in remove-message-
- * persistence Task 5 along with the SQLite persistence layer).
+ * settings/about — wraps [AboutSection] + License information.
  *
- * Parameters `viewModel` + `settingsVM` document the Activity-scoped Hilt
- * graph callers must keep alive for [DebugLogSection]'s @EntryPoint
- * (SettingsManager / AppState). They are not directly referenced in the body.
+ * The Debug section was migrated to [SettingsDebugRoute]; this page now shows
+ * the app version + a License section with the project's MIT license and a
+ * curated list of third-party dependencies.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -505,16 +503,13 @@ fun SettingsAboutRoute(
     onBack: () -> Unit,
 ) {
     SettingsSubRouteScaffold(titleRes = R.string.settings_section_about, onBack = onBack) { mod ->
-        // §review-AB: no parent horizontal padding — AppSectionHeader +
-        // DebugLogSection's Card self-pad; AboutSection's bare Texts self-pad.
         Column(
             modifier = mod.verticalScroll(rememberScrollState()),
         ) {
             AboutSection()
             Spacer(modifier = Modifier.height(Dimens.spacing6))
 
-            AppSectionHeader(text = stringResource(R.string.settings_section_debug))
-            DebugLogSection(hideHeader = true)
+            LicenseSection()
         }
     }
 }

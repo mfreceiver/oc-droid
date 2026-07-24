@@ -37,6 +37,7 @@ import cn.vectory.ocdroid.ui.files.FilesViewModel
 import cn.vectory.ocdroid.ui.sessions.SessionsScreen
 import cn.vectory.ocdroid.ui.settings.SettingsAboutRoute
 import cn.vectory.ocdroid.ui.settings.SettingsAppearanceRoute
+import cn.vectory.ocdroid.ui.settings.SettingsDebugRoute
 import cn.vectory.ocdroid.ui.settings.SettingsHostsRoute
 import cn.vectory.ocdroid.ui.settings.SettingsModelsRoute
 import cn.vectory.ocdroid.ui.settings.SettingsNotificationsRoute
@@ -218,6 +219,7 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                         navController.navigate(NavRoute.gitRoute(workdir = workdir))
                     },
                     onNavigateToSettings = { orchestratorVM.setLastRoute(NavRoute.Settings) },
+                    onLongClickServer = { navController.navigate(NavRoute.settingsDebugRoute) },
                     showBackNavigation = false,
                 )
             }
@@ -316,6 +318,13 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                 popExitTransition = { ExitTransition.None },
             ) {
                 SettingsNotificationsRoute { navController.popBackStack() }
+            }
+            composable(
+                NavRoute.settingsDebugRoute,
+                exitTransition = { ExitTransition.None },
+                popExitTransition = { ExitTransition.None },
+            ) {
+                SettingsDebugRoute(hostVM, settingsVM) { navController.popBackStack() }
             }
             composable(
                 NavRoute.settingsAboutRoute,

@@ -306,6 +306,7 @@ kover {
                     "cn.vectory.ocdroid.ui.settings.SettingsSectionsKt",
                     "cn.vectory.ocdroid.ui.settings.ModelManagementSectionKt",
                     "cn.vectory.ocdroid.ui.settings.DebugLogSectionKt",
+                    "cn.vectory.ocdroid.ui.settings.SettingsDebugRouteKt",
                     "cn.vectory.ocdroid.ui.settings.HostProfilesManagerScreenKt",
                     // L5b: HostProfileEditorDialog split out of
                     // HostProfilesManagerScreenKt — Composable-heavy dialog +

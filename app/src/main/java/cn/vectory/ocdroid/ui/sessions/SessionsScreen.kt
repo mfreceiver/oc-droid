@@ -116,6 +116,11 @@ fun SessionsScreen(
      * AppShell's existing call site keeps compiling; T7 wires the navigation.
      */
     onNavigateToSettings: () -> Unit = {},
+    /**
+     * §debug-escape: long-press on the server status icon navigates to the
+     * debug settings page. Defaults to a no-op for backward compatibility.
+     */
+    onLongClickServer: () -> Unit = {},
 ) {
     // ── Slice subscriptions ────────────────────────────────────────────────
     // sessionListFlow (sessions + directorySessions) + unreadFlow feed the
@@ -349,6 +354,7 @@ fun SessionsScreen(
                             },
                             onActivateTunnel = { hostVM?.activateTunnelForCurrentHost() },
                             onNavigateToSettings = onNavigateToSettings,
+                            onLongClickServer = onLongClickServer,
                         )
                     }
                 )

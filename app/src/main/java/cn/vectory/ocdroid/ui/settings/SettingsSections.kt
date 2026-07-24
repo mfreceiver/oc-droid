@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.outlined.Refresh
@@ -414,6 +416,80 @@ internal fun AboutSection() {
         modifier = Modifier.padding(horizontal = Dimens.spacing4),
     )
 }
+
+/**
+ * License section for the About page. Shows the project's MIT license and a
+ * curated list of third-party dependencies with their license types.
+ *
+ * Data source: manually curated from gradle/libs.versions.toml and
+ * app/build.gradle.kts dependencies. Not exhaustive (transitive deps omitted)
+ * but representative and accurate for non-Play Store apps.
+ */
+@Composable
+internal fun LicenseSection() {
+    AppSectionHeader(text = stringResource(R.string.settings_license))
+
+    // Project license
+    Text(
+        stringResource(R.string.settings_license_project_title),
+        style = MaterialTheme.typography.titleSmall,
+        modifier = Modifier.padding(horizontal = Dimens.spacing4),
+    )
+    Text(
+        stringResource(R.string.settings_license_project_text),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = Dimens.spacing4),
+    )
+
+    Spacer(modifier = Modifier.height(Dimens.spacing4))
+
+    // Third-party dependencies
+    AppSectionHeader(text = stringResource(R.string.settings_license_third_party))
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Dimens.spacing4),
+        userScrollEnabled = false,
+    ) {
+        items(licenseData) { (name, license) ->
+            ListItem(
+                headlineContent = { Text(name) },
+                supportingContent = { Text(license) },
+            )
+        }
+    }
+}
+
+/**
+ * Manually curated list of third-party dependencies and their licenses.
+ * Sourced from gradle/libs.versions.toml + app/build.gradle.kts.
+ * Not exhaustive — transitive dependencies are omitted.
+ */
+private val licenseData = listOf(
+    "AndroidX Core KTX" to "Apache-2.0",
+    "AndroidX Lifecycle Runtime KTX" to "Apache-2.0",
+    "AndroidX Activity Compose" to "Apache-2.0",
+    "AndroidX AppCompat" to "Apache-2.0",
+    "AndroidX Compose BOM" to "Apache-2.0",
+    "AndroidX Compose UI" to "Apache-2.0",
+    "AndroidX Compose Material3" to "Apache-2.0",
+    "AndroidX Navigation Compose" to "Apache-2.0",
+    "AndroidX Lifecycle ViewModel Compose" to "Apache-2.0",
+    "AndroidX Security Crypto" to "Apache-2.0",
+    "OkHttp" to "Apache-2.0",
+    "OkHttp Logging Interceptor" to "Apache-2.0",
+    "OkHttp SSE" to "Apache-2.0",
+    "Retrofit" to "Apache-2.0",
+    "Retrofit KotlinX Serialization" to "MIT",
+    "KotlinX Serialization JSON" to "Apache-2.0",
+    "KotlinX Coroutines Android" to "Apache-2.0",
+    "Dagger Hilt" to "Apache-2.0",
+    "Hilt Navigation Compose" to "Apache-2.0",
+    "Multiplatform Markdown Renderer" to "Apache-2.0",
+    "Material3 Window Size Class" to "Apache-2.0",
+    "Material Icons Extended" to "Apache-2.0",
+)
 
 // §WT5: the local `SectionHeader(title: String)` composable that used to live
 // here has been deleted. All settings call sites now use the canonical shared

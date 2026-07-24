@@ -47,8 +47,6 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.chat.ServerManagementDialog
-import cn.vectory.ocdroid.ui.settings.DebugLogSection
-import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.theme.SemanticColors
 
@@ -99,6 +97,7 @@ import cn.vectory.ocdroid.ui.theme.SemanticColors
  * @param onRefresh            refresh messages (dialog refresh button).
  * @param onActivateTunnel     activate the tunnel for the current host.
  * @param onNavigateToSettings open the Settings tab (dialog settings button).
+ * @param onLongClickServer    navigate to the debug settings page (long-press).
  * @param modifier             applied to the outer [BadgedBox].
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
@@ -118,13 +117,10 @@ internal fun ServerStatusIconButton(
     onRefresh: () -> Unit,
     onActivateTunnel: () -> Unit,
     onNavigateToSettings: () -> Unit,
+    onLongClickServer: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var showDialog by remember { mutableStateOf(false) }
-    // §debug-escape (P0 2-B): long-press the status button opens the debug-log
-    // sheet — an escape hatch for when Settings navigation stalls or a connect
-    // hangs. Single-tap still opens the server dialog (no behaviour change).
-    var showDebugLog by remember { mutableStateOf(false) }
 
     // Dot colour resolution — three-colour scheme:
     // connected + slimActive → blue (slim mode active)
@@ -219,7 +215,7 @@ internal fun ServerStatusIconButton(
                 .size(Dimens.touchTargetMin)
                 .combinedClickable(
                     onClick = { showDialog = true },
-                    onLongClick = { showDebugLog = true },
+                    onLongClick = { onLongClickServer() },
                 ),
             contentAlignment = Alignment.Center,
         ) {
@@ -245,18 +241,6 @@ internal fun ServerStatusIconButton(
             onNavigateToSettings = onNavigateToSettings,
             onDismiss = { showDialog = false },
         )
-    }
-
-    // §debug-escape: B-layer AppBottomSheet rendering DebugLogSection (Hilt
-    // EntryPoint self-sources SettingsManager, no callback plumbing needed).
-    // hideHeader = true because the sheet title already says "Debug Log".
-    if (showDebugLog) {
-        AppBottomSheet(
-            onDismissRequest = { showDebugLog = false },
-            title = stringResource(R.string.debug_log_title),
-        ) {
-            DebugLogSection(hideHeader = true)
-        }
     }
 }
 

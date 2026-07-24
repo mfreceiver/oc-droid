@@ -25,6 +25,7 @@ enum class NavRoute(val route: String, val legacyPage: Int) {
         const val settingsModelsRoute: String = "settings/models"
         const val settingsNotificationsRoute: String = "settings/notifications"
         const val settingsAboutRoute: String = "settings/about"
+        const val settingsDebugRoute: String = "settings/debug"
 
         /** Builds a fullscreen file preview pushed onto the Chat back stack. */
         fun chatPreviewRoute(workdir: String? = null, path: String? = null): String =

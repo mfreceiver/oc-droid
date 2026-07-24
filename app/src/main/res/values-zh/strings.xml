@@ -441,6 +441,14 @@
     <string name="debug_log_level_all">全部</string>
     <string name="debug_log_empty">（暂无日志）</string>
     <string name="debug_log_empty_filtered">（当前过滤下无日志）</string>
+    <!-- §sse-disabled-debug-toggle：REST-only 降级模式开关 -->
+    <string name="settings_debug_sse_disabled_title">禁用 SSE（仅 REST）</string>
+    <string name="settings_debug_sse_disabled_summary">强制仅使用 REST，不使用 Server-Sent Events。默认关闭。</string>
+    <!-- 关于页面许可证部分 -->
+    <string name="settings_license">许可证</string>
+    <string name="settings_license_project_title">本项目</string>
+    <string name="settings_license_project_text">MIT 许可证 — Copyright (c) 2026 grapeot + vectory</string>
+    <string name="settings_license_third_party">第三方依赖</string>
     <string name="chat_load_more_history">加载更多历史</string>
     <string name="chat_loading">加载中…</string>
     <string name="chat_no_messages">暂无消息</string>

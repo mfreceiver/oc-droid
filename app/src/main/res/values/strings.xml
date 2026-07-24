@@ -466,6 +466,14 @@
     <string name="debug_log_level_all">All</string>
     <string name="debug_log_empty">(no logs yet)</string>
     <string name="debug_log_empty_filtered">(no logs under current filter)</string>
+    <!-- §sse-disabled-debug-toggle: REST-only degraded mode toggle -->
+    <string name="settings_debug_sse_disabled_title">Disable SSE (REST-only)</string>
+    <string name="settings_debug_sse_disabled_summary">Force REST-only operation without Server-Sent Events. Off by default.</string>
+    <!-- License section for About page -->
+    <string name="settings_license">License</string>
+    <string name="settings_license_project_title">This Project</string>
+    <string name="settings_license_project_text">MIT License — Copyright (c) 2026 grapeot + vectory</string>
+    <string name="settings_license_third_party">Third-Party Dependencies</string>
     <string name="chat_load_more_history">Load more history</string>
     <string name="chat_loading">Loading…</string>
     <string name="chat_no_messages">No messages yet</string>
