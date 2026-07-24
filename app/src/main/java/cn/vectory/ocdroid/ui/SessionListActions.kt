@@ -33,6 +33,14 @@ import cn.vectory.ocdroid.util.WorkdirPaths
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import cn.vectory.ocdroid.ui.controller.SessionListRefreshOrchestrator
+import cn.vectory.ocdroid.ui.controller.SessionMetadataCacheWriter
+
+private val sessionMetadataCacheWriter = SessionMetadataCacheWriter()
+private val sessionListRefreshOrchestrator = SessionListRefreshOrchestrator(
+    cacheWriter = sessionMetadataCacheWriter,
+    clockMs = System::currentTimeMillis,
+)
 
 /**
  * Persist a bounded session-metadata cache to [SettingsManager.sessionCache]
@@ -56,101 +64,22 @@ import kotlinx.coroutines.launch
  * called from [MainViewModel.selectSession] and [MainViewModel.sendMessage]
  * so opening/creating a conversation persists its metadata immediately.
  */
-/**
- * Sweep pending-create IDs: remove any that the server just confirmed (serverIds),
- * and also drop any whose local creation timestamp is too old (beyond timeoutMs).
- * Returns the surviving IDs + their filtered createdAt map.
- */
-private fun sweepPendingCreateIds(
-    currentPendingCreateIds: Set<String>,
-    currentPendingCreatedAt: Map<String, Long>,
-    serverIds: Set<String>,
-    nowMs: Long,
-    timeoutMs: Long = MainViewModelTimings.pendingCreateTimeoutMs,
-): Pair<Set<String>, Map<String, Long>> {
-    val sweptIds = currentPendingCreateIds
-        .minus(serverIds)
-        .filter { pendingId ->
-            val registeredAt = currentPendingCreatedAt[pendingId]
-            registeredAt != null &&
-                nowMs - registeredAt <= timeoutMs
-        }
-        .toSet()
-    val sweptCreatedAt = currentPendingCreatedAt
-        .filterKeys { it in sweptIds }
-    return sweptIds to sweptCreatedAt
-}
 
-/**
- * Decision helper for auto-select logic. Returns a sealed outcome describing
- * which auto-select policy branch to follow. The caller maps each outcome to
- * the appropriate action (onSelectSession / onLoadSessionStatus+onLoadMessages
- * / dispatch ChatCleared / no-op).
- *
- * Never invents [sessions.first()]; restore-only from openSessionIds on cold
- * start. The draftWorkdir gate prevents hijacking the draft UI.
- */
-private sealed class AutoSelectDecision {
-    data object ClearChat : AutoSelectDecision()
-    data class SelectRestored(val sessionId: String) : AutoSelectDecision()
-    data class KeepCurrent(val sessionId: String) : AutoSelectDecision()
-    data object ClearChatResidual : AutoSelectDecision()
-}
-
-private fun decideAutoSelectSession(
-    currentSessionId: String?,
-    draftWorkdir: String?,
-    isInitialColdStart: Boolean,
-    currentOpenIds: List<String>,
-    refreshedSessions: List<Session>,
-): AutoSelectDecision {
-    return when {
-        currentSessionId == null && draftWorkdir == null && currentOpenIds.isEmpty() ->
-            AutoSelectDecision.ClearChat
-        currentSessionId == null && draftWorkdir == null && isInitialColdStart && currentOpenIds.isNotEmpty() -> {
-            val liveById = refreshedSessions
-                .filter { !it.isArchived }
-                .associateBy { it.id }
-            val candidateId = currentOpenIds.asReversed()
-                .firstOrNull { it in liveById }
-            if (candidateId != null) AutoSelectDecision.SelectRestored(candidateId)
-            else AutoSelectDecision.ClearChat
-        }
-        currentSessionId == null && draftWorkdir == null ->
-            AutoSelectDecision.ClearChatResidual
-        currentSessionId != null ->
-            AutoSelectDecision.KeepCurrent(currentSessionId)
-        else ->
-            AutoSelectDecision.ClearChatResidual
-    }
-}
-
-@Suppress("UNUSED_PARAMETER")
 internal fun persistSessionCache(
     settingsManager: SettingsManager,
     sessions: List<Session>,
     openIds: List<String>,
     currentId: String?,
     currentWorkdir: String?,
-    revertCutoffs: Map<String, RevertCutoff>
-) {
-    // §Q4-strict-sync: openIds / currentId / currentWorkdir retained in the
-    // signature for call-site stability; the filter is now ALL root sessions.
-    val cache = sessions
-        .asSequence()
-        .filter { s -> s.parentId == null && !s.isArchived }
-        .map { session ->
-            session.toCacheEntry().copy(
-                revertCreatedAtEpochMs = revertCutoffs[session.id]
-                    ?.takeIf { it.messageId == session.revert?.messageId }
-                    ?.let { (it.state as? RevertCutoffState.Resolved)?.createdAtEpochMs }
-            )
-        }
-        .sortedByDescending { it.timeUpdated ?: 0L }
-        .take(MainViewModelTimings.sessionCacheCap)
-        .toList()
-    settingsManager.sessionCache = cache
-}
+    revertCutoffs: Map<String, RevertCutoff>,
+) = sessionMetadataCacheWriter.persistSessionCache(
+    settingsManager = settingsManager,
+    sessions = sessions,
+    openIds = openIds,
+    currentId = currentId,
+    currentWorkdir = currentWorkdir,
+    revertCutoffs = revertCutoffs,
+)
 
 internal fun launchLoadSessions(
     scope: CoroutineScope,
@@ -161,433 +90,36 @@ internal fun launchLoadSessions(
     onLoadSessionStatus: () -> Unit,
     onLoadMessages: (String) -> Unit,
     emit: EventEmitter = EventEmitter { },
-    /**
-     * FIX-D (gpter #2): provider for the current host's serverGroupFp.
-     * Used to key the stale-host re-check after the REST suspend.
-     */
     expectedServerGroupFp: String? = null,
-    /**
-     * FIX-D (gpter #2): provider for the current host's serverGroupFp.
-     * Used to detect a host switch during the in-flight REST fetch.
-     */
     currentServerGroupFp: (() -> String)? = null,
-    // §grouping-rewrite Round-2 #5: hostProfileStore parameter removed — it
-    // was wired in by R-20 Phase 5 for the cross-group merge that item 1 of
-    // this rewrite deleted (attemptCrossGroupMerge was the sole consumer
-    // inside this function body). Both call sites (SessionViewModel,
-    // AppCoreOrchestration) and one test updated to drop the now-unused arg.
-    /**
-     * WT6 (archive-sync, gap-3): invoked when the merged refresh result flips
-     * the [currentSessionId] session to `isArchived == true` (the canonical
-     * cross-device-archive-during-SSE-gap case Task 1's reconnect refresh now
-     * surfaces). The caller mirrors the SSE archive eviction path
-     * (AppAction.SessionArchived → applyArchiveEviction + applyArchivedChatClear)
-     * so the chat does not linger on a session the render filters now hide.
-     * Null = caller has no dispatch surface (legacy / test) → the merged list is
-     * still written; only the chat-clear is skipped.
-     *
-     * FIX-A/C (review-blocker): RENAMED + REWIDENED from
-     * `onCurrentSessionArchived((Session) -> Unit)`. The callback now fires
-     * whenever ANY session in the merged result is archived AND was in the
-     * openIds or was the current session — not just the current session. It
-     * carries the full merged list + the pruned openIds so the caller can
-     * dispatch a SINGLE atomic [AppAction.BulkSessionsRefreshed] that writes
-     * the list AND prunes openIds AND (if current is archived) clears chat,
-     * eliminating the torn intermediate the prior two-step produced. The
-     * callback is invoked BEFORE any mutateSessionList so no collector ever
-     * observes the "sessions[current].isArchived == true AND
-     * chat.currentSessionId == current" combo.
-     * [confirmedServerIds] always comes from the raw REST response; it must not
-     * be derived from [mergedSessions], which can contain pending-local ids.
-     */
     onArchivedSessionsDetected: ((mergedSessions: List<Session>, newOpenIds: List<String>, hasMoreSessions: Boolean, confirmedServerIds: Set<String>, sweepNow: Long) -> Unit)? = null,
-) {
-
-    scope.launch {
-        fun staleHostAfterSuspend(): Boolean = expectedServerGroupFp != null &&
-            currentServerGroupFp != null &&
-            expectedServerGroupFp != currentServerGroupFp()
-
-        // FIX-D (gpter #2): capture this request's epoch. If a newer
-        // launchLoadSessions call is issued while this REST is in flight,
-        // the post-suspend check will detect the supersession and drop the
-        // stale result before any write/persist/archive-callback.
-        val myEpoch = sessionListLoadEpoch.incrementAndGet()
-
-        val limit = MainViewModelTimings.sessionFullLoadLimit
-        slices.mutateSessionList {
-            it.copy(
-                loadedSessionLimit = limit,
-                hasMoreSessions = true,
-                isLoadingMoreSessions = false,
-                isRefreshingSessions = true
-            )
-        }
-        repository.getSessions(limit)
-            .onSuccess { sessions ->
-                // FIX-D (gpter #2): if a newer load was issued while this REST
-                // was in flight, drop the stale result entirely — it must NOT
-                // update sessions/openSessionIds/cache NOR trigger archive
-                // side-effects (which are now destructive per FIX-A/C).
-                // §epoch-no-op (task 1): a stale result is fully no-op — it
-                // no longer clears isLoadingMoreSessions / isRefreshingSessions
-                // (the newer in-flight request owns those flags; writing here
-                // could transiently flip a still-loading UI to idle before the
-                // newer request resets it). Just log + return.
-                if (myEpoch != sessionListLoadEpoch.get()) {
-                    DebugLog.d("Sync", "launchLoadSessions: epoch $myEpoch superseded, discarding stale snapshot")
-                    return@onSuccess
-                }
-                if (staleHostAfterSuspend()) {
-                    // §epoch-no-op (task 1): stale-host ⇒ fully no-op (same
-                    // rationale as the epoch-stale branch above).
-                    return@onSuccess
-                }
-                // Capture cross-slice reads BEFORE the sessionList update:
-                // mergeRefreshedSessionsPreservingLocalActivity needs
-                // currentSessionId (chat slice) and openSessionIds (sessionList).
-                // §R-17 batch2 step e final: slice-only reads (slices are the
-                // sole authoritative store). Single capture for this
-                // synchronous pre-write cluster.
-                val currentSessionId = slices.chat.value.currentSessionId
-                val currentSessionList = slices.sessionList.value
-                val currentSessions = currentSessionList.sessions
-                val currentOpenIds = currentSessionList.openSessionIds
-                // §fix-close-all-residual: capture the pre-load cold-start flag.
-                // The auto-select below must fire ONLY on the first load (true
-                // cold start), not on every refresh — otherwise closing all
-                // tabs (currentSessionId → null) gets overridden on the next
-                // refresh and the first server session (often a stale error
-                // session) is resurrected as a tab-less residual chat.
-                val isInitialColdStart = !currentSessionList.hasCompletedInitialLoad
-                // §Q4-strict-sync: capture pendingCreateIds for the merge
-                // (preserve local-only ids that are still pending-create).
-                val currentPendingCreateIds = currentSessionList.pendingCreateIds
-                val currentPendingCreatedAt = currentSessionList.pendingCreatedAt
-                val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(
-                    sessions,
-                    currentSessions,
-                    currentSessionId,
-                    currentOpenIds.toSet(),
-                    pendingCreateIds = currentPendingCreateIds,
-                )
-                // Nav redesign: the initial load is a fixed full-page snapshot
-                // (sessionFullLoadLimit) with no load-more UI, so hasMore is
-                // hard-false after this load regardless of the returned size—
-                // other consumers (TopBar/Picker) must not advertise a next page
-                // that the Sessions tab will never trigger. 500 is an accepted
-                // "effectively all" product cap (per-workdir directorySessions
-                // fan-out covers connected projects beyond the global page).
-                val newHasMore = false
-                if (staleHostAfterSuspend()) {
-                    return@onSuccess
-                }
-                if (staleHostAfterSuspend()) return@onSuccess
-                val refreshedSessions = mergedSessions
-                // §Q4-strict-sync: compute the NEW pendingCreateIds set.
-                //   - Remove any id that surfaced in the authoritative refresh
-                //     (confirmed by the server → no longer pending).
-                //   - Sweep any remaining pending id whose LOCAL creation
-                //     timestamp is older than pendingCreateTimeoutMs (trust
-                //     the server — if it has not propagated by now, drop it).
-                // The sweep needs `now` (captured here, outside the reducer)
-                // and the independent local registration timestamp. Missing
-                // timestamps fail closed and are swept.
-                val sweepNow = System.currentTimeMillis()
-                val serverIds = sessions.mapTo(mutableSetOf()) { it.id }
-                val (sweptPendingCreateIds, sweptPendingCreatedAt) = sweepPendingCreateIds(
-                    currentPendingCreateIds = currentPendingCreateIds,
-                    currentPendingCreatedAt = currentPendingCreatedAt,
-                    serverIds = serverIds,
-                    nowMs = sweepNow,
-                )
-                // remove-message-persistence Task 6: the prior
-                // `currentSessionVerifyResult = cacheRepository.verifyFingerprint`
-                // suspend + epoch/host re-check block was deleted together
-                // with the CacheRepository surface. The currentSessionId is
-                // consumed directly below (memory LRU is the sole cache; the
-                // server is the source of truth for cross-restart drift).
-                // ── FIX-A/C (review-blocker): atomic bulk-archive commit ─────
-                // Detect ALL archived sessions in the merged result that are
-                // currently OPEN (in openSessionIds) or are the current chat
-                // session. If any are found AND the caller wired the callback,
-                // dispatch a SINGLE BulkSessionsRefreshed action that writes
-                // the merged list + prunes openIds + (if current is archived)
-                // clears chat — all in one committed aggregate state. This
-                // replaces the prior two-step (mutateSessionList THEN separate
-                // dispatch) which produced a torn "sessions[current].isArchived
-                // == true AND chat.currentSessionId == current" intermediate.
-                // The callback is invoked BEFORE the mutateSessionList so no
-                // collector can observe the combo.
-                val archivedIds = mergedSessions
-                    .filter { it.isArchived }
-                    .map { it.id }
-                    .toSet()
-                val newOpenIds = currentOpenIds.filter { it !in archivedIds }
-                val currentIsArchived = currentSessionId != null && currentSessionId in archivedIds
-                val anyArchivedOpen = archivedIds.isNotEmpty() &&
-                    (currentIsArchived || currentOpenIds.any { it in archivedIds })
-                if (anyArchivedOpen && onArchivedSessionsDetected != null) {
-                    // FIX-C: single atomic dispatch via the callback — writes
-                    // the list AND prunes openIds AND clears chat in ONE step.
-                    onArchivedSessionsDetected?.invoke(mergedSessions, newOpenIds, newHasMore, serverIds, sweepNow)
-                    // Persist the PRUNED cache (FIX-A: archived ids no longer
-                    // in openSessionIds; currentId null if archived so the
-                    // cache filter drops it from the "current" slot too).
-                    persistSessionCache(
-                        settingsManager = settingsManager,
-                        sessions = mergedSessions,
-                        openIds = newOpenIds,
-                        currentId = if (currentIsArchived) null else currentSessionId,
-                        currentWorkdir = settingsManager.currentWorkdir,
-                        revertCutoffs = slices.chat.value.revertCutoffs
-                    )
-                    // Skip the auto-select / load logic below — the dispatch
-                    // atomically cleared chat if needed; loading messages for
-                    // the just-archived id is wasteful + racy vs the reducer's
-                    // clear. Non-archive path runs for sessions that survived.
-                    //
-                    // T1c gap fix: BulkSessionsRefreshed reducer now sets
-                    // hasCompletedInitialLoad=true atomically — no separate
-                    // mutateSessionList patch needed.
-                    return@onSuccess
-                }
-                // T1c: SessionsRefreshedLocal owns the 9-field non-archive
-                // full-refresh copy (distinct from BulkSessionsRefreshed).
-                slices.store.dispatch(
-                    AppAction.SessionsRefreshedLocal(
-                        sessions = mergedSessions,
-                        hasMoreSessions = newHasMore,
-                        pendingCreateIds = sweptPendingCreateIds,
-                        pendingCreatedAt = sweptPendingCreatedAt,
-                    )
-                )
-                // Persist a BOUNDED session-metadata cache so the next cold
-                // start can reseed the session-list slice instantly (tabs/title/
-                // workdir groups). §Q4-strict-sync: now caches ALL non-archived
-                // root sessions (was: open/current/currentWorkdir only), capped
-                // at sessionCacheCap by time.updated desc.
-                persistSessionCache(
-                    settingsManager = settingsManager,
-                    sessions = mergedSessions,
-                    openIds = newOpenIds,
-                    currentId = currentSessionId,
-                    currentWorkdir = settingsManager.currentWorkdir,
-                    revertCutoffs = slices.chat.value.revertCutoffs
-                )
-                // §Q4-strict-sync (#9 workdir auto-discovery): scan the refreshed
-                // sessions' directories and add any NEW workdir (not already in
-                // the current serverGroupFp's recentWorkdirs) to recentWorkdirs
-                // + fan-out getSessionsForDirectory. This keeps recentWorkdirs
-                // in sync with the server's actual project distribution even
-                // when the user never explicitly connected a workdir via the
-                // draft flow (e.g. sessions created via another client). The
-                // fan-out is best-effort (failures swallowed) and identity-
-                // guarded (staleHostAfterSuspend drops cross-host results).
-                val discoveryFp = currentServerGroupFp?.invoke()
-                if (!discoveryFp.isNullOrEmpty()) {
-                    val knownWorkdirs = settingsManager
-                        .getRecentWorkdirs(discoveryFp)
-                        .map { WorkdirPaths.normalize(it) }
-                        .toSet()
-                    val currentWorkdirNorm = settingsManager.currentWorkdir
-                        ?.let { WorkdirPaths.normalize(it) }
-                    mergedSessions
-                        .mapNotNull { it.directory.takeIf { d -> d.isNotBlank() } }
-                        .map { WorkdirPaths.normalize(it) to it }
-                        .distinctBy { it.first }
-                        .filter { (norm, _) ->
-                            norm.isNotEmpty() &&
-                                norm !in knownWorkdirs &&
-                                norm != currentWorkdirNorm
-                        }
-                        .forEach { (_, rawWorkdir) ->
-                            settingsManager.addRecentWorkdir(discoveryFp, rawWorkdir)
-                            scope.launch {
-                                repository.getSessionsForDirectory(rawWorkdir)
-                                    .onSuccess { dirSessions ->
-                                        if (staleHostAfterSuspend()) return@launch
-                                        if (currentServerGroupFp?.invoke() != discoveryFp) return@launch
-                                        slices.mutateSessionList { slice ->
-                                            slice.copy(
-                                                directorySessions = slice.directorySessions + (rawWorkdir to dirSessions)
-                                            )
-                                        }
-                                    }
-                                    .onFailure { /* best-effort */ }
-                            }
-                        }
-                }
-                if (staleHostAfterSuspend()) return@onSuccess
-                // (FIX-A/C: the archived-current + non-current-open-id archive
-                // detection + atomic callback now lives ABOVE the normal
-                // mutateSessionList, before any write — see
-                // [anyArchivedOpen] / [onArchivedSessionsDetected]. This
-                // branch is reached only when no archives were detected OR
-                // the caller has no callback wired.)
-                //
-                // Auto-select policy: see [decideAutoSelectSession] doc.
-                // §fix-close-all-no-first: never invents from sessions.first().
-                when (val decision = decideAutoSelectSession(
-                    currentSessionId = currentSessionId,
-                    draftWorkdir = slices.composer.value.draftWorkdir,
-                    isInitialColdStart = isInitialColdStart,
-                    currentOpenIds = currentOpenIds,
-                    refreshedSessions = refreshedSessions,
-                )) {
-                    is AutoSelectDecision.ClearChat,
-                    is AutoSelectDecision.ClearChatResidual -> {
-                        slices.store.dispatch(AppAction.ChatCleared)
-                    }
-                    is AutoSelectDecision.SelectRestored -> {
-                        onSelectSession(decision.sessionId)
-                    }
-                    is AutoSelectDecision.KeepCurrent -> {
-                        // currentId is set: keep it. Even when the session is
-                        // temporarily absent from the refreshed list (e.g. just
-                        // created, or a directory session), tolerate it — reload
-                        // its messages but do NOT silently reselect first(). #10.
-                        onLoadSessionStatus()
-                        onLoadMessages(decision.sessionId)
-                    }
-                }
-            }
-            .onFailure { error ->
-                // §epoch-no-op (task 1): a stale FAILURE is fully no-op too —
-                // if a newer launchLoadSessions superseded this one (epoch
-                // bumped) or the host switched under us, clearing the loading
-                // flags + emitting an error here would (a) transiently flip a
-                // still-loading newer request to idle and (b) surface a stale
-                // error toast for a request the user no longer cares about.
-                // The newer request owns the loading flags; drop before any
-                // write/emit.
-                if (myEpoch != sessionListLoadEpoch.get() || staleHostAfterSuspend()) {
-                    DebugLog.d("Sync", "launchLoadSessions: stale failure (epoch/host changed), discarding")
-                    return@onFailure
-                }
-                slices.mutateSessionList {
-                    it.copy(
-                        isLoadingMoreSessions = false,
-                        isRefreshingSessions = false
-                    )
-                }
-                emit.emit(UiEvent.Error(R.string.error_load_sessions_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
-            }
-    }
-}
+) = sessionListRefreshOrchestrator.launchLoadSessions(
+    scope = scope,
+    repository = repository,
+    slices = slices,
+    settingsManager = settingsManager,
+    onSelectSession = onSelectSession,
+    onLoadSessionStatus = onLoadSessionStatus,
+    onLoadMessages = onLoadMessages,
+    emit = emit,
+    expectedServerGroupFp = expectedServerGroupFp,
+    currentServerGroupFp = currentServerGroupFp,
+    onArchivedSessionsDetected = onArchivedSessionsDetected,
+)
 
 internal fun launchLoadMoreSessions(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
     slices: SliceFlows,
     onSelectSession: (String) -> Unit,
-    emit: EventEmitter = EventEmitter { }
-) {
-
-    var nextLimit = 0
-    var shouldLaunch = false
-    // §R-17 batch2 step e final: slice-only reads. Single capture for this
-    // synchronous pre-launch guard cluster.
-    val currentHasMore = slices.sessionList.value.hasMoreSessions
-    val currentIsLoadingMore = slices.sessionList.value.isLoadingMoreSessions
-    val currentLoadedLimit = slices.sessionList.value.loadedSessionLimit
-    if (!currentHasMore || currentIsLoadingMore) {
-        // No-op (mirrors the legacy check-and-set return-current branch).
-    } else {
-        nextLimit = nextSessionFetchLimit(currentLoadedLimit)
-        shouldLaunch = true
-        slices.mutateSessionList { sl -> sl.copy(isLoadingMoreSessions = true) }
-    }
-    if (!shouldLaunch) return
-    scope.launch {
-        repository.getSessions(nextLimit)
-            .onSuccess { sessions ->
-                // §R-17 batch2 step e final: slice-only reads. Single capture
-                // for this cluster (if loadedLimit > nextLimit we write+return;
-                // otherwise no write before the merge reads below).
-                val loadedLimit = slices.sessionList.value.loadedSessionLimit
-                if (loadedLimit > nextLimit) {
-                    slices.mutateSessionList { sl -> sl.copy(isLoadingMoreSessions = false) }
-                    return@onSuccess
-                }
-                val currentSessionId = slices.chat.value.currentSessionId
-                val currentSessionList = slices.sessionList.value
-                val currentSessions = currentSessionList.sessions
-                val currentOpenIds = currentSessionList.openSessionIds
-                // §fix-close-all-residual: mirror the launchLoadSessions cold-
-                // start gate (see there). loadMore is user-scroll-triggered so
-                // this auto-select is effectively dead post-fix (initial load
-                // already completed before the user can scroll), but gate it
-                // symmetrically so a future trigger change can't resurrect the
-                // close-all-tabs residual via this path.
-                val isInitialColdStart = !currentSessionList.hasCompletedInitialLoad
-                // §Q4-strict-sync: capture pendingCreateIds for the merge + sweep.
-                val currentPendingCreateIds = currentSessionList.pendingCreateIds
-                val currentPendingCreatedAt = currentSessionList.pendingCreatedAt
-                val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(
-                    sessions,
-                    currentSessions,
-                    currentSessionId,
-                    currentOpenIds.toSet(),
-                    pendingCreateIds = currentPendingCreateIds,
-                )
-                // §Q4-strict-sync: sweep pendingCreateIds (remove confirmed +
-                // drop timed-out) — mirrors launchLoadSessions.
-                val sweepNow = System.currentTimeMillis()
-                val serverIds = sessions.mapTo(mutableSetOf()) { it.id }
-                val (sweptPendingCreateIds, sweptPendingCreatedAt) = sweepPendingCreateIds(
-                    currentPendingCreateIds = currentPendingCreateIds,
-                    currentPendingCreatedAt = currentPendingCreatedAt,
-                    serverIds = serverIds,
-                    nowMs = sweepNow,
-                )
-                val newHasMore = mergedSessions.size >= nextLimit
-                // T1c: SessionsPageAppended owns the 8-field loadMore copy.
-                slices.store.dispatch(
-                    AppAction.SessionsPageAppended(
-                        sessions = mergedSessions,
-                        loadedSessionLimit = nextLimit,
-                        hasMoreSessions = newHasMore,
-                        pendingCreateIds = sweptPendingCreateIds,
-                        pendingCreatedAt = sweptPendingCreatedAt,
-                    )
-                )
-                val currentId = currentSessionId
-                val refreshedSessions = mergedSessions
-                // §fix-close-all-no-first: mirror launchLoadSessions policy
-                // (see [decideAutoSelectSession] doc). Never invent from first().
-                when (val decision = decideAutoSelectSession(
-                    currentSessionId = currentId,
-                    draftWorkdir = slices.composer.value.draftWorkdir,
-                    isInitialColdStart = isInitialColdStart,
-                    currentOpenIds = currentOpenIds,
-                    refreshedSessions = refreshedSessions,
-                )) {
-                    is AutoSelectDecision.ClearChat,
-                    is AutoSelectDecision.ClearChatResidual -> {
-                        slices.store.dispatch(AppAction.ChatCleared)
-                    }
-                    is AutoSelectDecision.SelectRestored -> {
-                        onSelectSession(decision.sessionId)
-                    }
-                    is AutoSelectDecision.KeepCurrent -> {
-                        // A non-null currentId is never silently replaced by
-                        // refreshedSessions.first(): tolerate the session even when
-                        // it is temporarily absent from the refreshed list. #10.
-                        Unit // No-op for loadMore (status+msg already owned by initial load)
-                    }
-                }
-            }
-            .onFailure { error ->
-                slices.mutateSessionList {
-                    it.copy(
-                        isLoadingMoreSessions = false
-                    )
-                }
-                emit.emit(UiEvent.Error(R.string.error_load_more_sessions_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
-            }
-    }
-}
+    emit: EventEmitter = EventEmitter { },
+) = sessionListRefreshOrchestrator.launchLoadMoreSessions(
+    scope = scope,
+    repository = repository,
+    slices = slices,
+    onSelectSession = onSelectSession,
+    emit = emit,
+)
 
 // §single-flight/epoch (groker🟡 v0.7.5): statusLoadEpoch moved to
 // [StatusPollOrchestrator] (god-file-decomposition P7, single-owner rule). The
@@ -613,7 +145,6 @@ internal fun launchLoadMoreSessions(
 // check with no suspension in between (remove-message-persistence Task 6
 // removed the prior post-verifyFingerprint re-check), so no TOCTOU is
 // possible on this dispatcher.
-private val sessionListLoadEpoch = java.util.concurrent.atomic.AtomicLong(0)
 
 /**
  * T-R1 (slimapi R1) 方案A: distinguishes the foreground 4s SWEEP (a no-op for
@@ -670,22 +201,13 @@ internal fun launchLoadSessionDiff(
     scope: CoroutineScope,
     repository: OpenCodeRepository,
     slices: SliceFlows,
-    sessionId: String
-) {
-    scope.launch {
-        repository.getSessionDiff(sessionId)
-            .onSuccess { diffs ->
-                // §glmer-S1 / §maxer-复审：REST 仅在 SSE 尚未覆盖时写入——避免 REST 在途
-                //  期间 SSE 推送了更新快照后被旧的 REST 结果覆盖（stale-overwrite）。SSE
-                //  session.diff 是权威源；REST 只是乐观预取。抽成 applySessionDiffIfAbsent
-                //  纯函数以便单测，镜像上游 web client 的 diff() 守卫。
-                slices.mutateSessionList { it.applySessionDiffIfAbsent(sessionId, diffs).first }
-            }
-            .onFailure { error ->
-                reportNonFatalIssue("MainViewModel", "Failed to load session diff", error)
-            }
-    }
-}
+    sessionId: String,
+) = sessionListRefreshOrchestrator.launchLoadSessionDiff(
+    scope = scope,
+    repository = repository,
+    slices = slices,
+    sessionId = sessionId,
+)
 
 /**
  * §R-17 batch3d: free-function extraction of the former AppCore.loadChildSessions
@@ -835,8 +357,6 @@ internal fun launchLoadPendingPermissions(
     effects = effects,
     tag = tag,
 )
-
-
 
 /**
  * §R-17 batch3d: free-function extraction of the former AppCore.loadAgents body.

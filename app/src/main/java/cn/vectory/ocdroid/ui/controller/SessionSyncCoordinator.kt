@@ -8,25 +8,19 @@ import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
-import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.LastErrorField
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
 import cn.vectory.ocdroid.data.model.SlimSessionLastError
-import cn.vectory.ocdroid.data.model.SlimapiQuestionEntry
-import cn.vectory.ocdroid.data.model.SlimapiPermissionEntry
-import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ProbeResult
 import cn.vectory.ocdroid.data.repository.SlimColdStartSnapshot
-import cn.vectory.ocdroid.data.repository.SlimAggregationOutcome
 import cn.vectory.ocdroid.data.repository.SlimSessionState
 import cn.vectory.ocdroid.data.repository.catchUpSet
 import cn.vectory.ocdroid.data.repository.needsCatchUp
-import cn.vectory.ocdroid.data.repository.toPermissionRequest
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.status.SessionBusyStatus
@@ -42,7 +36,6 @@ import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.UnreadState
-import cn.vectory.ocdroid.ui.computeQuestionFanOutWorkdirs
 import cn.vectory.ocdroid.ui.lenientJson
 import cn.vectory.ocdroid.ui.parseMessagePartDeltaEvent
 import cn.vectory.ocdroid.ui.parseQuestionAskedEvent
@@ -67,8 +60,6 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
@@ -594,28 +585,39 @@ class SessionSyncCoordinator(
         }
     }
 
-    // ── P4-B wiring (§4.3, §6.1, §6.2, §6.4, §6.5) ─────────────────────────
+    // ── P4-B + P5 wiring (shared ports → reconciler → loader/applier) ──────
     //
-    // The reconciliation core lives in [SlimSessionReconciler] (P4-B move).
-    // SSC retains: the frozen façade (`reconcileSession` /
-    // `reconcileSessionExposed`), the digest event parsing
-    // (`handleSessionDigestImpl` — moves to the reconciler as
-    // `prepareSessionDigest` in P4-C), the resync worker
+    // P4: the reconciliation core lives in [SlimSessionReconciler].
+    // P5: the question loader lives in [SlimQuestionLoader]; the cold-start
+    // snapshot applier lives in [SlimColdStartSnapshotApplier].
+    //
+    // SSC retains: the frozen façades (`reconcileSession` /
+    // `reconcileSessionExposed`, both `applySlimColdStartSnapshot` overloads,
+    // `loadPendingQuestionsAllWorkdirs`), the digest event parsing
+    // (`handleSessionDigestImpl`), the resync worker
     // (`performSlimResync`), the cadence (`SlimResyncCadence`), the
     // coroutine `scope`, and the resync catch-up orchestrator
     // (`performResyncCatchUp`).
     //
-    // See docs/ocmar/plans/2026-07-24-p4-slim-session-reconciler-design.md.
+    // See docs/ocmar/plans/2026-07-24-p4-slim-session-reconciler-design.md and
+    // docs/ocmar/plans/2026-07-24-p5-slim-question-loader-design.md.
     //
     // P4-B command interpreter: SSC is the SOLE executor of the resync
     // worker launch (`scope.launch { performSlimResync(...) }`). The
     // reconciler returns a [SlimReconcileCommand]; SSC interprets it.
 
+    // P5 §2.3: shared P4 ports — constructed ONCE, reused by reconciler +
+    // loader + applier (no second store/repo incarnation).
+    private val slimRepositoryPort: SlimReconcileRepositoryPort? =
+        repository?.let(::OpenCodeSlimReconcileRepositoryPort)
+    private val slimStorePort: SlimReconcileStorePort =
+        DefaultSlimReconcileStorePort(slices, settingsManager)
+
     /**
      * P4 §4.3: the extracted reconciler. Constructed with SSC's own
-     * [StripeLock] / [SlimEffectsPort] impls + the [OpenCodeRepository]
-     * adapter, so there is exactly one stripe array, one effects bus, one
-     * repo incarnation (§11 acceptance: single SlimEffectsPort + single
+     * [StripeLock] / [SlimEffectsPort] impls + the shared repo/store ports,
+     * so there is exactly one stripe array, one effects bus, one repo
+     * incarnation (§11 acceptance: single SlimEffectsPort + single
      * StripeLock).
      *
      * Ownership confirmations (per §4.3):
@@ -624,19 +626,48 @@ class SessionSyncCoordinator(
      *    existing 64-entry `reconcileStripes` array (no second array).
      *  - `effects = this` — SSC is the sole [SlimEffectsPort] impl; every
      *    slim side-effect still funnels through SSC's single `effects` bus.
-     *  - `repository?.let(::OpenCodeSlimReconcileRepositoryPort)` — ONE repo
-     *    adapter (no second incarnation); null when SSC has no repo.
+     *  - [slimRepositoryPort] — ONE repo adapter (no second incarnation);
+     *    null when SSC has no repo.
      *  - No `CoroutineScope` / `SlimResyncCadence` / `currentEpoch` /
      *    `performSlimResync` callback is injected (§4.3 exclusions).
      */
     private val slimSessionReconciler = SlimSessionReconciler(
-        repository = repository?.let(::OpenCodeSlimReconcileRepositoryPort),
-        store = DefaultSlimReconcileStorePort(slices, settingsManager),
+        repository = slimRepositoryPort,
+        store = slimStorePort,
         stripeLock = this,
         effects = this,
         supportsWatermarkResync = supportsWatermarkResync,
         currentServerGroupFp = currentServerGroupFp,
         reconcileDispatcher = reconcileDispatcher,
+    )
+
+    /**
+     * P5 §2.1: the extracted question loader. Owns the legacy all-workdir
+     * fan-out + the slim single-shot question aggregation. Returns a sealed
+     * [SlimQuestionLoadCommand]; SSC owns the `scope.launch`. Holds NO
+     * `CoroutineScope` and NO SSC reference.
+     */
+    private val slimQuestionLoader = SlimQuestionLoader(
+        store = slimStorePort,
+        effects = this,
+        supportsWatermarkResync = supportsWatermarkResync,
+        currentWorkdir = { settingsManager.currentWorkdir },
+        recentWorkdirs = { settingsManager.getRecentWorkdirs(currentServerGroupFp()) },
+    )
+
+    /**
+     * P5 §2.2: the extracted cold-start snapshot applier. Owns both
+     * snapshot-application workflows. Message merging delegates ONLY to
+     * [slimSessionReconciler.mergeSlimMessagesIntoChat] (one-way child dep
+     * — no duplicate merge/authoritative logic). Holds NO `CoroutineScope`
+     * and NO SSC reference.
+     */
+    private val slimColdStartSnapshotApplier = SlimColdStartSnapshotApplier(
+        repository = slimRepositoryPort,
+        store = slimStorePort,
+        effects = this,
+        reconciler = slimSessionReconciler,
+        supportsWatermarkResync = supportsWatermarkResync,
     )
 
     /**
@@ -1173,169 +1204,27 @@ class SessionSyncCoordinator(
      * [SessionSyncCoordinatorTest].
      */
     fun loadPendingQuestionsAllWorkdirs(repository: OpenCodeRepository) {
-        // Cluster A / Phase 2 (P2.3): slim mode aggregates cross-directory
-        // pending questions in ONE `/slimapi/questions` call (routeToken
-        // preserved). Legacy keeps the multi-workdir fan-out below.
-        if (supportsWatermarkResync()) {
-            loadPendingQuestionsSlim(repository)
-            return
-        }
-        // §issue-1 Phase 2a Fix B: shared workdir-set computation (with per-fp
-        // recent_workdirs) — identical to AppCore's catchUpWorkdirs site, via
-        // the [computeQuestionFanOutWorkdirs] helper, so the two sites cannot drift.
-        val workdirs = computeQuestionFanOutWorkdirs(
-            directorySessionKeys = slices.sessionList.value.directorySessions.keys,
-            currentWorkdir = settingsManager.currentWorkdir,
-            recentWorkdirs = settingsManager.getRecentWorkdirs(currentServerGroupFp()),
-        )
-        // §Phase1a instrumentation (Issue 1): the full workdir SET being fanned out.
-        DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs fanOut=${workdirs.size} workdirs=$workdirs")
-        if (workdirs.isEmpty()) return
-        // §badge-stale-fix: fan out to EVERY known workdir in parallel, then
-        // reconcile AUTHORITATIVELY (server is source of truth). Unlike the
-        // single-workdir optimistic path [launchLoadPendingQuestions] — which
-        // keeps locally-held questions to avoid flicker — this sweep covers the
-        // full known-workdir set at once, so its union is authoritative. A
-        // question the server no longer returns (resolved without the client
-        // receiving the resolve event, e.g. a missed SSE gap while backgrounded)
-        // is dropped here instead of lingering as a ghost that keeps the
-        // Sessions nav badge lit forever. Matches launchLoadPendingPermissions
-        // (full replace) semantics.
-        //
-        // Race-safety: a question.asked SSE event that lands DURING the fan-out
-        // (after the start snapshot, not yet in any in-flight GET response) is
-        // preserved — only questions present at start AND absent from the server
-        // response are treated as resolved-and-dropped.
-        scope.launch {
-            val startIds = slices.sessionList.value.pendingQuestions
-                .mapTo(mutableSetOf()) { it.id }
-            val fetched = workdirs.map { dir ->
-                async {
-                    repository.getPendingQuestions(dir)
-                        .onSuccess { questions ->
-                            DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs dir=$dir count=${questions.size}")
-                        }
-                        .onFailure { error ->
-                            DebugLog.w(tag, "fan-out getPendingQuestions failed for $dir: ${error.message}")
-                        }
-                        .getOrDefault(emptyList())
-                }
-            }.awaitAll()
-            val fetchedIds = mutableSetOf<String>()
-            // §task5-ghost (final-review fix 2): snapshot the three-source
-            // sessions map BEFORE the merge so the filter can identify
-            // archived-session questions. A question whose session is marked
-            // archived in the local snapshot is dropped here even if the server
-            // still returns it — the archive reducer already cleared it from
-            // the presentation domain, and letting it back in would relight
-            // the Sessions nav badge for a session the user cannot open.
-            val slSnap = slices.sessionList.value
-            val sessionsById = allSessionsById(
-                slSnap.sessions,
-                slSnap.directorySessions,
-                slSnap.childSessions,
-            )
-            val authoritative = buildList {
-                fetched.flatten().forEach { if (fetchedIds.add(it.id)) add(it) }
-                slSnap.pendingQuestions.forEach { q ->
-                    if (q.id !in fetchedIds && q.id !in startIds) add(q)
-                }
-            }.let { filterArchivedSessionQuestions(it, sessionsById) }
-            slices.mutateSessionList { it.copy(pendingQuestions = authoritative) }
-            DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs authoritative reconcile total=${authoritative.size} (had ${startIds.size} before)")
+        // P5 §2.1: thin F5 façade. The loader's synchronous `planLoad`
+        // decides mode (slim vs legacy) + computes workdirs + early-returns
+        // for empty set. SSC owns the `scope.launch` and calls `execute`.
+        val command = slimQuestionLoader.planLoad(OpenCodeSlimQuestionRepositoryPort(repository))
+        when (command) {
+            SlimQuestionLoadCommand.None -> Unit
+            is SlimQuestionLoadCommand.LoadLegacy,
+            is SlimQuestionLoadCommand.LoadSlim -> {
+                scope.launch { slimQuestionLoader.execute(command) }
+            }
         }
     }
 
     /**
-     * Cluster A / Phase 2 (P2.3): slim single-shot pending-questions load via
-     * [OpenCodeRepository.getSlimapiQuestions]. Maps each entry to legacy
-     * [QuestionRequest] **preserving [QuestionRequest.routeToken]**. Same
-     * authoritative reconcile + archived-session filter as the legacy fan-out.
-     *
-     * C-D3 v2 §2.2: standalone workflow entry — captures ONE token before
-     * the network suspend, then guards every slice / signal / effect
-     * commit inside a single `commitIfSlimTokenCurrent` block. A stale
-     * result is a clean no-op (no slice mutation, no UiEvent).
+     * P5: the legacy fan-out + slim single-shot bodies MOVED to
+     * [SlimQuestionLoader] ([executeLegacy] / [executeSlim]). The private
+     * `loadPendingQuestionsSlim` was removed (not F5). Timing invariants
+     * preserved: mode selection / workdir computation / logging / empty-set
+     * early-return are synchronous in `planLoad`; `startIds` capture +
+     * slim token capture happen inside the launched `execute`.
      */
-    private fun loadPendingQuestionsSlim(repository: OpenCodeRepository) {
-        DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs slim single-shot")
-        scope.launch {
-            // Standalone workflow entry: ONE capture before first suspend.
-            val token = repository.captureSlimCommitToken()
-
-            val startIds = slices.sessionList.value.pendingQuestions
-                .mapTo(mutableSetOf()) { it.id }
-
-            val workdirs = computeQuestionFanOutWorkdirs(
-                directorySessionKeys = slices.sessionList.value.directorySessions.keys,
-                currentWorkdir = settingsManager.currentWorkdir,
-                recentWorkdirs = settingsManager.getRecentWorkdirs(currentServerGroupFp()),
-            )
-
-            val directories = workdirs.takeIf { it.isNotEmpty() }?.toList()
-
-            val outcome = repository.getSlimapiQuestions(
-                directories = directories,
-                token = token,
-            ).getOrElse { error ->
-                if (error is OpenCodeRepository.StaleSlimCommitException) {
-                    return@launch
-                }
-                SlimAggregationOutcome.Failure(error.message)
-            }
-
-            // Fast rejection after suspension but before building work.
-            if (!repository.isSlimCommitTokenCurrent(token)) return@launch
-
-            // C-D3 v2 §2.2: ALL slice + effect commits land inside ONE
-            // commitIfSlimTokenCurrent atomic gate so a host rotation
-            // between the network return and the slice commit can NOT
-            // write a stale question list / signal under a new host.
-            repository.commitIfSlimTokenCurrent(token) {
-                val signal = aggregationSignal(outcome)
-
-                slices.mutateSessionList { current ->
-                    val sessionsById = allSessionsById(
-                        current.sessions,
-                        current.directorySessions,
-                        current.childSessions,
-                    )
-
-                    val folded = applyAggregationOutcome(
-                        prior = current.pendingQuestions,
-                        outcome = outcome,
-                        wireToUi = SlimapiQuestionEntry::toQuestionRequest,
-                        uiId = QuestionRequest::id,
-                        uiDirectory = QuestionRequest::directory,
-                    )
-
-                    // Preserve an SSE arrival that occurred during this poll.
-                    val foldedIds = folded.items.mapTo(mutableSetOf()) { it.id }
-                    val raceArrivals = current.pendingQuestions.filter { question ->
-                        question.id !in startIds &&
-                            question.id !in foldedIds
-                    }
-
-                    val merged = (folded.items + raceArrivals)
-                        .distinctBy { it.id }
-                        .let {
-                            filterArchivedSessionQuestions(it, sessionsById)
-                        }
-
-                    current.copy(
-                        pendingQuestions = merged,
-                        questionAggregationSignal = signal,
-                    )
-                }
-
-                if (outcome is SlimAggregationOutcome.Failure) {
-                    effects.tryEmitUiEvent(
-                        UiEvent.Error(R.string.error_slim_questions_fetch_failed)
-                    )
-                }
-            }
-        }
-    }
 
     /**
      * Task 12 (slimapi v1 §2 / §6.1 + §G2 — T12-C2): folds a decoded
@@ -2001,17 +1890,12 @@ class SessionSyncCoordinator(
      * impossible to clear stale rows when the server genuinely returned an
      * empty list. The nullable shape fixes this.
      */
-    fun applySlimColdStartSnapshot(snapshot: SlimColdStartSnapshot): Boolean {
-        // T1d P1-1: fail-fast before any repo / token / fold work when not slim.
-        requireSlimOnlyStateWrite(supportsWatermarkResync(), "cold-start-snapshot")
-        val repo = repository ?: return false
-
-        // C-D3 v2 §3.6: token-gated snapshot fold. The token is captured
-        // at this entry; if the caller already has a workflow token
-        // (performSlimResync), it routes through the token-taking overload
-        // below.
-        return applySlimColdStartSnapshot(snapshot, repo.captureSlimCommitToken())
-    }
+    fun applySlimColdStartSnapshot(snapshot: SlimColdStartSnapshot): Boolean =
+        // P5 §2.2: thin F5 wrapper. The applier owns the slim-only guard +
+        // repository lookup + token capture + delegation to the token-aware
+        // overload. Returns true iff the snapshot landed (or was a valid
+        // no-op for null pieces / complete=false).
+        slimColdStartSnapshotApplier.apply(snapshot) is SlimSnapshotApplyResult.Applied
 
     /**
      * C-D3 v2 §3.6: token-aware cold-start snapshot fold. Returns `false`
@@ -2019,10 +1903,11 @@ class SessionSyncCoordinator(
      * — e.g. [performSlimResync] returns emptyMap). Returns `true` when
      * the snapshot landed (or was a no-op for null pieces).
      *
-     * All slice + effect commits run inside ONE
-     * [commitIfSlimTokenCurrent] atomic region so a configure() rotation
-     * between cold-start fetch return and slice commit cannot write a
-     * stale snapshot under a new host.
+     * P5 §2.2: thin F5 wrapper. The body MOVED to
+     * [SlimColdStartSnapshotApplier.apply] (token-aware overload). All
+     * slice + effect commits run inside ONE `commitIfTokenCurrent`
+     * atomic region. Message merging delegates ONLY to
+     * [SlimSessionReconciler.mergeSlimMessagesIntoChat] (no duplicate impl).
      *
      * §Stage-B §3.4: [authoritative] controls the messages-merge contract
      * — default `false` (cold-start skeleton: preserve any in-flight token-
@@ -2033,141 +1918,12 @@ class SessionSyncCoordinator(
         snapshot: SlimColdStartSnapshot,
         token: OpenCodeRepository.SlimCommitToken,
         authoritative: Boolean = false,
-    ): Boolean {
-        // T1d P1-1: same entry guard on the token-taking overload (direct
-        // callers / tests must not bypass via token path).
-        requireSlimOnlyStateWrite(supportsWatermarkResync(), "cold-start-snapshot")
-        val repo = repository ?: return false
-
-        return repo.commitIfSlimTokenCurrent(token) {
-            DebugLog.i(
-                "Sync",
-                "applySlimColdStartSnapshot sessions=${snapshot.sessions?.size ?: "null"} " +
-                    "questions=${snapshot.questions::class.simpleName} " +
-                    "permissions=${snapshot.permissions::class.simpleName} " +
-                    "messages=${snapshot.messages?.size ?: "null"} " +
-                    "complete=${snapshot.complete} discoveryDirectories=${snapshot.discoveryDirectories} " +
-                    "discoveryReady=${snapshot.discoveryReady}",
-            )
-
-            // O-C weak-network §1: when the server marks the snapshot as
-            // incomplete (X-Complete: false), the sidecar couldn't assemble the
-            // full snapshot on a flaky/lossy network. In that case, DO NOT
-            // full-replace (or even merge) — keep the existing page entirely
-            // to avoid wiping the user's current view with a partial snapshot.
-            if (snapshot.complete == false) {
-                DebugLog.w(
-                    "Sync",
-                    "applySlimColdStartSnapshot snapshot.complete=false — keeping prior page intact",
-                )
-                return@commitIfSlimTokenCurrent
-            }
-
-            val sessions = snapshot.sessions
-            if (sessions != null) {
-                // rev-F: if discoveryReady == false, treat empty/null sessions as
-                // "not ready" — do NOT authority-empty wipe the session list.
-                val isDiscoveryReady = snapshot.discoveryReady ?: true
-                if (isDiscoveryReady || sessions.isNotEmpty()) {
-                    // C-D3 v2 §3.6 (sessions-merge fix): fold the fetched
-                    // sessions with MERGE semantics, mirroring the retain-prior
-                    // pattern used by `applyAggregationOutcome`'s Success branch.
-                    //
-                    // Root cause this guards against: the slim cold-start fetch
-                    // (coldStartSlimSync / SSE first-frame) does NOT pass a
-                    // session limit, and the sidecar defaults to returning only
-                    // the most recent 100 sessions. A FULL REPLACE here would
-                    // therefore substitute the prior list (e.g. 374 sessions
-                    // accumulated across directories) with just those 100 —
-                    // making the entire session list "vanish" on cold start /
-                    // SSE reconnect. The merge below restricts the fetched
-                    // payload to overwriting ONLY the directories it actually
-                    // covers; sessions in every other directory survive.
-                    //
-                    // `directory` is non-null on Session (data class), so the
-                    // `mapNotNull` / null-directory defensive filters are a no-op
-                    // today; left in place to stay correct if the field ever
-                    // becomes nullable.
-                    val byDirectory = sessions.groupBy { it.directory }
-                    val fetchedDirs = sessions.mapNotNull { it.directory }.toSet()
-                    slices.mutateSessionList { s ->
-                        if (fetchedDirs.isEmpty()) {
-                            // Defensive: fetched sessions carry no directory
-                            // (legacy / malformed payload) → fall back to the
-                            // historical FULL REPLACE so we don't silently pin
-                            // the entire list to stale entries.
-                            s.copy(
-                                sessions = sessions,
-                                directorySessions = byDirectory,
-                            )
-                        } else {
-                            val priorKept = s.sessions.filter { it.directory == null || it.directory !in fetchedDirs }
-                            val mergedSessions = (priorKept + sessions).distinctBy { it.id }
-                            val mergedByDir = s.directorySessions.filterKeys { it !in fetchedDirs } + byDirectory
-                            s.copy(
-                                sessions = mergedSessions,
-                                directorySessions = mergedByDir,
-                            )
-                        }
-                    }
-                }
-                // If isDiscoveryReady=false && sessions.isNotEmpty(), the merge
-                // above still applies (non-empty sessions are merged normally).
-                // The !isDiscoveryReady guard only prevents emptiness-triggered wipe.
-            }
-
-            // I-2: questions + permissions use typed aggregation outcome.
-            slices.mutateSessionList { s ->
-                val sessionsById = allSessionsById(s.sessions, s.directorySessions, s.childSessions)
-
-                val questionFold = applyAggregationOutcome(
-                    prior = s.pendingQuestions,
-                    outcome = snapshot.questions,
-                    wireToUi = SlimapiQuestionEntry::toQuestionRequest,
-                    uiId = QuestionRequest::id,
-                    uiDirectory = QuestionRequest::directory,
-                )
-
-                val permissionFold = applyAggregationOutcome(
-                    prior = s.pendingPermissions,
-                    outcome = snapshot.permissions,
-                    wireToUi = SlimapiPermissionEntry::toPermissionRequest,
-                    uiId = PermissionRequest::id,
-                    uiDirectory = PermissionRequest::directory,
-                )
-
-                s.copy(
-                    pendingQuestions = filterArchivedSessionQuestions(
-                        questionFold.items,
-                        sessionsById,
-                    ),
-                    pendingPermissions = permissionFold.items,
-                    questionAggregationSignal = questionFold.signal,
-                    permissionAggregationSignal = permissionFold.signal,
-                )
-            }
-
-            val msgs = snapshot.messages
-            if (msgs != null) {
-                // P4-B §7.1: delegate to the reconciler (no duplicate impl).
-                slimSessionReconciler.mergeSlimMessagesIntoChat(msgs, authoritative)
-            }
-
-            // I-2: a whole-call Failure surfaces a toast. Partial
-            // incompleteness is observable via the signal — no toast on
-            // every resync.
-            if (snapshot.questions is SlimAggregationOutcome.Failure) {
-                effects.tryEmitUiEvent(
-                    UiEvent.Error(R.string.error_slim_questions_fetch_failed)
-                )
-            }
-            if (snapshot.permissions is SlimAggregationOutcome.Failure) {
-                effects.tryEmitUiEvent(
-                    UiEvent.Error(R.string.error_slim_permissions_fetch_failed)
-                )
-            }
-        }
-    }
+    ): Boolean =
+        slimColdStartSnapshotApplier.apply(
+            snapshot = snapshot,
+            token = token,
+            authoritative = authoritative,
+        ) is SlimSnapshotApplyResult.Applied
 
     companion object {
         /**
