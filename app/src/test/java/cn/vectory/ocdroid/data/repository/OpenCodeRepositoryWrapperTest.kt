@@ -72,6 +72,7 @@ class OpenCodeRepositoryWrapperTest {
         DebugLog.clear()
         server.start()
         repository = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+        repository.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         repository.configure(baseUrl = server.url("/").toString().trimEnd('/'))
     }
 

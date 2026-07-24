@@ -1122,6 +1122,7 @@ class SessionSyncCoordinatorResyncTest {
         // Use a REAL repository (mockk can't replicate the get→derive→put
         // atomicity) — same pattern as OpenCodeRepositorySlimapiEndpointsTest.
         val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+        realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         val sid = "s1"
         // reducer call (digest arrives with updatedAt=2000)
         realRepo.applySlimDigest(SlimSessionDigest(sessionId = sid, updatedAt = 2000L), token = realRepo.captureSlimCommitToken())
@@ -1142,6 +1143,7 @@ class SessionSyncCoordinatorResyncTest {
     @Test
     fun `I3-2 REST success does not overwrite newer remote when committed atomically`() = runTest {
         val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+        realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         val sid = "s1"
         // Apply a digest first (advances remote to 1000).
         realRepo.applySlimDigest(SlimSessionDigest(sessionId = sid, updatedAt = 1000L), token = realRepo.captureSlimCommitToken())
@@ -1159,6 +1161,7 @@ class SessionSyncCoordinatorResyncTest {
     @Test
     fun `I3-3 REST success does not clear dirty if fetched local pair still trails newer remote`() = runTest {
         val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+        realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         val sid = "s1"
         // digest arrives with updatedAt=2000 → remote=2000, dirty=true.
         realRepo.applySlimDigest(SlimSessionDigest(sessionId = sid, updatedAt = 2000L), token = realRepo.captureSlimCommitToken())
@@ -1176,6 +1179,7 @@ class SessionSyncCoordinatorResyncTest {
     @Test
     fun `I3-4 aligned commit must not erase a later digest dirty transition`() = runTest {
         val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+        realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         val sid = "s1"
         // digest advances remote to 1000 (dirty ratchets via needsReconcile).
         realRepo.applySlimDigest(SlimSessionDigest(sessionId = sid, updatedAt = 1000L), token = realRepo.captureSlimCommitToken())
@@ -1560,6 +1564,7 @@ class SessionSyncCoordinatorResyncTest {
         // mutates state). Seed localApplied*, dispatch EvictSession
         // directly through the repo method, assert cleared.
         val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+        realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         // Seed state with both remote + localApplied watermarks.
         realRepo.applySlimDigest(SlimSessionDigest(sessionId = "sid-evict", updatedAt = 1000L), token = realRepo.captureSlimCommitToken())
         // Manually advance localApplied via markSlimReconcileAligned (which
@@ -1772,6 +1777,7 @@ class SessionSyncCoordinatorResyncTest {
     @Test
     fun `CD3-v2 resync catch-up with old token returns Stale for every sid without probe`() = runTest {
         val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+        realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         // Configure A, capture tokenA, then rotate to B.
         realRepo.configure(baseUrl = "http://host-a.example/", slim = true)
         val tokenA = realRepo.captureSlimCommitToken()
@@ -1837,6 +1843,7 @@ class SessionSyncCoordinatorResyncTest {
                 encodeDefaults = true
             }
             val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+        realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
             val baseUrl = server.url("/").toString().trimEnd('/')
             realRepo.configure(baseUrl = baseUrl, slim = true)
 
@@ -1940,6 +1947,7 @@ class SessionSyncCoordinatorResyncTest {
     @Test
     fun `CD3-rev3 beginSlimReconfigure alone makes prior token catch-up Stale`() = runTest {
         val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+        realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         realRepo.configure(baseUrl = "http://host-a.example/", slim = true)
         val tokenA = realRepo.captureSlimCommitToken()
 

@@ -140,6 +140,7 @@ class SlimGoldenPathIntegrationTest {
             mockk<TrafficTracker>(relaxed = true),
             mockk<TrafficLogger>(relaxed = true),
         )
+        repository.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         repository.configure(
             baseUrl = server.url("/").toString().trimEnd('/'),
             slim = true,

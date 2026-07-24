@@ -83,6 +83,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         DebugLog.clear()
         server.start()
         repository = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+        repository.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         repository.configure(baseUrl = server.url("/").toString().trimEnd('/'), slim = true)
     }
 
@@ -216,6 +217,102 @@ class OpenCodeRepositorySlimapiEndpointsTest {
             "502 code logged at WARN for observability: ${DebugLog.entries.value.map { "${it.level}:${it.message}" }}",
             matches.isNotEmpty(),
         )
+    }
+
+    @Test
+    fun `getSlimapiSessions 503 transform_busy retries with Retry-After and succeeds`() = runBlocking {
+        // 🆕 v0.9.0 sessions list 503 transform_busy retry backoff.
+        // First response: 503 transform_busy with a VALID integer Retry-After=1
+        // (seconds). retryAfterHeaderToMs("1") = 1000ms > 0, so the HEADER
+        // branch is taken (NOT the exponential-backoff fall-back); the retry
+        // then hits the second enqueued 200 and succeeds.
+        //
+        // This integration test pins that a valid Retry-After header does not
+        // break the retry-then-success flow (and that exactly one retry is
+        // issued). Precise ms-parsing — including that a FRACTIONAL value like
+        // "0.1" is rejected (toLongOrNull → null → 0 → backoff fall-back),
+        // "1"→1000, "600"→capped 10000, null→0 — is the retryAfterHeaderToMs
+        // helper's contract, pinned by OpenCodeRepositoryExpandBudgetTest's
+        // retryAfterHeaderToMs cases (so it is genuinely covered, not assumed).
+        server.enqueue(
+            MockResponse().setResponseCode(503)
+                .setBody("""{"code":"transform_busy"}""")
+                .setHeader("Retry-After", "1")
+                .setHeader("Content-Type", "application/json")
+        )
+        server.enqueue(jsonResponse("""[{"id":"s1","directory":"/default","status":"idle"}]"""))
+
+        val result = repository.getSlimapiSessions()
+
+        assertTrue(
+            "retry succeeded: $result",
+            result.isSuccess,
+        )
+        val page = result.getOrThrow()
+        assertEquals(1, page.sessions.size)
+        assertEquals("s1", page.sessions[0].id)
+        // Exactly 2 HTTP requests: 1 × 503 (retry-able) + 1 × 200.
+        assertEquals("one 503 then one 200 retry", 2, server.requestCount)
+    }
+
+    @Test
+    fun `getSlimapiSessions 503 transform_busy 3 retries exhausted fails`() = runBlocking {
+        // Three 503 responses, no Retry-After header → backoff used, still fail.
+        repeat(3) {
+            server.enqueue(
+                MockResponse().setResponseCode(503)
+                    .setBody("""{"code":"transform_busy"}""")
+                    .setHeader("Content-Type", "application/json")
+            )
+        }
+
+        val result = repository.getSlimapiSessions()
+
+        assertTrue(
+            "final failure after 3 retries: $result",
+            result.isFailure,
+        )
+        assertTrue(
+            "exception is retrofit2.HttpException: ${result.exceptionOrNull()}",
+            result.exceptionOrNull() is retrofit2.HttpException,
+        )
+        val matches = DebugLog.entries.value.filter {
+            it.level == cn.vectory.ocdroid.util.DebugLog.Level.WARN &&
+                it.message.contains("transform_busy")
+        }
+        assertTrue(
+            "transform_busy logged at WARN: ${DebugLog.entries.value.map { "${it.level}:${it.message}" }}",
+            matches.size >= 1,
+        )
+    }
+
+    @Test
+    fun `getSlimapiSessions 503 with non-transform_busy code does not retry`() = runBlocking {
+        // 🆕 v0.9.0 retry-condition pin (conjunct 1): the retry requires BOTH
+        // `503` AND `transform_busy`. A 503 carrying a DIFFERENT code (here
+        // upstream_unavailable) MUST short-circuit to immediate failure — no
+        // retry, exactly 1 HTTP request (the transform_busy-only gate is
+        // real, not a bare `code == 503`).
+        server.enqueue(jsonResponse("""{"code":"upstream_unavailable"}""", 503))
+
+        val result = repository.getSlimapiSessions()
+
+        assertTrue("non-transform_busy 503 fails: $result", result.isFailure)
+        assertEquals("no retry — single request", 1, server.requestCount)
+    }
+
+    @Test
+    fun `getSlimapiSessions non-503 with transform_busy code does not retry`() = runBlocking {
+        // 🆕 v0.9.0 retry-condition pin (conjunct 2): a NON-503 status (here
+        // 502) carrying transform_busy MUST NOT retry — only the 503 status is
+        // retry-able, even when the body carries transform_busy. Exactly 1 HTTP
+        // request.
+        server.enqueue(jsonResponse("""{"code":"transform_busy"}""", 502))
+
+        val result = repository.getSlimapiSessions()
+
+        assertTrue("non-503 transform_busy fails: $result", result.isFailure)
+        assertEquals("no retry — single request", 1, server.requestCount)
     }
 
     @Test
@@ -624,7 +721,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         )
         assertEquals(
             "limit=SLIM_COLDSTART_SESSION_LIMIT forwarded: ${sessionsRequest.path}",
-            OpenCodeRepository.SLIM_COLDSTART_SESSION_LIMIT.toString(),
+            SlimSyncEngine.SLIM_COLDSTART_SESSION_LIMIT.toString(),
             sessionsUrl.queryParameter("limit"),
         )
         // coldStartSlimSync(token=…) with directories=null MUST NOT add
@@ -1315,6 +1412,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
     /** Helper: build a repository configured for either slim or legacy mode. */
     private fun makeRepository(slim: Boolean): OpenCodeRepository {
         val r = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+        r.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         r.configure(
             baseUrl = server.url("/").toString().trimEnd('/'),
             slim = slim,
@@ -1885,7 +1983,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         )
         assertEquals(
             "limit=SLIM_COLDSTART_SESSION_LIMIT forwarded: ${sessionsRequest.path}",
-            OpenCodeRepository.SLIM_COLDSTART_SESSION_LIMIT.toString(),
+            SlimSyncEngine.SLIM_COLDSTART_SESSION_LIMIT.toString(),
             sessionsUrl.queryParameter("limit"),
         )
     }

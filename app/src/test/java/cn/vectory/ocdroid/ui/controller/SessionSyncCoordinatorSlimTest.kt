@@ -799,6 +799,7 @@ class SessionSyncCoordinatorSlimTest {
             every { settingsManager.getRecentWorkdirs(any()) } returns emptyList()
 
             val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+            realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
             val baseUrl = server.url("/").toString().trimEnd('/')
             realRepo.configure(baseUrl = baseUrl, slim = true)
 
@@ -909,6 +910,7 @@ class SessionSyncCoordinatorSlimTest {
             every { settingsManager.getRecentWorkdirs(any()) } returns emptyList()
 
             val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+            realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
             realRepo.configure(
                 baseUrl = server.url("/").toString().trimEnd('/'),
                 slim = true,

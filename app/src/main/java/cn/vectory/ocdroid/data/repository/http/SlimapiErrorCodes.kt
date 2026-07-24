@@ -124,4 +124,19 @@ object SlimapiErrorCodes {
      * 200). The client marks just that message's expand as failed.
      */
     const val MESSAGE_NOT_FOUND = "message_not_found"
+
+    /**
+     * 🆕 B1 §2 S2 / contract §7 — catch-all path normalization rejected
+     * `..` or `.` segment in the normalized path after collapse of
+     * `//`. Terminal client error: do not retry, log and report.
+     */
+    const val INVALID_PATH = "invalid_path"
+
+    /**
+     * 🆕 B1 §2 S5 / contract §7 — `?directory=` or
+     * `X-Opencode-Directory` header failed validation: contains `..`,
+     * NUL, control characters, or exceeds 4096 bytes. Terminal client
+     * error: do not retry, log and report.
+     */
+    const val INVALID_DIRECTORY = "invalid_directory"
 }

@@ -203,6 +203,9 @@ class SlimapiV1ModelsTest {
         assertEquals("shell_not_allowed", SlimapiErrorCodes.SHELL_NOT_ALLOWED)
         assertEquals("invalid_directory_count", SlimapiErrorCodes.INVALID_DIRECTORY_COUNT)
         assertEquals("invalid_route_token", SlimapiErrorCodes.INVALID_ROUTE_TOKEN)
+        // 🆕 B1 §2 S2/S5 additive codes — catch-all path/directory validation
+        assertEquals("invalid_path", SlimapiErrorCodes.INVALID_PATH)
+        assertEquals("invalid_directory", SlimapiErrorCodes.INVALID_DIRECTORY)
     }
 
     @Test

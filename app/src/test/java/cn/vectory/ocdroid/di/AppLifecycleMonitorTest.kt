@@ -762,8 +762,9 @@ class AppLifecycleMonitorTest {
             try {
                 val baseUrlA = server.url("/").toString().trimEnd('/')
                 val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+                realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
                 realRepo.configure(baseUrl = baseUrlA, slim = true)
-                val identityStore = ConnectionIdentityStore()
+                val identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
                 identityStore.bind("g-a", "/a", baseUrlA)
 
                 val pollScope = kotlinx.coroutines.CoroutineScope(

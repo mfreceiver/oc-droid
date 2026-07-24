@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.data.repository
 
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
 import cn.vectory.ocdroid.data.model.MessageWithParts
+import java.util.IdentityHashMap
 
 /**
  * Cluster A (slim SSE state machine core): extracted from OpenCodeRepository
@@ -17,6 +18,7 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
  */
 class SlimSseStateMachine(
     private val slimStateLock: Any,
+    private val epochProvider: (() -> Long)? = null,
 ) {
     // ── Fields ───────────────────────────────────────────────────────────────────
     /**
@@ -24,6 +26,13 @@ class SlimSseStateMachine(
      * `/since/{ts}` anchor (§5 A2=A). Cleared by [beginSlimReconfigure].
      */
     private val slimSseState = SlimSseState()
+
+    /**
+     * Token-to-epoch map: tracks the epoch at which each token was captured.
+     * Uses IdentityHashMap so token identity (not equality) is the key.
+     * Cleared by [beginSlimReconfigure] so in-flight tokens are rejected.
+     */
+    private val tokenEpochs = IdentityHashMap<OpenCodeRepository.SlimCommitToken, Long>()
 
     /**
      * Rotated under [slimStateLock] by [beginSlimReconfigure] (and at the
@@ -52,10 +61,12 @@ class SlimSseStateMachine(
      */
     fun captureSlimCommitToken(): OpenCodeRepository.SlimCommitToken =
         synchronized(slimStateLock) {
-            OpenCodeRepository.SlimCommitToken(
+            val token = OpenCodeRepository.SlimCommitToken(
                 marker = slimCommitMarker,
                 issuedReady = slimIncarnationReady,
             )
+            epochProvider?.let { tokenEpochs[token] = it() }
+            token
         }
 
     /**
@@ -68,7 +79,8 @@ class SlimSseStateMachine(
         synchronized(slimStateLock) {
             token.issuedReady &&
                 slimIncarnationReady &&
-                token.marker === slimCommitMarker
+                token.marker === slimCommitMarker &&
+                isTokenEpochCurrent(token)
         }
 
     /**
@@ -87,7 +99,8 @@ class SlimSseStateMachine(
     ): T = synchronized(slimStateLock) {
         if (!token.issuedReady ||
             !slimIncarnationReady ||
-            token.marker !== slimCommitMarker
+            token.marker !== slimCommitMarker ||
+            !isTokenEpochCurrent(token)
         ) {
             onStale()
         } else {
@@ -136,8 +149,22 @@ class SlimSseStateMachine(
             slimCommitMarker = marker
             slimIncarnationReady = false
             slimSseState.clear()
+            tokenEpochs.clear()
             OpenCodeRepository.SlimReconfigureTicket(marker)
         }
+
+    /**
+     * Checks that [token] was captured under the current epoch (i.e. no
+     * host reconfigure has bumped the generation since capture). Returns true
+     * when no [epochProvider] is configured (legacy compat path).
+     *
+     * Provider exists but token unregistered → fail-closed (returns false).
+     */
+    private fun isTokenEpochCurrent(token: OpenCodeRepository.SlimCommitToken): Boolean {
+        val provider = epochProvider ?: return true
+        val capturedEpoch = tokenEpochs[token] ?: return false
+        return capturedEpoch == provider()
+    }
 
     /**
      * C-D3 rev-3 round-5 (oracle §1.4): asserts [ticket] still identifies

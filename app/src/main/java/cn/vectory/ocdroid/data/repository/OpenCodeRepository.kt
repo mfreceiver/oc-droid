@@ -58,6 +58,7 @@ import java.util.Base64
 import java.security.cert.X509Certificate
 import javax.inject.Inject
 import javax.inject.Singleton
+import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 
 // MessagesPage, SLIMAPI_DEFAULT_PAGE_LIMIT, SLIMAPI_LOCAL_HISTORY_BOUND moved to MessagesPage.kt
 
@@ -324,11 +325,29 @@ class OpenCodeRepository @Inject constructor(
     private val slimStateLock = Any()
 
     /**
+     * CP1 (notify Phase-0): the connection identity store for epoch-guard.
+     * Injected by Hilt (field injection); read lazily by [epochProvider] lambda.
+     */
+    @Inject lateinit var identityStore: ConnectionIdentityStore
+
+    /**
+     * Epoch provider for the slim state machine. Reads from [identityStore] lazily.
+     * Defined as a field (not inline lambda) so it can be referenced in both
+     * [slimStateMachine] construction and any future usage.
+     */
+    private val epochProvider: () -> Long = {
+        identityStore.currentEpoch()
+    }
+
+    /**
      * §slim-sse-machine (T3 extracted): the slim state machine core.
      * Owns [slimSseState], [slimCommitMarker], [slimIncarnationReady].
      * Injected with [slimStateLock] for atomic boundary compatibility.
      */
-    private val slimStateMachine = SlimSseStateMachine(slimStateLock)
+    private val slimStateMachine = SlimSseStateMachine(
+        slimStateLock = slimStateLock,
+        epochProvider = epochProvider,
+    )
 
     /**
      * Opaque capability for one configured slim-state incarnation (C-D3).
@@ -647,7 +666,7 @@ class OpenCodeRepository @Inject constructor(
             // 仅在整条事务全成功后才发布新 mode 的 source；throw 时 sessionSource
             // 保持先前 live source，与 slimConnection 不脱节）。api 已重建；
             // lambda 捕获 this，每次调用读最新 api（复用 SlimGetRepository 模式）。
-            sessionSource = if (slim) SlimSessionSource({ api }) else StandardSessionSource({ api })
+            sessionSource = if (slim) SlimSessionSource({ api }, { parseErrorCode(it) }, { retryAfterHeaderToMs(it) }) else StandardSessionSource({ api })
             // ι-P2: rebuild message source to match the new connection mode.
             // 与 sessionSource 同纪律：仅在 completeSlimReconfigure 之后（事务全成功）
             // 才发布新 mode 的 source；throw 时 messageSource 保持先前 live source。
@@ -804,6 +823,32 @@ class OpenCodeRepository @Inject constructor(
         parseErrorCodeFromRaw = { parseErrorCodeFromRaw(it) },
         retryAfterHeaderToMs = { retryAfterHeaderToMs(it) },
     )
+
+    /**
+     * §P1: slim message-sync engine (extracted from the 6 functions below).
+     * See [SlimSyncEngine] for the full contract. Field-init mirrors the
+     * [expandBatchEngine] pattern.
+     *
+     * **I3** — `apiProvider = { api }` re-reads the `api` field on EVERY
+     * call (a lambda that captures `this`, not a cached snapshot), so
+     * [configure]'s [rebuildClients] reassignment of `api` takes effect on
+     * the next message sync operation.
+     *
+     * **slimStateMachine** — injected directly (not lambda) because it is a
+     * stable singleton that outlives any host config cycle.
+     *
+     * **lazy** — because the 2-arg constructor `(TrafficTracker, TrafficLogger)`
+     * used by tests (mockk) does NOT run field initializers; lazy defers
+     * engine construction until first access, avoding NPE on mocks.
+     */
+    private val slimSyncEngine by lazy {
+        SlimSyncEngine(
+            apiProvider = { api },
+            slimStateMachine = slimStateMachine,
+            parseErrorCode = { parseErrorCode(it) },
+            retryAfterHeaderToMs = { retryAfterHeaderToMs(it) },
+        )
+    }
 
     /**
      * ι-P1: session 域端口—Standard 或 Slim 双实现,由 [configure] 在 client 重建后选束。
@@ -2079,25 +2124,8 @@ class OpenCodeRepository @Inject constructor(
         limit: Int? = null,
         before: String? = null,
         token: SlimCommitToken,
-    ): Result<List<MessageWithParts>> = runSuspendCatching {
-        val response = api.getSlimapiMessagesSince(sessionId, since, limit, before)
-
-        requireSlimTokenCurrent(token)
-
-        if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
-        val items = response.body() ?: emptyList()
-        if (!bumpSlimBookmarkFromItems(sessionId, items, token)) {
-            throw StaleSlimCommitException()
-        }
-        // POST-RELEASE instrumentation: per-resync fetch outcome for the
-        // SlimapiResync diagnostic surface. One line per anchored fetch.
-        DebugLog.d(
-            "SlimapiResync",
-            "since sid=$sessionId since=$since drained=${items.size} " +
-                "newest=${items.lastOrNull()?.info?.id ?: "-"}",
-        )
-        items
-    }
+    ): Result<List<MessageWithParts>> =
+        slimSyncEngine.getSlimapiMessagesSince(sessionId, since, limit, before, token)
 
     /**
      * §slim-v1-paging (Task 5 / G5 cursor): Cluster A cursor-paginated
@@ -2131,21 +2159,8 @@ class OpenCodeRepository @Inject constructor(
         mode: String? = "skeleton",
         bumpBookmark: Boolean = true,
         token: SlimCommitToken,
-    ): Result<MessagesPage> = runSuspendCatching {
-        val response = api.getSlimapiMessages(sessionId, limit, before, mode)
-
-        requireSlimTokenCurrent(token)
-
-        if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
-        val items = response.body() ?: emptyList()
-        if (bumpBookmark) {
-            if (!bumpSlimBookmarkFromItems(sessionId, items, token)) {
-                throw StaleSlimCommitException()
-            }
-        }
-        val nextCursor = response.headers()["X-Next-Cursor"]
-        MessagesPage(items = items, nextCursor = nextCursor)
-    }
+    ): Result<MessagesPage> =
+        slimSyncEngine.getSlimapiMessagesPage(sessionId, limit, before, mode, bumpBookmark, token)
 
     /**
      * Cluster A: single-message full expansion (`/slimapi/messages/{sid}/full/{mid}`).
@@ -2234,7 +2249,7 @@ class OpenCodeRepository @Inject constructor(
         limit: Int? = null,
         search: String? = null
     ): Result<SlimSessionsPage> =
-        getSlimapiSessionsDelegate(api, directories, roots, limit, search)
+        getSlimapiSessionsDelegate(api, directories, roots, limit, { parseErrorCode(it) }, { retryAfterHeaderToMs(it) }, search)
 
     /**
      * Private generic helper for aggregating cross-directory slimapi questions/
@@ -2402,155 +2417,8 @@ class OpenCodeRepository @Inject constructor(
         openSessionId: String? = null,
         directories: List<String>? = null,
         token: SlimCommitToken,
-    ): Result<SlimColdStartSnapshot> = runSuspendCatching {
-        // §slim-reconcile-lane-repo (B4 T6): forward [directories] to
-        // /slimapi/sessions (was: ignored — call always hit the unfiltered
-        // path). The contract's repeated `?directory` is now produced by
-        // Retrofit from the list parameter (null = sidecar decides scope).
-        //
-        // T11 round-2 (oracle D2): null on failure; emptyList on success.
-        //
-        // T11 round-3 (CE discipline, R-14): the metadata Retrofit calls
-        // are suspend — plain `runCatching` swallows CancellationException,
-        // violating the explicit must-hold rule. Use [runSuspendCatching]
-        // so a scope cancel mid-fetch propagates as CE instead of being
-        // collapsed to a null piece (which would mask the cancellation as
-        // a per-piece failure).
-        val sessionsPage: SlimSessionsPage? = runSuspendCatching {
-            // §session-scope-narrow: pin `roots=true` + explicit limit so the
-            // cold-start snapshot fetches ONLY root/main sessions of the
-            // (caller-narrowed) directory set, NOT the unbounded child fan-out
-            // (subagent / task children). The default `limit=100` was silently
-            // truncating the list; `roots=true` filters children server-side.
-            // curl-verified on the live sidecar: roots=true drops ≈244 child
-            // rows; limit=500 captures the full root set (130 roots → 120 once
-            // the caller's local-project directory filter is applied).
-            // Combined with [SessionSyncCoordinator.performSlimResync]'s
-            // `recentWorkdirs` directory narrowing + the merge in
-            // [SessionSyncCoordinator.applySlimColdStartSnapshot] (fix-4),
-            // this is the second of the two scope-narrowing levers.
-            getSlimapiSessions(
-                directories = directories,
-                roots = true,
-                limit = SLIM_COLDSTART_SESSION_LIMIT,
-            ).getOrNull()
-        }.getOrNull()
-        // §slim-envelope: /questions + /permissions return {items, errors};
-        // flatten `.items` for UI. Per-directory `errors` are logged here
-        // (the sidecar already degrades — a 200 with partial items is the
-        // expected steady-state when one upstream opencode is briefly down).
-        //
-        // C-D3 v2 §1.6: a stale incarnation is NOT a per-piece Failure;
-        // it invalidates the entire snapshot. StaleSlimCommitException
-        // rethrows out of this block; coldStartSlimSync returns
-        // Result.failure(StaleSlimCommitException) instead.
-        val questions: SlimAggregationOutcome<SlimapiQuestionEntry> = runSuspendCatching {
-            val agg = api.getSlimapiQuestions(directories)
-
-            requireSlimTokenCurrent(token)
-
-            if (agg.errors.isNotEmpty()) {
-                DebugLog.w(TAG, "slimapi/questions partial errors: ${agg.errors}")
-            }
-            aggregationOutcome(
-                items = agg.items,
-                errors = agg.errors,
-                requestedDirectories = directories,
-                directoryOf = SlimapiQuestionEntry::directory,
-                serverScope = agg.scope,
-            )
-        }.getOrElse { error ->
-            if (error is StaleSlimCommitException) throw error
-            SlimAggregationOutcome.Failure(error.message)
-        }
-        val permissions: SlimAggregationOutcome<SlimapiPermissionEntry> = runSuspendCatching {
-            val agg = api.getSlimapiPermissions(directories)
-
-            requireSlimTokenCurrent(token)
-
-            if (agg.errors.isNotEmpty()) {
-                DebugLog.w(TAG, "slimapi/permissions partial errors: ${agg.errors}")
-            }
-            aggregationOutcome(
-                items = agg.items,
-                errors = agg.errors,
-                requestedDirectories = directories,
-                directoryOf = SlimapiPermissionEntry::directory,
-                serverScope = agg.scope,
-            )
-        }.getOrElse { error ->
-            if (error is StaleSlimCommitException) throw error
-            SlimAggregationOutcome.Failure(error.message)
-        }
-        val messages: List<MessageWithParts>? = openSessionId?.let { sid ->
-            // C-D3 v2 §1.5: token-threaded anchored + cursor branches.
-            // A stale incarnation rethrows out of the message fetch
-            // (NOT collapses to null — that would mask a host rotation as
-            // "server unreachable"). Other transport/HTTP failures degrade
-            // to null as before (cold-start per-piece degradation).
-            val bookmark = slimStateMachine.readBookmarkOrThrowIfStale(sid, token)
-
-            if (bookmark != null) {
-                runSuspendCatching {
-                    val response = api.getSlimapiMessagesSince(
-                        sid, bookmark, limit = SLIMAPI_DEFAULT_PAGE_LIMIT,
-                    )
-
-                    requireSlimTokenCurrent(token)
-
-                    if (!response.isSuccessful) {
-                        return@runSuspendCatching null
-                    }
-
-                    val items = response.body() ?: emptyList()
-
-                    if (!bumpSlimBookmarkFromItems(sid, items, token)) {
-                        throw StaleSlimCommitException()
-                    }
-
-                    items
-                }.getOrElse { error ->
-                    if (error is StaleSlimCommitException) throw error
-                    null
-                }
-            } else {
-                runSuspendCatching {
-                    drainSlimapiMessagesBounded(
-                        sessionId = sid,
-                        pageLimit = SLIMAPI_DEFAULT_PAGE_LIMIT,
-                        itemBound = SLIMAPI_LOCAL_HISTORY_BOUND,
-                        token = token,
-                    )
-                }.getOrElse { error ->
-                    if (error is StaleSlimCommitException) throw error
-                    null
-                }
-            }
-        }
-        // If ALL four pieces are null AND openSessionId was supplied with
-        // at least one piece attempted, the overall Result is still
-        // success — the caller folds null pieces as "keep prior". Only a
-        // hard transport failure that threw out of runCatching surfaces
-        // as Result.failure.
-        // §#5 belt: chronological sort the drain result so any cold-start
-        // merge sees chronological input even if the serving layer reorders.
-        // (optional defense, reducer has the canonical sort)
-        val chronoMessages = messages?.sortedWith(
-            compareBy<MessageWithParts>(
-                { it.info.time?.created ?: Long.MAX_VALUE },
-                { it.info.id },
-            )
-        )
-        SlimColdStartSnapshot(
-            sessions = sessionsPage?.sessions,
-            questions = questions,
-            permissions = permissions,
-            messages = chronoMessages,
-            complete = sessionsPage?.complete,
-            discoveryDirectories = sessionsPage?.discoveryDirectories,
-            discoveryReady = sessionsPage?.discoveryReady,
-        )
-    }
+    ): Result<SlimColdStartSnapshot> =
+        slimSyncEngine.coldStartSlimSync(openSessionId, directories, token)
 
     // ── §slim-reconcile-lane-repo: shared slim helpers ────────────────────
 
@@ -2819,183 +2687,8 @@ class OpenCodeRepository @Inject constructor(
         pageLimit: Int,
         itemBound: Int,
         token: SlimCommitToken,
-    ): List<MessageWithParts> = drainSlimapiMessagesBoundedOutcome(
-        sessionId = sessionId,
-        pageLimit = pageLimit,
-        itemBound = itemBound,
-        token = token,
-    ).items
-
-    /**
-     * T11 round-3 (oracle I2 — cursor drain typed outcome): the underlying
-     * drain returns one of:
-     *
-     *  - [SlimDrainOutcome.Success] — the walk terminated cleanly
-     *    (cursor-null, item-bound, or page-count cap). The aggregate is
-     *    complete to the sidecar's current history view; the reconciler
-     *    may clear dirty. The watermark was advanced for the aggregated
-     *    portion (Success ALWAYS bumps).
-     *  - [SlimDrainOutcome.Partial] — a mid-walk transport / page failure
-     *    terminated the walk AFTER some items were aggregated. The
-     *    aggregated items ARE useful (the [coldStartSlimSync] path uses
-     *    them — partial history is better than nothing for the cold-start
-     *    snapshot). BUT the reconciler MUST treat this as a
-     *    distinguishable failure (don't clear dirty — there may be more
-     *    items we couldn't reach).
-     *
-     * # Watermark bump on Partial — caller-controlled (T11 round-4)
-     *
-     * Whether the Partial variant advances `localApplied*` is controlled
-     * by the caller via [drainSlimapiMessagesBoundedOutcome]'s
-     * `bumpBookmarkOnPartialFailure` parameter:
-     *
-     *  - cold-start (`true`, default): bump to record progress.
-     *  - T11 reconcile façade (`false`): NO bump — partial must not
-     *    masquerade as a complete localApplied watermark (durable retry
-     *    from the prior watermark until clean Success).
-     *
-     * See [drainSlimapiMessagesBoundedOutcome] for the full rationale.
-     */
-    // SlimDrainOutcome moved to MessagesPage.kt
-
-    /**
-     * T11 round-3 (oracle I2): the drain body, returning a typed outcome.
-     * See [SlimDrainOutcome] for the semantics.
-     *
-     * Page-count safety cap, item-bound termination, cursor-null
-     * termination, and message-id dedup all match the pre-round-3
-     * [drainSlimapiMessagesBounded] behaviour. ONLY the transport-failure
-     * termination path changed: instead of returning the partial aggregate
-     * as a plain List (indistinguishable from Success), it now returns
-     * [SlimDrainOutcome.Partial] carrying the cause.
-     *
-     * # T11 round-4 (durable partial-cursor retry — the parameterization)
-     *
-     * The transport-failure termination path's bump behavior is now
-     * parameterized via [bumpBookmarkOnPartialFailure]:
-     *
-     *  - `true` (default; cold-start path): bump the partial aggregate's
-     *    watermark before returning so the next cold-start re-drives from
-     *    the new anchor. Cold-start's "consume partial + record progress"
-     *    semantics preserved.
-     *  - `false` (T11 reconcile façade [fetchSlimInitialWindowBounded]):
-     *    do NOT bump — the partial progress must NOT masquerade as a
-     *    complete local watermark. Returning Partial WITHOUT advancing
-     *    `localApplied*` means the next reconcile re-enters the cursor
-     *    drain from the SAME pre-drain watermark (no `/since/{partial}`
-     *    short-circuit that would silently drop older pages). Dirty
-     *    stays preserved across retries until a clean Success.
-     *
-     * Pre-round-4 the bump was unconditional — Partial advanced the
-     * watermark even for the T11 façade, so the next reconcile's
-     * `needsCatchUp` (which compares probe vs `localApplied*`, NOT dirty)
-     * could see "aligned" if the partial window included the server's
-     * latest, then `markSlimReconcileAligned` cleared dirty and the
-     * cursor walk switched to `/since/{partial-watermark}` → older
-     * pages permanently lost.
-     */
-    private suspend fun drainSlimapiMessagesBoundedOutcome(
-        sessionId: String,
-        pageLimit: Int,
-        itemBound: Int,
-        bumpBookmarkOnPartialFailure: Boolean = true,
-        token: SlimCommitToken,
-    ): SlimDrainOutcome {
-        val aggregated = mutableListOf<MessageWithParts>()
-        val seen = HashSet<String>()
-        var before: String? = null
-        // +1 slack page for the trailing partial; ceil via Int math.
-        val maxPages = (itemBound + pageLimit - 1) / pageLimit + 1
-
-        fun commitBookmarkOrThrow() {
-            if (!bumpSlimBookmarkFromItems(sessionId, aggregated, token)) {
-                throw StaleSlimCommitException()
-            }
-        }
-
-        // G-F1: wall-clock bound for the entire cursor walk (30s). On timeout
-        // surface as Partial (preserve dirty, retain aggregated items).
-        return try {
-        withTimeout(30_000L) {
-            repeat(maxPages) {
-                // C-D3 v2 §1.4: SAME entry token on every page. No recapture.
-                val page = getSlimapiMessagesPage(
-                    sessionId = sessionId,
-                    limit = pageLimit,
-                    before = before,
-                    mode = "skeleton",
-                    bumpBookmark = false,
-                    token = token,
-                ).getOrElse { error ->
-                    // Stale incarnation is NOT an ordinary partial transport
-                    // result; it invalidates the entire aggregate.
-                    if (error is StaleSlimCommitException) {
-                        throw error
-                    }
-
-                    if (bumpBookmarkOnPartialFailure) {
-                        commitBookmarkOrThrow()
-                    }
-
-                    return@withTimeout SlimDrainOutcome.Partial(
-                        items = aggregated.toList(),
-                        cause = error,
-                    )
-                }
-
-                // Even with bumpBookmark=false, a host switch during the page
-                // request invalidates that page's payload.
-                requireSlimTokenCurrent(token)
-
-                // ── G-F1 loop detection ──────────────────────────────────────
-                // Loop = (a) same opaque cursor returned again, OR
-                //        (b) non-null cursor with zero new mids (all dupes).
-                val loopDetected =
-                    (before != null && page.nextCursor == before) ||
-                        (page.nextCursor != null && page.items.all { it.info.id in seen })
-                if (loopDetected) {
-                    // If no items aggregated at all, this is a complete failure;
-                    // if some items exist, this is a degraded walk.
-                    return@withTimeout if (aggregated.isEmpty()) {
-                        // No progress at all — surface as a Partial with cause.
-                        SlimDrainOutcome.Partial(
-                            items = emptyList(),
-                            cause = SlimDrainLoopException("loop detected on first page: cursor=$before"),
-                        )
-                    } else {
-                        SlimDrainOutcome.Degraded(
-                            items = aggregated.toList(),
-                            cause = SlimDrainLoopException("loop detected after page: cursor=$before"),
-                        )
-                    }
-                }
-
-                for (item in page.items) {
-                    if (seen.add(item.info.id)) {
-                        aggregated += item
-
-                        if (aggregated.size >= itemBound) {
-                            commitBookmarkOrThrow()
-                            return@withTimeout SlimDrainOutcome.Success(aggregated.toList())
-                        }
-                    }
-                }
-
-                if (page.nextCursor == null) {
-                    commitBookmarkOrThrow()
-                    return@withTimeout SlimDrainOutcome.Success(aggregated.toList())
-                }
-
-                before = page.nextCursor
-            }
-            // Page-count safety cap reached (repeat exhausted maxPages).
-            commitBookmarkOrThrow()
-            SlimDrainOutcome.Success(aggregated.toList())
-        }
-        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-            SlimDrainOutcome.Partial(aggregated.toList(), e)
-        }
-    }
+    ): List<MessageWithParts> =
+        slimSyncEngine.drainSlimapiMessagesBounded(sessionId, pageLimit, itemBound, token)
 
     /**
      * T11 round-2 (oracle I2 — watermark-branched fetch façade): fetch the
@@ -3075,37 +2768,8 @@ class OpenCodeRepository @Inject constructor(
     suspend fun fetchSlimInitialWindowBounded(
         sessionId: String,
         token: SlimCommitToken,
-    ): Result<List<MessageWithParts>> = runSuspendCatching {
-        when (
-            val outcome = drainSlimapiMessagesBoundedOutcome(
-                sessionId = sessionId,
-                pageLimit = SLIMAPI_DEFAULT_PAGE_LIMIT,
-                itemBound = SLIMAPI_LOCAL_HISTORY_BOUND,
-                bumpBookmarkOnPartialFailure = false,
-                token = token,
-            )
-        ) {
-            is SlimDrainOutcome.Success -> {
-                requireSlimTokenCurrent(token)
-                outcome.items
-            }
-
-            is SlimDrainOutcome.Partial -> {
-                // Mid-walk transport/page failure. localApplied* is
-                // unchanged (no-bump-on-partial). Surface as a
-                // distinguishable failure so the reconciler preserves
-                // dirty AND the next reconcile re-enters the cursor
-                // drain from the same pre-drain watermark.
-                throw SlimCursorPartialException(outcome.cause)
-            }
-
-            is SlimDrainOutcome.Degraded -> {
-                // G-F1 loop/zero-progress detection — same contract as Partial:
-                // keep dirty, no watermark advance.
-                throw SlimCursorPartialException(outcome.cause)
-            }
-        }
-    }
+    ): Result<List<MessageWithParts>> =
+        slimSyncEngine.fetchSlimInitialWindowBounded(sessionId, token)
 
     /**
      * T11 round-3 (oracle I2): typed exception wrapping a mid-cursor
@@ -3139,7 +2803,6 @@ class OpenCodeRepository @Inject constructor(
          * `data.repository` → `ui` layering inversion; the value duplication
          * is deliberate and pinned here so a wire-contract change is local.
          */
-        internal const val SLIM_COLDSTART_SESSION_LIMIT = 500
 
         /**
          * Tag for slimapi envelope-degradation warnings (per-directory

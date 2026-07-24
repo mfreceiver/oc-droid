@@ -91,11 +91,13 @@ class SlimapiDebugInterceptor @Inject constructor() : Interceptor {
         val code = response.code
         val contentType = response.body?.contentType()?.toString()
         val contentLength = response.body?.contentLength() ?: -1L
+        val requestId = response.header("X-Request-ID")
+        val requestIdSuffix = if (requestId != null) " requestId=$requestId" else " requestId=none"
         if (code in 200..299) {
             DebugLog.d(
                 TAG,
-                "← $code $method $encodedPath in ${elapsedMs}ms " +
-                    "type=${contentType ?: "null"} len=$contentLength",
+                "← $code $method $encodedPath in ${elapsedMs}ms" +
+                    " type=${contentType ?: "null"} len=$contentLength$requestIdSuffix",
             )
         } else {
             // Non-2xx: log status + timing. The sidecar's machine-readable
@@ -111,8 +113,8 @@ class SlimapiDebugInterceptor @Inject constructor() : Interceptor {
             // code is already surfaced by the repository's own logging.
             DebugLog.w(
                 TAG,
-                "← $code $method $encodedPath in ${elapsedMs}ms " +
-                    "type=${contentType ?: "null"} len=$contentLength",
+                "← $code $method $encodedPath in ${elapsedMs}ms" +
+                    " type=${contentType ?: "null"} len=$contentLength$requestIdSuffix",
             )
         }
         return response

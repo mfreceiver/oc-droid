@@ -1809,6 +1809,7 @@ class SessionListActionsTest {
         )
         try {
             val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+            realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
             val baseUrl = server.url("/").toString().trimEnd('/')
             realRepo.configure(baseUrl = baseUrl, slim = true)
 

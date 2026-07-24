@@ -1055,152 +1055,15 @@ internal fun launchLoadPendingPermissions(
     slices: SliceFlows,
     effects: SharedEffectBus,
     tag: String,
-) {
-    if (repository.supportsWatermarkResync) {
-        launchLoadPendingPermissionsSlim(
-            scope = scope,
-            repository = repository,
-            slices = slices,
-            effects = effects,
-            tag = tag,
-        )
-        return
-    }
-    scope.launch {
-        // §rev-grok 9.5 🟠1: snapshot pending ids BEFORE the poll so the
-        // post-fetch merge can distinguish "existed at start" (REST-
-        // authoritative — drop if absent from REST → ghost cleanup) from
-        // "arrived during the poll" (race-window — preserve to avoid
-        // dropping a fresh permission.asked the REST sweep hasn't seen).
-        // Mirrors [SessionSyncCoordinator.loadPendingQuestionsAllWorkdirs]'s
-        // startIds snapshot (NOT the single-workdir-optimistic
-        // [launchLoadPendingQuestions], which keeps existing to avoid
-        // flicker — there is no single-workdir variant for permissions;
-        // this sweep IS authoritative).
-        val startIds = slices.sessionList.value.pendingPermissions
-            .mapTo(mutableSetOf()) { it.id }
-        repository.getPendingPermissions()
-            .onSuccess { permissions ->
-                slices.mutateSessionList { currentState ->
-                    val existing = currentState.pendingPermissions.associateBy { it.id }
-                    val fetchedIds = mutableSetOf<String>()
-                    val merged = buildList {
-                        // Rule 1: REST authoritative for membership (de-ghost).
-                        permissions.forEach { rest ->
-                            if (fetchedIds.add(rest.id)) {
-                                val prev = existing[rest.id]
-                                // Rule 3 (Fix1): never downgrade a known-good
-                                // routeToken to null (slim SSE → REST race).
-                                val resolved = when {
-                                    prev == null -> rest
-                                    rest.routeToken.isNullOrBlank() &&
-                                        !prev.routeToken.isNullOrBlank() ->
-                                        rest.copy(routeToken = prev.routeToken)
-                                    else -> rest
-                                }
-                                add(resolved)
-                            }
-                        }
-                        // Rule 2: race-window — a permission.asked that
-                        // landed DURING the poll (NOT in startIds, NOT in
-                        // fetched) is preserved (REST sweep hasn't seen it
-                        // yet). Entries that WERE in startIds and are absent
-                        // from fetched are intentionally dropped here (rule 1).
-                        currentState.pendingPermissions.forEach { p ->
-                            if (p.id !in fetchedIds && p.id !in startIds) add(p)
-                        }
-                    }
-                    // §rev-grok fix1 defensive: in slim mode warn on any
-                    // final entry lacking a routeToken (no silent fallback
-                    // — the slim respond path will be unable to route it).
-                    if (repository.supportsWatermarkResync) {
-                        merged.filter { it.routeToken.isNullOrBlank() }.forEach { p ->
-                            android.util.Log.w(
-                                tag,
-                                "slim pending permission has null routeToken (slim respond will misroute): id=${p.id}",
-                            )
-                        }
-                    }
-                    currentState.copy(pendingPermissions = merged)
-                }
-            }
-            .onFailure { error -> android.util.Log.w(tag, "Failed to load permissions: ${error.message}") }
-    }
-}
+) = PermissionRefreshOrchestrator.launchLoadPendingPermissions(
+    scope = scope,
+    repository = repository,
+    slices = slices,
+    effects = effects,
+    tag = tag,
+)
 
-/**
- * C-D3 v2 §2.3 / I-2 v2 §3.3: slim standalone permissions load via
- * [OpenCodeRepository.getSlimapiPermissions]. Captures ONE token before
- * the network suspend; guards the slice + signal + UiEvent commits
- * inside a single `commitIfSlimTokenCurrent` atomic region. A stale
- * result is a clean no-op (no slice mutation, no signal update, no toast).
- */
-private fun launchLoadPendingPermissionsSlim(
-    scope: CoroutineScope,
-    repository: OpenCodeRepository,
-    slices: SliceFlows,
-    effects: SharedEffectBus,
-    tag: String,
-) {
-    scope.launch {
-        // Standalone workflow entry: ONE capture before first suspend.
-        val token = repository.captureSlimCommitToken()
 
-        val startIds = slices.sessionList.value.pendingPermissions
-            .mapTo(mutableSetOf()) { it.id }
-
-        val outcome = repository.getSlimapiPermissions(
-            directories = null,
-            token = token,
-        ).getOrElse { error ->
-            if (error is OpenCodeRepository.StaleSlimCommitException) {
-                return@launch
-            }
-            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Failure(error.message)
-        }
-
-        if (!repository.isSlimCommitTokenCurrent(token)) return@launch
-
-        // C-D3 v2 §2.3: ALL slice + effect commits land inside ONE atomic
-        // gate so a host rotation between the network return and the slice
-        // commit cannot write a stale permission list / signal under a
-        // new host.
-        repository.commitIfSlimTokenCurrent(token) {
-            val signal = aggregationSignal(outcome)
-
-            slices.mutateSessionList { current ->
-                val folded = applyAggregationOutcome(
-                    prior = current.pendingPermissions,
-                    outcome = outcome,
-                    wireToUi = SlimapiPermissionEntry::toPermissionRequest,
-                    uiId = PermissionRequest::id,
-                    uiDirectory = PermissionRequest::directory,
-                )
-
-                val foldedIds = folded.items
-                    .mapTo(mutableSetOf()) { it.id }
-
-                val raceArrivals =
-                    current.pendingPermissions.filter { permission ->
-                        permission.id !in startIds &&
-                            permission.id !in foldedIds
-                    }
-
-                current.copy(
-                    pendingPermissions = (folded.items + raceArrivals)
-                        .distinctBy { it.id },
-                    permissionAggregationSignal = signal,
-                )
-            }
-
-            if (outcome is SlimAggregationOutcome.Failure) {
-                effects.tryEmitUiEvent(
-                    UiEvent.Error(R.string.error_slim_permissions_fetch_failed)
-                )
-            }
-        }
-    }
-}
 
 /**
  * §R-17 batch3d: free-function extraction of the former AppCore.loadAgents body.

@@ -9,7 +9,7 @@
 
 | 任务 | 入口 | 规则 / 细节 |
 |---|---|---|
-| 改动后校验（替代 LSP，必做） | `./scripts/check.sh` | `.opencode/policies/build-signing.md`「改动校验」 |
+| 改动后校验（必做） | `./scripts/check.sh` | LSP 已启用（编辑后编译/类型诊断即时回流）；check.sh 跑单测+集成，仍是完成判据。`.opencode/policies/build-signing.md`「改动校验」 |
 | 发版（出包 + tag，版本由 git 派生，无 commit） | `./scripts/release.sh <patch\|minor\|major>` | `.opencode/policies/build-signing.md`、`.opencode/policies/versioning.md` |
 | 版本号来源 | git 派生（`versionName`=git describe、`versionCode`=commit count），无 bump 脚本 | `.opencode/policies/versioning.md` |
 | 构建环境 export | `source ./scripts/env.sh` | `scripts/env.sh` |
@@ -21,7 +21,7 @@
 
 ## 硬规则（不可违反）
 
-- **改动校验必做**：本工作区的 opencode 服务端已关闭 LSP（`lsp: false`），编辑后无编译器/诊断的自动反馈。每次改 Kotlin/资源后，必须 `./scripts/check.sh` 通过才算改动完成。等价于手动 LSP 自检；其输出走会被服务端截断（≤50KB）的 `output` 通道，不会产生 `metadata.diagnostics` 膨胀。
+- **改动校验必做**：本机 opencode 已启用 LSP——编辑后编译器/类型诊断自动回流（秒级，未解析引用 / 类型不匹配 / 签名错配等即时可见），过往 `lsp: false` 下“盲改 + 慢 check.sh 兜底”的痛点已解。但 **LSP 不跑单测**：每次改 Kotlin/资源后仍必须 `./scripts/check.sh` 通过（编译 + `testDebugUnitTest`）才算完成——**LSP 管编译期正确性（快），check.sh 管测试/集成（权威）**。
 - **设备安全**：不得在物理 Android 手机上跑 `connectedDebugAndroidTest`、安装或启动 debug 构建，**除非用户明确要求**。UI/插桩测试与安装**仅用模拟器**。若同时连了真机和模拟器，用 `ANDROID_SERIAL=<模拟器id>` 明确指定。
 - **模拟器占用纪律**：模拟器是本机共享资源。使用前必须 `./scripts/emulator.sh status` 确认「未运行」（=没人在用）再 `start`；已在运行时**不得抢占**（他人会话）。用完**必须 `stop`** 清理环境。详见 `docs/specs/emulator-debug.md`。
 - **Git 分支**：单一主线分支 `main`，在此分支工作与出包。

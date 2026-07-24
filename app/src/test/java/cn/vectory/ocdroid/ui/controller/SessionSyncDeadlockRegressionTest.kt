@@ -177,6 +177,7 @@ class SessionSyncDeadlockRegressionTest {
         // ── REAL repository: slimStateLock + all commit/token APIs are
         // production in-memory implementations. ──
         val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+        realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         val sid = "t3c-deadlock"
 
         // Spy only the suspend network method. Lock + commit stay real.
@@ -274,6 +275,7 @@ class SessionSyncDeadlockRegressionTest {
     @Test
     fun `T3c concurrent reconciles on different sids do not block each other_s slimStateLock acquisition`() = runBlocking {
         val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
+        realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         val sidA = "t3c-sid-a"
         val sidB = "t3c-sid-b"
 

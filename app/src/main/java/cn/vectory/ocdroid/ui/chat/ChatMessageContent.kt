@@ -669,48 +669,25 @@ internal fun ChatMessageList(
     // The render list now iterates `messages` directly (reverse + filter
     // for reverseLayout display).
     val reversedMessages = remember(messages, partsByMessage, streamingPartTexts.keys, streamingReasoningPart, sessionIsRunning) {
-        messages.reversed().filterNot { msg ->
-            val msgParts = partsByMessage[msg.id].orEmpty()
-            // §streaming-flicker-diagnosis §3.1 (locked, always-on): a
-            // session-running non-user message is treated as streaming
-            // whenever it has no parts yet OR carries a text/reasoning Part.
-            // This covers the placeholder window (text=null Part already in
-            // partsByMessage but partId not yet in streamingPartTexts) so the
-            // assistant message is never filterNot-ed out for one Compose
-            // snapshot — the Top1 blank-frame root cause of the ~1Hz flicker.
-            // Reasoning parts are swept in as well because they mutate through
-            // the same two-phase pattern. Previously gated by
-            // STREAMING_FLICKER_DEBUG; now unconditional — that gate survives
-            // only for the diagnostic log/counter block below.
-            val isStreamingMsg = msgParts.any { it.id in streamingPartTexts } ||
-                streamingReasoningPart?.messageId == msg.id ||
-                (!msg.isUser && sessionIsRunning &&
-                    (msgParts.isEmpty() || msgParts.any { it.isText || it.isReasoning }))
-            // §empty-msg / §error-feedback: same filter as the legacy
-            // reversedMessages (kept verbatim so rendering is byte-identical
-            // for the non-gap path).
-            val renderableEmpty = isEffectivelyRenderableEmpty(msgParts)
-            val filteredOut = !msg.isUser && !isStreamingMsg &&
-                msg.error?.message.isNullOrBlank() &&
-                renderableEmpty
-            // §streaming-flicker-diagnosis (Top1): a non-user, non-streaming
-            // message dropped here is the exact blank-frame path — the
-            // placeholder intermediate state makes isStreamingMsg=false AND
-            // renderableEmpty=true. If this fires ~1Hz during streaming, the
-            // Top1 root cause is confirmed. filterOutCount is the cumulative
-            // tally (AtomicLong); pair with the SessionSyncCoordinator
-            // "placeholder created" / "first delta staged" logs to time the
-            // two-phase window.
-            if (filteredOut && STREAMING_FLICKER_DEBUG) {
-                val count = flickerFilterOutCount.incrementAndGet()
-                Log.w(
-                    FLICKER_TAG,
-                    "FILTERED OUT msgId=${msg.id} isStreamingMsg=$isStreamingMsg " +
-                        "renderableEmpty=$renderableEmpty " +
-                        "hasError=${!msg.error?.message.isNullOrBlank()} filterOutCount=$count"
-                )
+        computeFilteredReversedMessages(
+            messages = messages,
+            partsByMessage = partsByMessage,
+            streamingPartTextKeys = streamingPartTexts.keys,
+            streamingReasoningPart = streamingReasoningPart,
+            sessionIsRunning = sessionIsRunning,
+        ).also { filtered ->
+            if (STREAMING_FLICKER_DEBUG) {
+                // Log each filtered-out message for flicker diagnosis.
+                messages.reversed().forEach { msg ->
+                    if (msg !in filtered) {
+                        val count = flickerFilterOutCount.incrementAndGet()
+                        Log.w(
+                            FLICKER_TAG,
+                            "FILTERED OUT msgId=${msg.id} filterOutCount=$count"
+                        )
+                    }
+                }
             }
-            filteredOut
         }
     }
     // Build folds in chronological order so the anchor is always the earliest
