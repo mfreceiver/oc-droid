@@ -125,7 +125,14 @@ class SharedStateStore @Inject constructor() {
     // transform sees the CURRENT committed aggregate's slice value (CAS loop),
     // and the write lands as ONE committed aggregate state.
     fun mutateConnection(transform: (ConnectionState) -> ConnectionState) =
-        state.update { it.copy(connection = transform(it.connection)) }
+        state.update { storeState ->
+            val previous = storeState.connection
+            val requested = transform(previous)
+            // §sse-rest-fallback (TODO 3): auto-stamp disconnectedSince on the
+            // Disconnected phase transition (single chokepoint → every writer
+            // records it). Pure helper so it is unit-testable in isolation.
+            storeState.copy(connection = stampDisconnectedSince(previous, requested, System.currentTimeMillis()))
+        }
     fun mutateTraffic(transform: (TrafficState) -> TrafficState) =
         state.update { it.copy(traffic = transform(it.traffic)) }
     fun mutateComposer(transform: (ComposerState) -> ComposerState) =
@@ -226,6 +233,38 @@ class SharedStateStore @Inject constructor() {
 
     /** Bundle view (preserves the [SliceFlows] data class for controller ctors). */
     val slices: SliceFlows = SliceFlows(this)
+}
+
+/**
+ * §sse-rest-fallback (TODO 3): pure phase-transition stamper for
+ * [ConnectionState.disconnectedSince]. Stamps the wall clock ([now]) on the
+ * transition INTO [ConnectionPhase.Disconnected] (only when the caller did NOT
+ * already set [ConnectionState.disconnectedSince] — explicit non-null writes
+ * win, so tests can simulate an old disconnect), and clears it on the
+ * transition OUT. Pure (all inputs are params) so it is unit-testable in
+ * isolation without a store or a clock.
+ *
+ * Called by [SharedStateStore.mutateConnection] — the single connection-write
+ * chokepoint — so every writer (CC / healthProbe / SSE connection owner /
+ * host-switch) records [ConnectionState.disconnectedSince] consistently without
+ * each site needing to remember.
+ */
+internal fun stampDisconnectedSince(
+    previous: ConnectionState,
+    requested: ConnectionState,
+    now: Long,
+): ConnectionState {
+    val wasDisconnected = previous.connectionPhase is ConnectionPhase.Disconnected
+    val isDisconnected = requested.connectionPhase is ConnectionPhase.Disconnected
+    return when {
+        // Transition INTO Disconnected: stamp unless the caller already did.
+        !wasDisconnected && isDisconnected && requested.disconnectedSince == null ->
+            requested.copy(disconnectedSince = now)
+        // Transition OUT of Disconnected: clear the stale stamp.
+        wasDisconnected && !isDisconnected && requested.disconnectedSince != null ->
+            requested.copy(disconnectedSince = null)
+        else -> requested
+    }
 }
 
 /**

@@ -247,6 +247,27 @@ class SettingsManager @Inject constructor(
         get() = debugPrefs.debugCardIdentityEnabled
         set(value) { debugPrefs.debugCardIdentityEnabled = value }
 
+    /**
+     * §omitted-content-card-gate: runtime toggle for the in-chat
+     * "展开省略内容" (OmittedContentCard) affordance. Default OFF — the card
+     * is hidden because all three of its forms proved net-negative value.
+     * The underlying expand machinery is intentionally KEPT (see
+     * [cn.vectory.ocdroid.ui.chat.PartExpandState] / [cn.vectory.ocdroid.data.repository.OpenCodeRepository.expandMessagesFullBatch]);
+     * flip this ON to re-expose the UI outlet for evaluation.
+     */
+    var omittedContentCardEnabled: Boolean
+        get() = debugPrefs.omittedContentCardEnabled
+        set(value) { debugPrefs.omittedContentCardEnabled = value }
+
+    /**
+     * §sse-disabled-debug-toggle: DEBUG-only runtime toggle that forces REST-
+     * only operation (no SSE). See [DebugPrefs.sseDisabled] for the full
+     * effect. Default OFF (no production impact).
+     */
+    var sseDisabled: Boolean
+        get() = debugPrefs.sseDisabled
+        set(value) { debugPrefs.sseDisabled = value }
+
     // ── Session domain (SessionPrefs) ───────────────────────────────────────
 
     var openSessionIds: List<String>

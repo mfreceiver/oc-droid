@@ -497,6 +497,8 @@
     <string name="chat_phase_reconnecting">reconnecting</string>
     <string name="chat_phase_reconnecting_attempt">reconnecting (attempt %1$d/%2$d)</string>
     <string name="chat_phase_disconnected">disconnected</string>
+    <!-- §sse-disabled-debug-toggle: REST-only degraded mode (debug flag sse_disabled=true). -->
+    <string name="chat_phase_sse_disabled">SSE disabled (REST-only)</string>
     <string name="chat_jump_to_latest">Jump to latest</string>
 
     <!-- §R18 Phase 2-G: UiEvent.Error / UiEvent.Success resource strings.
@@ -523,6 +525,7 @@
     <string name="error_edit_message_failed">Failed to edit message: %1$s</string>
     <string name="error_abort_session_failed">Failed to abort session: %1$s</string>
     <string name="success_refreshed">Refreshed</string>
+    <string name="info_refresh_in_progress">A refresh is already in progress; please try again shortly.</string>
     <string name="error_session_sse_named">%1$s: %2$s</string>
     <string name="error_session_sse_unnamed">%1$s</string>
     <string name="error_create_session_failed">Failed to create session: %1$s</string>

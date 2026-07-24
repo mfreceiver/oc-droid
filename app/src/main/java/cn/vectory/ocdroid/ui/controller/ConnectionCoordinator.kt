@@ -8,6 +8,7 @@ import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
 import cn.vectory.ocdroid.service.StreamingServiceLauncher
 import cn.vectory.ocdroid.service.OwnershipStartResult
+import cn.vectory.ocdroid.service.OwnershipRefusal
 import cn.vectory.ocdroid.service.TeardownReason
 import cn.vectory.ocdroid.service.DegradedBootstrapTerminator
 import cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy
@@ -604,11 +605,21 @@ class ConnectionCoordinator(
         scope.launch {
             val result = streamingServiceLauncher?.ensureStarted(identity)
             if (result !is OwnershipStartResult.Ready || result.identity != identity) {
+                // §sse-disabled-debug-toggle: surface the distinct SseDisabled
+                // phase when the launcher refused because the debug flag is ON
+                // (REST-only); otherwise the generic Disconnected phase.
+                val phase = if (result is OwnershipStartResult.Refused &&
+                    result.reason is OwnershipRefusal.SseDisabled
+                ) {
+                    ConnectionPhase.SseDisabled
+                } else {
+                    ConnectionPhase.Disconnected
+                }
                 writeConnection {
                     it.copy(
                         isConnected = false,
                         isConnecting = false,
-                        connectionPhase = ConnectionPhase.Disconnected,
+                        connectionPhase = phase,
                     )
                 }
             }

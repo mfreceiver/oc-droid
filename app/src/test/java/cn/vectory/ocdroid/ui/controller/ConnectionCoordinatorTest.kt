@@ -1013,6 +1013,54 @@ class ConnectionCoordinatorTest {
         assertEquals(1, launcher.callCount)
     }
 
+    // ── §sse-disabled-debug-toggle: connection phase mapping ──────────────
+
+    @Test
+    fun `startSSE with SseDisabled refusal surfaces the SseDisabled connection phase`() {
+        // REST-only mode: when the launcher refuses with [SseDisabled] (debug
+        // flag ON), CC's startSSE must write the distinct [SseDisabled] phase
+        // (NOT the generic Disconnected) so the UI can reflect "SSE disabled".
+        identityStore.bind("test-fp", "/proj", "test-endpoint")
+        launcher.nextOwnershipResult =
+            cn.vectory.ocdroid.service.OwnershipStartResult.Refused(
+                cn.vectory.ocdroid.service.OwnershipRefusal.SseDisabled,
+            )
+
+        coordinator.startSSE()
+        runPending()
+
+        assertEquals(
+            "launcher invoked once (gate is at the launcher, not CC)",
+            1,
+            launcher.callCount,
+        )
+        assertEquals(
+            "SseDisabled phase surfaced",
+            ConnectionPhase.SseDisabled,
+            connectionFlow.value.connectionPhase,
+        )
+        assertFalse("not connected", connectionFlow.value.isConnected)
+    }
+
+    @Test
+    fun `startSSE with a non-SseDisabled refusal still surfaces Disconnected`() {
+        // Regression guard: only the SseDisabled refusal maps to SseDisabled
+        // phase; every other refusal (e.g. ServiceStopped) stays Disconnected.
+        identityStore.bind("test-fp", "/proj", "test-endpoint")
+        launcher.nextOwnershipResult =
+            cn.vectory.ocdroid.service.OwnershipStartResult.Refused(
+                cn.vectory.ocdroid.service.OwnershipRefusal.ServiceStopped,
+            )
+
+        coordinator.startSSE()
+        runPending()
+
+        assertEquals(
+            ConnectionPhase.Disconnected,
+            connectionFlow.value.connectionPhase,
+        )
+    }
+
     @Test
     fun `D3 refused ownership settles false once and never publishes Connected`() {
         val engine = mockk<cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine>()

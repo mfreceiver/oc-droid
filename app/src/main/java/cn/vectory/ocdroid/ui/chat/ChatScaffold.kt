@@ -81,6 +81,7 @@ import cn.vectory.ocdroid.ui.controller.questionsInTree
 import cn.vectory.ocdroid.ui.controller.rootIdOf
 import cn.vectory.ocdroid.ui.inferCurrentAgent
 import cn.vectory.ocdroid.ui.inferCurrentModel
+import cn.vectory.ocdroid.ui.performForceRefresh
 import cn.vectory.ocdroid.ui.resolveMessage
 import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.visibleMessages
@@ -636,23 +637,23 @@ fun ChatScaffold(
             onOpenTodoDialog = { showTodoDialog = true },
             onOpenAgentPicker = { showAgentPicker = true },
             onOpenModelPicker = { showModelPicker = true },
-            // §6 (强制刷新): emit ClearSessionWindowCache THEN LoadMessages + LoadSessions
-            // (pure data reload — no ColdStartReconnect). Previously this was
-            // ColdStartReconnect which raced/overrode LoadMessages via the
-            // server.connected catch-up. Now it is a clean three-step:
-            // clear cache → reload current session window → reload session list
-            // (titles/metadata resync).
+            // §sse-rest-fallback (强制刷新 = SSE-disconnect REST 兜底): the
+            // user's explicit "Force refresh" — clear the current session
+            // window, wipe messages/parts, full UNANCHORED re-fetch (bypass a
+            // stale slim watermark so an SSE outage cannot leave the cleared
+            // window empty), re-probe the connection, and resync the session
+            // list. Routed through [AppCore.performForceRefresh] (5-step: clear
+            // cache + ColdStartChatReset + forceInitialWindow fetch +
+            // testConnection + LoadSessions) so the logic is shared + unit-
+            // tested at the orchestration layer. When no session is open, only
+            // the session-list resync applies.
             onForceRefresh = {
-                val bus = chatVM.core.effectBus
                 val sid = chat.currentSessionId
-                bus.tryEmitEffect(ControllerEffect.ClearSessionWindowCache)
                 if (sid != null) {
-                    bus.tryEmitEffect(ControllerEffect.LoadMessages(sid, resetLimit = true))
+                    chatVM.core.performForceRefresh(sid)
+                } else {
+                    chatVM.core.effectBus.tryEmitEffect(ControllerEffect.LoadSessions)
                 }
-                // §force-refresh-fix (#6a): pure data reload — drop ColdStartReconnect
-                // (it raced/overrode LoadMessages via the server.connected catch-up).
-                // Refresh the session list too so titles/metadata resync.
-                bus.tryEmitEffect(ControllerEffect.LoadSessions)
             },
         )
     }

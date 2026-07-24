@@ -566,12 +566,27 @@ class SessionStreamingService : Service() {
         bootstrapAbortIssued = false
         bootstrapJob = installedJob
         if (requestedOwnership != null) {
-            scope.launch {
-                // DIAGNOSTIC TIMING (KEY MEASUREMENT): how long did the main
-                // Looper sit on this coroutine before running it? If this
-                // queueDelayMs is ~5000ms+, the launcher's Stage-1 ack times
-                // out purely due to main-thread dispatch starvation — the
-                // Service's Late onStartCommand then sees outcome=Expired.
+            // SSE-cold-start-fix (root cause A — main-thread starvation): run
+            // the Stage-1 ownership registration on Dispatchers.Default so the
+            // ack (`pending.starting.complete(Accepted)` — a synchronized,
+            // non-suspending op inside the gate) completes WITHOUT waiting
+            // behind a busy main Looper. The bug logs showed a Stage-1
+            // AckTimeout at exactly ~5002ms, matching the launcher's 5s
+            // [OwnershipAckPolicy] window — i.e. the registration coroutine
+            // sat in the Main dispatch queue for ~5s during cold start. The
+            // gate is fully synchronized/thread-safe; [installedJob.start()]
+            // and [abortExpiredStartup] are safe to invoke from any dispatcher
+            // (the bootstrap job itself runs on [scope]'s Main dispatcher;
+            // teardown is launched on [scope] = Main).
+            //
+            // The [queueDelayMs] diagnostic is KEPT so the next run can read
+            // the value and confirm it is now small (Default-dispatcher
+            // latency) rather than ~5000ms (Main-queue starvation).
+            scope.launch(kotlinx.coroutines.Dispatchers.Default) {
+                // DIAGNOSTIC TIMING (KEY MEASUREMENT): how long did the
+                // dispatcher sit on this coroutine before running it? Post-fix
+                // this measures Dispatchers.Default latency (expected ~0ms),
+                // NOT main-Looper queueing.
                 val dispatchNs = SystemClock.elapsedRealtimeNanos()
                 DebugLog.i(TAG, "onStartCommand: bootstrap coroutine dispatched (queueDelayMs=${(dispatchNs - onStartEntryNs) / 1_000_000L})")
                 if (identityStore.isCurrent(requestedOwnership)) {
@@ -592,13 +607,15 @@ class SessionStreamingService : Service() {
                         // register an orphan owner / hold an FGS slot with no
                         // owner. The bootstrap job is cancelled; the shell
                         // teardown (stopForeground + stopSelf + cancel SSE)
-                        // runs via the BootstrapFailure teardown path.
+                        // runs via the BootstrapFailure teardown path UNLESS a
+                        // newer attempt has taken over the gate (see
+                        // [abortExpiredStartup] teardown-scope guard).
                         DebugLog.w(TAG, "onStartCommand: registerStarting outcome=$outcome → abort bootstrap (elapsedSinceEntryMs=${(SystemClock.elapsedRealtimeNanos() - onStartEntryNs) / 1_000_000L})")
-                        abortExpiredStartup()
+                        abortExpiredStartup(requestedAttemptId)
                     }
                 } else {
                     ownershipGate.refuse(requestedOwnership, OwnershipRefusal.StaleIdentity)
-                    abortExpiredStartup()
+                    abortExpiredStartup(requestedAttemptId)
                 }
             }
         } else {
@@ -637,7 +654,12 @@ class SessionStreamingService : Service() {
             // owner before the Service reaches Ready. The abort callback must
             // be symmetric with the late-Expired onStartCommand branch:
             // cancel bootstrap and force the terminal FGS/SSE teardown.
-            abortStartup = { abortExpiredStartup() },
+            //
+            // SSE-cold-start-fix: capture [attemptId] so the boundary-race
+            // abort (expire-after-Accept) scopes the teardown-scope guard to
+            // THIS attempt — a NEWER attempt that took over the gate must NOT
+            // be destroyed by this expiry teardown.
+            abortStartup = { abortExpiredStartup(attemptId) },
         )
         if (outcome is RegisterStartingOutcome.Accepted) {
             acceptedOwnershipIdentity = identity
@@ -667,7 +689,11 @@ class SessionStreamingService : Service() {
      */
     private enum class BootstrapRollbackKind { Timeout, Failed }
 
-    private fun rollbackBootstrap(kind: BootstrapRollbackKind, identity: ConnectionIdentity?) {
+    private fun rollbackBootstrap(
+        kind: BootstrapRollbackKind,
+        identity: ConnectionIdentity?,
+        attemptId: Long = StreamingOwnershipGate.NO_ATTEMPT_ID,
+    ) {
         when (kind) {
             BootstrapRollbackKind.Timeout -> {
                 // D5-3 (#4 seam) — terminal abort for a launcher attempt that
@@ -676,10 +702,34 @@ class SessionStreamingService : Service() {
                 // non-suspending and launch the awaitable teardown on the
                 // Service scope. [bootstrapAbortIssued] makes the path
                 // idempotent when an expiry callback and another terminal
-                // failure race. NO ownership rollback here.
+                // failure race. NO ownership rollback here (CRITICAL invariant:
+                // the Timeout branch MUST NOT call failStarting / ownership
+                // rollback).
                 bootstrapJob?.cancel()
                 bootstrapJob = null
                 if (bootstrapAbortIssued) return
+                // SSE-cold-start-fix (root cause B — teardown scope by
+                // attemptId): before tearing down the shared Service component,
+                // verify the gate has NOT been taken over by a NEWER attempt.
+                // If it has, a full teardown (StopForeground + StopSelf) would
+                // destroy that newer attempt's bootstrap too — exactly the
+                // dual-fire kill seen in the bug logs (attempt1 Expired →
+                // teardown nuked the attempt2-owned Service). In that case
+                // cancel ONLY this job; the newer attempt owns the service.
+                // The check is attemptId-scoped (NOT identity — the bug is two
+                // attempts for the SAME identity). [NO_ATTEMPT_ID] (sticky /
+                // controller-internal registration, no launcher deadline) skips
+                // the guard and teardowns as before.
+                if (attemptId != StreamingOwnershipGate.NO_ATTEMPT_ID &&
+                    ownershipGate.hasLiveAttemptOtherThan(attemptId)
+                ) {
+                    DebugLog.i(
+                        TAG,
+                        "rollbackBootstrap(Timeout): newer attempt holds the gate " +
+                            "(expiredAttemptId=$attemptId) → cancel job only, skip service teardown",
+                    )
+                    return
+                }
                 bootstrapAbortIssued = true
                 scope.launch {
                     coordinator.teardownAndAwait(TeardownReason.BootstrapFailure)
@@ -721,8 +771,15 @@ class SessionStreamingService : Service() {
      * Timeout-path rollback: launcher expiry / stale identity. Thin wrapper
      * over [rollbackBootstrap] (kept for external call sites + doc
      * references). NO ownership rollback; idempotent via [bootstrapAbortIssued].
+     *
+     * SSE-cold-start-fix: [attemptId] scopes the teardown-scope guard in
+     * [rollbackBootstrap] so a superseded attempt does not teardown a newer
+     * attempt's Service. Defaults to [StreamingOwnershipGate.NO_ATTEMPT_ID]
+     * (sticky / internal) → no guard, teardown as before.
      */
-    private fun abortExpiredStartup() = rollbackBootstrap(BootstrapRollbackKind.Timeout, null)
+    private fun abortExpiredStartup(
+        attemptId: Long = StreamingOwnershipGate.NO_ATTEMPT_ID,
+    ) = rollbackBootstrap(BootstrapRollbackKind.Timeout, null, attemptId)
 
     /**
      * Failed-path rollback: bootstrap exhaustion / transport rejection /

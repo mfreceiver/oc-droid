@@ -1367,7 +1367,9 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // all are wiped.
         val older = Message(id = "m_older", role = "user")
         val fresh = MessageWithParts(info = Message(id = "m_fresh", role = "assistant"))
-        coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
+        // §sse-rest-fallback (TODO 2): refreshCurrentSession now re-fetches
+        // UNANCHORED (forceInitialWindow=true → getMessagesPagedUnanchored).
+        coEvery { repository.getMessagesPagedUnanchored("session-A", any(), any(), any()) } returns
             Result.success(MessagesPage(listOf(fresh), null))
         // §4-A: refreshCurrentSession now also forces a testConnection probe
         // (so a stale red badge recovers). Mock checkHealth as a FAILURE so the
@@ -1398,6 +1400,9 @@ class ChatViewModelTest : MainViewModelTestBase() {
         chatVM.refreshCurrentSession()
         advanceUntilIdle()
 
+        // §sse-rest-fallback (TODO 2): refreshCurrentSession re-fetches UNANCHORED
+        // (staleNotice = SSE-disconnect recovery) — NOT the anchored /since path.
+        coVerify(atLeast = 1) { repository.getMessagesPagedUnanchored("session-A", any(), any(), any()) }
         val ids = chatVM.chatFlow.value.messages.map { it.id }
         assertFalse("Older message is dropped on cold-start refresh (got $ids)", ids.contains("m_older"))
         assertTrue("Fresh latest window is loaded (got $ids)", ids.contains("m_fresh"))
@@ -1421,7 +1426,9 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // branch (checkHealth mocked offline), leaving onSettled(true) →
         // successMessage entirely untested.
         val fresh = MessageWithParts(info = Message(id = "m_fresh", role = "assistant"))
-        coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
+        // §sse-rest-fallback (TODO 2): refreshCurrentSession now re-fetches
+        // UNANCHORED (forceInitialWindow=true → getMessagesPagedUnanchored).
+        coEvery { repository.getMessagesPagedUnanchored("session-A", any(), any(), any()) } returns
             Result.success(MessagesPage(listOf(fresh), null))
         // Healthy probe → onSettled(true). loadInitialData sub-callers are
         // stubbed in setUp (getAgents/getProviders/getCommands/etc.).

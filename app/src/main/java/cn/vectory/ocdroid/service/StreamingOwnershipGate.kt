@@ -110,8 +110,17 @@ class StreamingOwnershipGate @Inject constructor() {
      *  2. **Starting same identity** → starting pre-completed with Accepted,
      *     terminal = the existing owner's terminal deferred (join the in-
      *     flight Stage 2 wait), launchRequired = false.
-     *  3. **No owner** → allocate a fresh [attemptId], create both deferreds
-     *     (neither completed), store [pendingAttempt], launchRequired = true.
+     *  3. **No owner** → two sub-cases (SSE-cold-start-fix):
+     *     a. **Live pending, same identity** → JOIN: return the SAME attemptId
+     *        + shared starting/terminal deferreds, launchRequired = false. A
+     *        concurrent second ensureStarted collapses into the in-flight
+     *        attempt instead of overwriting the single pending slot.
+     *     b. **Live pending, different identity** → REFUSE with AlreadyOwned
+     *        (both deferreds completed immediately), launchRequired = false.
+     *        Never silently overwrites a live pending (would strand its waiter).
+     *     c. **No live pending** → allocate a fresh attemptId, create both
+     *        deferreds (neither completed), store [pendingAttempt],
+     *        launchRequired = true.
      *  4. **Different owner** → both deferreds pre-completed with Refused(
      *     AlreadyOwned), launchRequired = false.
      */
@@ -172,7 +181,44 @@ class StreamingOwnershipGate @Inject constructor() {
                 ).toPublic(launchRequired = false)
             }
         }
-        // Case 3: no owner → allocate attempt, create both deferreds, store.
+        // Case 3: no Ready/Starting owner. A prior prepareAttempt may have left
+        // a LIVE pending attempt (Stage 1 not yet accepted by the Service). The
+        // old code UNCONDITIONALLY overwrote [pendingAttempt], which was the
+        // SSE-cold-start double-fire root cause: a second ensureStarted (e.g.
+        // foreground-return + health-probe overlap) clobbered the single slot,
+        // the first attempt's late Service invocation then read Expired and
+        // tore down the whole (now attempt-2-owned) Service. Two sub-cases now:
+        val pending = pendingAttempt
+        if (pending != null) {
+            return@synchronized if (pending.identity == identity) {
+                // Same-identity JOIN: return the SAME [attemptId] + the SHARED
+                // [starting]/[terminal] deferreds. [launchRequired] = false →
+                // the second caller issues NO second startForegroundService.
+                // Both launchers await the identical Stage-1/Stage-2 outcome,
+                // collapsing a cold-start double-fire into a single Service
+                // invocation + single attemptId.
+                pending.toPublic(launchRequired = false)
+            } else {
+                // Different-identity pending: a bootstrap for another identity
+                // is in flight. Do NOT overwrite the live pending (would strand
+                // the in-flight waiter AND issue a second FGS start). REFUSE the
+                // new call — complete its deferreds immediately with
+                // [AlreadyOwned] so its launcher resolves (no hang) and retries
+                // on the next foreground return / health probe.
+                val refusal = OwnershipRefusal.AlreadyOwned(pending.identity)
+                PreparedAttemptState(
+                    attemptId = ++attemptIdCounter,
+                    identity = identity,
+                    starting = CompletableDeferred<StartingAck>().apply {
+                        complete(StartingAck.Refused(refusal))
+                    },
+                    terminal = CompletableDeferred<OwnershipStartResult>().apply {
+                        complete(OwnershipStartResult.Refused(refusal))
+                    },
+                ).toPublic(launchRequired = false)
+            }
+        }
+        // No owner, no live pending → allocate a fresh attempt.
         val state = PreparedAttemptState(
             attemptId = ++attemptIdCounter,
             identity = identity,
@@ -398,6 +444,34 @@ class StreamingOwnershipGate @Inject constructor() {
      */
     fun isAttemptLive(attemptId: Long): Boolean = synchronized(lock) {
         pendingAttempt?.attemptId == attemptId
+    }
+
+    /**
+     * SSE-cold-start-fix (teardown scope by attemptId) — returns true iff some
+     * OTHER attempt (attemptId != [excludeAttemptId], and != [NO_ATTEMPT_ID])
+     * currently holds the gate as a live pending attempt OR a Starting/Ready
+     * owner.
+     *
+     * Used by [SessionStreamingService.abortExpiredStartup] (Timeout rollback)
+     * to decide whether a BootstrapFailure teardown would destroy a NEWER
+     * attempt's bootstrap that now owns the shared Service component. When
+     * true, the caller cancels ONLY its own bootstrap job and SKIPS the
+     * service-wide teardown / StopSelf — the newer attempt owns the service.
+     *
+     * The check is deliberately **attemptId-scoped, NOT identity-scoped**: the
+     * very bug being closed is two attempts for the SAME identity where the
+     * older one expired; an identity-based guard would fail to detect it.
+     *
+     * [NO_ATTEMPT_ID] is excluded from "other" so the sticky / controller-
+     * internal registration path (which carries no launcher deadline) is never
+     * mistaken for a superseding attempt.
+     */
+    fun hasLiveAttemptOtherThan(excludeAttemptId: Long): Boolean = synchronized(lock) {
+        val pendingId = pendingAttempt?.attemptId
+        val ownerId = owner?.attemptId
+        val pendingOther = pendingId != null && pendingId != excludeAttemptId && pendingId != NO_ATTEMPT_ID
+        val ownerOther = ownerId != null && ownerId != excludeAttemptId && ownerId != NO_ATTEMPT_ID
+        pendingOther || ownerOther
     }
 
     /**

@@ -100,6 +100,29 @@ class SettingsManagerTest {
         // no null-default assertion for it here anymore.
     }
 
+    // ───────────────── §sse-disabled-debug-toggle ─────────────────
+
+    @Test
+    fun `sseDisabled defaults to false`() {
+        // Production default: SSE enabled (no REST-only degradation).
+        assertFalse(settings.sseDisabled)
+    }
+
+    @Test
+    fun `sseDisabled round trip`() {
+        settings.sseDisabled = true
+        assertTrue(settings.sseDisabled)
+        settings.sseDisabled = false
+        assertFalse(settings.sseDisabled)
+    }
+
+    @Test
+    fun `sseDisabled survives manager recreation`() {
+        settings.sseDisabled = true
+        val recreated = SettingsManager(ApplicationProvider.getApplicationContext())
+        assertTrue("flag persisted across SettingsManager recreation", recreated.sseDisabled)
+    }
+
     // ───── recentWorkdirs：项目记忆与冷启动恢复（§recent-workdirs）─────
     // R-20 Phase 5: per-serverGroupFp storage. Tests pass a fixed fp ("g1")
     // so the per-fp slot is exercised the same way the legacy global slot was.

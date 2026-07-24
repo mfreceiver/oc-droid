@@ -51,6 +51,13 @@ import cn.vectory.ocdroid.util.runSuspendCatching
  * transition table is unit-testable in isolation — same discipline as
  * [cn.vectory.ocdroid.data.repository.ExpandOutcome] /
  * [cn.vectory.ocdroid.data.repository.StatusOutcome].
+ *
+ * TODO(§omitted-content-card-gate): the UI outlet (OmittedContentCard)
+ * is default-OFF (SettingsManager.omittedContentCardEnabled = false). This
+ * sealed interface + its transition table are intentionally KEPT (NOT
+ * dead code) — they are referenced by unit tests and by
+ * [ExpandPartsUseCase]. Re-enable or delete once G6
+ * `/slimapi/messages/{sid}/full` (or a sidecar equivalent) is reliable.
  */
 sealed interface PartExpandState {
     /** Initial / reset. Affordance visible. */
@@ -185,6 +192,12 @@ data class ExpandPartsOutcome(
  * directly with a mockk `OpenCodeRepository`.
  *
  * @param repository T3's `expandMessagesFullBatch` is consume-only.
+ *
+ * TODO(§omitted-content-card-gate): the UI outlet that drives this usecase
+ * (OmittedContentCard) is default-OFF (SettingsManager.omittedContentCardEnabled
+ * = false). This usecase is intentionally KEPT (NOT dead code) — it is covered
+ * by unit tests and wired through the chat ViewModel. Re-enable or delete once
+ * G6 `/slimapi/messages/{sid}/full` (or a sidecar equivalent) is reliable.
  */
 class ExpandPartsUseCase(
     private val repository: OpenCodeRepository,

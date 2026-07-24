@@ -268,6 +268,7 @@ object ControllerModule {
         clientFactory: OkHttpClientFactory,
         sessionSyncCoordinator: SessionSyncCoordinator,
         effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver,
+        settingsManager: cn.vectory.ocdroid.util.SettingsManager,
     ): TokenStreamCoordinator = TokenStreamCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -306,6 +307,9 @@ object ControllerModule {
                 )
             }
         },
+        // §sse-disabled-debug-toggle: gate per-session token stream on the DEBUG
+        // flag (REST-only mode). Read live so toggling takes effect on next open.
+        sseDisabled = { settingsManager.sseDisabled },
     )
 
     @Provides

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.util.DebugLog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
@@ -374,11 +375,23 @@ class ChatViewModel @Inject constructor(
 
     fun refreshCurrentSession() {
         val sessionId = core.store.chatFlow.value.currentSessionId ?: return
-        // §history-load-fix: guard against both load flags (see
-        // performGlobalColdStartRefresh). A user loadMore in flight must also
-        // block a manual refresh.
-        if (core.store.chatFlow.value.isLoadingMessages || core.store.chatFlow.value.isLoadingMoreMessages) return
-        core.performGlobalColdStartRefresh(currentId = sessionId)
+        // §sse-rest-fallback (TODO 2): the staleNotice snackbar = "messages may
+        // be stale" → treat as an SSE-disconnect RECOVERY: clear+UNANCHORED
+        // re-fetch (forceInitialWindow=true, same ①②③ as performForceRefresh) so
+        // a stale slim watermark cannot leave the just-cleared window empty. The
+        // isLoading guard now lives inside performGlobalColdStartRefresh
+        // (explicit=true → surfaces an Info feedback instead of a silent no-op);
+        // ⑤ LoadSessions + the ④ health probe run ONLY when the clear+reload
+        // actually happened (refreshed=true), so a suppressed refresh is not a
+        // misleading partial action. The success toast fires when the reload +
+        // probe both settled cleanly.
+        val refreshed = core.performGlobalColdStartRefresh(
+            currentId = sessionId,
+            forceInitialWindow = true,
+            explicit = true,
+        )
+        if (!refreshed) return
+        core.effectBus.tryEmitEffect(ControllerEffect.LoadSessions)
         core.connectionCoordinator.testConnection(force = true, onSettled = { ok ->
             if (ok && !core.store.chatFlow.value.isLoadingMessages && !core.store.chatFlow.value.isLoadingMoreMessages) {
                 core.effectBus.tryEmitUiEvent(UiEvent.Success(R.string.success_refreshed))

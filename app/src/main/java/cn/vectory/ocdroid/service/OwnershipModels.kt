@@ -34,6 +34,14 @@ sealed interface OwnershipRefusal {
     data object ServiceStopped : OwnershipRefusal
     /** D4-B B1: bootstrap exhausted / transport rejected/timed out. */
     data object BootstrapFailed : OwnershipRefusal
+    /**
+     * §sse-disabled-debug-toggle: the client's DEBUG `sse_disabled` flag is ON
+     * — the launcher REFUSED to start the SSE foreground service (REST-only
+     * degraded mode). Surfaced to callers as a distinct refusal so the
+     * connection phase can render [cn.vectory.ocdroid.ui.ConnectionPhase.SseDisabled]
+     * instead of a generic Disconnected.
+     */
+    data object SseDisabled : OwnershipRefusal
 }
 
 /**

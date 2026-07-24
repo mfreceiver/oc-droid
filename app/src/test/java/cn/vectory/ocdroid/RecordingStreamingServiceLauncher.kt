@@ -34,12 +34,22 @@ class RecordingStreamingServiceLauncher : StreamingServiceLauncher {
     @Volatile
     var nextResult: Boolean = true
 
+    /**
+     * §sse-disabled-debug-toggle: when non-null, the next [ensureStarted] call
+     * returns this exact [OwnershipStartResult] (overrides [nextResult]). Used
+     * to simulate a distinct refusal reason (e.g. [OwnershipRefusal.SseDisabled])
+     * so callers can assert on the resulting connection phase. Null = use
+     * [nextResult] (preserves prior behavior).
+     */
+    @Volatile
+    var nextOwnershipResult: OwnershipStartResult? = null
+
     val requestedIdentities = mutableListOf<ConnectionIdentity>()
 
     override suspend fun ensureStarted(identity: ConnectionIdentity): OwnershipStartResult {
         callCountAtomic.incrementAndGet()
         requestedIdentities += identity
-        return if (nextResult) OwnershipStartResult.Ready(identity)
+        return nextOwnershipResult ?: if (nextResult) OwnershipStartResult.Ready(identity)
         else OwnershipStartResult.Refused(OwnershipRefusal.ServiceStopped)
     }
 }

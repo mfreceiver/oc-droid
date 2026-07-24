@@ -5,6 +5,7 @@ import androidx.core.content.ContextCompat
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
+import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -14,6 +15,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Before
 import org.junit.Test
 
@@ -23,6 +25,7 @@ class StreamingServiceLauncherTest {
     private lateinit var foreground: MutableStateFlow<Boolean>
     private lateinit var monitor: AppLifecycleMonitor
     private lateinit var gate: StreamingOwnershipGate
+    private lateinit var settingsManager: SettingsManager
     private lateinit var launcher: AndroidStreamingServiceLauncher
 
     @Before
@@ -33,12 +36,14 @@ class StreamingServiceLauncherTest {
         monitor = mockk(relaxed = true)
         every { monitor.isInForeground } returns foreground
         gate = StreamingOwnershipGate()
+        settingsManager = mockk(relaxed = true)
         launcher = AndroidStreamingServiceLauncher(
             context,
             monitor,
             mockk<StreamingLifecycleCoordinator>(relaxed = true),
             gate,
             OwnershipAckPolicy(),
+            settingsManager,
         )
     }
 
@@ -75,6 +80,41 @@ class StreamingServiceLauncherTest {
             OwnershipStartResult.Refused(OwnershipRefusal.AckTimeout),
             launcher.ensureStarted(identity),
         )
+    }
+
+    @Test
+    fun `sseDisabled true refuses SSE start with no FGS and no gate mutation`() = runTest {
+        // §sse-disabled-debug-toggle: flag ON → REST-only. ensureStarted must
+        // short-circuit BEFORE any eligibility check / prepareAttempt /
+        // startForegroundService, returning a distinct SseDisabled refusal.
+        every { settingsManager.sseDisabled } returns true
+
+        val result = launcher.ensureStarted(identity)
+
+        assertEquals(
+            OwnershipStartResult.Refused(OwnershipRefusal.SseDisabled),
+            result,
+        )
+        // NO foreground-service start was issued (no FGS bootstrap).
+        verify(exactly = 0) { ContextCompat.startForegroundService(any(), any()) }
+        // NO gate attempt was prepared (nothing to expire/roll back — the
+        // launcher never touched the ownership gate).
+        assertFalse("no pending attempt prepared", gate.isAttemptLive(1L))
+    }
+
+    @Test
+    fun `sseDisabled false (default) keeps normal SSE start path`() = runTest {
+        // §sse-disabled-debug-toggle: flag OFF (production default) → the gate
+        // is transparent; the normal AckTimeout path is unchanged (REST path /
+        // fix-1 bootstrap behavior untouched).
+        every { settingsManager.sseDisabled } returns false
+        every { ContextCompat.startForegroundService(any(), any()) } returns Unit
+
+        assertEquals(
+            OwnershipStartResult.Refused(OwnershipRefusal.AckTimeout),
+            launcher.ensureStarted(identity),
+        )
+        verify(exactly = 1) { ContextCompat.startForegroundService(any(), any()) }
     }
 
     @Test

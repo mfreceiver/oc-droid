@@ -2128,6 +2128,12 @@ class OpenCodeRepository @Inject constructor(
      * caller (PartExpandState / ExpandPartsUseCase / all tests) resolves
      * unchanged. Per-call `api` + `hostPort` are supplied to the engine via
      * providers (I3 / hostPort-live) — see [expandBatchEngine].
+     *
+     * TODO(§omitted-content-card-gate): the UI outlet that consumes this
+     * (OmittedContentCard) is default-OFF (SettingsManager.omittedContentCardEnabled
+     * = false). This function + [mergeFullBatchIntoLocal] are intentionally KEPT
+     * (NOT dead code) — they are referenced by unit tests. Re-enable or delete
+     * once G6 `/slimapi/messages/{sid}/full` (or a sidecar equivalent) is reliable.
      */
     suspend fun expandMessagesFullBatch(
         sessionId: String,

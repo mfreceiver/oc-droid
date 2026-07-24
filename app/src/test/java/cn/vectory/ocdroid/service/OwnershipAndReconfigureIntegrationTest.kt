@@ -180,6 +180,49 @@ class OwnershipAndReconfigureIntegrationTest {
         assertTrue("StopSelf emitted", commands.contains(LifecycleCommand.StopSelf))
     }
 
+    // ── SSE-cold-start-fix: BootstrapFailure teardown coexists with L3 poller ─
+
+    @Test
+    fun `cold-start-fix - BootstrapFailure teardown emits no StartPoller and allows re-arm`() = runTest {
+        val status = RecordingStatusAggregator()
+        val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
+        val inForeground = MutableStateFlow(false)
+        val commands = mutableListOf<LifecycleCommand>()
+        backgroundScope.launch { coordinator.commands.collect { commands += it } }
+        coordinator.start(inForeground)
+        // Layer starts at L3 (no bootstrap). The external ProcessStatusPoller
+        // runs on @ApplicationScope in this state (NOT the coordinator's
+        // pollerRuntime). A BootstrapFailure teardown (Stage-2 timeout /
+        // BootstrapFailed → failStarting) must retire SSE + foreground + self
+        // but must NOT emit a spurious StartPoller — the L3 poller stays
+        // coexisting (constraint: poller does NOT start FGS; it only refreshes
+        // status). This is the "Stage-2/BootstrapFailed 与 L3 poller 共存" case.
+        coordinator.teardownAndAwait(TeardownReason.BootstrapFailure)
+        runCurrent()
+
+        assertEquals(Layer.L3, coordinator.layer.value)
+        assertFalse(
+            "no StartPoller emitted on BootstrapFailure (L3 poller is external)",
+            commands.any { it is LifecycleCommand.StartPoller },
+        )
+        assertTrue("StopSse emitted", commands.contains(LifecycleCommand.StopSse))
+        assertTrue("StopForeground emitted", commands.contains(LifecycleCommand.StopForeground))
+        assertTrue("StopSelf emitted", commands.contains(LifecycleCommand.StopSelf))
+
+        // Recovery: a subsequent foreground-return / probe bootstrap re-arms the
+        // SSE source (Stage-2/BootstrapFailed does NOT strand the coordinator —
+        // matches the "可被后续 probe 再拉起" recovery entry).
+        commands.clear()
+        status.setState(GlobalBusyState.Busy)
+        val bound = ConnectionIdentity(7L, "group", "/work", "endpoint")
+        coordinator.onBootstrapResult(bound, GlobalBusyState.Busy)
+        runCurrent()
+        assertTrue(
+            "re-arm emits StartSse after BootstrapFailure recovery",
+            commands.any { it is LifecycleCommand.StartSse },
+        )
+    }
+
     // ── D4-B: releaseNow is non-suspend + removes owner ────────────────────
 
     @Test

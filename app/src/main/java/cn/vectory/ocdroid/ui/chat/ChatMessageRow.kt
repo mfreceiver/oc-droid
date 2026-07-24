@@ -35,6 +35,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
@@ -44,6 +45,10 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.theme.CardWidthScope
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.theme.StatusBanner
+import dagger.hilt.EntryPoint
+import dagger.hilt.InstallIn
+import dagger.hilt.android.EntryPointAccessors
+import dagger.hilt.components.SingletonComponent
 
 // ── Per-message row + Part dispatcher ────────────────────────────────────
 // MessageRow lays out a single turn (column of parts + footer caption +
@@ -292,10 +297,22 @@ internal fun MessageRow(
         // Multiple eligible parts are merged into ONE batch call (T16-C1).
         // This is an inline card (NOT a DropdownMenu / BottomSheet / AlertDialog),
         // so it is Layer A-adjacent per ui-style-spec.md (T16-C2).
+        //
+        // §omitted-content-card-gate: the entire OmittedContentCard outlet is
+        // gated behind [omittedContentCardEnabled] (default OFF). In practice
+        // all three forms proved net-negative value (permanently-hung card
+        // under subagent task parts; unclickable "生成中…" skeleton during
+        // streaming; expand calls that failed because G6
+        // `/slimapi/messages/{sid}/full` is unreliable / skeleton part ids are
+        // transient → orphan/residual/Failed). The underlying machinery is
+        // KEPT for future re-enablement; flip the flag ON to evaluate.
+        // (Read unconditionally then branch — Compose forbids composable
+        // calls inside a short-circuiting `&&` condition.)
+        val omittedCardEnabled = rememberOmittedContentCardEnabled()
         val expandEligible = parts.filter {
             it.hasFull == true && it.omitted != null && it.messageId != null
         }
-        if (expandEligible.isNotEmpty()) {
+        if (omittedCardEnabled && expandEligible.isNotEmpty()) {
             DebugCardIdentity(name = "OmittedContentCard", source = "MessageRow:285", part = expandEligible.firstOrNull()) {
                 OmittedContentCard(
                     eligibleParts = expandEligible,
@@ -325,6 +342,30 @@ internal fun MessageRow(
 }
 
 // ── §G6 omitted-content affordance ────────────────────────────────────
+
+// §omitted-content-card-gate: reads the [SettingsManager.omittedContentCardEnabled]
+// flag (default OFF) via the same EntryPoint-injection pattern as
+// [rememberDebugCardIdentityEnabled] in DebugCardIdentity.kt. When OFF, the
+// OmittedContentCard outlet is not rendered at all. The underlying expand
+// machinery is intentionally retained for future re-enablement.
+@EntryPoint
+@InstallIn(SingletonComponent::class)
+interface OmittedContentCardSettingsEntryPoint {
+    fun settingsManager(): cn.vectory.ocdroid.util.SettingsManager
+}
+
+@Composable
+private fun rememberOmittedContentCardEnabled(): Boolean {
+    val context = LocalContext.current
+    return try {
+        val sm = EntryPointAccessors.fromApplication(
+            context.applicationContext,
+            OmittedContentCardSettingsEntryPoint::class.java,
+        ).settingsManager()
+        sm.omittedContentCardEnabled
+    } catch (_: Exception) { false }
+}
+
 /**
  * §G6-T16 (redesign): unified inline card for omitted content expansion.
  * Matches the tool-card visual family (surfaceContainer fill, 1dp

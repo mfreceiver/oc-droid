@@ -75,6 +75,7 @@ class TokenStreamCoordinatorTest {
         initialBackoffMs: Long = 50L,
         retryAfter503Ms: Long = 20L,
         maxConsecutive503: Int = 3,
+        sseDisabled: () -> Boolean = { false },
     ): TokenStreamCoordinator = TokenStreamCoordinator(
         scope = scope,
         slices = slices,
@@ -88,6 +89,7 @@ class TokenStreamCoordinatorTest {
         retryAfter503Ms = retryAfter503Ms,
         maxConsecutive503 = maxConsecutive503,
         clock = { scope.testScheduler.currentTime },
+        sseDisabled = sseDisabled,
     )
 
     @After
@@ -280,6 +282,50 @@ class TokenStreamCoordinatorTest {
         assertEquals("s2", fake.lastOpenedSid)
         assertEquals(1, fake.openCount.get())
         debounced.close("s2")
+        runPending()
+    }
+
+    // ── epoch stale-frame drop ────────────────────────────────────────────
+
+    // ── §sse-disabled-debug-toggle ────────────────────────────────────────
+
+    @Test
+    fun `sseDisabled true makes open a no-op - no streamProvider call, no connection`() {
+        // REST-only mode: the per-session token stream must NEVER touch the
+        // streamProvider (no /slimapi/sessions/{sid}/stream). Gate is at the
+        // coordinator ENTRY (before debounce/job/state mutation).
+        val disabled = buildCoordinator(sseDisabled = { true }, openDebounceMs = 50L)
+        val baseline = fake.openCount.get()
+
+        disabled.open("s1")
+        // Advance well past the debounce window — even so, nothing should fire.
+        scope.advanceTimeBy(200L)
+        runPending()
+
+        assertEquals(
+            "streamProvider must NOT be called when sseDisabled=true",
+            baseline,
+            fake.openCount.get(),
+        )
+        assertNull("no sid recorded when disabled", fake.lastOpenedSid)
+        // close() is a harmless no-op (nothing was opened).
+        disabled.close("s1")
+        runPending()
+    }
+
+    @Test
+    fun `sseDisabled false keeps the normal open path`() {
+        // Production default: flag OFF → open() connects as usual (REST path /
+        // fix-1 bootstrap behavior untouched).
+        val enabled = buildCoordinator(sseDisabled = { false })
+        val baseline = fake.openCount.get()
+
+        enabled.open("s1")
+        runPending()
+
+        assertEquals("provider called once on normal open", baseline + 1, fake.openCount.get())
+        assertEquals("s1", fake.lastOpenedSid)
+        enabled.close("s1")
         runPending()
     }
 

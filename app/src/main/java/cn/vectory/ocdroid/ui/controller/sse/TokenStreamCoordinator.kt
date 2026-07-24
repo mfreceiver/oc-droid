@@ -143,6 +143,15 @@ class TokenStreamCoordinator(
      * crafted exceptions deterministically.
      */
     private val classifyFailure: (Throwable?) -> TokenStreamFailure = ::defaultClassifyFailure,
+    /**
+     * §sse-disabled-debug-toggle: when true, [open] short-circuits WITHOUT
+     * touching [streamProvider] — NO per-session `/slimapi/sessions/{sid}/stream`
+     * connection (REST-only degraded mode). Default `{ false }` so production
+     * wiring (ControllerModule) and tests opt in explicitly. The gate is at the
+     * coordinator ENTRY (before debounce/job/state mutation) so no stream
+     * lifecycle is ever created while the flag is on.
+     */
+    private val sseDisabled: () -> Boolean = { false },
 ) {
     // ── State ───────────────────────────────────────────────────────────────
     //
@@ -252,6 +261,16 @@ class TokenStreamCoordinator(
      */
     fun open(sid: String, directory: String? = null) {
         if (sid.isBlank()) return
+        // §sse-disabled-debug-toggle: REST-only mode — do NOT connect the
+        // per-session token stream. Gate at the coordinator ENTRY (before
+        // currentSid/state mutation and before launchStreamLifecycle) so no
+        // lifecycle job / debounce / streamProvider call is ever made. The chat
+        // falls back to REST (triggerSinceFetch / resync / manual refresh);
+        // ProcessStatusPoller keeps refreshing status (it never owned a stream).
+        if (sseDisabled()) {
+            DebugLog.i(TAG, "open($sid): sse_disabled=true → REST-only (no token stream)")
+            return
+        }
         currentSid.set(sid)
         currentDirectory.set(directory)
         // §MF-1 (gate r2): UNCONDITIONALLY clear the sentinel. A prior sid's

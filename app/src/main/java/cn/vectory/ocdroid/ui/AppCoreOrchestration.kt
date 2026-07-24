@@ -575,19 +575,166 @@ private fun AppCore.loadMessagesWithRetry(sessionId: String, resetLimit: Boolean
 // callers). Each calls the same primitive the matching VM method uses.
 // ════════════════════════════════════════════════════════════════════════════
 
-internal fun AppCore.performGlobalColdStartRefresh(currentId: String) {
+/**
+ * §sse-rest-fallback (TODO 3): how long SSE must stay terminally
+ * [ConnectionPhase.Disconnected] before the AUTOMATIC cold-start
+ * ([performGlobalColdStartRefresh] with defaults) upgrades to a clear+
+ * UNANCHORED fetch. Picked at the upper end of the health-probe retry cadence:
+ * [cn.vectory.ocdroid.ui.controller.ConnectionHealthProbe] retries with
+ * exponential backoff (≤30s); a disconnect lasting well past a few retry
+ * cycles is a REAL outage, not a transient blip. 90s balances "self-heal a
+ * real outage promptly" against "don't white-flash + drop loadMore history on
+ * every brief network hiccup" (the latter keeps the cheap anchored path).
+ */
+internal const val SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS = 90_000L
+
+/**
+ * §sse-rest-fallback (TODO 3): pure predicate — should the AUTOMATIC cold-start
+ * upgrade to an UNANCHORED (since=0L) fetch? True IFF the connection phase is
+ * terminally [ConnectionPhase.Disconnected] AND [ConnectionState.disconnectedSince]
+ * is at least [SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS] in the past. Pure (takes
+ * `now`) so it is unit-testable with a controlled clock. NOT triggered when SSE
+ * is healthy (Connected / Connecting / Reconnecting / Idle) or freshly
+ * disconnected (< threshold) — the normal anchored catch-up / three-way merge
+ * is preserved, so SSE-up cold-starts never degenerate into a clear.
+ */
+internal fun shouldAutoUnanchorOnColdStart(
+    phase: ConnectionPhase,
+    disconnectedSince: Long?,
+    now: Long,
+    thresholdMs: Long = SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS,
+): Boolean = phase is ConnectionPhase.Disconnected &&
+    disconnectedSince != null &&
+    (now - disconnectedSince) >= thresholdMs
+
+/**
+ * Returns `true` iff the clear+reload actually ran; `false` iff the isLoading
+ * guard suppressed it (when [explicit], an Info feedback was emitted on suppress).
+ */
+internal fun AppCore.performGlobalColdStartRefresh(
+    currentId: String,
+    forceInitialWindow: Boolean = false,
+    explicit: Boolean = false,
+): Boolean {
     // §history-load-fix: guard against BOTH load flags — a user loadMore in
     // flight (isLoadingMoreMessages) must also block a cold-start reset (which
     // would wipe the list mid-prepend). Previously only isLoadingMessages was
     // checked, so a cold-start refresh could clobber an in-flight loadMore.
-    if (store.chatFlow.value.isLoadingMessages || store.chatFlow.value.isLoadingMoreMessages) return
+    //
+    // §force-refresh-guard (SSE-disconnect REST fallback): for an EXPLICIT
+    // user force-refresh we must NOT silently swallow the tap when a load is
+    // already in flight. ColdStartChatReset does NOT clear isLoadingMessages
+    // (see AppAction.ColdStartChatReset docblock), so bypassing this guard
+    // here would wipe the chat slice while launchLoadMessages' OWN coalescing
+    // guard (MessageActions §R-17 batch2) skips the refill → an empty window
+    // with no fresh fetch to repopulate it (worse than status quo). Instead
+    // surface a feedback event so the user knows the refresh is queued; the
+    // in-flight load (or a repeated tap once it settles) delivers fresh data.
+    // The AUTOMATIC cold-start path keeps the silent no-op (explicit=false).
+    // Returns false so callers (performForceRefresh / refreshCurrentSession)
+    // can skip their cascading side-steps when nothing was actually refreshed.
+    if (store.chatFlow.value.isLoadingMessages || store.chatFlow.value.isLoadingMoreMessages) {
+        if (explicit) {
+            effectBus.tryEmitUiEvent(UiEvent.Info(R.string.info_refresh_in_progress))
+        }
+        return false
+    }
     sessionSwitcher.clearSessionWindowCache()
     // refreshNonce is NOT a §2.3 target field — leave as a separate writeChat
     // (minimal blast radius; not folded into ColdStartChatReset).
     writeChat { it.copy(refreshNonce = it.refreshNonce + 1) }
     // T1b writeChat-bypass: 8-field cold-start chat reset via dispatch.
     store.dispatch(AppAction.ColdStartChatReset)
-    loadMessagesForEffect(currentId, resetLimit = true)
+    // §sse-rest-fallback: forceInitialWindow=true (explicit force-refresh /
+    // staleNotice recovery) routes the slim fetch UNANCHORED
+    // (getMessagesPagedUnanchored → since=0L), bypassing a stale slim watermark
+    // that — after an SSE outage — would make the anchored /since return an
+    // empty delta and leave the just-cleared window EMPTY. The fetch then bumps
+    // the bookmark via bumpSlimBookmarkFromItems so later /since calls anchor on
+    // the fresh high-water mark.
+    //
+    // §sse-auto-unanchor (TODO 3): the AUTOMATIC cold-start (defaults, e.g. the
+    // GlobalColdStartRefresh effect emitted by ForegroundCatchUpController on a
+    // long foreground absence) ALSO upgrades to UNANCHORED when SSE has been
+    // Disconnected past [SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS] — a real
+    // outage self-heals without a manual refresh. Gated so a brief blip (or a
+    // healthy SSE) keeps the cheap anchored catch-up / three-way merge: no
+    // white flash, no lost loadMore history on every cold-start.
+    val conn = store.connectionFlow.value
+    val autoUnanchor = !forceInitialWindow &&
+        shouldAutoUnanchorOnColdStart(
+            conn.connectionPhase,
+            conn.disconnectedSince,
+            System.currentTimeMillis(),
+        )
+    loadMessagesForEffect(currentId, resetLimit = true, forceInitialWindow = forceInitialWindow || autoUnanchor)
+    return true
+}
+
+/**
+ * §sse-rest-fallback: the user-triggered FORCE refresh (ChatTopBar "Force
+ * refresh"). The SSE feed is a push OPTIMIZATION; when it is down the app
+ * must still pull the latest content over REST. This is the explicit,
+ * full-reset recovery path — strictly stronger than the automatic cold-start
+ * ([performGlobalColdStartRefresh] with defaults):
+ *
+ *  ① clearSessionWindowCache — drop the in-memory LRU window (SessionSwitcher).
+ *  ② ColdStartChatReset       — wipe the current session's messages/parts/
+ *                               cursor/streaming (8-field reset via dispatch).
+ *  ③ loadMessagesForEffect(   — full UNANCHORED re-fetch (forceInitialWindow=
+ *      resetLimit=true,         true → getMessagesPagedUnanchored → since=0L),
+ *      forceInitialWindow=true) bypassing any stale slim watermark; the fetch
+ *                               bumps the bookmark so later /since is correct.
+ *  ④ testConnection(force=true)— re-probe the connection (the user asked for a
+ *                               refresh; SSE may be stale — verify transport).
+ *  ⑤ LoadSessions             — resync the session list metadata (titles /
+ *                               updated_at) over REST.
+ *
+ * Steps ①②③ reuse [performGlobalColdStartRefresh] (explicit=true so the
+ * isLoading guard surfaces feedback instead of silently swallowing the tap;
+ * forceInitialWindow=true so the clear is followed by a real re-fetch).
+ *
+ * # Suppressed-refresh behavior (TODO 4)
+ *
+ * When the isLoading guard suppresses ①②③ (a load is in flight + an Info
+ * feedback was emitted), steps ④⑤ are SKIPPED — running a connection probe +
+ * session-list reload for a refresh that did not happen would be a misleading
+ * partial action. The user retries once the in-flight load settles. This is
+ * gated on [performGlobalColdStartRefresh]'s Boolean return.
+ *
+ * # Cold-start layering (review C3)
+ *
+ * This clear+unanchored reset is EXPENSIVE (white flash, lost loadMore
+ * history, a full REST round-trip) and is reserved for the EXPLICIT
+ * force-refresh. The AUTOMATIC cold-start keeps the cheaper anchored catch-up
+ * / three-way merge — it does NOT clear+unanchored on every session open. The
+ * AUTOMATIC path DOES self-heal to unanchored on a SUSTAINED SSE outage (see
+ * [shouldAutoUnanchorOnColdStart] + [performGlobalColdStartRefresh]); the
+ * per-session-open VerifyAndHydrate path keeps its existing forceInitialWindow
+ * behavior unchanged.
+ */
+internal fun AppCore.performForceRefresh(sessionId: String) {
+    // ①②③ reuse the cold-start clear+reload primitive, but force an UNANCHORED
+    // re-fetch (bypasses a stale slim watermark) and surface feedback if a
+    // load is already in flight instead of silently swallowing the tap.
+    val refreshed = performGlobalColdStartRefresh(
+        currentId = sessionId,
+        forceInitialWindow = true,
+        explicit = true,
+    )
+    if (!refreshed) {
+        // §force-refresh-guard (TODO 4): ①②③ were suppressed (a load is in
+        // flight; an Info feedback was emitted). Do NOT cascade ④ testConnection
+        // / ⑤ LoadSessions — those would be a misleading partial action (probe
+        // + session-list reload with no actual message refresh). The user
+        // retries once the in-flight load settles.
+        return
+    }
+    // ④ re-probe the connection — the user explicitly asked for a refresh, so
+    // verify transport health even if SSE looks connected (it may be stale).
+    connectionCoordinator.testConnection(force = true)
+    // ⑤ resync the session list metadata (titles / updated_at) over REST.
+    effectBus.tryEmitEffect(ControllerEffect.LoadSessions)
 }
 
 internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {

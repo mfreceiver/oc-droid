@@ -117,6 +117,15 @@ sealed class ConnectionPhase {
     data object AwaitingTofuTrust : ConnectionPhase()
     /** Probe failed terminally (retries exhausted or one-shot failure). */
     data object Disconnected : ConnectionPhase()
+    /**
+     * §sse-disabled-debug-toggle: the DEBUG `sse_disabled` flag is ON — the
+     * client is intentionally running REST-only (no SSE). Distinct from
+     * [Disconnected] so the UI can surface "SSE disabled by debug toggle"
+     * instead of a misleading "disconnected". Reached when
+     * [cn.vectory.ocdroid.service.StreamingServiceLauncher.ensureStarted]
+     * returns [cn.vectory.ocdroid.service.OwnershipRefusal.SseDisabled].
+     */
+    data object SseDisabled : ConnectionPhase()
 }
 
 /**
@@ -180,6 +189,20 @@ data class ConnectionState(
      * 但仍保持语义一致。默认 `false` 不破坏既有收集者。
      */
     val isSlimActive: Boolean = false,
+    /**
+     * §sse-rest-fallback (TODO 3): wall-clock ms of the transition INTO
+     * [ConnectionPhase.Disconnected], or null when connected / never stamped.
+     * Auto-stamped by [cn.vectory.ocdroid.ui.SharedStateStore.mutateConnection]
+     * (the single connection-write chokepoint) on the phase transition so EVERY
+     * writer (ConnectionCoordinator / healthProbe / SSE connection owner /
+     * host-switch) records it consistently, and cleared on the way OUT of
+     * Disconnected. Read by [cn.vectory.ocdroid.ui.performGlobalColdStartRefresh]
+     * to auto-upgrade to an UNANCHORED fetch when SSE has been down long enough
+     * that the slim /since watermark is likely stale (real-outage self-heal —
+     * no manual refresh needed). A writer MAY set it explicitly (e.g. tests
+     * simulating an old disconnect); the stamp respects non-null values.
+     */
+    val disconnectedSince: Long? = null,
 )
 
 /**

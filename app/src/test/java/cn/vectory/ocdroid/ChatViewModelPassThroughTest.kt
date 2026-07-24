@@ -564,7 +564,9 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coEvery { repository.checkHealth() } returns Result.success(
             cn.vectory.ocdroid.data.model.HealthResponse(healthy = true, version = "1.0"),
         )
-        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(
+        // §sse-rest-fallback (TODO 2): refreshCurrentSession now re-fetches
+        // UNANCHORED (forceInitialWindow=true → getMessagesPagedUnanchored).
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns Result.success(
             MessagesPage(emptyList(), null),
         )
         coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())

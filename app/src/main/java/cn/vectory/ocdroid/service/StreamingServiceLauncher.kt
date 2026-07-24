@@ -9,6 +9,7 @@ import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.lifecycle.Layer
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
 import cn.vectory.ocdroid.util.DebugLog
+import cn.vectory.ocdroid.util.SettingsManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -102,9 +103,23 @@ class AndroidStreamingServiceLauncher @Inject constructor(
     private val coordinator: StreamingLifecycleCoordinator,
     private val ownershipGate: StreamingOwnershipGate,
     private val ackPolicy: OwnershipAckPolicy,
+    private val settingsManager: SettingsManager,
 ) : StreamingServiceLauncher {
 
     override suspend fun ensureStarted(identity: ConnectionIdentity): OwnershipStartResult {
+        // §sse-disabled-debug-toggle (instance-SSE choke point): when the DEBUG
+        // `sse_disabled` flag is ON, REFUSE to start the SSE foreground service
+        // BEFORE any eligibility check / prepareAttempt / startForegroundService.
+        // This is the single gate that guarantees NO `/slimapi/events` bootstrap
+        // and NO FGS start, regardless of caller (ConnectionCoordinator.startSSE
+        // or ConnectionHealthProbe). Returns a distinct [SseDisabled] refusal so
+        // the connection phase can surface "SSE disabled" rather than Disconnected.
+        // Does NOT touch the gate (no prepareAttempt / pendingAttempt) — nothing
+        // was started, so there is nothing to expire/roll back.
+        if (settingsManager.sseDisabled) {
+            DebugLog.i(TAG, "ensureStarted: sse_disabled=true → REST-only (no SSE FGS bootstrap)")
+            return OwnershipStartResult.Refused(OwnershipRefusal.SseDisabled)
+        }
         // §C15 step 1: foreground truth. A background start would trip a
         // ForegroundServiceStartNotAllowedException on Android 12+ and is
         // explicitly out-of-scope (FGS spec §4.1 legal recovery entries only).

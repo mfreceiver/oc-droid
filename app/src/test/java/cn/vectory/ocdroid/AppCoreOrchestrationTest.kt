@@ -11,6 +11,8 @@ import cn.vectory.ocdroid.data.repository.MessagesPage
 import cn.vectory.ocdroid.ui.AppCore
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
+import cn.vectory.ocdroid.ui.ConnectionPhase
+import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
@@ -28,6 +30,9 @@ import cn.vectory.ocdroid.ui.performGlobalColdStartRefresh
 import cn.vectory.ocdroid.ui.resolveQuestionDirectory
 import cn.vectory.ocdroid.ui.resetLocalDataAndResync
 import cn.vectory.ocdroid.ui.sendMessage
+import cn.vectory.ocdroid.ui.shouldAutoUnanchorOnColdStart
+import cn.vectory.ocdroid.ui.SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS
+import cn.vectory.ocdroid.ui.stampDisconnectedSince
 import cn.vectory.ocdroid.util.ThemeMode
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -887,6 +892,230 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         assertEquals(nonceBefore + 1, core.chatFlow.value.refreshNonce)
         assertFalse(core.chatFlow.value.staleNotice)
         assertTrue(core.chatFlow.value.streamingPartTexts.isEmpty())
+    }
+
+    // ── §sse-rest-fallback (force-refresh REST 兜底) ───────────────────────────
+
+    @Test
+    fun `force-refresh clears the window and re-fetches UNANCHORED so it stays non-empty`() = runTest {
+        // §sse-rest-fallback: the explicit user force-refresh (ChatTopBar "Force
+        // refresh" → performForceRefresh → performGlobalColdStartRefresh) must
+        // clear the chat slice (ColdStartChatReset) then re-fetch UNANCHORED
+        // (getMessagesPagedUnanchored → since=0L) so a stale slim watermark
+        // after an SSE outage cannot make the anchored /since return an empty
+        // delta and leave the JUST-CLEARED window empty (clear + empty fetch =
+        // worse-than-status-quo regression). Locks in: clear + forceInitialWindow
+        // = true ⇒ non-empty + the unanchored fetch path.
+        //
+        // Driven via performGlobalColdStartRefresh(forceInitialWindow=true) —
+        // the shared ①②③ primitive performForceRefresh delegates to — so the
+        // assertion is NOT polluted by performForceRefresh's step ④ (testConnection)
+        // / ⑤ (LoadSessions) side-effects. The unanchored fetch is ALSO the
+        // precondition for bumpSlimBookmarkFromItems to advance the slim
+        // watermark; the bump itself lives inside the real repo's slim branch
+        // (getMessagesPagedImpl → MessageSource) and is verified by code reading
+        // + repository-level tests, not observable through this mock.
+        val stale = Message(id = "stale", role = "user")
+        val fresh = MessageWithParts(info = Message(id = "m_fresh", role = "assistant"))
+        // 4-arg signature (incl. the default SlimCommitToken param) matches the
+        // stub style in MainViewModelTestBase.setUp — a 3-arg stub on a function
+        // with a default param clashes with mockk's captureSlimCommitToken
+        // tracking (see setUp "C-D3 token guard" note).
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns
+            Result.success(MessagesPage(listOf(fresh), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        val core = wire()
+        core.writeChat {
+            it.copy(
+                currentSessionId = "s1",
+                messages = listOf(stale),
+                staleNotice = true,
+                streamingPartTexts = mapOf("p" to "x"),
+            )
+        }
+        val nonceBefore = core.chatFlow.value.refreshNonce
+
+        // explicit=true + forceInitialWindow=true = the force-refresh reset.
+        core.performGlobalColdStartRefresh("s1", forceInitialWindow = true, explicit = true)
+        advanceUntilIdle()
+
+        // Step ③ verified: the UNANCHORED fetch path was used (the precondition
+        // for bumpSlimBookmarkFromItems to advance the slim watermark).
+        coVerify(atLeast = 1) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
+        // Cleared window re-populated with the fresh fetch (non-empty).
+        val ids = core.chatFlow.value.messages.map { it.id }
+        assertFalse("stale message wiped by ColdStartChatReset (got $ids)", ids.contains("stale"))
+        assertTrue("fresh message loaded via unanchored fetch (got $ids)", ids.contains("m_fresh"))
+        // Step ② verified: clear signal fired (refreshNonce bumped) + stale cleared.
+        assertEquals(nonceBefore + 1, core.chatFlow.value.refreshNonce)
+        assertFalse(core.chatFlow.value.staleNotice)
+    }
+
+    @Test
+    fun `explicit force-refresh surfaces feedback instead of silently swallowing when a load is in flight`() = runTest {
+        // §force-refresh-guard: a user-triggered force-refresh must NOT be
+        // silently swallowed when a load is already in flight. ColdStartChatReset
+        // does NOT clear isLoadingMessages, so bypassing the guard would wipe the
+        // chat slice while launchLoadMessages' own coalescing guard skips the
+        // refill → an empty window with no fresh fetch. Instead an Info feedback
+        // event is posted and the slice is left untouched; the in-flight load (or
+        // a repeated tap once it settles) delivers fresh data.
+        val core = wire()
+        core.writeChat {
+            it.copy(
+                currentSessionId = "s1",
+                isLoadingMessages = true,
+                messages = listOf(Message(id = "keep", role = "user")),
+            )
+        }
+
+        // explicit=true = force-refresh path (the automatic cold-start keeps the
+        // silent no-op). Tested via performGlobalColdStartRefresh directly —
+        // performForceRefresh delegates ①②③ to it.
+        core.performGlobalColdStartRefresh("s1", explicit = true)
+        advanceUntilIdle()
+
+        // Guard short-circuited: no fetch, no slice wipe. (4-arg signature
+        // matches the default-token-param stub style in setUp.)
+        coVerify(exactly = 0) { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+        assertTrue(
+            "messages preserved (no ColdStartChatReset wipe while loading)",
+            core.chatFlow.value.messages.any { it.id == "keep" },
+        )
+    }
+
+    // ── §sse-auto-unanchor (TODO 3 — real SSE-outage self-heal) ────────────────
+
+    @Test
+    fun `shouldAutoUnanchorOnColdStart is true only when Disconnected past the threshold`() {
+        // Pure predicate — exhaustive branch coverage with a controlled clock.
+        val threshold = 90_000L
+        // Healthy phases never trigger (no white-flash on every cold-start).
+        assertFalse(shouldAutoUnanchorOnColdStart(ConnectionPhase.Connected, null, 0L, threshold))
+        assertFalse(shouldAutoUnanchorOnColdStart(ConnectionPhase.Connecting, null, 0L, threshold))
+        assertFalse(shouldAutoUnanchorOnColdStart(ConnectionPhase.Reconnecting, null, 0L, threshold))
+        assertFalse(shouldAutoUnanchorOnColdStart(ConnectionPhase.Idle, null, 0L, threshold))
+        // Disconnected but NO timestamp (defensive) → no trigger.
+        assertFalse(shouldAutoUnanchorOnColdStart(ConnectionPhase.Disconnected, null, 0L, threshold))
+        // Disconnected but FRESH (< threshold) → no trigger (transient blip).
+        assertFalse(shouldAutoUnanchorOnColdStart(ConnectionPhase.Disconnected, 0L, threshold - 1, threshold))
+        // Boundary is INCLUSIVE (>=): exactly at the threshold → trigger.
+        assertTrue(shouldAutoUnanchorOnColdStart(ConnectionPhase.Disconnected, 0L, threshold, threshold))
+        // Disconnected past the threshold → trigger (real outage self-heal).
+        assertTrue(shouldAutoUnanchorOnColdStart(ConnectionPhase.Disconnected, 0L, threshold + 1, threshold))
+        assertTrue(shouldAutoUnanchorOnColdStart(ConnectionPhase.Disconnected, 0L, threshold * 5, threshold))
+    }
+
+    @Test
+    fun `stampDisconnectedSince stamps on entry to Disconnected and clears on exit`() {
+        // Pure phase-transition stamper — exhaustive transitions.
+        val now = 1_000_000L
+        val connected = ConnectionState(connectionPhase = ConnectionPhase.Connected)
+        val disconnected = ConnectionState(connectionPhase = ConnectionPhase.Disconnected)
+        // Entry: Idle/Connected → Disconnected stamps now.
+        assertEquals(
+            now,
+            stampDisconnectedSince(connected, disconnected, now).disconnectedSince,
+        )
+        // Entry respects an explicit non-null stamp (tests / replay simulate old disconnect).
+        val oldStamp = now - 999_999L
+        assertEquals(
+            oldStamp,
+            stampDisconnectedSince(connected, disconnected.copy(disconnectedSince = oldStamp), now).disconnectedSince,
+        )
+        // Exit: Disconnected → Connected clears the stamp.
+        assertNull(
+            stampDisconnectedSince(disconnected.copy(disconnectedSince = oldStamp), connected, now).disconnectedSince,
+        )
+        // Staying Disconnected → no change (idempotent; keeps prior stamp).
+        assertEquals(
+            oldStamp,
+            stampDisconnectedSince(
+                disconnected.copy(disconnectedSince = oldStamp),
+                disconnected.copy(disconnectedSince = oldStamp),
+                now,
+            ).disconnectedSince,
+        )
+        // Staying Connected (never disconnected) → no spurious stamp.
+        assertNull(stampDisconnectedSince(connected, connected, now).disconnectedSince)
+    }
+
+    @Test
+    fun `automatic cold-start upgrades to UNANCHORED when SSE has been disconnected past the threshold`() = runTest {
+        // §sse-auto-unanchor (TODO 3): a real sustained SSE outage self-heals —
+        // the AUTOMATIC cold-start (performGlobalColdStartRefresh with defaults,
+        // e.g. the GlobalColdStartRefresh effect on a long foreground absence)
+        // upgrades to clear+UNANCHORED so a stale slim watermark cannot return
+        // an empty delta. No manual refresh needed.
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns
+            Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        val core = wire()
+        core.writeChat { it.copy(currentSessionId = "s1") }
+        // Simulate a sustained outage: Disconnected, stamped past the threshold.
+        val now = System.currentTimeMillis()
+        core.writeConnection {
+            it.copy(
+                connectionPhase = ConnectionPhase.Disconnected,
+                disconnectedSince = now - SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS - 1_000L,
+            )
+        }
+
+        // Defaults = automatic cold-start path (NOT explicit force-refresh).
+        core.performGlobalColdStartRefresh("s1")
+        advanceUntilIdle()
+
+        // Upgraded to UNANCHORED (the self-heal), NOT the anchored /since path.
+        coVerify(atLeast = 1) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
+    }
+
+    @Test
+    fun `automatic cold-start keeps the ANCHORED path when SSE is healthy or freshly disconnected`() = runTest {
+        // §sse-auto-unanchor (TODO 3): a healthy SSE (or a fresh blip < threshold)
+        // must NOT degenerate the cold-start into a clear — the cheap anchored
+        // catch-up / three-way merge is preserved.
+        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns
+            Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns
+            Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        val core = wire()
+        core.writeChat { it.copy(currentSessionId = "s1") }
+
+        // (a) Healthy: default ConnectionState (Idle, disconnectedSince=null).
+        core.performGlobalColdStartRefresh("s1")
+        advanceUntilIdle()
+        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `automatic cold-start keeps ANCHORED when SSE freshly disconnected under the threshold`() = runTest {
+        // Companion to the above: a FRESH disconnect (< threshold) is treated as
+        // a transient blip → anchored path (no clear), matching the throttle vs
+        // real-outage split in [SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS].
+        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns
+            Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns
+            Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        val core = wire()
+        core.writeChat { it.copy(currentSessionId = "s1") }
+        val now = System.currentTimeMillis()
+        core.writeConnection {
+            it.copy(
+                connectionPhase = ConnectionPhase.Disconnected,
+                // Fresh: only 1s ago (well under the 90s threshold).
+                disconnectedSince = now - 1_000L,
+            )
+        }
+
+        core.performGlobalColdStartRefresh("s1")
+        advanceUntilIdle()
+
+        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) }
     }
 
     // ── loadMessagesForEffect ─────────────────────────────────────────────────

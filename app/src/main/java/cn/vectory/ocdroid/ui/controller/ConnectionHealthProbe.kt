@@ -660,10 +660,20 @@ internal class ConnectionHealthProbe(
                                 return@launch
                             }
                             writeConnection {
+                                // §sse-disabled-debug-toggle: surface SseDisabled when
+                                // the launcher refused because the debug flag is ON
+                                // (REST-only); otherwise the generic Disconnected phase.
+                                val phase = if (ownership is cn.vectory.ocdroid.service.OwnershipStartResult.Refused &&
+                                    ownership.reason is cn.vectory.ocdroid.service.OwnershipRefusal.SseDisabled
+                                ) {
+                                    ConnectionPhase.SseDisabled
+                                } else {
+                                    ConnectionPhase.Disconnected
+                                }
                                 it.copy(
                                     isConnected = false,
                                     isConnecting = false,
-                                    connectionPhase = ConnectionPhase.Disconnected,
+                                    connectionPhase = phase,
                                 )
                             }
                             settled = true

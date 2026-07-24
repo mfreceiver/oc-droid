@@ -464,6 +464,8 @@
     <string name="chat_phase_reconnecting">重新连接中</string>
     <string name="chat_phase_reconnecting_attempt">重新连接中（第 %1$d/%2$d 次）</string>
     <string name="chat_phase_disconnected">已断开</string>
+    <!-- §sse-disabled-debug-toggle：仅 REST 降级模式（调试开关 sse_disabled=true）。 -->
+    <string name="chat_phase_sse_disabled">SSE 已禁用（仅 REST）</string>
     <string name="chat_jump_to_latest">跳到最新</string>
 
     <!-- §R18 Phase 2-G: UiEvent.Error / UiEvent.Success 资源字符串。
@@ -487,6 +489,7 @@
     <string name="error_edit_message_failed">编辑消息失败：%1$s</string>
     <string name="error_abort_session_failed">中止会话失败：%1$s</string>
     <string name="success_refreshed">已刷新</string>
+    <string name="info_refresh_in_progress">正在刷新，请稍候重试。</string>
     <string name="error_session_sse_named">%1$s：%2$s</string>
     <string name="error_session_sse_unnamed">%1$s</string>
     <string name="error_create_session_failed">创建会话失败：%1$s</string>
