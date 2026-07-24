@@ -1,6 +1,6 @@
 # Chat List-Detail 重构设计方案（方案 B）
 
-> **状态**：设计基线 v2（bgpt 评审 7.8/10）
+> **状态**：设计基线 v3（opus 终审 + bgpt 复核收敛，核心机制**设计层定型**）
 > **日期**：2026-07-24
 > **定位**：chat tab 问题的设计基线 + 调研快照 + 实施硬门控。依 `docs/specs/decomposition-guidelines.md` §0，一次性执行计划本应归档 `docs/ocmar/plans/`，但该路径被 `.gitignore`（第 108-109 行「生成式审计/规划报告，不应进 git」）排除为本地工件；应项目要求需入库可追溯，故置于被跟踪的 `docs/specs/`（其核心架构决策——不变式、模块化合规、list-detail 模型、实施门控——具长期参考价值）。
 > **行号约定**：本文行号均为调研时快照，实施时以最新代码为准；实施前应重新生成一次引用矩阵。
@@ -9,22 +9,29 @@
 
 ## 0. 文档定位与评审状态
 
-### 0.1 评审严格度区分（重要）
+### 0.1 评审严格度区分（v3 更新）
 
-本问题经过两轮 bgpt 评审（v1=7.4 block、v2=7.8 block）。核心结论：bgpt 要求的"bug 结构不可表达"证明（route-generation CAS、AST 级静态门控、"所有写入路径原子"的形式化证明、状态机表）本质是**实施级证据**，设计文档阶段无法提供（代码尚未写）。
+经四轮评审（bgpt v1=7.4、v2=7.8；rev-opus 终审有条件通过；rev-bgpt 复核有条件通过），形成分层严格度：
 
-因此采用**分层评审严格度**：
-- **设计文档（本文）**：方向正确性、根因诊断、模块化合规、风险识别、实施流程 —— v2 已达"可指导实施"水准。
-- **实施代码**：由实施流程（§13）的每批次 glm 评审 + 最终 bgpt 9.5 评审，强制落实"不可表达证明 / AST 门控 / 状态机形式化"（详见 §14 实施硬门控清单）。
+- **设计层（本文）**：方向 / 根因 / 模块化 / 风险 / 流程，**以及核心正确性机制选型**（§7 `LoadedContent` 值对象 + freshness token、§11 checkpoint 归属）—— **v3 已定型，不再延后**。
+- **实施层（代码）**：由 §13 流程的每批次 glm + 最终 bgpt 9.5，落实**机制成立的证据**（AST 门控测试、property-based parser 测试、状态机测试、SavedStateHandle 协议测试、A→B→A stale-load 测试）。
+
+> v2 曾把 G1（不可表达机制）整体延后到实施；opus 与 bgpt **一致指出：机制选型是架构决策（决定 blast radius 与批次计划），不可延后**。v3 将其回收到设计层定型（§7），仅保留"证明机制成立的测试"在实施层。
 
 ### 0.2 评审历史
 
-| 轮次 | 评审 | 得分 | 结论 | 主要 blocking |
-|---|---|---|---|---|
-| v1 | rev-bgpt | 7.4 | block | 不变量未达不可表达；文件矩阵不全；导航入口参数链未解决；fromRouteKey 不充分；delete/archive 链未闭合；checkpoint 迁移未证明 |
-| v2 | rev-bgpt | 7.8 | block（作基线） | BLOCK-1 contentSessionId 仍是 currentSessionId 别名（需 generation-CAS）；BLOCK-6 checkpoint 消费顺序自相矛盾；BLOCK-2 零残留门控不足（需 AST 级）；BLOCK-5 transition 调用契约未闭合 |
+| 轮次 | 评审 | 得分/结论 | 要点 |
+|---|---|---|---|
+| v1 | rev-bgpt | 7.4 block | 不变量未达不可表达；文件矩阵不全；导航入口参数链未解决；fromRouteKey 不充分；delete/archive 链未闭合；checkpoint 迁移未证明 |
+| v2 | rev-bgpt | 7.8 block（作基线） | BLOCK-1 contentSessionId 仍是 currentSessionId 别名（需 generation-CAS）；BLOCK-6 checkpoint 消费顺序自相矛盾；BLOCK-2 零残留门控不足（需 AST 级）；BLOCK-5 transition 调用契约未闭合 |
+| v3 | rev-opus 终审 | 有条件通过 | `LoadedContent` 值对象优于 generation-CAS 与 session-keyed Map；checkpoint 迁 per-entry `SavedStateHandle`；list-detail 是单一权威唯一终态；B0.5 薄片 + 共享文件串行。**但主张 generation-CAS 可全删（冗余计数器 #5）** |
+| v3 | rev-bgpt 复核 | 有条件通过 | 认可 opus 5 条建议中 4 条；**驳回"CAS 全删"**——A→B→A stale-load race 真实存在（同 session 旧 incarnation 覆盖新内容），既有 epoch 不覆盖；需窄化 freshness token。最终：采纳 LoadedContent + 窄化 token + SavedStateHandle 协议可接近/达到 ≥9.5 |
 
-两轮评审的完整 blocking 已转化为 §14 的实施硬门控清单。
+### 0.3 opus+bgpt 收敛与唯一分歧
+
+**共识**：`LoadedContent` 值对象替代 8 个平铺字段；否决 session-keyed Map（错 trade）；checkpoint 迁 per-entry `SavedStateHandle`；list-detail 为推荐终态；插入 B0.5 薄垂直片；共享文件批次串行。
+
+**唯一分歧（CAS 能否全删）→ 采纳 bgpt**：opus 称 generation-CAS 是冗余的第 5 个计数器可全删；bgpt 给出具体 race（见 §7.2）证明同 session 旧 incarnation 可覆盖新内容，既有 `completenessEpoch`/`sseConnectedGeneration`/token-stream epoch 都不覆盖 REST message-load merge 窗口。**v3 结论**：保留**窄化** freshness/incarnation token（既非 opus 的全删，也非 v2 的两个全局 Long），形态范围见 §7.2。
 
 ---
 
@@ -48,10 +55,10 @@ route = Chat                 // 仍停 Chat（NavState.lastRoute + NavController
 
 ### 1.3 为何屡修屡犯（打地鼠的结构性原因）
 
-1. `SessionViewModel.closeSession`（`SessionViewModel.kt:251-296`）把"关 tab"拆成 6 步**独立** store commit（OpenSessionIdsChanged → ChatCleared → persist → 清 composer → 改 NavState）。store 原子性只在单 dispatch 内，用户意图层非原子 → step1 后非法聚合态已落地。
+1. `SessionViewModel.closeSession`（`SessionViewModel.kt:251-296`）把"关 tab"拆成 6 步**独立** store commit。store 原子性只在单 dispatch 内，用户意图层非原子 → step1 后非法聚合态已落地。
 2. **三个导航参与者抢权**：closeSession 改 NavState；AppShell `LaunchedEffect(requestedRoute)`（`AppShell.kt:134-136`）翻译成 `navigateTopLevel`；ChatScaffold 还有**第二套** close 处理器（`LaunchedEffect` `L702-708` 监听 openSessionIds 变空调 onBackToHome），且带 `.drop(1)`——对"已在非法空态 compose 出来的 Chat"无能为力。三路并发编排不确定。
-3. 测试历史即证据：`SessionViewModelPassThroughTest` 含大量 close-all 分支回归（陈旧磁盘 ids、null 持久化、关非当前 tab、draft、关当前子 agent 的 root…）——每修一组合漏下一组合。典型症状：在每 mutation 点**程序化**事后维护不变式，而非让非法状态不可表达。
-4. 次要放大器：`navigateTopLevel` 用 `saveState=true/restoreState=true`（`AppShell.kt:85-91`，bottom-nav 配方，本 app 无 bottom nav）；持久化三件套独立写盘，进程死亡留混合快照。
+3. 测试历史即证据：`SessionViewModelPassThroughTest` 含大量 close-all 分支回归——每修一组合漏下一组合。典型症状：在每 mutation 点**程序化**事后维护不变式，而非让非法状态不可表达。
+4. 次要放大器：`navigateTopLevel` 用 `saveState=true/restoreState=true`（bottom-nav 配方，本 app 无 bottom nav）；持久化三件套独立写盘，进程死亡留混合快照。
 5. 隐式产品例外：`draftWorkdir != null` 时关最后一个 tab 故意留 Chat——是"非预期页面"主要嫌疑之一；draft 应为一等状态而非 close-all 规则的豁免。
 
 ---
@@ -62,13 +69,15 @@ route = Chat                 // 仍停 Chat（NavState.lastRoute + NavController
 
 本 app 已有三套 quick-switch 入口：`SessionsScreen`（列表）+ `SessionPickerSheet` + `RecentSessionsDrawer`。**删 tab strip 不损失可达性，是做减法**。
 
+> **opus+bgpt 共识**：list-detail 是本项目推荐终态。opus 论证 `NavController` 在 Android 不可删（deep link/通知/系统 back 必须驱动它）= 天然一个导航权威；保留 tab 就需独立于 route 的"当前选中 tab"指针 → 至少 2 套权威，到不了 1；list-detail 把会话身份并入 route → 2 套合并成 1。bgpt 采纳此工程结论（仅驳回"唯一可能"的绝对措辞）。
+
 ---
 
 ## 3. slimapi 边界
 
-slimapi 是 `/slimapi/` 前缀的服务端 sidecar（`data/api/SlimApi.kt`）。所有 session/message/status/stream 端点**早已按 `sessionId` 寻址**（`slimapi/messages/{sid}/since/{ts}`、`slimapi/sessions/{sid}/stream` 等）。服务端无"当前 tab / current session"概念。
+slimapi 是 `/slimapi/` 前缀的服务端 sidecar（`data/api/SlimApi.kt`）。所有 session/message/status/stream 端点**早已按 `sessionId` 寻址**。服务端无"当前 tab / current session"概念。
 
-**本重构是纯客户端改造，L0–L3（data/）零改动**。`SlimApi.kt` / `StandardApi.kt` / `SSEClient.kt` / `TokenStreamClient.kt` 无需任何改动。客户端 session-id threading 的正确性由 §7 expected-id guard + §14 AST 门控保证（禁止 UI/service 隐式读全局 current 决定提交目标）。
+**本重构是纯客户端改造，L0–L3（data/）零改动**。客户端 session-id threading 的正确性由 §7 LoadedContent owner + freshness token + §14 G2 AST 门控保证。
 
 ---
 
@@ -76,30 +85,29 @@ slimapi 是 `/slimapi/` 前缀的服务端 sidecar（`data/api/SlimApi.kt`）。
 
 | 准则 | 本方案遵从 |
 |---|---|
-| architecture §3 分层 | 导航身份归 L5 ui/shell；数据指针归 L5 state slice；编排归 L4 controller（SessionSwitcher）；data L0-L3 零改动 |
+| architecture §3 分层 | 导航身份归 L5 ui/shell；数据指针归 L5 state slice；编排归 L4 controller；data L0-L3 零改动 |
 | architecture §4 差异下沉 | 导航重构与传输无关，符合"共享形状专有取数" |
 | decomposition §3 不加构造器 arity | SessionViewModel/SessionSwitcher 新行为用方法，不加构造器参数 |
-| decomposition §5 单一归属 | 导航身份唯一=路由；删 lastRoute 第二套权威、删 ChatScaffold safety-net 第二套 close 处理器 |
+| decomposition §5 单一归属 | 导航身份唯一=路由；删 lastRoute 第二套权威、删 ChatScaffold safety-net 第二套 close 处理器；`LoadedContent` 把内容字段收敛为单一 owner 槽 |
 | decomposition §6 单向 DAG | feature→OrchestratorVM.navigateToChat→NavController，无回调环 |
 | decomposition §7 结构搬动≠语义改动 | §12 批次内部有序 commit（先搬结构后改语义），各自 check.sh-green |
-| decomposition §9 UI 域 | derivedStateOf 优于 LaunchedEffect+snapshotFlow；不抽新 scope-owning 控制器，编排并入既有 SessionViewModel；ChatMessageList 入口（冻结 seam）不动 |
+| decomposition §9 UI 域 | derivedStateOf 优于 LaunchedEffect+snapshotFlow；不抽新 scope-owning 控制器；ChatMessageList 入口（冻结 seam）不动 |
 
 ---
 
 ## 5. 目标不变式
 
 ```
-(P1) 渲染会话内容 ⟺ 路由=chat/{id} 且内容归属==id
+(P1) 渲染会话内容 ⟺ 路由=chat/{id} 且 content.sessionId==id   ← LoadedContent 结构 owner
 (P2) 路由=sessions ⟹ 占位页，绝不渲染任何 transcript
 (P3) 冷启动 ⟹ 路由恒 sessions（无复活对象）
 (P4) chat/{id} 中 id 已删/非法 ⟹ Missing 态或 pop 回列表，绝不渲染别的会话
-(P5) 导航身份唯一=路由参数；currentSessionId 仅作数据指针与后台 expected-id guard，不决定渲染
-(P6) 后台异步结果（SSE/REST/token-stream/refresh）提交给会话 X ⟹ commit 时校验 expected-id，否则丢弃
+(P5) 导航身份唯一=路由参数；currentSessionId 仅作数据指针与后台 guard，不决定渲染
+(P6) 后台异步结果提交给会话 X ⟹ 校验 freshness/incarnation token              ← 时序 owner
+     （同 session 旧 incarnation 不可覆盖新内容），否则丢弃
 ```
 
-(P1)+(P6) 使"tab 全关却显示某 chat"与"切到 B 却显示 A 内容"不可表达。
-
-> **实施强化（§14 门控 G1）**：(P1)/(P6) 的"不可表达"强度需由 route-generation CAS 落实（见 §7、§14）。设计文档层面此为目标不变式；实施代码层面为强制 CAS。
+**(P1) 结构性不可表达** + **(P6) 时序性不可表达** —— 二者共同使"tab 全关却显示某 chat"与"切到 B 显示 A 内容"以及"A→B→A 旧 load 覆盖新内容"在结构上不可表达。设计层已定型（§7）。
 
 ---
 
@@ -107,7 +115,7 @@ slimapi 是 `/slimapi/` 前缀的服务端 sidecar（`data/api/SlimApi.kt`）。
 
 | # | 决策 | 取代 |
 |---|---|---|
-| D1 | 带参路由 `chat/{sessionId}`；新建 `chat/new?workdir=…`（沿用 `chat/preview?…` 带参先例） | 参数化 `Chat("chat")`，身份藏全局可变 currentSessionId |
+| D1 | 带参路由 `chat/{sessionId}`；新建 `chat/new?workdir=…` | 参数化 `Chat("chat")`，身份藏全局可变 currentSessionId |
 | D2 | `parseRoute` 未知/空 → 回落 `Sessions` | 回落 `Chat` |
 | D3 | 渲染权威 = 路由派生 sealed `ChatDetailState{None; Loading(id); Content(id); NewConversation(workdir); Missing(id)}`（derivedStateOf） | currentSessionId!=null |
 | D4 | draft/新会话 = 显式路由 `chat/new` | currentSessionId==null && draftWorkdir!=null 隐式例外 |
@@ -117,46 +125,66 @@ slimapi 是 `/slimapi/` 前缀的服务端 sidecar（`data/api/SlimApi.kt`）。
 | D8 | 移除 NavState.lastRoute 第二套 NavController；改直接 navigate 回调 | 镜像同步 |
 | D9 | openSessionIds 整体移除（tab strip/pager 删） | SessionListState.openSessionIds + 持久化 + auto-select 全链 |
 | D10 | SelectConversation/CloseDetail 单原子跨切片 action | closeSession 拆 6 步独立 commit |
-| D11 | 子 agent 复用 `chat/{childId}` 详情模型；parentReturnCheckpoints 保留（迁移见 §11） | 子 agent 本就不进 tab |
+| **D11** | 子 agent 复用 `chat/{childId}`；**parentReturnCheckpoints 迁 per-entry `SavedStateHandle`**（§11），不再用全局 ChatState map | v2 保留全局 map（理由被 D9 自我推翻：删 pager 后无 swipe-between-roots 场景） |
+| **D12** | 内容收敛为 `LoadedContent(sessionId, …)?` 值对象 + 窄化 freshness token（§7） | 8 个平铺内容字段 + v2 的两个全局 Long |
 
 ---
 
-## 7. 核心机制：渲染权威 + 内容归属校验 + expected-id guard
+## 7. 核心机制（设计层定型）：`LoadedContent` 值对象 + freshness token
 
-**关键洞察**：全量矩阵（§9）证实 currentSessionId 被 ~15 处后台 guard 使用（`MessageActions.kt:476,129,425,455,544,615,634`、`SessionSyncCoordinator.kt:1333,1399,1823-1884,2338`、`AppCore.kt:600-611`、`AppCoreOrchestration.kt:818-820` token-stream gate），语义都是"这个异步结果是否属于当前活跃会话"——**这正是 expected-session-id guard，保留即正确**。
+全量矩阵（§9）证实 currentSessionId 被 ~15 处后台 guard 使用（`MessageActions.kt:476,129,425,455,544,615,634`、`SessionSyncCoordinator.kt:1333,1399,1823-1884,2338`、`AppCore.kt:600-611`、`AppCoreOrchestration.kt:818-820`），语义都是"这个异步结果是否属于当前活跃会话"——保留作 expected-id guard（D5）。
 
-### 7.1 渲染权威 = 路由派生态
+### 7.1 `LoadedContent` 值对象（结构性 owner —— opus 提，bgpt 认可）
 
-`ChatScaffold` 渲染唯一读 `detail`（删 `currentSessionId!=null` 渲染权威 `ChatScaffold.kt:862-895`；删 safety-net `L702-708`）：
+把当前平铺在 `ChatState`（`AppStateSlices.kt:436-593`）的 ~8 个内容字段 collapse 成**一个带 owner id 的 nullable 值对象、单一槽**：
 
+```kotlin
+data class LoadedContent(
+    val sessionId: String,              // 内容归属，与 messages 焊死
+    val messages: List<Message>,
+    val partsByMessage: Map<String, List<Part>>,
+    val streamingPartTexts: Map<String, String>,
+    val streamOwned: Map<String, Owner>,
+    val streamingReasoningPart: ReasoningPart?,
+    val olderMessagesCursor: String?,
+    val hasMoreMessages: Boolean,
+    val currentModel: String?,
+)
+// ChatState: val content: LoadedContent? = null   // 取代 8 个平铺字段
 ```
-detail(routeId, chat) = when {
-  routeId == null → None
-  chat.currentSessionId == routeId → Content(routeId)   // 归属一致才显示内容
-  else → Loading(routeId)                                // 滞后时显示 Loading，绝不显示旧会话内容
-}
+
+- **渲染权威**：`detail(routeId, chat) = chat.content?.takeIf { it.sessionId == routeId }?.let { Content(it) } ?: Loading(routeId)`。删 `currentSessionId!=null` 渲染权威（`ChatScaffold.kt:862-895`）；删 safety-net（`L702-708`）。
+- **构造即原子**：`(sessionId, messages)` 焊在一起，**不可能** messages 无归属，**不可能**更新 messages 却不重盖 owner id。焊死了"reducer 忘记同步 current 与 messages"这一 bug 类（今天 8 个独立字段可各自撕裂）。
+- **单一 AST 可审计 seam**：跨会话 bleed 需在唯一渲染 call site 读 `content.sessionId` 却比对 `routeId`——满足 §14 G2 AST 门控。
+- 无 map、无 eviction、无内存增长（单槽，与今天一致）；迁移机械（reducer `copy(messages=…)` → `copy(content=content.copy(…))`）。
+- `currentSessionId` 保留作数据指针（D5），由路由 effect 设置；后台 guard 用之。
+
+### 7.2 freshness / incarnation token（时序性 acceptance —— bgpt 补 opus 漏洞）
+
+`LoadedContent` 解决**结构性**撕裂，但**不解决时序性**：同 session 的旧 load incarnation 可覆盖新内容。
+
+**race（bgpt 给出，opus 曾误判为良性）**：
+```
+t0: route=A，启动 load(A, req-1)
+t1: A→B，currentSessionId=B
+t2: B→A，currentSessionId=A，启动 load(A, req-2)
+t3: req-2 返回，提交较新的 A 内容（含用户刚发消息 + SSE 更新）
+t4: req-1（旧快照）返回，currentSessionId 仍是 A → 既有 sessionId guard 通过
+t5: req-1 覆盖 req-2 的较新内容
 ```
 
-渲染层永不直接信任 `messages`，而是信任归属校验。当路由 A→B 后 currentSessionId 暂仍为 A（异步未跟上）时，`A != B` → 渲染 `Loading(B)`，绝不显示 A 的 messages。
+既有机制**不覆盖**此窗口：`completenessEpoch`（守会话树结构，A→B→A 不变树）、`sseConnectedGeneration`（守 SSE 传输生命周期）、token-stream `epoch`+`gen`（守 stream 事件）——都不约束普通 REST message-load merge。`sessionId==currentSessionId` guard 只答"现在是不是 A"，答不了"是不是当前这次 A incarnation 的结果"。
 
-### 7.2 原子 reducer
+**窄化 token（三选一，实施时定，但形态范围设计层钉死；既非 opus 全删，也非 v2 两个全局 Long）**：
+1. **route-instance token**（推荐）：每次 `chat/{id}` 导航生成不可复用 token；内容提交带 `expectedRouteInstance`，CAS 校验；
+2. **per-load request token**：每次 load 携 request id，提交时 CAS；
+3. **内容层单调 content-revision**：若能证明严格单调 merge（旧 load 不可能覆盖更新字段），可用 revision 取代 token。
 
-切换会话时 currentSessionId 更新与清空 messages/parts/streaming 在**同一 `StoreState.copy`**（现有 `reduceSessionSelected` `ChatFieldsReducer.kt:107-127` 正是如此：15 字段一次 copy）。故不存在"currentSessionId=B 但 messages=A"的单次提交。
+**关键约束**：必须有某种比 sessionId 更细的 freshness 判别式。token 由 reducer 内部维护，不必暴露 UI。可复用项目既有 `sseConnectedGeneration` 单调 CAS 模式（`SharedStateStore.kt:187-201`，architecture §5 先例）。
 
-### 7.3 expected-id guard（后台提交）
+### 7.3 currentSessionId（D5 不变）
 
-所有后台异步结果提交时校验 `sessionId == currentSessionId`（既有 guard 语义），不等则丢弃。
-
-### 7.4 实施强化（§14 门控 G1，对齐 bgpt BLOCK-1）
-
-v2 的 `contentSessionId` 仍是 `currentSessionId` 别名，未达"结构不可表达"。实施阶段**必须**引入 route-generation CAS（参照项目既有 `sseConnectedGeneration` 单调 generation-stamped CAS 先例，architecture §5）：
-
-- `ChatState` 增 `activeRouteToken: Long`（单调递增，每次 SelectConversation/导航 +1）+ `loadedContentRouteToken: Long`（当前 messages 归属）。
-- 内容提交（messages merge/SSE/token-stream/refresh）必带 `expectedRouteToken`，提交时 CAS 校验 `expected == activeRouteToken`，不等则丢弃。
-- 结构化内容身份：`ChatDetailState` 携 `routeSessionId` + `loadedContentSessionId`。
-- 异步提交统一 guard：`expectedSessionId + expectedHostGroup + expectedRouteToken`（防 host 切换后旧结果提交）。
-
-这样 route=B(token=g2) 时，A 的旧 payload（expected=g1）被 CAS 拒绝——**内容层结构不可表达**，不只是渲染层 fail-safe。
+数据指针 + 后台 guard。~15 处既有 guard 保留（§9.2）；新增 freshness token 与之并行（sessionId 判跨会话错写，token 判同会话旧 incarnation）。
 
 ---
 
@@ -201,7 +229,7 @@ OrchestratorVM.popToSessions() / backToHome()
 | sub-agent openSubAgent | `selectSession(childId)` | `navigateToChat(childId)`（§11 顺序） |
 | returnToParent | `switchTo(parent,Restore)` | `navigateToChat(parentId)` + checkpoint（§11） |
 
-> **实施强化（§14 门控 G3/G4）**：需补 warm-start/cold-start 导航事件暂存/消费契约（VM 未创建、NavHost 未 attached 时）；route parser property-based 测试（URL 编码、`%2F`、`?`、`#`、空白、重复 query、`ses_` grammar 稳定性、NavController 解码时序、`chat/new` vs `chat/{id}` 歧义消除）；通知指向不存在/已删会话 → Missing/Sessions。
+> **实施门控（§14 G3/G4）**：warm-start/cold-start 导航事件暂存/消费契约（VM 未创建、NavHost 未 attached 时）；route parser property-based 测试（URL 编码、`%2F`、`?`、`#`、空白、重复 query、`ses_` grammar、NavController 解码时序、`chat/new` vs `chat/{id}` 歧义）；通知指向不存在/已删会话 → Missing/Sessions。
 
 ---
 
@@ -217,9 +245,9 @@ rg 穷尽（src/main+test）：openSessionIds ~45 命中、currentSessionId ~80+
 
 `MessageActions.kt:476,129,425,455,544,615,634`、`SessionSyncCoordinator.kt:1333,1399,1823-1884,2338`、`AppCore.kt:600-611`、`AppCoreOrchestration.kt:818-820`（token-stream）、`AppCoreOrchestration.kt:284`（深链 no-op）。
 
-### 9.3 危险遗漏清单（一旦漏改复活 ghost/跨会话提交/错误归档）
+### 9.3 危险遗漏清单
 
-1. `MessageActions.kt:476` 等 guard——**保留**
+1. `MessageActions.kt:476` 等 guard——**保留**（并叠加 freshness token，§7.2）
 2. `SessionSyncCoordinator` SSE dispatch——**保留**
 3. `AppCoreOrchestration.kt:818-820` token-stream——**保留**
 4. `ChatScaffold.kt:552-553,703` empty-tabs→home——**改**路由级判断
@@ -230,18 +258,14 @@ rg 穷尽（src/main+test）：openSessionIds ~45 命中、currentSessionId ~80+
 9. `AppCore.kt:391-401` collector orphan 检查——**改**为 persisted id 有效性直查
 10. `ChatScaffold` snapshotFlow L703——**删**
 
-### 9.4 零残留门控（实施完成判据，§14 门控 G2 强化）
+### 9.4 零残留门控（§14 G2）
 
 ```
 rg 'openSessionIds|OpenSessionIdsChanged|reduceOpenSessionIdsChanged' src/main   # 必须 0 命中
 rg 'setLastRoute\(NavRoute\.Chat\)|navigateTopLevel.*Chat' src/main               # 必须 0 命中
 ```
 
-> **实施强化（§14 门控 G2）**：rg 不足以区分合法 guard vs 非法渲染读取，也不覆盖 tests/fixtures/持久化迁移/别名（`openSessions`/`SessionTabStrip`/`ChatSessionPager`/`topBarState.openSessions`）。实施阶段**必须**加 AST 级静态检查（freeze 测试风格）：
-> - UI 渲染代码不得用 `currentSessionId` 选择 transcript；
-> - `openSessionIds` 不得出现在 main/test 源集；
-> - Chat 导航必须调用带 id 的 API；
-> - 所有异步提交 action 必须携带并校验 expected-id。
+> **实施门控（§14 G2，AST 级）**：rg 不足，加 freeze 测试风格静态断言——UI 渲染不用 currentSessionId 选 transcript；openSessionIds 不在 main/test 源集；Chat 导航必带 id；异步提交必带 expected-id+freshness-token；覆盖 tests/fixtures/持久化迁移/别名。
 
 ---
 
@@ -257,53 +281,57 @@ rg 'setLastRoute\(NavRoute\.Chat\)|navigateTopLevel.*Chat' src/main             
 | SSE archive 当前 | `SessionSyncCoordinator:1357` filter open + `SessionArchived` | 若 archived==route id → `popToSessions()`+Missing/Cleared；否则仅 sessionList |
 | REST archive 当前 | `launchSetSessionArchived:218` null current | 同 SSE |
 | REST refresh | `launchLoadSessions` auto-select from openIds | 删 auto-select；refresh 不改 route（仅 sessionList）；若 route id 被 archived→popToSessions |
-| host switch（异组） | `HostProfileController.purgePerHostState:491` 清 open+current | 清 currentSessionId+sessionCache+draft；**route 强制 popToSessions** |
-| cold start | `applySavedSettings` 恢复 open+current | **route 恒 Sessions**；恢复 sessionCache+workdir；currentSessionId=null；删 decideAutoSelectSession |
-| sub-agent/archive 清理 subtree | `cleanScrollStateForSubtree` | 保留（checkpoint 清理，§11） |
+| host switch（异组） | `HostProfileController.purgePerHostState:491` 清 open+current | 清 currentSessionId+sessionCache+draft+`content=null`；**route 强制 popToSessions** |
+| cold start | `applySavedSettings` 恢复 open+current | **route 恒 Sessions**；恢复 sessionCache+workdir；currentSessionId=null、content=null；删 decideAutoSelectSession |
+| sub-agent/archive 清理 subtree | `cleanScrollStateForSubtree` | checkpoint 改由 entry 生命周期处理（§11） |
 
-> **实施强化（§14 门控 G5）**：每条 transition 须形式化为状态机表（输入事件 / 当前 route / store 前态 / store 后态 / NavController 操作 / 允许中间帧 / stale callback 行为）；`onSelectSession`/`selectSession`/`navigateToChat` 统一为强制带 route transition 的接口；host-switch 清 state 与 pop route 顺序定义；`Missing(id)` vs `Cleared` 选择标准定义；archive/refresh 的 stale-result guard 形式化。
+> **实施门控（§14 G5）**：每条 transition 形式化为状态机表（输入事件/当前 route/前态/后态/NavController 操作/允许中间帧/stale 行为）；`onSelectSession`/`selectSession`/`navigateToChat` 统一为强制带 route transition 接口；host-switch 清 state 与 pop route 顺序定义；Missing vs Cleared 标准；archive/refresh stale-result guard（叠 freshness token）。
 
 ---
 
-## 11. 子 agent checkpoint / revert 迁移
+## 11. 子 agent checkpoint / revert 迁移（SavedStateHandle 归属）
 
 ### 11.1 事实
 
 - `parentReturnCheckpoints: Map<childId, ScrollCheckpoint>` in ChatState（`AppStateSlices.kt:593`）
 - `openSubAgent`：dispatch `ParentCheckpointStored(childId)` 同步 → launch `selectSession(childId)` 异步
-- `returnToParent`：读 `parentReturnCheckpoints[currentId]` → `ParentCheckpointConsumed` → `switchTo(parent, Restore)`
-- `switchTo(parent, Restore)` 唯一区别：`SessionSelected` 携 `pendingScrollRequest.behavior=Restore(checkpoint)`；消费端 `ChatMessageContent.kt:766-821` compare-and-clear
+- `returnToParent`：读 `parentReturnCheckpoints[currentId]` → `ParentCheckpointConsumed` → `switchTo(parent, Restore)`（同步预消费 + 异步 Restore）
+- `switchTo(parent, Restore)` 唯一区别：`SessionSelected` 携 `pendingScrollRequest.behavior=Restore`；消费端 `ChatMessageContent.kt:766-821` compare-and-clear
 
-### 11.2 route-driven 原子顺序（消除危险窗口）
+### 11.2 迁 per-entry `SavedStateHandle`（opus 提，bgpt 认可方向 + 补协议）
 
-**openSubAgent**（capture→persist→navigate）：
+**D11 保留全局 map 的理由被 D9 自我推翻**：保留独立 map 的唯一辩护是"多 root 同时打开可 swipe"，但 D9 删了 pager/tab strip，list-detail 只有一个 detail pane，swipe 场景消失。导航退化为单一栈，per-entry `SavedStateHandle` 是自然归宿。
+
+迁移收益：
+- checkpoint 与具体 route entry 生命周期绑定，entry 出栈自然清理；
+- **消除三处手工 sweep**（host-purge / `cleanScrollStateForSubtree` / archive subtree）；
+- 跨进程死亡存活（优于 in-memory map）；
+- **顺带修 BLOCK-6**（checkpoint 消费作为目标 entry effect 的唯一滚动意图来源）。
+
+**转移协议（bgpt 指出 opus "pop 后读"有生命周期陷阱——child entry pop 即销毁，读不到 handle）**，四选一（实施时定）：
+1. child effect 在 pop **前**读取并转交 parent，再 pop；
+2. 存 **parent entry** 的 handle，以 child route id 为 key；
+3. NavController saved-state 回传协议，pop 前写 parent handle；
+4. checkpoint 作为 navigation result，parent 恢复时一次性消费。
+
+**唯一滚动意图来源**：Restore 与 Latest 不得由两个独立 effect 竞争——checkpoint present→Restore、absent→Latest、consume exactly once。
+
+**openSubAgent 顺序**（capture→persist→navigate）：
 ```
 1. capture checkpoint（Compose 层同步）
-2. dispatch ParentCheckpointStored(childId, checkpoint)   // 先持久化
-3. navigateToChat(childId)                                  // 后导航
-4. switchTo(childId, Latest) hydrate/load（由 route effect 触发）
+2. 写入 SavedStateHandle（按所选协议：child entry / parent entry keyed by child）
+3. navigateToChat(childId)
+4. switchTo(childId, Latest) hydrate/load（route effect 触发）
 ```
 
-**returnToParent**（以 route param 为 key）：
-```
-1. routeId = current route param（childId）
-2. checkpoint = parentReturnCheckpoints[routeId]
-3. navigateToChat(parentId)                          // 导航父
-4. switchTo(parentId, Restore(checkpoint))           // 写 pendingScrollRequest(Restore)
-   → 消费端 ChatMessageContent LaunchedEffect(routeParam=parentId) compare-and-clear
-```
+**需验证**：`ScrollCheckpoint` Parcelable/Bundle-able；进程死亡恢复语义；deep-link 直入 child（无 checkpoint→Latest）；多层 child→grandchild 按 entry 一一对应；config change/重复导航/快速 pop 不重复消费。
 
 ### 11.3 revert 链
 
 - `editFromMessage`（`ChatViewModel.kt:323`）/`retryRevertCutoff`（`:350`）读 currentSessionId——**改读 route param**
 - `RevertConversation.execute`/`RevertCutoffCoordinator.ensure` 已显式传 sessionId——不动
 - `filterBeforeRevert` 双源 guard（`AppStateDerived.kt:115`）——**保留**
-- revert 后 `loadMessages(resetLimit=true)` 不改 route（同 session）
-
-> **实施强化（§14 门控 G6，对齐 bgpt BLOCK-6）**：v2 的"到达后消费"与流程"导航前预消费"冲突，且 pending-Restore 在导航后才写存在 route effect 先初始化 Latest 的竞态；导航失败丢 checkpoint。实施阶段**必须**：
-> - checkpoint transaction 语义：导航前 persist（**不预消费**）；消费移到目标 route entry 的 effect（compare-and-clear）；pending-Restore 必须在 route effect 启动前就位（或 route effect 等待 Restore）；
-> - 导航失败/进程中断时 checkpoint 保留（由 routeToken 判废弃）；
-> - route-level 测试：root→child→parent→grandchild、快速 A→B→C、host purge、删 parent/child。
+- revert 后 `loadMessages(resetLimit=true)` 不改 route（同 session）；叠加 freshness token 防 stale 覆盖
 
 ---
 
@@ -311,12 +339,13 @@ rg 'setLastRoute\(NavRoute\.Chat\)|navigateTopLevel.*Chat' src/main             
 
 > 单次任务 = 一批 commit 一次性交付完整重构，最终态干净无并行旧实现。内部遵循 §7「结构搬动≠语义改动」拆成可独立 check.sh-green 的有序批次。
 
-- **B0 基础设施（串行前置）**：AppRoute sealed + parseRoute；ChatDetailState sealed；原子 action/reducer（SelectConversation/CloseDetail/DetailMissing）落 CrossSliceFieldsReducer；navigateToChat 脚手架。纯加法，check.sh green。
+- **B0 基础设施（串行前置）**：AppRoute sealed + parseRoute；`LoadedContent` 值对象 + freshness token 字段；原子 action/reducer（SelectConversation/CloseDetail/DetailMissing）落 CrossSliceFieldsReducer；navigateToChat 脚手架。纯加法，check.sh green。
+- **B0.5 薄垂直片（opus+bgpt 共识，spike-first）**：route `chat/{id}` + `LoadedContent` + 渲染 `content.sessionId==routeId` + freshness token，**只打通一条入口**（Sessions→tap→chat）+ failing-first 测试（close-all→无 transcript、切 B→无 A 内容、A→B→A→req-1 不覆盖 req-2）。先在窄路径端到端证明核心不变式 (P1)(P6)，再铺开。
 - **B1 导航接线**：AppShell composable("chat/{id}")；navigateToChat 实现；删 saveState/restoreState；back 处理；删 LaunchedEffect(requestedRoute) 镜像。
-- **B2 渲染切换（语义核心）**：ChatScaffold 改 derivedStateOf detail；删渲染权威 + safety-net；ChatEmptyState=None。此刻 (P1)(P2) 生效。
+- **B2 渲染切换（语义核心）**：ChatScaffold 改 derivedStateOf detail；删渲染权威 + safety-net；ChatEmptyState=None。此刻 (P1)(P2) 全面生效。
 - **B3 入口切流**：SessionsScreen/FilesScreen/MainActivity/picker/drawer → navigateToChat(id)。
 - **B4 状态清理**：删 openSessionIds（state/prefs/reducer）；delete/archive/refresh/host/cold-start transition 重写（§10）；持久化收敛。
-- **B5 subagent/revert**：checkpoint 原子顺序（§11）；editFromMessage/retryRevertCutoff 读 route param。
+- **B5 subagent/revert**：checkpoint 迁 SavedStateHandle + 转移协议（§11）；editFromMessage/retryRevertCutoff 读 route param。
 - **B6 删旧物**：删 ChatSessionPager/ChatSessionTabStrip；删 lastRoute 镜像；清理过时测试；补状态机性质测试。
 
 ---
@@ -325,57 +354,61 @@ rg 'setLastRoute\(NavRoute\.Chat\)|navigateTopLevel.*Chat' src/main             
 
 ### 13.1 并行原则
 
-在写作用域**不重叠**的前提下尽可能多线并行。**简单机械改动用 `fixer-zlm`，复杂跨文件/深层逻辑用 `fixer`**。同文件多 fixer 禁止（若某文件被多批次触碰，需先内部分区或串行）。
+在写作用域**不重叠**的前提下尽可能多线并行。**简单机械改动用 `fixer-zlm`，复杂跨文件/深层逻辑用 `fixer`**。
 
-### 13.2 批次依赖与并行图
+### 13.2 批次依赖与并行图（opus+bgpt：共享文件**串行**）
+
+route-authority 是**跨文件不变式**，共享文件并行改极易"局部绿、整体不一致"。故：
+
+- **串行（共享文件，同一时间只一个 fixer）**：`SessionViewModel` / `AppShell` / `ChatScaffold` / `AppCore` / `AppCoreOrchestration` / 状态 reducer / navigation effect。
+- **可并行（不共享状态协议的叶子）**：独立测试编写、文档、不共享协议的资源机械迁移、B0.5 后 API 冻结的独立模块工作。
 
 ```
-B0（串行前置，必须先完成）
- ├─ B1（导航：AppShell/NavRoute/OrchestratorVM）         ┐
- ├─ B3（入口：SessionsScreen/FilesScreen/MainActivity/   ├── 三者写作用域不重叠 → 可并行
- │      picker/drawer）                                  │
- └─ B5（subagent/revert：SessionViewModel/RevertConversation） ┘
-B2（渲染核心：ChatScaffold）依赖 B0+B1，串行
-B4（状态清理：store/reducer/actions/prefs）依赖 B0，与 B1/B2/B3 UI 文件不重叠，可与 B2 后期并行
-B6（删旧物：ChatSessionPager/ChatSessionTabStrip + 测试）最后，依赖 B1-B5
+B0（串行前置）→ B0.5（薄垂直片，串行）→
+ B1（导航接线，串行：AppShell/NavRoute/OrchestratorVM）
+ B2（渲染核心，串行：ChatScaffold）依赖 B1
+ B3（入口，可与 B2 末段并行若不碰 ChatScaffold：SessionsScreen/FilesScreen/MainActivity/picker/drawer）
+ B4（状态清理，串行：store/reducer/actions/prefs）
+ B5（subagent/revert，串行：SessionViewModel/RevertConversation）
+ B6（删旧物+测试，可并行：ChatSessionPager/ChatSessionTabStrip 删除、测试编写）
 ```
 
-fixer 分配建议：B1 复杂→fixer；B3 机械入口改造→fixer-zlm；B5 复杂→fixer；B2 渲染核心→fixer；B4 状态层→fixer；B6 机械删除+测试→fixer-zlm。
-
-> **注意（bgpt 指出）**：`SessionViewModel`/`AppShell`/`ChatScaffold`/`AppCore`/`AppCoreOrchestration` 是多批次共同边界，并行图按文件隔离可能产生"局部绿、整体不一致"。实施时对这些共享文件须显式排他（同一时间只一个 fixer 改），或拆成更细的函数级分区。
+fixer 分配：B0/B1/B2/B4/B5 复杂→fixer；B3/B6 机械→fixer-zlm。
 
 ### 13.3 评审流程（强制）
 
-1. 每批次实施完成后，派 **rev-glm 评审该批次**（代码 + 对该批次的 invariant + 本文档 §14 对应门控）；glm pass 后该批次才算完成。
+1. 每批次实施完成后，派 **rev-glm 评审该批次**（代码 + 该批次 invariant + 本文档 §14 对应门控）；glm pass 后该批次才算完成。
 2. 所有批次 glm 通过后，跑 **`./scripts/check.sh`（编译+单测）** 全绿。
 3. check 通过后，**整体派 rev-bgpt 评审 9.5**（评实施后整体：§14 全部门控落实、不变式成立、零残留门控、状态机测试、UI 合规）。bgpt ≥9.5 才算重构完成。
 4. 发版前按 `.opencode/policies/review-gate.md`：评审产物归档 `.opencode/runs/reviews/<date>/<reviewer>_feature-chat-listdetail.json`；模拟器**强制**跑导航/通知-深链冷启动/子 agent 返回/删归档当前会话 connectedTest（`./scripts/emulator.sh status`→确认空闲→`start`→跑→`stop`）。
 
 ---
 
-## 14. bgpt 评审 blocking → 实施硬门控清单
+## 14. 设计层定型机制 + 实施硬门控清单
 
-以下为两轮 bgpt 评审 blocking 转化的实施阶段强制门控。每批次 glm 评审与最终 bgpt 9.5 评审**必须**逐条核验。
+> v3 把 G1/G6 机制**回收到设计层定型**（§7/§11），仅保留"证明机制成立的测试"在实施层。G2-G5 为实施层测试门控。每批次 glm + 最终 bgpt 9.5 必须逐条核验。
 
-| 门控 | 对应 blocking | 实施要求 |
+| 门控 | 层 | 要求 |
 |---|---|---|
-| **G1 内容归属 route-generation CAS** | BLOCK-1 | 引入 `activeRouteToken`+`loadedContentRouteToken`（参照 `sseConnectedGeneration` 先例）；内容提交带 expected-token，CAS 校验；`ChatDetailState` 携 `routeSessionId`+`loadedContentSessionId`；异步提交统一 `expectedSessionId+expectedHostGroup+expectedRouteToken`。证明 `route=B ∧ 显示 A 内容` 在内容层（非仅渲染层）不可表达 |
-| **G2 AST 级零残留门控** | BLOCK-2 | freeze 测试风格静态断言：UI 渲染不用 currentSessionId 选 transcript；openSessionIds 不在 main/test 源集；Chat 导航必带 id；异步提交必带 expected-id；覆盖 tests/fixtures/持久化迁移/别名（openSessions/SessionTabStrip/ChatSessionPager） |
-| **G3 导航入口 warm/cold-start 契约** | BLOCK-3 | warm-start/cold-start 导航事件暂存/消费契约（VM 未创建、NavHost 未 attached 时）；通知 intent 非法/已删 session → Missing/Sessions；`onSelectSession`/`selectSession`/`navigateToChat` 统一为强制带 route transition 接口 |
-| **G4 route parser property-based 测试** | BLOCK-4 | URL 编码、`%2F`、`?`、`#`、空白、重复 query、`ses_` grammar 稳定性、NavController 解码时序、`chat/new` vs `chat/{id}` 歧义消除、旧裸 `chat`/通知 intent/持久化恢复三路径统一进 Sessions |
-| **G5 transition 状态机形式化** | BLOCK-5 | 每条 transition 状态机表（输入事件/当前 route/前态/后态/NavController 操作/允许中间帧/stale 行为）；host-switch 清 state 与 pop route 顺序；Missing vs Cleared 标准；archive/refresh stale-result guard |
-| **G6 checkpoint transaction 语义** | BLOCK-6 | 导航前 persist（不预消费）；消费移到目标 route entry effect（compare-and-clear）；pending-Restore 在 route effect 启动前就位；导航失败 checkpoint 保留（routeToken 判废弃）；route-level 测试（root↔child↔parent↔grandchild、快速 A→B→C、host purge、删 parent/child） |
+| **G1 内容不可表达（设计层定型）** | 设计+实施 | **`LoadedContent` 值对象**（结构性 owner：`content.sessionId==routeId` 才渲染，构造即原子）**+ 窄化 freshness/incarnation token**（时序性 acceptance，覆盖 bgpt 的 A→B→A stale-load race；route-instance token / per-load request token / content-revision 三选一）。证明 `route=B ∧ 显示 A 内容` 与 `A→B→A 旧 load 覆盖新内容` 在内容层不可表达 |
+| **G6 checkpoint（设计层定型）** | 设计+实施 | parentReturnCheckpoints 迁 **per-entry `SavedStateHandle`**；明确转移协议（四选一：pop 前转交 / parent-keyed-by-child / nav saved-state 回传 / nav-result 一次性消费）；Restore/Latest 单一滚动意图来源、consume once；`ScrollCheckpoint` Parcelable 验证；进程死亡/deep-link child/多层 child/config change/快速 pop 测试 |
+| **G2 AST 级零残留门控** | 实施 | freeze 测试风格静态断言：UI 渲染不用 currentSessionId 选 transcript；openSessionIds 不在 main/test 源集；Chat 导航必带 id；异步提交必带 expected-id+freshness-token；覆盖 tests/fixtures/持久化迁移/别名 |
+| **G3 导航入口 warm/cold-start 契约** | 实施 | warm/cold-start 导航事件暂存/消费契约（VM 未创建、NavHost 未 attached）；通知 intent 非法/已删 session → Missing/Sessions；`onSelectSession`/`selectSession`/`navigateToChat` 统一为强制带 route transition 接口 |
+| **G4 route parser property-based 测试** | 实施 | URL 编码、`%2F`、`?`、`#`、空白、重复 query、`ses_` grammar、NavController 解码时序、`chat/new` vs `chat/{id}` 歧义、旧裸 `chat`/通知 intent/持久化恢复三路径统一进 Sessions |
+| **G5 transition 状态机形式化** | 实施 | 每条 transition 状态机表（输入事件/当前 route/前态/后态/NavController 操作/允许中间帧/stale 行为）；host-switch 清 state 与 pop route 顺序；Missing vs Cleared 标准；archive/refresh stale-result guard |
 
 ---
 
 ## 15. 验证策略（decomposition §11 + architecture §8）
 
-- **failing-first**：B2 前先写红测试（close-all 后无 transcript、冷启动恒 sessions、route=B 不显示 A 内容），B2 后转 green。
-- **全过程 emission 收集**：收集 `store.stateFlow` 每次 emission，断言无"currentSessionId=X ∧ route=Y(X≠Y) ∧ messages 非空"的**可渲染**中间帧（注：允许 route/state 短暂不一致的过渡 emission，但必须不可渲染——由 §7 渲染归属校验保证；测试须明确区分"合法过渡态"与"非法可渲染态"）。
+- **failing-first**：B0.5/B2 前先写红测试（close-all 后无 transcript、冷启动恒 sessions、route=B 不显示 A 内容、A→B→A req-1 不覆盖 req-2），实施后转 green。
+- **全过程 emission 收集**：收集 `store.stateFlow` 每次 emission，断言无"`content.sessionId=X ∧ route=Y(X≠Y) ∧ content 非空`"的**可渲染**中间帧（允许过渡 emission，但必须不可渲染——由 §7.1 渲染归属校验保证）。
+- **A→B→A stale-load 测试（bgpt）**：req-1（旧快照）不得覆盖 req-2（新）；分别验证 SSE/REST message-merge/send-completion/refresh/auto-expand/token-stream 路径均被 freshness token 拦截。
+- **LoadedContent 结构测试**：reducers 不可撕裂 owner 与 messages（AST 级，G2）；切换会话时 content 整体替换。
+- **SavedStateHandle checkpoint 测试**：进程死亡恢复、deep-link 直入 child（无 checkpoint→Latest）、多层 child→grandchild 按 entry 对应、config change/重复导航/快速 pop 不重复消费。
 - **状态机性质测试**：SelectConversation/CloseDetail/delete/archive/SSE-archive/host-switch/draft/revert 序列 model-based，每步断言 P1-P6；store 边界 debug assert 非法聚合态 fail。
 - **freeze 守护**：动 SessionViewModel/SessionSwitcher/ChatState 公开面前先读 freeze 测试（SessionSwitcherTest/AppActionReducerTest/T1cSessionListOwnershipTest/T1cSessionListComplexOwnershipTest），改后 GREEN；不加构造器 arity。
-- **expected-id guard 测试（G1）**：A→B 切换中，A 的延迟 SSE/REST/send-completion/refresh/auto-expand/token-stream 提交被 CAS 丢弃（不污染 B）。
-- **门控**：每批 check.sh；B2/B4/B6 后模拟器 chat/navigation connectedTest。
+- **门控**：每批 check.sh；B0.5/B2/B4/B6 后模拟器 chat/navigation connectedTest。
 
 ---
 
@@ -383,16 +416,17 @@ fixer 分配建议：B1 复杂→fixer；B3 机械入口改造→fixer-zlm；B5 
 
 | 风险 | 缓解 |
 |---|---|
-| currentSessionId 双重职责解耦 | 保留作数据指针；§7 渲染归属校验使滞后无害；现有 guard 零改；G1 用 generation-CAS 强化至不可表达 |
-| 单次任务大改难验证 | §12 有序批次各自 check.sh；failing-first+全过程 emission+零残留门控+G1-G6 强证据 |
+| currentSessionId 双重职责解耦 | `LoadedContent` 结构 owner + freshness token（§7）；既有 guard 零改（仅叠加 token） |
+| 单次任务大改难验证 | §12 有序批次各自 check.sh；**B0.5 薄垂直片**先验证核心不变式；failing-first + 全过程 emission + 零残留门控 + G1-G6 强证据 |
 | 持久化移除 openSessionIds 单向 | 仅丢 tab 列表，会话不丢（sessionCache 保留） |
 | fromRouteKey 变更影响深链/通知 | parseRoute 统一兜底 Sessions（fail-safe）；通知 intent 必带 id；G4 property-based 测试 |
-| checkpoint 顺序 | §11 + G6 强制 capture→persist→navigate + route-scoped 消费 |
-| 共享文件并行冲突 | §13.2 共享文件（SessionViewModel/AppShell/ChatScaffold/AppCore）显式排他 |
+| checkpoint SavedStateHandle 迁移 | §11 转移协议（四选一）+ Parcelable 验证 + 全套恢复/快速导航测试 |
+| 共享文件并行冲突 | §13.2 共享文件**串行**（route-authority 跨文件不变式） |
+| A→B→A stale-load 覆盖 | freshness/incarnation token（§7.2）拦截旧 incarnation |
 
 - **ui-style-spec**：不新增 overlay；删 tab strip；quick-switch 复用 SessionPickerSheet（Tier B 已合规）。
 - **versioning**：建议 **minor**（移除 tab、改 list-detail 为用户可见行为变更）；版本 git 派生无硬编码。
-- **slimapi**：L0-L3 零改动；客户端 session-id threading 由 §7 expected-id guard + §14 G2 AST 门控保证。
+- **slimapi**：L0-L3 零改动；客户端 session-id threading 由 §7 LoadedContent owner + freshness token + §14 G2 AST 门控保证。
 - **review-gate**：发版前评审 agent 出 `.opencode/runs/reviews/<date>/<reviewer>_feature-chat-listdetail.json`；模拟器强制 connectedTest。
 
 ---
@@ -402,4 +436,4 @@ fixer 分配建议：B1 复杂→fixer；B3 机械入口改造→fixer-zlm；B5 
 - 根因+实现映射：explorer（chat/tab 实现 + slimapi 边界 + 全量引用矩阵 + checkpoint/revert 链）
 - 业界对照：librarian（移动端会话切换范式）
 - 架构判定：oracle（Option B list-detail 推荐）
-- 评审：rev-bgpt v1（7.4）、v2（7.8）
+- 评审：rev-bgpt v1（7.4）、v2（7.8）；rev-opus 终审（有条件通过，提 LoadedContent 值对象）；rev-bgpt 复核（有条件通过，补 A→B→A race → freshness token）
