@@ -55,19 +55,31 @@ printf 'sdk.dir=/home/mar/android-sdk\n' > local.properties
 ```
 
 - 首次 debug 构建约 10+ 分钟（下载依赖）；release 约 1–2 分钟（依赖缓存后）。
-- 加速：在 `gradle.properties` 加 `org.gradle.configuration-cache=true`、`org.gradle.caching=true`、`org.gradle.parallel=true`。
+- 加速（v0.13.5 起默认开启）：`gradle.properties` 已设 `org.gradle.parallel=true` + `org.gradle.caching=true`。`org.gradle.configuration-cache` **故意不开**——`app/build.gradle.kts` 在配置期用 `ProcessBuilder("git", …)` 派生 `versionName`/`versionCode`，与 configuration-cache 不兼容（须先迁 `providers.exec`/`ValueSource`，列为 follow-up）。`scripts/check.sh` 的 daemon 默认 `--no-daemon`（CI / 共享机安全）；本地 dev loop 想复用 daemon 设 `OC_GRADLE_DAEMON=1`。
 
 ---
 
-## 3. Release 签名（已配置）
+## 3. Release 签名（v0.13.5 新 key）
 
-Release 签名已在 `app/build.gradle.kts` 配置完毕：
+> 权威规则见 `.opencode/policies/build-signing.md`「Release 签名」；本节为本机实测记录。
 
-- keystore：`/home/mar/.android/opencode_release.keystore`（**仓库外**，永不入库），alias `release`。
-- 凭证从 `local.properties`（gitignored）读取：`release.storeFile / storePassword / keyAlias / keyPassword`。
-- `signingConfigs.release` 读取上述凭证，`buildTypes.release` 绑定该签名。
+Release 签名在 `app/build.gradle.kts` 的 `signingConfigs.release` 配置（读 `local.properties` 的 `release.storeFile/storePassword/keyAlias/keyPassword`，`buildTypes.release` 绑定）。
 
-> 若要在新机器上重建签名环境：用 `$JAVA_HOME/bin/keytool -genkeypair` 生成独立 keystore（**一 App 一 key**，勿复用其它项目），把 `release.*` 凭证写入 `local.properties`，并在 `signingConfigs.release` 指向它。**keystore 与密码务必备份**——丢失则无法以同一身份升级 App。
+- **v0.13.5 全新 release key**（旧 release keystore 凭证已丢失，`local.properties` 被误覆盖）：
+  - keystore `/home/mar/.android/opencode_release.keystore`（**仓库外**，mode 600，旧件备份 `.replaced-20260724`），alias `release`，RSA-4096 / SHA256withRSA / 25y。
+  - **新证书 SHA-256**：`15:6C:58:B7:B1:A4:7B:C3:65:1C:9C:AD:D2:F5:12:FA:AD:01:2B:05:31:B8:13:B2:75:63:B9:50:91:5F:F1:7A`。
+  - ⚠️ **破坏性签名变更**：v0.13.5 与 v0.13.4 及更早**不签名兼容**。升级用户**必须先卸载**（否则 `INSTALL_FAILED_INCONSISTENT_CERTIFICATES`；卸载清数据）。此后沿用此 key。
+  - 该 re-sign 在**隔离 git worktree（checkout v0.13.5）**完成；发布 APK 构自干净 v0.13.5 提交，仅签名不同。
+
+### 凭证来源（`pass` + `setup-signing.sh`）
+
+凭证**不再只存在 `local.properties`**：
+
+- canonical 存储 = **`pass`**（GPG 加密），entries `ocdroid/release/{store-file,store-password,key-alias,key-password}`，GPG key `E5D94730141E69F6`（无 passphrase，headless 友好）。
+- `scripts/setup-signing.sh` **优先读 `pass`**（`ocdroid/release/*`），`pass` 不可用则降级读仓库外凭证（`$OCROID_RELEASE_CREDS`，默认 `/home/mar/.android/ocdroid_release.creds`，mode 600）→ 重建 `local.properties`（保留 `sdk.dir`，末行打印 `source: pass|<creds>`）。**`local.properties` 是可重建的派生物**——丢失即重跑 `./scripts/setup-signing.sh`。
+- 备份清单 + 加固建议见 policy「备份职责」段（keystore + `~/.password-store/` + `~/.gnupg/` 三者离机备份）。
+
+> 新机器重建签名环境：用 `$JAVA_HOME/bin/keytool -genkeypair` 生成**独立** keystore（一 App 一 key，勿复用其它项目），把 `release.*` 存入 `pass`（`pass init <gpg-id>` 后 `pass insert ocdroid/release/<key>`）或写入 creds 文件 → `setup-signing.sh` 生成 `local.properties`。
 
 `./gradlew assembleRelease` 直接产出已签名的 `app-release.apk`。
 
@@ -83,6 +95,8 @@ Release 签名已在 `app/build.gradle.kts` 配置完毕：
 ./scripts/check.sh --full      # + lint + 覆盖率
 # 等价于：./gradlew compileDebugKotlin && testDebugUnitTest [&& lintDebug [&& koverHtmlReport]]
 ```
+
+> **Daemon（v0.13.5）**：`check.sh` 默认 `./gradlew --no-daemon`（CI / 共享机安全，无残留 daemon 进程）。本地 dev loop 想复用 daemon 提速迭代，`export OC_GRADLE_DAEMON=1` 后再跑——脚本会切回 `./gradlew`（复用常驻 daemon）。
 
 集成测试（`connectedDebugAndroidTest`）需运行中的 OpenCode Server：把 `.env.example` 复制为 `.env` 填入凭证，且**仅在模拟器**运行（详见 `AGENTS.md` 设备安全规定）。
 
@@ -199,7 +213,7 @@ curl -X PATCH "$API/$RID" -H "Authorization: token $GITEA_TOKEN" \
 | Android SDK | android-35 + build-tools 35.0.0/35.0.1 ✓ |
 | `./gradlew assembleDebug` | **BUILD SUCCESSFUL**（首次约 10+ 分钟）✓ |
 | Debug APK | `app/build/outputs/apk/debug/app-debug.apk`（约 26 MB，调试密钥签名）✓ |
-| Release 签名 | 已配置（`signingConfigs.release` 读 `local.properties`），`assembleRelease` 通过 ✓ |
-| Release APK | `APK/oc-droid-0.2.3.apk`（约 4.1 MB，release 密钥签名）✓ |
+| Release 签名 | 已配置（`signingConfigs.release` 读 `local.properties`，凭证经 `pass` + `setup-signing.sh` 注入）；**v0.13.5 新 key**（cert SHA-256 `15:6C:58:B7…:F1:7A`）✓ |
+| Release APK | `APK/oc-droid-0.13.5-7aa1daf.apk`（约 12 MB，新 release 密钥签名；apksigner 验签通过）✓ ⚠️ 与 v0.13.4 及更早不签名兼容 |
 | 服务端 | OpenCode Server v1.17.12（本机 `0.0.0.0:4096`）✓ |
 

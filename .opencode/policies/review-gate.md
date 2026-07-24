@@ -78,7 +78,7 @@
 
 ## 留存与索引
 
-- `.opencode/runs/reviews/` 已纳入版本库（不 gitignore），作为可追溯的项目资产。
+- `.opencode/runs/reviews/` **已纳入版本库**（v0.13.5 起由 `.gitignore` 否定链**强制**再包含，而非仅靠 policy 约束）：`.opencode/*` / `!.opencode/runs/` / `.opencode/runs/*` / `!.opencode/runs/reviews/`——只放行 `reviews/` 这一条路径，`.opencode/policies/`、`templates/`、其它 `runs/` 仍被忽略。评审产物**应提交**（git 可跟踪），作为可追溯的项目资产。
 - 同一天同 scope 多轮评审：在文件名后加 `-r2`、`-r3`，如 `glmer_release-r2.json`。
 - 不删旧评审文件；若结论被推翻，新增一轮文件而非覆盖。
 
