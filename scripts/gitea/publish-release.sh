@@ -9,6 +9,7 @@ set -euo pipefail
 TAG="${1:?用法: publish-release.sh <tag>}"
 REPO="mfreceiver/oc-droid"
 GITEA_URL="${GITEA_URL:-https://git.vectory.cn:18443}"
+[[ "$TAG" == v* ]] || { echo "❌ TAG='$TAG' 不是 v* 格式;release.yml 应由 tag push 触发,workflow_dispatch 走错路径"; exit 1; }
 [[ -n "${GITEA_TOKEN:-}" ]] || { echo "❌ GITEA_TOKEN 未设置"; exit 1; }
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 [[ -d artifacts && "$(ls -A artifacts 2>/dev/null)" ]] || { echo "❌ artifacts/ 为空(先跑 release-check.sh)"; exit 1; }
@@ -26,8 +27,8 @@ else
   RANGE="${TAG}"
   TITLE="## Release snapshot(首次打 tag,最近 50 条 commit)"
 fi
-# head -50 防止超长 changelog 撑爆 API body
-CHANGELOG=$(git log "$RANGE" --pretty=format:"- %s" --no-merges 2>/dev/null | head -50 || true)
+# head -50 防止超长 changelog 撑爆 API body;--max-count 避免 pipefail 下 SIGPIPE 吞 git 错误
+CHANGELOG=$(git log "$RANGE" --pretty=format:"- %s" --no-merges --max-count=50 2>/dev/null || true)
 [[ -z "$CHANGELOG" ]] && CHANGELOG="_(no commits in range)_"
 BODY="${TITLE}
 
@@ -45,6 +46,10 @@ if [[ -z "$RID" ]]; then
   RID=$(curl -sf -X POST "$API" -H "$AUTH" -H "Content-Type: application/json" \
         -d "$PAYLOAD" \
         | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+else
+  # 已存在(可能是 workflow_dispatch 重跑):PATCH 更新 body,保持 idempotent
+  curl -sf -X PATCH "$API/$RID" -H "$AUTH" -H "Content-Type: application/json" -d "$PAYLOAD" >/dev/null \
+    && echo "==> 已更新 release #$RID 的 body(changelog)"
 fi
 echo "==> release id: $RID"
 

@@ -61,3 +61,17 @@ jobs:
       - name: 清理临时 keystore
         if: always()
         run: rm -f "$RUNNER_TEMP/release.keystore" local.properties ~/.git-credentials
+
+      - name: 通知企业微信（发版结果）
+        # if: always() → 成功（附下载/Changelog 链接）与失败（附 Actions 链接）都通知。
+        # WECOM_WEBHOOK 是站点级 Actions Variable（管理后台→管理设置→工作流→变量），全实例仓库继承，
+        # 引用 vars.*（非 secrets.*）。best-effort：缺失或 qyapi 不可达只警告，不影响发版结果。
+        if: always()
+        env:
+          WECOM_WEBHOOK: ${{ vars.WECOM_WEBHOOK }}
+          TAG: ${{ github.ref_name }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          BASE="https://git.vectory.cn:18443/mfreceiver/oc-droid"
+          ./scripts/gitea/notify-wecom.sh "$WECOM_WEBHOOK" "$OUTCOME" "$TAG" \
+            "$BASE/releases/tag/$TAG" "$BASE/actions"
