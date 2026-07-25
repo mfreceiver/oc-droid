@@ -1,7 +1,8 @@
 # release: 受保护 v* tag push 触发,独立 release runner 出签名包。
 # 签名密钥经 Gitea Secrets 注入(RELEASE_KEYSTORE base64 + 3 密码);agent / 普通 runner 不可读。
-# 产物:APK / AAB / mapping.txt / SHA256SUMS → Gitea Release。
+# 产物:APK / AAB / mapping.txt / SHA256SUMS → Gitea Release(由 scripts/gitea/publish-release.sh 上传)。
 # 注:android-release runner 属 Phase 5;未部署前可临时把 runs-on 改回 android 验证流程。
+# 无外部 action(不依赖 github.com)。
 name: release
 
 on:
@@ -13,15 +14,18 @@ jobs:
   release:
     runs-on: android-release
     steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-      - uses: actions/cache@v3
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml') }}
-          restore-keys: gradle-${{ runner.os }}-
+      - name: Checkout(直连 Gitea,完整历史 + tag)
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          printf 'https://x-access-token:%s@git.vectory.cn:18443\n' "$TOKEN" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+          git config --global credential.helper store
+          git config --global advice.detachedHead false
+          git clone https://git.vectory.cn:18443/mfreceiver/oc-droid.git .
+          git fetch --tags --force
+          git checkout -q "${{ github.sha }}"
 
       - name: 恢复临时 keystore(从 Secrets)
         env:
@@ -47,12 +51,12 @@ jobs:
 
       - name: 上传产物到 Gitea Release
         env:
-          # Gitea Actions 自动注入 GITHUB_TOKEN(contents: write,可建 release / 上传 asset)。
-          # 若 403,改用自建 secret RELEASE_GITEA_TOKEN(个人 token,release 权限)。
+          # Gitea Actions 自动注入 GITHUB_TOKEN(contents: write)。
+          # 若 asset 上传 403,改用自建 secret RELEASE_GITEA_TOKEN(个人 token,release 权限)。
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: ./scripts/gitea/publish-release.sh "$TAG"
 
       - name: 清理临时 keystore
         if: always()
-        run: rm -f "$RUNNER_TEMP/release.keystore" local.properties
+        run: rm -f "$RUNNER_TEMP/release.keystore" local.properties ~/.git-credentials

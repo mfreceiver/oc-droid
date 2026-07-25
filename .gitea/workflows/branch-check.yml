@@ -1,6 +1,9 @@
-# branch-check: agent/** / feature/** / fix/** 分支 push 时触发。
+# branch-check: agent/** / feature/** / fix/** / ci/** 分支 push 时触发。
 # 干净 CI 容器中跑 lint + 单测 + assembleDebug,验证任务分支可构建。
 # 通过 ≠ 可发布,仅表示该分支远端验证 OK。详见 docs/specs/gitea-cicd.md。
+#
+# 设计:无外部 action(不依赖 github.com)。checkout 用内联 git clone 直连 Gitea;
+# Gradle 依赖缓存改由 act_runner 的 ~/.gradle 持久卷复用(后续可加 Gitea 镜像 action)。
 name: branch-check
 
 on:
@@ -16,18 +19,19 @@ jobs:
   build:
     runs-on: android   # → act_runner label android:docker://ocdroid-ci-android:35-jdk21
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # app/build.gradle.kts 配置期 git describe 需要 tag + 完整历史
-
-      - name: Gradle / wrapper 缓存
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml') }}
-          restore-keys: gradle-${{ runner.os }}-
+      - name: Checkout(直连 Gitea,无外部 action)
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          printf 'https://x-access-token:%s@git.vectory.cn:18443\n' "$TOKEN" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+          git config --global credential.helper store
+          git config --global advice.detachedHead false
+          git clone https://git.vectory.cn:18443/mfreceiver/oc-droid.git .
+          git fetch --tags --force
+          git checkout -q "${{ github.sha }}"
+          echo "HEAD: $(git rev-parse --short HEAD) / $(git describe --tags --always 2>/dev/null)"
 
       - name: local.properties(指向 CI SDK)
         run: printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
@@ -35,19 +39,8 @@ jobs:
       - name: remote-check(lint + test + assembleDebug)
         run: ./scripts/ci/remote-check.sh
 
-      - name: 上传 Debug APK
-        uses: actions/upload-artifact@v3
-        with:
-          name: debug-apk-${{ github.sha }}
-          path: artifacts/*.apk
-          retention-days: 14
-
-      - name: 上传测试 / Lint 报告
+      - name: 归档产物清单(job 容器内,供排查)
         if: always()
-        uses: actions/upload-artifact@v3
-        with:
-          name: reports-${{ github.sha }}
-          path: |
-            app/build/reports/tests/
-            app/build/reports/lint-results-*.html
-          retention-days: 14
+        run: |
+          echo "=== APK ==="; ls -lh app/build/outputs/apk/debug/ 2>/dev/null || true
+          echo "=== artifacts/ ==="; ls -lh artifacts/ 2>/dev/null || true
