@@ -15,6 +15,12 @@ on:
       - ci/**
   workflow_dispatch:
 
+# 全局串行:runner 共用 gradle cache bind mount(/root/.gradle),并发 job 会锁冲突。
+# group=ci-runner-serialization 让所有 workflow 在同 ref 上的 job 排队串行。
+concurrency:
+  group: ci-runner-serialization
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: android   # → act_runner label android:docker://universal-ci-android:35-jdk21
