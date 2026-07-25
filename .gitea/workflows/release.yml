@@ -1,7 +1,8 @@
 # release: 受保护 v* tag push 触发,独立 release runner 出签名包。
 # 签名密钥经 Gitea Secrets 注入(RELEASE_KEYSTORE base64 + 3 密码);agent / 普通 runner 不可读。
 # 产物:APK / AAB / mapping.txt / SHA256SUMS → Gitea Release(由 scripts/gitea/publish-release.sh 上传)。
-# 注:android-release runner 属 Phase 5;未部署前可临时把 runs-on 改回 android 验证流程。
+# 注:Gitea Actions secrets 是 repo 级而非 runner 级,独立 release runner 无额外安全增益,
+# 直接用 android runner 即可。若未来要做 secrets 隔离,改用 Gitea Environments。
 # 无外部 action(不依赖 github.com)。
 name: release
 
@@ -12,7 +13,7 @@ on:
 
 jobs:
   release:
-    runs-on: android-release
+    runs-on: android
     steps:
       - name: Checkout(直连 Gitea,完整历史 + tag)
         env:
@@ -60,3 +61,17 @@ jobs:
       - name: 清理临时 keystore
         if: always()
         run: rm -f "$RUNNER_TEMP/release.keystore" local.properties ~/.git-credentials
+
+      - name: 通知企业微信（发版结果）
+        # if: always() → 成功（附下载/Changelog 链接）与失败（附 Actions 链接）都通知。
+        # WECOM_WEBHOOK 是站点级 Actions Variable（管理后台→管理设置→工作流→变量），全实例仓库继承，
+        # 引用 vars.*（非 secrets.*）。best-effort：缺失或 qyapi 不可达只警告，不影响发版结果。
+        if: always()
+        env:
+          WECOM_WEBHOOK: ${{ vars.WECOM_WEBHOOK }}
+          TAG: ${{ github.ref_name }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          BASE="https://git.vectory.cn:18443/mfreceiver/oc-droid"
+          ./scripts/gitea/notify-wecom.sh "$WECOM_WEBHOOK" "$OUTCOME" "$TAG" \
+            "$BASE/releases/tag/$TAG" "$BASE/actions"
