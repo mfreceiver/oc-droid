@@ -10,6 +10,7 @@
 | 任务 | 入口 | 规则 / 细节 |
 |---|---|---|
 | 改动后校验（必做） | `./scripts/check.sh` | LSP 已启用（编辑后编译/类型诊断即时回流）；check.sh 跑单测+集成，仍是完成判据。`.opencode/policies/build-signing.md`「改动校验」 |
+| CI 状态查询（最新 run） | `./scripts/gitea/query-run.sh` | 用 `GITEA_TOKEN` 查最新 run 状态/conclusion；`.opencode/policies/build-signing.md` |
 | 发版（出包 + tag，版本由 git 派生，无 commit） | `./scripts/release.sh <patch\|minor\|major>` | `.opencode/policies/build-signing.md`、`.opencode/policies/versioning.md` |
 | 版本号来源 | git 派生（`versionName`=git describe、`versionCode`=commit count），无 bump 脚本 | `.opencode/policies/versioning.md` |
 | 构建环境 export | `source ./scripts/env.sh` | `scripts/env.sh` |
