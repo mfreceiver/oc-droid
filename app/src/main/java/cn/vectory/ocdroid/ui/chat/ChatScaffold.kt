@@ -1,6 +1,5 @@
 // ChatScaffold.kt — Phase 1B chat shell. Replaces the chrome of ChatScreen
-// (TopAppBar second-row SessionTabStrip, the HorizontalPager session switcher,
-// and the alert-dialog popups for agent/model pickers) with the new M3-native
+// (the alert-dialog popups for agent/model pickers) with the new M3-native
 // surface (D.2/D.5): single TopAppBar + session-history icon + context chip,
 // ModalBottomSheet SessionPicker (D.4), Agent/Model AssistChips (D.3).
 //
@@ -48,10 +47,8 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
@@ -60,6 +57,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.ChatViewModel
@@ -69,8 +67,11 @@ import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.SettingsViewModel
+import cn.vectory.ocdroid.ui.ScrollCheckpoint
 import cn.vectory.ocdroid.ui.UiEvent
+import cn.vectory.ocdroid.ui.checkpointKeyForChild
 import cn.vectory.ocdroid.ui.computeContextUsage
+import cn.vectory.ocdroid.ui.consumeAnySubAgentCheckpoint
 import cn.vectory.ocdroid.ui.currentHostProfile
 import cn.vectory.ocdroid.ui.currentSessionStatus
 import cn.vectory.ocdroid.ui.effectiveBusySessionIds
@@ -87,9 +88,6 @@ import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.visibleMessages
 import cn.vectory.ocdroid.ui.settings.TofuTrustDialog
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.drop
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 
 /**
@@ -154,6 +152,34 @@ fun ChatScaffold(
      * this param is purely an extension point for callers (default `{}`).
      */
     onOpenDrawer: () -> Unit = {},
+    /** Active parameterized route id; null is the explicitly staged legacy
+     * bare-chat compatibility surface. */
+    routeSessionId: String? = null,
+    /**
+     * §chat-list-detail §11 / G6 (B5): the parent route entry's
+     * [SavedStateHandle]. Used as the per-entry backing store for sub-agent
+     * checkpoints (protocol 2 — parent-keyed-by-child). The handle's
+     * lifecycle is bound to the chat/{sessionId} NavBackStackEntry, so the
+     * checkpoint is naturally cleaned when the entry pops.
+     *
+     * Three roles:
+     *  1. WRITE — at openSubAgent time (user is on parent): the
+     *     [onOpenSubAgentNavigate] callback writes the captured checkpoint to
+     *     this handle under `subAgentCheckpoint:{childId}` BEFORE triggering
+     *     navigation.
+     *  2. READ + CONSUME — at re-composition (the user popped back from a
+     *     child): the LaunchedEffect keyed on routeSessionId fires, calls
+     *     [consumeAnySubAgentCheckpoint], and dispatches Restore via
+     *     [ChatViewModel.requestScrollRestore] if a checkpoint is present.
+     *  3. PROCESS-DEATH SURVIVAL — SavedStateHandle is Bundle-backed, so the
+     *     checkpoint survives process death + config change; the
+     *     LaunchedEffect re-fires on the rebuilt entry and replays the
+     *     Restore.
+     *
+     * Null on the legacy bare-chat route (no per-entry handle); the
+     * checkpoint paths are inert in that case.
+     */
+    routeSavedStateHandle: SavedStateHandle? = null,
 ) {
     // §PARITY (verbatim from ChatScreen): all six slice reads survive the
     // chrome swap. The streaming / settings / host / unread / traffic reads
@@ -185,6 +211,98 @@ fun ChatScaffold(
     val hostState = orchestratorVM.hostFlow.collectAsStateWithLifecycle()
     val host by hostState
     val recentWorkdirs by settingsVM.recentWorkdirs.collectAsStateWithLifecycle()
+    val routeInstance by orchestratorVM.chatRouteInstanceFlow.collectAsStateWithLifecycle()
+    // Once a parameterized route has accepted content, use that immutable
+    // payload for transcript-adjacent chrome as well as the message list.
+    val routeOwnedContent = routeSessionId
+        ?.takeIf { isRouteContentRenderable(it, chat.content, routeInstance) }
+        ?.let { chat.content }
+    // §B2 rev-gpt #4: the parameterized chat/{sessionId} route MUST NOT fall
+    // back to flat fields when route-owned content is unavailable — flat
+    // reads would surface a stale session's transcript-adjacent chrome (agent /
+    // model inference, context-usage) while the detail pane shows Loading. The
+    // legacy bare-chat branch (routeSessionId == null) keeps flat reads. Empty
+    // values are harmless for chrome inference and never reach the message
+    // list (the list is chosen by the routeSessionId branch below, which
+    // already routes to ChatDetailSlice when content is non-renderable).
+    val onParameterizedRoute = routeSessionId != null
+    val renderedMessages =
+        if (onParameterizedRoute) routeOwnedContent?.messages ?: emptyList() else chat.messages
+    val renderedPartsByMessage =
+        if (onParameterizedRoute) routeOwnedContent?.partsByMessage ?: emptyMap() else chat.partsByMessage
+    val renderedStreamingTexts =
+        if (onParameterizedRoute) routeOwnedContent?.streamingPartTexts ?: emptyMap() else chat.streamingPartTexts
+    val renderedStreamingReasoning =
+        if (onParameterizedRoute) routeOwnedContent?.streamingReasoningPart else chat.streamingReasoningPart
+    // §B2 rev-gpt MAJOR 1: the authoritative session id for transcript-
+    // adjacent chrome (agent / model / status / revert cutoff). On the
+    // parameterized route the route id governs — flat currentSessionId can
+    // lag the route flip (navigateToChat commits nav.lastRoute + token in one
+    // dispatch; SessionSelected follows in a separate dispatch), so reading
+    // currentSessionId during the loading window would surface the PRIOR
+    // session's chrome. The legacy bare-chat branch keeps flat currentSessionId.
+    val chromeSessionId = chromeSessionIdFor(routeSessionId, chat.currentSessionId)
+
+    // §chat-list-detail §11 / G6 (B5): per-entry SavedStateHandle checkpoint
+    // consume-once. This LaunchedEffect fires every time ChatScaffold enters
+    // composition for a route id (first entry AND re-entry after a pop — when
+    // the user returns from a child via [SessionViewModel.returnToParent]).
+    // The handle is the route entry's, so its `subAgentCheckpoint:*` key (if
+    // present) was written by THIS SAME composable's onOpenSubAgent callback
+    // BEFORE the user navigated to the child. consume-once removes the key so
+    // a second re-entry (config change / duplicate nav / fast pop) cannot
+    // double-fire Restore. When the handle has no checkpoint (first entry /
+    // deep-link direct into this session / process-death without a stored
+    // checkpoint), the default Latest from openForRoute stands.
+    //
+    // Single-scroll-intent contract (§11): Restore vs Latest is decided in
+    // exactly this one place. The dispatch goes through the unified
+    // [AppAction.ScrollRequested] slot — the consumer in ChatMessageList sees
+    // `behavior=Restore` and applies it.
+    LaunchedEffect(chromeSessionId, routeSavedStateHandle) {
+        val handle = routeSavedStateHandle ?: return@LaunchedEffect
+        val sid = chromeSessionId ?: return@LaunchedEffect
+        val cp = consumeAnySubAgentCheckpoint(handle)
+        if (cp != null) {
+            chatVM.requestScrollRestore(sid, cp)
+        }
+    }
+
+    /**
+     * §chat-list-detail §11 / G6 (B5): the openSubAgent-side callback passed
+     * down to ChatMessageList. The listState live-capture stays in
+     * ChatMessageContent (where the LazyListState reference is owned); this
+     * callback is invoked AFTER the synchronous capture, with the resulting
+     * [ScrollCheckpoint].
+     *
+     * §B5 BLOCK-fix (rev-gpt MAJOR 1): the checkpoint write + nav call are
+     * INSIDE the SessionViewModel.openSubAgent success callback — NOT before
+     * the call. This avoids leaving a stale checkpoint on the parent handle
+     * when the child fetch fails or the route changed mid-fetch. The
+     * callback receives `(resolvedChildId, checkpoint)` and writes the
+     * checkpoint to the parent route entry's SavedStateHandle in the SAME
+     * atomic step as the route-aware navigation.
+     *
+     * The handle is THIS entry's (the user is on parent at click time), so
+     * the persisted checkpoint is bound to the parent entry's lifecycle and
+     * will be auto-cleaned when that entry pops.
+     *
+     * Delegates child-session fetch + navigation to [SessionViewModel.openSubAgent]
+     * with an `orchestratorVM.navigateToChat(childId)` nav callback — each
+     * child gets its own NavBackStackEntry, giving the parent's SavedStateHandle
+     * a distinct lifecycle counterpart (per §11 protocol 2).
+     */
+    val onOpenSubAgentNavigate: (childSessionId: String, checkpoint: ScrollCheckpoint) -> Unit =
+        { childSessionId, checkpoint ->
+            sessionVM.openSubAgent(childSessionId, checkpoint) { resolvedId, cp ->
+                // §B5 BLOCK-fix MAJOR 1: checkpoint write + nav fire ONLY on
+                // the success path (VM re-validated the route + token AFTER
+                // the async fetch landed). The handle write is bound to the
+                // parent route entry that is STILL current at callback time.
+                routeSavedStateHandle?.set(checkpointKeyForChild(resolvedId), cp)
+                orchestratorVM.navigateToChat(resolvedId)
+            }
+        }
 
     // ── Chrome-only state (new for Phase 1B) ─────────────────────────────
     // §0.8.2 P2: showContextSelector / showOverflow are
@@ -306,7 +424,7 @@ fun ChatScaffold(
             sessionList.childSessions,
         )
     }
-    val curSession = chat.currentSessionId?.let { sessionsById[it] }
+    val curSession = chromeSessionId?.let { sessionsById[it] }
     val effectiveBusy = remember(
         sessionList.activeSessionIds,
         sessionList.sessionStatuses,
@@ -322,10 +440,10 @@ fun ChatScaffold(
     val onChatFileClick: (String) -> Unit = remember(curSession, onOpenChatFilePreview) {
         { path -> onOpenChatFilePreview(curSession?.directory, path) }
     }
-    val curCutoff = chat.currentSessionId?.let(chat.revertCutoffs::get)
+    val curCutoff = chromeSessionId?.let(chat.revertCutoffs::get)
     val curRevertMessageId = if (curSession != null) curSession.revert?.messageId else curCutoff?.messageId
-    val curSessionStatus = currentSessionStatus(sessionList.sessionStatuses, chat.currentSessionId)
-    val computedContextUsage = computeContextUsage(chat.messages, settings.providers)
+    val curSessionStatus = currentSessionStatus(sessionList.sessionStatuses, chromeSessionId)
+    val computedContextUsage = computeContextUsage(renderedMessages, settings.providers)
     // §L5a: cache `cachedContextUsage` behind a State handle so the
     // rememberChatTopBarState lambda can read `.value` on it (snapshot-tracking
     // contract). The `by` delegate below stays — ChatScaffold's other reads
@@ -353,11 +471,23 @@ fun ChatScaffold(
     val visibleAgents = remember(settings.agents) {
         settings.agents.filter { it.isVisible }.map { it.name }.toSet()
     }
-    val effectiveAgent: String? = remember(chat.pendingAgent, curSession, chat.messages, visibleAgents) {
+    val effectiveAgent: String? = remember(chat.pendingAgent, curSession, renderedMessages, visibleAgents, onParameterizedRoute) {
         val sessionAgent = curSession?.agent?.takeIf { it.isNotBlank() && it in visibleAgents }
-        chat.pendingAgent ?: sessionAgent ?: inferCurrentAgent(chat.messages, visibleAgents)
+        val inferred = inferCurrentAgent(renderedMessages, visibleAgents)
+        // §B2 rev-gpt MAJOR 3: for the parameterized chat/{sessionId} route
+        // the route session's stored agent (+ transcript inference) is the
+        // RENDER authority. Flat pendingAgent is a global single-slot with no
+        // session attribution; during the nav-flip → SessionSelected window
+        // it can hold the PRIOR route's pick. pendingAgent stays the legacy
+        // bare-chat source (routeSessionId == null); the pending WRITE path
+        // is unchanged (the pick still applies on send via pendingAgent).
+        if (onParameterizedRoute) {
+            sessionAgent ?: inferred
+        } else {
+            chat.pendingAgent ?: sessionAgent ?: inferred
+        }
     }
-    val effectiveModel: cn.vectory.ocdroid.data.model.Message.ModelInfo? = remember(chat.pendingModel, curSession, chat.messages, visibleAgents) {
+    val effectiveModel: cn.vectory.ocdroid.data.model.Message.ModelInfo? = remember(chat.pendingModel, curSession, routeOwnedContent, renderedMessages, visibleAgents, onParameterizedRoute) {
         // §Q2: bridge Session.ModelInfo → Message.ModelInfo (the type the
         // top-bar / ContextMenuCluster.currentModel consume). Extract to
         // local vals so Kotlin smart-casts the nullable members to non-null
@@ -371,10 +501,20 @@ fun ChatScaffold(
             if (mid != null && mid.isNotBlank() && mpid != null && mpid.isNotBlank())
                 cn.vectory.ocdroid.data.model.Message.ModelInfo(modelId = mid, providerId = mpid)
             else null
-        chat.pendingModel ?: converted ?: inferCurrentModel(chat.messages, visibleAgents)
+        val inferred = inferCurrentModel(renderedMessages, visibleAgents)
+        // §B2 rev-gpt MAJOR 3: for the parameterized route the route-owned
+        // LoadedContent.currentModel (the model under which the loaded
+        // content was produced) + the route session's stored model +
+        // transcript inference form the RENDER authority. Flat pendingModel
+        // (global single-slot) is the legacy bare-chat source only.
+        if (onParameterizedRoute) {
+            routeOwnedContent?.currentModel ?: converted ?: inferred
+        } else {
+            chat.pendingModel ?: converted ?: inferred
+        }
     }
     val currentSessionIsRunning = curSessionStatus?.let { it.isBusy || it.isRetry } == true ||
-        chat.currentSessionId?.let { it in composer.sendingSessionIds } == true
+        chromeSessionId?.let { it in composer.sendingSessionIds } == true
     // §phase2-parity: narrow projection of composerFlow for the
     // canEditAndRerun destructive gate. Derived ONCE here (ChatScaffold
     // already subscribes to composerFlow + chatFlow + sessionListFlow) and
@@ -387,36 +527,36 @@ fun ChatScaffold(
     // ChatMessageList (read from its own chatFlow + sessionListFlow
     // subscriptions, which fire on legitimate message/stream events, not
     // keystrokes).
-    val isCurrentSessionSending = chat.currentSessionId?.let { it in composer.sendingSessionIds } == true
+    val isCurrentSessionSending = chromeSessionId?.let { it in composer.sendingSessionIds } == true
     val currentActivity = remember(
-        chat.currentSessionId,
+        chromeSessionId,
         curSessionStatus,
         curRevertMessageId,
         curCutoff,
-        chat.messages,
-        chat.partsByMessage,
-        chat.streamingReasoningPart,
-        chat.streamingPartTexts,
+        renderedMessages,
+        renderedPartsByMessage,
+        renderedStreamingReasoning,
+        renderedStreamingTexts,
     ) {
         currentSessionActivity(
-            sessionId = chat.currentSessionId,
+            sessionId = chromeSessionId,
             status = curSessionStatus,
             messages = visibleMessages(
-                chat.messages,
+                renderedMessages,
                 curSession,
                 curCutoff
             ),
-            partsByMessage = chat.partsByMessage,
-            streamingReasoningPart = chat.streamingReasoningPart,
-            streamingPartTexts = chat.streamingPartTexts,
+            partsByMessage = renderedPartsByMessage,
+            streamingReasoningPart = renderedStreamingReasoning,
+            streamingPartTexts = renderedStreamingTexts,
         )
     }
     val matchingQuestions = remember(
         sessionList.pendingQuestions,
-        chat.currentSessionId,
+        chromeSessionId,
         sessionsById,
     ) {
-        val root = chat.currentSessionId?.let { rootIdOf(it, sessionsById) }
+        val root = chromeSessionId?.let { rootIdOf(it, sessionsById) }
         if (root != null) questionsInTree(root, sessionList.pendingQuestions, sessionsById)
         else emptyList()
     }
@@ -426,8 +566,8 @@ fun ChatScaffold(
     // to StatusSlot, which guarantees the slot is fed only this session's
     // pending permission (cross-session pending items become a Sessions
     // nav-bar badge in Phase 1A / scheme D.1).
-    val pendingPermission = remember(sessionList.pendingPermissions, chat.currentSessionId) {
-        sessionList.pendingPermissions.firstOrNull { it.sessionId == chat.currentSessionId }
+    val pendingPermission = remember(sessionList.pendingPermissions, chromeSessionId) {
+        sessionList.pendingPermissions.firstOrNull { it.sessionId == chromeSessionId }
     }
     // §1C: compacting + retry card height tracking is no longer needed —
     // the single status slot is anchored at the top of the chat area (not
@@ -444,12 +584,15 @@ fun ChatScaffold(
     var lastParent by remember { mutableStateOf<String?>(null) }
     if (parent != null) lastParent = parent
     BackHandler(enabled = parent != null) {
-        // §Wave5b-Q13: 子→父 via Android Back. Routes through the dedicated
-        // returnToParent() — NOT selectSession(parentId) — so the parent's
-        // Restore checkpoint is consumed and the parent re-opens at the
-        // user's prior viewport. selectSession(parentId) would dispatch
-        // Latest and clobber the captured checkpoint.
-        sessionVM.returnToParent()
+        // §chat-list-detail §11 / G6 (B5 BLOCK-fix CRITICAL): 子→父 via
+        // Android Back. Routes through returnToExistingChat (NOT
+        // navigateToChat) so the AppShell synchronizer pops to the EXISTING
+        // parent entry — preserving its SavedStateHandle + the openSubAgent
+        // checkpoint. A plain navigateToChat(parentId) would push a NEW
+        // parent entry, stranding both the checkpoint and the old entry.
+        // The parent's ChatScaffold LaunchedEffect then consumes the
+        // checkpoint → Restore scroll intent fires.
+        sessionVM.returnToParent { pid -> orchestratorVM.returnToExistingChat(pid) }
     }
 
     val errorMessage = stringResource(R.string.chat_error_occurred)
@@ -509,12 +652,17 @@ fun ChatScaffold(
             }
         }
     }
-    LaunchedEffect(chat.staleNotice, chat.currentSessionId) {
-        if (chat.staleNotice && chat.currentSessionId != null) {
+    // §B2 rev-gpt MAJOR 2: gate the stale-notice snackbar on the route-owned
+    // identity (chromeSessionId) so the transition window (route flipped, flat
+    // currentSessionId lagging) cannot surface the PRIOR session's stale
+    // notice. Legacy bare-chat passes flat currentSessionId via the same
+    // chromeSessionId val.
+    LaunchedEffect(chat.staleNotice, chromeSessionId) {
+        if (chat.staleNotice && chromeSessionId != null) {
             snackbarHostState.showTimed(
                 message = staleNoticeMessage,
                 actionLabel = staleNoticeActionLabel,
-                onAction = { chatVM.refreshCurrentSession() }
+                onAction = { chatVM.refreshCurrentSession(chromeSessionId) }
             )
         }
     }
@@ -549,11 +697,18 @@ fun ChatScaffold(
     // those fall back to the saveable default initializer.
     val savedPositions = remember { mutableStateMapOf<String, Pair<Int, Int>>() }
     val accessOrder = remember { mutableStateListOf<String>() }
-    LaunchedEffect(sessionList.openSessionIds) {
-        val open = sessionList.openSessionIds.toSet()
-        val stale = savedPositions.keys - open
-        if (stale.isNotEmpty()) {
-            stale.forEach { id ->
+    // §B4: open-tabs-list prune removed. Cap the scroll-position cache by
+    // chromeSessionId + LRU (accessOrder) only — list-detail has no open-tab set.
+    // Keep entries for the active chrome session; drop others on route change.
+    LaunchedEffect(chromeSessionId) {
+        if (chromeSessionId == null) return@LaunchedEffect
+        val keep = setOf(chromeSessionId)
+        val stale = savedPositions.keys - keep
+        // Retain a small LRU of recently viewed positions (max 8) so
+        // Sessions→Chat→back→Chat re-entry can still restore when present.
+        if (stale.isNotEmpty() && savedPositions.size > 8) {
+            val overflow = accessOrder.filter { it !in keep }.dropLast(7)
+            overflow.forEach { id ->
                 savedPositions.remove(id)
                 accessOrder.remove(id)
             }
@@ -598,14 +753,17 @@ fun ChatScaffold(
         effectiveAgent = effectiveAgent,
         effectiveModel = effectiveModel,
         noHostFallback = noHostFallback,
+        chromeSessionId = chromeSessionId,
     )
-    // §Q11 (2026-07-16): chat.currentSessionId is a remember key because the
-    // onForceRefresh lambda below captures it to emit LoadMessages(sid) —
-    // without it the lambda would hold a stale id across a session switch.
+    // §Q11 (2026-07-16): chromeSessionId is the remember key because the
+    // onForceRefresh lambda below captures it to emit the refresh for the
+    // ACTIVE route — without it the lambda would hold a stale id across a
+    // route switch. §B2 rev-gpt MAJOR 1: route-owned identity, not flat
+    // currentSessionId (which can lag the route flip).
     val topBarActions = remember(
         sessionVM,
         chatVM,
-        chat.currentSessionId,
+        chromeSessionId,
     ) {
         // §0.8.2 P2.3: the new overflow menu (Context / Todo / Agent / Model)
         // lives inside ChatTopBar; its open-callbacks fire the local
@@ -620,19 +778,16 @@ fun ChatScaffold(
         // was removed; compaction is triggered via the ContextUsageDialog's
         // own "Compress context" button (see showContextDialog below).
         //
-        // §nav-redesign (2026-07-13): onCloseSession wired to
-        // sessionVM::closeSession so the per-tab close-X in the restored
-        // SessionTabStrip can dismiss an open tab (closes the browser-tab,
-        // NOT archive — the conversation stays in the Sessions history).
         ChatTopBarActions(
             onSelectSession = sessionVM::selectSession,
-            onCloseSession = sessionVM::closeSession,
-            // §Wave5b-Q13: dedicated子→父 callback for the breadcrumb —
-            // routes through SessionViewModel.returnToParent (which consumes
-            // the parent's Restore checkpoint) instead of the default-
-            // Latest selectSession path. Wired here so ChatTopBar's
-            // breadcrumb Text.clickable can call actions.onNavigateParent().
-            onNavigateParent = { sessionVM.returnToParent() },
+            // §chat-list-detail §11 / G6 (B5 BLOCK-fix): dedicated子→父
+            // callback for the breadcrumb — routes through
+            // SessionViewModel.returnToParent (which calls
+            // returnToExistingChat; the parent entry's LaunchedEffect
+            // replays the Restore checkpoint from its SavedStateHandle).
+            // Wired here so ChatTopBar's breadcrumb Text.clickable can call
+            // actions.onNavigateParent().
+            onNavigateParent = { sessionVM.returnToParent { pid -> orchestratorVM.returnToExistingChat(pid) } },
             onOpenContextDialog = { showContextDialog = true },
             onOpenTodoDialog = { showTodoDialog = true },
             onOpenAgentPicker = { showAgentPicker = true },
@@ -648,7 +803,7 @@ fun ChatScaffold(
             // tested at the orchestration layer. When no session is open, only
             // the session-list resync applies.
             onForceRefresh = {
-                val sid = chat.currentSessionId
+                val sid = chromeSessionId
                 if (sid != null) {
                     chatVM.core.performForceRefresh(sid)
                 } else {
@@ -658,64 +813,10 @@ fun ChatScaffold(
         )
     }
 
-    // §new1 (2026-07-13): HorizontalPager restoration (0.7.6 parity). The
-    // pager page set is the SAME `openSessions` list the (restored)
-    // SessionTabStrip renders above — root-only, capped at 8 by the session
-    // domain. Pager is engaged only when ≥2 root sessions are open AND the
-    // current session is itself a root (no parent); otherwise the single
-    // ChatMessageList path below renders directly (matches v0.7.6's
-    // "sub-agent or single-root fallback"). When openSessions is empty the
-    // ChatEmptyState branch (with the new Sessions deep-link, §new2) handles
-    // the surface.
-    val openSessions = topBarState.openSessions
-    // §fix-close-all-to-home: when the user closes the last open tab
-    // (openSessionIds transitions to empty) AND there is no in-progress draft,
-    // navigate to the home hub (Sessions) instead of lingering on an empty
-    // Chat body. Paired with closeSession's persisted-currentSessionId clear
-    // (SessionViewModel) so neither the runtime nor the persisted id can
-    // resurrect a residual chat.
-    //
-    // §snapshot-read-inside-block (oracle review): the snapshotFlow body MUST
-    // read Compose State via the `by` delegates (sessionList / composer) so
-    // changes are tracked and the flow re-emits. Reading the derived local
-    // val `openSessions` (assigned at line above) would NOT track — it
-    // captures a plain List at recomposition, so the flow emitted only once
-    // and `drop(1)` discarded it, making this effect dead for the tab-close
-    // trigger. `sessionList.openSessionIds` is also the AUTHORITATIVE tab
-    // list (topBarState.openSessions is metadata-resolved/filtered and can
-    // transiently empty when a session's metadata is briefly missing).
-    //
-    // drop(1) skips the initial emission so entering Chat with no tabs (rare
-    // — cold start lands on Sessions) does not spuriously fire. The draft
-    // guard keeps a user mid-composition (draftWorkdir set) on Chat even if
-    // they closed every existing tab — their draft is the active work.
-    //
-    // §fix-effect-key-stability (opus review): AppShell passes onBackToHome
-    // as an inline lambda `{ backToHome() }` (unstable — new instance per
-    // recomposition). Keying the LaunchedEffect on it would restart the
-    // effect on every recomposition, and drop(1) would then skip a valid
-    // openSessions→0 transition that coincided with a recomposition. Use a
-    // stable Unit key (effect lives for ChatScaffold's lifetime — it is
-    // disposed when we navigate away to home anyway) and rememberUpdatedState
-    // so the latest lambda is always invoked.
-    val currentOnBackToHome by rememberUpdatedState(onBackToHome)
-    LaunchedEffect(Unit) {
-        snapshotFlow { sessionList.openSessionIds.size to (composer.draftWorkdir != null) }
-            .distinctUntilChanged()
-            .drop(1)
-            .filter { (size, hasDraft) -> size == 0 && !hasDraft }
-            .collect { currentOnBackToHome() }
-    }
-    // §L5a (UI god-file split): the pager setup block (pagerEngaged /
-    // initialPage / pagerState / both bidirectional-sync LaunchedEffects /
-    // the rememberUpdatedState pair) MOVED INTO ChatSessionPager
-    // (ChatSessionPager.kt) — verbatim, with `chat.currentSessionId` /
-    // `topBarState.parentSessionId` references remapped to the
-    // ChatSessionPager params. `pagerEngaged` is now a LOCAL inside
-    // ChatSessionPager (single definition site); the old ChatScaffold local
-    // is deleted. The render branch below calls ChatSessionPager when
-    // chat.currentSessionId != null; the ChatEmptyState branch (different
-    // concern) STAYS here.
+    // §B6: ChatSessionPager and ChatSessionTabStrip deleted. The
+    // route-driven single detail pane (routeSessionId != null below) is
+    // the sole chat surface. When routeSessionId is null and no draft
+    // is active, ChatEmptyState renders instead.
 
     // §home-hub T4 (C2): wrap the chat body in ModalNavigationDrawer (now via
     // ChatDrawerHost — §L5a). The drawer is tablet-only by construction: the
@@ -769,16 +870,13 @@ fun ChatScaffold(
         closeDrawerAction = closeDrawerAction,
         onBackToHome = onBackToHome,
         onShowWorkdirPicker = { pendingWorkdirPick = true },
+        // §B3: drawer session-row tap uses the route-aware open pipeline.
+        onNavigateToChat = { sid -> orchestratorVM.navigateToChat(sid) },
     ) {
     Column(modifier = Modifier.fillMaxSize()) {
         ChatTopBar(
             state = topBarState,
             actions = topBarActions,
-            // §1B: tabVisible is now decorative (no second-row strip is
-            // rendered); ChatMessageList still calls onTabVisibilityChange
-            // but the callback is a no-op stub.
-            tabVisible = true,
-            onTabVisibilityChange = { /* no second-row strip in 1B */ },
             onTitleClick = { showSessionPicker = true },
             // §home-hub T4 (C1/C3): responsive top-left affordance. ChatTopBar
             // branches on width internally (phone ArrowBack / tablet Menu).
@@ -786,37 +884,8 @@ fun ChatScaffold(
             onOpenDrawer = openDrawerAction,
         )
 
-        // §nav-redesign (2026-07-13): SessionTabStrip is restored as the
-        // TopAppBar's second row — the persistent horizontal "open sessions"
-        // browser-tab strip. Coexists with the SessionPickerSheet (opened by
-        // tapping the title above) — the strip is the always-visible quick
-        // switcher, the sheet is the full list / search / archive surface.
-        // currentWorkdir tints the selected tab's accent bar with the
-        // current session's directory hash (draftWorkdir fallback so a brand-
-        // new draft tab still gets a stable colour).
-        // §task6-grandchild (final-review fix 4): resolve the FULL root of the
-        // current session via rootIdOf (not just the direct parent) and feed
-        // it to SessionTabStrip's parentSessionId slot. resolveEffectiveSelectedId
-        // alone only walks one level (direct parent), so a grandchild current
-        // session (currentSessionId=grandchild, parentSessionId=child, neither
-        // in the root-only openSessions list) returned null → no tab was
-        // selected → the root tab's "?" marker was NOT suppressed even though
-        // its question was already surfaced in the chat's QuestionCard. By
-        // passing the full root id here, the root tab reads as selected for
-        // any descendant depth. topBarState.parentSessionId (the DIRECT parent)
-        // stays untouched — ChatTopBar's breadcrumb still navigates one level
-        // up, not all the way to root.
-        val currentRootId = chat.currentSessionId?.let { rootIdOf(it, sessionsById) }
-        SessionTabStrip(
-            openSessions = topBarState.openSessions,
-            currentSessionId = topBarState.currentSessionId,
-            parentSessionId = currentRootId,
-            currentWorkdir = curSession?.directory ?: composer.draftWorkdir,
-            unreadSessions = topBarState.unreadSessions,
-            effectiveBusy = effectiveBusy,
-            questionSessionIds = topBarState.questionSessionIds,
-            actions = topBarActions,
-        )
+        // §B6: SessionTabStrip removed. The SessionPickerSheet (opened by
+        // tapping the ChatTopBar title) is the sole session-switching surface.
 
         // §PARITY: wide-screen card wrap mirrors ChatScreen 10/§B3. Phase 1B
         // keeps the wrapping Surface so the chat area looks identical on
@@ -840,42 +909,43 @@ fun ChatScaffold(
                         .weight(1f)
                         .fillMaxWidth()
                 ) {
-                    // §L5a (UI god-file split): the HorizontalPager + both
-                    // ChatMessageList call sites (in-pager + single-root /
-                    // sub-agent fallback) MOVED INTO ChatSessionPager. This
-                    // call site gates on chat.currentSessionId != null and
-                    // delegates the pager-engaged / single-list decision to
-                    // ChatSessionPager (belt-and-braces: ChatSessionPager
-                    // re-checks currentSessionId != null inside its first
-                    // branch — kept verbatim per spec). The ChatEmptyState
-                    // branch (different concern — connection-empty surface)
-                    // STAYS here.
-                    //
-                    // §streaming-parity: ChatMessageList (composed inside
-                    // ChatSessionPager) subscribes to chatFlow and reads
-                    // `chatState.currentSessionId` for ALL its slicing
-                    // (messages / parts / streaming / scroll memory). The
-                    // extraction does NOT change that subscription — the
-                    // active page's ChatMessageList still drives off the
-                    // same chatFlow emission, so streaming / SSE token
-                    // deltas / scroll-anchoring behave identically.
-                    val isDraft = composer.draftWorkdir != null && chat.currentSessionId == null
-                    if (chat.currentSessionId != null) {
-                        ChatSessionPager(
-                            openSessions = openSessions,
-                            currentSessionId = chat.currentSessionId,
-                            parentSessionId = topBarState.parentSessionId,
-                            isCurrentSessionSending = isCurrentSessionSending,
-                            savedPositions = savedPositions,
-                            accessOrder = accessOrder,
-                            onFileClick = onChatFileClick,
-                            onOpenChanges = onOpenGitChanges,
-                            chatVM = chatVM,
-                            composerVM = composerVM,
-                            sessionVM = sessionVM,
-                            orchestratorVM = orchestratorVM,
-                        )
-                    } else if (!isDraft) {
+                    // §B6: ChatSessionPager deleted. The route-aware detail
+                    // (routeSessionId != null) is the sole chat surface.
+                    if (routeSessionId != null) {
+                        // Route-aware B2 detail: only LoadedContent owned by
+                        // this route instance can become transcript UI.
+                        val routeContent = routeOwnedContent
+                        if (routeContent != null) {
+                            ChatMessageList(
+                                chatVM = chatVM,
+                                composerVM = composerVM,
+                                sessionVM = sessionVM,
+                                orchestratorVM = orchestratorVM,
+                                onFileClick = onChatFileClick,
+                                onOpenChanges = onOpenGitChanges,
+                                savedPositions = savedPositions,
+                                accessOrder = accessOrder,
+                                onCopyMessage = { _, text -> copyToSystemClipboard(context, text) },
+                                onEditAndRerun = { messageId -> chatVM.editFromMessage(messageId) },
+                                onFork = { messageId -> sessionVM.forkSession(routeSessionId, messageId) },
+                                isCurrentSessionSending = isCurrentSessionSending,
+                                routeSessionId = routeSessionId,
+                                routeContent = routeContent,
+                                // §chat-list-detail §11 / G6 (B5): the
+                                // openSubAgent callback that persists the
+                                // captured checkpoint on the parent route
+                                // entry's SavedStateHandle BEFORE route-aware
+                                // navigation to the child.
+                                onOpenSubAgentNavigate = onOpenSubAgentNavigate,
+                            )
+                        } else {
+                            ChatDetailSlice(
+                                routeId = routeSessionId,
+                                chatVM = chatVM,
+                                orchestratorVM = orchestratorVM,
+                            )
+                        }
+                    } else if (composer.draftWorkdir == null) {
                         ChatEmptyState(
                             isConnected = connection.isConnected,
                             isConnecting = connection.isConnecting,
@@ -953,7 +1023,7 @@ fun ChatScaffold(
                         // the map (no error / recovered) — the slot's
                         // LastError branch NEVER fires for an absent sid.
                         // Caller is the sole filter site (file doc rule).
-                        lastError = chat.currentSessionId?.let { sessionList.sessionErrorsById[it] },
+                        lastError = chromeSessionId?.let { sessionList.sessionErrorsById[it] },
                         // §1C-FIX-⑧: scheme E.4 metadata. Sourced from
                         // the canonical slices: host (host.hostProfiles
                         // + currentHostProfileId), workdir (current
@@ -1004,7 +1074,7 @@ fun ChatScaffold(
                             matchingQuestions.indexOfFirst { it.id == q.id } + 1
                         } ?: 1,
                         questionQueueTotal = matchingQuestions.size,
-                        onAbort = chatVM::abortSession,
+                        onAbort = { chatVM.abortSession(chromeSessionId) },
                     )
                 }
             }
@@ -1015,7 +1085,7 @@ fun ChatScaffold(
         // rounding / elevation. Composer.kt replaces ChatInputBar.kt and
         // subscribes to the same slices (composerFlow + settingsFlow) and
         // routes through the same domain methods.
-        if (chat.currentSessionId != null || composer.draftWorkdir != null) {
+        if (routeSessionId != null || chat.currentSessionId != null || composer.draftWorkdir != null) {
             // §1B-FIX (I5): Composer no longer takes connectionVM / hostVM —
             // it does not render any chrome that needs them (the surface
             // stays on composerFlow + settingsFlow + a narrow
@@ -1028,6 +1098,7 @@ fun ChatScaffold(
                 isBusy = currentSessionIsRunning || chat.isCompacting,
                 questionPending = pendingQuestion != null,
                 onAddImages = onAddImages,
+                onAbort = { chatVM.abortSession(chromeSessionId) },
             )
         }
 
@@ -1063,8 +1134,14 @@ fun ChatScaffold(
             showModelPicker = false
         },
         onDismissSessionPicker = { showSessionPicker = false },
+        // §B3: the SessionPickerSheet selection is a session-OPENING entry
+        // point — route it through navigateToChat (route-aware pipeline) so it
+        // mints the freshness token + dispatches openForRoute, matching the
+        // SessionsScreen / drawer / deep-link entries. The legacy
+        // sessionVM.selectSession (flat switchTo) is retired for entries that
+        // open a chat.
         onSelectSession = { sessionId ->
-            sessionVM.selectSession(sessionId)
+            orchestratorVM.navigateToChat(sessionId)
             showSessionPicker = false
         },
         onNewSession = {
@@ -1093,9 +1170,9 @@ fun ChatScaffold(
         sessions = sessionList.sessions,
         sessionStatuses = sessionList.sessionStatuses,
         activeSessionIds = sessionList.activeSessionIds,
-        currentSessionId = chat.currentSessionId,
+        currentSessionId = chromeSessionId,
         unreadSessions = unread.unreadSessions,
-        todos = sessionList.sessionTodos[chat.currentSessionId ?: ""] ?: emptyList(),
+        todos = sessionList.sessionTodos[chromeSessionId ?: ""] ?: emptyList(),
         cachedContextUsage = cachedContextUsage,
         recentWorkdirs = recentWorkdirs,
         pendingTofuCapture = connection.pendingTofuCapture,

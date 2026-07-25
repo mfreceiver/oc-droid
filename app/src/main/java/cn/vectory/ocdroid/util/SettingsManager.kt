@@ -274,10 +274,7 @@ class SettingsManager @Inject constructor(
         set(value) { debugPrefs.sseDisabled = value }
 
     // ── Session domain (SessionPrefs) ───────────────────────────────────────
-
-    var openSessionIds: List<String>
-        get() = sessionPrefs.openSessionIds
-        set(value) { sessionPrefs.openSessionIds = value }
+    // §B4: open-tabs-list removed (list-detail; route is sole open identity).
 
     var sessionCache: List<SessionCacheEntry>
         get() = sessionPrefs.sessionCache

@@ -78,8 +78,7 @@ class SessionSyncCoordinatorStatusFeedTest {
             currentServerGroupFp = { serverGroupFp },
             identityStore = identityStore,
             statusAggregatorInput = aggregatorInput,
-            clock = { clockNow },
-        )
+            clock = { clockNow })
     }
 
     @After
@@ -104,9 +103,7 @@ class SessionSyncCoordinatorStatusFeedTest {
                 pendingQuestions = emptyList(),
                 childSessions = emptyMap(),
                 directorySessions = emptyMap(),
-                openSessionIds = emptyList(),
-                sessionTodos = emptyMap(),
-            )
+                sessionTodos = emptyMap())
         }
     }
 
@@ -170,11 +167,8 @@ class SessionSyncCoordinatorStatusFeedTest {
                 pendingQuestions = emptyList(),
                 childSessions = emptyMap(),
                 directorySessions = mapOf(
-                    "/work-x" to listOf(Session(id = "dir-1", directory = "/work-x")),
-                ),
-                openSessionIds = emptyList(),
-                sessionTodos = emptyMap(),
-            )
+                    "/work-x" to listOf(Session(id = "dir-1", directory = "/work-x"))),
+                sessionTodos = emptyMap())
         }
 
         coordinator.handleEvent(event("session.status") {
@@ -197,8 +191,7 @@ class SessionSyncCoordinatorStatusFeedTest {
 
         assertTrue(
             "unknown sessionId must NOT reach the aggregator (no composite key without workdir)",
-            aggregatorInput.applyCalls.isEmpty(),
-        )
+            aggregatorInput.applyCalls.isEmpty())
     }
 
     @Test
@@ -245,8 +238,7 @@ class SessionSyncCoordinatorStatusFeedTest {
             currentServerGroupFp = { serverGroupFp },
             identityStore = identityStore,
             statusAggregatorInput = null,
-            clock = { clockNow },
-        )
+            clock = { clockNow })
         seedSessions(listOf(Session(id = "s1", directory = "/work-a")))
 
         legacyCoordinator.handleEvent(event("session.status") {
@@ -261,8 +253,7 @@ class SessionSyncCoordinatorStatusFeedTest {
     private data class ApplyCall(
         val key: SessionStatusKey,
         val status: SessionBusyStatus,
-        val sourceTimeMs: Long,
-    )
+        val sourceTimeMs: Long)
 
     private class RecordingStatusAggregatorInput : StatusAggregatorInput {
         val applyCalls = mutableListOf<ApplyCall>()
@@ -271,8 +262,7 @@ class SessionSyncCoordinatorStatusFeedTest {
 
         override suspend fun refresh(
             identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
-            snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
-        ) {
+            snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot) {
             // Unused by these tests (they exercise the SSE feed path only).
         }
 
@@ -283,8 +273,7 @@ class SessionSyncCoordinatorStatusFeedTest {
         override fun markRequestFailed(
             identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
             snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
-            sourceTimeMs: Long,
-        ) {
+            sourceTimeMs: Long) {
             // Unused by these tests.
         }
     }

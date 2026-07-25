@@ -1,11 +1,10 @@
 package cn.vectory.ocdroid.data.repository.http
 
 import cn.vectory.ocdroid.data.repository.HostConfig
+import cn.vectory.ocdroid.data.repository.HostSnapshot
 import okhttp3.Interceptor
 import okhttp3.Response
 import java.util.Base64
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * Basic Auth injector: when the current host profile has both a username and
@@ -24,14 +23,16 @@ import javax.inject.Singleton
  * (`HostConfig.username` / `password`), so the replace semantics are a
  * no-op in practice but defensive against accidental duplicates.
  */
-@Singleton
-class AuthInterceptor @Inject constructor(
-    private val hostConfig: HostConfig
+class AuthInterceptor internal constructor(
+    private val hostSnapshot: HostSnapshot
 ) : Interceptor {
 
+    /** Compatibility constructor: capture, never retain, the mutable holder. */
+    constructor(hostConfig: HostConfig) : this(hostConfig.snapshot())
+
     override fun intercept(chain: Interceptor.Chain): Response {
-        val username = hostConfig.username ?: return chain.proceed(chain.request())
-        val password = hostConfig.password ?: return chain.proceed(chain.request())
+        val username = hostSnapshot.username ?: return chain.proceed(chain.request())
+        val password = hostSnapshot.password ?: return chain.proceed(chain.request())
         val credential = "$username:$password"
         val encoded = Base64.getEncoder().encodeToString(credential.toByteArray())
         val authenticated = chain.request().newBuilder()

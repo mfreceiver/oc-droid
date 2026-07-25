@@ -144,23 +144,14 @@ internal fun launchSetSessionArchived(
                     // used for all reads in this synchronous onSuccess block.
                     // T1c: map-replace of sessions/dirSessions/childSessions is
                     // owned by SessionArchivedLocal reduce (by session.id).
-                    val currentOpenIds = slices.sessionList.value.openSessionIds
+                    // §B4: open-tabs-list removed; route id is the sole detail
+                    // identity for clear/pop decisions.
                     val currentCurrentId = slices.chat.value.currentSessionId
+                    val routeId = routeChatSessionId(slices.store.stateFlow.value.nav.lastRoute)
                     val isArchive = archivedValue > 0
-                    // Archived: evict the id from the open-tabs list (browser-tab close
-                    // equivalent for archive) and persist via the existing SettingsManager
-                    // setter. Mirrors closeSession's currentSessionId fallback: if the
-                    // archived session was current, clear it (and the loaded message window)
-                    // so the chat view falls back to the empty state instead of pointing
-                    // at a now-archived session.
-                    val newOpenIds = if (isArchive) currentOpenIds.filter { it != id } else currentOpenIds
-                    if (isArchive && newOpenIds != currentOpenIds) {
-                        settingsManager.openSessionIds = newOpenIds
-                    }
-                    val clearCurrent = isArchive && currentCurrentId == id
-                    // §R18 Phase 2-F: chatFlow is the sole runtime source; the
-                    // chat.update below clears currentSessionId, and the AppCore
-                    // collector drops null (no manual SettingsManager write).
+                    // §10 REST archive: clear chat IFF archived id is current
+                    // pointer OR active chat/{id} route.
+                    val clearCurrent = isArchive && (currentCurrentId == id || routeId == id)
 
                     // §task5-lifecycle: per-id question filter (presentation domain).
                     val cleanedQuestions = if (isArchive) {
@@ -169,12 +160,11 @@ internal fun launchSetSessionArchived(
                         slices.sessionList.value.pendingQuestions
                     }
                     val activeIdsToRemove = if (isArchive) subtree else setOf(id)
-                    // T1c: SessionArchivedLocal owns the 6-field sessionList copy.
+                    // T1c: SessionArchivedLocal owns the sessionList copy.
                     // Cross-slice mutateUnread / mutateChat / ChatCleared stay below.
                     slices.store.dispatch(
                         AppAction.SessionArchivedLocal(
                             session = updated,
-                            openSessionIds = newOpenIds,
                             pendingQuestions = cleanedQuestions,
                             activeSessionIdsToRemove = activeIdsToRemove,
                         )
@@ -184,43 +174,33 @@ internal fun launchSetSessionArchived(
                         slices.mutateUnread { it.removeSessions(subtree) }
                         // §Wave5b-Q13 blocker-2: UNCONDITIONAL scroll-state
                         // cleanup for the archived subtree. Drops a stale
-                        // pendingScrollRequest (target in subtree) +
-                        // parentReturnCheckpoints entries (key in subtree)
-                        // WITHOUT touching chat content. The current-archive
-                        // chat-content clear below uses mutateChat which only
+                        // pendingScrollRequest (target in subtree) WITHOUT
+                        // touching chat content. The current-archive chat-
+                        // content clear below uses mutateChat which only
                         // wipes currentSessionId/messages/partsByMessage —
                         // cleanScrollStateForSubtree is the SOLE path that
                         // catches scroll-state leakage for NON-current
                         // archived ids (which the clearCurrent branch skips).
+                        // §chat-list-detail §11 / G6 (B5): the checkpoint map
+                        // is gone (per-entry SavedStateHandle); this helper
+                        // now only sweeps pendingScrollRequest.
                         slices.mutateChat { it.cleanScrollStateForSubtree(subtree) }
                     }
                     if (clearCurrent) {
-                        // Cross-slice: currentSessionId/messages/partsByMessage are
-                        // chat-slice fields; the rest above are sessionList.
-                        //
-                        // §Wave5b-Q13: applyArchivedChatClear-equivalent content
-                        // clear for the CURRENT archived id. The
-                        // cleanScrollStateForSubtree call above already wiped
-                        // the slot + the currentId's checkpoint entry; this
-                        // branch additionally wipes messages / partsByMessage /
-                        // currentSessionId so the chat view falls back to the
-                        // empty state. (Does NOT call applyArchivedChatClear
-                        // directly to preserve the pre-existing field set —
-                        // streaming overlays / cursor / model are reset by the
-                        // next switchTo's clearSessionData, not here.)
-                        // T1b residual: ChatCleared (3-field clear).
+                        // §B4 / §10 REST archive current: ChatCleared +
+                        // CloseDetail + popToSessions. Route id (or residual
+                        // current) matches archived id.
                         slices.store.dispatch(AppAction.ChatCleared)
-                        // §fix-archive-persisted-null (opus review): also clear
-                        // the PERSISTED currentSessionId synchronously. The
-                        // AppCore collector now persists null too, but it is
-                        // async — if the process dies in the ms window between
-                        // the chat mutation above and the collector's write,
-                        // applySavedSettings would re-seed the archived id on
-                        // the next cold start. Belt-and-suspenders, mirroring
-                        // closeSession's explicit clear. (Archive also self-
-                        // heals via applySavedSettings' archived-id filter, but
-                        // the explicit write removes even the transient seed.)
+                        slices.store.dispatch(AppAction.CloseDetail)
                         settingsManager.currentSessionId = null
+                        settingsManager.lastRoute = NavRoute.Sessions.route
+                        slices.store.mutateNav {
+                            it.copy(
+                                lastRoute = NavRoute.Sessions.route,
+                                lastNavPage = NavRoute.Sessions.legacyPage,
+                                navEpoch = it.navEpoch + 1L,
+                            )
+                        }
                     }
                     // R-20 Phase 1 (C3, plan §3 矩阵 "用户归档" 行): emit
                     // EvictSession for each successfully-archived subtree id
@@ -289,40 +269,31 @@ internal fun launchDeleteSession(
                 slices.store.dispatch(AppAction.SessionDeletedLocal(removedIds))
                 // §task5-lifecycle: unread drop for the whole removed subtree.
                 slices.mutateUnread { it.removeSessions(removedIds) }
+                // §B4 / §10 delete: if deleted id (== route id or residual
+                // current) is the active detail → popToSessions + ChatCleared.
+                // Non-current: sessionList purge alone (already dispatched).
+                // No remainingOpenIds / onSelectSession sibling switch.
                 val currentId = slices.chat.value.currentSessionId
-                if (currentId != null && currentId in removedIds) {
-                    // §fix-delete-no-resurrect (oracle+grok review): align with
-                    // closeSession — switch to the last remaining OPEN tab if
-                    // any, else clear currentSessionId (the centralized AppCore
-                    // collector persists the null). Pre-fix this unconditionally
-                    // picked newSessions.first() and opened it as a tab,
-                    // bypassing the user's tab set and resurrecting a session
-                    // the same way the close-all bug did. newSessions.first()
-                    // also ignored openSessionIds entirely, so a non-open
-                    // session could become a tab-less current.
-                    val remainingOpenIds = slices.sessionList.value.openSessionIds
-                        .filter { it !in removedIds }
-                    val nextId = remainingOpenIds.lastOrNull()
-                    if (nextId != null) {
-                        onSelectSession(nextId)
-                    } else {
-                        // #10: no remaining OPEN session — clear currentSessionId
-                        // on the chat slice too, otherwise a stale id survives in
-                        // the runtime state pointing at a deleted session.
-                        // T1b residual: ChatCleared (3-field clear).
-                        slices.store.dispatch(AppAction.ChatCleared)
-                        // §fix-delete-persisted-null (opus review): clear the
-                        // PERSISTED currentSessionId synchronously too (mirrors
-                        // closeSession / archive). The async AppCore collector
-                        // would persist null eventually, but a process-death in
-                        // the ms window would leave the deleted id in
-                        // SettingsManager — applySavedSettings would then re-seed
-                        // it on cold start, pointing chat at a ghost. Deleted
-                        // sessions have NO archived filter to self-heal, so this
-                        // explicit clear matters more here than on the archive path.
-                        settingsManager.currentSessionId = null
+                val routeId = routeChatSessionId(slices.store.stateFlow.value.nav.lastRoute)
+                val deletingActiveDetail =
+                    (currentId != null && currentId in removedIds) ||
+                        (routeId != null && routeId in removedIds)
+                if (deletingActiveDetail) {
+                    slices.store.dispatch(AppAction.ChatCleared)
+                    slices.store.dispatch(AppAction.CloseDetail)
+                    settingsManager.currentSessionId = null
+                    settingsManager.lastRoute = NavRoute.Sessions.route
+                    slices.store.mutateNav {
+                        it.copy(
+                            lastRoute = NavRoute.Sessions.route,
+                            lastNavPage = NavRoute.Sessions.legacyPage,
+                            navEpoch = it.navEpoch + 1L,
+                        )
                     }
                 }
+                // §B4: onSelectSession retained in signature for call-site
+                // stability but is no longer invoked on delete-current (no
+                // sibling-tab switch; route pops to Sessions instead).
                 // R-20 Phase 1 (C3, plan §3 矩阵 "用户删除" 行): emit EvictSession
                 // AFTER the REST delete confirmed. The eviction (memory LRU +
                 // persistent cache) is routed through AppCore.dispatchHostEffect.

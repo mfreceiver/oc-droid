@@ -84,6 +84,14 @@ fun ChatScreen(
      * an extension point for callers. Defaults to `{}`.
      */
     onOpenDrawer: () -> Unit = {},
+    routeSessionId: String? = null,
+    /**
+     * §chat-list-detail §11 / G6 (B5): the parent route entry's
+     * [androidx.lifecycle.SavedStateHandle], threaded through from AppShell's
+     * `chat/{sessionId}` composable. Pass-through to [ChatScaffold] — see its
+     * kdoc for the per-entry checkpoint protocol.
+     */
+    routeSavedStateHandle: androidx.lifecycle.SavedStateHandle? = null,
 ) {
     ChatScaffold(
         chatVM = chatVM,
@@ -99,6 +107,8 @@ fun ChatScreen(
         onOpenGitChanges = onOpenGitChanges,
         onBackToHome = onBackToHome,
         onOpenDrawer = onOpenDrawer,
+        routeSessionId = routeSessionId,
+        routeSavedStateHandle = routeSavedStateHandle,
     )
 }
 

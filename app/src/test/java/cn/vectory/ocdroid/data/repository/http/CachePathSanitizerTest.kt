@@ -15,7 +15,8 @@ import org.junit.Test
 class CachePathSanitizerTest {
 
     private val hostConfig = HostConfig()
-    private val sanitizer = CachePathSanitizer(hostConfig)
+    private val sanitizer: CachePathSanitizer
+        get() = CachePathSanitizer(hostConfig.snapshot())
 
     @Test
     fun `bare host returns request path unchanged`() {

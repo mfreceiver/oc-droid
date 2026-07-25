@@ -432,7 +432,6 @@ class T1bConversationResidualOwnershipTest {
                 fullTextBuffer = mapOf("p1" to "full"),
                 pendingFlushPartIds = setOf("p1"),
                 pendingScrollRequest = PendingScrollRequest(1L, "sess-A", ScrollBehavior.Latest),
-                parentReturnCheckpoints = emptyMap(),
             ),
         )
         val store = SharedStateStore().apply { mutateState { prior } }
@@ -446,7 +445,6 @@ class T1bConversationResidualOwnershipTest {
         assertTrue("fullTextBuffer cleared by HostStatePurged (fix-leak-window)", out.fullTextBuffer.isEmpty())
         assertTrue("pendingFlushPartIds cleared by HostStatePurged (fix-leak-window)", out.pendingFlushPartIds.isEmpty())
         assertNull("pendingScrollRequest cleared by HostStatePurged (Wave5b-Q13)", out.pendingScrollRequest)
-        assertTrue("parentReturnCheckpoints cleared by HostStatePurged (Wave5b-Q13)", out.parentReturnCheckpoints.isEmpty())
     }
 
     // ═══════════════════════════════════════════════════════════════════════

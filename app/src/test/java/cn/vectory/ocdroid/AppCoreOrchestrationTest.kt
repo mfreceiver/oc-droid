@@ -90,7 +90,6 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSession(any()) } returns Result.success(Session(id = "session-1", directory = "/x"))
-        every { settingsManager.openSessionIds } returns emptyList()
 
         val core = wire()
         core.writeChat { it.copy(currentSessionId = "session-1") }
@@ -126,15 +125,13 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSession(any()) } returns Result.success(Session(id = "session-1", directory = "/x"))
-        every { settingsManager.openSessionIds } returns emptyList()
 
         val core = wire()
         core.writeChat {
             it.copy(
                 currentSessionId = "session-1",
                 pendingAgent = "my-pending-agent",
-                pendingModel = Message.ModelInfo("openai", "gpt-5"),
-            )
+                pendingModel = Message.ModelInfo("openai", "gpt-5"))
         }
         core.writeSettings { it.copy(agents = listOf(AgentInfo(name = "my-pending-agent"))) }
         core.writeSessionList { it.copy(sessions = listOf(Session(id = "session-1", directory = "/x"))) }
@@ -149,8 +146,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
                 eq("hi"),
                 eq("my-pending-agent"),
                 eq(Message.ModelInfo("openai", "gpt-5")),
-                any(),
-            )
+                any())
         }
         // Pending cleared after send (transient).
         assertNull(core.chatFlow.value.pendingAgent)
@@ -168,7 +164,6 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSession(any()) } returns Result.success(Session(id = "session-1", directory = "/x"))
-        every { settingsManager.openSessionIds } returns emptyList()
 
         val core = wire()
         core.writeChat {
@@ -184,10 +179,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
                         id = "a1",
                         role = "assistant",
                         providerId = "anthropic",
-                        modelId = "claude-3",
-                    ),
-                ),
-            )
+                        modelId = "claude-3")))
         }
         core.writeSettings { it.copy(agents = listOf(AgentInfo(name = "visible-bot"))) }
         core.writeSessionList { it.copy(sessions = listOf(Session(id = "session-1", directory = "/x"))) }
@@ -204,8 +196,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
                 eq("hi"),
                 eq("visible-bot"),
                 eq(Message.ModelInfo("anthropic", "claude-3")),
-                any(),
-            )
+                any())
         }
     }
 
@@ -222,7 +213,6 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSession(any()) } returns Result.success(Session(id = "session-1", directory = "/x"))
-        every { settingsManager.openSessionIds } returns emptyList()
 
         val core = wire()
         core.writeChat {
@@ -238,10 +228,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
                         role = "assistant",
                         agent = "compaction",
                         providerId = "openai",
-                        modelId = "gpt-4",
-                    ),
-                ),
-            )
+                        modelId = "gpt-4")))
         }
         // The visible catalog does NOT contain "compaction" → it is filtered out.
         core.writeSettings { it.copy(agents = listOf(AgentInfo(name = "compaction", hidden = true))) }
@@ -259,8 +246,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
                 eq("hi"),
                 isNull(),
                 isNull(),
-                any(),
-            )
+                any())
         }
     }
 
@@ -273,7 +259,6 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSession(any()) } returns Result.success(Session(id = "session-1", directory = "/x"))
-        every { settingsManager.openSessionIds } returns emptyList()
 
         val core = wire()
         core.writeChat { it.copy(currentSessionId = "session-1") }
@@ -283,8 +268,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
                 inputText = "User text\nFile: /a/b.kt",
                 fileReferences = listOf(
                     cn.vectory.ocdroid.ui.ComposerFileReference(path = "/a/b.kt")
-                ),
-            )
+                ))
         }
 
         core.sendMessage()
@@ -337,7 +321,6 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(created))
         coEvery { repository.getSession(any()) } returns Result.success(created)
-        every { settingsManager.openSessionIds } returns emptyList()
 
         val core = wire()
         core.writeComposer { it.copy(inputText = "hi", draftWorkdir = "/proj") }
@@ -482,7 +465,6 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         coEvery { repository.executeCommand(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(created))
         coEvery { repository.getSession(any()) } returns Result.success(created)
-        every { settingsManager.openSessionIds } returns emptyList()
 
         val core = wire()
         core.writeComposer { it.copy(inputText = "args", draftWorkdir = "/draft") }
@@ -558,8 +540,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         val question = QuestionRequest(
             id = "req1",
             sessionId = "session-q",
-            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
-        )
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())))
         val core = wire()
         core.writeSessionList {
             it.copy(sessions = listOf(session), pendingQuestions = listOf(question))
@@ -578,15 +559,13 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         val question = QuestionRequest(
             id = "req1",
             sessionId = "session-q",
-            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
-        )
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())))
         val core = wire()
         core.writeSessionList {
             it.copy(
                 sessions = emptyList(),
                 directorySessions = mapOf("/connected" to listOf(session)),
-                pendingQuestions = listOf(question),
-            )
+                pendingQuestions = listOf(question))
         }
 
         val dir = core.resolveQuestionDirectory("req1")
@@ -607,8 +586,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         val question = QuestionRequest(
             id = "req1",
             sessionId = "missing",
-            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
-        )
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())))
         val core = wire()
         core.writeSessionList {
             it.copy(sessions = emptyList(), directorySessions = emptyMap(), pendingQuestions = listOf(question))
@@ -645,13 +623,11 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         // value to prove it is no longer used as the fallback.
         every { settingsManager.currentWorkdir } returns "/workdir-Y"
         coEvery { repository.getSession("session-S") } returns Result.success(
-            Session(id = "session-S", directory = "/real-dir"),
-        )
+            Session(id = "session-S", directory = "/real-dir"))
         val question = QuestionRequest(
             id = "req1",
             sessionId = "session-S",
-            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
-        )
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())))
         val core = wire()
         core.writeSessionList {
             it.copy(sessions = emptyList(), directorySessions = emptyMap(), pendingQuestions = listOf(question))
@@ -676,14 +652,12 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         // → falls through to the fetch path. Same fetch+CAS as A1.
         every { settingsManager.currentWorkdir } returns "/workdir-Y"
         coEvery { repository.getSession("session-S") } returns Result.success(
-            Session(id = "session-S", directory = "/real-dir"),
-        )
+            Session(id = "session-S", directory = "/real-dir"))
         val session = Session(id = "session-S", directory = "")
         val question = QuestionRequest(
             id = "req1",
             sessionId = "session-S",
-            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
-        )
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())))
         val core = wire()
         core.writeSessionList {
             it.copy(sessions = listOf(session), pendingQuestions = listOf(question))
@@ -716,8 +690,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         val question = QuestionRequest(
             id = "req1",
             sessionId = "session-S",
-            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
-        )
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())))
         val core = wire()
         core.writeSessionList {
             it.copy(sessions = emptyList(), directorySessions = emptyMap(), pendingQuestions = listOf(question))
@@ -754,15 +727,13 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         val question = QuestionRequest(
             id = "req1",
             sessionId = "session-S",
-            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
-        )
+            questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())))
         val core = wire()
         core.writeSessionList {
             it.copy(
                 sessions = listOf(session),
                 directorySessions = mapOf("/hydrated" to listOf(hydrated)),
-                pendingQuestions = listOf(question),
-            )
+                pendingQuestions = listOf(question))
         }
 
         val dir = core.resolveQuestionDirectory("req1")
@@ -832,15 +803,13 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
     fun `resetLocalDataAndResync wipes settings and clears slices`() = runTest {
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.checkHealth() } returns Result.success(
-            cn.vectory.ocdroid.data.model.HealthResponse(healthy = true, version = "1.0"),
-        )
+            cn.vectory.ocdroid.data.model.HealthResponse(healthy = true, version = "1.0"))
         every { settingsManager.clearAllLocalData() } just runs
         val core = wire()
         core.writeChat {
             it.copy(
                 currentSessionId = "stale",
-                messages = listOf(Message(id = "m", role = "user")),
-            )
+                messages = listOf(Message(id = "m", role = "user")))
         }
         core.writeSessionList {
             it.copy(sessions = listOf(Session(id = "s1", directory = "/x")))
@@ -881,8 +850,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
                 currentSessionId = "s1",
                 messages = listOf(Message(id = "stale", role = "user")),
                 staleNotice = true,
-                streamingPartTexts = mapOf("p" to "x"),
-            )
+                streamingPartTexts = mapOf("p" to "x"))
         }
         val nonceBefore = core.chatFlow.value.refreshNonce
 
@@ -930,8 +898,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
                 currentSessionId = "s1",
                 messages = listOf(stale),
                 staleNotice = true,
-                streamingPartTexts = mapOf("p" to "x"),
-            )
+                streamingPartTexts = mapOf("p" to "x"))
         }
         val nonceBefore = core.chatFlow.value.refreshNonce
 
@@ -965,8 +932,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
             it.copy(
                 currentSessionId = "s1",
                 isLoadingMessages = true,
-                messages = listOf(Message(id = "keep", role = "user")),
-            )
+                messages = listOf(Message(id = "keep", role = "user")))
         }
 
         // explicit=true = force-refresh path (the automatic cold-start keeps the
@@ -981,8 +947,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
         assertTrue(
             "messages preserved (no ColdStartChatReset wipe while loading)",
-            core.chatFlow.value.messages.any { it.id == "keep" },
-        )
+            core.chatFlow.value.messages.any { it.id == "keep" })
     }
 
     // ── §sse-auto-unanchor (TODO 3 — real SSE-outage self-heal) ────────────────
@@ -1016,27 +981,22 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         // Entry: Idle/Connected → Disconnected stamps now.
         assertEquals(
             now,
-            stampDisconnectedSince(connected, disconnected, now).disconnectedSince,
-        )
+            stampDisconnectedSince(connected, disconnected, now).disconnectedSince)
         // Entry respects an explicit non-null stamp (tests / replay simulate old disconnect).
         val oldStamp = now - 999_999L
         assertEquals(
             oldStamp,
-            stampDisconnectedSince(connected, disconnected.copy(disconnectedSince = oldStamp), now).disconnectedSince,
-        )
+            stampDisconnectedSince(connected, disconnected.copy(disconnectedSince = oldStamp), now).disconnectedSince)
         // Exit: Disconnected → Connected clears the stamp.
         assertNull(
-            stampDisconnectedSince(disconnected.copy(disconnectedSince = oldStamp), connected, now).disconnectedSince,
-        )
+            stampDisconnectedSince(disconnected.copy(disconnectedSince = oldStamp), connected, now).disconnectedSince)
         // Staying Disconnected → no change (idempotent; keeps prior stamp).
         assertEquals(
             oldStamp,
             stampDisconnectedSince(
                 disconnected.copy(disconnectedSince = oldStamp),
                 disconnected.copy(disconnectedSince = oldStamp),
-                now,
-            ).disconnectedSince,
-        )
+                now).disconnectedSince)
         // Staying Connected (never disconnected) → no spurious stamp.
         assertNull(stampDisconnectedSince(connected, connected, now).disconnectedSince)
     }
@@ -1058,8 +1018,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         core.writeConnection {
             it.copy(
                 connectionPhase = ConnectionPhase.Disconnected,
-                disconnectedSince = now - SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS - 1_000L,
-            )
+                disconnectedSince = now - SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS - 1_000L)
         }
 
         // Defaults = automatic cold-start path (NOT explicit force-refresh).
@@ -1107,8 +1066,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
             it.copy(
                 connectionPhase = ConnectionPhase.Disconnected,
                 // Fresh: only 1s ago (well under the 90s threshold).
-                disconnectedSince = now - 1_000L,
-            )
+                disconnectedSince = now - 1_000L)
         }
 
         core.performGlobalColdStartRefresh("s1")
@@ -1189,8 +1147,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         assertEquals(
             "catch-up fan-out set must be directorySessions.keys + currentWorkdir + recent_workdirs",
             setOf("/wA", "/wB", "/wC", "/recent-1"),
-            queriedDirs.toSet(),
-        )
+            queriedDirs.toSet())
     }
 
     // ── R-20 Phase 2 复审 #2: launchCatchUp live fp provider ────────────────
@@ -1211,14 +1168,12 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
             id = "host-A",
             name = "A",
             serverUrl = "http://a",
-            serverGroupFp = "fp-A",
-        )
+            serverGroupFp = "fp-A")
         val switchedProfile = cn.vectory.ocdroid.data.model.HostProfile(
             id = "host-B",
             name = "B",
             serverUrl = "http://b",
-            serverGroupFp = "fp-B",
-        )
+            serverGroupFp = "fp-B")
         every { hostProfileStore.currentProfile() } returns originalProfile
         coEvery { repository.probeLatestMessageId(any()) } returns Result.success("server-new")
         // The probe-page REST: simulate the host switch DURING the suspend.
@@ -1243,8 +1198,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         assertEquals(
             "stale fp-A probe tail must NOT merge into fp-B's slice (guard must fire)",
             listOf("anchor"),
-            core.chatFlow.value.messages.map { it.id },
-        )
+            core.chatFlow.value.messages.map { it.id })
         // Loading flag cleared on the early return.
         assertFalse(core.chatFlow.value.isLoadingMessages)
     }
@@ -1264,8 +1218,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         assertTrue("read-timeout should yield UiEvent.Info, got $event", event is UiEvent.Info)
         assertEquals(
             R.string.command_submitted_processing,
-            (event as UiEvent.Info).resId,
-        )
+            (event as UiEvent.Info).resId)
     }
 
     @Test
@@ -1303,8 +1256,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         // The fallback message propagates as the 2nd format arg.
         assertTrue(
             "error message should propagate via the fallback, got args=${err.args}",
-            err.args.any { it.toString().contains("boom") },
-        )
+            err.args.any { it.toString().contains("boom") })
     }
 
     @Test
@@ -1329,12 +1281,10 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
 
         assertTrue(
             "null-message SocketTimeoutException should default to non-fatal Info, got $event",
-            event is UiEvent.Info,
-        )
+            event is UiEvent.Info)
         assertEquals(
             R.string.command_submitted_processing,
-            (event as UiEvent.Info).resId,
-        )
+            (event as UiEvent.Info).resId)
     }
 
     // ── §issue-1 Phase 2a Fix B / Phase 2 gate 🟡3: computeQuestionFanOutWorkdirs ──
@@ -1351,8 +1301,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         val result = computeQuestionFanOutWorkdirs(
             directorySessionKeys = setOf("/dup", "/a"),
             currentWorkdir = "/dup",
-            recentWorkdirs = listOf("/dup", "/b"),
-        )
+            recentWorkdirs = listOf("/dup", "/b"))
         assertEquals(listOf("/dup", "/a", "/b"), result)
         assertEquals("no duplicate entries", 3, result.toSet().size)
     }
@@ -1365,8 +1314,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         val result = computeQuestionFanOutWorkdirs(
             directorySessionKeys = setOf("/ok", "", "   "),
             currentWorkdir = "",
-            recentWorkdirs = listOf("/recent", "", "  "),
-        )
+            recentWorkdirs = listOf("/recent", "", "  "))
         assertEquals(listOf("/ok", "/recent"), result)
     }
 
@@ -1377,8 +1325,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         val result = computeQuestionFanOutWorkdirs(
             directorySessionKeys = setOf("/a"),
             currentWorkdir = null,
-            recentWorkdirs = listOf("/b"),
-        )
+            recentWorkdirs = listOf("/b"))
         assertEquals(listOf("/a", "/b"), result)
     }
 
@@ -1388,8 +1335,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         val result = computeQuestionFanOutWorkdirs(
             directorySessionKeys = emptySet(),
             currentWorkdir = null,
-            recentWorkdirs = emptyList(),
-        )
+            recentWorkdirs = emptyList())
         assertTrue(result.isEmpty())
     }
 
@@ -1423,8 +1369,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         val result = computeQuestionFanOutWorkdirs(
             directorySessionKeys = setOf("/app", "/app/"),
             currentWorkdir = "/app",
-            recentWorkdirs = listOf("/b"),
-        )
+            recentWorkdirs = listOf("/b"))
         assertEquals(listOf("/app", "/b"), result)
     }
 
@@ -1440,8 +1385,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         val result = computeQuestionFanOutWorkdirs(
             directorySessionKeys = setOf("", "/"),
             currentWorkdir = "/",
-            recentWorkdirs = listOf(""),
-        )
+            recentWorkdirs = listOf(""))
         assertEquals(listOf("/"), result)
     }
 
@@ -1454,8 +1398,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         val result = computeQuestionFanOutWorkdirs(
             directorySessionKeys = setOf("/proj-a/"), // trailing-slash variant seen first
             currentWorkdir = "/proj-a",
-            recentWorkdirs = listOf("/proj-b/"),
-        )
+            recentWorkdirs = listOf("/proj-b/"))
         // /proj-a/ is normalized to /proj-a (NOT the raw "/proj-a/" form);
         // /proj-b/ is normalized to /proj-b.
         assertEquals(listOf("/proj-a", "/proj-b"), result)

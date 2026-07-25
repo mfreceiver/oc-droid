@@ -265,20 +265,18 @@ internal fun SessionListState.applyMessageTimestampBump(
 }
 
 /**
- * session.updated (archived) → upsert the session AND rewrite [openSessionIds]
- * to the caller-supplied [newOpenIds] (with the archived id evicted). The
- * caller computes [newOpenIds] + persists it via SettingsManager (a side
- * effect that stays inline). Pure; effects empty.
+ * session.updated (archived) → upsert the archived session into sessions /
+ * directorySessions. §B4: no open-tabs-list rewrite (list-detail has no tab
+ * strip). Pure; effects empty. Route pop for the active detail is the
+ * caller's job when the archived id matches the chat/{id} route.
  */
 internal fun SessionListState.applyArchiveEviction(
     updated: Session,
-    newOpenIds: List<String>
 ): Pair<SessionListState, List<SseSideEffect>> = copy(
     sessions = upsertSession(sessions, updated),
     directorySessions = directorySessions.mapValues { (_, list) ->
         list.map { session -> if (session.id == updated.id) updated else session }
     },
-    openSessionIds = newOpenIds
 ) to emptyList()
 
 /**

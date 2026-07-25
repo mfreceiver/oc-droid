@@ -139,7 +139,7 @@ class TokenStreamWiringTest {
         // Dispatch ClearTokenStreamState only if evicted session == current.
         if (store.chatFlow.value.currentSessionId == evictedSid) {
             if (ownedKeys.isNotEmpty()) {
-                store.dispatch(AppAction.ClearTokenStreamState(ownedKeys))
+                store.dispatch(AppAction.ClearTokenStreamState(ownedKeys, bundleStamp = BundleStamp(0L, "")))
             }
         }
 
@@ -171,7 +171,7 @@ class TokenStreamWiringTest {
         // branch does NOT fire. We verify that the state is unchanged.
         if (store.chatFlow.value.currentSessionId == evictedSid) {
             if (ownedKeys.isNotEmpty()) {
-                store.dispatch(AppAction.ClearTokenStreamState(ownedKeys))
+                store.dispatch(AppAction.ClearTokenStreamState(ownedKeys, bundleStamp = BundleStamp(0L, "")))
             }
         }
 

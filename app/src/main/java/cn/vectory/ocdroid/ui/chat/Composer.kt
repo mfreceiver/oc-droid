@@ -110,6 +110,13 @@ fun Composer(
     isBusy: Boolean,
     questionPending: Boolean,
     onAddImages: () -> Unit,
+    // §B2 rev-gpt MAJOR 2: the abort target is caller-supplied so the
+    // parameterized chat/{sessionId} route can pass its route identity
+    // (chromeSessionId) — Composer itself does NOT subscribe to chatFlow
+    // (the §1B-FIX I5 parity boundary), so it cannot resolve the route-
+    // owned id. Legacy bare-chat callers pass a lambda that resolves flat
+    // currentSessionId.
+    onAbort: () -> Unit,
 ) {
     // §PARITY (R-17 Stage 2): composer subscribes to composerFlow +
     // settingsFlow directly so keystrokes only recompose the composer.
@@ -134,7 +141,6 @@ fun Composer(
     val onTextChange = composerVM::setInputText
     val onSend = chatVM::sendMessage
     val onRemoveImage = composerVM::removeImageAttachment
-    val onAbort = chatVM::abortSession
     val onExecuteCommand = orchestratorVM::executeCommand
 
     // §PARITY: same command-suggestion logic as ChatInputBar.kt:99-113.

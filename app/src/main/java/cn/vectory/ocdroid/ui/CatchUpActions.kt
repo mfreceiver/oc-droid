@@ -68,6 +68,8 @@ internal fun launchCatchUp(
     sessionsEverColdSnapshotted: Set<String> = emptySet(),
     /** G6: fired on a successful catch-up to mark the baseline. */
     onColdSnapshot: (String) -> Unit = {},
+    /** Route token captured when this catch-up started, if route-owned. */
+    expectedRouteInstance: Long = 0L,
 ) {
 
     // §Phase1B (gpt-2 S3 / glm-1 🟡-1): synchronous check-and-set to close the
@@ -129,7 +131,10 @@ internal fun launchCatchUp(
                     // (plan §0 N1) would otherwise let the stale probe write into
                     // the new group's chat slice. Both legs must match — fp first,
                     // sessionId second.
+                    val routeTokenValid = expectedRouteInstance == 0L ||
+                        expectedRouteInstance == slices.store.stateFlow.value.chatRouteInstance
                     if (sessionId != slices.chat.value.currentSessionId ||
+                        !routeTokenValid ||
                         currentServerGroupFp() != expectedServerGroupFp
                     ) {
                         // §history-load-fix round-2 (gpter 🟠): stale probe
@@ -149,6 +154,8 @@ internal fun launchCatchUp(
                             AppAction.CatchUpMessagesMerged(
                                 messages = merged.first,
                                 partsByMessage = merged.second,
+                                expectedRouteInstance = expectedRouteInstance,
+                                sessionId = sessionId,
                             )
                         )
                         // §chat-ux-batch T8 (B3): the legacy
@@ -182,7 +189,10 @@ internal fun launchCatchUp(
             // loads), session-guarded so a stale response doesn't clobber a new
             // session's flag. Idempotent — the branches above already clear it
             // on the normal paths.
+            val routeTokenValid = expectedRouteInstance == 0L ||
+                expectedRouteInstance == slices.store.stateFlow.value.chatRouteInstance
             if (sessionId == slices.chat.value.currentSessionId &&
+                routeTokenValid &&
                 slices.chat.value.isLoadingMessages
             ) {
                 slices.mutateChat { c -> c.copy(isLoadingMessages = false) }

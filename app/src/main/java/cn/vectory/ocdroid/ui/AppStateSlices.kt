@@ -1,5 +1,7 @@
 package cn.vectory.ocdroid.ui
 
+import android.os.Parcel
+import android.os.Parcelable
 import cn.vectory.ocdroid.data.model.AgentInfo
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.api.CommandInfo
@@ -382,12 +384,86 @@ sealed interface ScrollBehavior {
  *    body (clamped to [0, itemCount)).
  *  - [offset]: listState.firstVisibleItemScrollOffset at capture time. Paired
  *    with the resolved index for scrollToItem(index, offset).
+ *
+ * §chat-list-detail §11 / G6 (B5-C2): [Parcelable] so the checkpoint can be
+ * stored in a per-route-entry [androidx.lifecycle.SavedStateHandle] (Bundle-
+ * backed). Manual [Parcelable] impl (no kotlin-parcelize plugin) keeps the
+ * build config untouched. Round-trip verified by [ScrollCheckpointParcelableTest].
  */
 data class ScrollCheckpoint(
     val anchorKey: String?,
     val fallbackIndex: Int,
     val offset: Int,
-)
+) : Parcelable {
+    constructor(parcel: Parcel) : this(
+        anchorKey = parcel.readString(),
+        fallbackIndex = parcel.readInt(),
+        offset = parcel.readInt(),
+    )
+
+    override fun writeToParcel(parcel: Parcel, flags: Int) {
+        parcel.writeString(anchorKey)
+        parcel.writeInt(fallbackIndex)
+        parcel.writeInt(offset)
+    }
+
+    override fun describeContents(): Int = 0
+
+    companion object CREATOR : Parcelable.Creator<ScrollCheckpoint> {
+        override fun createFromParcel(parcel: Parcel): ScrollCheckpoint = ScrollCheckpoint(parcel)
+        override fun newArray(size: Int): Array<ScrollCheckpoint?> = arrayOfNulls(size)
+    }
+}
+
+/**
+ * §chat-list-detail §11 / G6 (B5): per-route-entry SavedStateHandle key under
+ * which the PARENT's scroll checkpoint is persisted at openSubAgent time.
+ * The handle belongs to the parent route entry; when the user pops back to
+ * parent, the parent's [ChatScaffold] LaunchedEffect reads this key, consumes
+ * it (single-shot), and replays the checkpoint as a Restore scroll intent.
+ *
+ * Keyed by childId (the route being navigated INTO) so a parent that has
+ * multiple in-flight children (rare; only possible via deep-link fan-in) can
+ * distinguish them. The single-slot pattern (one openSubAgent → one
+ * checkpoint → one pop) means in practice there is at most one entry per
+ * parent handle.
+ *
+ * The consume side iterates all keys with this prefix and consumes the
+ * (single) match — see [consumeAnySubAgentCheckpoint].
+ */
+internal const val SUB_AGENT_CHECKPOINT_KEY_PREFIX: String = "subAgentCheckpoint:"
+
+/** §chat-list-detail §11 / G6 (B5): build the SavedStateHandle key for a
+ *  parent-side checkpoint keyed by the child route id. */
+internal fun checkpointKeyForChild(childSessionId: String): String =
+    SUB_AGENT_CHECKPOINT_KEY_PREFIX + childSessionId
+
+/**
+ * §chat-list-detail §11 / G6 (B5): consume-once helper. Pulls the first
+ * `subAgentCheckpoint:*` entry out of [handle] (if any) and removes it so a
+ * subsequent re-entry (config change / duplicate nav / fast pop) cannot
+ * double-fire Restore. Returns null when no checkpoint is present (the
+ * Latest-by-default case).
+ *
+ * Single-shot contract (§11): the caller MUST treat a non-null return as the
+ * single scroll intent — re-dispatching Latest from openForRoute's default is
+ * the no-checkpoint path.
+ */
+internal fun consumeAnySubAgentCheckpoint(handle: androidx.lifecycle.SavedStateHandle): ScrollCheckpoint? {
+    val keys = handle.keys().filter { it.startsWith(SUB_AGENT_CHECKPOINT_KEY_PREFIX) }
+    if (keys.isEmpty()) return null
+    // §11: there is at most ONE in-flight child per parent in normal flow.
+    // Iterate the (single) match; if a degenerate case ever produces more
+    // than one, consume them all but only the first becomes a Restore intent
+    // (the others are silently dropped — never applied — preserving the
+    // "single scroll intent" contract).
+    var first: ScrollCheckpoint? = null
+    for (k in keys) {
+        val cp = handle.remove<ScrollCheckpoint>(k)
+        if (first == null) first = cp
+    }
+    return first
+}
 
 /**
  * §Wave5b-Q13: the single-slot "next scroll intent to consume" intent.
@@ -435,6 +511,23 @@ internal fun ChatState.hasActiveTokenStreamOwner(): Boolean =
  */
 data class ChatState(
     val currentSessionId: String? = null,
+    /**
+     * §chat-list-detail §7.1 B0.5: the structural owner of the loaded chat
+     * content for the route-driven chat/{id} render path. Nullable — null
+     * means "no content committed (or cleared by navigation/close)". The
+     * render guard is `content?.sessionId == routeId && content?.routeInstance
+     * == chatRouteInstance` (P1 structural + P6 temporal). Construction is
+     * atomic (sessionId welded to messages via [LoadedContent]'s data-class
+     * ctor), so a torn "messages belong to X but content thinks Y" is
+     * structurally unconstructable.
+     *
+     * B0.5 coexistence: the old flat fields ([messages] / [partsByMessage] /
+     * etc.) remain the authority for the OLD bare-chat render path
+     * (currentSessionId != null). This slot is the authority for the NEW
+     * chat/{id} path only. B2 collapses them (the flat fields migrate INTO
+     * [LoadedContent] and [currentSessionId] drops to a data-pointer).
+     */
+    val content: LoadedContent? = null,
     val messages: List<Message> = emptyList(),
     val revertCutoffs: Map<String, cn.vectory.ocdroid.data.model.RevertCutoff> = emptyMap(),
     val partsByMessage: Map<String, List<Part>> = emptyMap(),
@@ -557,41 +650,31 @@ data class ChatState(
        *    `Latest`. All these go through `switchTo(id)` default arg + the
        *    `requestLatestScroll(id)` helper on the send / Chat-reselect paths
        *    (same-session switchTo is a deliberate no-op).
-       *  - 父→子 openSubAgent → child gets `Latest` AND the parent's checkpoint
-       *    is stored in [parentReturnCheckpoints] for the eventual return.
-       *  - 子→父 returnToParent → `Restore(checkpoint)` from the stored entry.
+       *  - 父→子 openSubAgent → child gets `Latest`. The parent's checkpoint is
+       *    captured at click time and persisted on the parent route entry's
+       *    [androidx.lifecycle.SavedStateHandle] (§chat-list-detail §11 / G6
+       *    B5 — per-entry storage, NOT a global ChatState map).
+       *  - 子→父 returnToParent → `Restore(checkpoint)` replayed by the parent
+       *    entry's LaunchedEffect (reads + consumes the handle entry, dispatches
+       *    [AppAction.ScrollRequested] with behavior=Restore).
        *
-       * Cleared alongside [parentReturnCheckpoints] on host purge (both same-
-       * group and cross-group), draft materialize, and current-session archive
+       * Cleared on host purge / draft materialize / current-session archive
        * (see [cn.vectory.ocdroid.ui.clearSessionData] +
        * [cn.vectory.ocdroid.ui.controller.applyArchivedChatClear] + the same-
-       * group host-purge branch in [cn.vectory.ocdroid.ui.reduce]).
+       * group host-purge branch in [cn.vectory.ocdroid.ui.reduce]). The legacy
+       * global checkpoint map is GONE (B5 §11): checkpoint lifecycle is now
+       * bound to the route entry's SavedStateHandle, so pop-driven cleanup is
+       * automatic.
        */
       val pendingScrollRequest: PendingScrollRequest? = null,
+      // §chat-list-detail §11 / G6 (B5): the legacy per-child checkpoint
+      // map field is REMOVED. Checkpoints now live on the parent route
+      // entry's SavedStateHandle (keyed by childId via
+      // [checkpointKeyForChild]); entry pop auto-cleans the handle, so the
+      // three manual sweep sites (host-purge / archive subtree / draft
+      // materialize) no longer need to touch checkpoints. The single-slot
+      // [pendingScrollRequest] above is unchanged.
       /**
-       * §Wave5b-Q13: navigation-return map for 子→父 restore. Keyed by the
-       * CHILD session id (the current session id at the moment of
-       * openSubAgent). When the user navigates back from child to parent
-       * (Android Back or breadcrumb), [cn.vectory.ocdroid.ui.SessionViewModel.returnToParent]
-       * reads `parentReturnCheckpoints[currentSessionId]` and dispatches
-       * `Restore(checkpoint)` to the parent's consumer.
-       *
-       * Stored in the SAME dispatch as the parent-checkpoint capture
-       * ([AppAction.ParentCheckpointStored]) so there is no torn intermediate
-       * where the child is current but the parent's checkpoint is not yet on
-       * file. Consumed (entry removed) by [AppAction.ParentCheckpointConsumed]
-       * when returnToParent fires. Cleared entirely on host purge / draft
-       * materialize / current-session archive.
-       *
-       * Why a separate map (not embedded in PendingScrollRequest): the
-       * pending-scroll slot is the NEXT intent to consume on the active
-       * session, whereas this map is a navigation backstack that survives
-       * across multiple in-flight sessions. Folding them would force a single
-       * child-deep navigation, breaking the "swipe between roots while inside
-       * a sub-agent" case.
-       */
-      val parentReturnCheckpoints: Map<String /*childId*/, ScrollCheckpoint> = emptyMap(),
-     /**
       * §chat-ux-batch T7 (B2): the user's just-picked agent for the active
       * session — TRANSIENT, consumed and cleared by [cn.vectory.ocdroid.ui.AppCoreOrchestration.dispatchSendMessage]
       * at send time. Null means "no explicit pick this turn → fall back to
@@ -666,7 +749,9 @@ data class SessionListState(
      */
     val completenessEpoch: Long = 0L,
     val directorySessions: Map<String, List<Session>> = emptyMap(),
-    val openSessionIds: List<String> = emptyList(),
+    // §B4 / chat-list-detail §9.1 D9: open-tabs-list removed. List-detail has
+    // a single detail pane driven by route id (`chat/{id}`); there is no tab
+    // strip open-set to maintain. Legacy ESP key is ignored on read (§16).
     val sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
     /** §issue-1(1): per-session 文件变更快照（session.diff SSE / GET /session/{id}/diff）。
      *  key = sessionId，value = 该会话累计的 FileDiff 列表。仅在打开会话时拉取 +
@@ -778,15 +863,12 @@ data class SessionListState(
      */
     val pendingCreatedAt: Map<String, Long> = emptyMap(),
     /**
-     * §fix-close-all-residual / §fix-close-all-no-first: gates open-tab
-     * restore in [launchLoadSessions] when currentSessionId is null.
-     * Auto-select is restore-only (last live id still in openSessionIds) —
-     * never invents a session from `sessions.first()`. Empty openSessionIds
-     * always wins (user closed every tab / cold start with no tabs). Pre-fix,
-     * every session-list refresh re-fired a first()-select when current was
-     * null, resurrecting the earliest server session after close-all. Flipped
-     * to true on the first successful [launchLoadSessions] commit; reset on
-     * cross-group host purge (empty open tabs still prevent first()).
+     * §B4 / chat-list-detail §10 cold-start: flipped true on the first
+     * successful [launchLoadSessions] commit; reset on cross-group host
+     * purge. Pre-B4 this gated open-tab auto-select; post-B4 auto-select
+     * from open-tabs-list is gone (route is always Sessions on cold start).
+     * The flag still marks "first refresh completed" for load UI / residual
+     * current-clear decisions that must not invent sessions.first().
      */
     val hasCompletedInitialLoad: Boolean = false,
 )
@@ -886,6 +968,25 @@ class SliceFlows internal constructor(internal val store: SharedStateStore) {
     val sessionList: StateFlow<SessionListState> get() = store.sessionListFlow
     val unread: StateFlow<UnreadState> get() = store.unreadFlow
     val host: StateFlow<HostState> get() = store.hostFlow
+
+    /**
+     * Captures the minted token for the currently active parameterized chat
+     * route. A bare `chat` selection deliberately returns `0L`: zero is the
+     * legacy compatibility scope, never a reusable route identity.
+     */
+    internal fun routeInstanceFor(sessionId: String): Long {
+        val snapshot = store.stateFlow.value
+        return if (
+            // Chat detail ids are URL-safe branded ids, so the route string
+            // comparison avoids reparsing/decode work on every token frame.
+            snapshot.nav.lastRoute == "chat/$sessionId" &&
+            snapshot.chat.currentSessionId == sessionId
+        ) {
+            snapshot.chatRouteInstance
+        } else {
+            0L
+        }
+    }
 
     fun mutateConnection(transform: (ConnectionState) -> ConnectionState) = store.mutateConnection(transform)
     fun mutateTraffic(transform: (TrafficState) -> TrafficState) = store.mutateTraffic(transform)

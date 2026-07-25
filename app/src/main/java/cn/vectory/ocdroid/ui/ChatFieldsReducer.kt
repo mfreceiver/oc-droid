@@ -44,13 +44,20 @@ internal fun reduceExpandedPartsCleared(state: StoreState, action: AppAction.Exp
 
 // ── T1b conversation reduce (1:1 pure-fn / field-set delegates) ────────
 
-internal fun reduceMessageUpdatedApplied(state: StoreState, action: AppAction.MessageUpdatedApplied): StoreState = state.copy(
-    chat = state.chat.applyMessageUpdated(action.message).first,
-)
+internal fun reduceMessageUpdatedApplied(state: StoreState, action: AppAction.MessageUpdatedApplied): StoreState {
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
+    return state.copy(chat = state.chat.applyMessageUpdated(action.message).first)
+        .withRouteContentSynced(
+            expectedRouteInstance = action.expectedRouteInstance,
+            expectedSessionId = action.sessionId ?: state.chat.currentSessionId,
+        )
+}
 
-internal fun reduceSlimMessagesMerged(state: StoreState, action: AppAction.SlimMessagesMerged): StoreState = state.copy(
-    chat = state.chat.mergeSlimMessages(action.items, action.authoritative),
-)
+internal fun reduceSlimMessagesMerged(state: StoreState, action: AppAction.SlimMessagesMerged): StoreState {
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
+    return state.copy(chat = state.chat.mergeSlimMessages(action.items, action.authoritative))
+        .withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+}
 
 internal fun reduceMessagesMerged(state: StoreState, action: AppAction.MessagesMerged): StoreState {
     // §Stage-B §3.10 (grok S3 / bgpt SF-2): on an authoritative load the
@@ -85,30 +92,72 @@ internal fun reduceMessagesMerged(state: StoreState, action: AppAction.MessagesM
     )
 }
 
-internal fun reduceMessagesPrepended(state: StoreState, action: AppAction.MessagesPrepended): StoreState = state.copy(
-    chat = state.chat.copy(
-        messages = action.messages.chronological(),
-        partsByMessage = action.partsByMessage,
-        olderMessagesCursor = action.olderMessagesCursor,
-        hasMoreMessages = action.hasMoreMessages,
-        isLoadingMoreMessages = false,
-    ),
-)
+internal fun reduceMessagesPrepended(state: StoreState, action: AppAction.MessagesPrepended): StoreState {
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
+    // This is the legacy loadMore 5-field write.  The route-aware projection is
+    // mirrored only when the caller carries a non-zero route token; bare-chat
+    // callers remain flat-only for source compatibility.
+    return state.copy(
+        chat = state.chat.copy(
+            messages = action.messages.chronological(),
+            partsByMessage = action.partsByMessage,
+            olderMessagesCursor = action.olderMessagesCursor,
+            hasMoreMessages = action.hasMoreMessages,
+            isLoadingMoreMessages = false,
+        ),
+    ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+}
 
-internal fun reduceChatWindowHydrated(state: StoreState, action: AppAction.ChatWindowHydrated): StoreState = state.copy(
-    chat = state.chat.copy(
-        messages = action.messages.chronological(),
-        partsByMessage = action.partsByMessage,
-        olderMessagesCursor = action.olderMessagesCursor,
-        hasMoreMessages = action.hasMoreMessages,
-    ),
-)
+internal fun reduceChatWindowHydrated(state: StoreState, action: AppAction.ChatWindowHydrated): StoreState {
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
+    val hydratedMessages = action.messages.chronological()
+    val routeSessionId = action.sessionId ?: state.chat.currentSessionId
+    val routeContent = if (
+        action.expectedRouteInstance > 0L &&
+        routeSessionId != null &&
+        routeSessionId == state.chat.currentSessionId &&
+        action.expectedRouteInstance == state.chatRouteInstance
+    ) {
+        // Cache hydration is itself a route-owned initial commit. Construct
+        // the value object here rather than leaving the parameterized route
+        // stuck on the loading surface until the follow-up REST load returns.
+        LoadedContent(
+            sessionId = routeSessionId,
+            messages = hydratedMessages,
+            partsByMessage = action.partsByMessage,
+            streamingPartTexts = state.chat.streamingPartTexts,
+            streamOwned = state.chat.streamOwned,
+            streamingReasoningPart = state.chat.streamingReasoningPart,
+            olderMessagesCursor = action.olderMessagesCursor,
+            hasMoreMessages = action.hasMoreMessages,
+            currentModel = state.chat.currentModel,
+            routeInstance = action.expectedRouteInstance,
+        )
+    } else {
+        state.chat.content
+    }
+    return state.copy(
+        chat = state.chat.copy(
+            messages = hydratedMessages,
+            partsByMessage = action.partsByMessage,
+            olderMessagesCursor = action.olderMessagesCursor,
+            hasMoreMessages = action.hasMoreMessages,
+            content = routeContent,
+        ),
+    ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+}
 
 internal fun reduceSessionSelected(state: StoreState, action: AppAction.SessionSelected): StoreState = state.copy(
-    // SessionSwitcher.kt:417-472 field set (15 writes) in ONE dispatch.
+    // SessionSwitcher.kt:417-472 field set in ONE dispatch.
+    // Route-aware selection advances the incarnation in the same aggregate
+    // transition as the legacy chat clear.  Legacy callers pass null, so the
+    // historical SessionSelected state shape remains byte-for-byte unchanged.
+    chatRouteInstance = action.routeInstance?.let { maxOf(state.chatRouteInstance, it) }
+        ?: state.chatRouteInstance,
     chat = state.chat.copy(
         currentSessionId = action.sessionId,
         pendingScrollRequest = action.pendingScrollRequest,
+        content = null,
         messages = emptyList(),
         partsByMessage = emptyMap(),
         streamingPartTexts = emptyMap(),
@@ -123,6 +172,23 @@ internal fun reduceSessionSelected(state: StoreState, action: AppAction.SessionS
         currentModel = null,
         pendingAgent = null,
         pendingModel = null,
+        // §B4 rev-gpt round3 CRITICAL: clear coalesce buffers on EVERY
+        // SessionSelected — including same-session route re-entry (navigateToChat
+        // → openForRoute → performSwitch ALWAYS dispatches SessionSelected, no
+        // same-session guard). Without this, a stale flush Job (still pending on
+        // the coordinator because SessionSwitcher only dispatches
+        // ClearDeltaBuffers on a real session-id change) would read the NEW route
+        // token from slices.routeInstanceFor(sid) at flush time and dispatch
+        // CoalesceFlushedForPart(newToken, sid) — the reducer's acceptsRouteUpdate
+        // accepts (token matches the new incarnation), and the buffer (still
+        // holding the prior incarnation's delta/fullText) would be applied,
+        // corrupting the new incarnation's content. Clearing here at the
+        // authoritative reducer guarantees the late flush finds empty buffers
+        // (flushCoalesceBufferForPart's `bufferedDelta.isNullOrEmpty()` branch is
+        // a verified no-op). Same-session re-entry must NOT inherit prior buffers.
+        deltaBuffer = emptyMap(),
+        fullTextBuffer = emptyMap(),
+        pendingFlushPartIds = emptySet(),
     ),
 )
 
@@ -134,18 +200,33 @@ internal fun reduceSlimChatContentCleared(state: StoreState, action: AppAction.S
     ),
 )
 
+internal fun reduceSlimChatContentClearedForRoute(
+    state: StoreState,
+    action: AppAction.SlimChatContentClearedForRoute,
+): StoreState {
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
+    return state.copy(
+        chat = state.chat.copy(
+            messages = emptyList(),
+            partsByMessage = emptyMap(),
+        ),
+    ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+}
+
 // ── T1b residual reduce ────────────────────────────────────────────────
 
 internal fun reduceChatCleared(state: StoreState, action: AppAction.ChatCleared): StoreState = state.copy(
     // 3-field clear only — streaming / cursor / model / staleNotice survive.
     chat = state.chat.copy(
         currentSessionId = null,
+        content = null,
         messages = emptyList(),
         partsByMessage = emptyMap(),
     ),
 )
 
 internal fun reduceLastAssistantErrorAttached(state: StoreState, action: AppAction.LastAssistantErrorAttached): StoreState {
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
     // SSC:1706-1712 1:1 — attach to last assistant; no-op if absent or
     // already has an error.
     val last = state.chat.messages.lastOrNull { it.isAssistant }
@@ -158,27 +239,39 @@ internal fun reduceLastAssistantErrorAttached(state: StoreState, action: AppActi
                     if (m.id == last.id) m.copy(error = action.error) else m
                 },
             ),
-        )
+        ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
     }
 }
 
-internal fun reduceCatchUpMessagesMerged(state: StoreState, action: AppAction.CatchUpMessagesMerged): StoreState = state.copy(
-    // CatchUpActions:147-154 4-field merge (not MessagesMerged's 8).
-    chat = state.chat.copy(
-        messages = action.messages.chronological(),
-        partsByMessage = action.partsByMessage,
-        isLoadingMessages = false,
-        staleNotice = false,
-    ),
-)
+internal fun reduceCatchUpMessagesMerged(state: StoreState, action: AppAction.CatchUpMessagesMerged): StoreState {
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
+    return state.copy(
+        chat = state.chat.copy(
+            // CatchUpActions:147-154 4-field merge (not MessagesMerged's 8).
+            messages = action.messages.chronological(),
+            partsByMessage = action.partsByMessage,
+            isLoadingMessages = false,
+            staleNotice = false,
+        ),
+    ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+}
 
 // ── T1b writeChat-bypass reduce ────────────────────────────────────────
 
 internal fun reduceColdStartChatReset(state: StoreState, action: AppAction.ColdStartChatReset): StoreState = state.copy(
-    // AppCoreOrchestration:577-590 8-field reset (1:1).
+    // AppCoreOrchestration:577-590 legacy reset (1:1 for the historical fields)
+    // + §B4 rev-gpt round3 CRITICAL: also clear the SSE coalesce buffers.
+    // The legacy 8-field write intentionally preserves currentSessionId /
+    // currentModel / pendingAgent / isLoadingMessages (chrome fields); only its
+    // historical fields are owned here. The coalesce buffers are NOT chrome —
+    // they represent in-flight streaming state for the prior incarnation. After
+    // cold-start the route has advanced, so a stale flush Job carrying the new
+    // route token (read dynamically in flushDeltaBuffer) must find empty
+    // buffers here, otherwise the prior incarnation's delta/fullText would
+    // resurrect as the new incarnation's content (same hazard as SessionSelected).
     chat = state.chat.copy(
+        content = null,
         streamingPartTexts = emptyMap(),
-        streamOwned = emptyMap(),
         streamingReasoningPart = null,
         staleNotice = false,
         messages = emptyList(),
@@ -186,10 +279,16 @@ internal fun reduceColdStartChatReset(state: StoreState, action: AppAction.ColdS
         olderMessagesCursor = null,
         hasMoreMessages = false,
         isLoadingMoreMessages = false,
+        // §B4 rev-gpt round3 CRITICAL: clear coalesce buffers (see header).
+        deltaBuffer = emptyMap(),
+        fullTextBuffer = emptyMap(),
+        pendingFlushPartIds = emptySet(),
     ),
 )
 
-internal fun reduceExpandedPartsContentCommitted(state: StoreState, action: AppAction.ExpandedPartsContentCommitted): StoreState = state.copy(
+internal fun reduceExpandedPartsContentCommitted(state: StoreState, action: AppAction.ExpandedPartsContentCommitted): StoreState {
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.expectedSessionId)) return state
+    return state.copy(
     // Strategy 2: pure reconcile against latest chat (CAS via state.update).
     // Session guard + merge live inside reconcileExpandedPartsContent.
     chat = state.chat.reconcileExpandedPartsContent(
@@ -197,4 +296,5 @@ internal fun reduceExpandedPartsContentCommitted(state: StoreState, action: AppA
         local = action.local,
         expectedSessionId = action.expectedSessionId,
     ),
-)
+    ).withRouteContentSynced(action.expectedRouteInstance, action.expectedSessionId)
+}

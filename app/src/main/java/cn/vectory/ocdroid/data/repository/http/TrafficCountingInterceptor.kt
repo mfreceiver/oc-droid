@@ -10,8 +10,6 @@ import okio.BufferedSource
 import okio.ForwardingSource
 import okio.buffer
 import java.util.concurrent.atomic.AtomicLong
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * Traffic accounting: records the request body (sent) and ACTUAL bytes read
@@ -33,8 +31,7 @@ import javax.inject.Singleton
  *
  * Extracted verbatim from `OpenCodeRepository.baseBuilder` in R-18.
  */
-@Singleton
-class TrafficCountingInterceptor @Inject constructor(
+class TrafficCountingInterceptor(
     private val trafficTracker: TrafficTracker,
     private val trafficLogger: TrafficLogger
 ) : Interceptor {

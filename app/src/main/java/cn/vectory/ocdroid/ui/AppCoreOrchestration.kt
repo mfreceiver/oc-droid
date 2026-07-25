@@ -313,39 +313,21 @@ internal fun AppCore.materializeDraftSession(onSessionReady: (String) -> Unit) {
     appScope.launch {
         repository.createSession(title = null, directory = draftWorkdir)   // §R18 Final 终审 fix (gpter): route to the draft workdir
             .onSuccess { session ->
-                val openIds = (settingsManager.openSessionIds.filterNot { it == session.id } + session.id).takeLast(8)
-                settingsManager.openSessionIds = openIds
                 val now = System.currentTimeMillis()
-                // §A5-3 Phase B2: the success-path writeSessionList + writeChat
-                // + writeUnread + writeComposer sequence is collapsed into ONE
-                // atomic dispatch — sessionList (upsert + openSessionIds),
-                // chat.currentSessionId, unread (drop + lastViewedTime), and
-                // composer.draftWorkdir clear all land as a SINGLE committed
-                // aggregate state (no torn intermediates for stateFlow
-                // collectors). The reducer is pure (see [AppAction]); the
-                // settings/persist/side-effect calls below stay OUTSIDE the
-                // dispatch (they are not state).
+                // §A5-3 Phase B2 + §B4: success-path collapses into ONE atomic
+                // dispatch — sessionList upsert (no open-tabs-list), chat
+                // currentSessionId, unread, composer.draftWorkdir clear.
                 store.dispatch(
                     AppAction.DraftSessionMaterialized(
                         session = session,
-                        openSessionIds = openIds,
                         viewedAt = now,
                     )
                 )
-                // §R18 Phase 2-F: chatFlow.currentSessionId (set in writeChat
-                // above) is the sole runtime source; the AppCore init collector
-                // persists session.id to SettingsManager. No manual write here.
-                //
-                // §chat-ux-batch T8 (B3): the legacy per-session agent/model
-                // copy from chatFlow.currentModel / settingsFlow.selectedAgentName
-                // to SettingsManager.set{Model,Agent}ForSession was deleted
-                // here. T7 rewired both picks to TRANSIENT pendingModel /
-                // pendingAgent (consumed at dispatchSendMessage); no
-                // persistence is needed for the carry.
+                // §R18 Phase 2-F: chatFlow.currentSessionId is the sole runtime
+                // source; the AppCore init collector persists session.id.
                 persistSessionCache(
                     settingsManager = settingsManager,
                     sessions = store.sessionListFlow.value.sessions,
-                    openIds = store.sessionListFlow.value.openSessionIds,
                     currentId = session.id,
                     currentWorkdir = settingsManager.currentWorkdir,
                     revertCutoffs = store.chatFlow.value.revertCutoffs,
@@ -566,7 +548,11 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
 
 private fun AppCore.loadMessagesWithRetry(sessionId: String, resetLimit: Boolean = true) {
     launchLoadMessagesWithRetry(appScope, sessionId, store.slices, resetLimit) { sid, reset ->
-        loadMessagesForEffect(sid, reset)
+        loadMessagesForEffect(
+            sessionId = sid,
+            resetLimit = reset,
+            expectedRouteInstance = store.slices.routeInstanceFor(sid),
+        )
     }
 }
 
@@ -639,6 +625,10 @@ internal fun AppCore.performGlobalColdStartRefresh(
         }
         return false
     }
+    // Capture the route incarnation before the reset clears LoadedContent. A
+    // route-owned force refresh must commit its replacement through the same
+    // token; legacy callers intentionally retain the 0L flat-only scope.
+    val expectedRouteInstance = store.slices.routeInstanceFor(currentId)
     sessionSwitcher.clearSessionWindowCache()
     // refreshNonce is NOT a §2.3 target field — leave as a separate writeChat
     // (minimal blast radius; not folded into ColdStartChatReset).
@@ -667,7 +657,12 @@ internal fun AppCore.performGlobalColdStartRefresh(
             conn.disconnectedSince,
             System.currentTimeMillis(),
         )
-    loadMessagesForEffect(currentId, resetLimit = true, forceInitialWindow = forceInitialWindow || autoUnanchor)
+    loadMessagesForEffect(
+        currentId,
+        resetLimit = true,
+        forceInitialWindow = forceInitialWindow || autoUnanchor,
+        expectedRouteInstance = expectedRouteInstance,
+    )
     return true
 }
 
@@ -773,6 +768,7 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
         sseCurrentWorkdir = sseWorkdir,
         sessionsEverColdSnapshotted = sseSnap.sessionsEverColdSnapshotted,
         onColdSnapshot = { sid -> sessionSyncCoordinator.markSessionColdSnapshotted(sid) },
+        expectedRouteInstance = store.slices.routeInstanceFor(sessionId),
     )
     // §R18 Phase 3 Wave 3 (P1-9 wire-up): fan-out pending-questions catch-up
     // across EVERY known workdir, not just currentWorkdir. Without this, a
@@ -837,7 +833,7 @@ internal fun shouldOpenTokenStream(
  * calls this AFTER its own 二次 guard confirmed fp match, so
  * `currentServerGroupFp()` here equals `effect.serverGroupFp`.
  */
-internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolean, forceInitialWindow: Boolean = false) {
+internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolean, forceInitialWindow: Boolean = false, expectedRouteInstance: Long = 0L) {
     launchLoadMessages(
         scope = appScope,
         repository = repository,
@@ -855,6 +851,11 @@ internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolea
         // fetch bypasses a stale watermark. All other callers keep the default
         // (false → anchored /since).
         forceInitialWindow = forceInitialWindow,
+        // §chat-list-detail §7.2 B0.5-rework: the route-instance token threaded
+        // from navigateToChat → openForRoute → VerifyAndHydrate → HERE →
+        // launchLoadMessages. 0L = legacy (MessagesMerged); > 0L = route-aware
+        // (ChatContentLoaded with CAS). Guards the ENTIRE completion txn.
+        expectedRouteInstance = expectedRouteInstance,
     )
     // §Stage-D2 §5.8 B-1 busy-open: the SHARED load entry for all production
     // message loads (session switch via SessionSwitcher/VerifyAndHydrate,
@@ -872,7 +873,7 @@ internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolea
             sessionId,
         )
     ) {
-        tokenStreamCoordinator.open(sessionId, settingsManager.currentWorkdir)
+        tokenStreamCoordinator.open(sessionId, settingsManager.currentWorkdir, source = "effect-load")
     }
 }
 
@@ -885,7 +886,13 @@ internal fun AppCore.loadSessionsForEffect() {
         settingsManager = settingsManager,
         onSelectSession = { selectSessionForEffect(it) },
         onLoadSessionStatus = { launchLoadSessionStatus(appScope, repository, store.slices, trigger = SessionStatusLoadTrigger.COLD_START) },
-        onLoadMessages = { sessionId -> loadMessagesForEffect(sessionId, resetLimit = true) },
+        onLoadMessages = { sessionId ->
+            loadMessagesForEffect(
+                sessionId = sessionId,
+                resetLimit = true,
+                expectedRouteInstance = store.slices.routeInstanceFor(sessionId),
+            )
+        },
         emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
         // remove-message-persistence Task 6: the prior
         // `cacheRepository = cacheRepository` argument (R-20 Phase 1 C7
@@ -897,90 +904,67 @@ internal fun AppCore.loadSessionsForEffect() {
         // Phase 5 wired here (for cross-group merge of LAN + tunnel same-server
         // profiles) is removed — attemptCrossGroupMerge was deleted by item 1
         // of this rewrite.
-        // WT6 (archive-sync, gap-3) + FIX-A/C (review-blocker): if the merged
-        // refresh result contains ANY archived session that was open (in
-        // openSessionIds) or was the current session, the callback dispatches
-        // a SINGLE atomic [AppAction.BulkSessionsRefreshed] that writes the
-        // merged list AND prunes ALL archived openIds (FIX-A — not just
-        // current) AND (if current is archived) clears chat + unread/questions
-        // subtree cleanup + emits [ControllerEffect.EvictSession]. One
-        // committed aggregate state — no torn intermediate.
-        onArchivedSessionsDetected = { merged, newOpenIds, hasMore, confirmedServerIds, sweepNow ->
-            dispatchBulkArchivedSessions(merged, newOpenIds, hasMore, confirmedServerIds, sweepNow)
+        // WT6 (archive-sync) + §B4: if the merged refresh discovers archived
+        // sessions, dispatch a SINGLE atomic BulkSessionsRefreshed that writes
+        // the merged list and (if current is archived) clears chat. No
+        // open-tabs-list prune. Route pop when route id is archived is done
+        // here after the dispatch.
+        onArchivedSessionsDetected = { merged, hasMore, confirmedServerIds, sweepNow ->
+            dispatchBulkArchivedSessions(merged, hasMore, confirmedServerIds, sweepNow)
         },
     )
 }
 
 /**
- * WT6 (archive-sync, gap-3) + FIX-A/C (review-blocker): mirrors the SSE
- * archive handler in [cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator]
- * (the `session.updated` isArchived branch) for the BULK-refresh path. When
- * the merged refresh result discovers archived sessions, this dispatches a
- * SINGLE [AppAction.BulkSessionsRefreshed] that atomically:
- *  1. Writes the merged session list (sessions).
- *  2. Prunes [SessionListState.openSessionIds] of EVERY archived id (FIX-A —
- *     not just the current session; the SSE path does this per-session).
- *  3. IFF the current session is among the archived, clears chat
- *     ([applyArchivedChatClear] → currentSessionId/messages/partsByMessage/
- *     pendingScrollRequest + parentReturnCheckpoints per FIX-B / §Wave5b-Q13)
- *     + scroll-state cleanup for the WHOLE archived subtree (§Wave5b-Q13
- *     blocker-2 — non-current archived ids also get pendingScrollRequest /
- *     parentReturnCheckpoints entries swept via cleanScrollStateForSubtree)
- *     + unread/questions subtree cleanup.
+ * WT6 (archive-sync) + §B4: bulk-refresh archive path. Dispatches a SINGLE
+ * [AppAction.BulkSessionsRefreshed] that atomically:
+ *  1. Writes the merged session list.
+ *  2. IFF the current session is among the archived, clears chat
+ *     ([applyArchivedChatClear]) + scroll-state / unread / questions subtree.
  *
- * The reducer derives the "clear chat" decision from the snapshot
- * (chat.currentSessionId in archivedIds), so the action carries pure data
- * only. ONE committed aggregate state — no torn intermediate (the prior
- * two-step mutateSessionList → onCurrentSessionArchived produced an observable
- * emission where sessions[current].isArchived == true AND
- * chat.currentSessionId == current coexisted; FIX-C eliminates this).
- *
- * Side effects OUTSIDE the dispatch (not state): persisting
- * [SettingsManager.openSessionIds] + emitting [ControllerEffect.EvictSession]
- * for the archived current session's cache window (mirrors the SSE path's
- * R-20 Phase 1 eviction). The [persistSessionCache] call is in
- * [launchLoadSessions] (it uses the caller's local variables, not the slice).
+ * §B4: no open-tabs-list prune. After dispatch, if the active chat/{id}
+ * route (or residual current) was archived → force popToSessions +
+ * CloseDetail. Side effects OUTSIDE the dispatch: EvictSession for the
+ * archived current's cache window. [persistSessionCache] stays in
+ * [launchLoadSessions].
  */
 private fun AppCore.dispatchBulkArchivedSessions(
     mergedSessions: List<Session>,
-    newOpenIds: List<String>,
     hasMoreSessions: Boolean,
     confirmedServerIds: Set<String>,
     sweepNow: Long,
 ) {
-    val currentOpenIds = store.sessionListFlow.value.openSessionIds
-    // Capture the PREVIOUS currentSessionId before the dispatch clears it
-    // (used to emit EvictSession for the archived current's cache window).
     val previousCurrentId = store.chatFlow.value.currentSessionId
+    val routeId = routeChatSessionId(store.navFlow.value.lastRoute)
     val archivedIds = mergedSessions
         .filter { it.isArchived }
         .map { it.id }
         .toSet()
     val currentWasArchived = previousCurrentId != null && previousCurrentId in archivedIds
-    // FIX-A: persist ALL archived ids pruned from openSessionIds (not just
-    // current — the SSE path prunes any archived id; the bulk path previously
-    // only handled the current session, leaving non-current archived open
-    // tabs as ghosts capping the 8-tab budget).
-    if (newOpenIds != currentOpenIds) {
-        settingsManager.openSessionIds = newOpenIds
-    }
-    // FIX-C: single atomic dispatch. The reducer writes the merged list +
-    // pruned openIds + load flags, and IFF the current session is archived,
-    // clears chat + unread/questions subtree. No torn intermediate.
+    val routeWasArchived = routeId != null && routeId in archivedIds
     store.dispatch(
         AppAction.BulkSessionsRefreshed(
             sessions = mergedSessions,
-            openSessionIds = newOpenIds,
             hasMoreSessions = hasMoreSessions,
             confirmedServerIds = confirmedServerIds,
             sweepNow = sweepNow,
         )
     )
-    // R-20 Phase 1 cache hygiene (mirrors the SSE archive path's EvictSession
-    // emit): drop the archived CURRENT session's window from the memory LRU +
-    // persistent cache. Non-current archived ids don't have an active chat
-    // window to evict (openIds prune alone is sufficient per FIX-A spec). The
-    // fp is read live so a mid-flight host switch cannot re-key the eviction.
+    // §B4 / §10 REST refresh: if route id was archived → popToSessions.
+    // (Reducer already cleared chat when current was archived; CloseDetail
+    // advances the route-instance token so stale loads drop.)
+    if (routeWasArchived || currentWasArchived) {
+        store.dispatch(AppAction.CloseDetail)
+        settingsManager.currentSessionId = null
+        settingsManager.lastRoute = NavRoute.Sessions.route
+        store.mutateNav {
+            it.copy(
+                lastRoute = NavRoute.Sessions.route,
+                lastNavPage = NavRoute.Sessions.legacyPage,
+                navEpoch = it.navEpoch + 1L,
+            )
+        }
+    }
     if (currentWasArchived && previousCurrentId != null) {
         effectBus.tryEmitEffect(
             ControllerEffect.EvictSession(currentServerGroupFp(), previousCurrentId)

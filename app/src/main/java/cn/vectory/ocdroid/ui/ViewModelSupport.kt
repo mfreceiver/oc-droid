@@ -208,23 +208,23 @@ internal fun bumpSessionUpdated(sessions: List<Session>, sessionId: String, upda
  * §Q4-strict-sync: the [preserve] pass now keeps a local-only session IFF its
  * id is in [pendingCreateIds] (the "just created, not yet confirmed by the
  * server" set). This is STRICTER than the legacy `currentSessionId ||
- * openSessionIds` rule: a session that was opened locally but is NOT in the
+ * open-tabs-list` rule: a session that was opened locally but is NOT in the
  * server's authoritative listing AND is NOT pending-create will now drop
  * naturally on refresh (the "ghost after server-side cleanup" fix). The final
  * list is `authoritative ∪ local.filter { id in pendingCreateIds }`.
  *
- * [currentSessionId] and [openSessionIds] are retained in the signature for
- * call-site compatibility but are NO LONGER used in the preserve filter —
- * pendingCreateIds is the sole authority. (They were kept to minimise the
- * call-site diff; a future cleanup can drop them.)
+ * §B4: [open-tabs-list] removed from the signature. [currentSessionId] is
+ * retained for call-site compatibility but is NO LONGER used in the preserve
+ * filter — pendingCreateIds is the sole authority.
  */
 internal fun mergeRefreshedSessionsPreservingLocalActivity(
     refreshed: List<Session>,
     local: List<Session>,
-    currentSessionId: String?,
-    openSessionIds: Set<String>,
+    currentSessionId: String? = null,
     pendingCreateIds: Set<String> = emptySet(),
 ): List<Session> {
+    @Suppress("UNUSED_VARIABLE", "UNUSED_PARAMETER")
+    val unusedCurrent = currentSessionId
     val localById = local.associateBy { it.id }
     val refreshedIds = refreshed.map { it.id }.toSet()
     val base = refreshed.map { remote ->

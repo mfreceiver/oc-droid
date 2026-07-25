@@ -1,8 +1,6 @@
 package cn.vectory.ocdroid.data.repository
 
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * R-18: thread-safe holder for the host connection profile currently in use
@@ -20,10 +18,8 @@ import javax.inject.Singleton
  *   a single atomic group, mirroring the pre-R-18 `@Synchronized
  *   OpenCodeRepository.configure` contract.
  *
- * The `@Inject constructor` keeps Hilt happy if this holder is later wired
- * via DI; today it is constructed manually by [OpenCodeRepository] because
- * the repository's public constructor signature is locked by
- * `OpenCodeRepositoryTest` (`OpenCodeRepository(mockk(), mockk())`).
+ * This is a graph-internal compatibility mirror. Published client
+ * generations never capture this mutable holder; they capture [HostSnapshot].
  *
  * §tofu R2: the boolean `allowInsecure` field was REPLACED by
  * `hostPort: String?` (host:port authority of `_baseUrl`, derived in
@@ -31,8 +27,7 @@ import javax.inject.Singleton
  * model), so every code path that previously read `allowInsecure` to
  * downgrade TLS now reads `hostPort` to look up a pinned SPKI instead.
  */
-@Singleton
-class HostConfig @Inject constructor() {
+class HostConfig {
 
     @Volatile private var _baseUrl: String = DEFAULT_SERVER
     @Volatile private var _username: String? = null
@@ -71,6 +66,16 @@ class HostConfig @Inject constructor() {
 
     /** R8 slim-mode foundation: 当前 server 的 slimapi 路由属性。 */
     val slim: Boolean get() = _slim
+
+    /** Capture all fields under the same monitor for graph compatibility/tests. */
+    @Synchronized
+    internal fun snapshot(): HostSnapshot = HostSnapshot(
+        baseUrl = _baseUrl,
+        hostPort = _hostPort,
+        username = _username,
+        password = _password,
+        slimHost = _slim,
+    )
 
     /** True iff a complete Basic Auth credential pair is configured. */
     val hasBasicAuth: Boolean get() = _username != null && _password != null

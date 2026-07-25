@@ -2,9 +2,13 @@ package cn.vectory.ocdroid.ui.controller.sse
 
 import cn.vectory.ocdroid.data.model.ResyncReason
 import cn.vectory.ocdroid.data.model.TokenStreamFrame
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.StreamOwnedState
+import cn.vectory.ocdroid.util.TrafficLogger
+import cn.vectory.ocdroid.util.TrafficTracker
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -20,6 +24,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -50,6 +55,8 @@ class TokenStreamCoordinatorTest {
     private lateinit var slices: SliceFlows
     private lateinit var stateStore: SharedStateStore
     private lateinit var fake: FakeStreamProvider
+    /** Test publication/lock pair for bundle-bound coordinator dispatch. */
+    private lateinit var bundleRepository: OpenCodeRepository
     private val sinceFetchCalls = mutableListOf<SinceFetchCall>()
     private lateinit var coordinator: TokenStreamCoordinator
 
@@ -59,6 +66,12 @@ class TokenStreamCoordinatorTest {
         stateStore = SharedStateStore()
         slices = stateStore.slices
         fake = FakeStreamProvider()
+        bundleRepository = OpenCodeRepository(
+            io.mockk.mockk<TrafficTracker>(relaxed = true),
+            io.mockk.mockk<TrafficLogger>(relaxed = true),
+        )
+        val bundle = bundleRepository.currentClientBundle()!!
+        stateStore.dispatch(AppAction.BundlePublished(bundle.generation, bundle.endpointFp))
         sinceFetchCalls.clear()
         // watchdogMs is intentionally LARGE in the shared coordinator so
         // `runPending()` (= advanceUntilIdle) in non-watchdog tests does not
@@ -71,6 +84,8 @@ class TokenStreamCoordinatorTest {
         watchdogMs: Long = 10_000L,
         openDebounceMs: Long = 0L,
         streamProvider: (String, String?) -> Flow<TokenStreamFrame> = fake.provider,
+        streamConnectionProvider: ((String, String?) -> TokenStreamConnection)? = null,
+        currentBundleProvider: () -> Any? = { bundleRepository.currentClientBundle() },
         triggerSinceFetch: (String, Boolean) -> Unit = { sid, auth -> sinceFetchCalls += SinceFetchCall(sid, auth) },
         initialBackoffMs: Long = 50L,
         retryAfter503Ms: Long = 20L,
@@ -80,6 +95,9 @@ class TokenStreamCoordinatorTest {
         scope = scope,
         slices = slices,
         streamProvider = streamProvider,
+        streamConnectionProvider = streamConnectionProvider,
+        bundleCommitLock = bundleRepository,
+        currentBundleProvider = currentBundleProvider,
         triggerSinceFetch = triggerSinceFetch,
         openDebounceMs = openDebounceMs,
         watchdogPollMs = 10L,
@@ -338,7 +356,7 @@ class TokenStreamCoordinatorTest {
         val currentEpoch = coordinator.epochOf("s1")
         assertTrue("epoch should be > 0 after open", currentEpoch > 0L)
         // Dispatch a frame with the current epoch — should be processed.
-        coordinator.dispatchEpochFrame("s1", currentEpoch, gen = 1L, snapshot(text = "live"))
+        coordinator.dispatchEpochFrame("s1", currentEpoch, 1L, snapshot(text = "live"), 0L, bundleRepository.currentClientBundle())
         assertEquals("live", stateStore.chatFlow.value.streamingPartTexts["p1"])
         // Now bump the epoch (simulating a re-open) and dispatch a stale-epoch frame.
         coordinator.bumpEpochForTest("s1")
@@ -346,11 +364,68 @@ class TokenStreamCoordinatorTest {
         assertTrue(newEpoch > currentEpoch)
         // The stale-epoch frame (using the OLD epoch) must be dropped: the
         // buffer must NOT change.
-        coordinator.dispatchEpochFrame("s1", currentEpoch, gen = 1L, snapshot(text = "STALE"))
+        coordinator.dispatchEpochFrame("s1", currentEpoch, 1L, snapshot(text = "STALE"), 0L, bundleRepository.currentClientBundle())
         assertEquals("live", stateStore.chatFlow.value.streamingPartTexts["p1"])
         // The fresh-epoch frame DOES land.
-        coordinator.dispatchEpochFrame("s1", newEpoch, gen = 1L, snapshot(text = "fresh"))
+        coordinator.dispatchEpochFrame("s1", newEpoch, 1L, snapshot(text = "fresh"), 0L, bundleRepository.currentClientBundle())
         assertEquals("fresh", stateStore.chatFlow.value.streamingPartTexts["p1"])
+    }
+
+    /**
+     * T3.3-C1(ii): A has already delivered a frame to the coordinator, then
+     * configure(B) wins the second (pre-commit) bundle validation. No chat
+     * token/SSE state may be committed from A. This is a failing-first test
+     * that is directly green because T3.2's commit-point bundle revalidation
+     * is already present.
+     */
+    @Test
+    fun `frame received by retired A is rejected when host switches before commit`() {
+        val repository = OpenCodeRepository(
+            io.mockk.mockk<TrafficTracker>(relaxed = true),
+            io.mockk.mockk<TrafficLogger>(relaxed = true),
+        )
+        repository.configure(baseUrl = "http://host-a.test", slim = true)
+        val bundleA = repository.currentClientBundle()!!
+        val dispatchBundleReads = AtomicInteger(0)
+        var switchArmed = false
+
+        val raceCoordinator = buildCoordinator(
+            streamProvider = { _, _ -> error("resolve-time provider must be used") },
+            streamConnectionProvider = { sid, directory ->
+                TokenStreamConnection(fake.provider(sid, directory), bundleA)
+            },
+            currentBundleProvider = {
+                if (switchArmed && dispatchBundleReads.incrementAndGet() == 2) {
+                    repository.configure(baseUrl = "http://host-b.test", slim = true)
+                }
+                repository.currentClientBundle()
+            },
+        )
+
+        raceCoordinator.open("s1", "/work", source = "t3.3-c1-ii")
+        runPending()
+        switchArmed = true
+
+        raceCoordinator.dispatchEpochFrame(
+            sid = "s1",
+            epoch = raceCoordinator.epochOf("s1"),
+            gen = raceCoordinator.genOf("s1"),
+            frame = TokenStreamFrame.PartSnapshot("s1", "m1", "p1", "A-frame", false, false),
+            capturedRouteInstance = 0L,
+            boundBundle = bundleA,
+        )
+
+        assertTrue("host switch retires A", bundleA.isRetired)
+        assertTrue(
+            "A frame must not reach chat state after the pre-commit recheck",
+            stateStore.chatFlow.value.streamingPartTexts.isEmpty(),
+        )
+        assertTrue(
+            "A frame must not claim a stream-owned part after the host switch",
+            stateStore.chatFlow.value.streamOwned.isEmpty(),
+        )
+        raceCoordinator.close("s1")
+        runPending()
     }
 
     // ── watchdog timeout → ClearPartState + TriggerSinceFetch + Reconnect ─
@@ -363,7 +438,7 @@ class TokenStreamCoordinatorTest {
         coordinator.open("s1")
         runPending()
         // Stream a part so the sid owns it.
-        coordinator.dispatchEpochFrame("s1", coordinator.epochOf("s1"), coordinator.genOf("s1"), snapshot(partId = "p1", text = "buf"))
+        coordinator.dispatchEpochFrame("s1", coordinator.epochOf("s1"), coordinator.genOf("s1"), snapshot(partId = "p1", text = "buf"), 0L, bundleRepository.currentClientBundle())
         assertTrue(stateStore.chatFlow.value.streamOwned.containsKey("p1"))
         val baseline = fake.openCount.get()
         // Advance virtual time past the watchdog window WITHOUT any frame
@@ -414,14 +489,17 @@ class TokenStreamCoordinatorTest {
         runPending()
         val gen1 = coordinator.genOf("s1")
         // Stream p1 under gen1 → owner=(s1, gen1).
-        coordinator.dispatchEpochFrame("s1", coordinator.epochOf("s1"), gen1, snapshot(partId = "p1", text = "v1"))
+        coordinator.dispatchEpochFrame("s1", coordinator.epochOf("s1"), gen1, snapshot(partId = "p1", text = "v1"), 0L, bundleRepository.currentClientBundle())
         assertEquals(setOf("p1"), coordinator.ownedPartsForSid("s1"))
-        // Reopen s1 → bumps generation; the new stream re-claims p1.
+        // §T1.1 Fix①: reopen with same (sid, null-dir) would be idempotent-skipped.
+        // Close first to force a genuine reopen that bumps generation.
+        coordinator.close("s1")
+        runPending()
         coordinator.open("s1")
         runPending()
         val gen2 = coordinator.genOf("s1")
         assertTrue("gen should bump on reopen", gen2 > gen1)
-        coordinator.dispatchEpochFrame("s1", coordinator.epochOf("s1"), gen2, snapshot(partId = "p1", text = "v2"))
+        coordinator.dispatchEpochFrame("s1", coordinator.epochOf("s1"), gen2, snapshot(partId = "p1", text = "v2"), 0L, bundleRepository.currentClientBundle())
         // Now a stale clear targeting (s1, gen1) — the partId is owned by (s1, gen2).
         val allowed = coordinator.filterClearByGeneration("s1", gen1, setOf("p1"))
         assertTrue("stale clear must be rejected", allowed.isEmpty())
@@ -435,7 +513,7 @@ class TokenStreamCoordinatorTest {
         coordinator.open("s1")
         runPending()
         val gen = coordinator.genOf("s1")
-        coordinator.dispatchEpochFrame("s1", coordinator.epochOf("s1"), gen, snapshot(partId = "p1", text = "v"))
+        coordinator.dispatchEpochFrame("s1", coordinator.epochOf("s1"), gen, snapshot(partId = "p1", text = "v"), 0L, bundleRepository.currentClientBundle())
         val allowed = coordinator.filterClearByGeneration("s1", gen, setOf("p1"))
         assertEquals(setOf("p1"), allowed)
     }
@@ -461,10 +539,10 @@ class TokenStreamCoordinatorTest {
         val gen = coordinator.genOf("s1")
         val epoch = coordinator.epochOf("s1")
         // Stream the part first so it's owned.
-        coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", text = "partial"))
+        coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", text = "partial"), 0L, bundleRepository.currentClientBundle())
         assertTrue(stateStore.chatFlow.value.streamOwned.containsKey("p1"))
         // Truncate.
-        coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", truncated = true))
+        coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", truncated = true), 0L, bundleRepository.currentClientBundle())
         // ClearPartState dispatched for p1.
         assertFalse(stateStore.chatFlow.value.streamOwned.containsKey("p1"))
         assertFalse(stateStore.chatFlow.value.streamingPartTexts.containsKey("p1"))
@@ -509,84 +587,74 @@ class TokenStreamCoordinatorTest {
     // ── MF-1 (gate r1): max-1 under concurrent reconnect ──────────────────
 
     @Test
-    fun `open during reconnect backoff supersedes the pending reconnect — no double subscription`() {
-        // Use the default large watchdogMs so the watchdog doesn't interfere.
+    fun `open during reconnect backoff is idempotent — no double subscription (Fix①)`() {
+        // §T1.1 Fix①: open(same sid+dir) during backoff is idempotent-skipped;
+        // the pending reconnect (J2) survives and fires after backoff.
+        // (Supersedes the pre-Fix① "supersede" expectation — see
+        //  TokenStreamCoordinatorIdempotencyTest for the canonical coverage.)
         coordinator = buildCoordinator(watchdogMs = 10_000L, initialBackoffMs = 200L)
         coordinator.open("s1")
         runPending()
         assertEquals(1, fake.openCount.get())
-        assertEquals("no collector should be live beyond the initial", 1, fake.maxLiveCollectors.get())
 
-        // Pump a resync(reconnect_no_replay) through the flow → sentinel →
-        // throw → catch → scheduleReconnect → J2 in delay(200).
+        // Pump a resync(reconnect_no_replay) → J2 in delay(200).
         fake.send(snapshot(partId = "p1", text = "a"))
         runPending()
         fake.send(TokenStreamFrame.Resync(ResyncReason.RECONNECT_NO_REPLAY, "s1"))
         runPending()
-        // J2 is now pending in backoff; the live collector (J1) has unwound.
         assertEquals("J1 unwound → liveCount back to 0", 0, fake.liveCollectors.get())
         assertEquals("only J1's provider call so far", 1, fake.openCount.get())
 
-        // During the backoff window, user issues open("s1") again. This MUST
-        // supersede J2 (the pending reconnect) via launchStreamLifecycle →
-        // currentStreamJob.getAndSet(J3)?.cancel() → J2 cancelled.
+        val backoffJob = coordinator.currentStreamJobSnapshot()
+        assertTrue("backoff job (J2) is active", backoffJob!!.isActive)
+
+        // open(same sid, same dir=null) during backoff → Fix① idempotent skip.
         coordinator.open("s1")
         runPending()
-        // J3's runStream called streamProvider (openCount=2) and its collector
-        // is now live. J2 was cancelled BEFORE its delay(200) could fire, so
-        // it NEVER called streamProvider.
-        assertEquals("openCount should be exactly 2 (J1 + J3, NOT J2)", 2, fake.openCount.get())
-        assertEquals("exactly one live collector (J3)", 1, fake.liveCollectors.get())
+        assertEquals("idempotent skip — openCount unchanged", 1, fake.openCount.get())
+        assertSame("currentStreamJob unchanged (J2 NOT superseded)", backoffJob, coordinator.currentStreamJobSnapshot())
 
-        // Advance past the backoff window. The orphaned J2 would have fired
-        // here (at +200ms) if NOT cancelled — calling streamProvider a 3rd
-        // time and creating a 2nd concurrent collector.
+        // Advance past backoff → J2 fires runStream → provider called.
         scope.advanceTimeBy(300L)
         runPending()
-        assertEquals(
-            "orphan reconnect must NOT fire — openCount should stay at 2",
-            2,
-            fake.openCount.get(),
-        )
-        assertEquals(
-            "maxLiveCollectors must never exceed 1 — no overlapping collectors",
-            1,
-            fake.maxLiveCollectors.get(),
-        )
+        assertEquals("pending reconnect fires after backoff — openCount=2", 2, fake.openCount.get())
+        assertEquals("maxLiveCollectors never exceeds 1", 1, fake.maxLiveCollectors.get())
+
         coordinator.close("s1")
         runPending()
     }
 
     @Test
-    fun `open during 503-retry backoff supersedes the pending retry — no double subscription`() {
-        // §MF-1: the 503-retry path also goes through launchStreamLifecycle,
-        // so a user open() during the Retry-After window supersedes the retry.
+    fun `open during 503-retry backoff is idempotent — no double subscription (Fix①)`() {
+        // §T1.1 Fix①: open(same sid+dir) during 503-retry backoff is
+        // idempotent-skipped; the pending retry survives and fires after Retry-After.
         val fifty = FiftyProvider()
         val c = buildCoordinator(
             streamProvider = fifty.provider,
             triggerSinceFetch = { _, _ -> },
             retryAfter503Ms = 200L,
-            maxConsecutive503 = 10, // high cap so we don't degrade mid-test
+            maxConsecutive503 = 10,
         )
         c.open("s1")
         scope.advanceTimeBy(10L)
         runPending()
-        // First open → immediate 503 failure → 503-retry scheduled in delay(200).
         val countAfterFirstFailure = fifty.openCount.get()
         assertTrue("at least one provider call from initial open", countAfterFirstFailure >= 1)
 
-        // During the Retry-After window, user issues open("s1") again. This
-        // supersedes the pending 503-retry via launchStreamLifecycle.
+        val retryJob = c.currentStreamJobSnapshot()
+        assertTrue("503-retry job is active in backoff", retryJob!!.isActive)
+
+        // open(same sid, same dir=null) during Retry-After → Fix① skip.
         c.open("s1")
         scope.advanceTimeBy(10L)
         runPending()
-        val countAfterReopen = fifty.openCount.get()
-        assertTrue("reopen should call provider", countAfterReopen > countAfterFirstFailure)
+        assertEquals("idempotent skip — openCount unchanged", countAfterFirstFailure, fifty.openCount.get())
+        assertSame("currentStreamJob unchanged (retry NOT superseded)", retryJob, c.currentStreamJobSnapshot())
 
-        // Advance past the Retry-After window. The orphaned 503-retry would
-        // have fired here if NOT cancelled.
+        // Advance past Retry-After → retry fires → provider called.
         scope.advanceTimeBy(300L)
         runPending()
+        assertTrue("retry fires after backoff — openCount increased", fifty.openCount.get() > countAfterFirstFailure)
         // The reopen's own 503 failure may schedule another retry, but the
         // ORPHANED retry (from the first failure) must NOT have fired. We
         // verify by checking that the count didn't jump by more than the
@@ -619,6 +687,8 @@ class TokenStreamCoordinatorTest {
             coordinator.epochOf("s1"),
             coordinator.genOf("s1"),
             TokenStreamFrame.ServerConnected("s1"),
+            0L,
+            bundleRepository.currentClientBundle(),
         )
         assertEquals(
             "successful frame must reset the consecutive-503 streak",
@@ -692,7 +762,7 @@ class TokenStreamCoordinatorTest {
         val gen = coordinator.genOf("s1")
         val epoch = coordinator.epochOf("s1")
         // Resync with sessionId == null — coordinator must infer "s1".
-        coordinator.dispatchEpochFrame("s1", epoch, gen, TokenStreamFrame.Resync(ResyncReason.SESSION_IDLE, null))
+        coordinator.dispatchEpochFrame("s1", epoch, gen, TokenStreamFrame.Resync(ResyncReason.SESSION_IDLE, null), 0L, bundleRepository.currentClientBundle())
         // TriggerSinceFetch fired with the inferred sid (SESSION_IDLE does NOT
         // reconnect, so no provider re-open expected).
         assertTrue(
@@ -758,7 +828,7 @@ class TokenStreamCoordinatorTest {
     fun `streaming snapshot writes STREAMING ownership and the buffer text`() {
         coordinator.open("s1")
         runPending()
-        coordinator.dispatchEpochFrame("s1", coordinator.epochOf("s1"), coordinator.genOf("s1"), snapshot(partId = "p1", text = "hello"))
+        coordinator.dispatchEpochFrame("s1", coordinator.epochOf("s1"), coordinator.genOf("s1"), snapshot(partId = "p1", text = "hello"), 0L, bundleRepository.currentClientBundle())
         assertEquals("hello", stateStore.chatFlow.value.streamingPartTexts["p1"])
         assertEquals(StreamOwnedState.STREAMING, stateStore.chatFlow.value.streamOwned["p1"])
     }
@@ -769,8 +839,8 @@ class TokenStreamCoordinatorTest {
         runPending()
         val epoch = coordinator.epochOf("s1")
         val gen = coordinator.genOf("s1")
-        coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", text = "hello"))
-        coordinator.dispatchEpochFrame("s1", epoch, gen, delta(partId = "p1", text = " world"))
+        coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", text = "hello"), 0L, bundleRepository.currentClientBundle())
+        coordinator.dispatchEpochFrame("s1", epoch, gen, delta(partId = "p1", text = " world"), 0L, bundleRepository.currentClientBundle())
         assertEquals("hello world", stateStore.chatFlow.value.streamingPartTexts["p1"])
         assertEquals(StreamOwnedState.STREAMING, stateStore.chatFlow.value.streamOwned["p1"])
     }
@@ -781,9 +851,9 @@ class TokenStreamCoordinatorTest {
         runPending()
         val epoch = coordinator.epochOf("s1")
         val gen = coordinator.genOf("s1")
-        coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", text = "partial"))
-        coordinator.dispatchEpochFrame("s1", epoch, gen, delta(partId = "p1", text = "+"))
-        coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", text = "FINAL", done = true))
+        coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", text = "partial"), 0L, bundleRepository.currentClientBundle())
+        coordinator.dispatchEpochFrame("s1", epoch, gen, delta(partId = "p1", text = "+"), 0L, bundleRepository.currentClientBundle())
+        coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", text = "FINAL", done = true), 0L, bundleRepository.currentClientBundle())
         assertEquals("FINAL", stateStore.chatFlow.value.streamingPartTexts["p1"])
         assertEquals(StreamOwnedState.DONE, stateStore.chatFlow.value.streamOwned["p1"])
     }

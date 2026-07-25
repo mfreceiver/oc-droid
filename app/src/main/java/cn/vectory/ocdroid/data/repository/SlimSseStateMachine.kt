@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.data.repository
 
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
 import cn.vectory.ocdroid.data.model.MessageWithParts
+import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import java.util.IdentityHashMap
 
 /**
@@ -16,9 +17,11 @@ import java.util.IdentityHashMap
  * @param slimStateLock the per-repository atomic state boundary (injected;
  *       declared on OpenCodeRepository for freeze §4c binary compat).
  */
-class SlimSseStateMachine(
+class SlimSseStateMachine internal constructor(
     private val slimStateLock: Any,
     private val epochProvider: (() -> Long)? = null,
+    private val identityCaptureProvider: (() -> ConnectionIdentityStore.Capture)? = null,
+    private val clientBundleProvider: (() -> ClientBundle?)? = null,
 ) {
     // ── Fields ───────────────────────────────────────────────────────────────────
     /**
@@ -61,27 +64,46 @@ class SlimSseStateMachine(
      */
     fun captureSlimCommitToken(): OpenCodeRepository.SlimCommitToken =
         synchronized(slimStateLock) {
+            val identityCapture = identityCaptureProvider?.invoke()
+            val capturedBundle = clientBundleProvider?.invoke()
+            val capturedEpoch = identityCapture?.epoch ?: epochProvider?.invoke()
             val token = OpenCodeRepository.SlimCommitToken(
                 marker = slimCommitMarker,
                 issuedReady = slimIncarnationReady,
+                capturedConnectionIdentity = identityCapture?.identity,
+                capturedIdentityEpoch = capturedEpoch,
+                capturedClientBundleGeneration = capturedBundle?.generation,
+                capturedEndpointFp = capturedBundle?.endpointFp,
+                capturedClientBundle = capturedBundle,
             )
-            epochProvider?.let { tokenEpochs[token] = it() }
+            capturedEpoch?.let { tokenEpochs[token] = it }
             token
         }
 
     /**
-     * Three-condition check: the token must (1) have been captured from
-     * a READY incarnation, (2) still match the current marker, and (3)
-     * the current incarnation must still be ready. This rejects both
-     * superseded markers AND mid-reconfigure captures.
+     * Operation-entry validation: the token must be from a READY incarnation,
+     * still match the current marker, identity epoch, and published client
+     * generation, and the current incarnation must still be ready. This
+     * rejects superseded markers, host switches, and mid-reconfigure captures.
      */
     fun isSlimCommitTokenCurrent(token: OpenCodeRepository.SlimCommitToken): Boolean =
         synchronized(slimStateLock) {
-            token.issuedReady &&
-                slimIncarnationReady &&
-                token.marker === slimCommitMarker &&
-                isTokenEpochCurrent(token)
+            isTokenCurrentLocked(token)
         }
+
+    /**
+     * The complete operation-entry validation.  The three guards are kept
+     * intentionally orthogonal: the slim marker, ConnectionIdentity epoch,
+     * and published ClientBundle generation are different lifetimes and must
+     * not be substituted for one another.
+     */
+    private fun isTokenCurrentLocked(token: OpenCodeRepository.SlimCommitToken): Boolean =
+        token.issuedReady &&
+            slimIncarnationReady &&
+            token.marker === slimCommitMarker &&
+            isTokenEpochCurrent(token) &&
+            isConnectionIdentityCurrent(token) &&
+            isClientBundleCurrent(token)
 
     /**
      * C-D3 v2 §1.2: Runs a short, non-suspending commit atomically against
@@ -97,11 +119,7 @@ class SlimSseStateMachine(
         onStale: () -> T,
         commit: () -> T,
     ): T = synchronized(slimStateLock) {
-        if (!token.issuedReady ||
-            !slimIncarnationReady ||
-            token.marker !== slimCommitMarker ||
-            !isTokenEpochCurrent(token)
-        ) {
+        if (!isTokenCurrentLocked(token)) {
             onStale()
         } else {
             commit()
@@ -154,9 +172,10 @@ class SlimSseStateMachine(
         }
 
     /**
-     * Checks that [token] was captured under the current epoch (i.e. no
-     * host reconfigure has bumped the generation since capture). Returns true
-     * when no [epochProvider] is configured (legacy compat path).
+     * Checks that [token] was captured under the current slim epoch (i.e. no
+     * host reconfigure has bumped the counter since capture). Returns true
+     * when no [epochProvider] is configured (legacy compat path). The
+     * independent identity and ClientBundle checks live beside this helper.
      *
      * Provider exists but token unregistered → fail-closed (returns false).
      */
@@ -164,6 +183,26 @@ class SlimSseStateMachine(
         val provider = epochProvider ?: return true
         val capturedEpoch = tokenEpochs[token] ?: return false
         return capturedEpoch == provider()
+    }
+
+    private fun isConnectionIdentityCurrent(token: OpenCodeRepository.SlimCommitToken): Boolean {
+        val provider = identityCaptureProvider ?: return true
+        val capturedEpoch = token.capturedIdentityEpoch ?: return false
+        val current = provider()
+        if (current.epoch != capturedEpoch) return false
+        // A null identity is a valid cold-start capture; the epoch still
+        // protects it from a host switch. Once an identity exists, require the
+        // exact immutable identity captured at operation entry.
+        return token.capturedConnectionIdentity == null ||
+            current.identity == token.capturedConnectionIdentity
+    }
+
+    private fun isClientBundleCurrent(token: OpenCodeRepository.SlimCommitToken): Boolean {
+        val provider = clientBundleProvider ?: return true
+        val capturedGeneration = token.capturedClientBundleGeneration ?: return true
+        val current = provider() ?: return false
+        return current.generation == capturedGeneration &&
+            current.endpointFp == token.capturedEndpointFp
     }
 
     /**
@@ -270,7 +309,7 @@ class SlimSseStateMachine(
         sid: String,
         token: OpenCodeRepository.SlimCommitToken,
     ): Long? = synchronized(slimStateLock) {
-        if (token.marker !== slimCommitMarker) {
+        if (!isTokenCurrentLocked(token)) {
             throw OpenCodeRepository.StaleSlimCommitException()
         }
         slimSseState.get(sid)?.updatedAt

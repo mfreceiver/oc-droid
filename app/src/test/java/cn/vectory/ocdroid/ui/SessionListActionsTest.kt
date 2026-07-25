@@ -66,7 +66,6 @@ class SessionListActionsTest {
         coEvery { repository.getActiveSessionIds() } returns Result.success(emptySet())
         settingsManager = mockk(relaxed = true)
         every { settingsManager.currentWorkdir } returns null
-        every { settingsManager.openSessionIds } returns emptyList()
         every { settingsManager.sessionCache } returns emptyList()
         scope = TestScope(UnconfinedTestDispatcher())
         emitted = mutableListOf()
@@ -106,15 +105,13 @@ class SessionListActionsTest {
         persistSessionCache(
             settingsManager = settingsManager,
             sessions = listOf(open, current, workdirRoot, unrelated, child, archived),
-            openIds = listOf("open"),
             currentId = "current",
             currentWorkdir = "/workdir",
             revertCutoffs = mapOf(
                 "open" to cn.vectory.ocdroid.data.model.RevertCutoff(
                     "open", "revert", cn.vectory.ocdroid.data.model.RevertCutoffState.Resolved(42L)
                 )
-            ),
-        )
+            ))
 
         verify {
             settingsManager.sessionCache = match { entries ->
@@ -135,11 +132,9 @@ class SessionListActionsTest {
         persistSessionCache(
             settingsManager = settingsManager,
             sessions = listOf(Session(id = "x", directory = "/a", parentId = "parent")),
-            openIds = emptyList(),
             currentId = null,
             currentWorkdir = null,
-            revertCutoffs = emptyMap(),
-        )
+            revertCutoffs = emptyMap())
 
         verify { settingsManager.sessionCache = emptyList() }
     }
@@ -151,13 +146,10 @@ class SessionListActionsTest {
         persistSessionCache(
             settingsManager = settingsManager,
             sessions = listOf(
-                Session(id = "child", directory = "/workdir", parentId = "parent"),
-            ),
-            openIds = emptyList(),
+                Session(id = "child", directory = "/workdir", parentId = "parent")),
             currentId = null,
             currentWorkdir = "/workdir",
-            revertCutoffs = emptyMap(),
-        )
+            revertCutoffs = emptyMap())
 
         verify { settingsManager.sessionCache = emptyList() }
     }
@@ -169,17 +161,14 @@ class SessionListActionsTest {
         persistSessionCache(
             settingsManager = settingsManager,
             sessions = listOf(
-                Session(id = "s1", directory = "/x", revert = Session.RevertInfo("actual")),
-            ),
-            openIds = listOf("s1"),
+                Session(id = "s1", directory = "/x", revert = Session.RevertInfo("actual"))),
             currentId = null,
             currentWorkdir = null,
             revertCutoffs = mapOf(
                 "s1" to cn.vectory.ocdroid.data.model.RevertCutoff(
                     "s1", "different", cn.vectory.ocdroid.data.model.RevertCutoffState.Resolved(99L)
                 )
-            ),
-        )
+            ))
 
         verify {
             settingsManager.sessionCache = match { entries ->
@@ -195,17 +184,14 @@ class SessionListActionsTest {
         persistSessionCache(
             settingsManager = settingsManager,
             sessions = listOf(
-                Session(id = "s1", directory = "/x", revert = Session.RevertInfo("msg")),
-            ),
-            openIds = listOf("s1"),
+                Session(id = "s1", directory = "/x", revert = Session.RevertInfo("msg"))),
             currentId = null,
             currentWorkdir = null,
             revertCutoffs = mapOf(
                 "s1" to cn.vectory.ocdroid.data.model.RevertCutoff(
                     "s1", "msg", cn.vectory.ocdroid.data.model.RevertCutoffState.PendingFetch
                 )
-            ),
-        )
+            ))
 
         verify {
             settingsManager.sessionCache = match { entries ->
@@ -223,15 +209,13 @@ class SessionListActionsTest {
             sessions = listOf(
                 Session(id = "s1", directory = "/x"),  // no revert field
             ),
-            openIds = listOf("s1"),
             currentId = null,
             currentWorkdir = null,
             revertCutoffs = mapOf(
                 "s1" to cn.vectory.ocdroid.data.model.RevertCutoff(
                     "s1", "orphan-cutoff", cn.vectory.ocdroid.data.model.RevertCutoffState.Resolved(77L)
                 )
-            ),
-        )
+            ))
 
         verify {
             settingsManager.sessionCache = match { entries ->
@@ -255,8 +239,7 @@ class SessionListActionsTest {
             onSelectSession = {},
             onLoadSessionStatus = {},
             onLoadMessages = {},
-            emit = emit,
-        )
+            emit = emit)
         advanceUntilIdle()
 
         assertEquals(listOf("s1", "s2"), slices.sessionList.value.sessions.map { it.id })
@@ -275,8 +258,7 @@ class SessionListActionsTest {
             it.copy(
                 sessions = listOf(serverSession, pendingSession),
                 pendingCreateIds = setOf("s2"),
-                pendingCreatedAt = mapOf("s2" to registeredAt),
-            )
+                pendingCreatedAt = mapOf("s2" to registeredAt))
         }
 
         launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
@@ -297,9 +279,7 @@ class SessionListActionsTest {
                 sessions = listOf(serverSession, pendingSession),
                 pendingCreateIds = setOf("s2"),
                 pendingCreatedAt = mapOf(
-                    "s2" to System.currentTimeMillis() - MainViewModelTimings.pendingCreateTimeoutMs - 1L,
-                ),
-            )
+                    "s2" to System.currentTimeMillis() - MainViewModelTimings.pendingCreateTimeoutMs - 1L))
         }
 
         launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
@@ -317,8 +297,7 @@ class SessionListActionsTest {
             it.copy(
                 sessions = listOf(serverSession),
                 pendingCreateIds = setOf("s2"),
-                pendingCreatedAt = mapOf("s2" to System.currentTimeMillis()),
-            )
+                pendingCreatedAt = mapOf("s2" to System.currentTimeMillis()))
         }
 
         launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
@@ -377,42 +356,45 @@ class SessionListActionsTest {
     // ── §fix-close-all-no-first: restore-only auto-select from open tabs ────
 
     @Test
-    fun `fix-close-all-no-first - cold start restores last open tab not server first`() = runTest {
-        // Open tabs restored from cache with null current (persisted current
-        // wiped). First load may restore the last OPEN tab — never the
-        // earliest server session that is not open.
+    fun `fix-close-all-no-first - cold start does NOT restore open tab (B4)`() = runTest {
+        // §B4 / §10: open-tabs-list removed. Cold start never auto-selects from
+        // a (now-nonexistent) open-tabs list. current stays null even when
+        // cached open ids would have pointed at open-B.
         val earliest = Session(id = "earliest", directory = "/x")
         val openA = Session(id = "open-A", directory = "/x")
         val openB = Session(id = "open-B", directory = "/x")
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(earliest, openA, openB))
         store.mutateSessionList {
-            it.copy(openSessionIds = listOf("open-A", "open-B"), hasCompletedInitialLoad = false)
+            it.copy(hasCompletedInitialLoad = false)
         }
         var selected: String? = null
 
         launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
         advanceUntilIdle()
 
-        assertEquals("restore last open tab, not earliest", "open-B", selected)
+        assertNull("B4: no open-tab restore — current stays null", selected)
+        assertNull(slices.chat.value.currentSessionId)
     }
 
     @Test
-    fun `fix-close-all-no-first - open-tab restore skips archived open ids`() = runTest {
+    fun `fix-close-all-no-first - no auto-select even with archived sessions (B4)`() = runTest {
+        // §B4 / §10: open-tabs-list removed. Even when the refreshed list mixes
+        // archived + live sessions, cold start never auto-selects. current stays null.
         val archivedOpen = Session(id = "archived-open", directory = "/x", time = Session.TimeInfo(archived = 1L))
         val liveOpen = Session(id = "live-open", directory = "/x")
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(archivedOpen, liveOpen))
         store.mutateSessionList {
             it.copy(
-                openSessionIds = listOf("live-open", "archived-open"),
-                hasCompletedInitialLoad = false,
-            )
+                
+                hasCompletedInitialLoad = false)
         }
         var selected: String? = null
 
         launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
         advanceUntilIdle()
 
-        assertEquals("must select live open tab, not archived", "live-open", selected)
+        assertNull("B4: no auto-select from open-tabs-list (removed)", selected)
+        assertNull(slices.chat.value.currentSessionId)
     }
 
     @Test
@@ -422,7 +404,7 @@ class SessionListActionsTest {
         val liveElsewhere = Session(id = "live-elsewhere", directory = "/x")
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(archivedA, archivedC, liveElsewhere))
         store.mutateSessionList {
-            it.copy(openSessionIds = listOf("archived-A", "archived-C"), hasCompletedInitialLoad = false)
+            it.copy(hasCompletedInitialLoad = false)
         }
         var selected: String? = null
 
@@ -438,7 +420,6 @@ class SessionListActionsTest {
         val sessions = listOf(Session(id = "first", directory = "/x"))
         coEvery { repository.getSessions(any()) } returns Result.success(sessions)
         store.mutateComposer { it.copy(draftWorkdir = "/somewhere") }
-        store.mutateSessionList { it.copy(openSessionIds = listOf("first")) }
         var selected: String? = null
 
         launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
@@ -456,7 +437,7 @@ class SessionListActionsTest {
         // Simulate "initial load already happened" (the normal pre-condition
         // before the user can close tabs): the flag is true, currentSessionId
         // is null (user just closed the last tab), no draft.
-        store.mutateSessionList { it.copy(hasCompletedInitialLoad = true, openSessionIds = emptyList()) }
+        store.mutateSessionList { it.copy(hasCompletedInitialLoad = true) }
         var selected: String? = null
 
         launchLoadSessions(scope, repository, slices, settingsManager, { selected = it }, {}, {}, emit)
@@ -473,11 +454,10 @@ class SessionListActionsTest {
         // for the real suspend window; this keeps the empty-list gate pinned.
         val sessions = listOf(
             Session(id = "earliest", directory = "/x"),
-            Session(id = "later", directory = "/x"),
-        )
+            Session(id = "later", directory = "/x"))
         coEvery { repository.getSessions(any()) } returns Result.success(sessions)
         store.mutateSessionList {
-            it.copy(hasCompletedInitialLoad = false, openSessionIds = emptyList())
+            it.copy(hasCompletedInitialLoad = false)
         }
         store.mutateChat { it.copy(currentSessionId = null) }
         var selected: String? = null
@@ -487,7 +467,6 @@ class SessionListActionsTest {
 
         assertNull("close-all during cold start must NOT select earliest", selected)
         assertNull(slices.chat.value.currentSessionId)
-        assertTrue(slices.sessionList.value.openSessionIds.isEmpty())
     }
 
     @Test
@@ -495,13 +474,12 @@ class SessionListActionsTest {
         // Real race (gate 9.5): REST hangs, user empties tabs mid-flight the
         // same way closeSession leaves state, then REST completes with a
         // non-empty list headed by "earliest". Post-suspend capture of
-        // openSessionIds/currentSessionId must see empty/null and MUST NOT
+        // open-tabs-list/currentSessionId must see empty/null and MUST NOT
         // onSelectSession(earliest).
         val gate = CompletableDeferred<Unit>()
         val sessions = listOf(
             Session(id = "earliest", directory = "/x"),
-            Session(id = "later", directory = "/x"),
-        )
+            Session(id = "later", directory = "/x"))
         coEvery { repository.getSessions(any()) } coAnswers {
             gate.await()
             Result.success(sessions)
@@ -510,9 +488,7 @@ class SessionListActionsTest {
         // (same as cold start with cached tabs while first REST is out).
         store.mutateSessionList {
             it.copy(
-                hasCompletedInitialLoad = false,
-                openSessionIds = listOf("earliest", "later"),
-            )
+                hasCompletedInitialLoad = false)
         }
         store.mutateChat { it.copy(currentSessionId = "later") }
         var selected: String? = null
@@ -522,7 +498,6 @@ class SessionListActionsTest {
         advanceUntilIdle()
 
         // Simulate closeSession emptying all tabs while REST is still in flight.
-        store.mutateSessionList { it.copy(openSessionIds = emptyList()) }
         store.mutateChat {
             it.copy(currentSessionId = null, messages = emptyList(), partsByMessage = emptyMap())
         }
@@ -532,11 +507,9 @@ class SessionListActionsTest {
 
         assertNull("in-flight close-all must NOT select earliest", selected)
         assertNull(slices.chat.value.currentSessionId)
-        assertTrue(slices.sessionList.value.openSessionIds.isEmpty())
         assertTrue(
             "load still completes (flag set)",
-            slices.sessionList.value.hasCompletedInitialLoad,
-        )
+            slices.sessionList.value.hasCompletedInitialLoad)
     }
 
     @Test
@@ -546,7 +519,7 @@ class SessionListActionsTest {
         val sessions = listOf(Session(id = "first", directory = "/x"))
         coEvery { repository.getSessions(any()) } returns Result.success(sessions)
         store.mutateSessionList {
-            it.copy(hasCompletedInitialLoad = false, openSessionIds = emptyList())
+            it.copy(hasCompletedInitialLoad = false)
         }
         var selected: String? = null
 
@@ -570,8 +543,7 @@ class SessionListActionsTest {
             onSelectSession = {},
             onLoadSessionStatus = { statusLoads += 1 },
             onLoadMessages = { msgLoads += 1 },
-            emit = emit,
-        )
+            emit = emit)
         advanceUntilIdle()
 
         assertEquals(1, msgLoads)
@@ -594,9 +566,7 @@ class SessionListActionsTest {
         )
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(archived))
         store.mutateChat { it.copy(currentSessionId = "s1") }
-        store.mutateSessionList { it.copy(openSessionIds = listOf("s1")) }
         var archivedSessions: List<Session>? = null
-        var archivedOpenIds: List<String>? = null
         var msgLoads = 0
         var statusLoads = 0
 
@@ -606,14 +576,12 @@ class SessionListActionsTest {
             onLoadSessionStatus = { statusLoads += 1 },
             onLoadMessages = { msgLoads += 1 },
             emit = emit,
-            onArchivedSessionsDetected = { sessions, openIds, _, _, _ -> archivedSessions = sessions; archivedOpenIds = openIds },
-        )
+            onArchivedSessionsDetected = { sessions, _, _, _ -> archivedSessions = sessions })
         advanceUntilIdle()
 
         assertEquals("callback fired with the merged list", listOf("s1"), archivedSessions?.map { it.id })
         assertTrue("archived flag preserved in callback payload", archivedSessions?.first()?.isArchived == true)
         // FIX-A: the archived id is pruned from the new openIds.
-        assertEquals("archived id pruned from newOpenIds", emptyList<String>(), archivedOpenIds)
         // The auto-select / load path is SKIPPED when the callback fires (the
         // caller's dispatch atomically clears chat — loading messages for the
         // just-archived id would be wasteful + racy vs the reducer's clear).
@@ -628,7 +596,6 @@ class SessionListActionsTest {
         val sessions = listOf(Session(id = "s1", directory = "/x"))
         coEvery { repository.getSessions(any()) } returns Result.success(sessions)
         store.mutateChat { it.copy(currentSessionId = "s1") }
-        store.mutateSessionList { it.copy(openSessionIds = listOf("s1")) }
         var archivedInvoked = false
         var msgLoads = 0
 
@@ -638,8 +605,7 @@ class SessionListActionsTest {
             onLoadSessionStatus = {},
             onLoadMessages = { msgLoads += 1 },
             emit = emit,
-            onArchivedSessionsDetected = { _, _, _, _, _ -> archivedInvoked = true },
-        )
+            onArchivedSessionsDetected = { _, _, _, _ -> archivedInvoked = true })
         advanceUntilIdle()
 
         assertFalse("callback must NOT fire for a non-archived current session", archivedInvoked)
@@ -670,17 +636,17 @@ class SessionListActionsTest {
     @Test
     fun `FIX-A launchLoadSessions prunes ALL archived ids from openIds not just current`() = runTest {
         // The bug: the SSE archive path prunes ANY archived id from
-        // openSessionIds, but the bulk-refresh path only handled the CURRENT
+        // open-tabs-list, but the bulk-refresh path only handled the CURRENT
         // session. So if non-current OPEN tabs B and C were archived cross-
-        // device, they stayed as ghosts in openSessionIds (capped at 8) —
+        // device, they stayed as ghosts in open-tabs-list (capped at 8) —
         // silently occupying tab slots. FIX-A prunes EVERY archived id.
         val current = Session(id = "current", directory = "/x")
         val archivedB = Session(id = "B", directory = "/x", time = Session.TimeInfo(archived = 1L))
         val archivedC = Session(id = "C", directory = "/x", time = Session.TimeInfo(archived = 1L))
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(current, archivedB, archivedC))
         store.mutateChat { it.copy(currentSessionId = "current") }
-        store.mutateSessionList { it.copy(openSessionIds = listOf("current", "B", "C")) }
-        var capturedOpenIds: List<String>? = null
+        var callbackFired = false
+        var capturedSessions: List<Session>? = null
 
         launchLoadSessions(
             scope, repository, slices, settingsManager,
@@ -688,16 +654,16 @@ class SessionListActionsTest {
             onLoadSessionStatus = {},
             onLoadMessages = {},
             emit = emit,
-            onArchivedSessionsDetected = { _, openIds, _, _, _ -> capturedOpenIds = openIds },
-        )
+            onArchivedSessionsDetected = { sessions, _, _, _ ->
+                callbackFired = true
+                capturedSessions = sessions
+            })
         advanceUntilIdle()
 
-        assertNotNull("callback must fire (non-current archived open tabs detected)", capturedOpenIds)
-        assertEquals(
-            "FIX-A: ALL archived ids (B, C) pruned from openIds; current kept",
-            listOf("current"),
-            capturedOpenIds,
-        )
+        assertTrue("callback must fire when any archived session is in refresh", callbackFired)
+        assertNotNull(capturedSessions)
+        assertTrue(capturedSessions!!.any { it.id == "B" && it.isArchived })
+        assertTrue(capturedSessions!!.any { it.id == "C" && it.isArchived })
     }
 
     @Test
@@ -709,9 +675,7 @@ class SessionListActionsTest {
         val archivedTab = Session(id = "ghost-tab", directory = "/x", time = Session.TimeInfo(archived = 1L))
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(current, archivedTab))
         store.mutateChat { it.copy(currentSessionId = "current") }
-        store.mutateSessionList { it.copy(openSessionIds = listOf("current", "ghost-tab")) }
         var callbackFired = false
-        var capturedOpenIds: List<String>? = null
         var msgLoads = 0
 
         launchLoadSessions(
@@ -720,16 +684,10 @@ class SessionListActionsTest {
             onLoadSessionStatus = {},
             onLoadMessages = { msgLoads += 1 },
             emit = emit,
-            onArchivedSessionsDetected = { _, openIds, _, _, _ -> callbackFired = true; capturedOpenIds = openIds },
-        )
+            onArchivedSessionsDetected = { _, _, _, _ -> callbackFired = true })
         advanceUntilIdle()
 
-        assertTrue("callback MUST fire for non-current archived open tab", callbackFired)
-        assertEquals(
-            "ghost-tab pruned from openIds",
-            listOf("current"),
-            capturedOpenIds,
-        )
+        assertTrue("callback MUST fire when any archived session is in refresh", callbackFired)
         // The current session is NOT archived → the normal load path runs
         // (the reducer's BulkSessionsRefreshed does NOT clear chat when
         // current is not archived — launchLoadSessions still fires the
@@ -772,8 +730,7 @@ class SessionListActionsTest {
         assertEquals(
             "newer call's result must be in effect",
             listOf("fresh"),
-            slices.sessionList.value.sessions.map { it.id },
-        )
+            slices.sessionList.value.sessions.map { it.id })
 
         firstGate.complete(Unit) // stale first call completes
         advanceUntilIdle()
@@ -781,8 +738,7 @@ class SessionListActionsTest {
         assertEquals(
             "stale superseded result must be discarded",
             listOf("fresh"),
-            slices.sessionList.value.sessions.map { it.id },
-        )
+            slices.sessionList.value.sessions.map { it.id })
     }
 
     @Test
@@ -833,19 +789,16 @@ class SessionListActionsTest {
             }
         }
         store.mutateChat { it.copy(currentSessionId = "current") }
-        store.mutateSessionList { it.copy(openSessionIds = listOf("current")) }
         var archiveCallbackCount = 0
 
         launchLoadSessions(
             scope, repository, slices, settingsManager, {}, {}, {}, emit,
-            onArchivedSessionsDetected = { _, _, _, _, _ -> archiveCallbackCount += 1 },
-        )
+            onArchivedSessionsDetected = { _, _, _, _ -> archiveCallbackCount += 1 })
         advanceUntilIdle()
         // Second call (fresh, non-archived) supersedes the first
         launchLoadSessions(
             scope, repository, slices, settingsManager, {}, {}, {}, emit,
-            onArchivedSessionsDetected = { _, _, _, _, _ -> archiveCallbackCount += 1 },
-        )
+            onArchivedSessionsDetected = { _, _, _, _ -> archiveCallbackCount += 1 })
         advanceUntilIdle()
 
         assertEquals("current session NOT archived (fresh result wins)", "current", slices.chat.value.currentSessionId)
@@ -1016,8 +969,7 @@ class SessionListActionsTest {
         store.mutateSessionList {
             it.copy(
                 sessions = listOf(Session(id = "known", directory = "/x")),
-                activeSessionIds = setOf("known", "deleted"),
-            )
+                activeSessionIds = setOf("known", "deleted"))
         }
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
         coEvery { repository.getActiveSessionIds() } returns Result.failure(IllegalStateException("offline"))
@@ -1101,13 +1053,11 @@ class SessionListActionsTest {
             it.copy(
                 sessions = listOf(
                     Session(id = "stale-idle", directory = "/x"),
-                    Session(id = "keep", directory = "/x"),
-                ),
+                    Session(id = "keep", directory = "/x")),
                 sessionStatuses = mutableMapOf(
                 "stale-idle" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"),
                 "keep" to cn.vectory.ocdroid.data.model.SessionStatus(type = "retry")
-                ),
-            )
+                ))
         }
         coEvery { repository.getSessionStatus() } returns Result.success(
             mapOf("keep" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"))
@@ -1120,8 +1070,7 @@ class SessionListActionsTest {
         assertEquals(
             "successful omission is authoritative idle, not unknown",
             cn.vectory.ocdroid.data.model.SessionStatus(type = "idle"),
-            result["stale-idle"],
-        )
+            result["stale-idle"])
         assertEquals(cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"), result["keep"])
         assertEquals(2, result.size)
     }
@@ -1131,8 +1080,7 @@ class SessionListActionsTest {
         slices.mutateSessionList {
             it.copy(
                 sessions = listOf(Session(id = "known", directory = "/x")),
-                sessionStatuses = mapOf("outside" to cn.vectory.ocdroid.data.model.SessionStatus("busy")),
-            )
+                sessionStatuses = mapOf("outside" to cn.vectory.ocdroid.data.model.SessionStatus("busy")))
         }
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
 
@@ -1227,8 +1175,7 @@ class SessionListActionsTest {
         store.mutateSessionList {
             it.copy(
                 sessions = listOf(Session(id = "A", directory = "/x")),
-                sessionStatuses = mapOf("A" to busy),
-            )
+                sessionStatuses = mapOf("A" to busy))
         }
         store.mutateChat { it.copy(currentSessionId = "other") }
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
@@ -1239,12 +1186,10 @@ class SessionListActionsTest {
         assertEquals(
             "successful omission must normalize A to explicit idle",
             cn.vectory.ocdroid.data.model.SessionStatus("idle"),
-            slices.sessionList.value.sessionStatuses["A"],
-        )
+            slices.sessionList.value.sessionStatuses["A"])
         assertFalse(
             "A must NOT be marked unread by the REST backstop (sweep owns marking)",
-            slices.unread.value.unreadSessions.contains("A"),
-        )
+            slices.unread.value.unreadSessions.contains("A"))
     }
 
     @Test
@@ -1262,8 +1207,7 @@ class SessionListActionsTest {
 
         assertTrue(
             "first snapshot with empty localBefore must not batch-mark unread",
-            slices.unread.value.unreadSessions.isEmpty(),
-        )
+            slices.unread.value.unreadSessions.isEmpty())
     }
 
     @Test
@@ -1274,8 +1218,7 @@ class SessionListActionsTest {
         store.mutateSessionList {
             it.copy(
                 sessions = listOf(Session(id = "X", directory = "/x")),
-                sessionStatuses = emptyMap(),
-            )
+                sessionStatuses = emptyMap())
         }
         store.mutateChat { it.copy(currentSessionId = "other") }
         coEvery { repository.getSessionStatus() } coAnswers {
@@ -1293,8 +1236,7 @@ class SessionListActionsTest {
 
         assertFalse(
             "X turned busy in-flight must not be marked unread (G1: use localBefore, not sl)",
-            slices.unread.value.unreadSessions.contains("X"),
-        )
+            slices.unread.value.unreadSessions.contains("X"))
     }
 
     @Test
@@ -1309,14 +1251,11 @@ class SessionListActionsTest {
                 sessions = listOf(
                     Session(id = "root", directory = "/x"),
                     Session(id = "child", directory = "/x", parentId = "root"),
-                    Session(id = "cur", directory = "/x"),
-                ),
+                    Session(id = "cur", directory = "/x")),
                 sessionStatuses = mapOf(
                     "root" to busy,
                     "child" to busy,
-                    "cur" to busy,
-                ),
-            )
+                    "cur" to busy))
         }
         store.mutateChat { it.copy(currentSessionId = "cur") }
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
@@ -1425,8 +1364,7 @@ class SessionListActionsTest {
         // §gpter-blocker: stale result dropped — root NOT in completeRootIds.
         assertFalse(
             "stale child-load must NOT re-certify root after invalidation",
-            "p1" in slices.sessionList.value.completeRootIds,
-        )
+            "p1" in slices.sessionList.value.completeRootIds)
 
         // Follow-up tick re-hydrates and succeeds.
         coEvery { repository.getChildren("p1") } returns Result.success(listOf(child))
@@ -1435,8 +1373,7 @@ class SessionListActionsTest {
 
         assertTrue(
             "follow-up tick re-hydrates and certifies root",
-            "p1" in slices.sessionList.value.completeRootIds,
-        )
+            "p1" in slices.sessionList.value.completeRootIds)
     }
 
     @Test
@@ -1465,8 +1402,7 @@ class SessionListActionsTest {
             it.copy(
                 sessions = listOf(root),
                 completeRootIds = setOf("A"),
-                completenessEpoch = 5L,
-            )
+                completenessEpoch = 5L)
         }
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(root))
 
@@ -1475,8 +1411,7 @@ class SessionListActionsTest {
 
         assertTrue(
             "stale completeRootIds discarded on REST full-list replace",
-            slices.sessionList.value.completeRootIds.isEmpty(),
-        )
+            slices.sessionList.value.completeRootIds.isEmpty())
         assertEquals("epoch bumped", 6L, slices.sessionList.value.completenessEpoch)
     }
 
@@ -1490,8 +1425,7 @@ class SessionListActionsTest {
                 completenessEpoch = 3L,
                 hasMoreSessions = true,
                 isLoadingMoreSessions = false,
-                loadedSessionLimit = 10,
-            )
+                loadedSessionLimit = 10)
         }
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(root))
 
@@ -1500,8 +1434,7 @@ class SessionListActionsTest {
 
         assertTrue(
             "stale completeRootIds discarded on REST pagination catch-up",
-            slices.sessionList.value.completeRootIds.isEmpty(),
-        )
+            slices.sessionList.value.completeRootIds.isEmpty())
         assertEquals("epoch bumped", 4L, slices.sessionList.value.completenessEpoch)
     }
 
@@ -1512,8 +1445,7 @@ class SessionListActionsTest {
         val info = cn.vectory.ocdroid.data.model.QuestionInfo(
             question = "fresh",
             header = "h",
-            options = emptyList(),
-        )
+            options = emptyList())
         val existing = QuestionRequest(id = "q1", sessionId = "s1", questions = listOf(info.copy(question = "old")))
         val fetched = QuestionRequest(id = "q1", sessionId = "s1", questions = listOf(info))
         store.mutateSessionList { it.copy(pendingQuestions = listOf(existing)) }
@@ -1550,8 +1482,7 @@ class SessionListActionsTest {
         val perm = PermissionRequest(
             id = "perm1",
             sessionId = "s1",
-            permission = "once",
-        )
+            permission = "once")
         coEvery { repository.getPendingPermissions() } returns Result.success(listOf(perm))
 
         launchLoadPendingPermissions(scope, repository, slices, effects, "Tag")
@@ -1621,8 +1552,7 @@ class SessionListActionsTest {
         assertEquals(
             "SSE-folded routeToken MUST NOT be wiped by a null-token REST refresh",
             "tok-sse",
-            merged.routeToken,
-        )
+            merged.routeToken)
     }
 
     @Test
@@ -1685,8 +1615,7 @@ class SessionListActionsTest {
         val merged = slices.sessionList.value.pendingPermissions
         assertTrue(
             "REST authoritative: server-stale permission dropped (ghost cleanup), was: ${merged.map { it.id }}",
-            merged.isEmpty(),
-        )
+            merged.isEmpty())
     }
 
     @Test
@@ -1719,8 +1648,7 @@ class SessionListActionsTest {
         assertEquals(
             "race-window: SSE arrival during in-flight poll preserved",
             listOf("p-fresh"),
-            merged.map { it.id },
-        )
+            merged.map { it.id })
         assertEquals("tok-fresh", merged.single().routeToken)
     }
 
@@ -1756,8 +1684,7 @@ class SessionListActionsTest {
 
         assertTrue(
             "id known at start + absent from REST → dropped, even if SSE re-delivered during poll",
-            slices.sessionList.value.pendingPermissions.isEmpty(),
-        )
+            slices.sessionList.value.pendingPermissions.isEmpty())
     }
 
     @Test
@@ -1771,14 +1698,11 @@ class SessionListActionsTest {
             id = "p1",
             sessionId = "s1",
             permission = "edit",
-            routeToken = null,
-        )
+            routeToken = null)
         coEvery { repository.getSlimapiPermissions(any(), any()) } returns Result.success(
             cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
                 items = listOf(entry),
-                authoritativeDirectories = null,
-            ),
-        )
+                authoritativeDirectories = null))
 
         launchLoadPendingPermissions(scope, repository, slices, effects, "Tag")
         advanceUntilIdle()
@@ -1788,8 +1712,7 @@ class SessionListActionsTest {
         assertNull(slices.sessionList.value.pendingPermissions.single().routeToken)
         assertEquals(
             SlimAggregationCompleteness.COMPLETE,
-            slices.sessionList.value.permissionAggregationSignal.completeness,
-        )
+            slices.sessionList.value.permissionAggregationSignal.completeness)
     }
 
     /**
@@ -1805,8 +1728,7 @@ class SessionListActionsTest {
         val server = okhttp3.mockwebserver.MockWebServer()
         server.start()
         val realScope = kotlinx.coroutines.CoroutineScope(
-            kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob(),
-        )
+            kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
         try {
             val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
             realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
@@ -1818,15 +1740,12 @@ class SessionListActionsTest {
                 sessionId = "s-b",
                 permission = "edit",
                 directory = "/b",
-                routeToken = "rt-b",
-            )
+                routeToken = "rt-b")
             slices.mutateSessionList {
                 it.copy(
                     pendingPermissions = listOf(bSeed),
                     permissionAggregationSignal = SlimAggregationSignal(
-                        completeness = SlimAggregationCompleteness.COMPLETE,
-                    ),
-                )
+                        completeness = SlimAggregationCompleteness.COMPLETE))
             }
 
             val body = """
@@ -1848,8 +1767,7 @@ class SessionListActionsTest {
                     .setResponseCode(200)
                     .setBody(body)
                     .setHeader("Content-Type", "application/json")
-                    .setBodyDelay(400, java.util.concurrent.TimeUnit.MILLISECONDS),
-            )
+                    .setBodyDelay(400, java.util.concurrent.TimeUnit.MILLISECONDS))
 
             val recorded = mutableListOf<UiEvent>()
             val collector = realScope.launch {
@@ -1861,15 +1779,13 @@ class SessionListActionsTest {
                 repository = realRepo,
                 slices = slices,
                 effects = effects,
-                tag = "Tag",
-            )
+                tag = "Tag")
 
             val started = server.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS)
             assertNotNull("permissions request must start under A", started)
             assertTrue(
                 "path must be slim permissions: ${started!!.path}",
-                started.path!!.startsWith("/slimapi/permissions"),
-            )
+                started.path!!.startsWith("/slimapi/permissions"))
 
             // C-D3 rev-3: beginSlimReconfigure before configure (purge window).
             realRepo.beginSlimReconfigure()
@@ -1881,16 +1797,13 @@ class SessionListActionsTest {
             assertEquals(
                 "B seed must be unchanged after stale A response",
                 listOf(bSeed),
-                slices.sessionList.value.pendingPermissions,
-            )
+                slices.sessionList.value.pendingPermissions)
             assertEquals(
                 SlimAggregationCompleteness.COMPLETE,
-                slices.sessionList.value.permissionAggregationSignal.completeness,
-            )
+                slices.sessionList.value.permissionAggregationSignal.completeness)
             assertTrue(
                 "no p-a-stale write under B",
-                slices.sessionList.value.pendingPermissions.none { it.id == "p-a-stale" },
-            )
+                slices.sessionList.value.pendingPermissions.none { it.id == "p-a-stale" })
             assertTrue("no UiEvent from stale A aggregation", recorded.isEmpty())
         } finally {
             realScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()

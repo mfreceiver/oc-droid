@@ -59,8 +59,8 @@ class T4ChatUiSplitFreezeTest {
         //   - ChatOverlayHost     : the parity overlays (Todo/Context/workdir
         //                           pickers + error + TOFU dialogs) hoisted out
         //                           of the ChatScaffold tail (lines ~1411-1512)
-        //   - ChatSessionPager    : the HorizontalPager page-per-root-session
-        //                           switcher + its two ChatMessageList call sites
+        //   - ChatSessionPager    : deleted in B6 (HorizontalPager page-per-root-
+        //                           session switcher + ChatMessageList call sites)
         //   - ChatMessageList seam: already its own internal @Composable
         //                           (ChatMessageContent.kt:82-1251) — the split
         //                           carves its scroll/auto-follow/paging body
@@ -75,7 +75,7 @@ class T4ChatUiSplitFreezeTest {
         // Already-extracted (do NOT re-extract — reference contracts):
         //   - ChatRenderBlockBuilder.kt (250)  buildRenderBlocks + RenderBlock ADT
         //   - ChatMessageNavFab.kt      (105)  ChatMessageNavFab composable
-        assertTrue("ChatChrome / ChatDrawerHost / ChatOverlayHost / ChatSessionPager are the planned T4 extract targets", true)
+        assertTrue("ChatChrome / ChatDrawerHost / ChatOverlayHost are the planned T4 extract targets (ChatSessionPager was deleted in B6)", true)
         assertTrue("ChatScaffold.kt:114-1512 is the oversized shell-chrome spine", true)
         assertTrue("ChatMessageContent.kt:82-1251 is the oversized ChatMessageList body", true)
         assertTrue("ChatRenderBlockBuilder.kt + ChatMessageNavFab.kt are already extracted (reference, not re-extract)", true)

@@ -1,5 +1,5 @@
-// ChatEmptyState.kt — the empty-state placeholder shown by ChatScaffold when
-// there is no active session or the server connection is down/in-flight.
+// ChatEmptyState.kt — presentation-only placeholder for empty/loading/missing
+// connection surfaces. It never selects a detail route.
 // Pure relocation from ChatTopBar.kt; visibility stays `internal` (used by
 // ChatScaffold).
 

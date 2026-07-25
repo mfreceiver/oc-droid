@@ -9,6 +9,8 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.SSEPayload
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.ChatState
 import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.ConnectionState
@@ -79,6 +81,8 @@ class SessionSyncCoordinatorTest {
     private lateinit var settingsManager: SettingsManager
     private lateinit var scope: TestScope
     private lateinit var coordinator: SessionSyncCoordinator
+    private lateinit var stateStore: cn.vectory.ocdroid.ui.SharedStateStore
+    private lateinit var repository: OpenCodeRepository
     /** CP1 (notify Phase-0): single connection-identity store. */
     private lateinit var identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
     /**
@@ -100,8 +104,14 @@ class SessionSyncCoordinatorTest {
         appStateFixture = SeedFixture()
         // §R18 Phase 4 (P0-9): SliceFlows is built via a SharedStateStore; the
         // bundle exposes read-only StateFlow views + per-slice mutateXxx.
-        val store = cn.vectory.ocdroid.ui.SharedStateStore()
-        slices = store.slices
+        stateStore = cn.vectory.ocdroid.ui.SharedStateStore()
+        slices = stateStore.slices
+        repository = OpenCodeRepository(
+            mockk(relaxed = true),
+            mockk(relaxed = true),
+        )
+        val bundle = repository.currentClientBundle()!!
+        stateStore.dispatch(AppAction.BundlePublished(bundle.generation, bundle.endpointFp))
         settingsManager = mockk(relaxed = true)
         effects = SharedEffectBus()
         collectedEffects = mutableListOf()
@@ -116,7 +126,7 @@ class SessionSyncCoordinatorTest {
             scope, slices, settingsManager, effects,
             currentServerGroupFp = { "test-fp" },
             identityStore = identityStore,
-        )
+            repository = repository)
     }
 
     @After
@@ -207,7 +217,6 @@ class SessionSyncCoordinatorTest {
                 pendingQuestions = s.pendingQuestions,
                 childSessions = s.childSessions,
                 directorySessions = s.directorySessions,
-                openSessionIds = s.openSessionIds,
                 sessionTodos = s.sessionTodos
             )
         }
@@ -319,15 +328,13 @@ class SessionSyncCoordinatorTest {
     }
 
     @Test
-    fun `session updated archived evicts the id from openSessionIds and persists`() {
+    fun `session updated archived evicts the id from open-tabs-list and persists`() {
         // Archived-by-another-client path: the SSE frame flips the session to
-        // archived. The handler must drop it from openSessionIds (so the tab
+        // archived. The handler must drop it from open-tabs-list (so the tab
         // strip drops it) and persist the cleaned list.
         seed {
             it.copy(
-                sessions = listOf(Session(id = "session-1", directory = "/tmp/project")),
-                openSessionIds = listOf("session-1", "session-2")
-            )
+                sessions = listOf(Session(id = "session-1", directory = "/tmp/project")))
         }
 
         coordinator.handleEvent(event("session.updated") {
@@ -341,20 +348,18 @@ class SessionSyncCoordinatorTest {
         // Upsert still happened (authoritative record kept), but the tab list
         // dropped the now-archived id.
         assertTrue(slices.sessionList.value.sessions.any { it.id == "session-1" && it.isArchived })
-        assertEquals(listOf("session-2"), slices.sessionList.value.openSessionIds)
-        verify { settingsManager.openSessionIds = listOf("session-2") }
+        // §B4: open-tabs-list removed — no openSessionIds verify.
     }
 
     @Test
     fun `session updated archived clears currentSessionId and messages when it is the open session`() {
         // Cross-client archive of the currently-open session: the SSE handler
-        // must not only drop the tab (openSessionIds) but also clear
+        // must not only drop the tab (open-tabs-list) but also clear
         // currentSessionId + messages so the chat view falls back to empty,
         // aligning with the user-triggered archive path.
         seed {
             it.copy(
                 sessions = listOf(Session(id = "session-1", directory = "/tmp/project")),
-                openSessionIds = listOf("session-1"),
                 currentSessionId = "session-1",
                 messages = listOf(Message(id = "msg-1", role = "assistant")),
                 partsByMessage = mapOf("msg-1" to emptyList())
@@ -372,19 +377,16 @@ class SessionSyncCoordinatorTest {
         assertNull(slices.chat.value.currentSessionId)
         assertTrue(slices.chat.value.messages.isEmpty())
         assertTrue(slices.chat.value.partsByMessage.isEmpty())
-        assertEquals(emptyList<String>(), slices.sessionList.value.openSessionIds)
         // §R18 Phase 2-F: SettingsManager is no longer written directly here —
         // chatFlow.currentSessionId (asserted null above) is the runtime source;
         // the AppCore collector persists non-null changes only.
     }
 
     @Test
-    fun `session updated non-archived keeps openSessionIds untouched and does not persist`() {
+    fun `session updated non-archived keeps open-tabs-list untouched and does not persist`() {
         seed {
             it.copy(
-                sessions = listOf(Session(id = "session-1", directory = "/tmp/project")),
-                openSessionIds = listOf("session-1", "session-2")
-            )
+                sessions = listOf(Session(id = "session-1", directory = "/tmp/project")))
         }
 
         coordinator.handleEvent(event("session.updated") {
@@ -395,8 +397,7 @@ class SessionSyncCoordinatorTest {
             })
         })
 
-        assertEquals(listOf("session-1", "session-2"), slices.sessionList.value.openSessionIds)
-        verify(exactly = 0) { settingsManager.openSessionIds = any() }
+        // §B4: open-tabs-list removed — no openSessionIds verify.
     }
 
     // ── session.status (busy / idle) ───────────────────────────────────────
@@ -494,10 +495,8 @@ class SessionSyncCoordinatorTest {
                 currentSessionId = "CUR",
                 sessions = listOf(
                     Session(id = "A", directory = "/tmp", parentId = null),
-                    Session(id = "CUR", directory = "/tmp", parentId = null),
-                ),
-                sessionStatuses = mapOf("A" to SessionStatus(type = "busy")),
-            )
+                    Session(id = "CUR", directory = "/tmp", parentId = null)),
+                sessionStatuses = mapOf("A" to SessionStatus(type = "busy")))
         }
 
         coordinator.handleEvent(event("session.status") {
@@ -517,8 +516,7 @@ class SessionSyncCoordinatorTest {
             it.copy(
                 currentSessionId = "A",
                 sessions = listOf(Session(id = "A", directory = "/tmp", parentId = null)),
-                sessionStatuses = mapOf("A" to SessionStatus(type = "busy")),
-            )
+                sessionStatuses = mapOf("A" to SessionStatus(type = "busy")))
         }
 
         coordinator.handleEvent(event("session.status") {
@@ -537,10 +535,8 @@ class SessionSyncCoordinatorTest {
                 sessions = listOf(
                     Session(id = "CHILD", directory = "/tmp", parentId = "A"),
                     Session(id = "A", directory = "/tmp", parentId = null),
-                    Session(id = "CUR", directory = "/tmp", parentId = null),
-                ),
-                sessionStatuses = mapOf("CHILD" to SessionStatus(type = "busy")),
-            )
+                    Session(id = "CUR", directory = "/tmp", parentId = null)),
+                sessionStatuses = mapOf("CHILD" to SessionStatus(type = "busy")))
         }
 
         coordinator.handleEvent(event("session.status") {
@@ -557,8 +553,7 @@ class SessionSyncCoordinatorTest {
             it.copy(
                 currentSessionId = "CUR",
                 sessions = listOf(Session(id = "CUR", directory = "/tmp", parentId = null)),
-                sessionStatuses = mapOf("GHOST" to SessionStatus(type = "busy")),
-            )
+                sessionStatuses = mapOf("GHOST" to SessionStatus(type = "busy")))
         }
 
         coordinator.handleEvent(event("session.status") {
@@ -575,8 +570,7 @@ class SessionSyncCoordinatorTest {
             it.copy(
                 currentSessionId = "CUR",
                 sessions = listOf(Session(id = "A", directory = "/tmp", parentId = null)),
-                sessionStatuses = mapOf("A" to SessionStatus(type = "idle")),
-            )
+                sessionStatuses = mapOf("A" to SessionStatus(type = "idle")))
         }
 
         coordinator.handleEvent(event("session.status") {
@@ -723,8 +717,7 @@ class SessionSyncCoordinatorTest {
         assertEquals("m2", append.message.id)
         assertTrue(
             "parts must be empty (the new message has no parts yet)",
-            append.parts.isEmpty(),
-        )
+            append.parts.isEmpty())
     }
 
     @Test
@@ -739,8 +732,7 @@ class SessionSyncCoordinatorTest {
             it.copy(
                 messages = listOf(
                     Message(id = "m1", role = "user"),
-                    Message(id = "m2", role = "assistant"),
-                )
+                    Message(id = "m2", role = "assistant"))
             )
         }
 
@@ -759,8 +751,7 @@ class SessionSyncCoordinatorTest {
             .filterIsInstance<ControllerEffect.AppendMessageToCache>()
         assertTrue(
             "patch-existing branch must NOT emit AppendMessageToCache (got ${appends.size})",
-            appends.isEmpty(),
-        )
+            appends.isEmpty())
     }
 
     @Test
@@ -785,8 +776,7 @@ class SessionSyncCoordinatorTest {
             .filterIsInstance<ControllerEffect.AppendMessageToCache>()
         assertTrue(
             "non-current-session branch must NOT emit AppendMessageToCache (got ${appends.size})",
-            appends.isEmpty(),
-        )
+            appends.isEmpty())
     }
 
     // ── §recent-sort-by-message: bump session.time.updated on message events ──
@@ -1592,8 +1582,7 @@ class SessionSyncCoordinatorTest {
         assertEquals(
             "fan-out set must be directorySessions.keys + currentWorkdir + recent_workdirs",
             setOf("/proj-a", "/proj-b", "/current", "/recent-1", "/recent-2"),
-            queriedDirs.toSet(),
-        )
+            queriedDirs.toSet())
     }
 
     @Test
@@ -1652,10 +1641,8 @@ class SessionSyncCoordinatorTest {
             it.copy(
                 sessions = listOf(
                     Session(id = "live", directory = "/p"),
-                    Session(id = "archived", directory = "/p", time = Session.TimeInfo(archived = 1L)),
-                ),
-                directorySessions = mapOf("/p" to listOf(Session(id = "live", directory = "/p"))),
-            )
+                    Session(id = "archived", directory = "/p", time = Session.TimeInfo(archived = 1L))),
+                directorySessions = mapOf("/p" to listOf(Session(id = "live", directory = "/p"))))
         }
         every { settingsManager.currentWorkdir } returns "/p"
         every { settingsManager.getRecentWorkdirs("test-fp") } returns emptyList()
@@ -1664,8 +1651,7 @@ class SessionSyncCoordinatorTest {
             listOf(
                 QuestionRequest(id = "q-live", sessionId = "live", questions = emptyList()),
                 QuestionRequest(id = "q-archived", sessionId = "archived", questions = emptyList()),
-                QuestionRequest(id = "q-unknown", sessionId = "no-such-session", questions = emptyList()),
-            )
+                QuestionRequest(id = "q-unknown", sessionId = "no-such-session", questions = emptyList()))
         )
 
         coordinator.loadPendingQuestionsAllWorkdirs(repository)
@@ -1675,12 +1661,10 @@ class SessionSyncCoordinatorTest {
         assertTrue("live session question kept", "q-live" in ids)
         assertFalse(
             "archived session question NOT resurrected (ghost guard)",
-            "q-archived" in ids,
-        )
+            "q-archived" in ids)
         assertTrue(
             "unknown session question kept (conservative)",
-            "q-unknown" in ids,
-        )
+            "q-unknown" in ids)
     }
 
     @Test
@@ -1697,17 +1681,14 @@ class SessionSyncCoordinatorTest {
             it.copy(
                 sessions = listOf(
                     Session(id = "archived-root", directory = "/p", time = Session.TimeInfo(archived = 1L)),
-                    Session(id = "child", directory = "/p", parentId = "archived-root"),
-                ),
-            )
+                    Session(id = "child", directory = "/p", parentId = "archived-root")))
         }
         every { settingsManager.currentWorkdir } returns "/p"
         every { settingsManager.getRecentWorkdirs("test-fp") } returns emptyList()
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
         coEvery { repository.getPendingQuestions(any()) } returns Result.success(
             listOf(
-                QuestionRequest(id = "q-child", sessionId = "child", questions = emptyList()),
-            )
+                QuestionRequest(id = "q-child", sessionId = "child", questions = emptyList()))
         )
 
         coordinator.loadPendingQuestionsAllWorkdirs(repository)
@@ -1716,8 +1697,7 @@ class SessionSyncCoordinatorTest {
         val ids = slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
         assertFalse(
             "descendant of archived root question NOT resurrected (ancestor ghost guard)",
-            "q-child" in ids,
-        )
+            "q-child" in ids)
     }
 
     // ── §task7-coverage: session.error event handler ────────────────────────
@@ -1766,8 +1746,7 @@ class SessionSyncCoordinatorTest {
         seed {
             it.copy(messages = listOf(
                 Message(id = "m-user", role = "user"),
-                Message(id = "m-bot", role = "assistant"),
-            ))
+                Message(id = "m-bot", role = "assistant")))
         }
 
         coordinator.handleEvent(event("session.error") {
@@ -1808,8 +1787,7 @@ class SessionSyncCoordinatorTest {
         setCurrentSession("s1")
         seed {
             it.copy(messages = listOf(
-                Message(id = "m-bot", role = "assistant", error = Message.MessageError(name = "old", data = null)),
-            ))
+                Message(id = "m-bot", role = "assistant", error = Message.MessageError(name = "old", data = null))))
         }
 
         coordinator.handleEvent(event("session.error") {
@@ -1851,8 +1829,7 @@ class SessionSyncCoordinatorTest {
             it.copy(
                 currentSessionId = "CUR",
                 sessions = listOf(Session(id = "A", directory = "/tmp", parentId = null)),
-                sessionStatuses = mapOf("A" to SessionStatus(type = "busy")),
-            )
+                sessionStatuses = mapOf("A" to SessionStatus(type = "busy")))
         }
 
         coordinator.handleEvent(event("session.status") {
@@ -1871,10 +1848,8 @@ class SessionSyncCoordinatorTest {
                 currentSessionId = "CUR",
                 sessions = listOf(
                     Session(id = "A", directory = "/tmp", parentId = null),
-                    Session(id = "CUR", directory = "/tmp", parentId = null),
-                ),
-                sessionStatuses = emptyMap(),
-            )
+                    Session(id = "CUR", directory = "/tmp", parentId = null)),
+                sessionStatuses = emptyMap())
         }
 
         coordinator.handleEvent(event("session.status") {
@@ -1982,8 +1957,7 @@ class SessionSyncCoordinatorTest {
         seed {
             it.copy(
                 currentSessionId = "s1",
-                sessions = listOf(Session(id = "s1", directory = "/tmp")),
-            )
+                sessions = listOf(Session(id = "s1", directory = "/tmp")))
         }
 
         coordinator.handleEvent(event("message.created") {
@@ -2135,9 +2109,7 @@ class SessionSyncCoordinatorTest {
             it.copy(
                 sessions = listOf(
                     Session(id = "s1", directory = "/tmp"),
-                    Session(id = "s2", directory = "/tmp"),
-                ),
-            )
+                    Session(id = "s2", directory = "/tmp")))
         }
 
         coordinator.handleEvent(event("message.updated") {
@@ -2272,8 +2244,7 @@ class SessionSyncCoordinatorTest {
         seed {
             it.copy(
                 messages = listOf(Message(id = "m1", role = "assistant")),
-                partsByMessage = mapOf("m1" to listOf(Part(id = "p1", messageId = "m1", sessionId = "s1", type = "tool"))),
-            )
+                partsByMessage = mapOf("m1" to listOf(Part(id = "p1", messageId = "m1", sessionId = "s1", type = "tool"))))
         }
         coordinator.handleEvent(event("message.part.delta") {
             put("sessionID", JsonPrimitive("s1"))
@@ -2426,8 +2397,7 @@ class SessionSyncCoordinatorTest {
         seed {
             it.copy(
                 currentSessionId = "s1",
-                sessions = listOf(Session(id = "s1", directory = "/tmp")),
-            )
+                sessions = listOf(Session(id = "s1", directory = "/tmp")))
         }
 
         coordinator.handleEvent(event("message.created") {
@@ -2462,12 +2432,10 @@ class SessionSyncCoordinatorTest {
     }
 
     @Test
-    fun `session updated archived when session is not in openSessionIds does not persist`() {
+    fun `session updated archived when session is not in open-tabs-list does not persist`() {
         seed {
             it.copy(
-                sessions = listOf(Session(id = "keep", directory = "/tmp")),
-                openSessionIds = listOf("keep"),
-            )
+                sessions = listOf(Session(id = "keep", directory = "/tmp")))
         }
 
         coordinator.handleEvent(event("session.updated") {
@@ -2480,7 +2448,7 @@ class SessionSyncCoordinatorTest {
             })
         })
 
-        io.mockk.verify(exactly = 0) { settingsManager.openSessionIds = any() }
+        // §B4: open-tabs-list removed — no openSessionIds verify.
     }
 
     @Test
@@ -2491,8 +2459,7 @@ class SessionSyncCoordinatorTest {
                 messages = listOf(Message(id = "m1", role = "assistant")),
                 partsByMessage = mapOf("m1" to listOf(
                     Part(id = "p1", messageId = "m1", sessionId = "s1", type = "text")
-                )),
-            )
+                )))
         }
 
         coordinator.handleEvent(event("message.part.updated") {
@@ -2582,8 +2549,7 @@ class SessionSyncCoordinatorTest {
         assertEquals(
             "SSC overlay hostGeneration must match the effect's epoch",
             newEpoch,
-            snap.hostGeneration,
-        )
+            snap.hostGeneration)
         assertFalse("connectedOnce reset by HostReconfigured", snap.connectedOnce)
         assertTrue("sessionsDirty cleared", snap.sessionsDirty.isEmpty())
         assertNull("lastDisconnectAt cleared", snap.lastDisconnectAt)

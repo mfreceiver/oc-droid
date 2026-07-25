@@ -310,7 +310,7 @@ class OpenCodeRepositoryWrapperTest {
         )
         server.enqueue(jsonResponse(json.encodeToString(session)))
 
-        val result = repository.updateSessionArchived("session-1", archived = 0)
+        val result = repository.updateSessionArchived("session-1", 0L)
 
         assertTrue(result.isSuccess)
         // isArchived = (time.archived ?: 0) > 0 → false for 0
@@ -325,7 +325,7 @@ class OpenCodeRepositoryWrapperTest {
     fun `updateSessionArchived surfaces HTTP failure`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(400))
 
-        val result = repository.updateSessionArchived("session-1", archived = 1234)
+        val result = repository.updateSessionArchived("session-1", 1L)
 
         assertTrue(result.isFailure)
     }

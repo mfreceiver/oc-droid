@@ -69,6 +69,12 @@ abstract class StreamingModule {
 
     @Binds
     @Singleton
+    abstract fun bindBundleEndpointResolver(
+        impl: DefaultEffectiveConnectionConfigResolver,
+    ): BundleEndpointResolver
+
+    @Binds
+    @Singleton
     abstract fun bindDegradedBootstrapTerminator(
         impl: cn.vectory.ocdroid.service.AndroidDegradedBootstrapTerminator,
     ): cn.vectory.ocdroid.service.DegradedBootstrapTerminator

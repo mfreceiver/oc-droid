@@ -37,19 +37,10 @@ internal fun reduceScrollConsumed(state: StoreState, action: AppAction.ScrollCon
     }
 }
 
-internal fun reduceParentCheckpointStored(state: StoreState, action: AppAction.ParentCheckpointStored): StoreState = state.copy(
-    // §Wave5b-Q13: append the (childId → checkpoint) entry. Preserves any
-    // other entries (a user can be deep in child-of-child-of-child
-    // navigation; each openSubAgent stores its own parent's checkpoint).
-    chat = state.chat.copy(
-        parentReturnCheckpoints = state.chat.parentReturnCheckpoints + (action.childId to action.checkpoint),
-    ),
-)
-
-internal fun reduceParentCheckpointConsumed(state: StoreState, action: AppAction.ParentCheckpointConsumed): StoreState = state.copy(
-    // §Wave5b-Q13: remove only the matching childId key. No-op if absent
-    // (double-consume / cleared by a host purge between store + consume).
-    chat = state.chat.copy(
-        parentReturnCheckpoints = state.chat.parentReturnCheckpoints - action.childId,
-    ),
-)
+// §chat-list-detail §11 / G6 (B5): the legacy per-child checkpoint
+// store/consume reducers are REMOVED. The ChatState per-child checkpoint
+// map is gone; checkpoints now live on per-route-entry SavedStateHandle
+// (see [checkpointKeyForChild] / [consumeAnySubAgentCheckpoint]). The
+// single-slot [PendingScrollRequest] above is the sole scroll-intent
+// channel — the parent entry's ChatScaffold LaunchedEffect dispatches
+// [AppAction.ScrollRequested] when it consumes a checkpoint from its handle.

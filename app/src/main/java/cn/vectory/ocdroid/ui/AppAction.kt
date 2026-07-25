@@ -8,6 +8,11 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.ui.chat.ExpandPartsOutcome
 
+internal data class BundleStamp(
+    val generation: Long,
+    val endpointFp: String,
+)
+
 /**
  * §A5-3 Phase B2: a pure-data sealed hierarchy describing the cross-slice
  * state transitions the app performs atomically. Each variant replaces a
@@ -44,44 +49,39 @@ import cn.vectory.ocdroid.ui.chat.ExpandPartsOutcome
 internal sealed interface AppAction {
     /**
      * materializeDraftSession success path: a freshly-created [session] is
-     * wired into sessionList (upsert + openSessionIds), chat.currentSessionId
-     * is set, the new session is dropped from unread + its lastViewedTime is
-     * bumped to [viewedAt], and composer.draftWorkdir is cleared.
+     * wired into sessionList (upsert), chat.currentSessionId is set, the new
+     * session is dropped from unread + its lastViewedTime is bumped to
+     * [viewedAt], and composer.draftWorkdir is cleared.
      *
-     * Carries exactly the data the reducer needs:
-     *  - [session]: the Session returned by `repository.createSession` (the
-     *    reducer upserts it into sessionList.sessions).
-     *  - [openSessionIds]: the NEW full open-tabs list (caller computes
-     *    `(settingsManager.openSessionIds.filterNot { it == session.id }
-     *    + session.id).takeLast(8)` — the new tab joins from the RIGHT;
-     *    the reducer just stores it — persistence is the caller's job).
-     *  - [viewedAt]: `System.currentTimeMillis()` captured at the call site
-     *    (the reducer writes both `unread.lastViewedTime` and the independent
-     *    pending-create registration timestamp from this same clock value).
+     * §B4: no open-tabs-list — list-detail has no tab strip; navigation to
+     * the new session is the caller's job (navigateToChat / switchTo).
+     *
+     * Carries:
+     *  - [session]: Session from `repository.createSession` (upserted).
+     *  - [viewedAt]: wall-clock for lastViewedTime + pending-create stamp.
      */
     data class DraftSessionMaterialized(
         val session: Session,
-        val openSessionIds: List<String>,
         val viewedAt: Long,
     ) : AppAction
 
     /**
      * session.updated archived SSE branch (cross-client archive): upsert the
-     * archived [session] + replace openSessionIds (applyArchiveEviction), and
-     * IFF the archived [session].id IS the currently-open chat session, clear
+     * archived [session] via applyArchiveEviction, and IFF the archived
+     * [session].id IS the currently-open chat session, clear
      * chat.currentSessionId + messages + partsByMessage (applyArchivedChatClear).
      * The "clear chat" decision is derived inside [reduce] from the snapshot
      * (NOT carried as a boolean) so the action stays pure data.
      *
+     * §B4: no open-tabs-list — route-driven pop is the caller's job when the
+     * archived id matches the active chat/{id} route.
+     *
      * Carries:
      *  - [session]: the archived Session (full record — the reducer upserts it
      *    so the authoritative copy reflects the archived flag).
-     *  - [openSessionIds]: the NEW open-tabs list with this id filtered out
-     *    (caller computes + persists; reducer just stores it).
      */
     data class SessionArchived(
         val session: Session,
-        val openSessionIds: List<String>,
     ) : AppAction
 
     /**
@@ -94,11 +94,12 @@ internal sealed interface AppAction {
      * settings.availableCommands / connection.serverVersion) is ALWAYS reset.
      *
      * What is NOT here (oracle): the SettingsManager writes
-     * (`clearRecentWorkdirs` / `currentWorkdir` / `openSessionIds` /
-     * `sessionCache`) and the effect-bus emissions (`EvictGroup` /
-     * `ForceReconnect` / `HostProfileSwitched`) stay at the call site — they
-     * are side-effects, not state. The reducer only touches SharedStateStore
-     * slices.
+     * (`clearRecentWorkdirs` / `currentWorkdir` / `sessionCache`) and the
+     * effect-bus emissions (`EvictGroup` / `ForceReconnect` /
+     * `HostProfileSwitched`) stay at the call site — they are side-effects,
+     * not state. The reducer only touches SharedStateStore slices.
+     * §B4: open-tabs-list no longer exists; host switch forces popToSessions
+     * at the call site.
      *
      * The reducer PRESERVES the three ChatState-only fields documented at
      * HostProfileController.kt:475-479 (isCompacting, compactStartedAt,
@@ -133,10 +134,14 @@ internal sealed interface AppAction {
      *
      * Issued by [cn.vectory.ocdroid.ui.controller.SessionSwitcher.switchTo]
      * inside the SAME mutateChat that flips currentSessionId (Latest for the
-     * default arg, Restore(checkpoint) for returnToParent), AND by
+     * default arg), by
      * [cn.vectory.ocdroid.ui.controller.SessionSwitcher.requestLatestScroll]
      * for the same-session "snap to latest on send / Chat-tab reselect" path
-     * (which deliberately bypasses switchTo's same-session no-op guard).
+     * (which deliberately bypasses switchTo's same-session no-op guard), AND
+     * by [cn.vectory.ocdroid.ui.ChatViewModel.requestScrollRestore] when the
+     * parent route entry's ChatScaffold LaunchedEffect consumes a sub-agent
+     * checkpoint from its SavedStateHandle (§chat-list-detail §11 / G6 B5 —
+     * the parent re-entry path, behavior=Restore).
      *
      * Single-slice / single-field write. Kept as a dispatched [AppAction]
      * (rather than a raw `mutateChat`) per the WT2 plan lineage so the intent
@@ -165,55 +170,32 @@ internal sealed interface AppAction {
         val requestId: Long,
     ) : AppAction
 
-    /**
-     * §Wave5b-Q13: store the parent's [ScrollCheckpoint] under the child id
-     * key. Issued by [cn.vectory.ocdroid.ui.SessionViewModel.openSubAgent]
-     * BEFORE the inner selectSession(childId) so the entry is on file by the
-     * time currentSessionId flips. Single-field write
-     * (`chat.parentReturnCheckpoints + (childId to checkpoint)`).
-     */
-    data class ParentCheckpointStored(
-        val childId: String,
-        val checkpoint: ScrollCheckpoint,
-    ) : AppAction
-
-    /**
-     * §Wave5b-Q13: remove the [childId] entry from
-     * `chat.parentReturnCheckpoints`. Issued by
-     * [cn.vectory.ocdroid.ui.SessionViewModel.returnToParent] in the SAME
-     * sequence as the inner `switchTo(parentId, Restore(checkpoint))` so the
-     * entry is cleaned even if the user re-opens the child later (no stale
-     * checkpoint leak). The reducer removes only the matching key (no-op if
-     * absent — defensive against a double-consume).
-     */
-    data class ParentCheckpointConsumed(
-        val childId: String,
-    ) : AppAction
+    // §chat-list-detail §11 / G6 (B5): the legacy per-child checkpoint
+    // stored/consumed actions are REMOVED. Checkpoints now live on the
+    // parent route entry's SavedStateHandle (keyed by childId via
+    // [cn.vectory.ocdroid.ui.checkpointKeyForChild]); the consume side is
+    // [cn.vectory.ocdroid.ui.consumeAnySubAgentCheckpoint]. The
+    // [PendingScrollRequest] slot above remains the single scroll-intent
+    // channel; the parent entry's ChatScaffold LaunchedEffect dispatches
+    // [ScrollRequested] with behavior=Restore when it consumes a checkpoint.
 
     /**
      * FIX-A/C (archive-sync, review-blocker): atomic bulk-refresh commit.
-     * Replaces the torn two-step (`mutateSessionList` then
-     * `onCurrentSessionArchived` → separate dispatch) with a SINGLE dispatch
-     * that writes the merged session list AND prunes [openSessionIds] of EVERY
-     * archived id (FIX-A — not just current) AND — if the current session is
-     * among the archived — clears chat via [applyArchivedChatClear] + does
-     * unread/pending-question subtree cleanup (mirrors [SessionArchived]'s
-     * cleanup for the current session). All in one committed aggregate state
-     * so no collector ever observes the torn intermediate
-     * "sessions[current].isArchived == true AND chat.currentSessionId == current".
+     * Writes the merged session list AND — if the current session is among
+     * the archived — clears chat via [applyArchivedChatClear] + does
+     * unread/pending-question subtree cleanup (mirrors [SessionArchived]).
+     * All in one committed aggregate state so no collector ever observes the
+     * torn intermediate "sessions[current].isArchived == true AND
+     * chat.currentSessionId == current".
      *
-     * Non-current archived ids: the [openSessionIds] prune alone is sufficient
-     * (SSE parity — the SSE path's observable effect for non-current archived
-     * sessions is the openIds prune; the per-session unread/questions cleanup
-     * there is defensive and the bulk path's prune closes the ghost-tab hole).
+     * §B4: no open-tabs-list prune. Route-driven pop (when route id is
+     * archived) is the caller's job; refresh itself does not invent a new
+     * route / auto-select.
      *
      * Carries:
      *  - [sessions]: the full merged refresh result (authoritative server
      *    records plus any still-pending local-only records preserved by Q4).
-     *  - [openSessionIds]: the NEW open-tabs list with ALL archived ids pruned
-     *    (caller computes + persists; reducer just stores it).
-     *  - [hasMoreSessions]: the pagination flag (mirrors the mutateSessionList
-     *    field the non-archive path writes).
+     *  - [hasMoreSessions]: the pagination flag.
      *  - [confirmedServerIds]: ids from the raw REST response before merge;
      *    this is the only source allowed to confirm pending creates.
      *  - [sweepNow]: caller-captured wall-clock time used with
@@ -221,7 +203,6 @@ internal sealed interface AppAction {
      */
     data class BulkSessionsRefreshed(
         val sessions: List<Session>,
-        val openSessionIds: List<String>,
         val hasMoreSessions: Boolean,
         /** Ids from the raw REST response, before pending-local preservation. */
         val confirmedServerIds: Set<String>,
@@ -255,6 +236,8 @@ internal sealed interface AppAction {
         val partId: String,
         val messageId: String,
         val sessionId: String,
+        val expectedRouteInstance: Long = 0L,
+        val bundleStamp: BundleStamp,
     ) : AppAction
 
     /**
@@ -268,6 +251,7 @@ internal sealed interface AppAction {
         val partType: String,
         val messageId: String,
         val sessionId: String,
+        val expectedRouteInstance: Long = 0L,
     ) : AppAction
 
     /**
@@ -281,6 +265,7 @@ internal sealed interface AppAction {
         val partType: String,
         val messageId: String,
         val sessionId: String,
+        val expectedRouteInstance: Long = 0L,
     ) : AppAction
 
     /** T1b trailing coalesce fullText REPLACE (SSC:1421). */
@@ -292,8 +277,18 @@ internal sealed interface AppAction {
     /**
      * T1b flush buffered delta/fullText into streamingPartTexts then clear the
      * 3 coalesce entries for [partId] (SSC:1850).
+     *
+     * [expectedRouteInstance] is the §7.2 freshness token captured at flush
+     * time. The reducer also requires the live bundle stamp to match.
+     * [sessionId] is the owning session, used by
+     * the route-content CAS alongside the token.
      */
-    data class CoalesceFlushedForPart(val partId: String) : AppAction
+    data class CoalesceFlushedForPart(
+        val partId: String,
+        val expectedRouteInstance: Long = 0L,
+        val sessionId: String? = null,
+        val bundleStamp: BundleStamp,
+    ) : AppAction
 
     /**
      * T1b drop [partId]'s buffers WITHOUT flushing (SSC:1864). Overlay preserved.
@@ -306,8 +301,20 @@ internal sealed interface AppAction {
      */
     data object CoalesceBuffersCleared : AppAction
 
-    /** Clear token-stream ownership state for specified partIds. */
-    data class ClearTokenStreamState(val partIds: Set<String>) : AppAction
+    /**
+     * Clear token-stream ownership state for specified partIds.
+     *
+     * [expectedRouteInstance] is the §7.2 freshness token: the reducer accepts
+     * IFF the live incarnation and bundle stamp match.
+     * [sessionId] is the owning session, used by the route-content CAS
+     * alongside the token.
+     */
+    data class ClearTokenStreamState(
+        val partIds: Set<String>,
+        val expectedRouteInstance: Long = 0L,
+        val sessionId: String? = null,
+        val bundleStamp: BundleStamp,
+    ) : AppAction
 
     /**
      * §Stage-D1 §3.8 / §5.8: bridge from the [cn.vectory.ocdroid.data.repository.TokenStreamReducer]
@@ -331,6 +338,10 @@ internal sealed interface AppAction {
         val partId: String,
         val text: String,
         val state: StreamOwnedState,
+        val expectedRouteInstance: Long = 0L,
+        /** Session owning this asynchronous stream update, when known. */
+        val sessionId: String? = null,
+        val bundleStamp: BundleStamp,
     ) : AppAction
 
     // ── T1b: conversation-path ownership (messages + partsByMessage) ───────
@@ -340,7 +351,12 @@ internal sealed interface AppAction {
      * Reducer: [applyMessageUpdated]. Found flag for DebugLog / cache-append
      * side-effects stays at the call site (computed from prior snapshot).
      */
-    data class MessageUpdatedApplied(val message: Message) : AppAction
+    data class MessageUpdatedApplied(
+        val message: Message,
+        val expectedRouteInstance: Long = 0L,
+        /** Session owning this asynchronous SSE update, when known. */
+        val sessionId: String? = null,
+    ) : AppAction
 
     /**
      * T1b slim reconcile merge (SSC:3307 mergeSlimMessagesIntoChat).
@@ -360,6 +376,9 @@ internal sealed interface AppAction {
     data class SlimMessagesMerged(
         val items: List<MessageWithParts>,
         val authoritative: Boolean = false,
+        /** Non-zero only when the merge belongs to the active route. */
+        val expectedRouteInstance: Long = 0L,
+        val sessionId: String? = null,
     ) : AppAction
 
     /**
@@ -401,6 +420,9 @@ internal sealed interface AppAction {
         val partsByMessage: Map<String, List<Part>>,
         val olderMessagesCursor: String?,
         val hasMoreMessages: Boolean,
+        /** Non-zero only for the route-owned load-more path. */
+        val expectedRouteInstance: Long = 0L,
+        val sessionId: String? = null,
     ) : AppAction
 
     /**
@@ -411,6 +433,9 @@ internal sealed interface AppAction {
         val partsByMessage: Map<String, List<Part>>,
         val olderMessagesCursor: String?,
         val hasMoreMessages: Boolean,
+        /** Non-zero only for route-owned cache hydration. */
+        val expectedRouteInstance: Long = 0L,
+        val sessionId: String? = null,
     ) : AppAction
 
     /**
@@ -421,6 +446,8 @@ internal sealed interface AppAction {
     data class SessionSelected(
         val sessionId: String,
         val pendingScrollRequest: PendingScrollRequest,
+        /** Route token already minted by navigateToChat, when route-aware. */
+        val routeInstance: Long? = null,
     ) : AppAction
 
     /**
@@ -428,6 +455,12 @@ internal sealed interface AppAction {
      * (streaming overlay / cursor / model preserved).
      */
     data object SlimChatContentCleared : AppAction
+
+    /** Route-owned counterpart of the legacy [SlimChatContentCleared] action. */
+    data class SlimChatContentClearedForRoute(
+        val expectedRouteInstance: Long,
+        val sessionId: String,
+    ) : AppAction
 
     // ── T1b residual: bypass write sites on §2.3 target fields ─────────────
 
@@ -444,7 +477,11 @@ internal sealed interface AppAction {
      * assistant message. No-op when no assistant exists or it already has an
      * error (byte-for-byte with the pre-residual mutateChat at SSC:1706-1712).
      */
-    data class LastAssistantErrorAttached(val error: Message.MessageError) : AppAction
+    data class LastAssistantErrorAttached(
+        val error: Message.MessageError,
+        val expectedRouteInstance: Long = 0L,
+        val sessionId: String? = null,
+    ) : AppAction
 
     /**
      * T1b residual: CatchUpActions probe-page merge. 4-field set only
@@ -454,6 +491,9 @@ internal sealed interface AppAction {
     data class CatchUpMessagesMerged(
         val messages: List<Message>,
         val partsByMessage: Map<String, List<Part>>,
+        /** Non-zero only for the route-owned catch-up path. */
+        val expectedRouteInstance: Long = 0L,
+        val sessionId: String? = null,
     ) : AppAction
 
     // ── T1b writeChat-bypass: last two target-field writeChat sites ────────
@@ -479,9 +519,10 @@ internal sealed interface AppAction {
         val outcome: ExpandPartsOutcome,
         val local: List<MessageWithParts>,
         val expectedSessionId: String,
+        val expectedRouteInstance: Long = 0L,
     ) : AppAction
 
-    // ── T1c: sessionList ownership (sessions + openSessionIds + co-written fields) ─
+    // ── T1c: sessionList ownership (sessions + co-written fields) ─
 
     /**
      * T1c: simple session upsert (sessions only). Covers fork / rename / child
@@ -500,23 +541,18 @@ internal sealed interface AppAction {
         val registeredAt: Long,
     ) : AppAction
 
-    /**
-     * T1c: openSessionIds-only write (closeSession / switchTo open-tab append).
-     * Caller computes the full list; reducer just stores it.
-     */
-    data class OpenSessionIdsChanged(val openSessionIds: List<String>) : AppAction
+    // §B4: OpenTabsChanged(removed) removed with open-tabs-list (D9).
 
     /**
      * T1c: REST archive/restore of a single session id (one loop iteration of
      * launchSetSessionArchived). Map-replaces [session] into sessions /
      * directorySessions / childSessions by id; stores caller-computed
-     * [openSessionIds] / [pendingQuestions]; subtracts
-     * [activeSessionIdsToRemove] from activeSessionIds. Cross-slice
-     * mutateUnread / mutateChat / ChatCleared stay at the call site.
+     * [pendingQuestions]; subtracts [activeSessionIdsToRemove] from
+     * activeSessionIds. Cross-slice mutateUnread / mutateChat / ChatCleared
+     * stay at the call site. §B4: no open-tabs-list field.
      */
     data class SessionArchivedLocal(
         val session: Session,
-        val openSessionIds: List<String>,
         val pendingQuestions: List<QuestionRequest>,
         val activeSessionIdsToRemove: Set<String>,
     ) : AppAction
@@ -540,9 +576,9 @@ internal sealed interface AppAction {
     ) : AppAction
 
     /**
-     * T1c: launchLoadSessions NON-archive success path. 9-field sessionList
-     * copy. Distinct from [BulkSessionsRefreshed] (does NOT overwrite
-     * openSessionIds / intersect activeSessionIds / archive-subtree cleanup).
+     * T1c: launchLoadSessions NON-archive success path. sessionList copy.
+     * Distinct from [BulkSessionsRefreshed] (does NOT intersect
+     * activeSessionIds / archive-subtree cleanup).
      */
     data class SessionsRefreshedLocal(
         val sessions: List<Session>,
@@ -576,6 +612,92 @@ internal sealed interface AppAction {
         val completeRootIdsDelta: Set<String>,
         val sessionStatuses: Map<String, SessionStatus>,
     ) : AppAction
+
+    // ── §chat-list-detail §12 B0: atomic SelectConversation / CloseDetail /
+    //    DetailMissing (scaffolding — inert until B0.5/B1 wire dispatch).
+
+    /**
+     * §chat-list-detail §6 D10 / §12 B0: atomic select of session
+     * [sessionId] under route incarnation [routeInstance]. The single-
+     * dispatch replacement for the pre-refactor closeSession / switchTo
+     * scattered-commit sequence — the reducer commits the new incarnation
+     * atomically so no collector ever observes a torn "currentSessionId
+     * flipped but messages still from the prior session" intermediate.
+     *
+     * B0 scaffolding: this action EXISTS in the sealed hierarchy and the
+     * [reduce] dispatch, but NO existing flow dispatches it yet (B0.5/B1
+     * wire the call sites). [routeInstance] is the §7.2 freshness token
+     * minted by [cn.vectory.ocdroid.ui.OrchestratorViewModel.navigateToChat]
+     * at navigation time; the reducer stamps it onto
+     * [StoreState.chatRouteInstance].
+     */
+    data class SelectConversation(
+        val sessionId: String,
+        val routeInstance: Long,
+    ) : AppAction
+
+    /**
+     * §chat-list-detail §6 D10 / §12 B0: close the detail pane (return to
+     * the session list). The atomic counterpart to [SelectConversation]:
+     * the reducer tears down the active route incarnation in a single
+     * dispatch so a late content load (carrying the prior incarnation's
+     * token) is rejected by the §7.2 freshness CAS.
+     *
+     * B0 scaffolding — not yet dispatched by any flow.
+     */
+    data object CloseDetail : AppAction
+
+    /**
+     * §chat-list-detail §5 P4 / §12 B0: the requested [sessionId] is gone
+     * (deleted / archived / never existed / ill-formed). The reducer
+     * advances [StoreState.chatRouteInstance] to [routeInstance] so any
+     * in-flight load for the missing session is dropped by the freshness
+     * CAS, and (B2+) the render gate shows the Missing placeholder rather
+     * than another session's transcript.
+     *
+     * B0 scaffolding — not yet dispatched by any flow.
+     */
+    data class DetailMissing(
+        val sessionId: String,
+        val routeInstance: Long,
+    ) : AppAction
+
+    /**
+     * §chat-list-detail §7.1/§7.2 B0.5-rework: commit loaded chat content for
+     * the chat/{id} render path with the §7.2 freshness CAS. Carries the
+     * COMPLETE computed payload (enough to populate BOTH [LoadedContent] AND
+     * the flat mirror in one atomic reducer pass). The reducer accepts IFF
+     * [expectedRouteInstance] == the live [StoreState.chatRouteInstance] AND
+     * [sessionId] == [ChatState.currentSessionId] — a stale load (the A→B→A
+     * race) loses the CAS and is silently dropped (P6). On accept, the reducer
+     * commits LoadedContent + the flat fields atomically (no torn intermediate).
+     *
+     * Replaces [MessagesMerged] for the route-aware path (the load pipeline
+     * dispatches this when `expectedRouteInstance > 0`); MessagesMerged still
+     * serves the legacy bare-chat path. The token [expectedRouteInstance] is
+     * captured at load-START (in [ControllerEffect.VerifyAndHydrate]) and
+     * threaded UNCHANGED across the entire REST suspension — it guards the
+     * ENTIRE completion transaction (content commit, isLoadingMessages clear,
+     * error emission, cache write, auto-expand), not just the content CAS.
+     */
+    data class ChatContentLoaded(
+        val sessionId: String,
+        val expectedRouteInstance: Long,
+        val messages: List<Message> = emptyList(),
+        val partsByMessage: Map<String, List<Part>> = emptyMap(),
+        val streamingPartTexts: Map<String, String> = emptyMap(),
+        val streamingReasoningPart: Part? = null,
+        val olderMessagesCursor: String? = null,
+        val hasMoreMessages: Boolean = false,
+        val currentModel: Message.ModelInfo? = null,
+        val authoritative: Boolean = false,
+    ) : AppAction
+
+    /** §P11: published when ClientBundle changes — StoreState stamp update (atomic CAS). */
+    data class BundlePublished(
+        val generation: Long,
+        val endpointFp: String,
+    ) : AppAction
 }
 
 /**
@@ -592,15 +714,30 @@ internal sealed interface AppAction {
  * for the mapping + the call sites (AppCoreOrchestration.kt /
  * SessionSyncCoordinator.kt / HostProfileController.kt).
  */
-internal fun reduce(state: StoreState, action: AppAction): StoreState = when (action) {
+internal fun reduce(
+    state: StoreState,
+    action: AppAction,
+): StoreState {
+    if (!action.acceptsBundle(state)) return state
+    return when (action) {
+    is AppAction.BundlePublished -> {
+        when {
+            action.generation < state.liveBundleGeneration -> state
+            action.generation == state.liveBundleGeneration &&
+                state.liveEndpointFp.isNotEmpty() &&
+                action.endpointFp != state.liveEndpointFp -> state
+            else -> state.copy(
+                liveBundleGeneration = action.generation,
+                liveEndpointFp = action.endpointFp,
+            )
+        }
+    }
     is AppAction.DraftSessionMaterialized -> reduceDraftSessionMaterialized(state, action)
     is AppAction.SessionArchived -> reduceSessionArchived(state, action)
     is AppAction.HostStatePurged -> reduceHostStatePurged(state, action)
     is AppAction.WorkdirDraftStarted -> reduceWorkdirDraftStarted(state, action)
     is AppAction.ScrollRequested -> reduceScrollRequested(state, action)
     is AppAction.ScrollConsumed -> reduceScrollConsumed(state, action)
-    is AppAction.ParentCheckpointStored -> reduceParentCheckpointStored(state, action)
-    is AppAction.ParentCheckpointConsumed -> reduceParentCheckpointConsumed(state, action)
     is AppAction.BulkSessionsRefreshed -> reduceBulkSessionsRefreshed(state, action)
     is AppAction.PartExpansionToggled -> reducePartExpansionToggled(state, action)
     is AppAction.ExpandedPartsCleared -> reduceExpandedPartsCleared(state, action)
@@ -621,6 +758,7 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
     is AppAction.ChatWindowHydrated -> reduceChatWindowHydrated(state, action)
     is AppAction.SessionSelected -> reduceSessionSelected(state, action)
     is AppAction.SlimChatContentCleared -> reduceSlimChatContentCleared(state, action)
+    is AppAction.SlimChatContentClearedForRoute -> reduceSlimChatContentClearedForRoute(state, action)
     is AppAction.ChatCleared -> reduceChatCleared(state, action)
     is AppAction.LastAssistantErrorAttached -> reduceLastAssistantErrorAttached(state, action)
     is AppAction.CatchUpMessagesMerged -> reduceCatchUpMessagesMerged(state, action)
@@ -628,13 +766,29 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
     is AppAction.ExpandedPartsContentCommitted -> reduceExpandedPartsContentCommitted(state, action)
     is AppAction.SessionUpserted -> reduceSessionUpserted(state, action)
     is AppAction.SessionCreatedLocal -> reduceSessionCreatedLocal(state, action)
-    is AppAction.OpenSessionIdsChanged -> reduceOpenSessionIdsChanged(state, action)
     is AppAction.SessionArchivedLocal -> reduceSessionArchivedLocal(state, action)
     is AppAction.SessionDeletedLocal -> reduceSessionDeletedLocal(state, action)
     is AppAction.SessionStatusPatched -> reduceSessionStatusPatched(state, action)
     is AppAction.SessionsRefreshedLocal -> reduceSessionsRefreshedLocal(state, action)
     is AppAction.SessionsPageAppended -> reduceSessionsPageAppended(state, action)
     is AppAction.SessionTreeHydrated -> reduceSessionTreeHydrated(state, action)
+    is AppAction.SelectConversation -> reduceSelectConversation(state, action)
+    is AppAction.CloseDetail -> reduceCloseDetail(state, action)
+    is AppAction.DetailMissing -> reduceDetailMissing(state, action)
+    is AppAction.ChatContentLoaded -> reduceChatContentLoaded(state, action)
+    }
+}
+
+private fun AppAction.acceptsBundle(state: StoreState): Boolean {
+    val expected = when (this) {
+        is AppAction.PartPlaceholderEnsured -> bundleStamp
+        is AppAction.CoalesceFlushedForPart -> bundleStamp
+        is AppAction.ClearTokenStreamState -> bundleStamp
+        is AppAction.TokenStreamPartUpdated -> bundleStamp
+        else -> return true
+    }
+    return state.liveBundleGeneration == expected.generation &&
+        state.liveEndpointFp == expected.endpointFp
 }
 
 /**
@@ -658,6 +812,10 @@ internal fun reduce(state: StoreState, action: AppAction): StoreState = when (ac
  */
 internal fun ChatState.clearSessionData(): ChatState = copy(
     currentSessionId = null,
+    // §chat-list-detail §7.1 B0.5: clear the LoadedContent slot alongside
+    // the flat fields — a host-purge / draft-create must NOT leave stale
+    // content for the chat/{id} render path. Additive (new field).
+    content = null,
     messages = emptyList(),
     revertCutoffs = emptyMap(),
     partsByMessage = emptyMap(),
@@ -682,13 +840,15 @@ internal fun ChatState.clearSessionData(): ChatState = copy(
     // (or into a freshly-purged host view), defeating the pending contract.
     pendingAgent = null,
     pendingModel = null,
-    // §Wave5b-Q13: clear the unified scroll slot + the parent-return
-    // backstack (replaces the prior `pendingJumpToLatest = null` clear).
-    // The slot references a target session id that is being cleared; the
-    // backstack is per-session navigation context that has no meaning after
-    // a draft-create or cross-host purge.
+    // §Wave5b-Q13: clear the unified scroll slot (replaces the prior
+    // `pendingJumpToLatest = null` clear). The slot references a target
+    // session id that is being cleared.
+    // §chat-list-detail §11 / G6 (B5): the legacy per-child checkpoint
+    // backstack clear is GONE — checkpoints now live on per-route-entry
+    // SavedStateHandle, so a draft-create / host-purge does not need to
+    // (and CANNOT) sweep them from ChatState. The entries die with their
+    // owning route entry when it pops (host-switch / leave-to-Sessions).
     pendingScrollRequest = null,
-    parentReturnCheckpoints = emptyMap(),
     // PRESERVED (chrome, NOT per-session — kept via .copy() above):
     // isCompacting, compactStartedAt, refreshNonce.
 )

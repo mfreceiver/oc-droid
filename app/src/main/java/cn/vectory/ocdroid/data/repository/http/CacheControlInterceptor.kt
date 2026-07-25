@@ -1,10 +1,9 @@
 package cn.vectory.ocdroid.data.repository.http
 
 import cn.vectory.ocdroid.data.repository.HostConfig
+import cn.vectory.ocdroid.data.repository.HostSnapshot
 import okhttp3.Interceptor
 import okhttp3.Response
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * §16.1(b) cache-safety gate. OkHttp's cache key is `URL + method + Vary`
@@ -22,15 +21,18 @@ import javax.inject.Singleton
  * Split out of the pre-R-18 combined interceptor for testability.
  * Behavior preserved byte-for-byte.
  */
-@Singleton
-class CacheControlInterceptor @Inject constructor(
-    private val hostConfig: HostConfig,
+class CacheControlInterceptor internal constructor(
+    private val hostSnapshot: HostSnapshot,
     private val pathSanitizer: CachePathSanitizer
 ) : Interceptor {
 
+    /** Compatibility constructor: capture, never retain, the mutable holder. */
+    constructor(hostConfig: HostConfig, pathSanitizer: CachePathSanitizer) :
+        this(hostConfig.snapshot(), pathSanitizer)
+
     override fun intercept(chain: Interceptor.Chain): Response {
         val original = chain.request()
-        val cacheable = !hostConfig.hasBasicAuth &&
+        val cacheable = !hostSnapshot.hasBasicAuth &&
             original.method == "GET" &&
             pathSanitizer.cacheRelativePath(original.url.encodedPath) in HttpHeaders.CACHEABLE_PATHS
         if (!cacheable) {

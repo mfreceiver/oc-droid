@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.ui.routeChatSessionId
 import cn.vectory.ocdroid.data.model.RevertCutoff
 import cn.vectory.ocdroid.data.model.RevertCutoffState
 import cn.vectory.ocdroid.data.model.Session
@@ -50,7 +51,7 @@ internal class SessionListRefreshOrchestrator(
         emit: EventEmitter,
         expectedServerGroupFp: String? = null,
         currentServerGroupFp: (() -> String)? = null,
-        onArchivedSessionsDetected: ((mergedSessions: List<Session>, newOpenIds: List<String>, hasMoreSessions: Boolean, confirmedServerIds: Set<String>, sweepNow: Long) -> Unit)? = null,
+        onArchivedSessionsDetected: ((mergedSessions: List<Session>, hasMoreSessions: Boolean, confirmedServerIds: Set<String>, sweepNow: Long) -> Unit)? = null,
     ) {
         scope.launch {
             fun staleHostAfterSuspend(): Boolean = expectedServerGroupFp != null &&
@@ -81,22 +82,21 @@ internal class SessionListRefreshOrchestrator(
                     val currentSessionId = slices.chat.value.currentSessionId
                     val currentSessionList = slices.sessionList.value
                     val currentSessions = currentSessionList.sessions
-                    val currentOpenIds = currentSessionList.openSessionIds
-                    val isInitialColdStart = !currentSessionList.hasCompletedInitialLoad
                     val currentPendingCreateIds = currentSessionList.pendingCreateIds
                     val currentPendingCreatedAt = currentSessionList.pendingCreatedAt
+                    // §B4: open-tabs-list gone — merge only needs pendingCreateIds
+                    // for local-activity preserve (currentSessionId retained for
+                    // call-site compatibility; unused in preserve filter).
                     val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(
                         sessions,
                         currentSessions,
                         currentSessionId,
-                        currentOpenIds.toSet(),
                         pendingCreateIds = currentPendingCreateIds,
                     )
                     val newHasMore = false
                     if (staleHostAfterSuspend()) {
                         return@onSuccess
                     }
-                    if (staleHostAfterSuspend()) return@onSuccess
                     val refreshedSessions = mergedSessions
                     val sweepNow = clockMs()
                     val serverIds = sessions.mapTo(mutableSetOf()) { it.id }
@@ -110,16 +110,20 @@ internal class SessionListRefreshOrchestrator(
                         .filter { it.isArchived }
                         .map { it.id }
                         .toSet()
-                    val newOpenIds = currentOpenIds.filter { it !in archivedIds }
-                    val currentIsArchived = currentSessionId != null && currentSessionId in archivedIds
-                    val anyArchivedOpen = archivedIds.isNotEmpty() &&
-                        (currentIsArchived || currentOpenIds.any { it in archivedIds })
-                    if (anyArchivedOpen && onArchivedSessionsDetected != null) {
-                        onArchivedSessionsDetected?.invoke(mergedSessions, newOpenIds, newHasMore, serverIds, sweepNow)
+                    // §B4 / §10 REST refresh: do NOT change route / auto-select.
+                    // Check BOTH currentSessionId AND route id — a session can be
+                    // the active chat/{id} detail without currentSessionId being
+                    // set yet (nav-flip → SessionSelected window).
+                    val routeId = routeChatSessionId(slices.store.stateFlow.value.nav.lastRoute)
+                    val routeIsArchived = routeId != null && routeId in archivedIds
+                    val currentIsArchived = (currentSessionId != null && currentSessionId in archivedIds) ||
+                        routeIsArchived
+                    val anyArchived = archivedIds.isNotEmpty()
+                    if (anyArchived && onArchivedSessionsDetected != null) {
+                        onArchivedSessionsDetected?.invoke(mergedSessions, newHasMore, serverIds, sweepNow)
                         cacheWriter.persistSessionCache(
                             settingsManager = settingsManager,
                             sessions = mergedSessions,
-                            openIds = newOpenIds,
                             currentId = if (currentIsArchived) null else currentSessionId,
                             currentWorkdir = settingsManager.currentWorkdir,
                             revertCutoffs = slices.chat.value.revertCutoffs,
@@ -137,7 +141,6 @@ internal class SessionListRefreshOrchestrator(
                     cacheWriter.persistSessionCache(
                         settingsManager = settingsManager,
                         sessions = mergedSessions,
-                        openIds = newOpenIds,
                         currentId = currentSessionId,
                         currentWorkdir = settingsManager.currentWorkdir,
                         revertCutoffs = slices.chat.value.revertCutoffs,
@@ -177,24 +180,23 @@ internal class SessionListRefreshOrchestrator(
                             }
                     }
                     if (staleHostAfterSuspend()) return@onSuccess
-                    when (val decision = decideAutoSelectSession(
+                    // §B4 / §10 REST refresh: no auto-select from open-tabs-list.
+                    // Keep current if still live; clear residual current pointing
+                    // at a missing/archived session. Never invent sessions.first()
+                    // and never navigate (route is caller's job).
+                    when (val decision = decideRefreshCurrentSession(
                         currentSessionId = currentSessionId,
                         draftWorkdir = slices.composer.value.draftWorkdir,
-                        isInitialColdStart = isInitialColdStart,
-                        currentOpenIds = currentOpenIds,
                         refreshedSessions = refreshedSessions,
                     )) {
-                        is AutoSelectDecision.ClearChat,
-                        is AutoSelectDecision.ClearChatResidual -> {
+                        is RefreshCurrentDecision.ClearChat -> {
                             slices.store.dispatch(AppAction.ChatCleared)
                         }
-                        is AutoSelectDecision.SelectRestored -> {
-                            onSelectSession(decision.sessionId)
-                        }
-                        is AutoSelectDecision.KeepCurrent -> {
+                        is RefreshCurrentDecision.KeepCurrent -> {
                             onLoadSessionStatus()
                             onLoadMessages(decision.sessionId)
                         }
+                        is RefreshCurrentDecision.NoOp -> Unit
                     }
                 }
                 .onFailure { error ->
@@ -246,15 +248,12 @@ internal class SessionListRefreshOrchestrator(
                     val currentSessionId = slices.chat.value.currentSessionId
                     val currentSessionList = slices.sessionList.value
                     val currentSessions = currentSessionList.sessions
-                    val currentOpenIds = currentSessionList.openSessionIds
-                    val isInitialColdStart = !currentSessionList.hasCompletedInitialLoad
                     val currentPendingCreateIds = currentSessionList.pendingCreateIds
                     val currentPendingCreatedAt = currentSessionList.pendingCreatedAt
                     val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(
                         sessions,
                         currentSessions,
                         currentSessionId,
-                        currentOpenIds.toSet(),
                         pendingCreateIds = currentPendingCreateIds,
                     )
                     val sweepNow = clockMs()
@@ -275,25 +274,19 @@ internal class SessionListRefreshOrchestrator(
                             pendingCreatedAt = sweptPendingCreatedAt,
                         )
                     )
-                    val currentId = currentSessionId
-                    val refreshedSessions = mergedSessions
-                    when (val decision = decideAutoSelectSession(
-                        currentSessionId = currentId,
-                        draftWorkdir = slices.composer.value.draftWorkdir,
-                        isInitialColdStart = isInitialColdStart,
-                        currentOpenIds = currentOpenIds,
-                        refreshedSessions = refreshedSessions,
-                    )) {
-                        is AutoSelectDecision.ClearChat,
-                        is AutoSelectDecision.ClearChatResidual -> {
+                    // §B4: page-append never auto-selects / navigates.
+                    when (
+                        decideRefreshCurrentSession(
+                            currentSessionId = currentSessionId,
+                            draftWorkdir = slices.composer.value.draftWorkdir,
+                            refreshedSessions = mergedSessions,
+                        )
+                    ) {
+                        is RefreshCurrentDecision.ClearChat -> {
                             slices.store.dispatch(AppAction.ChatCleared)
                         }
-                        is AutoSelectDecision.SelectRestored -> {
-                            onSelectSession(decision.sessionId)
-                        }
-                        is AutoSelectDecision.KeepCurrent -> {
-                            Unit
-                        }
+                        is RefreshCurrentDecision.KeepCurrent,
+                        is RefreshCurrentDecision.NoOp -> Unit
                     }
                 }
                 .onFailure { error ->
@@ -354,46 +347,50 @@ internal class SessionListRefreshOrchestrator(
     }
 
     /**
-     * Decision helper for auto-select logic. Returns a sealed outcome describing
-     * which auto-select policy branch to follow. The caller maps each outcome to
-     * the appropriate action.
+     * §B4 / §10 REST refresh: decide whether the live [currentSessionId] still
+     * belongs on the detail pane after a sessions refresh. Never invents
+     * sessions.first(); never restores from open-tabs-list (removed). Draft
+     * gate prevents hijacking mid-composition.
      *
-     * Never invents [sessions.first()]; restore-only from openSessionIds on cold
-     * start. The draftWorkdir gate prevents hijacking the draft UI.
+     * - KeepCurrent: id still live (non-archived) in refreshed list, OR id is
+     *   temporarily absent (not yet propagated / not archived) → reload status/
+     *   messages. §9.3: an in-session refresh must not clobber a valid current
+     *   unless it is confirmed archived.
+     * - ClearChat: residual current points at a CONFIRMED archived session (and
+     *   no draft), OR no sessions at all with no current (empty state).
+     * - NoOp: null current with non-empty session list and no draft — leave chat
+     *   alone (e.g. mid-draft or a refresh that returned sessions but no current
+     *   was ever set).
      */
-    private fun decideAutoSelectSession(
+    private fun decideRefreshCurrentSession(
         currentSessionId: String?,
         draftWorkdir: String?,
-        isInitialColdStart: Boolean,
-        currentOpenIds: List<String>,
         refreshedSessions: List<Session>,
-    ): AutoSelectDecision {
-        return when {
-            currentSessionId == null && draftWorkdir == null && currentOpenIds.isEmpty() ->
-                AutoSelectDecision.ClearChat
-            currentSessionId == null && draftWorkdir == null && isInitialColdStart && currentOpenIds.isNotEmpty() -> {
-                val liveById = refreshedSessions
-                    .filter { !it.isArchived }
-                    .associateBy { it.id }
-                val candidateId = currentOpenIds.asReversed()
-                    .firstOrNull { it in liveById }
-                if (candidateId != null) AutoSelectDecision.SelectRestored(candidateId)
-                else AutoSelectDecision.ClearChat
+    ): RefreshCurrentDecision {
+        if (currentSessionId == null) {
+            // No current session. If the refresh returned no sessions at all,
+            // clear any residual chat (empty state). Otherwise leave chat alone.
+            return if (refreshedSessions.isEmpty()) {
+                RefreshCurrentDecision.ClearChat
+            } else {
+                RefreshCurrentDecision.NoOp
             }
-            currentSessionId == null && draftWorkdir == null ->
-                AutoSelectDecision.ClearChatResidual
-            currentSessionId != null ->
-                AutoSelectDecision.KeepCurrent(currentSessionId)
-            else ->
-                AutoSelectDecision.ClearChatResidual
+        }
+        if (draftWorkdir != null) return RefreshCurrentDecision.NoOp
+        val archived = refreshedSessions.firstOrNull { it.id == currentSessionId && it.isArchived }
+        return if (archived != null) {
+            RefreshCurrentDecision.ClearChat
+        } else {
+            // Session is either live in the list, or temporarily absent (not yet
+            // propagated). In both cases keep current + reload messages (§9.3).
+            RefreshCurrentDecision.KeepCurrent(currentSessionId)
         }
     }
 
-    private sealed class AutoSelectDecision {
-        data object ClearChat : AutoSelectDecision()
-        data class SelectRestored(val sessionId: String) : AutoSelectDecision()
-        data class KeepCurrent(val sessionId: String) : AutoSelectDecision()
-        data object ClearChatResidual : AutoSelectDecision()
+    private sealed class RefreshCurrentDecision {
+        data object ClearChat : RefreshCurrentDecision()
+        data class KeepCurrent(val sessionId: String) : RefreshCurrentDecision()
+        data object NoOp : RefreshCurrentDecision()
     }
 }
 
@@ -406,13 +403,12 @@ internal class SessionMetadataCacheWriter {
     internal fun persistSessionCache(
         settingsManager: SettingsManager,
         sessions: List<Session>,
-        openIds: List<String>,
-        currentId: String?,
-        currentWorkdir: String?,
+        currentId: String? = null,
+        currentWorkdir: String? = null,
         revertCutoffs: Map<String, RevertCutoff>,
     ) {
-        // §Q4-strict-sync: openIds / currentId / currentWorkdir retained in the
-        // signature for call-site stability; the filter is now ALL root sessions.
+        // §B4: openIds removed. currentId / currentWorkdir retained for
+        // call-site stability; the filter is ALL root non-archived sessions.
         val cache = sessions
             .asSequence()
             .filter { s -> s.parentId == null && !s.isArchived }

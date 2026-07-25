@@ -338,8 +338,8 @@ class SessionSwitcher(
      *     调度，禁 switchTo 同步发"). Removing the synchronous LoadMessages
      *     avoids a double-load race with the handler's verify-and-then-load.
      *  8. Update unread state machine (clear target's unread badge +
-     *     record lastViewedTime) + discard draft + openSessionIds append +
-     *     persistSessionCache.
+     *     record lastViewedTime) + discard draft + persistSessionCache.
+     *     (§B4: open-tabs-list append removed — list-detail has no tab strip.)
      *
      * **Step 3 timing caveat**: VerifyAndHydrate needs targetSession.time.created,
      * which Step 4 looks up. We resolve targetSession BEFORE emitting the effect
@@ -360,7 +360,53 @@ class SessionSwitcher(
         // reselect paths use [requestLatestScroll] (which BYPASSES this guard)
         // instead of switchTo — those paths need a fresh Latest intent on an
         // already-current session.
+        //
+        // §chat-list-detail B0.5-rework: the route-aware path uses
+        // [openForRoute] (which deliberately bypasses this guard — the §7.2
+        // route-instance token is the freshness contract, not session identity).
         if (slices.chat.value.currentSessionId == sessionId) return
+        performSwitch(sessionId, behavior, expectedRouteInstance = 0L)
+    }
+
+    /**
+     * §chat-list-detail §8.2/§7.2 B0.5-rework: the route-aware open. DISTINCT
+     * from [switchTo] — deliberately bypasses the same-session no-op guard
+     * (route-driven navigation ALWAYS re-enters, even for the same session;
+     * the §7.2 route-instance token is the freshness contract). Carries the
+     * [expectedRouteInstance] minted by [cn.vectory.ocdroid.ui.OrchestratorViewModel.navigateToChat]
+     * into [ControllerEffect.VerifyAndHydrate] so the load pipeline can CAS-
+     * guard the ENTIRE completion transaction (§7.2 A→B→A stale-load defense).
+     *
+     * Does the SAME session housekeeping as [switchTo] (draft save/restore,
+     * unread state, session upsert, child/status effects) — the shared body
+     * is [performSwitch]. The ONLY differences from switchTo:
+     *  (a) no same-session guard (the token is the freshness contract);
+     *  (b) the VerifyAndHydrate effect carries expectedRouteInstance > 0,
+     *      which routes the load pipeline to ChatContentLoaded (route-aware)
+     *      instead of MessagesMerged (legacy).
+     */
+    fun openForRoute(
+        sessionId: String,
+        expectedRouteInstance: Long,
+        behavior: ScrollBehavior = ScrollBehavior.Latest,
+    ) {
+        performSwitch(sessionId, behavior, expectedRouteInstance)
+    }
+
+    /**
+     * The shared session-switch body — 8 steps (see [switchTo]'s doc for the
+     * step list). Extracted so [switchTo] (legacy, same-session guard) and
+     * [openForRoute] (route-aware, no guard) share the IDENTICAL housekeeping.
+     *
+     * [expectedRouteInstance] `0L` = legacy path (switchTo) → VerifyAndHydrate
+     * routes to MessagesMerged. `> 0L` = route-aware (openForRoute) →
+     * VerifyAndHydrate routes to ChatContentLoaded with the CAS token.
+     */
+    private fun performSwitch(
+        sessionId: String,
+        behavior: ScrollBehavior,
+        expectedRouteInstance: Long,
+    ) {
         // ── Step 1: Capture outgoing session state ──────────────────────────
         // Capture the previously-selected session BEFORE overwriting
         // currentSessionId. Used below for the per-session message-cache
@@ -431,6 +477,7 @@ class SessionSwitcher(
                     targetSessionId = sessionId,
                     behavior = behavior,
                 ),
+                routeInstance = expectedRouteInstance.takeIf { it > 0L },
             )
         )
         // Restore the selected session's draft into the composer slice.
@@ -479,7 +526,12 @@ class SessionSwitcher(
             ControllerEffect.VerifyAndHydrate(
                 serverGroupFp = currentServerGroupFp(),
                 sessionId = sessionId,
-                createdAt = targetSession?.time?.created
+                createdAt = targetSession?.time?.created,
+                // §chat-list-detail §7.2 B0.5-rework: thread the route-instance
+                // token into the load pipeline. 0L = legacy (switchTo) →
+                // MessagesMerged. > 0L = route-aware (openForRoute) →
+                // ChatContentLoaded with CAS guard.
+                expectedRouteInstance = expectedRouteInstance,
             )
         )
 
@@ -532,7 +584,10 @@ class SessionSwitcher(
         effects.tryEmitEffect(ControllerEffect.LoadSessionStatus)
         effects.tryEmitEffect(ControllerEffect.LoadChildSessions(sessionId))
 
-        // ── Step 8: Unread state machine + draft discard + openSessionIds ───
+        // ── Step 8: Unread state machine + draft discard ────────────────────
+        // §B4: open-tabs-list append removed (list-detail; route is sole open
+        // identity). Still persist session metadata so titles/workdir seed
+        // survives restart.
         val now = clock()
         val sessionMap = allSessionsById(
             slices.sessionList.value.sessions,
@@ -550,30 +605,12 @@ class SessionSwitcher(
         // Selecting a real session discards any in-progress draft.
         slices.mutateComposer { it.copy(draftWorkdir = null) }
 
-        // Browser-tab semantics: append only when NOT already in the list
-        // (new tabs join from the RIGHT). Skip sub-agents (parentId != null)
-        // — transient navigations.
-        // §final-review F5: the `sessionId !in openSessionIds` guard is an
-        // INTENTIONAL product decision — re-selecting an already-open session
-        // does NOT reorder it to the rightmost. The spec formula
-        // `(filterNot + append).takeLast(8)` implied a reorder-on-reselect,
-        // but the current behavior (no reorder) matches browser-tab intuition
-        // (clicking an open tab doesn't move it) and is covered by the
-        // `switchTo does NOT append already-open session` test. Do NOT
-        // "fix" this to reorder without an explicit product decision.
-        if (targetSession?.parentId == null && sessionId !in slices.sessionList.value.openSessionIds) {
-            val updated = (slices.sessionList.value.openSessionIds + sessionId).takeLast(8)
-            settingsManager.openSessionIds = updated
-            // T1c: OpenSessionIdsChanged owns openSessionIds-only write.
-            store.dispatch(AppAction.OpenSessionIdsChanged(updated))
-            // Fix #5: persist the newly-opened session's metadata into
-            // sessionCache so its tab survives a restart.
+        if (targetSession?.parentId == null) {
             val sourceSessions = (slices.sessionList.value.sessions + slices.sessionList.value.directorySessions.values.flatten())
                 .distinctBy { it.id }
             persistSessionCache(
                 settingsManager = settingsManager,
                 sessions = sourceSessions,
-                openIds = updated,
                 currentId = slices.chat.value.currentSessionId,
                 currentWorkdir = settingsManager.currentWorkdir,
                 revertCutoffs = slices.chat.value.revertCutoffs,
@@ -584,8 +621,8 @@ class SessionSwitcher(
     companion object {
         /**
          * §Per-session message cache capacity: max number of session windows
-         * kept in memory. ~12 covers the typical "open tabs" working set
-         * (openSessionIds is capped at 8) plus a few recently-evicted tabs.
+         * kept in memory. ~12 covers a typical multi-session working set
+         * (list-detail no longer caps open tabs; cache is LRU-only).
          */
         internal const val SESSION_WINDOW_CACHE_CAPACITY = 12
     }

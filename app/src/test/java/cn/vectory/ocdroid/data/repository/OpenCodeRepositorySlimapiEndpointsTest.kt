@@ -3104,7 +3104,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
             repository.getSlimSessionState("sid")?.localAppliedUpdatedAt,
         )
 
-        // ── First call: page 1 (success + cursor), page 2 (HTTP 500 →
+        // ── First call: page 1 (success + cursor), page 2 (socket disconnect →
         //    IOException → Partial). Assert: Result.failure (Partial) AND
         //    localAppliedUpdatedAt STILL null (partial did NOT advance).
         server.enqueue(
@@ -3113,8 +3113,20 @@ class OpenCodeRepositorySlimapiEndpointsTest {
                 .setHeader("Content-Type", "application/json")
                 .setHeader("X-Next-Cursor", "cursor-page-2"),
         )
-        // 500 → getSlimapiMessagesPage throws IOException → drain Partial.
-        server.enqueue(MockResponse().setResponseCode(500).setBody("upstream boom"))
+        // Socket disconnect → getSlimapiMessagesPage throws IOException →
+        // drain Partial while the token remains current.
+        server.enqueue(
+            MockResponse().setSocketPolicy(
+                okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST,
+            ),
+        )
+        // Page 2 absorber: restClient has retryOnConnectionFailure(true) (GET
+        // contract). OkHttp auto-retries the DISCONNECT_AFTER_REQUEST failure
+        // exactly once. This 3rd response absorbs that retry so it does NOT
+        // steal the second call's clean response from the MockResponse queue.
+        server.enqueue(
+            MockResponse().setResponseCode(500),
+        )
 
         val firstResult = repository.fetchSlimInitialWindowBounded("sid", token = token())
 
@@ -3143,10 +3155,12 @@ class OpenCodeRepositorySlimapiEndpointsTest {
             stateAfterPartial?.localAppliedMessageId == null,
         )
 
-        // Take the first 2 requests so the second call's request is
-        // distinguishable (page 1 + page 2 of the failed walk).
+        // Take the first 3 requests: page 1 + page 2 original (DISCONNECT)
+        // + page 2 auto-retry (absorbed by 500). Draining all 3 prevents
+        // the retry's request from being confused with the second call.
         server.takeRequest() // page 1
-        server.takeRequest() // page 2 (failed)
+        server.takeRequest() // page 2 (original — DISCONNECT_AFTER_REQUEST)
+        server.takeRequest() // page 2 (auto-retry absorber)
 
         // ── Second call: with localAppliedUpdatedAt STILL null, the
         //    coordinator-side reconcile would re-enter the cursor drain
@@ -3205,7 +3219,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
     // ── C-D3 v2 real-incarnation discriminators ────────────────────────────
 
     /**
-     * C-D3 v2 §4.1: real repository + MockWebServer. Request starts under
+     * T3.3-C3/C7 REST merge: real repository + MockWebServer. Request starts under
      * tokenA → configure rotates marker mid-flight → delayed response
      * completes → Result.failure(StaleSlimCommitException) and B state is
      * empty (no watermark from A's payload).
@@ -3213,7 +3227,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
      * Does NOT mock captureSlimCommitToken / isSlimCommitTokenCurrent.
      */
     @Test
-    fun `CD3-v2 mid-flight configure rejects getSlimapiMessagesSince stale token`() = runBlocking {
+    fun `T3-3-C3 C7 mid-flight configure rejects stale REST merge`() = runBlocking {
         val body = json.encodeToString(listOf(skeleton("m-stale", 999L)))
         server.enqueue(
             MockResponse()

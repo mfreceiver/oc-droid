@@ -43,7 +43,12 @@ internal fun applySavedSettings(
         username = currentProfile.basicAuth?.username,
         password = password,
         hostPort = hostPortFromUrl(currentProfile.serverUrl),
-        clientCert = clientCert
+        clientCert = clientCert,
+        // §sse-self-cancel T1.2 / Fix②: slim provenance — propagate
+        // currentProfile.slim at cold start so HostConfig.slim routes correctly
+        // from boot (was defaulting to false, leaving a slim-profile host routed
+        // as legacy until a later profile-select reconfigure fixed it).
+        slim = currentProfile.slim,
     )
     // #12 / §2.5(c) (gpter#4): 冷启动也要把 mTLS 信任策略同步给 image client，
     // 否则冷启图片无客户端证书 / 不信私有 CA（与 REST/SSE 对称）。
@@ -74,61 +79,22 @@ internal fun applySavedSettings(
     val cachedEntries = settingsManager.sessionCache
     val restoredSessions = cachedEntries.map { entry -> entry.toSession() }
     val restoredRevertCutoffs = restoreRevertCutoffs(cachedEntries)
-    // Archived-session filtering: a cached entry may carry timeArchived if the
-    // user archived it last run (or another client did, surfaced via SSE
-    // session.updated before the process died). Without this filter the tab
-    // strip would render an archived tab and the chat could restore onto an
-    // archived session. Drop any openSessionId whose cached session is
-    // archived, persist the cleaned list back via the existing setter, and
-    // clear currentSessionId if it points at an archived session.
+    // §B4 / §10 cold start: route is always Sessions (NavState default);
+    // do NOT restore currentSessionId into the detail pane. Seed session
+    // list + workdir + revert cutoffs from cache only. Any persisted
+    // currentSessionId is wiped so a stale id cannot re-open chat body.
+    // Legacy open-tabs-list ESP key is ignored (§16 one-way drop).
     val archivedIds = restoredSessions.filter { it.isArchived }.map { it.id }.toSet()
-    val persistedOpenSessionIds = settingsManager.openSessionIds
-    val restoredOpenSessionIds = persistedOpenSessionIds.filterNot { it in archivedIds }
-    if (restoredOpenSessionIds != persistedOpenSessionIds) {
-        settingsManager.openSessionIds = restoredOpenSessionIds
-    }
     val persistedCurrentSessionId = settingsManager.currentSessionId
-    val restoredCurrentSessionIdRaw = persistedCurrentSessionId?.let { cid ->
-        if (cid in archivedIds) null else cid
-    }
-    // §fix-orphan-upgrade (cold-start invariant): a non-null currentSessionId
-    // is only valid when openSessionIds is non-empty. Pre-fix builds could
-    // leave `currentSessionId=<stale>` with `openSessionIds=[]` on disk after
-    // close-all (open cleared, persisted current not always wiped). Restoring
-    // both raw values produced orphan-current: chat body rendered messages
-    // while SessionTabStrip early-returned on empty open ids (no tab bar).
-    // Cold-start has no reliable session tree for descendancy checks, so the
-    // minimal safe guard is: empty open tabs → force current null. (Live
-    // sub-agent navigation is unaffected — that path never goes through
-    // applySavedSettings mid-session.)
-    val restoredCurrentSessionId = if (restoredOpenSessionIds.isEmpty()) {
-        null
-    } else {
-        restoredCurrentSessionIdRaw
-    }
-    // §fix-orphan-upgrade self-heal: one-shot write of cleaned current when
-    // we null out a stale non-null persisted id. Without this, the next cold
-    // start re-reads the stale id from SettingsManager even though the in-
-    // memory slice is correct. (Normally §R18 Phase 2-F leaves SettingsManager
-    // writes to the AppCore collector; that collector only sees DISTINCT
-    // transitions and may miss a "already-null-in-memory after we force null
-    // here while disk still has stale" case if chat never held the stale id.)
-    if (restoredCurrentSessionId == null && persistedCurrentSessionId != null) {
+    if (persistedCurrentSessionId != null) {
         settingsManager.currentSessionId = null
     }
-    // §R18 Phase 2-F: SettingsManager is no longer written here for the
-    // normal non-null path — the AppCore init collector persists chatFlow
-    // currentSessionId changes. The empty-open self-heal write above is the
-    // sole exception (upgrade-data orphan). The archived-id filter
-    // (restoredCurrentSessionIdRaw == null when persisted pointed at an
-    // archived session) is re-applied on every cold start via this same read
-    // path. The chat.update below is the runtime source of truth.
-    // §R-17 batch2 step d → step e final: each domain written directly to its
-    // own slice via thread-safe MutableStateFlow.update. The AppState mirror
-    // is no longer written from here — slices are the sole authoritative
-    // store.
     slices.mutateChat {
-        it.copy(currentSessionId = restoredCurrentSessionId, revertCutoffs = restoredRevertCutoffs)
+        it.copy(
+            currentSessionId = null,
+            content = null,
+            revertCutoffs = restoredRevertCutoffs,
+        )
     }
     slices.mutateHost {
         it.copy(
@@ -136,11 +102,9 @@ internal fun applySavedSettings(
             currentHostProfileId = currentProfile.id
         )
     }
+    val liveSeed = restoredSessions.filter { it.id !in archivedIds }
     slices.mutateSessionList {
-        it.copy(
-            openSessionIds = restoredOpenSessionIds,
-            sessions = restoredSessions
-        )
+        it.copy(sessions = liveSeed)
     }
     // §R-17 M3 (RFC §4 strategy A): seed the settings slice from persisted
     // prefs. Runs synchronously alongside the slice updates above; intermediate

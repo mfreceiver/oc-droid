@@ -2,11 +2,13 @@ package cn.vectory.ocdroid.ui.controller.sse
 
 import cn.vectory.ocdroid.data.model.EpochFrame
 import cn.vectory.ocdroid.data.model.TokenStreamFrame
+import cn.vectory.ocdroid.data.repository.ClientBundle
 import cn.vectory.ocdroid.data.repository.TokenPartStreamState
 import cn.vectory.ocdroid.data.repository.TokenStreamCoordinatorEffect
 import cn.vectory.ocdroid.data.repository.TokenStreamReducer
 import cn.vectory.ocdroid.data.repository.TokenStreamReducerState
 import cn.vectory.ocdroid.ui.AppAction
+import cn.vectory.ocdroid.ui.BundleStamp
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.StreamOwnedState
 import cn.vectory.ocdroid.util.DebugLog
@@ -15,6 +17,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -94,6 +97,16 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * RFC reference: dev-plan §3.7 / §3.8 / §5.8 / §3.10 Stage-D.
  */
+/**
+ * A stream flow together with the exact immutable client bundle that created
+ * it. [bundle] is opaque at the public transport boundary, but the
+ * coordinator retains it by reference for generation/endpoint validation.
+ */
+data class TokenStreamConnection(
+    val flow: kotlinx.coroutines.flow.Flow<TokenStreamFrame>,
+    val bundle: Any?,
+)
+
 class TokenStreamCoordinator(
     private val scope: CoroutineScope,
     private val slices: SliceFlows,
@@ -152,6 +165,12 @@ class TokenStreamCoordinator(
      * lifecycle is ever created while the flag is on.
      */
     private val sseDisabled: () -> Boolean = { false },
+     /** Resolve-time stream connection, including its immutable bundle. */
+     private val streamConnectionProvider: ((String, String?) -> TokenStreamConnection)? = null,
+     /** Shared with [OpenCodeRepository.configure]'s @Synchronized monitor. */
+     private val bundleCommitLock: Any = Any(),
+     /** Published bundle identity used by all lifecycle/result guards. */
+     private val currentBundleProvider: () -> Any? = { null },
 ) {
     // ── State ───────────────────────────────────────────────────────────────
     //
@@ -165,17 +184,51 @@ class TokenStreamCoordinator(
     private val currentSid = AtomicReference<String?>(null)
     /** The directory captured for the current stream (for reconnect). */
     private val currentDirectory = AtomicReference<String?>(null)
-    /** The composite Job owning debounce + collector + watchdog for the current stream. */
-    private val currentStreamJob = AtomicReference<Job?>(null)
+    /**
+     * The single active lifecycle reference. Its [StreamLifecycle.bundle] is
+     * filled at resolve-time, after debounce, and is never sourced from an
+     * independent generation/endpoint variable.
+     */
+    private data class StreamLifecycle(
+        val job: Job,
+        val bundle: Any? = null,
+    ) {
+        val boundBundleGeneration: Long?
+            get() = (bundle as? ClientBundle)?.generation
+        val boundEndpointFp: String?
+            get() = (bundle as? ClientBundle)?.endpointFp
+    }
 
-    /** Per-sid monotonic epoch counter. Bumped at every open(sid). */
+    private val currentLifecycle = AtomicReference<StreamLifecycle?>(null)
+    /**
+     * §B4 rev-gpt round3 MAJOR: the route token captured at the most recent
+     * entry of the currently-tracked lifecycle (open / 503-retry / reconnect).
+     * Used ONLY by the [open] idempotent guard to detect same-session NEW route
+     * incarnations (navigateToChat same-session re-entry advances
+     * chatRouteInstance; the old guard's (sid, directory)-only check would skip
+     * → the prior lifecycle's stale captured token would be reused →
+     * dispatchEpochFrame would carry an outdated token → acceptsRouteUpdate
+     * would reject the new incarnation's frames).
+     *
+     * NOT used by the dispatch chain — the per-lifecycle captured token is
+     * threaded VERBATIM as a function parameter through runStream →
+     * dispatchEpochFrame (rev-gpt C2 fix, unchanged). This field is the guard's
+     * sole reader; reconnect / 503-retry re-set it so the guard recognizes the
+     * in-flight lifecycle's latest captured token.
+     */
+    private val lifecycleRouteInstance = AtomicLong(0L)
+
+    /**
+     * Per-sid monotonic epoch counter. Bumped at every open(sid) that reaches
+     * runStream.
+     */
     private val epochBySid = ConcurrentHashMap<String, AtomicLong>()
     /**
      * Per-sid generation counter (bgpt MF-3). Bumped by [beginSession]; used
      * to reject stale clears that target a partId a NEWER session/generation
      * now owns. Distinct from [epochBySid] (epoch tags inbound frames;
-     * generation tags outbound clears) — they happen to bump together at
-     * open() but serve different guards.
+     * generation tags outbound clears) — they bump together at every open/
+     * reconnect but serve different guards.
      */
     private val genBySid = ConcurrentHashMap<String, AtomicLong>()
     /** partId → the (sid, generation) that owns it. */
@@ -192,6 +245,41 @@ class TokenStreamCoordinator(
      * the stream until [resetDegraded] (called by D2's next health re-check).
      */
     private val degradedSids: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    private fun requireBundleStamp(bundle: Any?): BundleStamp? {
+        val clientBundle = bundle as? ClientBundle
+        if (clientBundle == null) {
+            DebugLog.w(TAG, "bundle-bound dispatch rejected: missing ClientBundle")
+            return null
+        }
+        return BundleStamp(clientBundle.generation, clientBundle.endpointFp)
+    }
+
+    private fun dispatchBound(action: AppAction) {
+        synchronized(bundleCommitLock) {
+            slices.store.dispatch(action)
+        }
+    }
+
+    /** Dispatches an ownership clear with a stamp captured under the bundle lock. */
+    internal fun dispatchTokenStreamClear(
+        partIds: Set<String>,
+        expectedRouteInstance: Long,
+        sessionId: String?,
+    ): Boolean {
+        synchronized(bundleCommitLock) {
+            val bundle = currentBundleProvider() as? ClientBundle ?: return false
+            dispatchBound(
+                AppAction.ClearTokenStreamState(
+                    partIds = partIds,
+                    expectedRouteInstance = expectedRouteInstance,
+                    sessionId = sessionId,
+                    bundleStamp = BundleStamp(bundle.generation, bundle.endpointFp),
+                ),
+            )
+            return true
+        }
+    }
 
     /**
      * Watchdog clock — last frame (any kind, incl. heartbeat) arrival time.
@@ -246,10 +334,10 @@ class TokenStreamCoordinator(
     // ── Public API ──────────────────────────────────────────────────────────
 
     /**
-     * Foreground opt-in connect for [sid]. Cancels any currently-open stream
-     * (max-1: opening B closes A). Applies a short debounce to coalesce
-     * rapid opens (UI taps / state-driven bursts) before actually issuing
-     * the transport connect.
+     * Foreground opt-in connect for [sid]. Supersedes any currently-open stream
+     * (max-1: opening B closes A). Applies a short debounce to coalesce rapid
+     * opens (UI taps / state-driven bursts) before actually issuing the
+     * transport connect.
      *
      * `directory` is threaded verbatim into the [streamProvider]; production
      * D2 wiring resolves it from the live workdir just before calling open().
@@ -258,9 +346,17 @@ class TokenStreamCoordinator(
      * which supersedes the prior [currentStreamJob] (whether it was an active
      * collector OR a pending reconnect-in-backoff). This is the max-1 invariant:
      * there is exactly ONE lifecycle job at any time.
+     *
+     * [source] is a diagnostic tag logged at entry so repro logcat can
+     * distinguish the driving caller.
+     *
+     * @param source diagnostic tag identifying the caller (e.g. "effect-load",
+     *   "chatvm-load"); logged at entry for root-cause attribution. Defaults to
+     *   "unknown" for backward compatibility.
      */
-    fun open(sid: String, directory: String? = null) {
+    fun open(sid: String, directory: String? = null, source: String = "unknown") {
         if (sid.isBlank()) return
+        DebugLog.i(TAG, "open($sid) source=$source")
         // §sse-disabled-debug-toggle: REST-only mode — do NOT connect the
         // per-session token stream. Gate at the coordinator ENTRY (before
         // currentSid/state mutation and before launchStreamLifecycle) so no
@@ -271,8 +367,56 @@ class TokenStreamCoordinator(
             DebugLog.i(TAG, "open($sid): sse_disabled=true → REST-only (no token stream)")
             return
         }
+        // §T1.1 Fix① + T3.2-C1 IDEMPOTENT GUARD: same (sid, directory,
+        // routeToken, published bundle reference) + active lifecycle → skip
+        // (no supersede, no provider call). This is the
+        // single-flight guard for open(): a burst of identical opens (UI taps,
+        // state-driven bursts, reconnect-backoff re-entry) absorbs into the
+        // existing lifecycle. A different sid or directory, an inactive job
+        // (cancelled / completing), a changed published bundle, OR a same-session NEW route incarnation
+        // (navigateToChat same-session re-entry → chatRouteInstance advanced)
+        // falls through to supersede. The guard and lifecycle installation are
+        // serialized by [bundleCommitLock], so configure/open cannot split this
+        // decision from the supersede operation.
+        //
+        // §B4 rev-gpt round3 MAJOR: the route token comparison is REQUIRED.
+        // navigateToChat same-session re-entry deliberately bypasses the
+        // SessionSwitcher's same-session guard (openForRoute → performSwitch →
+        // SessionSelected ALWAYS dispatches). Without the token check, this
+        // guard would skip on (sid, directory) match alone → the prior
+        // lifecycle's stale captured token would persist → token-stream frames
+        // would carry the OLD token → reducer's acceptsRouteUpdate would reject
+        // → new incarnation would receive NO real-time updates.
+        synchronized(bundleCommitLock) {
+        val currentBundle = currentBundleProvider()
+        val existingLifecycle = currentLifecycle.get()
+        val existingJob = existingLifecycle?.job
+        val currentRouteInstance = slices.routeInstanceFor(sid)
+        if (currentSid.get() == sid &&
+            currentDirectory.get() == directory &&
+            existingJob?.isActive == true &&
+            lifecycleRouteInstance.get() == currentRouteInstance && // §B4 round3 MAJOR
+            existingLifecycle?.bundle === currentBundle
+        ) {
+            // The first bundle read above is only a candidate for the guard.
+            // Re-read immediately before returning: a publication can happen
+            // between the candidate snapshot and this skip decision. If it
+            // did, fall through and bind the new lifecycle to the new bundle.
+            val revalidatedBundle = currentBundleProvider()
+            if (existingLifecycle.bundle === revalidatedBundle) {
+                DebugLog.i(TAG, "open($sid) idempotent skip — same (sid,dir,routeToken,bundle) + active lifecycle (source=$source)")
+                return
+            }
+            DebugLog.i(TAG, "open($sid) bundle changed during guard revalidation — superseding (source=$source)")
+        }
         currentSid.set(sid)
         currentDirectory.set(directory)
+        // §B4 rev-gpt round3 MAJOR: capture this lifecycle's route token for
+        // the guard. Read ONCE here (the same snapshot threaded into runStream
+        // below as capturedRouteInstance). Reconnect / 503-retry re-set this
+        // field at their entry so a same-session open() during their backoff
+        // correctly absorbs into the in-flight lifecycle.
+        lifecycleRouteInstance.set(currentRouteInstance)
         // §MF-1 (gate r2): UNCONDITIONALLY clear the sentinel. A prior sid's
         // resync(Reconnect) may have set the sentinel to a DIFFERENT sid, and
         // that sid's collect was cancelled before the post-dispatch check
@@ -282,6 +426,22 @@ class TokenStreamCoordinator(
         reconnectRequested.set(null)
         val capturedSid = sid
         val capturedDir = directory
+        // §B4 lifecycle capture: snapshot the route token BEFORE runStream so
+        // late events from this lifecycle carry the token captured at entry
+        // (rev-bgpt CRITICAL 2 — prevents a stale event from adopting a newer
+        // token via a dynamic routeInstanceFor read). Token=0 is the legacy
+        // flat-path scope (the route did not point at this sid when opened).
+        // §B4 round-2 (rev-gpt C2): the token is threaded VERBATIM through
+        // runStream → dispatchEpochFrame → bridgePartToChatState / handleEffect
+        // as a function parameter (NOT a shared AtomicLong field — a shared
+        // field would let a new lifecycle's open()/reconnect overwrite the
+        // value mid-flight, so a prior lifecycle's late frame could pick up
+        // the NEW token and bypass the §7.2 freshness CAS).
+        // §B4 rev-gpt round3 MAJOR: reuse the single routeInstanceFor read
+        // from the guard above (no suspension between → identical value under
+        // the single-threaded premise; avoids a second dynamic read that could
+        // race a route advance on a future off-main call-site).
+        val capturedRouteInstance = currentRouteInstance
         launchStreamLifecycle(capturedSid, "open") {
             if (openDebounceMs > 0L) {
                 delay(openDebounceMs)
@@ -298,7 +458,7 @@ class TokenStreamCoordinator(
             val epoch = epochBySid.computeIfAbsent(capturedSid) { AtomicLong(0L) }.incrementAndGet()
             val gen = beginSession(capturedSid)
             try {
-                runStream(capturedSid, capturedDir, epoch, gen, isReconnect = false)
+                runStream(capturedSid, capturedDir, epoch, gen, isReconnect = false, capturedRouteInstance)
             } catch (ce: CancellationException) {
                 throw ce
             } catch (e: Throwable) {
@@ -308,6 +468,7 @@ class TokenStreamCoordinator(
                 DebugLog.w(TAG, "open($capturedSid) escaped: ${e.message}")
                 onStreamFailure(capturedSid, capturedDir, e)
             }
+        }
         }
     }
 
@@ -359,7 +520,7 @@ class TokenStreamCoordinator(
     internal fun isDegraded(sid: String): Boolean = sid in degradedSids
 
     /** Test/diagnostic read: the current stream Job (or null when idle). */
-    internal fun currentStreamJobSnapshot(): Job? = currentStreamJob.get()
+    internal fun currentStreamJobSnapshot(): Job? = currentLifecycle.get()?.job
 
     /** Test/diagnostic read: the current epoch for [sid] (or 0 if none). */
     internal fun epochOf(sid: String): Long = epochBySid[sid]?.get() ?: 0L
@@ -416,8 +577,8 @@ class TokenStreamCoordinator(
 
     /**
      * Bumps the generation for [sid] and returns the new value. Called at
-     * every open(sid) (incl. reconnects) so ownership claims + clears
-     * emitted by the prior generation become stale.
+     * every open/reconnect so ownership claims + clears emitted by the prior
+     * generation become stale.
      */
     internal fun beginSession(sid: String): Long =
         genBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
@@ -474,7 +635,34 @@ class TokenStreamCoordinator(
      * Exposed internal so unit tests can drive frames with crafted epochs
      * without going through the asynchronous [streamProvider].
      */
-    internal fun dispatchEpochFrame(sid: String, epoch: Long, gen: Long, frame: TokenStreamFrame) {
+    /**
+     * Epoch-guarded entry: validates [sid]/[epoch] against the current
+     * `epochBySid[sid]` BEFORE any reduce / state mutation. Drops stale
+     * frames (the connection that delivered this frame has been torn down
+     * and re-opened under a newer epoch — late OkHttp callbacks that leaked
+     * past the transport's own `closed` guard). Then resets the watchdog,
+     * runs the pure reducer, bridges any part-text change into ChatState,
+     * and processes emitted effects.
+     *
+     * §B4 round-2 (rev-gpt C2): [capturedRouteInstance] is the route token
+     * captured at THIS lifecycle's open()/runStream() entry and threaded
+     * verbatim through the call chain. It is NOT read from a shared field —
+     * a new lifecycle's open()/reconnect could overwrite such a field mid-
+     * flight, letting a prior lifecycle's late frame adopt the new token
+     * and bypass the §7.2 freshness CAS.
+     *
+     * Exposed internal so unit tests can drive frames with crafted epochs
+     * without going through the asynchronous [streamProvider].
+     */
+    internal fun dispatchEpochFrame(
+        sid: String,
+        epoch: Long,
+        gen: Long,
+        frame: TokenStreamFrame,
+        capturedRouteInstance: Long,
+        boundBundle: Any? = null,
+    ) {
+        if (!isBundleCurrentForCommit(boundBundle)) return
         val currentEpoch = epochBySid[sid]?.get() ?: return
         if (currentEpoch != epoch) {
             DebugLog.d(
@@ -518,6 +706,7 @@ class TokenStreamCoordinator(
         // the engine stays decoupled from the UI slice in unit tests).
         val ownedBySession: Map<String, Set<String>> = mapOf(sid to ownedPartsForSid(sid))
         val (newState, effects) = TokenStreamReducer.reduce(priorState, effectiveFrame, ownedBySession)
+        if (!isBundleCurrentForCommit(boundBundle)) return
         reducerStateBySid[sid] = newState
 
         // Bridge reducer state → ChatState for any frame that touches a part
@@ -529,13 +718,18 @@ class TokenStreamCoordinator(
             is TokenStreamFrame.PartDelta -> effectiveFrame.partId
             else -> null
         }
+        // §B4 lifecycle token: use the value captured at open()/runStream()
+        // entry and threaded verbatim through the call chain (rev-gpt C2) —
+        // NOT a shared-field read (a new lifecycle's open()/reconnect could
+        // overwrite a shared field mid-flight, letting a prior lifecycle's
+        // late frame pick up the NEW token).
         if (partId != null) {
-            bridgePartToChatState(sid, gen, partId, newState)
+            bridgePartToChatState(sid, gen, partId, newState, capturedRouteInstance, boundBundle)
         }
 
         val directory = currentDirectory.get()
         for (effect in effects) {
-            handleEffect(sid, epoch, gen, directory, effect)
+            handleEffect(sid, epoch, gen, directory, effect, capturedRouteInstance, boundBundle)
         }
     }
 
@@ -549,33 +743,45 @@ class TokenStreamCoordinator(
         gen: Long,
         partId: String,
         state: TokenStreamReducerState,
+        capturedRouteInstance: Long,
+        boundBundle: Any?,
     ) {
+        if (!isBundleCurrentForCommit(boundBundle)) return
         val acc = state.parts[partId] ?: return
+        if (!isBundleCurrentForCommit(boundBundle)) return
         onPartOwned(sid, gen, partId)
+        val stamp = requireBundleStamp(boundBundle) ?: return
         // §E2 PartPlaceholderEnsured from bridge: when a NEW partId arrives that is
         // NOT yet in partsByMessage[messageId], dispatch PartPlaceholderEnsured BEFORE
         // the TokenStreamPartUpdated, so MessageCard has a stable list key.
         val msgId = acc.messageId
         if (slices.chat.value.partsByMessage[msgId]?.none { it.id == partId } != false) {
-            slices.store.dispatch(
+            if (!isBundleCurrentForCommit(boundBundle)) return
+            dispatchBound(
                 AppAction.PartPlaceholderEnsured(
                     partType = "text",
                     partId = partId,
                     messageId = msgId,
                     sessionId = sid,
-                )
+                    expectedRouteInstance = capturedRouteInstance,
+                    bundleStamp = stamp,
+                ),
             )
         }
         val owned = when (acc.state) {
             TokenPartStreamState.STREAMING -> StreamOwnedState.STREAMING
             TokenPartStreamState.DONE -> StreamOwnedState.DONE
         }
-        slices.store.dispatch(
+        if (!isBundleCurrentForCommit(boundBundle)) return
+        dispatchBound(
             AppAction.TokenStreamPartUpdated(
                 partId = partId,
                 text = acc.text,
                 state = owned,
-            )
+                sessionId = sid,
+                expectedRouteInstance = capturedRouteInstance,
+                bundleStamp = stamp,
+            ),
         )
     }
 
@@ -595,15 +801,29 @@ class TokenStreamCoordinator(
         gen: Long,
         directory: String?,
         effect: TokenStreamCoordinatorEffect,
+        capturedRouteInstance: Long,
+        boundBundle: Any?,
     ) {
+        if (!isBundleCurrentForCommit(boundBundle)) return
         when (effect) {
             is TokenStreamCoordinatorEffect.ClearPartState -> {
                 val allowed = filterClearByGeneration(sid, gen, effect.partIds)
+                if (!isBundleCurrentForCommit(boundBundle)) return
                 if (allowed.isNotEmpty()) {
-                    slices.store.dispatch(AppAction.ClearTokenStreamState(allowed))
+                    if (!isBundleCurrentForCommit(boundBundle)) return
+                    val stamp = requireBundleStamp(boundBundle) ?: return
+                    dispatchBound(
+                        AppAction.ClearTokenStreamState(
+                            allowed,
+                            expectedRouteInstance = capturedRouteInstance,
+                            sessionId = sid,
+                            bundleStamp = stamp,
+                        ),
+                    )
                 }
             }
             is TokenStreamCoordinatorEffect.TriggerSinceFetch -> {
+                if (!isBundleCurrentForCommit(boundBundle)) return
                 // S2 (Stage-C should-fix): a resync frame may arrive with
                 // sessionId == null (backpressure overflow omits it per the
                 // handoff contract). Infer from the active connection's sid.
@@ -611,6 +831,7 @@ class TokenStreamCoordinator(
                 triggerSinceFetch(resolvedSid, effect.authoritative)
             }
             is TokenStreamCoordinatorEffect.Reconnect -> {
+                if (!isBundleCurrentForCommit(boundBundle)) return
                 // §MF-1 (gate r1): do NOT call scheduleReconnect from here —
                 // handleEffect runs synchronously INSIDE `flow.collect { }`
                 // (called from dispatchEpochFrame). Calling scheduleReconnect
@@ -664,21 +885,15 @@ class TokenStreamCoordinator(
         epoch: Long,
         gen: Long,
         isReconnect: Boolean,
+        capturedRouteInstance: Long,
     ) {
         if (isReconnect && sid in degradedSids) return
-        // §MF-1 (gate r2): UNCONDITIONALLY clear the sentinel at the START of
-        // each runStream invocation (was compareAndSet(sid, null)). A prior
-        // sid's resync(Reconnect) may have left a stale sentinel under a
-        // FOREIGN sid; CAS-on-current-sid would fail. set(null) always wins.
-        // The sentinel is normally consumed inside the collect lambda's post-
-        // dispatch check (throw → catch → clear → scheduleReconnect), but a
-        // prior frame's user-callback (e.g. triggerSinceFetch) could have
-        // thrown before the check ran, leaving the sentinel stale.
-        reconnectRequested.set(null)
-        // Seed watchdog clock at open so it can fire BEFORE the first frame.
-        lastFrameAt.set(clock())
-        val flow = try {
-            streamProvider(sid, directory)
+        val connection = try {
+            streamConnectionProvider?.invoke(sid, directory)
+                ?: TokenStreamConnection(
+                    flow = streamProvider(sid, directory),
+                    bundle = currentBundleProvider(),
+                )
         } catch (e: Throwable) {
             // Provider itself threw synchronously (test fake misconfig or a
             // production TokenStreamClient constructor blow-up). Treat as a
@@ -686,6 +901,16 @@ class TokenStreamCoordinator(
             onStreamFailure(sid, directory, e)
             return
         }
+        val boundBundle = connection.bundle
+        if (!bindCurrentLifecycleBundle(boundBundle)) return
+        if (!isCurrentLifecycleBundle(boundBundle)) return
+        // §MF-1 (gate r2): clear the sentinel only after this lifecycle has
+        // proved ownership of its resolve-time bundle. A stale lifecycle must
+        // not mutate the replacement stream's reconnect state.
+        reconnectRequested.set(null)
+        // Seed watchdog clock at open so it can fire BEFORE the first frame.
+        lastFrameAt.set(clock())
+        val flow = connection.flow
 
         try {
             coroutineScope {
@@ -704,7 +929,7 @@ class TokenStreamCoordinator(
                 }
                 try {
                     flow.collect { frame ->
-                        dispatchEpochFrame(sid, epoch, gen, frame)
+                        dispatchEpochFrame(sid, epoch, gen, frame, capturedRouteInstance, boundBundle)
                         // §MF-1 (gate r1): mid-collect Reconnect sentinel. If
                         // handleEffect set the sentinel during this frame's
                         // dispatch (reducer emitted a Reconnect effect), unwind
@@ -719,7 +944,9 @@ class TokenStreamCoordinator(
                     }
                     // Flow completed normally → server closed cleanly.
                     DebugLog.i(TAG, "stream completed (server closed) sid=$sid")
-                    attemptBySid[sid]?.set(0)
+                    if (isBundleCurrentForCommit(boundBundle)) {
+                        attemptBySid[sid]?.set(0)
+                    }
                 } finally {
                     // Always cancel the watchdog when collect returns (normally
                     // OR via the scope cancellation the watchdog itself
@@ -728,7 +955,7 @@ class TokenStreamCoordinator(
                 }
             }
         } catch (e: TokenStreamWatchdogTimeout) {
-            onWatchdogTimeout(sid, epoch, gen, directory)
+            onWatchdogTimeout(sid, epoch, gen, directory, capturedRouteInstance, boundBundle)
         } catch (e: TokenStreamReconnectRequested) {
             // §MF-1 (gate r1/r2): the SINGLE re-entry point for runStream after
             // a mid-collect Reconnect effect. The old flow's EventSource was
@@ -737,11 +964,15 @@ class TokenStreamCoordinator(
             // EventSource only after the old one is gone — no overlap.
             // §gate r2: UNCONDITIONALLY clear (was compareAndSet(sid, null)).
             reconnectRequested.set(null)
-            scheduleReconnect(sid, directory)
+            if (isCurrentLifecycleBundle(boundBundle)) {
+                scheduleReconnect(sid, directory)
+            }
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: Throwable) {
-            onStreamFailure(sid, directory, e)
+            if (isCurrentLifecycleBundle(boundBundle)) {
+                onStreamFailure(sid, directory, e)
+            }
         }
     }
 
@@ -750,15 +981,41 @@ class TokenStreamCoordinator(
      * collector), clear the sid's parts (generation-guarded), trigger an
      * authoritative /since fetch (the in-flight overlay may be stale), and
      * schedule a reconnect (the link is dead).
+     *
+     * §B4 round-2 (rev-gpt C2): [capturedRouteInstance] is threaded from
+     * runStream (NOT read from a shared field) so the clear dispatch carries
+     * the token captured at THIS lifecycle's entry.
      */
-    private fun onWatchdogTimeout(sid: String, epoch: Long, gen: Long, directory: String?) {
+    private fun onWatchdogTimeout(
+        sid: String,
+        epoch: Long,
+        gen: Long,
+        directory: String?,
+        capturedRouteInstance: Long,
+        boundBundle: Any?,
+    ) {
+        if (!isBundleCurrentForCommit(boundBundle)) return
         val parts = ownedPartsForSid(sid)
         val allowed = filterClearByGeneration(sid, gen, parts)
         if (allowed.isNotEmpty()) {
-            slices.store.dispatch(AppAction.ClearTokenStreamState(allowed))
+            if (!isBundleCurrentForCommit(boundBundle)) return
+            // §B4 lifecycle token: clear uses the value threaded from
+            // runStream's entry-time capture (rev-gpt C2).
+            val stamp = requireBundleStamp(boundBundle) ?: return
+            dispatchBound(
+                AppAction.ClearTokenStreamState(
+                    allowed,
+                    expectedRouteInstance = capturedRouteInstance,
+                    sessionId = sid,
+                    bundleStamp = stamp,
+                ),
+            )
         }
+        if (!isBundleCurrentForCommit(boundBundle)) return
         triggerSinceFetch(sid, true)
-        scheduleReconnect(sid, directory)
+        if (isBundleCurrentForCommit(boundBundle)) {
+            scheduleReconnect(sid, directory)
+        }
     }
 
     /**
@@ -791,6 +1048,16 @@ class TokenStreamCoordinator(
                     // §MF-1 (gate r1): bounded Retry-After backoff via the
                     // lifecycle-tracked launch helper (NOT a bare scope.launch)
                     // so the retry is supervised under currentStreamJob.
+                    // §B4 lifecycle capture at 503-retry: snapshot the route
+                    // token NOW and thread it verbatim through runStream →
+                    // dispatchEpochFrame (rev-gpt C2 — no shared field).
+                    // §B4 rev-gpt round3 MAJOR: also publish into
+                    // lifecycleRouteInstance so the open() guard recognizes
+                    // this retry as the in-flight lifecycle (a same-session
+                    // open during the Retry-After delay absorbs instead of
+                    // superseding a perfectly-good retry).
+                    val retryRouteInstance = slices.routeInstanceFor(sid)
+                    lifecycleRouteInstance.set(retryRouteInstance)
                     launchStreamLifecycle(sid, "503-retry") {
                         delay(retryAfter503Ms)
                         if (currentSid.get() != sid) return@launchStreamLifecycle
@@ -798,7 +1065,7 @@ class TokenStreamCoordinator(
                         val epoch = epochBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
                         val gen = beginSession(sid)
                         try {
-                            runStream(sid, directory, epoch, gen, isReconnect = true)
+                            runStream(sid, directory, epoch, gen, isReconnect = true, retryRouteInstance)
                         } catch (ce: CancellationException) {
                             throw ce
                         }
@@ -832,6 +1099,20 @@ class TokenStreamCoordinator(
         val attempt = attemptBySid.computeIfAbsent(sid) { AtomicInteger(0) }.getAndIncrement()
         val backoff = nextBackoffMs(attempt)
         DebugLog.i(TAG, "scheduleReconnect sid=$sid attempt=$attempt backoff=${backoff}ms")
+        // §B4 lifecycle capture at reconnect: snapshot the route token NOW and
+        // thread it verbatim through runStream → dispatchEpochFrame (rev-gpt C2
+        // — no shared field). The reconnected stream carries the token valid
+        // at reconnect time (not the stale token from the original open, nor a
+        // dynamic read that could race with a newer lifecycle's open).
+        // §B4 rev-gpt round3 MAJOR: also publish into lifecycleRouteInstance
+        // so the open() guard recognizes this reconnect's token as the in-
+        // flight lifecycle's. If the route advanced during the backoff delay
+        // (navigateToChat same-session re-entry), the next same-session open()
+        // would otherwise supersede this reconnect — even though the reconnect
+        // is already carrying the new token verbatim. Publishing here keeps the
+        // guard in sync with the tracked lifecycle's actual capture.
+        val reconnectRouteInstance = slices.routeInstanceFor(sid)
+        lifecycleRouteInstance.set(reconnectRouteInstance)
         launchStreamLifecycle(sid, "reconnect") {
             delay(backoff)
             // Re-check after the delay: a newer open() / close() may have
@@ -842,7 +1123,7 @@ class TokenStreamCoordinator(
             val epoch = epochBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
             val gen = beginSession(sid)
             try {
-                runStream(sid, directory, epoch, gen, isReconnect = true)
+                runStream(sid, directory, epoch, gen, isReconnect = true, reconnectRouteInstance)
             } catch (ce: CancellationException) {
                 throw ce
             }
@@ -855,6 +1136,40 @@ class TokenStreamCoordinator(
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /**
+     * Binds the resolve-time bundle to the currently executing lifecycle via
+     * one CAS. A lifecycle superseded while its provider is resolving cannot
+     * publish its bundle into the replacement lifecycle.
+     */
+    private suspend fun bindCurrentLifecycleBundle(bundle: Any?): Boolean {
+        val currentJob = currentCoroutineContext()[Job] ?: return false
+        while (true) {
+            val current = currentLifecycle.get() ?: return false
+            if (current.job !== currentJob) return false
+            if (current.bundle === bundle) return isCurrentLifecycleBundle(bundle)
+            val bound = current.copy(bundle = bundle)
+            if (currentLifecycle.compareAndSet(current, bound)) {
+                return isCurrentLifecycleBundle(bundle)
+            }
+        }
+    }
+
+    /**
+     * Validates both lifecycle ownership and exact published-bundle identity.
+     * Generation/endpoint values are derived from [StreamLifecycle.bundle]
+     * (see its computed properties), never from a second mutable counter.
+     */
+    private suspend fun isCurrentLifecycleBundle(bundle: Any?): Boolean {
+        val currentJob = currentCoroutineContext()[Job] ?: return false
+        val lifecycle = currentLifecycle.get() ?: return false
+        return lifecycle.job === currentJob &&
+            lifecycle.bundle === bundle &&
+            bundle === currentBundleProvider()
+    }
+
+    private fun isBundleCurrentForCommit(bundle: Any?): Boolean =
+        bundle === currentBundleProvider()
 
     /**
      * §MF-1 (gate r1): the SINGLE launch point for every stream lifecycle job
@@ -888,23 +1203,33 @@ class TokenStreamCoordinator(
      * Cancelled. The INNER job is the sole tracked lifecycle job.
      */
     private fun launchStreamLifecycle(sid: String, reason: String, block: suspend () -> Unit): Job {
+        synchronized(bundleCommitLock) {
         val job = scope.launch(start = CoroutineStart.LAZY) { block() }
         // Set currentStreamJob + cancel the prior BEFORE starting the body,
         // so a nested launchStreamLifecycle inside the body sees the correct
         // prior (this job) and supersedes IT, not the stale pre-outer value.
-        val prior = currentStreamJob.getAndSet(job)
-        prior?.cancel(CancellationException("superseded by $reason sid=$sid"))
+        val publishedBundle = currentBundleProvider()
+        val prior = currentLifecycle.getAndSet(StreamLifecycle(job, publishedBundle))
+        // §sse-self-cancel T1.3: 冒烟枪 (smoking gun) — priorActive==true means a
+        // supersede just cancelled an ACTIVE collector (the self-cancel-loop
+        // fingerprint). Combined with open()'s entry `source=` tag this pinpoints
+        // the driving caller (digest storm / dual-entry). On repro logcat a run of
+        // `priorActive=true reason=open source=effect-load` confirms the root cause.
+        DebugLog.i(TAG, "supersede prior sid=$sid priorActive=${prior?.job?.isActive} reason=$reason")
+        prior?.job?.cancel(CancellationException("superseded by $reason sid=$sid"))
         // Now start the body. With an unconfined dispatcher this runs inline
-        // until the first suspension (delay / collect).
+        // until the first suspension (delay / collect). The lifecycle slot was
+        // installed and the prior job cancelled under bundleCommitLock.
         job.start()
         return job
+        }
     }
 
     private fun cancelCurrentStream(reason: String) {
         // Cancel the in-flight stream job but KEEP the reference: a subsequent
         // isActive read (e.g. a test or D2 lifecycle probe) observes the
         // cancelled state. The next open() overwrites this slot atomically.
-        currentStreamJob.get()?.cancel(CancellationException(reason))
+        currentLifecycle.get()?.job?.cancel(CancellationException(reason))
     }
 
     companion object {

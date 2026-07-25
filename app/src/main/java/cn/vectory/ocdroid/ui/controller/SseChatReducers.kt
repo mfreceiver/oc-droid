@@ -23,26 +23,31 @@ import cn.vectory.ocdroid.ui.reasoningPartOrNull
  * one: drop currentSessionId + messages + partsByMessage so the chat view
  * falls back to the empty state. Pure; effects empty.
  *
- * FIX-B (review-blocker, groker B3): also clears the unified scroll slot +
- * parent-return backstack (added by WT2 / §Wave5b-Q13). The clearSessionData
- * path already clears them, but this archive-clear path was missed → a
- * pending scroll intent / checkpoint could stick if the session was archived
- * between the intent being set and consumed. Now the slot + backstack are
- * wiped atomically with the rest of the chat clear (one committed state, no
- * torn "session archived but scroll intent still references it").
+ * FIX-B (review-blocker, groker B3): also clears the unified scroll slot
+ * (added by WT2 / §Wave5b-Q13). The clearSessionData path already clears it,
+ * but this archive-clear path was missed → a pending scroll intent could
+ * stick if the session was archived between the intent being set and
+ * consumed. Now the slot is wiped atomically with the rest of the chat clear
+ * (one committed state, no torn "session archived but scroll intent still
+ * references it").
+ *
+ * §chat-list-detail §11 / G6 (B5): the legacy per-child checkpoint
+ * backstack clear is GONE — checkpoints now live on per-route-entry
+ * SavedStateHandle, so an archive cannot leave a stale checkpoint in
+ * ChatState. If the archived session had a parent entry with a stored
+ * checkpoint, that entry's pop (B4 §10 transition) auto-cleans the handle.
  */
 internal fun ChatState.applyArchivedChatClear(): Pair<ChatState, List<SseSideEffect>> = copy(
     currentSessionId = null,
+    content = null,
     messages = emptyList(),
     partsByMessage = emptyMap(),
     // §slimapi-client-v1 §G6 (Task 16 round-2): clear per-part expand states
     // on archived-chat clear. Matches the partsByMessage clear above.
     partExpandStates = emptyMap(),
-    // FIX-B / §Wave5b-Q13: clear the unified scroll slot + parent-return
-    // backstack — a pending scroll / checkpoint for an archived session is
-    // meaningless.
+    // FIX-B / §Wave5b-Q13: clear the unified scroll slot — a pending scroll
+    // for an archived session is meaningless.
     pendingScrollRequest = null,
-    parentReturnCheckpoints = emptyMap(),
 ) to emptyList()
 
 /**
@@ -59,20 +64,20 @@ internal fun ChatState.applyArchivedChatClear(): Pair<ChatState, List<SseSideEff
  *    fire correctly; the consumer would skip it on the next switch anyway,
  *    but leaving it risks a stale fire if the user re-opens the same id
  *    later via a fresh create).
- *  - [ChatState.parentReturnCheckpoints] → filter out every entry whose key
- *    (childId) is in [subtree]. A returnToParent from an archived child is
- *    unreachable (the user cannot navigate to an archived session), but the
- *    stale entry would otherwise leak indefinitely in the map.
+ *
+ * §chat-list-detail §11 / G6 (B5): the per-child checkpoint filter is GONE
+ * — checkpoints now live on per-route-entry SavedStateHandle. An archived
+ * subtree's parent entry (if any) pops via the §10 transition, auto-cleaning
+ * its handle. ChatState has no checkpoint map to filter.
  *
  * Pure; effects empty. Callers MUST already have computed [subtree] via
  * [subtreeIds] (the SAME three-source union used for unread/questions
  * cleanup) — no second subtree walk here.
  *
- * Idempotent: safe to call when the slot is already null / the map already
- * has no entries in [subtree] (the operations are no-ops in that case).
- * Safe to compose with [applyArchivedChatClear] for the current-archived
- * case: applyArchivedChatClear wipes BOTH fields unconditionally, so a
- * subsequent call to this helper is a no-op.
+ * Idempotent: safe to call when the slot is already null (the operations are
+ * no-ops in that case). Safe to compose with [applyArchivedChatClear] for the
+ * current-archived case: applyArchivedChatClear wipes the slot
+ * unconditionally, so a subsequent call to this helper is a no-op.
  */
 internal fun ChatState.cleanScrollStateForSubtree(
     subtree: Set<String>,
@@ -80,20 +85,14 @@ internal fun ChatState.cleanScrollStateForSubtree(
     if (subtree.isEmpty()) return this
     val cleanSlot = pendingScrollRequest
         ?.takeUnless { it.targetSessionId in subtree }
-    val cleanCheckpoints = if (parentReturnCheckpoints.isEmpty()) {
-        parentReturnCheckpoints
-    } else {
-        parentReturnCheckpoints.filterKeys { it !in subtree }
-    }
-    // Skip the .copy() allocation entirely if neither field would change
+    // Skip the .copy() allocation entirely if the slot would not change
     // (hot path: archive of an unrelated subtree on a chat with no scroll
     // state — common during bulk refreshes).
-    if (cleanSlot === pendingScrollRequest && cleanCheckpoints === parentReturnCheckpoints) {
+    if (cleanSlot === pendingScrollRequest) {
         return this
     }
     return copy(
         pendingScrollRequest = cleanSlot,
-        parentReturnCheckpoints = cleanCheckpoints,
     )
 }
 

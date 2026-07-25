@@ -1,10 +1,9 @@
 package cn.vectory.ocdroid.data.repository.http
 
 import cn.vectory.ocdroid.data.repository.HostConfig
+import cn.vectory.ocdroid.data.repository.HostSnapshot
 import okhttp3.Interceptor
 import okhttp3.Response
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * R8 slim-mode foundation / B2 Opt-A: oc-slimapi capability 选入头注入器。
@@ -31,16 +30,18 @@ import javax.inject.Singleton
  *
  * @see docs/specs/slim-mode-api-routing.md（能力/版本协商契约）+ SlimapiContract
  */
-@Singleton
-class SlimapiCapabilitiesInterceptor @Inject constructor(
-    private val hostConfig: HostConfig
+class SlimapiCapabilitiesInterceptor internal constructor(
+    private val hostSnapshot: HostSnapshot
 ) : Interceptor {
+
+    /** Compatibility constructor: capture, never retain, the mutable holder. */
+    constructor(hostConfig: HostConfig) : this(hostConfig.snapshot())
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val original = chain.request()
         // 双门闩：profile 必须 slim=true AND 路径必须 /slimapi/ 前缀。
         // 任意一者不满足 → 原样透传（legacy opencode 不识别该头）。
-        if (!hostConfig.slim) return chain.proceed(original)
+        if (!hostSnapshot.slimHost) return chain.proceed(original)
         if (!original.url.encodedPath.startsWith(SlimapiContract.SLIMAPI_PATH_PREFIX)) {
             return chain.proceed(original)
         }

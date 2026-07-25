@@ -19,6 +19,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -37,8 +41,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.snapshots.SnapshotStateMap
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
@@ -53,6 +55,7 @@ import cn.vectory.ocdroid.data.model.isEffectivelyRenderableEmpty
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
+import cn.vectory.ocdroid.ui.LoadedContent
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.NavRoute
@@ -96,7 +99,6 @@ internal fun ChatMessageList(
     orchestratorVM: OrchestratorViewModel,
     onFileClick: (String) -> Unit,
     onOpenChanges: (String) -> Unit = {},
-    onTabVisibilityChange: (Boolean) -> Unit = {},
     // §3-scroll-memory: hoisted per-session scroll-position cache + its
     // access-order LRU ledger. Lifted out of this composable (previously
     // local `remember{}` blocks) so the HorizontalPager page slot disposing
@@ -115,7 +117,8 @@ internal fun ChatMessageList(
     //   (b) HorizontalPager swipe + SessionTabStrip tap for ROOT sessions in
     //       the pager page set (stable pager `key = session.id` keeps each
     //       page's SaveableStateHolder slot — and thus its saveable
-    //       LazyListState — alive across page-slot reuse).
+    //       LazyListState — alive across page-slot reuse). §B6: both pager
+    //       and tab strip deleted; this comment kept as historical context.
     //   (c) Chat→file-preview→back re-entry with the SAME sessionId (the
     //       Chat NavBackStackEntry's SaveableStateHolder restores the prior
     //       viewport).
@@ -152,6 +155,24 @@ internal fun ChatMessageList(
      * message/stream events, not keystrokes.
      */
     isCurrentSessionSending: Boolean = false,
+    /** Route-aware payload. When present, transcript data comes only from it. */
+    routeSessionId: String? = null,
+    routeContent: LoadedContent? = null,
+    /**
+     * §chat-list-detail §11 / G6 (B5): the post-capture callback for opening
+     * a sub-agent. ChatMessageList's local `onOpenSubAgent` lambda captures
+     * the live [LazyListState] viewport synchronously (oracle ruling — the
+     * async mirror cannot be trusted), builds a [ScrollCheckpoint], then
+     * delegates to this callback. The callback (owned by ChatScaffold) writes
+     * the checkpoint to the parent route entry's SavedStateHandle and triggers
+     * route-aware navigation to the child.
+     *
+     * The split keeps the synchronous capture local (the listState lives
+     * here) while the per-entry storage + navigation wiring lives at the
+     * ChatScaffold level (where SavedStateHandle + orchestratorVM are
+     * available).
+     */
+    onOpenSubAgentNavigate: (childSessionId: String, checkpoint: cn.vectory.ocdroid.ui.ScrollCheckpoint) -> Unit = { _, _ -> },
 ) {
     // §R-17 Stage 2: subscribe to chatFlow + sessionListFlow directly so SSE
     // streaming deltas (streamingPartTexts mutation) only recompose this list,
@@ -174,8 +195,10 @@ internal fun ChatMessageList(
     // visibleMessages is a cross-slice derived value: the revert message id
     // lives on the Session (sessionListFlow) but the messages list lives on
     // chatFlow. Recompute only when either input changes (remember key).
-    val currentSession = sessionListState.sessions.find { it.id == chatState.currentSessionId }
-    val currentCutoff = chatState.currentSessionId?.let(chatState.revertCutoffs::get)
+    val effectiveSessionId = routeSessionId ?: chatState.currentSessionId
+    val currentSession = (sessionListState.sessions + sessionListState.directorySessions.values.flatten() + sessionListState.childSessions.values.flatten())
+        .firstOrNull { it.id == effectiveSessionId }
+    val currentCutoff = effectiveSessionId?.let(chatState.revertCutoffs::get)
     val revertMessageId = if (currentSession != null) currentSession.revert?.messageId else currentCutoff?.messageId
     LaunchedEffect(chatState.currentSessionId, revertMessageId, currentSession?.revert?.messageId) {
         // Start one bounded resolve for a newly-needed cutoff. Failed is terminal
@@ -184,17 +207,24 @@ internal fun ChatMessageList(
             chatVM.retryRevertCutoff()
         }
     }
-    val messages: List<Message> = remember(chatState.messages, revertMessageId, currentCutoff) {
-        val reverted = chatState.messages.filterBeforeRevert(revertMessageId, currentCutoff)
+    // A parameterized route has one transcript authority.  Do not use Elvis
+    // fallbacks here: nullable route-owned fields (reasoning part and cursor)
+    // must be allowed to be null without resurrecting stale flat values.
+    val loadedMessages = if (routeContent != null) routeContent.messages else chatState.messages
+    val messages: List<Message> = remember(loadedMessages, revertMessageId, currentCutoff) {
+        val reverted = loadedMessages.filterBeforeRevert(revertMessageId, currentCutoff)
         // §s3-markers: keep user/assistant turns + the synthetic metadata
         // marker roles, then interleave markers wherever agent/model
         // changed between consecutive turns.
         val visible = reverted.filter { !it.isToolRole || it.role in METADATA_MARKER_ROLES }
         injectMetadataMarkers(visible)
     }
-    val partsByMessage: Map<String, List<Part>> = chatState.partsByMessage
-    val streamingPartTexts: Map<String, String> = chatState.streamingPartTexts
-    val streamingReasoningPart: Part? = chatState.streamingReasoningPart
+    val partsByMessage: Map<String, List<Part>> =
+        if (routeContent != null) routeContent.partsByMessage else chatState.partsByMessage
+    val streamingPartTexts: Map<String, String> =
+        if (routeContent != null) routeContent.streamingPartTexts else chatState.streamingPartTexts
+    val streamingReasoningPart: Part? =
+        if (routeContent != null) routeContent.streamingReasoningPart else chatState.streamingReasoningPart
     // §ui-stream A1: hoist the chat-wide "is any text streaming" boolean OUT
     // of the itemsIndexed row content lambda. The canEditAndRerun destructive
     // gate (in the Conversation branch below) previously read
@@ -226,7 +256,7 @@ internal fun ChatMessageList(
     // which is empty exactly then (the user-input-echo part is filtered by the
     // §user-part-guard in SessionSyncCoordinator, so it no longer leaks into
     // the overlay to fake-keep the row). See ChatMessageList filter §flicker-fix-D.
-    val sessionIsRunning = chatState.currentSessionId?.let { id ->
+    val sessionIsRunning = effectiveSessionId?.let { id ->
         sessionListState.sessionStatuses[id]?.let { it.isBusy || it.isRetry }
     } == true
     // §1C: derived once for the canEditAndRerun gate inside the message
@@ -234,13 +264,15 @@ internal fun ChatMessageList(
     // through currentSessionStatus() (which is the same value but
     // allocated per-message) and keeps the per-row gate logic
     // explicit.
-    val currentSessionStatus = chatState.currentSessionId?.let { sid ->
+    val currentSessionStatus = effectiveSessionId?.let { sid ->
         sessionListState.sessionStatuses[sid]
     }
-    val hasMoreMessages: Boolean = chatState.hasMoreMessages
+    val hasMoreMessages: Boolean =
+        if (routeContent != null) routeContent.hasMoreMessages else chatState.hasMoreMessages
     // §F3-load-more: 同时取 cursor——渲染门加 cursor 守卫，任何 cursor 缺失/不一致
     // 都不显示"加载更多"按钮（避免按钮显示但点击因 cursor=null 无反应）。
-    val olderMessagesCursor: String? = chatState.olderMessagesCursor
+    val olderMessagesCursor: String? =
+        if (routeContent != null) routeContent.olderMessagesCursor else chatState.olderMessagesCursor
     val repository: OpenCodeRepository = chatVM.repository
     val workspaceDirectory: String? = currentSession?.directory
     val onLoadMore: () -> Unit = chatVM::loadMoreMessages
@@ -263,7 +295,7 @@ internal fun ChatMessageList(
     }
 
     // sessionId 在 remember key 里需要——提前取（下面 savedPositions 等也用）。
-    val sessionId = chatState.currentSessionId
+    val sessionId = effectiveSessionId
     // §issue-1(1): 当前会话的文件变更快照（来自 SessionListState.sessionDiffs），
     // 驱动聊天内 SessionDiffCard。非空时在 timeline 底部渲染一张可展开卡片。
     val sessionDiff = sessionId?.let { sessionListState.sessionDiffs[it] }
@@ -309,7 +341,19 @@ internal fun ChatMessageList(
             fallbackIndex = listState.firstVisibleItemIndex,
             offset = listState.firstVisibleItemScrollOffset,
         )
-        sessionVM.openSubAgent(childSessionId, checkpoint)
+        // §chat-list-detail §11 / G6 (B5 BLOCK-fix): delegate storage +
+        // navigation to the ChatScaffold-owned callback. The checkpoint is
+        // captured SYNCHRONOUSLY here (oracle ruling — the async
+        // savedPositions mirror cannot guarantee the last pre-navigation
+        // frame); the callback forwards (childId, checkpoint) to
+        // sessionVM.openSubAgent, which writes the checkpoint to the parent
+        // route entry's SavedStateHandle INSIDE the success callback (NOT
+        // before the call) — so a failed fetch or a route change mid-fetch
+        // leaves no stale checkpoint. Replaces the legacy
+        // `sessionVM.openSubAgent(childId, checkpoint)` two-arg call (which
+        // stored the checkpoint in a global ChatState map and used the
+        // non-route selectSession path).
+        onOpenSubAgentNavigate(childSessionId, checkpoint)
     }
     // §B1: followBottom is per-session saveable so it survives Chat→preview→back.
     // A REAL sessionId change re-runs the initializer (default true); a re-entry
@@ -344,6 +388,7 @@ internal fun ChatMessageList(
     // to latest via pendingScrollRequest (NOT a restore); (b) HorizontalPager
     // swipe + SessionTabStrip tap for ROOT sessions in the pager page set
     // (stable `key = session.id` keeps each page's saveable slot alive);
+    // §B6: pager and tab strip deleted — historical context only;
     // (c) Chat→file-preview→back re-entry with the SAME sessionId. They do
     // NOT reliably cover sheet-select of a non-paged session, root↔sub-agent
     // switches, post-fork re-entry, or programmatic selects outside the
@@ -435,10 +480,9 @@ internal fun ChatMessageList(
             }
     }
 
-    // ── §顶部 session tab 联动显隐 ────────────────────────────────────────
-    // 检测 LazyColumn 滚动方向，把"显示/隐藏顶部 tab strip"的意图通过
-    // [onTabVisibilityChange] 回调提升到 ChatScreen（消费方在 ChatTopBar 用
-    // AnimatedVisibility 包裹 SessionTabStrip）。
+    // ── 滚动方向检测 ─────────────────────────────────────────────────────
+    // §B6: onTabVisibilityChange 已删除（SessionTabStrip 已移除）。
+    // 滚动方向仍用于控制 followBottom 和 navFabVisible。
     //
     // **reverseLayout 语义**（见 LazyColumn reverseLayout=true）：
     //   - index 0 = 最新消息，渲染在视觉**底部**。
@@ -487,13 +531,13 @@ internal fun ChatMessageList(
                 if (absDelta > 3) return@collect
                 when {
                     delta > 0 -> {
-                        onTabVisibilityChange(true)   // 向上滚（看更旧）→ show
+                        // §B6: onTabVisibilityChange 已删除。
                         followBottom = false           // §Q4: user scrolled away from bottom
                         // §navfab-redesign: 向旧滑动 → 隐藏"跳到最新"（仅向新滑动时浮现）。
                         navFabVisible = false
                     }
                     delta < 0 -> {
-                        onTabVisibilityChange(false)   // 向下滚（看更新）→ hide
+                        // §B6: onTabVisibilityChange 已删除。
                         // §Q4: scrolled back to bottom.
                         if (index == 0) {
                             followBottom = true

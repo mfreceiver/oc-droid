@@ -61,7 +61,6 @@ class RevertCutoffCoordinator(private val core: AppCore) {
                 persistSessionCache(
                     settingsManager = core.settingsManager,
                     sessions = core.store.sessionListFlow.value.sessions,
-                    openIds = core.store.sessionListFlow.value.openSessionIds,
                     currentId = core.store.chatFlow.value.currentSessionId,
                     currentWorkdir = core.settingsManager.currentWorkdir,
                     revertCutoffs = core.store.chatFlow.value.revertCutoffs

@@ -17,14 +17,17 @@ import io.mockk.spyk
 import io.mockk.unmockkAll
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
@@ -201,15 +204,36 @@ class SessionSyncDeadlockRegressionTest {
             localAppliedUpdatedAt = 100L,
         )
 
+        val staleException = CompletableDeferred<OpenCodeRepository.StaleSlimCommitException>()
+        val unexpectedException = CompletableDeferred<Throwable>()
+        val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+            when (throwable) {
+                is OpenCodeRepository.StaleSlimCommitException -> staleException.complete(throwable)
+                else -> unexpectedException.complete(throwable)
+            }
+        }
         val worker = Dispatchers.Default
-        val scope = CoroutineScope(SupervisorJob() + worker)
+        val scope = CoroutineScope(SupervisorJob() + worker + exceptionHandler)
+        val scopeJob = checkNotNull(scope.coroutineContext[Job])
         try {
             val c = coordinator(scope, repo, worker)
+            val coordinatorChildren = scopeJob.children.toSet()
 
             // Launch the reconcile. It will acquire the stripe, then
             // suspend on the gated probe (still holding the stripe Mutex).
+            // With D3 semantics the reconcile throws StaleSlimCommitException
+            // after the probe gate is released. It may be raised by the
+            // reconcile job itself or by a child launched by the coordinator;
+            // consume both paths through the same expected-exception latch.
             val reconcileJob = scope.launch {
-                c.reconcileSessionExposed(sid, SessionSyncCoordinator.ReconcileMode.RESYNC)
+                try {
+                    c.reconcileSessionExposed(sid, SessionSyncCoordinator.ReconcileMode.RESYNC)
+                } catch (e: OpenCodeRepository.StaleSlimCommitException) {
+                    staleException.complete(e)
+                } catch (e: Throwable) {
+                    unexpectedException.complete(e)
+                    throw e
+                }
             }
             assertTrue(
                 "probe must be entered within deadline (otherwise the test setup is wrong)",
@@ -249,15 +273,49 @@ class SessionSyncDeadlockRegressionTest {
                 reconfigElapsedMs < DEADLINE_MS,
             )
 
-            // Release the gated probe so the reconcile completes; verify it
-            // finishes cleanly (no crash, no leaked job).
+            // Release the gated probe so the reconcile completes; verify its
+            // expected stale completion is consumed (no uncaught pollution).
             releaseProbe.complete(Unit)
             assertTrue(
                 "reconcile must complete after the probe gate is released",
                 reconcileJob.joinBounded(),
             )
+            // A coordinator command may create a second child on the supplied
+            // scope. Wait for every child created by this test after the
+            // persistent coordinator collector, so its completion exception is
+            // delivered to exceptionHandler before assertions run.
+            val childrenCompleted = withTimeoutOrNull(DEADLINE_MS) {
+                while (true) {
+                    val pending = scopeJob.children
+                        .filter { it !in coordinatorChildren && it.isActive }
+                        .toList()
+                    if (pending.isEmpty()) break
+                    pending.forEach { it.join() }
+                    yield()
+                }
+                true
+            } == true
+            assertTrue(
+                "all reconcile children must complete after the probe gate is released",
+                childrenCompleted,
+            )
+
+            assertFalse(
+                "unexpected reconcile exception must not be consumed by the test harness",
+                unexpectedException.isCompleted,
+            )
+            // With D3 semantics the reconcile throws StaleSlimCommitException.
+            // Assert that it was captured either directly or by the scope-level
+            // handler when the throw originated in an internal child.
+            val thrown = withTimeoutOrNull(DEADLINE_MS) { staleException.await() }
+            assertNotNull(
+                "reconcile must have thrown StaleSlimCommitException (D3 semantics)",
+                thrown,
+            )
         } finally {
-            scope.cancel("teardown")
+            // Cancel and join the parent so the coordinator's persistent
+            // collector cannot outlive this test.
+            scopeJob.cancelAndJoin()
         }
     }
 

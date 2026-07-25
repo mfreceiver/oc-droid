@@ -28,6 +28,8 @@ import cn.vectory.ocdroid.service.status.SessionStatusKey
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.service.status.toSessionBusyStatus
 import cn.vectory.ocdroid.ui.ChatState
+import cn.vectory.ocdroid.ui.AppAction
+import cn.vectory.ocdroid.ui.BundleStamp
 import cn.vectory.ocdroid.ui.MESSAGE_CHRONO
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.StreamOwnedState
@@ -175,16 +177,15 @@ class SessionSyncCoordinator(
      * legacy/test constructions byte-identical.
      *
      * **ι-Q3b rename — behavior equivalence**: this thunk was renamed from
-     * the prior raw mode-flag thunk to the capability name
+     * the prior raw transport flag thunk to the capability name
      * [supportsWatermarkResync]; the two are byte-for-byte equal today —
      * both resolve to `slimConnection` / slim mode (see
      * [cn.vectory.ocdroid.data.repository.ServerCompatProfile.supportsWatermarkResync],
      * which is `= slimConnection`). The rename only clears the prior
-     * raw-mode literal from L4+ to satisfy plan §6 grep acceptance
-     * (「L4+ raw-slim-flag 零命中」); no reconcile/watermark gate logic
-     * changed — only which named boolean is read. The [slimMode] override
-     * below keeps its name (SseDispatchHost interface contract, §6
-     * SSE-mechanism exemption) and only re-routes its read to this thunk.
+     * raw transport literal from L4+ to satisfy plan §6 grep acceptance
+     * (「L4+ raw transport flag 零命中」); no reconcile/watermark gate logic
+     * changed — only which named boolean is read. The semantic SSE capability
+     * below only re-routes its read to this thunk.
      */
     private val supportsWatermarkResync: () -> Boolean = { false },
     /**
@@ -887,7 +888,11 @@ class SessionSyncCoordinator(
                 is SseSyncDecision.ReloadSession -> {
                     // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
                     effects.tryEmitEffect(
-                        ControllerEffect.LoadMessages(decision.sessionId, decision.resetLimit)
+                        ControllerEffect.LoadMessages(
+                            sessionId = decision.sessionId,
+                            resetLimit = decision.resetLimit,
+                            expectedRouteInstance = slices.routeInstanceFor(decision.sessionId),
+                        )
                     )
                 }
                 SseSyncDecision.LoadSessionStatus -> {
@@ -928,7 +933,11 @@ class SessionSyncCoordinator(
                 is SseSideEffect.ReloadMessages -> {
                     // §R18 Phase 3 Wave 1 (P1-3 B 类): 单发非 suspend → tryEmitEffect。
                     effects.tryEmitEffect(
-                        ControllerEffect.LoadMessages(effect.sessionId, effect.resetLimit)
+                        ControllerEffect.LoadMessages(
+                            sessionId = effect.sessionId,
+                            resetLimit = effect.resetLimit,
+                            expectedRouteInstance = slices.routeInstanceFor(effect.sessionId),
+                        )
                     )
                 }
                 SseSideEffect.LoadPendingPermissions -> {
@@ -1087,7 +1096,19 @@ class SessionSyncCoordinator(
     private fun flushDeltaBuffer(partId: String) {
         flushJobs.remove(partId)
         // T1b: flushJobs lifecycle stays here; state transform via dispatch.
-        slices.store.dispatch(cn.vectory.ocdroid.ui.AppAction.CoalesceFlushedForPart(partId))
+        // §B4 route-aware dispatch: capture the live route token + owning
+        // session so the reducer's acceptsRouteUpdate guard can CAS-check the
+        // route content (a late flush must not corrupt a newer incarnation).
+        val sid = slices.chat.value.currentSessionId
+        val routeInstance = sid?.let { slices.routeInstanceFor(it) } ?: 0L
+        dispatchBundleBound { stamp ->
+            AppAction.CoalesceFlushedForPart(
+                partId = partId,
+                expectedRouteInstance = routeInstance,
+                sessionId = sid,
+                bundleStamp = stamp,
+            )
+        }
     }
 
     /**
@@ -1130,7 +1151,7 @@ class SessionSyncCoordinator(
             .incrementAndGet()
     }
     override fun sseClock(): Long = clock()
-    override fun slimMode(): Boolean = supportsWatermarkResync()
+    override fun supportsDurableSessionErrorBanner(): Boolean = supportsWatermarkResync()
     override fun isFlushActiveForPart(partId: String): Boolean = flushJobs[partId]?.isActive == true
     override fun handleSessionDigest(event: SSEEvent) {
         // P4-C §6.3: thin decision interpreter. The digest-event PREPARATION
@@ -1155,6 +1176,41 @@ class SessionSyncCoordinator(
                     slimSessionReconciler.applyReconcileResult(attempt)
                 }
             }
+        }
+    }
+
+    override fun dispatchTokenStreamPlaceholder(
+        partType: String,
+        partId: String,
+        messageId: String,
+        sessionId: String,
+        expectedRouteInstance: Long,
+    ): Boolean {
+        return dispatchBundleBound { stamp ->
+                AppAction.PartPlaceholderEnsured(
+                    partType = partType,
+                    partId = partId,
+                    messageId = messageId,
+                    sessionId = sessionId,
+                    expectedRouteInstance = expectedRouteInstance,
+                    bundleStamp = stamp,
+                )
+        }
+    }
+
+    /**
+     * Shared bundle-bound dispatch gate for SSE-owned streaming actions. The
+     * bundle read, stamp construction, and StoreState CAS all occur under the
+     * same repository monitor used by configure/publish.
+     */
+    private fun dispatchBundleBound(actionFactory: (BundleStamp) -> AppAction): Boolean {
+        val repo = repository ?: return false
+        synchronized(repo) {
+            val bundle = repo.currentClientBundle() ?: return false
+            slices.store.dispatch(
+                actionFactory(BundleStamp(bundle.generation, bundle.endpointFp)),
+            )
+            return true
         }
     }
 
@@ -1568,6 +1624,10 @@ class SessionSyncCoordinator(
         // to the sweep. Each per-sid launch is independent.
         supervisorScope {
             for (sid in catchUpSet) {
+                // Capture the route incarnation before the per-sid REST work;
+                // a late A result must not be stamped with a newer A token
+                // after an A→B→A navigation cycle.
+                val routeInstance = slices.routeInstanceFor(sid)
                 launch {
                     // D4 timeout ordering: acquire the permit FIRST, then
                     // start the deadline. A sid queued behind others does
@@ -1615,6 +1675,7 @@ class SessionSyncCoordinator(
                                 result = outcome.result,
                                 token = entryToken,
                                 mode = SlimReconcileMode.RESYNC,
+                                expectedRouteInstance = routeInstance,
                             )
                         }
                         outcomes[sid] = applied.toFacadeResult()

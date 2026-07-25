@@ -353,13 +353,13 @@ class SessionStreamingService : Service() {
             // ReconcileMode.RESYNC for every sid. Round-1 called
             // coldStartSlimSync directly which left performResyncCatchUp
             // as dead code (T11 review I1).
-            // ι-Q3a: 用 supportsWatermarkResync 替换 isSlimMode。此 onResync 接
+            // ι-Q3a: 用 supportsWatermarkResync 替换原始 transport flag。此 onResync 接
             // SessionSyncCoordinator.performSlimResync（见上注释 :347-355）——slim SSE
             // cold-start + watermark catch-up（coldStartSlimSync + performResyncCatchUp），
             // 与 TokenStreamCoordinator / slimapiTokenStreamEnabled 无关。故门用
-            // supportsWatermarkResync（≡ slimConnection，与 performSlimResync 内部门一致），
+            // supportsWatermarkResync（与 performSlimResync 内部门一致），
             // 非 supportsTokenStreamResync（后者额外要求 tokenStream 特性，会在 slim +
-            // 特性未探/未公告时误杀整段 resync）。逐字等价（=slimConnection=原 isSlimMode）。
+            // 特性未探/未公告时误杀整段 resync）。
             // [rev-grok NO-GO 5.0→修复：原误用 supportsTokenStreamResync]
             onResync = onResync@{ isStillCurrent ->
                 if (!isStillCurrent()) return@onResync

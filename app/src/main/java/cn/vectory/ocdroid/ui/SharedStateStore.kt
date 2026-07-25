@@ -105,6 +105,15 @@ class SharedStateStore @Inject constructor() {
     val sseConnectedFlow: StateFlow<Boolean> = DerivedStateFlow(state) { it.isSseConnected }
 
     /**
+     * §chat-list-detail §7.2 B0.5: the chat-route incarnation counter
+     * projection. The chat/{id} render composable collects this to apply the
+     * P6 freshness CAS at render time (`content.routeInstance ==
+     * chatRouteInstance`). Internal — surfaced to the shell via
+     * [OrchestratorViewModel.chatRouteInstanceFlow].
+     */
+    internal val chatRouteInstanceFlow: StateFlow<Long> = DerivedStateFlow(state) { it.chatRouteInstance }
+
+    /**
      * §breathing-indicator (item ①, TOCTOU fix): the last generation that
      * committed [sseConnectedFlow]. Read accessor used by
      * [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner] to SEED

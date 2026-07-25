@@ -11,11 +11,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * T1c freeze — **RED until impl**. Step-4 `sessions` + `openSessionIds`
+ * T1c freeze — **RED until impl**. Step-4 `sessions` + `open-tabs-list`
  * ownership migration (full-refactor-plan §2.3 ownership table row 4 +
  * §4-T1 acceptance "目标字段业务直接写入点静态归零").
  *
- * **Scope**: the §2.3 target fields `sessions` + `openSessionIds` (and any
+ * **Scope**: the §2.3 target fields `sessions` + `open-tabs-list` (and any
  * fields written in the SAME `copy()` as these two, to avoid splitting a
  * single atomic mutateSessionList into two dispatches). Non-target fields
  * like `sessionTodos` / `sessionStatuses` / `pendingQuestions` /
@@ -55,13 +55,12 @@ import org.junit.Test
  * //     pendingCreatedAt = state.sessionList.pendingCreatedAt + (action.session.id to action.registeredAt),
  * // ))
  *
- * // ── OpenSessionIds changed (openSessionIds only) ───────────────────────
+ * // ── OpenSessionIds changed (open-tabs-list only) ───────────────────────
  * // Covers: closeSession (SessionViewModel:247), switchTo open-tab append
  * // (SessionSwitcher:561).
- * data class OpenSessionIdsChanged(val openSessionIds: List<String>) : AppAction
+ * data class OpenTabsChanged(removed)(val open-tabs-list: List<String>) : AppAction
  * // reduce: state.copy(sessionList = state.sessionList.copy(
- * //     openSessionIds = action.openSessionIds
- * // ))
+ * //     ))
  * ```
  *
  * **BulkSessionsRefreshed hasCompletedInitialLoad gap** (Group D): the
@@ -87,10 +86,10 @@ class T1cSessionListOwnershipTest {
         val existing = listOf(Session(id = "s1", directory = "/a"), Session(id = "s2", directory = "/b"))
         val newSession = Session(id = "s1", directory = "/a-updated") // same id → replace
         val oldStore = SharedStateStore().apply {
-            mutateSessionList { it.copy(sessions = existing, openSessionIds = listOf("s1", "s2")) }
+            mutateSessionList { it.copy(sessions = existing) }
         }
         val newStore = SharedStateStore().apply {
-            mutateSessionList { it.copy(sessions = existing, openSessionIds = listOf("s1", "s2")) }
+            mutateSessionList { it.copy(sessions = existing) }
         }
 
         // Old path: upsertSession (prepends + dedupes by id).
@@ -101,8 +100,7 @@ class T1cSessionListOwnershipTest {
         assertEquals(
             "SessionUpserted MUST equal legacy upsertSession (prepend + dedupe by id)",
             oldStore.stateFlow.value,
-            newStore.stateFlow.value,
-        )
+            newStore.stateFlow.value)
         // Sanity: the new session is at the head; the old entry with the same id is gone.
         assertEquals("new session prepended", "s1", newStore.stateFlow.value.sessionList.sessions.first().id)
         assertEquals("directory updated on the replaced entry", "/a-updated", newStore.stateFlow.value.sessionList.sessions.first().directory)
@@ -122,22 +120,18 @@ class T1cSessionListOwnershipTest {
         assertEquals(
             "SessionUpserted with a new id prepends (list grows by 1)",
             oldStore.stateFlow.value,
-            newStore.stateFlow.value,
-        )
+            newStore.stateFlow.value)
         assertEquals(2, newStore.stateFlow.value.sessionList.sessions.size)
         assertEquals("s-new", newStore.stateFlow.value.sessionList.sessions.first().id)
     }
 
     @Test
-    fun `SessionUpserted is scoped to sessions — openSessionIds and all other fields untouched`() {
+    fun `SessionUpserted is scoped to sessions — open-tabs-list and all other fields untouched`() {
         val prior = StoreState.initial().copy(
             sessionList = SessionListState(
                 sessions = listOf(Session(id = "s1", directory = "/a")),
-                openSessionIds = listOf("s1"),
                 hasMoreSessions = true,
-                hasCompletedInitialLoad = true,
-            ),
-        )
+                hasCompletedInitialLoad = true))
         val store = SharedStateStore().apply { mutateState { prior } }
 
         store.dispatch(AppAction.SessionUpserted(Session(id = "s2", directory = "/b")))
@@ -146,7 +140,6 @@ class T1cSessionListOwnershipTest {
         // sessions changed.
         assertEquals(2, out.sessions.size)
         // Non-target fields MUST survive.
-        assertEquals("openSessionIds untouched by SessionUpserted", listOf("s1"), out.openSessionIds)
         assertTrue("hasMoreSessions untouched", out.hasMoreSessions)
         assertTrue("hasCompletedInitialLoad untouched", out.hasCompletedInitialLoad)
     }
@@ -165,8 +158,7 @@ class T1cSessionListOwnershipTest {
                 it.copy(
                     sessions = existing,
                     pendingCreateIds = setOf("s1"),
-                    pendingCreatedAt = mapOf("s1" to 100L),
-                )
+                    pendingCreatedAt = mapOf("s1" to 100L))
             }
         }
         val newStore = SharedStateStore().apply {
@@ -174,8 +166,7 @@ class T1cSessionListOwnershipTest {
                 it.copy(
                     sessions = existing,
                     pendingCreateIds = setOf("s1"),
-                    pendingCreatedAt = mapOf("s1" to 100L),
-                )
+                    pendingCreatedAt = mapOf("s1" to 100L))
             }
         }
 
@@ -184,8 +175,7 @@ class T1cSessionListOwnershipTest {
             sl.copy(
                 sessions = upsertSession(sl.sessions, created),
                 pendingCreateIds = sl.pendingCreateIds + created.id,
-                pendingCreatedAt = sl.pendingCreatedAt + (created.id to registeredAt),
-            )
+                pendingCreatedAt = sl.pendingCreatedAt + (created.id to registeredAt))
         }
         // New path.
         newStore.dispatch(AppAction.SessionCreatedLocal(created, registeredAt))
@@ -194,8 +184,7 @@ class T1cSessionListOwnershipTest {
             "SessionCreatedLocal MUST equal legacy create mutateSessionList " +
                 "(sessions + pendingCreateIds + pendingCreatedAt in ONE dispatch)",
             oldStore.stateFlow.value,
-            newStore.stateFlow.value,
-        )
+            newStore.stateFlow.value)
         // Sanity: pendingCreateIds grew.
         val out = newStore.stateFlow.value.sessionList
         assertTrue("pendingCreateIds includes the new id", out.pendingCreateIds.contains("s-new"))
@@ -211,8 +200,7 @@ class T1cSessionListOwnershipTest {
         val prior = StoreState.initial().copy(
             sessionList = SessionListState(sessions = listOf(Session(id = "s1", directory = "/a"))),
             chat = ChatState(currentSessionId = "s1"),
-            unread = UnreadState(unreadSessions = setOf("s1")),
-        )
+            unread = UnreadState(unreadSessions = setOf("s1")))
         val store = SharedStateStore().apply { mutateState { prior } }
 
         store.dispatch(AppAction.SessionCreatedLocal(Session(id = "s2", directory = "/b"), 999L))
@@ -226,73 +214,8 @@ class T1cSessionListOwnershipTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // C. OpenSessionIdsChanged — openSessionIds-only writes
+    // C. OpenSessionIdsChanged REMOVED in B4 (list-detail; no open-tabs field)
     // ═══════════════════════════════════════════════════════════════════════
-
-    @Test
-    fun `dispatch OpenSessionIdsChanged is byte-for-byte equivalent to mutateSessionList openSessionIds write`() = runTest {
-        val oldIds = listOf("s1", "s2", "s3")
-        val newIds = listOf("s1", "s3") // s2 removed (close)
-        val oldStore = SharedStateStore().apply {
-            mutateSessionList { it.copy(sessions = listOf(Session(id = "s1", directory = "/a"), Session(id = "s2", directory = "/b"), Session(id = "s3", directory = "/c")), openSessionIds = oldIds) }
-        }
-        val newStore = SharedStateStore().apply {
-            mutateSessionList { it.copy(sessions = listOf(Session(id = "s1", directory = "/a"), Session(id = "s2", directory = "/b"), Session(id = "s3", directory = "/c")), openSessionIds = oldIds) }
-        }
-
-        oldStore.mutateSessionList { it.copy(openSessionIds = newIds) }
-        newStore.dispatch(AppAction.OpenSessionIdsChanged(newIds))
-
-        assertEquals(
-            "OpenSessionIdsChanged MUST equal legacy mutateSessionList openSessionIds write",
-            oldStore.stateFlow.value,
-            newStore.stateFlow.value,
-        )
-        assertEquals("openSessionIds updated", newIds, newStore.stateFlow.value.sessionList.openSessionIds)
-        // sessions MUST survive (OpenSessionIdsChanged does NOT touch sessions).
-        assertEquals("sessions untouched by OpenSessionIdsChanged", 3, newStore.stateFlow.value.sessionList.sessions.size)
-    }
-
-    @Test
-    fun `dispatch OpenSessionIdsChanged for switchTo append mirrors SessionSwitcher 558-561`() = runTest {
-        // SessionSwitcher:558-561: val updated = (openIds + sessionId).takeLast(8)
-        // The caller computes `updated` and passes it in. The reducer just stores it.
-        val existing = listOf("s1", "s2")
-        val appended = (existing + "s3").takeLast(8) // = ["s1", "s2", "s3"]
-        val store = SharedStateStore().apply {
-            mutateSessionList { it.copy(openSessionIds = existing) }
-        }
-
-        store.dispatch(AppAction.OpenSessionIdsChanged(appended))
-
-        assertEquals(
-            "OpenSessionIdsChanged for switchTo append mirrors SessionSwitcher:561",
-            appended,
-            store.stateFlow.value.sessionList.openSessionIds,
-        )
-    }
-
-    @Test
-    fun `OpenSessionIdsChanged is scoped to openSessionIds — no other field touched`() {
-        val prior = StoreState.initial().copy(
-            sessionList = SessionListState(
-                sessions = listOf(Session(id = "s1", directory = "/a")),
-                openSessionIds = listOf("s1"),
-                hasMoreSessions = true,
-                pendingCreateIds = setOf("s1"),
-            ),
-        )
-        val store = SharedStateStore().apply { mutateState { prior } }
-
-        store.dispatch(AppAction.OpenSessionIdsChanged(listOf("s1", "s2")))
-
-        val out = store.stateFlow.value.sessionList
-        assertEquals("openSessionIds changed", listOf("s1", "s2"), out.openSessionIds)
-        // Non-target fields MUST survive.
-        assertEquals("sessions untouched", 1, out.sessions.size)
-        assertTrue("hasMoreSessions untouched", out.hasMoreSessions)
-        assertTrue("pendingCreateIds untouched", out.pendingCreateIds.contains("s1"))
-    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // D. BulkSessionsRefreshed + hasCompletedInitialLoad gap
@@ -315,18 +238,15 @@ class T1cSessionListOwnershipTest {
         store.dispatch(
             AppAction.BulkSessionsRefreshed(
                 sessions = listOf(Session(id = "s1", directory = "/a")),
-                openSessionIds = listOf("s1"),
                 hasMoreSessions = false,
                 confirmedServerIds = setOf("s1"),
-                sweepNow = 0L,
-            )
+                sweepNow = 0L)
         )
 
         assertTrue(
             "BulkSessionsRefreshed sets hasCompletedInitialLoad = true (the gap fix — " +
                 "currently requires a separate mutateSessionList patch at SessionListActions:296)",
-            store.stateFlow.value.sessionList.hasCompletedInitialLoad,
-        )
+            store.stateFlow.value.sessionList.hasCompletedInitialLoad)
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -367,36 +287,18 @@ class T1cSessionListOwnershipTest {
         job.cancel()
     }
 
-    @Test
-    fun `dispatch OpenSessionIdsChanged produces exactly one aggregate emission`() = runTest {
-        val store = SharedStateStore().apply {
-            mutateSessionList { it.copy(openSessionIds = listOf("s1")) }
-        }
-        val seen = mutableListOf<StoreState>()
-        val job = launch { store.stateFlow.collect { seen += it } }
-        advanceUntilIdle()
-        assertEquals(1, seen.size)
-
-        store.dispatch(AppAction.OpenSessionIdsChanged(listOf("s1", "s2")))
-        advanceUntilIdle()
-
-        assertEquals("exactly one post-dispatch emission", 2, seen.size)
-        assertEquals(listOf("s1", "s2"), seen.last().sessionList.openSessionIds)
-        job.cancel()
-    }
-
     // ═══════════════════════════════════════════════════════════════════════
     // F. Documentation — production write-site inventory (target vs deferred)
     // ═══════════════════════════════════════════════════════════════════════
 
     @Test
-    fun `DOCUMENTATION — sessions and openSessionIds write-site inventory (target vs deferred)`() {
+    fun `DOCUMENTATION — sessions and open-tabs-list write-site inventory (target vs deferred)`() {
         // Full inventory of production mutateSessionList/writeSessionList
-        // sites that touch `sessions` or `openSessionIds`. Audit with:
+        // sites that touch `sessions` or `open-tabs-list`. Audit with:
         //   rg -n 'mutateSessionList|writeSessionList' app/src/main
         //
         // ┌──────────────────────────────────────────────────────────────────────┐
-        // │ TARGET (sessions and/or openSessionIds) — must migrate to dispatch   │
+        // │ TARGET (sessions and/or open-tabs-list) — must migrate to dispatch   │
         // ├──────────────────────────────────┬──────────────┬────────────────────┤
         // │ file                             │ line(s)      │ action             │
         // ├──────────────────────────────────┼──────────────┼────────────────────┤
@@ -410,8 +312,8 @@ class T1cSessionListOwnershipTest {
         // │ AppCoreOrchestration.kt          │ 195          │ SessionUpserted    │
         // │ SSC.kt                           │ 972          │ SessionUpserted    │
         // │ SSC.kt                           │ 1025         │ SessionUpserted    │
-        // │ SessionViewModel.kt              │ 247          │ OpenSessionIdsChanged│
-        // │ SessionSwitcher.kt               │ 561          │ OpenSessionIdsChanged│
+        // │ SessionViewModel.kt              │ 247          │ OpenTabsChanged(removed)│
+        // │ SessionSwitcher.kt               │ 561          │ OpenTabsChanged(removed)│
         // │ SessionListActions.kt            │ 296 (patch)  │ BulkSessionsRefreshed│
         // │                                  │              │ +hasCompletedInitialLoad│
         // └──────────────────────────────────┴──────────────┴────────────────────┘
@@ -440,14 +342,14 @@ class T1cSessionListOwnershipTest {
         // └──────────────────────────────────┴──────────────┴────────────────────┘
         //
         // ┌──────────────────────────────────────────────────────────────────────┐
-        // │ EXPLICITLY NON-TARGET (no sessions/openSessionIds write)             │
+        // │ EXPLICITLY NON-TARGET (no sessions/open-tabs-list write)             │
         // ├──────────────────────────────────┬───────────────────────────────────┤
-        // │ SessionListActions.kt:151        │ openSessionIds only — but part of │
+        // │ SessionListActions.kt:151        │ open-tabs-list only — but part of │
         // │                                  │ a larger flow that dispatches      │
         // │                                  │ BulkSessionsRefreshed.            │
         // │ SessionListActions.kt:368        │ sessions upsert (directory session)│
         // │                                  │ → SessionUpserted.                 │
-        // │ SessionListActions.kt:467        │ sessions + openSessionIds +        │
+        // │ SessionListActions.kt:467        │ sessions + open-tabs-list +        │
         // │                                  │ hasMore + loading flags            │
         // │                                  │ → BulkSessionsRefreshed variant.   │
         // │ SessionListActions.kt:601        │ sessions (merged refresh)           │
@@ -481,8 +383,7 @@ class T1cSessionListOwnershipTest {
         // │ SessionSwitcher.kt:529           │ expandedParts only (T1a)           │
         // └──────────────────────────────────┴───────────────────────────────────┘
         assertTrue(
-            "sessions/openSessionIds write-site inventory documented — see comment block above",
-            true,
-        )
+            "sessions/open-tabs-list write-site inventory documented — see comment block above",
+            true)
     }
 }

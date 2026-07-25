@@ -68,14 +68,12 @@ private val sessionListRefreshOrchestrator = SessionListRefreshOrchestrator(
 internal fun persistSessionCache(
     settingsManager: SettingsManager,
     sessions: List<Session>,
-    openIds: List<String>,
-    currentId: String?,
-    currentWorkdir: String?,
+    currentId: String? = null,
+    currentWorkdir: String? = null,
     revertCutoffs: Map<String, RevertCutoff>,
 ) = sessionMetadataCacheWriter.persistSessionCache(
     settingsManager = settingsManager,
     sessions = sessions,
-    openIds = openIds,
     currentId = currentId,
     currentWorkdir = currentWorkdir,
     revertCutoffs = revertCutoffs,
@@ -92,7 +90,7 @@ internal fun launchLoadSessions(
     emit: EventEmitter = EventEmitter { },
     expectedServerGroupFp: String? = null,
     currentServerGroupFp: (() -> String)? = null,
-    onArchivedSessionsDetected: ((mergedSessions: List<Session>, newOpenIds: List<String>, hasMoreSessions: Boolean, confirmedServerIds: Set<String>, sweepNow: Long) -> Unit)? = null,
+    onArchivedSessionsDetected: ((mergedSessions: List<Session>, hasMoreSessions: Boolean, confirmedServerIds: Set<String>, sweepNow: Long) -> Unit)? = null,
 ) = sessionListRefreshOrchestrator.launchLoadSessions(
     scope = scope,
     repository = repository,

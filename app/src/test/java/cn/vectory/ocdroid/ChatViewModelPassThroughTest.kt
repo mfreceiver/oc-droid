@@ -75,8 +75,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
             it.copy(
                 currentSessionId = "s1",
                 currentModel = Message.ModelInfo("p", "m"),
-                isCompacting = true,
-            )
+                isCompacting = true)
         }
 
         vm.compactSession()
@@ -93,8 +92,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
-                currentModel = Message.ModelInfo("p", "m"),
-            )
+                currentModel = Message.ModelInfo("p", "m"))
         }
 
         vm.compactSession()
@@ -108,8 +106,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         assertNull(core.recentTestErrors.lastOrNull())
         assertEquals(
             R.string.info_compact_in_progress,
-            core.lastInfoEvent?.resId,
-        )
+            core.lastInfoEvent?.resId)
         coVerify { repository.summarizeSession("s1", Message.ModelInfo("p", "m")) }
     }
 
@@ -128,8 +125,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
-                currentModel = Message.ModelInfo("p", "m"),
-            )
+                currentModel = Message.ModelInfo("p", "m"))
         }
         advanceUntilIdle()
 
@@ -150,15 +146,13 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         // was likely accepted, SSE may still deliver. Don't clear isCompacting;
         // emit Info; arm watchdog.
         coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
-            java.net.SocketTimeoutException("response timed out"),
-        )
+            java.net.SocketTimeoutException("response timed out"))
         val core = createCore()
         val vm = ChatViewModel(core)
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
-                currentModel = Message.ModelInfo("p", "m"),
-            )
+                currentModel = Message.ModelInfo("p", "m"))
         }
         advanceUntilIdle()
 
@@ -172,8 +166,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         assertNull(core.recentTestErrors.lastOrNull())
         assertEquals(
             R.string.info_compact_in_progress,
-            core.lastInfoEvent?.resId,
-        )
+            core.lastInfoEvent?.resId)
         coVerify { repository.summarizeSession("s1", Message.ModelInfo("p", "m")) }
     }
 
@@ -183,15 +176,13 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         // never reached the server, SSE cannot deliver → clear isCompacting +
         // emit Error.
         coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
-            java.io.IOException("connection refused"),
-        )
+            java.io.IOException("connection refused"))
         val core = createCore()
         val vm = ChatViewModel(core)
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
-                currentModel = Message.ModelInfo("p", "m"),
-            )
+                currentModel = Message.ModelInfo("p", "m"))
         }
         advanceUntilIdle()
 
@@ -212,15 +203,13 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         // (delay WATCHDOG_MS) must clear isCompacting + emit Info so the
         // Composer cannot lock forever.
         coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
-            java.net.SocketTimeoutException("response timed out"),
-        )
+            java.net.SocketTimeoutException("response timed out"))
         val core = createCore()
         val vm = ChatViewModel(core)
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
-                currentModel = Message.ModelInfo("p", "m"),
-            )
+                currentModel = Message.ModelInfo("p", "m"))
         }
 
         vm.compactSession()
@@ -237,8 +226,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         assertEquals(0L, core.chatFlow.value.compactStartedAt)
         assertEquals(
             R.string.info_compact_timeout_retry,
-            core.lastInfoEvent?.resId,
-        )
+            core.lastInfoEvent?.resId)
     }
 
     @Test
@@ -247,15 +235,13 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         // hook clears isCompacting before the watchdog fires, the watchdog's
         // recheck sees isCompacting=false and emits nothing.
         coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
-            java.net.SocketTimeoutException("response timed out"),
-        )
+            java.net.SocketTimeoutException("response timed out"))
         val core = createCore()
         val vm = ChatViewModel(core)
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
-                currentModel = Message.ModelInfo("p", "m"),
-            )
+                currentModel = Message.ModelInfo("p", "m"))
         }
 
         vm.compactSession()
@@ -290,15 +276,13 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         //             gen mismatch → no-op.
         // After advancing to A's deadline, B MUST still be compacting.
         coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
-            java.net.SocketTimeoutException("response timed out"),
-        )
+            java.net.SocketTimeoutException("response timed out"))
         val core = createCore()
         val vm = ChatViewModel(core)
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
-                currentModel = Message.ModelInfo("p", "m"),
-            )
+                currentModel = Message.ModelInfo("p", "m"))
         }
 
         // ── A starts at virtual t=0 ─────────────────────────────────────────
@@ -330,24 +314,20 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         // B must still be compacting — A's stale watchdog did NOT clear it.
         assertTrue(
             "B must still be compacting after A's stale watchdog fired (generation guard)",
-            core.chatFlow.value.isCompacting,
-        )
+            core.chatFlow.value.isCompacting)
         assertTrue(
             "B's compactStartedAt must be intact",
-            core.chatFlow.value.compactStartedAt > 0L,
-        )
+            core.chatFlow.value.compactStartedAt > 0L)
         // No spurious timeout Info from A's stale watchdog — the most recent
         // Info is still B's `info_compact_in_progress` from compactSession(B).
         assertEquals(
             "no info_compact_timeout_retry should be emitted by A's stale watchdog",
             infoBeforeAdvance,
-            core.lastInfoEvent?.resId,
-        )
+            core.lastInfoEvent?.resId)
         assertNotEquals(
             "watchdog-timeout Info must NOT have been emitted by A's stale watchdog",
             R.string.info_compact_timeout_retry,
-            core.lastInfoEvent?.resId,
-        )
+            core.lastInfoEvent?.resId)
 
         // ── Sanity: advancing to B's OWN deadline (t=280 s) does clear B —
         //    B's watchdog is correctly scoped to B's gen and fires normally.
@@ -355,12 +335,10 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         runCurrent()
         assertFalse(
             "B's own watchdog should clear B at B's deadline",
-            core.chatFlow.value.isCompacting,
-        )
+            core.chatFlow.value.isCompacting)
         assertEquals(
             R.string.info_compact_timeout_retry,
-            core.lastInfoEvent?.resId,
-        )
+            core.lastInfoEvent?.resId)
     }
 
     @Test
@@ -432,8 +410,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
             it.copy(
                 currentSessionId = "s1",
                 messages = listOf(Message(id = "m1", role = "user")),
-                partsByMessage = mapOf("m1" to listOf(Part(id = "p1", type = "text", text = "  "))),
-            )
+                partsByMessage = mapOf("m1" to listOf(Part(id = "p1", type = "text", text = "  "))))
         }
 
         vm.editFromMessage("m1")
@@ -456,8 +433,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
             it.copy(
                 currentSessionId = "s1",
                 messages = listOf(Message(id = "m1", role = "user")),
-                partsByMessage = mapOf("m1" to listOf(Part(id = "p1", type = "text", text = "original prompt"))),
-            )
+                partsByMessage = mapOf("m1" to listOf(Part(id = "p1", type = "text", text = "original prompt"))))
         }
 
         vm.editFromMessage("m1")
@@ -467,19 +443,54 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         verify { settingsManager.setDraftText(any(), "s1", "original prompt") }
     }
 
+    /**
+     * §chat-list-detail §11.3 / G6 (B5): editFromMessage MUST read the session
+     * id from the route param (navState.lastRoute), NOT the lagging flat
+     * currentSessionId. This test verifies the route-param path: even when
+     * currentSessionId is "lagging-old", the route id ("route-current")
+     * governs and is forwarded to revertSession.
+     */
+    @Test
+    fun `editFromMessage reads session id from route param not lagging currentSessionId (B5)`() = runTest {
+        val reverted = Session(id = "ses_route_current", directory = "/x")
+        coEvery { repository.revertSession(any(), any(), any()) } returns Result.success(reverted)
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+        val core = createCore()
+        val vm = ChatViewModel(core)
+        // Route says "ses_route_current"; flat currentSessionId LAGS at "ses_lagging_old".
+        // The route authority MUST win.
+        core.store.mutateNav {
+            it.copy(lastRoute = "chat/ses_route_current")
+        }
+        core.writeChat {
+            it.copy(
+                currentSessionId = "ses_lagging_old",
+                messages = listOf(Message(id = "m1", role = "user")),
+                partsByMessage = mapOf("m1" to listOf(Part(id = "p1", type = "text", text = "prompt"))))
+        }
+
+        vm.editFromMessage("m1")
+        advanceUntilIdle()
+
+        // Route id was forwarded — NOT the lagging flat id.
+        coVerify { repository.revertSession("ses_route_current", "m1", null) }
+        verify { settingsManager.setDraftText(any(), "ses_route_current", "prompt") }
+    }
+
     @Test
     fun `editFromMessage failure emits error_edit_message_failed`() = runTest {
         coEvery { repository.revertSession(any(), any(), any()) } returns Result.failure(
-            java.io.IOException("denied"),
-        )
+            java.io.IOException("denied"))
         val core = createCore()
         val vm = ChatViewModel(core)
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
                 messages = listOf(Message(id = "m1", role = "user")),
-                partsByMessage = mapOf("m1" to listOf(Part(id = "p1", type = "text", text = "draft"))),
-            )
+                partsByMessage = mapOf("m1" to listOf(Part(id = "p1", type = "text", text = "draft"))))
         }
         advanceUntilIdle()
 
@@ -518,8 +529,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `abortSession failure emits error_abort_session_failed`() = runTest {
         coEvery { repository.abortSession(any()) } returns Result.failure(
-            java.io.IOException("already finished"),
-        )
+            java.io.IOException("already finished"))
         val core = createCore()
         val vm = ChatViewModel(core)
         core.writeChat { it.copy(currentSessionId = "s1") }
@@ -536,8 +546,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `refreshCurrentSession with no current session is a no-op`() = runTest {
         coEvery { repository.checkHealth() } returns Result.success(
-            cn.vectory.ocdroid.data.model.HealthResponse(healthy = true, version = "1.0"),
-        )
+            cn.vectory.ocdroid.data.model.HealthResponse(healthy = true, version = "1.0"))
         val core = createCore()
         val vm = ChatViewModel(core)
 
@@ -562,13 +571,11 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `refreshCurrentSession happy path triggers cold-start refresh and forced health check`() = runTest {
         coEvery { repository.checkHealth() } returns Result.success(
-            cn.vectory.ocdroid.data.model.HealthResponse(healthy = true, version = "1.0"),
-        )
+            cn.vectory.ocdroid.data.model.HealthResponse(healthy = true, version = "1.0"))
         // §sse-rest-fallback (TODO 2): refreshCurrentSession now re-fetches
         // UNANCHORED (forceInitialWindow=true → getMessagesPagedUnanchored).
         coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns Result.success(
-            MessagesPage(emptyList(), null),
-        )
+            MessagesPage(emptyList(), null))
         coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
         every { repository.connectSSE(any()) } returns kotlinx.coroutines.flow.emptyFlow()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
@@ -643,7 +650,6 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSession(any()) } returns Result.success(Session(id = "s1", directory = "/x"))
-        every { settingsManager.openSessionIds } returns emptyList()
         val core = createCore()
         val vm = ChatViewModel(core)
         core.writeChat { it.copy(currentSessionId = "s1") }
@@ -659,8 +665,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `loadMessages single-arg overload defaults resetLimit to true`() = runTest {
         coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(
-            MessagesPage(emptyList(), null),
-        )
+            MessagesPage(emptyList(), null))
         coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
         val core = createCore()
         val vm = ChatViewModel(core)

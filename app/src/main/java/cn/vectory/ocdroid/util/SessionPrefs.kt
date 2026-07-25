@@ -44,35 +44,18 @@ internal class SessionPrefs(
     /** When non-null, draft writes are debounced on this scope. */
     private val debounceScope: CoroutineScope? = null,
 ) {
-    /**
-     * "Open" (not closed) session IDs in open-order (most recently opened first).
-     * Replaces the previous MRU [recentSessionIds] model with a browser-tab style
-     * list: opening/switching a session prepends it; closing (x) removes it.
-     * Capped at 8 entries.
-     */
-    var openSessionIds: List<String>
-        get() {
-            val json = encryptedPrefs.getString(KEY_OPEN_SESSION_IDS, null) ?: return emptyList()
-            return try {
-                Json.decodeFromString<List<String>>(json)
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse open session IDs, using empty", e)
-                emptyList()
-            }
-        }
-        set(value) {
-            val json = Json.encodeToString(value)
-            encryptedPrefs.edit().putString(KEY_OPEN_SESSION_IDS, json).apply()
-        }
+    // §B4 / chat-list-detail §9.1 D9 / §16: open-tabs-list persistence
+    // removed. The legacy ESP key `open_session_ids` is left unread/unwritten
+    // (one-way drop of tab list only — sessionCache still restores metadata).
 
     /**
      * Persisted projection of [cn.vectory.ocdroid.data.model.Session]
      * metadata, used to seed the session-list slice
      * ([cn.vectory.ocdroid.ui.SessionListState.sessions])
-     * on cold start so tabs/title/workdir groups render instantly before the
+     * on cold start so title/workdir groups render instantly before the
      * server list is fetched. Written only from `launchLoadSessions`
-     * onSuccess (bounded to open/current/workdir-relevant entries). A server
-     * refresh later replaces these with authoritative data.
+     * onSuccess (bounded to root sessions). A server refresh later replaces
+     * these with authoritative data.
      */
     var sessionCache: List<SessionCacheEntry>
         get() {
@@ -338,6 +321,8 @@ internal class SessionPrefs(
         /** §C1: debounce window for coalescing rapid draft writes. */
         internal const val DEBOUNCE_MS = 500L
 
+        // Legacy key left for documentation only — no longer read or written (§B4).
+        @Suppress("unused")
         internal const val KEY_OPEN_SESSION_IDS = "open_session_ids"
         internal const val KEY_SESSION_CACHE = "session_cache"
         internal const val KEY_SESSION_DRAFTS = "session_drafts"

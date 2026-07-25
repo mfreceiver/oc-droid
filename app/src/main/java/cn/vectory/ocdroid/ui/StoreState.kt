@@ -84,6 +84,34 @@ data class StoreState(
      * generation so a recovered frame (same gen) can re-assert true.
      */
     val sseConnectedGeneration: Long = 0L,
+    /**
+     * §chat-list-detail §7.2 / §14 G1: chat-route incarnation counter — the
+     * §7.2 freshness-token anchor (route-instance form, bgpt's recommended
+     * option 1). Monotonically minted by
+     * [cn.vectory.ocdroid.ui.OrchestratorViewModel.navigateToChat] at each
+     * `chat/{id}` navigation and stamped by the SelectConversation /
+     * DetailMissing reducers. A content load (B0.5+) captures the live
+     * value at request time and stamps [LoadedContent.routeInstance] with
+     * it; the render gate (§7.1) accepts the content IFF
+     * `content.routeInstance == chatRouteInstance` (CAS) — a stale
+     * req-1 from an earlier A incarnation cannot overwrite req-2's newer
+     * content after an A→B→A round-trip.
+     *
+     * Mirrors the [sseConnectedGeneration] monotonic-CAS precedent
+     * (§7.2 "可复用项目既有 sseConnectedGeneration 单调 CAS 模式"); the
+     * reducer-internal token is never surfaced to the UI.
+     *
+     * B0 scaffolding (PURE ADDITIVE): default 0L, no existing reader. The
+     * 3 new [AppAction]s (SelectConversation / CloseDetail / DetailMissing)
+     * are the only writers; none is dispatched by any existing flow yet.
+     */
+    val chatRouteInstance: Long = 0L,
+    /**
+     * Store-owned connection-generation stamp. Bundle publication and every
+     * action reducer decision share the same aggregate CAS boundary.
+     */
+    val liveBundleGeneration: Long = 0L,
+    val liveEndpointFp: String = "",
 ) {
     companion object {
         /** Factory matching the pre-B1 per-slice `MutableStateFlow(XxxState())`

@@ -4,8 +4,6 @@ import cn.vectory.ocdroid.BuildConfig
 import cn.vectory.ocdroid.util.DebugLog
 import okhttp3.Interceptor
 import okhttp3.Response
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * POST-RELEASE instrumentation (slimapi-client-v1): dedicated DEBUG-only
@@ -50,8 +48,7 @@ import javax.inject.Singleton
  * one received). Failures inside the logging block are swallowed (best-
  * effort) — instrumentation must NEVER break the request.
  */
-@Singleton
-class SlimapiDebugInterceptor @Inject constructor() : Interceptor {
+class SlimapiDebugInterceptor : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()

@@ -8,11 +8,13 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.ComposerState
 import cn.vectory.ocdroid.ui.ConnectionFormSettings
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
 import cn.vectory.ocdroid.ui.FileState
+import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SettingsState
 import cn.vectory.ocdroid.ui.SharedEffectBus
@@ -355,7 +357,7 @@ class HostProfileController(
      *
      * `purgePerHostState` still runs — but with the group-isolated field
      * classification (see [purgePerHostState] doc): per-profile UX state
-     * (openSessionIds / draft / currentWorkdir) is wiped, but per-server-data
+     * (draft / currentWorkdir) is wiped, but per-server-data
      * (sessions / unread / recentWorkdirs) is preserved iff same group.
      */
     fun selectHostProfile(profileId: String) {
@@ -426,7 +428,7 @@ class HostProfileController(
      * **R-20 Phase 1 group-isolated field classification** (plan §3 v4
      * glmer I2 — same-server vs per-profile UX):
      *
-     *  - **per-profile UX (ALWAYS reset)**: openSessionIds, draft,
+     *  - **per-profile UX (ALWAYS reset)**: draft,
      *    currentWorkdir, composer draftWorkdir, availableCommands,
      *    serverVersion. These describe "what the user was doing on this
      *    profile" — they would leak across profiles in the same group.
@@ -459,7 +461,7 @@ class HostProfileController(
         //
         // What stays OUTSIDE the dispatch (oracle: not state): the
         // settingsManager writes (clearRecentWorkdirs / currentWorkdir /
-        // openSessionIds / sessionCache) + the effect-bus emissions
+        // sessionCache) + the effect-bus emissions
         // (EvictGroup / ForceReconnect / HostProfileSwitched) below — they
         // are side-effects, run at the call site.
         slices.store.dispatch(
@@ -486,31 +488,28 @@ class HostProfileController(
             // longer nukes-all either — correct: the deleted host's group is
             // evicted group-scoped, other groups keep their caches.)
             //
-            // §R18 Phase 2-F: currentSessionId clear above (chat slice) is the
-            // runtime source; the AppCore collector persists non-null changes
-            // only, so no manual null write here. openSessionIds/sessionCache
-            // are still persisted directly (no collector for them).
-            settingsManager.openSessionIds = emptyList()
+            // §R18 Phase 2-F + §B4: currentSessionId cleared by HostStatePurged
+            // reducer; wipe persisted current + sessionCache. open-tabs-list
+            // no longer exists (list-detail).
+            settingsManager.currentSessionId = null
             settingsManager.sessionCache = emptyList()
+            // §B4 / §10 host switch 异组: force popToSessions so the detail
+            // pane cannot stay on a prior host's chat/{id}.
+            settingsManager.lastRoute = NavRoute.Sessions.route
+            slices.store.mutateNav {
+                it.copy(
+                    lastRoute = NavRoute.Sessions.route,
+                    lastNavPage = NavRoute.Sessions.legacyPage,
+                    navEpoch = it.navEpoch + 1L,
+                )
+            }
+            slices.store.dispatch(AppAction.CloseDetail)
         } else {
             // §review-fix #5 (glm-3 ⚠️ per-profile UX): plan §3 glmer I2
-            // classifies currentWorkdir as per-profile UX ("两接入点各有
-            // currentWorkdir，不清会跨 profile 泄漏"). Same-group switches
-            // MUST reset currentWorkdir so the new profile starts fresh
-            // (configureRepositoryForProfile re-scopes to null). The prior
-            // code only reset currentWorkdir in the 异组 branch.
+            // classifies currentWorkdir as per-profile UX. Same-group switches
+            // MUST reset currentWorkdir so the new profile starts fresh.
             settingsManager.currentWorkdir = null
-            // §review-fix #5 openSessionIds same-group sharing: plan §3 glmer
-            // I2 lists openSessionIds as per-profile UX (reset). HOWEVER
-            // openSessionIds is currently a GLOBAL single key (no fp
-            // dimension) — Phase 5 migrates it to fp-keyed. For same-group
-            // (same server), sharing tabs is the correct UX (the user sees
-            // the same open conversations on both entry points). Resetting
-            // here would clear the tabs the user JUST had open on the sibling
-            // profile. DECISION:校正 plan — same-group preserves
-            // openSessionIds until Phase 5 migrates it to fp-keyed (at which
-            // point each profile gets its own). No code change needed; the
-            // comment documents the intentional divergence from plan §3.
+            // §B4: open-tabs-list removed — no same-group tab-sharing concern.
         }
     }
 
@@ -584,6 +583,13 @@ class HostProfileController(
             url, username, password,
             hostPort = hostPortFromUrl(url),
             clientCert = clientCert,
+            // §sse-self-cancel T1.2 / Fix②: slim provenance — propagate the
+            // active profile's slim flag so HostConfig.slim (→ routing,
+            // X-Slimapi-Version header, /slimapi/health) matches the user's
+            // server type. Was implicitly defaulting to false (legacy) which
+            // left a slim-profile host routed as legacy after a manual URL
+            // change. See OpenCodeRepository.configure slim param.
+            slim = profile.slim,
             reconfigureTicket = ticket,
         )
         // #12 / §2.5(b): mirror the host's TLS trust policy (incl. mTLS) into
@@ -674,6 +680,11 @@ class HostProfileController(
             profile.serverUrl, profile.basicAuth?.username, password,
             hostPort = hostPortFromUrl(profile.serverUrl),
             clientCert = clientCert,
+            // §sse-self-cancel T1.2 / Fix②: slim provenance — propagate
+            // profile.slim so HostConfig.slim routes correctly (slim sidecar vs
+            // legacy opencode). Was defaulting to false, leaving slim profiles
+            // mis-routed on selectHostProfile / deleteHostProfile / testConnection.
+            slim = profile.slim,
             reconfigureTicket = ticket,
         )
         // #12 / §2.5(a): keep the markdown image HTTP client's TLS trust policy

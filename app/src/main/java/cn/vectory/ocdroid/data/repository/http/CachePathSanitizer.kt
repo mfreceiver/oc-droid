@@ -1,8 +1,7 @@
 package cn.vectory.ocdroid.data.repository.http
 
 import cn.vectory.ocdroid.data.repository.HostConfig
-import javax.inject.Inject
-import javax.inject.Singleton
+import cn.vectory.ocdroid.data.repository.HostSnapshot
 
 /**
  * §Stage D (gpter 阻塞 #2): strips the configured baseUrl's path prefix from
@@ -19,10 +18,12 @@ import javax.inject.Singleton
  * Extracted verbatim from `OpenCodeRepository.cacheRelativePath` in R-18;
  * behavior preserved byte-for-byte.
  */
-@Singleton
-class CachePathSanitizer @Inject constructor(
-    private val hostConfig: HostConfig
+class CachePathSanitizer internal constructor(
+    private val hostSnapshot: HostSnapshot
 ) {
+
+    /** Compatibility constructor: capture, never retain, the mutable holder. */
+    constructor(hostConfig: HostConfig) : this(hostConfig.snapshot())
 
     /**
      * Strips the configured baseUrl's path prefix from [requestPath]. Pure
@@ -30,7 +31,7 @@ class CachePathSanitizer @Inject constructor(
      * from interceptor threads.
      */
     fun cacheRelativePath(requestPath: String): String {
-        val baseUrl = hostConfig.baseUrl
+        val baseUrl = hostSnapshot.baseUrl
         val protocolEnd = baseUrl.indexOf("://")
         val hostStart = if (protocolEnd >= 0) protocolEnd + 3 else 0
         val pathStart = baseUrl.indexOf('/', hostStart)

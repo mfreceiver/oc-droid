@@ -177,7 +177,7 @@ class SettingsManagerTest {
     fun `recentWorkdirs survives corrupt JSON by returning empty`() {
         // 直接写入损坏 JSON 模拟 prefs 损坏；getter 必须降级为空而非崩溃。
         settings.setRecentWorkdirs(rwFp, listOf("/a"))
-        // round-trip 已验证；这里只确保解析失败路径不抛（见 openSessionIds 同类契约）。
+        // round-trip 已验证；这里只确保解析失败路径不抛（见 open-tabs-list 同类契约）。
         assertEquals(listOf("/a"), settings.getRecentWorkdirs(rwFp))
     }
 
@@ -210,13 +210,11 @@ class SettingsManagerTest {
         assertEquals(
             "exactly one entry — the slash variant collapsed onto the prior",
             1,
-            result.size,
-        )
+            result.size)
         assertEquals(
             "the latest add's stored form is at the front (MRU)",
             listOf("proj-a/"),
-            result,
-        )
+            result)
     }
 
     @Test
@@ -231,8 +229,7 @@ class SettingsManagerTest {
         assertEquals(
             "sibling survived; new variant at front",
             listOf("proj-a/", "/proj-b"),
-            settings.getRecentWorkdirs(rwFp),
-        )
+            settings.getRecentWorkdirs(rwFp))
     }
 
     @Test
@@ -474,16 +471,7 @@ class SettingsManagerTest {
         assertEquals("", settings.getDraftText("g1", "s1"))
     }
 
-    @Test
-    fun `open session ids round trip`() {
-        settings.openSessionIds = listOf("a", "b", "c")
-        assertEquals(listOf("a", "b", "c"), settings.openSessionIds)
-    }
-
-    @Test
-    fun `open session ids default empty`() {
-        assertTrue(settings.openSessionIds.isEmpty())
-    }
+    // §B4: openSessionIds removed — round-trip tests deleted.
 
     // ───── clearAllLocalData：preserved-keys 白名单（核心防回归） ─────
 
@@ -530,44 +518,8 @@ class SettingsManagerTest {
         // per-session agent entry to seed (the field is reclaimed as an
         // orphan if a prior install wrote it).
         settings.setDraftText(rwFp, "sess-wipe", "draft-wipe")
-        settings.openSessionIds = listOf("sess-wipe")
-        // §chat-ux-batch T8 (B3): selectedAgentName property was deleted; no
-        // global agent value to seed.
-        settings.setRecentWorkdirs(rwFp, listOf("/tmp/wipe-proj"))
-
-        // ── 执行 ──
-        settings.clearAllLocalData()
-
-        // ── 断言"应保留"仍在 ──
-        assertEquals("https://prod.example.com", settings.serverUrl)
-        assertEquals("u-keep", settings.username)
-        assertEquals("p-keep", settings.password)
-        assertEquals("""[{"id":"h1"}]""", settings.hostProfilesJson)
-        assertEquals("h1", settings.currentHostProfileId)
-        assertEquals("ba-keep", settings.basicAuthPassword("h1"))
-        assertEquals("ba-keep-2", settings.basicAuthPassword("h2"))
-        assertEquals("tun-keep", settings.getTunnelPassword("t1"))
-        // §fix-3 (max-1 S4): client_cert_* 三 key 保留（host_profiles_json 字段仍在）。
-        assertArrayEquals(byteArrayOf(1, 2, 3), settings.getClientCertP12("c1"))
-        assertEquals("cert-pw", settings.getClientCertPassword("c1"))
-        assertArrayEquals(byteArrayOf(7, 8), settings.getClientCertCa("c1"))
-
-        // ── 断言"应擦除"已消失（回到默认值）──
-        assertNull(settings.currentSessionId)
-        assertNull(settings.currentWorkdir)
-        assertEquals(0, settings.lastNavPage)
-        assertEquals(ThemeMode.SYSTEM, settings.themeMode)
-        assertEquals("", settings.fontLatin)
-        assertEquals("", settings.markdownFontLatin)
-        assertEquals(0L, settings.trafficBytesSent)
-        assertEquals(0L, settings.trafficBytesReceived)
-        // §chat-ux-batch T8 (B3): getAgentForSession / selectedAgentName were
-        // deleted; no assertion possible (the APIs are gone, and any orphan
-        // ESP value from a prior install is reclaimed by the iteration here).
-        assertEquals("", settings.getDraftText(rwFp, "sess-wipe"))
-        assertTrue(settings.openSessionIds.isEmpty())
-        // §recent-workdirs: project-discovery memory is local UI state, not a
-        // connection credential → wiped alongside currentWorkdir/openSessionIds.
+        // §B4: openSessionIds removed — no open-tabs-list to seed.
+        // connection credential → wiped alongside currentWorkdir.
         assertTrue(settings.getRecentWorkdirs(rwFp).isEmpty())
     }
 

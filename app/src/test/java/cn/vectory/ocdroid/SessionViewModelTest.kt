@@ -29,6 +29,7 @@ import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.currentSession
 import cn.vectory.ocdroid.ui.loadSessionsForEffect
+import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.session.buildSessionTree
 import cn.vectory.ocdroid.ui.visibleMessages
 import cn.vectory.ocdroid.util.ThemeMode
@@ -53,6 +54,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -256,8 +258,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coVerify { repository.getSessions(cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit) }
         assertEquals(
             cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit,
-            sessionVM.sessionListFlow.value.loadedSessionLimit,
-        )
+            sessionVM.sessionListFlow.value.loadedSessionLimit)
         // 10 < 500 ⇒ no next page.
         assertFalse(sessionVM.sessionListFlow.value.hasMoreSessions)
         assertEquals(10, sessionVM.sessionListFlow.value.sessions.size)
@@ -684,10 +685,10 @@ class SessionViewModelTest : MainViewModelTestBase() {
             parentId = "parent",
             time = Session.TimeInfo(archived = 1_000)
         )
-        coEvery { repository.updateSessionArchived("parent", -1L) } returns Result.success(
+        coEvery { repository.updateSessionArchived("parent", any()) } returns Result.success(
             parent.copy(time = Session.TimeInfo(archived = -1))
         )
-        coEvery { repository.updateSessionArchived("child", -1L) } returns Result.success(
+        coEvery { repository.updateSessionArchived("child", any()) } returns Result.success(
             child.copy(time = Session.TimeInfo(archived = -1))
         )
 
@@ -705,8 +706,8 @@ class SessionViewModelTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         coVerify {
-            repository.updateSessionArchived("parent", -1L)
-            repository.updateSessionArchived("child", -1L)
+            repository.updateSessionArchived("parent", any())
+            repository.updateSessionArchived("child", any())
         }
         assertFalse(sessionVM.sessionListFlow.value.sessions.any { it.isArchived })
     }
@@ -799,7 +800,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
 
     @Test
     fun `openSubAgent surfaces error and keeps currentSessionId when child cannot be resolved`() = runTest {
-        coEvery { repository.getSession("child-missing") } returns Result.failure(IllegalStateException("404"))
+        coEvery { repository.getSession("ses_child_missing") } returns Result.failure(IllegalStateException("404"))
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
@@ -809,25 +810,33 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
         val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
         val viewModel = SessionViewModel(core)  // primary VM under test
-        core.writeChat { it.copy(currentSessionId = "parent-1") }
+        // §B5 BLOCK-fix: set the parent route (nav.lastRoute) so the
+        // route-instance guard inside openSubAgent recognizes parent-1 as
+        // the active route for re-validation after the fetch.
+        core.store.mutateNav { it.copy(lastRoute = "chat/ses_parent_1") }
+        core.writeChat { it.copy(currentSessionId = "ses_parent_1") }
         val beforeId = chatVM.chatFlow.value.currentSessionId
 
+        // §chat-list-detail §11 / G6 (B5 BLOCK-fix): openSubAgent signature —
+        // (childSessionId, checkpoint, onNavigateToChild={(id, cp) -> ...}).
+        // The checkpoint write + nav happen INSIDE the callback on the success
+        // path (avoids stale checkpoint when fetch fails or route changes).
+        var navigatedTo: Pair<String, cn.vectory.ocdroid.ui.ScrollCheckpoint>? = null
         sessionVM.openSubAgent(
-            "child-missing",
-            // §Wave5b-Q13: openSubAgent now requires a parent checkpoint
-            // (captured synchronously by the Compose layer in production).
-            cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = null, fallbackIndex = 0, offset = 0),
+            childSessionId = "ses_child_missing",
+            checkpoint = cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = null, fallbackIndex = 0, offset = 0),
+            onNavigateToChild = { id, cp -> navigatedTo = id to cp },
         )
         advanceUntilIdle()
 
         assertEquals(beforeId, chatVM.chatFlow.value.currentSessionId)
+        assertNull("navigation must not fire on failed fetch", navigatedTo)
         assertNotNull("error channel must be set when child session is unavailable", core.recentTestErrors.lastOrNull())
     }
 
     @Test
-    fun `closeSession preserves closed session draft and does not pollute next session draft`() = runTest {
-        every { settingsManager.openSessionIds } returns listOf("s1", "s2")
-        every { settingsManager.openSessionIds = any() } just runs
+    fun `closeSession preserves closed session draft and clears to Sessions (B4)`() = runTest {
+        // §B4: open-tabs-list removed — no openSessionIds mock needed.
         every { settingsManager.getDraftText(any(), "s2") } returns "s2draft"
 
         val core = createCore()
@@ -840,8 +849,6 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val viewModel = SessionViewModel(core)  // primary VM under test
         core.writeChat { it.copy(currentSessionId = "s1") }
         core.writeComposer { it.copy(inputText = "s1-unsent-draft") }
-        core.writeSessionList { it.copy(openSessionIds = listOf("s1", "s2")) }
-
         sessionVM.closeSession("s1")
         advanceUntilIdle()
 
@@ -849,9 +856,41 @@ class SessionViewModelTest : MainViewModelTestBase() {
         verify(atLeast = 1) { settingsManager.setDraftText(any(), "s1", "s1-unsent-draft") }
         // The next session must NOT inherit the closed session's draft text.
         verify(exactly = 0) { settingsManager.setDraftText(any(), "s2", "s1-unsent-draft") }
-        // s2 becomes current and its own draft is restored.
-        assertEquals("s2", chatVM.chatFlow.value.currentSessionId)
-        assertEquals("s2draft", composerVM.composerFlow.value.inputText)
+        // §B4 / §10: closing the active session pops to Sessions → current null.
+        // No auto-select of s2 (tab concept gone).
+        assertNull(chatVM.chatFlow.value.currentSessionId)
+        assertEquals(NavRoute.Sessions.route, core.navFlow.value.lastRoute)
+    }
+
+    @Test
+    fun `closeSession ancestor of current is a no-op (B4 §10 — non-current close)`() = runTest {
+        // §B4 / §10: non-current close is a no-op — list-detail has a single
+        // detail pane. Closing an ancestor of the current session does NOT
+        // trigger chat clear + pop-to-Sessions (only the active route's leave does).
+        val core = createCore()
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
+        core.writeSessionList {
+            it.copy(
+                sessions = listOf(
+                    cn.vectory.ocdroid.data.model.Session(id = "parent", directory = "/p"),
+                    cn.vectory.ocdroid.data.model.Session(id = "child", directory = "/p", parentId = "parent"),
+                ),
+            )
+        }
+        core.writeChat { it.copy(currentSessionId = "child") }
+        // Set the active route to Chat so the no-op assertion can verify the
+        // route stays Chat (without this the default route is already Sessions
+        // and the assertion is vacuously true).
+        core.store.mutateNav { it.copy(lastRoute = NavRoute.Chat.route, lastNavPage = NavRoute.Chat.legacyPage) }
+
+        // Closing the parent (ancestor of current "child") → no-op.
+        sessionVM.closeSession("parent")
+        advanceUntilIdle()
+
+        // Current session and route unchanged — non-current close is a no-op.
+        assertEquals("child", chatVM.chatFlow.value.currentSessionId)
+        assertNotEquals(NavRoute.Sessions.route, core.navFlow.value.lastRoute)
     }
 
     @Test
@@ -939,8 +978,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         core.writeSessionList {
             it.copy(
                 sessions = listOf(globalSession),
-                directorySessions = mapOf(workdir to listOf(inWorkdir)),
-            )
+                directorySessions = mapOf(workdir to listOf(inWorkdir)))
         }
         core.writeUnread { it.copy(unreadSessions = setOf("A", "Z")) }
 
@@ -996,8 +1034,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
             it.copy(
                 sessions = listOf(globalInWorkdir, globalOther),
                 // directorySessions is EMPTY — G is not pre-fetched here.
-                directorySessions = emptyMap(),
-            )
+                directorySessions = emptyMap())
         }
         core.writeUnread { it.copy(unreadSessions = setOf("G", "Z")) }
 
@@ -1006,12 +1043,10 @@ class SessionViewModelTest : MainViewModelTestBase() {
         // G (in workdir, only in global sessions) cleared; Z (other workdir) preserved.
         assertFalse(
             "global session G in this workdir cleared even without directorySessions entry",
-            sessionVM.unreadFlow.value.unreadSessions.contains("G"),
-        )
+            sessionVM.unreadFlow.value.unreadSessions.contains("G"))
         assertTrue(
             "global session Z in other workdir preserved",
-            sessionVM.unreadFlow.value.unreadSessions.contains("Z"),
-        )
+            sessionVM.unreadFlow.value.unreadSessions.contains("Z"))
     }
 
     @Test
@@ -1041,8 +1076,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         core.writeSessionList {
             it.copy(
                 sessions = listOf(inWorkdir, globalOther),
-                directorySessions = emptyMap(),
-            )
+                directorySessions = emptyMap())
         }
         core.writeUnread { it.copy(unreadSessions = setOf("A", "Z")) }
 
@@ -1052,12 +1086,10 @@ class SessionViewModelTest : MainViewModelTestBase() {
 
         assertFalse(
             "session A unread cleared even when disconnect workdir is a normalize-variant of its directory",
-            sessionVM.unreadFlow.value.unreadSessions.contains("A"),
-        )
+            sessionVM.unreadFlow.value.unreadSessions.contains("A"))
         assertTrue(
             "global session Z in other workdir preserved",
-            sessionVM.unreadFlow.value.unreadSessions.contains("Z"),
-        )
+            sessionVM.unreadFlow.value.unreadSessions.contains("Z"))
     }
 
     @Test

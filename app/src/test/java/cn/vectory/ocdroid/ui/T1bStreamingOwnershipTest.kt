@@ -111,7 +111,7 @@ class T1bStreamingOwnershipTest {
         oldStore.mutateChat { c ->
             c.applyPartCreatedPlaceholder("text", "p1", "m1", "sess-A").first
         }
-        newStore.dispatch(AppAction.PartPlaceholderEnsured("text", "p1", "m1", "sess-A"))
+        newStore.dispatch(AppAction.PartPlaceholderEnsured("text", "p1", "m1", "sess-A", bundleStamp = BundleStamp(0L, "")))
 
         assertEquals(
             "PartPlaceholderEnsured MUST equal legacy applyPartCreatedPlaceholder",
@@ -198,7 +198,7 @@ class T1bStreamingOwnershipTest {
         )
 
         oldStore.mutateChat { c -> c.flushCoalesceBufferForPart("p1").first }
-        newStore.dispatch(AppAction.CoalesceFlushedForPart("p1"))
+        newStore.dispatch(AppAction.CoalesceFlushedForPart("p1", bundleStamp = BundleStamp(0L, "")))
 
         assertEquals(
             "CoalesceFlushedForPart MUST equal legacy flushCoalesceBufferForPart",
@@ -224,7 +224,7 @@ class T1bStreamingOwnershipTest {
         )
 
         oldStore.mutateChat { c -> c.flushCoalesceBufferForPart("p1").first }
-        newStore.dispatch(AppAction.CoalesceFlushedForPart("p1"))
+        newStore.dispatch(AppAction.CoalesceFlushedForPart("p1", bundleStamp = BundleStamp(0L, "")))
 
         assertEquals(
             "CoalesceFlushedForPart REPLACE path (fullText wins over delta) MUST match legacy",
@@ -317,7 +317,7 @@ class T1bStreamingOwnershipTest {
         assertEquals("initial state emitted once", 1, seen.size)
 
         // Phase 1: placeholder ensured (SSC:1362 — the first mutateChat).
-        store.dispatch(AppAction.PartPlaceholderEnsured("text", "p1", "m1", "sess-A"))
+        store.dispatch(AppAction.PartPlaceholderEnsured("text", "p1", "m1", "sess-A", bundleStamp = BundleStamp(0L, "")))
         advanceUntilIdle()
 
         assertEquals(
@@ -380,7 +380,7 @@ class T1bStreamingOwnershipTest {
         val job = launch { store.stateFlow.collect { seen += it } }
         advanceUntilIdle()
 
-        store.dispatch(AppAction.PartPlaceholderEnsured("reasoning", "p1", "m1", "sess-A"))
+        store.dispatch(AppAction.PartPlaceholderEnsured("reasoning", "p1", "m1", "sess-A", bundleStamp = BundleStamp(0L, "")))
         advanceUntilIdle()
         store.dispatch(AppAction.PartFullTextReceived("p1", "thinking...", "reasoning", "m1", "sess-A"))
         advanceUntilIdle()

@@ -166,8 +166,7 @@ class HostProfileControllerTest {
             settingsManager = settingsManager,
             trafficTracker = trafficTracker,
             effects = effects,
-            currentServerGroupFp = { "test-fp" },
-        )
+            currentServerGroupFp = { "test-fp" })
         // Default store seeding; tests re-stub as needed (last stub wins).
         seedStore(listOf(profileA, profileB), currentId = "p-A")
         // #12: HttpImageHolder 是 object 单例，跨单测会残留 allowInsecure 状态——
@@ -277,7 +276,6 @@ class HostProfileControllerTest {
                 pendingQuestions = s.pendingQuestions,
                 childSessions = s.childSessions,
                 directorySessions = s.directorySessions,
-                openSessionIds = s.openSessionIds,
                 sessionTodos = s.sessionTodos
             )
         }
@@ -329,8 +327,7 @@ class HostProfileControllerTest {
             tunnelPassword = null,
             clientCertId = null,
             mtlsEnabled = false,
-            slim = false,
-        )
+            slim = false)
         val controllerWithResolver = HostProfileController(
             scope = scope,
             slices = slices,
@@ -340,8 +337,7 @@ class HostProfileControllerTest {
             trafficTracker = trafficTracker,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            effectiveConnectionConfigResolver = resolver,
-        )
+            effectiveConnectionConfigResolver = resolver)
 
         val settings = controllerWithResolver.getSavedConnectionSettings()
 
@@ -367,8 +363,7 @@ class HostProfileControllerTest {
             trafficTracker = trafficTracker,
             effects = effects,
             currentServerGroupFp = { "test-fp" },
-            effectiveConnectionConfigResolver = resolver,
-        )
+            effectiveConnectionConfigResolver = resolver)
         every { settingsManager.serverUrl } returns "http://stale-should-not-leak:4096"
 
         val settings = controllerWithResolver.getSavedConnectionSettings()
@@ -535,8 +530,7 @@ class HostProfileControllerTest {
             controller.saveHostProfile(
                 profileB,
                 basicAuthPassword = "new-secret",
-                basicAuthEdited = true,
-            )
+                basicAuthEdited = true)
         }
 
         // Password write fired.
@@ -546,12 +540,10 @@ class HostProfileControllerTest {
         verify { repository.configure(profileB.serverUrl, any(), any(), any(), any(), any(), any()) }
         assertEquals(
             "ForceReconnect must fire for an active-host basicAuth-only edit",
-            1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size,
-        )
+            1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
         assertEquals(
             "CancelSseForReconfigure must fire for an active-host basicAuth-only edit",
-            1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size,
-        )
+            1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
     }
 
     @Test
@@ -572,8 +564,7 @@ class HostProfileControllerTest {
         verify { repository.configure(renamed.serverUrl, "user-b-renamed", any(), any(), any(), any(), any()) }
         assertEquals(
             "ForceReconnect must fire for an active-host username-only edit",
-            1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size,
-        )
+            1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
     }
 
     @Test
@@ -587,8 +578,7 @@ class HostProfileControllerTest {
             controller.saveHostProfile(
                 profileB,
                 basicAuthPassword = "new-secret",
-                basicAuthEdited = true,
-            )
+                basicAuthEdited = true)
         }
 
         verify(exactly = 0) { repository.configure(any(), any(), any(), any()) }
@@ -631,8 +621,7 @@ class HostProfileControllerTest {
             currentServerGroupFp = { "test-fp" },
             identityStore = null,
             reconfigureBarrier = mockBarrier,
-            effectiveConnectionConfigResolver = null,
-        )
+            effectiveConnectionConfigResolver = null)
         seed { it.copy(currentHostProfileId = "p-A") }
         // Active host + URL change → needsReconfigure=true → barrier path.
         val moved = profileA.copy(serverUrl = "http://changed:4096")
@@ -645,8 +634,7 @@ class HostProfileControllerTest {
         }
         assertTrue(
             "CancellationException from the barrier must PROPAGATE (runSuspendCatching rethrows CE), not collapse to Result.failure",
-            threwCE,
-        )
+            threwCE)
     }
 
     // ── #12 / §tofu R2: HttpImageHolder.updateSsl sync verification ─────────
@@ -732,9 +720,7 @@ class HostProfileControllerTest {
             it.copy(
             currentHostProfileId = "p-A",
             currentSessionId = "sess-old",
-            sessions = listOf(cn.vectory.ocdroid.data.model.Session(id = "sess-old", directory = "/d")),
-            openSessionIds = listOf("sess-old")
-            )
+            sessions = listOf(cn.vectory.ocdroid.data.model.Session(id = "sess-old", directory = "/d")))
         }
         // §review-fix #6: keep BOTH profiles in store.profiles() so
         // deleteHostProfile can capture deletedProfile.serverGroupFp. The
@@ -759,13 +745,11 @@ class HostProfileControllerTest {
         assertEquals(
             "EvictGroup(g-A) replaces ClearSessionWindowCache (group-scoped)",
             1,
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size,
-        )
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
         assertEquals("g-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().serverGroupFp)
         // Per-host state purged.
         assertNull("currentSessionId purged", slices.chat.value.currentSessionId)
         assertTrue("sessions purged", slices.sessionList.value.sessions.isEmpty())
-        assertTrue("openSessionIds purged", slices.sessionList.value.openSessionIds.isEmpty())
         // AppState now reflects the replacement current id.
         assertEquals("p-B", slices.host.value.currentHostProfileId)
     }
@@ -811,7 +795,6 @@ class HostProfileControllerTest {
             it.copy(
             currentSessionId = "sess-old",
             messages = listOf(cn.vectory.ocdroid.data.model.Message(id = "m1", role = "user")),
-            openSessionIds = listOf("sess-old"),
             unreadSessions = setOf("sess-old"),
             draftWorkdir = "/old/proj",
             availableCommands = listOf(cn.vectory.ocdroid.data.api.CommandInfo("cmd"))
@@ -824,7 +807,6 @@ class HostProfileControllerTest {
 
         assertNull("currentSessionId purged", slices.chat.value.currentSessionId)
         assertTrue("messages purged", slices.chat.value.messages.isEmpty())
-        assertTrue("openSessionIds purged", slices.sessionList.value.openSessionIds.isEmpty())
         assertTrue("unread purged", slices.unread.value.unreadSessions.isEmpty())
         assertNull("draftWorkdir purged", slices.composer.value.draftWorkdir)
         assertTrue("availableCommands purged", slices.settings.value.availableCommands.isEmpty())
@@ -848,8 +830,7 @@ class HostProfileControllerTest {
                 "b:4096",
                 any(),
                 any(),
-                any(),
-            )
+                any())
         }
     }
 
@@ -867,19 +848,17 @@ class HostProfileControllerTest {
         assertEquals(
             "EvictGroup(g-A) replaces ClearSessionWindowCache",
             1,
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size,
-        )
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
         assertEquals("g-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().serverGroupFp)
         // ClearSessionWindowCache is no longer emitted here.
         assertTrue(
             "ClearSessionWindowCache must NOT fire (EvictGroup handles group-scoped clear)",
-            collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().isEmpty(),
-        )
+            collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().isEmpty())
         // §R18 Phase 2-F: currentSessionId is no longer written to
         // SettingsManager here (purgePerHostState clears it on the chat slice,
         // asserted below); the AppCore collector persists non-null changes only.
         assertNull("currentSessionId purged on chat slice", slices.chat.value.currentSessionId)
-        verify { settingsManager.openSessionIds = emptyList() }
+        // §B4: open-tabs-list removed — no openSessionIds verify.
         verify { settingsManager.sessionCache = emptyList() }
         verify { settingsManager.currentWorkdir = null }
         // §recent-workdirs fix: clearRecentWorkdirs was REMOVED from
@@ -910,8 +889,7 @@ class HostProfileControllerTest {
         assertTrue("forceReconnect recorded", reconnectIdx >= 0)
         assertTrue(
             "C-D3 rev-3: CancelSse (with beginSlim) fires before EvictGroup/purge",
-            cancelIdx < evictIdx,
-        )
+            cancelIdx < evictIdx)
         assertTrue("EvictGroup fires before reconnect", evictIdx < reconnectIdx)
     }
 
@@ -935,8 +913,7 @@ class HostProfileControllerTest {
         // Same-group → EvictGroup MUST NOT fire (only异组 emits it).
         assertTrue(
             "same-group switch must NOT emit EvictGroup",
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().isEmpty(),
-        )
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().isEmpty())
         // Same-group → clearRecentWorkdirs MUST NOT be called (per-fp slot
         // belongs to the same server group, data is still valid).
         verify(exactly = 0) { settingsManager.clearRecentWorkdirs(any()) }
@@ -994,8 +971,7 @@ class HostProfileControllerTest {
                 "b:4096",
                 any(),
                 any(),
-                any(),
-            )
+                any())
         }
         // §R18 Phase 2-E step 2: the repository.setCurrentDirectory call was
         // removed; directory routing now uses explicit `directory` parameters
@@ -1021,8 +997,7 @@ class HostProfileControllerTest {
                 "a:4096",
                 any(),
                 any(),
-                any(),
-            )
+                any())
         }
     }
 
@@ -1154,12 +1129,10 @@ class HostProfileControllerTest {
         assertEquals(
             "epoch bumped from 5 to 6, not reset to 0",
             6L,
-            slices.sessionList.value.completenessEpoch,
-        )
+            slices.sessionList.value.completenessEpoch)
         assertTrue(
             "completeness proofs cleared on reset",
-            slices.sessionList.value.completeRootIds.isEmpty(),
-        )
+            slices.sessionList.value.completeRootIds.isEmpty())
     }
 
     @Test
@@ -1213,8 +1186,7 @@ class HostProfileControllerTest {
                     assertEquals(cn.vectory.ocdroid.service.TeardownReason.Reconfigure, reason)
                 }
             },
-            effects,
-        )
+            effects)
         val barrierController = HostProfileController(
             scope = scope,
             slices = slices,
@@ -1225,8 +1197,7 @@ class HostProfileControllerTest {
             effects = effects,
             currentServerGroupFp = { "test-fp" },
             identityStore = identityStore,
-            reconfigureBarrier = barrier,
-        )
+            reconfigureBarrier = barrier)
         seedStore(listOf(profileA, profileB), currentId = "p-A")
 
         barrierController.resetLocalDataAndResync()
@@ -1326,8 +1297,7 @@ class HostProfileControllerTest {
         assertEquals(
             "EvictGroup(g-A) replaces ClearSessionWindowCache",
             1,
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size,
-        )
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
     }
 
     @Test
@@ -1396,13 +1366,11 @@ class HostProfileControllerTest {
 
         assertTrue(
             "ClearSessionWindowCache (nuke-all) must NOT fire on cross-group switch — EvictGroup (group-scoped) handles it",
-            collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().isEmpty(),
-        )
+            collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().isEmpty())
         assertEquals(
             "EvictGroup(g-A) fires for the previous group only",
             1,
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size,
-        )
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
     }
 
     @Test
@@ -1429,8 +1397,7 @@ class HostProfileControllerTest {
 
         assertTrue(
             "EvictGroup must NOT fire when a sibling profile still references the group",
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().isEmpty(),
-        )
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().isEmpty())
     }
 
     @Test
@@ -1447,8 +1414,7 @@ class HostProfileControllerTest {
         assertEquals(
             "EvictGroup(g-A) fires when no sibling remains",
             1,
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size,
-        )
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
         assertEquals("g-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().serverGroupFp)
     }
 
@@ -1465,8 +1431,7 @@ class HostProfileControllerTest {
         val ks = KeyStore.getInstance("PKCS12").apply { load(null, null) }
         ks.setKeyEntry(
             "client", client.keyPair.private, password.toCharArray(),
-            arrayOf(client.certificate, ca.certificate),
-        )
+            arrayOf(client.certificate, ca.certificate))
         val baos = ByteArrayOutputStream()
         ks.store(baos, password.toCharArray())
         return baos.toByteArray()
@@ -1484,9 +1449,7 @@ class HostProfileControllerTest {
                 basicAuthEdited = false,
                 clientCertEdit = ClientCertEditIntent.Update(
                     stagedP12 = p12, caStage = CaStage.Unchanged,
-                    p12Password = "p12pw", p12PasswordEdited = true, hasImportedP12 = true,
-                ),
-            )
+                    p12Password = "p12pw", p12PasswordEdited = true, hasImportedP12 = true))
         }
         scope.testScheduler.advanceUntilIdle()
 
@@ -1510,8 +1473,7 @@ class HostProfileControllerTest {
             controller.saveHostProfile(
                 mtlsProfile,  // 携带 cert-old（Disable 据此清理）
                 basicAuthEdited = false,
-                clientCertEdit = ClientCertEditIntent.Disable,
-            )
+                clientCertEdit = ClientCertEditIntent.Disable)
         }
         scope.testScheduler.advanceUntilIdle()
 
@@ -1534,9 +1496,7 @@ class HostProfileControllerTest {
                 basicAuthEdited = false,
                 clientCertEdit = ClientCertEditIntent.Update(
                     stagedP12 = newP12, caStage = CaStage.Unchanged,
-                    p12Password = "p12pw", p12PasswordEdited = true, hasImportedP12 = true,
-                ),
-            )
+                    p12Password = "p12pw", p12PasswordEdited = true, hasImportedP12 = true))
         }
         scope.testScheduler.advanceUntilIdle()
 
@@ -1544,8 +1504,7 @@ class HostProfileControllerTest {
         verify { settingsManager.saveClientCert("cert-stable", newP12, any(), any()) }
         assertEquals(
             "material edit (re-import) triggers reconfigure even though clientCertId unchanged",
-            1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size,
-        )
+            1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
     }
 
     @Test
@@ -1562,14 +1521,11 @@ class HostProfileControllerTest {
                 profileA, basicAuthEdited = false,
                 clientCertEdit = ClientCertEditIntent.Update(
                     stagedP12 = null, caStage = CaStage.Unchanged,
-                    p12Password = null, p12PasswordEdited = false, hasImportedP12 = false,
-                ),
-            )
+                    p12Password = null, p12PasswordEdited = false, hasImportedP12 = false))
             assertTrue("save must fail when mTLS enabled without p12", result.isFailure)
             assertTrue(
                 "failure cause must be IllegalArgumentException (got ${result.exceptionOrNull()})",
-                result.exceptionOrNull() is IllegalArgumentException,
-            )
+                result.exceptionOrNull() is IllegalArgumentException)
         }
     }
 
@@ -1584,14 +1540,11 @@ class HostProfileControllerTest {
                 profileA, basicAuthEdited = false,
                 clientCertEdit = ClientCertEditIntent.Update(
                     stagedP12 = ByteArray(32) { it.toByte() }, caStage = CaStage.Unchanged,
-                    p12Password = null, p12PasswordEdited = false, hasImportedP12 = true,
-                ),
-            )
+                    p12Password = null, p12PasswordEdited = false, hasImportedP12 = true))
             assertTrue("save must fail when p12 is corrupt", result.isFailure)
             assertTrue(
                 "failure cause must be IllegalArgumentException (got ${result.exceptionOrNull()})",
-                result.exceptionOrNull() is IllegalArgumentException,
-            )
+                result.exceptionOrNull() is IllegalArgumentException)
         }
     }
 
@@ -1607,9 +1560,7 @@ class HostProfileControllerTest {
                 basicAuthEdited = false,
                 clientCertEdit = ClientCertEditIntent.Update(
                     stagedP12 = p12, caStage = CaStage.Unchanged,
-                    p12Password = "p12pw", p12PasswordEdited = true, hasImportedP12 = true,
-                ),
-            )
+                    p12Password = "p12pw", p12PasswordEdited = true, hasImportedP12 = true))
         }
         scope.testScheduler.advanceUntilIdle()
 

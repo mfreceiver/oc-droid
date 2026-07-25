@@ -24,13 +24,21 @@ import cn.vectory.ocdroid.ui.controller.replaceFullTextBuffer
 
 // ── T1b streaming reduce (1:1 pure-fn delegates) ───────────────────────
 
-internal fun reducePartPlaceholderEnsured(state: StoreState, action: AppAction.PartPlaceholderEnsured): StoreState = state.copy(
-    chat = state.chat.applyPartCreatedPlaceholder(
-        action.partType, action.partId, action.messageId, action.sessionId,
-    ).first,
-)
+internal fun reducePartPlaceholderEnsured(state: StoreState, action: AppAction.PartPlaceholderEnsured): StoreState {
+    // Route-owned (token≠0) session-id-bearing events are rejected from a
+    // newly selected session by acceptsRouteUpdate. Legacy (token=0) events
+    // write the flat compatibility surface unconditionally (pre-B2 parity).
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
+    return state.copy(
+        chat = state.chat.applyPartCreatedPlaceholder(
+            action.partType, action.partId, action.messageId, action.sessionId,
+        ).first,
+    ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+}
 
-internal fun reducePartFullTextReceived(state: StoreState, action: AppAction.PartFullTextReceived): StoreState = state.copy(
+internal fun reducePartFullTextReceived(state: StoreState, action: AppAction.PartFullTextReceived): StoreState {
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
+    return state.copy(
     // pId = partId (same key used by the SSC leading-edge call site).
     chat = state.chat.applyPartFullTextLeadingEdge(
         partId = action.partId,
@@ -40,9 +48,12 @@ internal fun reducePartFullTextReceived(state: StoreState, action: AppAction.Par
         msgId = action.messageId,
         sessionId = action.sessionId,
     ).first.markFlushPending(action.partId).first,
-)
+    ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+}
 
-internal fun reducePartDeltaReceived(state: StoreState, action: AppAction.PartDeltaReceived): StoreState = state.copy(
+internal fun reducePartDeltaReceived(state: StoreState, action: AppAction.PartDeltaReceived): StoreState {
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
+    return state.copy(
     // 5-arg overload (knownType + msgId + sessionId); NOT the 6-arg
     // part.updated variant. Matches SSC:1539 + the T1b freeze test.
     chat = state.chat.applyPartDeltaLeadingEdge(
@@ -52,7 +63,8 @@ internal fun reducePartDeltaReceived(state: StoreState, action: AppAction.PartDe
         msgId = action.messageId,
         sessionId = action.sessionId,
     ).first.markFlushPending(action.partId).first,
-)
+    ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+}
 
 internal fun reduceFullTextBuffered(state: StoreState, action: AppAction.FullTextBuffered): StoreState = state.copy(
     chat = state.chat.replaceFullTextBuffer(action.partId, action.text).first,
@@ -62,9 +74,15 @@ internal fun reduceDeltaBuffered(state: StoreState, action: AppAction.DeltaBuffe
     chat = state.chat.appendDeltaBuffer(action.partId, action.delta).first,
 )
 
-internal fun reduceCoalesceFlushedForPart(state: StoreState, action: AppAction.CoalesceFlushedForPart): StoreState = state.copy(
-    chat = state.chat.flushCoalesceBufferForPart(action.partId).first,
-)
+internal fun reduceCoalesceFlushedForPart(state: StoreState, action: AppAction.CoalesceFlushedForPart): StoreState {
+    // Route-owned (token≠0) flush is rejected from a newly selected session by
+    // acceptsRouteUpdate. Legacy (token=0) flush writes the flat compatibility
+    // surface unconditionally (pre-B2 parity).
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
+    return state.copy(
+        chat = state.chat.flushCoalesceBufferForPart(action.partId).first,
+    ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+}
 
 internal fun reduceCoalesceClearedForPart(state: StoreState, action: AppAction.CoalesceClearedForPart): StoreState = state.copy(
     chat = state.chat.clearCoalesceBufferForPart(action.partId).first,
@@ -74,11 +92,19 @@ internal fun reduceCoalesceBuffersCleared(state: StoreState, action: AppAction.C
     chat = state.chat.clearAllCoalesceBuffers().first,
 )
 
-internal fun reduceClearTokenStreamState(state: StoreState, action: AppAction.ClearTokenStreamState): StoreState = state.copy(
-    chat = state.chat.clearTokenStreamState(action.partIds),
-)
+internal fun reduceClearTokenStreamState(state: StoreState, action: AppAction.ClearTokenStreamState): StoreState {
+    // Route-owned (token≠0) clear is rejected from a newly selected session by
+    // acceptsRouteUpdate. Legacy (token=0) clear writes the flat compatibility
+    // surface unconditionally (pre-B2 parity).
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
+    return state.copy(
+        chat = state.chat.clearTokenStreamState(action.partIds),
+    ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+}
 
-internal fun reduceTokenStreamPartUpdated(state: StoreState, action: AppAction.TokenStreamPartUpdated): StoreState = state.copy(
+internal fun reduceTokenStreamPartUpdated(state: StoreState, action: AppAction.TokenStreamPartUpdated): StoreState {
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
+    return state.copy(
     // §Stage-D1 §3.8 bridge: REPLACE streamingPartTexts[partId] + streamOwned[partId].
     // The reducer already accumulated the joined buffer text; mirror it into the
     // chat slice so the legacy single-owner guard (SharedConversationSseHandler)
@@ -88,4 +114,5 @@ internal fun reduceTokenStreamPartUpdated(state: StoreState, action: AppAction.T
         streamingPartTexts = state.chat.streamingPartTexts + (action.partId to action.text),
         streamOwned = state.chat.streamOwned + (action.partId to action.state),
     ),
-)
+    ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+}

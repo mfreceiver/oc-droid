@@ -69,7 +69,7 @@ internal object StatusPollOrchestrator {
         // /session/status + /api/session/active endpoints. Steady-state status
         // arrives via the slim digest `status` relay
         // (SessionSyncCoordinator.handleSessionDigest → applySessionStatus).
-        // Legacy mode (isSlimMode == false) is byte-for-byte unchanged.
+        // Legacy transport behavior remains byte-for-byte unchanged.
         if (repository.usesSlimStatusFanOut) {
             launchLoadSessionStatusSlim(scope, repository, slices, myEpoch, hostAtRequestStart, onComplete)
             return

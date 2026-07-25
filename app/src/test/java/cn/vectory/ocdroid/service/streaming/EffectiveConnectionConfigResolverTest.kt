@@ -1,12 +1,16 @@
 package cn.vectory.ocdroid.service.streaming
 
 import cn.vectory.ocdroid.data.model.HostProfile
+import cn.vectory.ocdroid.data.repository.ClientBundle
 import cn.vectory.ocdroid.data.repository.HostProfileStore
+import cn.vectory.ocdroid.data.repository.HostSnapshot
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -159,6 +163,38 @@ class EffectiveConnectionConfigResolverTest {
         val resolved = DefaultEffectiveConnectionConfigResolver(settings, profiles).resolve()!!
 
         assertEquals(false, resolved.slim)
+    }
+
+    @Test
+    fun `repository endpoint resolution returns one published bundle snapshot`() {
+        val settings = mockk<SettingsManager>(relaxed = true)
+        val profiles = mockk<HostProfileStore>()
+        val repository = mockk<OpenCodeRepository>()
+        val bundle = mockk<ClientBundle>()
+        val snapshot = HostSnapshot(
+            baseUrl = "https://published.example",
+            hostPort = "published.example:443",
+            username = "user",
+            password = "password",
+            slimHost = true,
+        )
+        every { settings.effectiveConnectionSourceMarker } returns EffectiveConnectionSource.Profile.name
+        every { settings.currentWorkdir } returns "/work"
+        every { profiles.currentProfile() } returns profile.copy(serverUrl = snapshot.baseUrl, slim = true)
+        every { repository.currentClientBundle() } returns bundle
+        every { bundle.hostSnapshot } returns snapshot
+        every { bundle.endpointFp } returns snapshot.baseUrl
+        every { bundle.generation } returns 17L
+
+        val endpointResolver: BundleEndpointResolver =
+            DefaultEffectiveConnectionConfigResolver(settings, profiles)
+        val resolved = endpointResolver.resolveEndpoint(repository)!!
+
+        assertEquals(snapshot.baseUrl, resolved.baseUrl)
+        assertEquals(snapshot.baseUrl, resolved.endpointFp)
+        assertEquals(17L, resolved.bundleGeneration)
+        assertSame("resolver must preserve the exact published bundle identity", bundle, resolved.bundle)
+        verify(exactly = 1) { repository.currentClientBundle() }
     }
 
     @Test

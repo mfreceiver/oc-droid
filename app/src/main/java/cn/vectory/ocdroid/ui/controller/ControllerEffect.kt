@@ -46,7 +46,12 @@ sealed class ControllerEffect {
     data class CatchUpAfterDisconnect(val sessionId: String) : ControllerEffect()
 
     // ── SessionSwitcher ──
-    data class LoadMessages(val sessionId: String, val resetLimit: Boolean) : ControllerEffect()
+    data class LoadMessages(
+        val sessionId: String,
+        val resetLimit: Boolean,
+        /** Captured route incarnation; 0L keeps the legacy flat path. */
+        val expectedRouteInstance: Long = 0L,
+    ) : ControllerEffect()
     data class LoadChildSessions(val sessionId: String) : ControllerEffect()
     data object LoadSessionStatus : ControllerEffect()
     class LoadSessionStatusWithCompletion(
@@ -77,7 +82,20 @@ sealed class ControllerEffect {
     data class VerifyAndHydrate(
         val serverGroupFp: String,
         val sessionId: String,
-        val createdAt: Long?
+        val createdAt: Long?,
+        /**
+         * §chat-list-detail §7.2 B0.5-rework: the route-instance token minted by
+         * [cn.vectory.ocdroid.ui.OrchestratorViewModel.navigateToChat] at
+         * navigation time. Threaded UNCHANGED through the load pipeline
+         * (AppCore → loadMessagesForEffect → launchLoadMessages) so the
+         * ChatContentLoaded reducer CAS can reject a stale A→B→A load.
+         *
+         * `0L` = legacy path (emitted by [cn.vectory.ocdroid.ui.controller.SessionSwitcher.switchTo]
+         * — the non-route callers). The handler treats `0L` as "no token
+         * guard" and dispatches MessagesMerged (legacy bare-chat path). `> 0L`
+         * = route-aware path — dispatches ChatContentLoaded(expectedRouteInstance=T).
+         */
+        val expectedRouteInstance: Long = 0L,
     ) : ControllerEffect()
 
     // ── HostProfileController ──

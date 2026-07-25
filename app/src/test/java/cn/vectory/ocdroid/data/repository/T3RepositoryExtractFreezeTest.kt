@@ -13,6 +13,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import javax.inject.Inject
 
 /**
  * # T3 freeze — OpenCodeRepository extract contracts
@@ -216,7 +217,8 @@ class T3RepositoryExtractFreezeTest {
      */
     @Test
     fun `constructor surface keeps the 4-arg Hilt production shape`() {
-        val ctorArities = OpenCodeRepository::class.java.declaredConstructors
+        val constructors = OpenCodeRepository::class.java.declaredConstructors
+        val ctorArities = constructors
             .map { it.parameterCount }
             .distinct()
             .sorted()
@@ -236,6 +238,53 @@ class T3RepositoryExtractFreezeTest {
             "must expose a synthetic default-args ctor (arity 6 = 4 params + mask + marker) " +
                 "so the locked 2-arg call site keeps compiling. arities=$ctorArities",
             6 in ctorArities,
+        )
+        assertEquals(
+            "constructor freeze must not grow an alternate 5/7-arg production surface",
+            listOf(4, 6),
+            ctorArities,
+        )
+
+        // The ordinary constructor is the actual Hilt entrypoint. Keep this
+        // as an executable JVM contract rather than a source-text assertion:
+        // adding a defaulted graph parameter would create a different ordinary
+        // arity and would no longer match Hilt's four-dependency factory call.
+        val ordinaryConstructors = constructors.filterNot { it.isSynthetic }
+        assertEquals(
+            "there must be exactly one non-synthetic production constructor",
+            1,
+            ordinaryConstructors.size,
+        )
+        val productionConstructor = ordinaryConstructors.single()
+        assertEquals(4, productionConstructor.parameterCount)
+        assertTrue(
+            "the 4-param constructor must remain Hilt-injectable",
+            productionConstructor.isAnnotationPresent(Inject::class.java),
+        )
+        assertEquals(
+            listOf(
+                TrafficTracker::class.java,
+                TrafficLogger::class.java,
+                TofuPinStore::class.java,
+                ServerCompatProfile::class.java,
+            ),
+            productionConstructor.parameterTypes.toList(),
+        )
+
+        val defaultConstructor = constructors.singleOrNull {
+            it.isSynthetic && it.parameterCount == 6
+        }
+        assertNotNull(
+            "the only synthetic default-argument constructor must be 4 params + mask + marker",
+            defaultConstructor,
+        )
+        assertEquals(
+            Int::class.javaPrimitiveType,
+            defaultConstructor!!.parameterTypes[4],
+        )
+        assertEquals(
+            "kotlin.jvm.internal.DefaultConstructorMarker",
+            defaultConstructor.parameterTypes[5].name,
         )
     }
 

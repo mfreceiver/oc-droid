@@ -99,7 +99,13 @@ internal class SlimColdStartSnapshotApplier(
         // at this entry; if the caller already has a workflow token
         // (the resync worker), it routes through the token-taking overload
         // below.
-        return apply(snapshot, repo.captureCommitToken())
+        val sessionId = store.currentChat().currentSessionId
+        val routeInstance = sessionId?.let(store::routeInstanceFor) ?: 0L
+        return apply(
+            snapshot = snapshot,
+            token = repo.captureCommitToken(),
+            expectedRouteInstance = routeInstance,
+        )
     }
 
     /**
@@ -126,11 +132,16 @@ internal class SlimColdStartSnapshotApplier(
         snapshot: SlimColdStartSnapshot,
         token: OpenCodeRepository.SlimCommitToken,
         authoritative: Boolean = false,
+        expectedRouteInstance: Long? = null,
     ): SlimSnapshotApplyResult {
         // T1d P1-1: same entry guard on the token-taking overload (direct
         // callers / tests must not bypass via token path).
         requireSlimOnlyStateWrite(supportsWatermarkResync(), "cold-start-snapshot")
         val repo = repository ?: return SlimSnapshotApplyResult.Rejected
+        val sessionId = store.currentChat().currentSessionId
+        val routeInstance = expectedRouteInstance
+            ?: sessionId?.let(store::routeInstanceFor)
+            ?: 0L
 
         val committed = repo.commitIfTokenCurrent(token) {
             DebugLog.i(
@@ -245,7 +256,12 @@ internal class SlimColdStartSnapshotApplier(
                 // P5 §3.2: delegate to the P4 reconciler (no duplicate impl).
                 // Forward caller's `authoritative` UNCHANGED — this class does
                 // NOT calculate authoritative mode.
-                reconciler.mergeSlimMessagesIntoChat(items = msgs, authoritative = authoritative)
+                reconciler.mergeSlimMessagesIntoChat(
+                    items = msgs,
+                    authoritative = authoritative,
+                    expectedRouteInstance = routeInstance,
+                    sessionId = sessionId,
+                )
             }
 
             // I-2: a whole-call Failure surfaces a toast. Partial

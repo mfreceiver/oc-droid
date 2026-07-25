@@ -189,8 +189,8 @@ internal fun RecentSessionsDrawer(
  * badges, no selection check): the drawer's [RecentSessionsDrawer] signature
  * does not carry `currentSessionId` (T4 contract), so a selection glyph would
  * be misleading; cross-session state indicators already surface via the
- * restored SessionTabStrip + StatusSlot in the chat body. The row shows only
- * identity: display name (headline) + workdir basename (supporting).
+ * StatusSlot in the chat body (SessionTabStrip was deleted in B6). The row
+ * shows only identity: display name (headline) + workdir basename (supporting).
  *
  * §T17 slimapi v1 §6.1: when [showErrorIndicator] is true (the session has a
  * SET lastError in `SessionListState.sessionErrorsById`), the row renders a

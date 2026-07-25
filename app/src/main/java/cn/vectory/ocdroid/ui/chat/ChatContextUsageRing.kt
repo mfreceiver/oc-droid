@@ -1,7 +1,7 @@
 // ChatContextUsageRing.kt — the live context-usage ring shown in the
 // ChatTopBar actions cluster (and as the ContextMenuButton anchor). Pure
-// relocation from ChatTopBar.kt; visibility stays `internal` (used cross-file
-// by ChatSessionTabStrip / ChatTopBar).
+// relocation from ChatTopBar.kt; visibility stays `internal` (used by
+// ChatTopBar; ChatSessionTabStrip was deleted in B6).
 
 package cn.vectory.ocdroid.ui.chat
 

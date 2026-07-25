@@ -29,7 +29,10 @@ class SlimapiCapabilitiesInterceptorTest {
 
     private val server = MockWebServer()
     private lateinit var hostConfig: HostConfig
-    private lateinit var client: OkHttpClient
+    private val client: OkHttpClient
+        get() = OkHttpClient.Builder()
+            .addInterceptor(SlimapiCapabilitiesInterceptor(hostConfig.snapshot()))
+            .build()
 
     @Before
     fun setup() {
@@ -43,9 +46,6 @@ class SlimapiCapabilitiesInterceptorTest {
                 slim = false
             )
         }
-        client = OkHttpClient.Builder()
-            .addInterceptor(SlimapiCapabilitiesInterceptor(hostConfig))
-            .build()
     }
 
     @After

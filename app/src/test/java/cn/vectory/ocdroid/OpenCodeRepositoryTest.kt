@@ -209,7 +209,7 @@ class OpenCodeRepositoryTest {
         )
         server.enqueue(jsonResponse(json.encodeToString(session)))
 
-        val result = repository.updateSessionArchived("session-1", 1234)
+        val result = repository.updateSessionArchived("session-1", 1234L)
 
         assertTrue(result.isSuccess)
         assertTrue(result.getOrThrow().isArchived)

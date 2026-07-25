@@ -89,7 +89,6 @@ class SessionMetadataPoller @Inject constructor(
                     refreshed = refreshed,
                     local = current.sessions,
                     currentSessionId = store.chatFlow.value.currentSessionId,
-                    openSessionIds = current.openSessionIds.toSet(),
                     pendingCreateIds = current.pendingCreateIds,
                 )
             )

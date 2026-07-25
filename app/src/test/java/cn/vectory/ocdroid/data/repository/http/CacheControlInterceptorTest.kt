@@ -25,7 +25,15 @@ class CacheControlInterceptorTest {
 
     private val server = MockWebServer()
     private lateinit var hostConfig: HostConfig
-    private lateinit var client: OkHttpClient
+    private val client: OkHttpClient
+        get() = OkHttpClient.Builder()
+            .addInterceptor(
+                CacheControlInterceptor(
+                    hostConfig.snapshot(),
+                    CachePathSanitizer(hostConfig.snapshot()),
+                )
+            )
+            .build()
 
     @Before
     fun setup() {
@@ -38,11 +46,6 @@ class CacheControlInterceptorTest {
                 hostPort = null
             )
         }
-        client = OkHttpClient.Builder()
-            .addInterceptor(
-                CacheControlInterceptor(hostConfig, CachePathSanitizer(hostConfig))
-            )
-            .build()
     }
 
     @After

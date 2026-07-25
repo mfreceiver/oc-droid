@@ -22,7 +22,10 @@ class AuthInterceptorTest {
 
     private val server = MockWebServer()
     private lateinit var hostConfig: HostConfig
-    private lateinit var client: OkHttpClient
+    private val client: OkHttpClient
+        get() = OkHttpClient.Builder()
+            .addInterceptor(AuthInterceptor(hostConfig.snapshot()))
+            .build()
 
     @Before
     fun setup() {
@@ -35,9 +38,6 @@ class AuthInterceptorTest {
 hostPort = null
             )
         }
-        client = OkHttpClient.Builder()
-            .addInterceptor(AuthInterceptor(hostConfig))
-            .build()
     }
 
     @After

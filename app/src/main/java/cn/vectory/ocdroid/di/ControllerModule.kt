@@ -1,12 +1,12 @@
 package cn.vectory.ocdroid.di
 
+import cn.vectory.ocdroid.data.api.TokenStreamClient
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
-import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
-import cn.vectory.ocdroid.data.api.TokenStreamClient
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
+import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.controller.ComposerController
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
@@ -17,6 +17,7 @@ import cn.vectory.ocdroid.ui.controller.SessionSwitcher
 import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
 import cn.vectory.ocdroid.ui.controller.UnreadSoakController
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
+import cn.vectory.ocdroid.ui.controller.sse.TokenStreamConnection
 import cn.vectory.ocdroid.ui.controller.sse.TokenStreamCoordinator
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
@@ -245,17 +246,12 @@ object ControllerModule {
      *
      * # streamProvider wiring
      *
-     * Resolves the LIVE host config at call time (when `open(sid, dir)` is
-     * invoked) from `EffectiveConnectionConfigResolver.resolve()` — NOT from a
-     * captured snapshot, and NOT from a direct `settingsManager.serverUrl`
-     * read (RESOLVER lane ②: the resolver is the single authority for the
-     * effective connection URL). `hostPortFromUrl(resolvedUrl)` gives the
-     * `host:port` authority for the TOFU pin lookup (same derivation as
-     * `HostConfig.configure` + ConnectionBootstrapEngine). A new
-     * `TokenStreamClient` is constructed per call (lightweight wrapper; the
-     * `OkHttpClient` is built fresh — no `cache(tokenStreamClient)` per the
-     * Stage-C design note). A null resolve() throws (explicit fail — see the
-     * lambda comment); it does NOT fall back to stale settings.
+     * Resolves the LIVE published endpoint at call time (when `open(sid, dir)`
+     * reaches the provider) from the resolver's bundle-aware overload — NOT
+     * from a captured snapshot or direct settings read. The returned endpoint
+     * carries the exact bundle identity, endpoint fingerprint, and generation;
+     * the client is built from that same bundle. A null resolve throws
+     * (explicit fail) and never falls back to stale settings.
      *
      * # triggerSinceFetch wiring (S2 — AUTHORITATIVE)
      *
@@ -285,53 +281,54 @@ object ControllerModule {
         // Option A follow-up that unifies ownership; do NOT delete.)
         repository: OpenCodeRepository,
         sessionSyncCoordinator: SessionSyncCoordinator,
-        effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver,
+        bundleEndpointResolver: cn.vectory.ocdroid.service.streaming.BundleEndpointResolver,
         settingsManager: cn.vectory.ocdroid.util.SettingsManager,
-    ): TokenStreamCoordinator = TokenStreamCoordinator(
-        scope = appScope,
-        slices = store.slices,
-        streamProvider = { sid, directory ->
-            // §resolver-single-source-of-truth (RESOLVER lane ②): the token-
-            // stream baseUrl MUST come from the EffectiveConnectionConfigResolver
-            // (the single authority for the effective connection URL), NOT from a
-            // direct settingsManager.serverUrl read. resolve() is called HERE, at
-            // open(sid,dir) time (NOT captured at DI construction), so a
-            // profile/host switch takes effect on the NEXT stream open — a new
-            // TokenStreamClient is built per call against the CURRENT resolver
-            // value (the live-host-config invariant the old comment documented).
-            //
-            // null = EXPLICIT FAIL: a null resolve() means "no valid active
-            // endpoint". We throw instead of falling back to a stale
-            // settingsManager.serverUrl — a stale fallback is exactly what
-            // resurrected the token-stream-connection-storm bug (the mirror
-            // write at HostProfileController.kt:864 exists BECAUSE direct
-            // readers used to bypass the resolver). The synchronous throw is
-            // caught by TokenStreamCoordinator.open()'s defence-in-depth net
-            // (TokenStreamCoordinator.kt ~L285) → onStreamFailure → bounded
-            // exponential-backoff reconnect, which self-heals once a valid
-            // config reappears (post host switch). No silent storm.
-            val baseUrl = effectiveConnectionConfigResolver.resolve()?.url
-                ?: error("token-stream open($sid) with no effective connection config — no active endpoint")
-            val hostPort = hostPortFromUrl(baseUrl)
-            // §tokenstream-mtls-fix: repository.tokenStreamClient delegates to the
-            // repository's own clientFactory → its mTLS-loaded sslConfigFactory →
-            // sslConfigFor returns MutualTLS (not SystemDefault) → private CA trusted.
-            TokenStreamClient(repository.tokenStreamClient(hostPort), baseUrl)
-                .connect(sid, directory)
-        },
-        triggerSinceFetch = { sid, auth ->
-            appScope.launch {
-                sessionSyncCoordinator.reconcileSession(
-                    sid,
-                    if (auth) SessionSyncCoordinator.ReconcileMode.RESYNC
-                    else SessionSyncCoordinator.ReconcileMode.DIGEST_FOCUS,
-                )
+    ): TokenStreamCoordinator {
+        repository.onBundlePublished = { generation, endpointFp ->
+            store.dispatch(AppAction.BundlePublished(generation, endpointFp))
+        }
+        val streamConnectionProvider: (String, String?) -> TokenStreamConnection = { sid, directory ->
+            val resolved = bundleEndpointResolver.resolveEndpoint(repository)
+                ?: error("token-stream open($sid) with no published effective endpoint")
+            val bundle = resolved.bundle
+            check(bundle.generation == resolved.bundleGeneration) {
+                "token-stream endpoint generation drift for $sid"
             }
-        },
-        // §sse-disabled-debug-toggle: gate per-session token stream on the DEBUG
-        // flag (REST-only mode). Read live so toggling takes effect on next open.
-        sseDisabled = { settingsManager.sseDisabled },
-    )
+            check(bundle.endpointFp == resolved.endpointFp) {
+                "token-stream endpoint fingerprint drift for $sid"
+            }
+            TokenStreamConnection(
+                flow = TokenStreamClient(
+                    repository.tokenStreamClient(bundle),
+                    resolved.baseUrl,
+                ).connect(sid, directory),
+                bundle = bundle,
+            )
+        }
+
+        return TokenStreamCoordinator(
+            scope = appScope,
+            slices = store.slices,
+            streamProvider = { sid, directory ->
+                streamConnectionProvider(sid, directory).flow
+            },
+            streamConnectionProvider = streamConnectionProvider,
+            bundleCommitLock = repository,
+            currentBundleProvider = { repository.currentClientBundle() },
+            triggerSinceFetch = { sid, auth ->
+                appScope.launch {
+                    sessionSyncCoordinator.reconcileSession(
+                        sid,
+                        if (auth) SessionSyncCoordinator.ReconcileMode.RESYNC
+                        else SessionSyncCoordinator.ReconcileMode.DIGEST_FOCUS,
+                    )
+                }
+            },
+            // §sse-disabled-debug-toggle: gate per-session token stream on the DEBUG
+            // flag (REST-only mode). Read live so toggling takes effect on next open.
+            sseDisabled = { settingsManager.sseDisabled },
+        )
+    }
 
     @Provides
     @Singleton

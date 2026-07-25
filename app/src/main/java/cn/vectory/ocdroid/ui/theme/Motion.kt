@@ -1,7 +1,5 @@
 package cn.vectory.ocdroid.ui.theme
 
-import androidx.compose.animation.EnterTransition
-import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.DurationBasedAnimationSpec
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -10,12 +8,6 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.ui.unit.IntSize
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -45,7 +37,7 @@ object AppMotion {
     // ── Duration tokens (ms) ──────────────────────────────────────────────
     /** 极短（瞬时反馈，如 ripple 补充）。 */
     const val DURATION_INSTANT = 100
-    /** 短（SessionTabStrip 显隐等紧凑过渡，保留原 tween(200) 行为）。 */
+    /** 短（紧凑过渡，保留原 tween(200) 行为）。§B6: SessionTabStrip 已删除。 */
     const val DURATION_SMALL = 200
     /** 中（标准内容过渡，M3 推荐范围 250-400）。 */
     const val DURATION_MEDIUM = 300
@@ -95,18 +87,5 @@ object AppMotion {
     fun <T> linearPulse(durationMillis: Int = DURATION_PULSE): DurationBasedAnimationSpec<T> =
         tween(durationMillis = durationMillis, easing = LinearEasing)
 
-    // ── 常用过渡 helper ────────────────────────────────────────────────────
-    // 注：helper 内 expandVertically/slideInVertically 需 IntSize/IntOffset spec，
-    // 用泛型 standard(DURATION_SMALL) 让类型推断（helper 调用低频，分配可接受）。
-    /** SessionTabStrip 显隐入场：fade + 垂直展开 + 从顶部滑入（SHORT standard）。 */
-    fun tabStripEnter(): EnterTransition =
-        fadeIn(standardSmall) +
-            expandVertically(standard(DURATION_SMALL)) +
-            slideInVertically(standard(DURATION_SMALL)) { fullHeight -> -fullHeight }
-
-    /** SessionTabStrip 退场：fade + 垂直收起 + 向顶部滑出。 */
-    fun tabStripExit(): ExitTransition =
-        fadeOut(standardSmall) +
-            shrinkVertically(standard(DURATION_SMALL)) +
-            slideOutVertically(standard(DURATION_SMALL)) { fullHeight -> -fullHeight }
+    // §B6: tabStripEnter/tabStripExit 已删除（SessionTabStrip 已移除，死代码）。
 }

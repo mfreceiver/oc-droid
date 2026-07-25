@@ -14,6 +14,7 @@ import okhttp3.tls.HandshakeCertificates
 import okhttp3.tls.HeldCertificate
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -100,7 +101,7 @@ class OpenCodeRepositoryTokenStreamMtlsTest {
         return baos.toByteArray()
     }
 
-    // ── 1. mTLS path: configure(clientCert) → tokenStreamClient trusts the private CA ──
+    // ── 1. mTLS path: one candidate bundle serves REST and token stream ───────
 
     @Test
     fun `tokenStreamClient uses the repository mTLS factory after configure - private-CA handshake succeeds`() {
@@ -115,11 +116,15 @@ class OpenCodeRepositoryTokenStreamMtlsTest {
         )
         val hostPort = "localhost:${server.port}"
 
-        // Server presents a leaf signed by the private CA + trusts the client cert.
+        // Server presents a leaf signed by the private CA and trusts client
+        // certificates issued by that CA.
         val serverCert = newSigned(ca, cn = "server", san = "localhost")
         val serverHs = HandshakeCertificates.Builder()
             .heldCertificate(serverCert)
-            .addTrustedCertificate(client.certificate) // server requests + verifies the client cert
+            // Trust the issuing CA so JSSE advertises that CA as an acceptable
+            // client-certificate issuer. Trusting only the leaf can make the
+            // client key manager decline the alias before the handshake.
+            .addTrustedCertificate(ca.certificate)
             .build()
         server.useHttps(serverHs.sslContext().socketFactory, false)
 
@@ -128,6 +133,8 @@ class OpenCodeRepositoryTokenStreamMtlsTest {
         repo.configure(
             baseUrl = server.url("/").toString(),
             hostPort = hostPort,
+            username = "bundle-user",
+            password = "bundle-password",
             clientCert = ClientCertMaterial(p12Bytes, pw.toCharArray(), caPem),
         )
 
@@ -149,14 +156,52 @@ class OpenCodeRepositoryTokenStreamMtlsTest {
         //     trust the private CA (server cert) AND present the client cert → 200.
         //     A SystemDefault client (the bug) would throw SSLHandshakeException
         //     ("Trust anchor for certification path not found") here.
-        server.enqueue(MockResponse().setBody("ok"))
+        // Require client authentication: a client that merely trusts the
+        // private CA but does not present the candidate's PKCS12 certificate
+        // must fail the TLS handshake.
+        server.requireClientAuth()
+
+        // REST and token-stream requests must both use the published bundle's
+        // private-CA trust and client certificate, and both must capture the
+        // same immutable credentials rather than reading a later HostConfig.
+        server.enqueue(MockResponse().setBody("rest-ok"))
+        val restBundle = repo.currentClientBundle()!!
+        val restResponse = restBundle.restHttp.newCall(
+            Request.Builder().url(server.url("/rest")).build(),
+        ).execute()
+        assertEquals("REST mTLS handshake via candidate bundle succeeds", 200, restResponse.code)
+        assertEquals("rest-ok", restResponse.body?.string())
+        restResponse.close()
+        val restRequest = server.takeRequest()
+        assertEquals(
+            "Basic " + Base64.getEncoder().encodeToString("bundle-user:bundle-password".toByteArray()),
+            restRequest.getHeader("Authorization"),
+        )
+
+        server.enqueue(MockResponse().setBody("token-ok"))
         val streamClient = repo.tokenStreamClient(hostPort)
         val res = streamClient
-            .newCall(Request.Builder().url(server.url("/").toString()).build())
+            .newCall(Request.Builder().url(server.url("/token").toString()).build())
             .execute()
         assertEquals("mTLS handshake via repository.tokenStreamClient succeeds", 200, res.code)
-        assertEquals("ok", res.body?.string())
+        assertEquals("token-ok", res.body?.string())
         res.close()
+        val tokenRequest = server.takeRequest()
+        assertEquals(
+            "REST and token stream must carry the candidate bundle credentials",
+            restRequest.getHeader("Authorization"),
+            tokenRequest.getHeader("Authorization"),
+        )
+        assertSame(
+            "mTLS token-stream construction must remain on the same immutable generation as REST",
+            restBundle,
+            repo.currentClientBundle(),
+        )
+        assertEquals(
+            "REST and token stream must share the published generation",
+            restBundle.generation,
+            repo.currentClientBundle()!!.generation,
+        )
     }
 
     // ── 2. reconfigure timing: each open reads LIVE SSL state ───────────────
@@ -220,7 +265,7 @@ class OpenCodeRepositoryTokenStreamMtlsTest {
         val serverCert = newSigned(caB, cn = "server", san = "localhost")
         val serverHs = HandshakeCertificates.Builder()
             .heldCertificate(serverCert)
-            .addTrustedCertificate(clientB.certificate)
+            .addTrustedCertificate(caB.certificate)
             .build()
         server.useHttps(serverHs.sslContext().socketFactory, false)
         server.enqueue(MockResponse().setBody("ok-b"))

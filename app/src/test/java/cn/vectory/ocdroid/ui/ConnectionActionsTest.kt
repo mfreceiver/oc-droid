@@ -29,7 +29,7 @@ import org.junit.Test
  * [applyReloadDisabledModelsForCurrentHost].
  *
  * Covers the cold-start seed path (~130 lines): repository configure with
- * BasicAuth, archived-session filtering on cached metadata, openSessionIds
+ * BasicAuth, archived-session filtering on cached metadata, open-tabs-list
  * cleaning, ConnectionPhase.Reconnecting signal, settings slice seeding from
  * prefs, and per-host disabled-model reload.
  */
@@ -70,8 +70,7 @@ class ConnectionActionsTest {
         val profile = HostProfile(
             name = "p",
             serverUrl = "https://example.test",
-            basicAuth = BasicAuthConfig(username = "alice", passwordId = "pid"),
-        )
+            basicAuth = BasicAuthConfig(username = "alice", passwordId = "pid"))
         every { hostProfileStore.currentProfile() } returns profile
         every { hostProfileStore.profiles() } returns listOf(profile)
         every { settingsManager.basicAuthPassword("pid") } returns "secret"
@@ -83,8 +82,7 @@ class ConnectionActionsTest {
                 baseUrl = "https://example.test",
                 username = "alice",
                 password = "secret",
-                hostPort = "example.test:443",
-            )
+                hostPort = "example.test:443")
         }
     }
 
@@ -117,30 +115,28 @@ class ConnectionActionsTest {
         every { hostProfileStore.profiles() } returns listOf(profile)
         val cacheEntry = SessionCacheEntry(id = "s1", directory = "/workdir", title = "Cached")
         every { settingsManager.sessionCache } returns listOf(cacheEntry)
-        every { settingsManager.openSessionIds } returns listOf("s1")
 
         applySavedSettings(repository, settingsManager, hostProfileStore, slices)
 
         val restored = slices.sessionList.value.sessions
         assertTrue(restored.any { it.id == "s1" && it.title == "Cached" })
-        assertEquals(listOf("s1"), slices.sessionList.value.openSessionIds)
     }
 
     @Test
-    fun `applySavedSettings filters archived sessions out of openSessionIds`() {
+    fun `applySavedSettings filters archived sessions out of session seed (B4)`() {
         val profile = HostProfile.defaultDirect(serverUrl = "http://x")
         every { hostProfileStore.currentProfile() } returns profile
         every { hostProfileStore.profiles() } returns listOf(profile)
         val active = SessionCacheEntry(id = "active", directory = "/w")
         val archived = SessionCacheEntry(id = "archived", directory = "/w", timeArchived = 1000L)
         every { settingsManager.sessionCache } returns listOf(active, archived)
-        every { settingsManager.openSessionIds } returns listOf("active", "archived")
 
         applySavedSettings(repository, settingsManager, hostProfileStore, slices)
 
-        // archived evicted.
-        assertEquals(listOf("active"), slices.sessionList.value.openSessionIds)
-        verify { settingsManager.openSessionIds = listOf("active") }
+        // §B4: seed sessions exclude archived; no open-tabs list.
+        assertTrue(slices.sessionList.value.sessions.any { it.id == "active" })
+        assertTrue(slices.sessionList.value.sessions.none { it.id == "archived" })
+        assertNull(slices.chat.value.currentSessionId)
     }
 
     @Test
@@ -150,7 +146,6 @@ class ConnectionActionsTest {
         every { hostProfileStore.profiles() } returns listOf(profile)
         val archived = SessionCacheEntry(id = "archived", directory = "/w", timeArchived = 1000L)
         every { settingsManager.sessionCache } returns listOf(archived)
-        every { settingsManager.openSessionIds } returns listOf("archived")
         every { settingsManager.currentSessionId } returns "archived"
 
         applySavedSettings(repository, settingsManager, hostProfileStore, slices)
@@ -161,44 +156,38 @@ class ConnectionActionsTest {
     // ── §fix-orphan-upgrade: empty open tabs ⇒ null current on cold start ─
 
     @Test
-    fun `applySavedSettings nulls stale current when openSessionIds empty (upgrade orphan)`() {
-        // Confirmed upgrade-data orphan: pre-fix disk had currentSessionId
-        // set and openSessionIds cleared (close-all wiped tabs, not always
-        // current). Restoring both raw produced chat-with-no-tab-bar.
+    fun `applySavedSettings always nulls current on cold start (B4 list-detail)`() {
+        // §B4 / §10 cold start: route is Sessions; never restore currentSessionId
+        // into the detail pane. Self-heal disk.
         val profile = HostProfile.defaultDirect(serverUrl = "http://x")
         every { hostProfileStore.currentProfile() } returns profile
         every { hostProfileStore.profiles() } returns listOf(profile)
         every { settingsManager.sessionCache } returns listOf(
-            SessionCacheEntry(id = "stale_ses", directory = "/w", title = "Stale"),
-        )
-        every { settingsManager.openSessionIds } returns emptyList()
+            SessionCacheEntry(id = "stale_ses", directory = "/w", title = "Stale"))
         every { settingsManager.currentSessionId } returns "stale_ses"
 
         applySavedSettings(repository, settingsManager, hostProfileStore, slices)
 
-        assertNull("empty open tabs → no orphan current", slices.chat.value.currentSessionId)
-        assertTrue(slices.sessionList.value.openSessionIds.isEmpty())
-        // Self-heal disk so the next cold start cannot re-read the stale id.
+        assertNull("cold start → no restored current", slices.chat.value.currentSessionId)
+        assertNull("content null on cold start", slices.chat.value.content)
         verify { settingsManager.currentSessionId = null }
     }
 
     @Test
-    fun `applySavedSettings restores current when it is among openSessionIds`() {
+    fun `applySavedSettings does not restore current even when cache has live id (B4)`() {
         val profile = HostProfile.defaultDirect(serverUrl = "http://x")
         every { hostProfileStore.currentProfile() } returns profile
         every { hostProfileStore.profiles() } returns listOf(profile)
         every { settingsManager.sessionCache } returns listOf(
-            SessionCacheEntry(id = "ses_x", directory = "/w", title = "Live"),
-        )
-        every { settingsManager.openSessionIds } returns listOf("ses_x")
+            SessionCacheEntry(id = "ses_x", directory = "/w", title = "Live"))
         every { settingsManager.currentSessionId } returns "ses_x"
 
         applySavedSettings(repository, settingsManager, hostProfileStore, slices)
 
-        assertEquals("ses_x", slices.chat.value.currentSessionId)
-        assertEquals(listOf("ses_x"), slices.sessionList.value.openSessionIds)
-        // Legit restore must NOT wipe the persisted current.
-        verify(exactly = 0) { settingsManager.currentSessionId = null }
+        assertNull(slices.chat.value.currentSessionId)
+        verify { settingsManager.currentSessionId = null }
+        // Session metadata still seeds the list.
+        assertTrue(slices.sessionList.value.sessions.any { it.id == "ses_x" })
     }
 
     @Test

@@ -3,8 +3,6 @@ package cn.vectory.ocdroid.data.repository.http
 import okhttp3.Interceptor
 import okhttp3.Response
 import cn.vectory.ocdroid.util.DebugLog
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * §16.1(b) directory-scoping interceptor: injects `X-Opencode-Directory` for
@@ -49,8 +47,7 @@ import javax.inject.Singleton
  * - Only GET/HEAD: POST/PUT bodies cannot rely on query-based directory
  *   resolution, and the server does not read it for mutations.
  */
-@Singleton
-class DirectoryHeaderInterceptor @Inject constructor() : Interceptor {
+class DirectoryHeaderInterceptor : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val original = chain.request()

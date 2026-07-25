@@ -453,7 +453,6 @@ class ChatViewModelTest : MainViewModelTestBase() {
         }
         assertEquals("session-1", chatVM.chatFlow.value.currentSessionId)
         assertNull(composerVM.composerFlow.value.draftWorkdir)
-        assertTrue(sessionVM.sessionListFlow.value.openSessionIds.contains("session-1"))
     }
 
     @Test
@@ -1393,8 +1392,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
                 currentSessionId = "session-A",
                 messages = listOf(older),
                 olderMessagesCursor = "cursor-1",
-                hasMoreMessages = true,
-            )
+                hasMoreMessages = true)
         }
 
         chatVM.refreshCurrentSession()

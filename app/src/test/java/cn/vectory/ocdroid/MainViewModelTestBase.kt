@@ -13,6 +13,7 @@ import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
+import cn.vectory.ocdroid.util.TrafficLogger
 import cn.vectory.ocdroid.util.TrafficTracker
 import io.mockk.coEvery
 import io.mockk.every
@@ -163,6 +164,22 @@ abstract class MainViewModelTestBase {
         // the test mock the underlying repository / settingsManager / etc.
         val store = SharedStateStore()
         val effectBus = SharedEffectBus()
+        // The streaming SSE actions are bundle-bound. Keep the repository mock
+        // used by the core, but give its current-bundle seam a real published
+        // identity so SessionSyncCoordinator's coalesce flush can commit in
+        // these unit tests just as it does in production.
+        val publishedBundleSource = OpenCodeRepository(
+            mockk<TrafficTracker>(relaxed = true),
+            mockk<TrafficLogger>(relaxed = true),
+        )
+        val publishedBundle = publishedBundleSource.currentClientBundle()!!
+        every { repository.currentClientBundle() } returns publishedBundle
+        store.dispatch(
+            cn.vectory.ocdroid.ui.AppAction.BundlePublished(
+                publishedBundle.generation,
+                publishedBundle.endpointFp,
+            ),
+        )
         // CP1 (notify Phase-0): the single connection-identity store, shared
         // by CC / SSC / HPC + AppCore (same wiring as ControllerModule).
         identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
@@ -219,6 +236,7 @@ abstract class MainViewModelTestBase {
             currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
             // CP1 (notify Phase-0): single connection-identity store.
             identityStore = identityStore,
+            repository = repository,
         )
         val connectionCoordinator = cn.vectory.ocdroid.ui.controller.ConnectionCoordinator(
             scope = appScope,
@@ -265,6 +283,8 @@ abstract class MainViewModelTestBase {
                 slices = store.slices,
                 streamProvider = { _, _ -> kotlinx.coroutines.flow.emptyFlow() },
                 triggerSinceFetch = { _, _ -> },
+                bundleCommitLock = repository,
+                currentBundleProvider = { repository.currentClientBundle() },
             ),
             unreadSoakController,
             // §review-fix #1: same fp provider every controller uses.

@@ -137,6 +137,10 @@ class ChatViewModel @Inject constructor(
             // gpter 复审 final-fix: compound-key guard.
             expectedServerGroupFp = fp,
             currentServerGroupFp = core.currentServerGroupFp,
+            // The VM is also a live route-aware entry point (refresh/retry),
+            // not only a legacy bare-chat caller. Capture the active minted
+            // token here so its completion updates LoadedContent as well.
+            expectedRouteInstance = core.store.slices.routeInstanceFor(sessionId),
         )
         // §E3 ChatViewModel.loadMessages side-door open (D2 gate r2 S1): re-apply
         // the same open gate used in loadMessagesForEffect. Mid-generation retry /
@@ -148,7 +152,7 @@ class ChatViewModel @Inject constructor(
                 sessionId,
             )
         ) {
-            core.tokenStreamCoordinator.open(sessionId, core.settingsManager.currentWorkdir)
+            core.tokenStreamCoordinator.open(sessionId, core.settingsManager.currentWorkdir, source = "chatvm-load")
         }
     }
 
@@ -160,6 +164,7 @@ class ChatViewModel @Inject constructor(
 
     fun loadMoreMessages() {
         val sessionId = core.store.chatFlow.value.currentSessionId ?: return
+        val routeInstance = core.store.slices.routeInstanceFor(sessionId)
         // glm-3 🟡#1 / gpter 复审 final-fix: single-read fp.
         val fp = core.currentServerGroupFp()
         launchLoadMoreMessages(
@@ -171,6 +176,7 @@ class ChatViewModel @Inject constructor(
             // gpter 复审 final-fix: compound-key guard.
             expectedServerGroupFp = fp,
             currentServerGroupFp = core.currentServerGroupFp,
+            expectedRouteInstance = routeInstance,
         )
     }
 
@@ -320,7 +326,15 @@ class ChatViewModel @Inject constructor(
 
     fun editFromMessage(messageId: String) {
         val chatFlow = core.store.chatFlow
-        val sessionId = chatFlow.value.currentSessionId ?: return
+        // §chat-list-detail §11.3 / G6 (B5): read the session id from the
+        // route param (navState.lastRoute), NOT the lagging flat
+        // currentSessionId. The route flip commits BEFORE SessionSelected
+        // flips currentSessionId, so a bare currentSessionId read can target
+        // the PRIOR session during the transition window. The route id is
+        // the sole identity authority post-B2.
+        val sessionId = routeChatSessionId(core.store.navFlow.value.lastRoute)
+            ?: chatFlow.value.currentSessionId
+            ?: return
         val message = chatFlow.value.messages.firstOrNull { it.id == messageId && it.isUser } ?: return
         val draft = (chatFlow.value.partsByMessage[messageId] ?: emptyList()).firstOrNull { it.isText }?.text?.trim().orEmpty()
         if (draft.isBlank()) return
@@ -347,7 +361,12 @@ class ChatViewModel @Inject constructor(
 
     /** [force] is reserved for an explicit user retry after a terminal failure. */
     fun retryRevertCutoff(force: Boolean = false) {
-        val sessionId = core.store.chatFlow.value.currentSessionId ?: return
+        // §chat-list-detail §11.3 / G6 (B5): read the session id from the
+        // route param (navState.lastRoute), NOT the lagging currentSessionId.
+        // See [editFromMessage] for the transition-window rationale.
+        val sessionId = routeChatSessionId(core.store.navFlow.value.lastRoute)
+            ?: core.store.chatFlow.value.currentSessionId
+            ?: return
         val messageId = core.store.sessionListFlow.value.sessions.firstOrNull { it.id == sessionId }
             ?.revert?.messageId
             ?: core.store.chatFlow.value.revertCutoffs[sessionId]?.messageId
@@ -355,8 +374,37 @@ class ChatViewModel @Inject constructor(
         core.appScope.launch { revertCutoffCoordinator.ensure(sessionId, messageId, retryFailed = force) }
     }
 
-    fun abortSession() {
-        val sessionId = core.store.chatFlow.value.currentSessionId ?: return
+    /**
+     * §chat-list-detail §11 / G6 (B5): replay a captured [ScrollCheckpoint]
+     * as a Restore scroll intent. Called by the parent route entry's
+     * ChatScaffold LaunchedEffect when it consumes a checkpoint from its own
+     * SavedStateHandle on re-composition (i.e. the user popped back from a
+     * child). The dispatch goes through the unified [AppAction.ScrollRequested]
+     * slot — the consumer in ChatMessageList sees `behavior=Restore` and
+     * applies it. The `Latest` default from openForRoute (if any) is
+     * superseded by this newer requestId.
+     */
+    fun requestScrollRestore(targetSessionId: String, checkpoint: ScrollCheckpoint) {
+        val requestId = System.nanoTime()
+        core.store.dispatch(
+            AppAction.ScrollRequested(
+                requestId = requestId,
+                targetSessionId = targetSessionId,
+                behavior = ScrollBehavior.Restore(checkpoint),
+            )
+        )
+    }
+
+    /**
+     * §B2 rev-gpt MAJOR 2: [sessionId] is the route-aware target. The
+     * parameterized chat/{sessionId} route passes its route id
+     * (chromeSessionId) so the abort cannot drift to a lagging flat
+     * currentSessionId during the nav-flip → SessionSelected window. The
+     * legacy bare-chat path omits it (null) → resolves flat currentSessionId
+     * exactly as before.
+     */
+    fun abortSession(sessionId: String? = null) {
+        val sid = sessionId ?: core.store.chatFlow.value.currentSessionId ?: return
         // §R18 Phase 3 Wave 2 + Gate-3 fix (maxer): abort is a SERVER-STATE
         // mutation (POST /session/{id}/abort), not an ephemeral UI action. It
         // MUST outlive the VM — if the user backgrounds the app / navigates
@@ -366,15 +414,23 @@ class ChatViewModel @Inject constructor(
         // VM lifecycle. (Closure captures only core.repository + core.effectBus,
         // no VM self-ref → no P1-7 leak.)
         core.appScope.launch {
-            core.repository.abortSession(sessionId)
+            core.repository.abortSession(sid)
                 .onFailure { error ->
                     core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_abort_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
         }
     }
 
-    fun refreshCurrentSession() {
-        val sessionId = core.store.chatFlow.value.currentSessionId ?: return
+    /**
+     * §B2 rev-gpt MAJOR 1: [sessionId] is the route-aware target. The
+     * parameterized chat/{sessionId} route passes its route id
+     * (chromeSessionId) so the stale-notice refresh cannot drift to a lagging
+     * flat currentSessionId during the nav-flip → SessionSelected window. The
+     * legacy bare-chat path omits it (null) → resolves flat currentSessionId
+     * exactly as before.
+     */
+    fun refreshCurrentSession(sessionId: String? = null) {
+        val sid = sessionId ?: core.store.chatFlow.value.currentSessionId ?: return
         // §sse-rest-fallback (TODO 2): the staleNotice snackbar = "messages may
         // be stale" → treat as an SSE-disconnect RECOVERY: clear+UNANCHORED
         // re-fetch (forceInitialWindow=true, same ①②③ as performForceRefresh) so
@@ -386,7 +442,7 @@ class ChatViewModel @Inject constructor(
         // misleading partial action. The success toast fires when the reload +
         // probe both settled cleanly.
         val refreshed = core.performGlobalColdStartRefresh(
-            currentId = sessionId,
+            currentId = sid,
             forceInitialWindow = true,
             explicit = true,
         )
@@ -454,6 +510,11 @@ class ChatViewModel @Inject constructor(
     fun expandParts(sessionId: String, parts: List<cn.vectory.ocdroid.data.model.Part>) {
         // P4: capture host identity ONCE (no TOCTOU).
         val capturedFp = core.currentServerGroupFp()
+        // Capture both freshness tokens at invocation time. Completion must
+        // validate these captured values; re-reading either one would let an
+        // old response be accepted under a newer host/client generation.
+        val capturedRouteInstance = core.store.slices.routeInstanceFor(sessionId)
+        val capturedSlimToken = core.repository.captureSlimCommitToken()
 
         viewModelScope.launch {
             // Step 2: single-read dispatch state (Main dispatcher — no suspension).
@@ -524,6 +585,7 @@ class ChatViewModel @Inject constructor(
             // P4: abort if identity changed during dispatch (before network call).
             if (core.store.chatFlow.value.currentSessionId != sessionId) return@launch
             if (core.currentServerGroupFp() != capturedFp) return@launch
+            if (!core.repository.isSlimCommitTokenCurrent(capturedSlimToken)) return@launch
 
             // Step 8: invoke usecase (non-mutating, CE discipline).
             val useCase = cn.vectory.ocdroid.ui.chat.ExpandPartsUseCase(core.repository)
@@ -531,6 +593,7 @@ class ChatViewModel @Inject constructor(
                 sessionId = sessionId,
                 local = local,
                 parts = partsToLoad,
+                token = capturedSlimToken,
             ).getOrElse {
                 // Diagnostic: usecase threw (NOT a normal Failed outcome —
                 // runSuspendCatching collapsed something unexpected, e.g.
@@ -549,6 +612,7 @@ class ChatViewModel @Inject constructor(
                 core.writeChat { current ->
                     if (current.currentSessionId != sessionId) return@writeChat current
                     if (core.currentServerGroupFp() != capturedFp) return@writeChat current
+                    if (!core.repository.isSlimCommitTokenCurrent(capturedSlimToken)) return@writeChat current
 
                     val updatedStates = current.partExpandStates.toMutableMap()
                     keysToLoad.forEach { key ->
@@ -572,11 +636,13 @@ class ChatViewModel @Inject constructor(
             // (state.update CAS loop), so concurrent SSE updates to other
             // owners are preserved — restores pre-Strategy-1 writeChat CAS.
             if (core.currentServerGroupFp() != capturedFp) return@launch
+            if (!core.repository.isSlimCommitTokenCurrent(capturedSlimToken)) return@launch
             core.store.dispatch(
                 AppAction.ExpandedPartsContentCommitted(
                     outcome = outcome,
                     local = local,
                     expectedSessionId = sessionId,
+                    expectedRouteInstance = capturedRouteInstance,
                 )
             )
         }

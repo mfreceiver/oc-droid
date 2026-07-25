@@ -221,7 +221,7 @@ kover {
         // 排除判定：类内非 Composable helper 全为 `private`（不可直接 JVM 单测）。
         //
         // MIXED 文件分两类处理：
-        //  (a) 含 `internal` 可测 helper 的 → **保留**（ChatToolCards/ChatSessionTabStrip/
+        //  (a) 含 `internal` 可测 helper 的 → **保留**（ChatToolCards/
         //      ChatSubAgentCard/ChatPatchCards/ThinkingCapsule/ChatEmptyState/
         //      ChatRenderUtils/ToolCardClassifier/AgentTone/ChatUiTuning/
         //      ImageAttachmentLoader/PickerProviderFilter）。helper 计入覆盖；同文件
@@ -259,11 +259,6 @@ kover {
                     // ChatTopBarKt: visiblePickerProviders 已提取到 PickerProviderFilter.kt
                     // （独立文件，保留计入覆盖）；ChatTopBarKt 剩余为纯 @Composable，排除。
                     "cn.vectory.ocdroid.ui.chat.ChatTopBarKt",
-                    // §unread-lifecycle: ChatSessionTabStripKt is a pure @Composable
-                    // (SessionTabStrip + SessionTab bodies); the shouldShowQuestionMarker
-                    // pure helper lives in SessionPickerHelpers.kt (covered). Same
-                    // exclusion rationale as ChatTopBarKt/ChatScaffoldKt above.
-                    "cn.vectory.ocdroid.ui.chat.ChatSessionTabStripKt",
                     // §1B: ChatScaffold / Composer / SessionPickerSheet are
                     // @Composable-heavy chrome surfaces — same exclusion
                     // rationale as ChatTopBarKt (kover excludes Composable

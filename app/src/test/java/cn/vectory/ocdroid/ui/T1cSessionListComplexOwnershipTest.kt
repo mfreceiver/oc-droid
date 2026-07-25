@@ -19,7 +19,7 @@ import org.junit.Test
  * T1c complex freeze (round 2) — **RED until impl**.
  *
  * Round 1 (`T1cSessionListOwnershipTest`) froze the 3 SIMPLE single-purpose
- * actions (`SessionUpserted` / `SessionCreatedLocal` / `OpenSessionIdsChanged`)
+ * actions (`SessionUpserted` / `SessionCreatedLocal` / `OpenTabsChanged(removed)`)
  * + the `BulkSessionsRefreshed.hasCompletedInitialLoad` gap. This round freezes
  * the DEFERRED complex multi-field write sites — the ones whose single
  * `mutateSessionList { it.copy(...) }` block writes `sessions` AND several
@@ -38,12 +38,12 @@ import org.junit.Test
  * action owns ONLY the `sessionList` copy).
  *
  * **Reuse decisions** (see Group N for the full write-up):
- *  - `SessionArchived` (SSE cross-client): field set = {session, openSessionIds}
+ *  - `SessionArchived` (SSE cross-client): field set = {session, open-tabs-list}
  *    — does NOT cover the REST archive path's 6-field copy (directorySessions
  *    + childSessions + pendingQuestions + activeSessionIds). → NEW action
  *    `SessionArchivedLocal`.
  *  - `BulkSessionsRefreshed` (archive-sync bulk): reducer additionally
- *    INTERSECTS activeSessionIds + OVERWRITES openSessionIds + does archived-
+ *    INTERSECTS activeSessionIds + OVERWRITES open-tabs-list + does archived-
  *    subtree chat/unread cleanup. The :299 non-archive path does NONE of those
  *    (byte-for-byte incompatible). → NEW action `SessionsRefreshedLocal`.
  *
@@ -59,7 +59,7 @@ class T1cSessionListComplexOwnershipTest {
     // G. SessionArchivedLocal — REST archive/restore (SessionMutationActions:186-202)
     //
     // Production copy() block writes 6 fields atomically:
-    //   sessions + directorySessions + childSessions + openSessionIds
+    //   sessions + directorySessions + childSessions + open-tabs-list
     //   + pendingQuestions + activeSessionIds
     // (the cross-slice mutateUnread / mutateChat / ChatCleared happen in
     // SEPARATE calls outside this block — out of scope; this action owns the
@@ -73,13 +73,13 @@ class T1cSessionListComplexOwnershipTest {
      * // REST archive/restore of a single session id (one loop iteration of
      * // launchSetSessionArchived). Carries the updated [session] (reducer
      * // map-replaces it into sessions / directorySessions / childSessions by
-     * // id) plus the caller-computed [openSessionIds] (filtered), the caller-
+     * // id) plus the caller-computed [open-tabs-list] (filtered), the caller-
      * // computed [pendingQuestions] (subtree-filtered), and the caller-
      * // computed [activeSessionIdsToRemove] (subtree for archive, {id} for
      * // restore). The isArchive branch decision stays at the call site.
      * data class SessionArchivedLocal(
      *     val session: Session,
-     *     val openSessionIds: List<String>,
+     *     val open-tabs-list: List<String>,
      *     val pendingQuestions: List<QuestionRequest>,
      *     val activeSessionIdsToRemove: Set<String>,
      * ) : AppAction
@@ -91,7 +91,7 @@ class T1cSessionListComplexOwnershipTest {
      * //       l.map { if (it.id == id) action.session else it } },
      * //     childSessions = state.sessionList.childSessions.mapValues { (_, l) ->
      * //       l.map { if (it.id == id) action.session else it } },
-     * //     openSessionIds = action.openSessionIds,
+     * //     
      * //     pendingQuestions = action.pendingQuestions,
      * //     activeSessionIds = state.sessionList.activeSessionIds - action.activeSessionIdsToRemove,
      * //   ))
@@ -108,14 +108,11 @@ class T1cSessionListComplexOwnershipTest {
             sessions = listOf(original, other),
             directorySessions = mapOf("/a" to listOf(original), "/b" to listOf(other)),
             childSessions = mapOf("s1" to listOf(childOfS1)),
-            openSessionIds = listOf("s1", "s2"),
             pendingQuestions = listOf(
                 QuestionRequest(id = "q1", sessionId = "s1", questions = emptyList()),
                 QuestionRequest(id = "q2", sessionId = "s2", questions = emptyList()),
-                QuestionRequest(id = "q3", sessionId = "c1", questions = emptyList()),
-            ),
-            activeSessionIds = setOf("s1", "s2", "c1"),
-        )
+                QuestionRequest(id = "q3", sessionId = "c1", questions = emptyList())),
+            activeSessionIds = setOf("s1", "s2", "c1"))
         val oldStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
         val newStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
 
@@ -125,7 +122,6 @@ class T1cSessionListComplexOwnershipTest {
         val currentSessions = oldStore.stateFlow.value.sessionList.sessions
         val currentDirSessions = oldStore.stateFlow.value.sessionList.directorySessions
         val currentChildSessions = oldStore.stateFlow.value.sessionList.childSessions
-        val currentOpenIds = oldStore.stateFlow.value.sessionList.openSessionIds
         val subtree = subtreeIds(id, currentSessions, currentDirSessions, currentChildSessions)
         val newSessions = currentSessions.map { s -> if (s.id == id) archived else s }
         val newDirSessions = currentDirSessions.mapValues { (_, list) ->
@@ -134,7 +130,7 @@ class T1cSessionListComplexOwnershipTest {
         val newChildSessions = currentChildSessions.mapValues { (_, list) ->
             list.map { s -> if (s.id == id) archived else s }
         }
-        val newOpenIds = if (isArchive) currentOpenIds.filter { it != id } else currentOpenIds
+        // §B4: openSessionIds removed — no openIds filter in archive path.
         val cleanedQuestions = oldStore.stateFlow.value.sessionList.pendingQuestions
             .filter { q -> q.sessionId !in subtree }
         val activeIdsToRemove = if (isArchive) subtree else setOf(id)
@@ -143,10 +139,8 @@ class T1cSessionListComplexOwnershipTest {
                 sessions = newSessions,
                 directorySessions = newDirSessions,
                 childSessions = newChildSessions,
-                openSessionIds = newOpenIds,
                 pendingQuestions = cleanedQuestions,
-                activeSessionIds = it.activeSessionIds - activeIdsToRemove,
-            )
+                activeSessionIds = it.activeSessionIds - activeIdsToRemove)
         }
 
         // ── NEW path: the caller computes the SAME payload values; the reducer
@@ -154,18 +148,15 @@ class T1cSessionListComplexOwnershipTest {
         newStore.dispatch(
             AppAction.SessionArchivedLocal(
                 session = archived,
-                openSessionIds = newOpenIds,
                 pendingQuestions = cleanedQuestions,
-                activeSessionIdsToRemove = activeIdsToRemove,
-            )
+                activeSessionIdsToRemove = activeIdsToRemove)
         )
 
         assertEquals(
             "SessionArchivedLocal MUST equal legacy archive mutateSessionList " +
                 "(sessions + dirSessions + childSessions + openIds + pendingQ + activeIds)",
             oldStore.stateFlow.value,
-            newStore.stateFlow.value,
-        )
+            newStore.stateFlow.value)
         // Sanity on the critical archived-flag propagation across all 3 stores.
         val out = newStore.stateFlow.value.sessionList
         assertEquals("sessions: archived copy replaced by id", archived, out.sessions.first { it.id == "s1" })
@@ -175,16 +166,14 @@ class T1cSessionListComplexOwnershipTest {
         assertEquals(
             "childSessions: child c1 preserved (map-replace only touches matching id)",
             childOfS1,
-            out.childSessions["s1"]!!.first(),
-        )
-        assertEquals("openSessionIds: archived id evicted", listOf("s2"), out.openSessionIds)
+            out.childSessions["s1"]!!.first())
         assertEquals("pendingQuestions: subtree pruned (s1+c1 gone, s2 kept)", 1, out.pendingQuestions.size)
         assertEquals("s2 question survived", "q2", out.pendingQuestions.first().id)
         assertEquals("activeSessionIds: subtree removed", setOf("s2"), out.activeSessionIds)
     }
 
     @Test
-    fun `SessionArchivedLocal restore path keeps openSessionIds and pendingQuestions, removes only id from activeSessionIds`() {
+    fun `SessionArchivedLocal restore path keeps open-tabs-list and pendingQuestions, removes only id from activeSessionIds`() {
         // Restore (archived=false): newOpenIds = current (no filter), cleanedQuestions
         // = current (no filter), activeIdsToRemove = setOf(id) only (NOT subtree).
         val original = Session(id = "s1", directory = "/a", time = Session.TimeInfo(archived = 1000L))
@@ -193,10 +182,9 @@ class T1cSessionListComplexOwnershipTest {
         val priorList = SessionListState(
             sessions = listOf(original),
             childSessions = mapOf("s1" to listOf(child)),
-            openSessionIds = listOf("s2"), // s1 NOT in openIds (was archived)
+            // s1 NOT in openIds (was archived)
             pendingQuestions = listOf(QuestionRequest(id = "q1", sessionId = "c1", questions = emptyList())),
-            activeSessionIds = setOf("s1", "c1", "s2"),
-        )
+            activeSessionIds = setOf("s1", "c1", "s2"))
         val oldStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
         val newStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
 
@@ -206,12 +194,11 @@ class T1cSessionListComplexOwnershipTest {
         val currentSessions = oldStore.stateFlow.value.sessionList.sessions
         val currentDirSessions = oldStore.stateFlow.value.sessionList.directorySessions
         val currentChildSessions = oldStore.stateFlow.value.sessionList.childSessions
-        val currentOpenIds = oldStore.stateFlow.value.sessionList.openSessionIds
         val subtree = subtreeIds(id, currentSessions, currentDirSessions, currentChildSessions)
         val newSessions = currentSessions.map { s -> if (s.id == id) restored else s }
         val newDirSessions = currentDirSessions.mapValues { (_, l) -> l.map { s -> if (s.id == id) restored else s } }
         val newChildSessions = currentChildSessions.mapValues { (_, l) -> l.map { s -> if (s.id == id) restored else s } }
-        val newOpenIds = if (isArchive) currentOpenIds.filter { it != id } else currentOpenIds
+        // §B4: openSessionIds removed — no openIds filter in restore path.
         val cleanedQuestions = oldStore.stateFlow.value.sessionList.pendingQuestions // unchanged (restore)
         val activeIdsToRemove = if (isArchive) subtree else setOf(id)
         oldStore.mutateSessionList {
@@ -219,28 +206,22 @@ class T1cSessionListComplexOwnershipTest {
                 sessions = newSessions,
                 directorySessions = newDirSessions,
                 childSessions = newChildSessions,
-                openSessionIds = newOpenIds,
                 pendingQuestions = cleanedQuestions,
-                activeSessionIds = it.activeSessionIds - activeIdsToRemove,
-            )
+                activeSessionIds = it.activeSessionIds - activeIdsToRemove)
         }
 
         newStore.dispatch(
             AppAction.SessionArchivedLocal(
                 session = restored,
-                openSessionIds = newOpenIds,
                 pendingQuestions = cleanedQuestions,
-                activeSessionIdsToRemove = activeIdsToRemove,
-            )
+                activeSessionIdsToRemove = activeIdsToRemove)
         )
 
         assertEquals(
             "SessionArchivedLocal restore MUST equal legacy restore branch",
             oldStore.stateFlow.value,
-            newStore.stateFlow.value,
-        )
+            newStore.stateFlow.value)
         val out = newStore.stateFlow.value.sessionList
-        assertEquals("openSessionIds untouched on restore", listOf("s2"), out.openSessionIds)
         assertEquals("pendingQuestions untouched on restore", 1, out.pendingQuestions.size)
         assertEquals("activeSessionIds: only id removed (subtree c1 KEPT on restore)", setOf("c1", "s2"), out.activeSessionIds)
     }
@@ -255,21 +236,16 @@ class T1cSessionListComplexOwnershipTest {
         val prior = StoreState.initial().copy(
             sessionList = SessionListState(
                 sessions = listOf(Session(id = "s1", directory = "/a")),
-                openSessionIds = listOf("s1"),
-                activeSessionIds = setOf("s1"),
-            ),
+                activeSessionIds = setOf("s1")),
             chat = ChatState(currentSessionId = "s-other"),
-            expandedParts = mapOf("k1" to true),
-        )
+            expandedParts = mapOf("k1" to true))
         val store = SharedStateStore().apply { mutateState { prior } }
 
         store.dispatch(
             AppAction.SessionArchivedLocal(
                 session = archived,
-                openSessionIds = emptyList(),
                 pendingQuestions = emptyList(),
-                activeSessionIdsToRemove = setOf("s1"),
-            )
+                activeSessionIdsToRemove = setOf("s1"))
         )
 
         val out = store.stateFlow.value
@@ -320,18 +296,14 @@ class T1cSessionListComplexOwnershipTest {
             directorySessions = mapOf(
                 "/a" to listOf(Session(id = "s1", directory = "/a")),
                 "/b" to listOf(survivor),
-                "/empty-after" to listOf(Session(id = "c1", directory = "/a")),
-            ),
+                "/empty-after" to listOf(Session(id = "c1", directory = "/a"))),
             pendingQuestions = listOf(
                 QuestionRequest(id = "q1", sessionId = "s1", questions = emptyList()),
-                QuestionRequest(id = "q2", sessionId = "s2", questions = emptyList()),
-            ),
+                QuestionRequest(id = "q2", sessionId = "s2", questions = emptyList())),
             activeSessionIds = setOf("s1", "c1", "s2"),
             sessionErrorsById = mapOf(
                 "s1" to SlimSessionLastError(name = "err1"),
-                "s2" to SlimSessionLastError(name = "err2"),
-            ),
-        )
+                "s2" to SlimSessionLastError(name = "err2")))
         val oldStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
         val newStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
 
@@ -348,8 +320,7 @@ class T1cSessionListComplexOwnershipTest {
                 directorySessions = newDirSessions,
                 pendingQuestions = sl.pendingQuestions.filter { it.sessionId !in removedIds },
                 activeSessionIds = sl.activeSessionIds - removedIds,
-                sessionErrorsById = sl.sessionErrorsById.filterKeys { it !in removedIds },
-            )
+                sessionErrorsById = sl.sessionErrorsById.filterKeys { it !in removedIds })
         }
 
         // NEW path: reducer derives all 5 fields from removedIds.
@@ -359,16 +330,14 @@ class T1cSessionListComplexOwnershipTest {
             "SessionDeletedLocal MUST equal legacy delete mutateSessionList " +
                 "(sessions + dirSessions + pendingQ + activeIds + sessionErrorsById)",
             oldStore.stateFlow.value,
-            newStore.stateFlow.value,
-        )
+            newStore.stateFlow.value)
         val out = newStore.stateFlow.value.sessionList
         assertEquals("sessions: removed ids gone", listOf(survivor), out.sessions)
         // /a held only s1 (removed) → filterValues drops empty entry; /b holds survivor.
         assertEquals(
             "directorySessions: empty-entry dir pruned (/a gone, /b kept)",
             setOf("/b"),
-            out.directorySessions.keys,
-        )
+            out.directorySessions.keys)
         assertTrue("directorySessions: /a entry is now empty after filter → pruned by filterValues", out.directorySessions["/a"] == null)
         assertEquals("pendingQuestions: removed-subtree questions gone", 1, out.pendingQuestions.size)
         assertEquals("sessionErrorsById: removed id gone", mapOf("s2" to SlimSessionLastError(name = "err2")), out.sessionErrorsById)
@@ -380,11 +349,9 @@ class T1cSessionListComplexOwnershipTest {
         val prior = StoreState.initial().copy(
             sessionList = SessionListState(
                 sessions = listOf(Session(id = "s1", directory = "/a")),
-                activeSessionIds = setOf("s1"),
-            ),
+                activeSessionIds = setOf("s1")),
             chat = ChatState(currentSessionId = "s-other"),
-            unread = UnreadState(unreadSessions = setOf("s-other")),
-        )
+            unread = UnreadState(unreadSessions = setOf("s-other")))
         val store = SharedStateStore().apply { mutateState { prior } }
 
         store.dispatch(AppAction.SessionDeletedLocal(setOf("s1")))
@@ -430,8 +397,7 @@ class T1cSessionListComplexOwnershipTest {
         val status = SessionStatus(type = "busy")
         val priorList = SessionListState(
             sessions = listOf(Session(id = "s1", directory = "/a"), Session(id = "s2", directory = "/b")),
-            sessionStatuses = mapOf("s2" to SessionStatus(type = "idle")),
-        )
+            sessionStatuses = mapOf("s2" to SessionStatus(type = "idle")))
         val oldStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
         val newStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
 
@@ -448,8 +414,7 @@ class T1cSessionListComplexOwnershipTest {
         assertEquals(
             "SessionStatusPatched MUST equal legacy optimistic-busy mutateSessionList (sessions + sessionStatuses)",
             oldStore.stateFlow.value,
-            newStore.stateFlow.value,
-        )
+            newStore.stateFlow.value)
         val out = newStore.stateFlow.value.sessionList
         assertEquals("sessionStatuses: busy set for sid", status, out.sessionStatuses[sid])
         assertEquals("sessionStatuses: pre-existing idle survived", SessionStatus(type = "idle"), out.sessionStatuses["s2"])
@@ -458,22 +423,18 @@ class T1cSessionListComplexOwnershipTest {
     }
 
     @Test
-    fun `SessionStatusPatched is scoped to sessions and sessionStatuses - openSessionIds and activeSessionIds untouched`() {
+    fun `SessionStatusPatched is scoped to sessions and sessionStatuses - open-tabs-list and activeSessionIds untouched`() {
         val prior = StoreState.initial().copy(
             sessionList = SessionListState(
                 sessions = listOf(Session(id = "s1", directory = "/a")),
-                openSessionIds = listOf("s1"),
                 activeSessionIds = setOf("s1"),
-                pendingCreateIds = setOf("s1"),
-            ),
-        )
+                pendingCreateIds = setOf("s1")))
         val store = SharedStateStore().apply { mutateState { prior } }
 
         store.dispatch(AppAction.SessionStatusPatched("s1", 99L, SessionStatus(type = "busy")))
 
         val out = store.stateFlow.value.sessionList
         assertEquals("sessionStatuses patched", SessionStatus(type = "busy"), out.sessionStatuses["s1"])
-        assertEquals("openSessionIds untouched", listOf("s1"), out.openSessionIds)
         assertEquals("activeSessionIds untouched", setOf("s1"), out.activeSessionIds)
         assertEquals("pendingCreateIds untouched", setOf("s1"), out.pendingCreateIds)
     }
@@ -487,7 +448,7 @@ class T1cSessionListComplexOwnershipTest {
     //   + completeRootIds=emptySet() + completenessEpoch++ + hasCompletedInitialLoad=true
     //
     // Reuse of BulkSessionsRefreshed REJECTED (see Group N): that reducer also
-    // overwrites openSessionIds + intersects activeSessionIds + does archived-
+    // overwrites open-tabs-list + intersects activeSessionIds + does archived-
     // subtree chat/unread cleanup — none of which the :299 non-archive path does.
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -535,10 +496,9 @@ class T1cSessionListComplexOwnershipTest {
             completeRootIds = setOf("old-root"),
             completenessEpoch = 7L,
             hasCompletedInitialLoad = false,
-            // openSessionIds + activeSessionIds MUST survive untouched.
-            openSessionIds = listOf("tab1"),
-            activeSessionIds = setOf("active1"),
-        )
+            // open-tabs-list + activeSessionIds MUST survive untouched.
+            
+            activeSessionIds = setOf("active1"))
         val oldStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
         val newStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
 
@@ -554,8 +514,7 @@ class T1cSessionListComplexOwnershipTest {
                 pendingCreatedAt = sweptCreatedAt,
                 completeRootIds = emptySet(),
                 completenessEpoch = it.completenessEpoch + 1L,
-                hasCompletedInitialLoad = true,
-            )
+                hasCompletedInitialLoad = true)
         }
 
         // NEW path.
@@ -564,15 +523,13 @@ class T1cSessionListComplexOwnershipTest {
                 sessions = merged,
                 hasMoreSessions = newHasMore,
                 pendingCreateIds = sweptIds,
-                pendingCreatedAt = sweptCreatedAt,
-            )
+                pendingCreatedAt = sweptCreatedAt)
         )
 
         assertEquals(
             "SessionsRefreshedLocal MUST equal legacy full-refresh mutateSessionList (9 fields)",
             oldStore.stateFlow.value,
-            newStore.stateFlow.value,
-        )
+            newStore.stateFlow.value)
         val out = newStore.stateFlow.value.sessionList
         assertEquals("sessions replaced", merged, out.sessions)
         assertFalse("hasMoreSessions updated", out.hasMoreSessions)
@@ -585,7 +542,6 @@ class T1cSessionListComplexOwnershipTest {
         assertTrue("hasCompletedInitialLoad set", out.hasCompletedInitialLoad)
         // CRITICAL: fields NOT in the :299 copy block MUST survive (BulkSessionsRefreshed
         // WOULD overwrite these — that's why reuse was rejected).
-        assertEquals("openSessionIds untouched (BulkSessionsRefreshed would overwrite)", listOf("tab1"), out.openSessionIds)
         assertEquals("activeSessionIds untouched (BulkSessionsRefreshed would intersect)", setOf("active1"), out.activeSessionIds)
     }
 
@@ -593,8 +549,7 @@ class T1cSessionListComplexOwnershipTest {
     fun `SessionsRefreshedLocal is scoped to sessionList - chat untouched`() {
         val prior = StoreState.initial().copy(
             sessionList = SessionListState(sessions = listOf(Session(id = "old", directory = "/o"))),
-            chat = ChatState(currentSessionId = "s-current"),
-        )
+            chat = ChatState(currentSessionId = "s-current"))
         val store = SharedStateStore().apply { mutateState { prior } }
 
         store.dispatch(
@@ -602,8 +557,7 @@ class T1cSessionListComplexOwnershipTest {
                 sessions = listOf(Session(id = "s1", directory = "/a")),
                 hasMoreSessions = false,
                 pendingCreateIds = emptySet(),
-                pendingCreatedAt = emptyMap(),
-            )
+                pendingCreatedAt = emptyMap())
         )
 
         assertEquals("chat.currentSessionId untouched by SessionsRefreshedLocal", "s-current", store.stateFlow.value.chat.currentSessionId)
@@ -682,8 +636,7 @@ class T1cSessionListComplexOwnershipTest {
                 pendingCreateIds = sweptIds,
                 pendingCreatedAt = sweptCreatedAt,
                 completeRootIds = emptySet(),
-                completenessEpoch = it.completenessEpoch + 1L,
-            )
+                completenessEpoch = it.completenessEpoch + 1L)
         }
 
         // NEW path.
@@ -693,15 +646,13 @@ class T1cSessionListComplexOwnershipTest {
                 loadedSessionLimit = nextLimit,
                 hasMoreSessions = newHasMore,
                 pendingCreateIds = sweptIds,
-                pendingCreatedAt = sweptCreatedAt,
-            )
+                pendingCreatedAt = sweptCreatedAt)
         )
 
         assertEquals(
             "SessionsPageAppended MUST equal legacy loadMore mutateSessionList (8 fields)",
             oldStore.stateFlow.value,
-            newStore.stateFlow.value,
-        )
+            newStore.stateFlow.value)
         val out = newStore.stateFlow.value.sessionList
         assertEquals("sessions replaced", merged, out.sessions)
         assertEquals("loadedSessionLimit updated", 50, out.loadedSessionLimit)
@@ -718,8 +669,7 @@ class T1cSessionListComplexOwnershipTest {
     fun `SessionsPageAppended is scoped to sessionList - chat untouched`() {
         val prior = StoreState.initial().copy(
             sessionList = SessionListState(sessions = listOf(Session(id = "old", directory = "/o"))),
-            chat = ChatState(currentSessionId = "s-current"),
-        )
+            chat = ChatState(currentSessionId = "s-current"))
         val store = SharedStateStore().apply { mutateState { prior } }
 
         store.dispatch(
@@ -728,8 +678,7 @@ class T1cSessionListComplexOwnershipTest {
                 loadedSessionLimit = 50,
                 hasMoreSessions = false,
                 pendingCreateIds = emptySet(),
-                pendingCreatedAt = emptyMap(),
-            )
+                pendingCreatedAt = emptyMap())
         )
 
         assertEquals("chat.currentSessionId untouched by SessionsPageAppended", "s-current", store.stateFlow.value.chat.currentSessionId)
@@ -782,8 +731,7 @@ class T1cSessionListComplexOwnershipTest {
             childSessions = mapOf("s1" to listOf(Session(id = "c-old", directory = "/a", parentId = "s1"))),
             completeRootIds = setOf("s0"),
             completenessEpoch = epochAtStart, // MATCHES → apply
-            sessionStatuses = mapOf("s0" to SessionStatus(type = "idle")),
-        )
+            sessionStatuses = mapOf("s0" to SessionStatus(type = "idle")))
         val oldStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
         val newStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
 
@@ -793,8 +741,7 @@ class T1cSessionListComplexOwnershipTest {
             current.copy(
                 childSessions = current.childSessions + childDelta,
                 completeRootIds = current.completeRootIds + rootDelta,
-                sessionStatuses = nextStatuses,
-            )
+                sessionStatuses = nextStatuses)
         }
 
         // NEW path.
@@ -803,23 +750,20 @@ class T1cSessionListComplexOwnershipTest {
                 epochAtStart = epochAtStart,
                 childSessionsDelta = childDelta,
                 completeRootIdsDelta = rootDelta,
-                sessionStatuses = nextStatuses,
-            )
+                sessionStatuses = nextStatuses)
         )
 
         assertEquals(
             "SessionTreeHydrated (epoch match) MUST equal legacy hydrate commit",
             oldStore.stateFlow.value,
-            newStore.stateFlow.value,
-        )
+            newStore.stateFlow.value)
         val out = newStore.stateFlow.value.sessionList
         // Map `+` replaces the value for key "s1" wholesale (legacy + reduce both
         // use map merge, not list concat). Delta for s1 is [c1] → c-old is gone.
         assertEquals(
             "childSessions: delta replaces key s1 (map +, not list concat)",
             listOf(Session(id = "c1", directory = "/a", parentId = "s1")),
-            out.childSessions["s1"],
-        )
+            out.childSessions["s1"])
         assertEquals("completeRootIds: delta added", setOf("s0", "s1"), out.completeRootIds)
         assertEquals("sessionStatuses: replaced with nextStatuses", nextStatuses, out.sessionStatuses)
     }
@@ -832,8 +776,7 @@ class T1cSessionListComplexOwnershipTest {
             childSessions = emptyMap(),
             completeRootIds = setOf("s0"),
             completenessEpoch = 99L, // MISMATCH → no-op
-            sessionStatuses = mapOf("s0" to SessionStatus(type = "idle")),
-        )
+            sessionStatuses = mapOf("s0" to SessionStatus(type = "idle")))
         val store = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
         val before = store.stateFlow.value
 
@@ -842,26 +785,21 @@ class T1cSessionListComplexOwnershipTest {
                 epochAtStart = epochAtStart,
                 childSessionsDelta = mapOf("s1" to listOf(Session(id = "c1", directory = "/a", parentId = "s1"))),
                 completeRootIdsDelta = setOf("s1"),
-                sessionStatuses = mapOf("s1" to SessionStatus(type = "idle")),
-            )
+                sessionStatuses = mapOf("s1" to SessionStatus(type = "idle")))
         )
 
         assertEquals(
             "SessionTreeHydrated (epoch mismatch) MUST be a full no-op — state byte-for-byte unchanged",
             before,
-            store.stateFlow.value,
-        )
+            store.stateFlow.value)
     }
 
     @Test
-    fun `SessionTreeHydrated is scoped to childSessions completeRootIds sessionStatuses - sessions and openSessionIds untouched`() {
+    fun `SessionTreeHydrated is scoped to childSessions completeRootIds sessionStatuses - sessions and open-tabs-list untouched`() {
         val prior = StoreState.initial().copy(
             sessionList = SessionListState(
                 sessions = listOf(Session(id = "s1", directory = "/a")),
-                openSessionIds = listOf("s1"),
-                completenessEpoch = 5L,
-            ),
-        )
+                completenessEpoch = 5L))
         val store = SharedStateStore().apply { mutateState { prior } }
 
         store.dispatch(
@@ -869,13 +807,11 @@ class T1cSessionListComplexOwnershipTest {
                 epochAtStart = 5L,
                 childSessionsDelta = mapOf("s1" to listOf(Session(id = "c1", directory = "/a", parentId = "s1"))),
                 completeRootIdsDelta = setOf("s1"),
-                sessionStatuses = mapOf("s1" to SessionStatus(type = "idle")),
-            )
+                sessionStatuses = mapOf("s1" to SessionStatus(type = "idle")))
         )
 
         val out = store.stateFlow.value.sessionList
         assertEquals("sessions untouched by SessionTreeHydrated", listOf(Session(id = "s1", directory = "/a")), out.sessions)
-        assertEquals("openSessionIds untouched by SessionTreeHydrated", listOf("s1"), out.openSessionIds)
         assertEquals("completenessEpoch untouched (not bumped by hydration)", 5L, out.completenessEpoch)
     }
 
@@ -889,9 +825,7 @@ class T1cSessionListComplexOwnershipTest {
             mutateSessionList {
                 it.copy(
                     sessions = listOf(Session(id = "s1", directory = "/a")),
-                    openSessionIds = listOf("s1"),
-                    activeSessionIds = setOf("s1"),
-                )
+                    activeSessionIds = setOf("s1"))
             }
         }
         val seen = mutableListOf<StoreState>()
@@ -902,10 +836,8 @@ class T1cSessionListComplexOwnershipTest {
         store.dispatch(
             AppAction.SessionArchivedLocal(
                 session = Session(id = "s1", directory = "/a", time = Session.TimeInfo(archived = 1000L)),
-                openSessionIds = emptyList(),
                 pendingQuestions = emptyList(),
-                activeSessionIdsToRemove = setOf("s1"),
-            )
+                activeSessionIdsToRemove = setOf("s1"))
         )
         advanceUntilIdle()
 
@@ -920,8 +852,7 @@ class T1cSessionListComplexOwnershipTest {
             mutateSessionList {
                 it.copy(
                     sessions = listOf(Session(id = "s1", directory = "/a")),
-                    activeSessionIds = setOf("s1"),
-                )
+                    activeSessionIds = setOf("s1"))
             }
         }
         val seen = mutableListOf<StoreState>()
@@ -952,8 +883,7 @@ class T1cSessionListComplexOwnershipTest {
                 sessions = listOf(Session(id = "s1", directory = "/a")),
                 hasMoreSessions = false,
                 pendingCreateIds = emptySet(),
-                pendingCreatedAt = emptyMap(),
-            )
+                pendingCreatedAt = emptyMap())
         )
         advanceUntilIdle()
 
@@ -974,7 +904,7 @@ class T1cSessionListComplexOwnershipTest {
      * │ site                 │ action (NEW unless noted) │ reuse rationale                         │
      * ├──────────────────────┼──────────────────────────┼─────────────────────────────────────────┤
      * │ SMA:186-202 archive  │ SessionArchivedLocal     │ SessionArchived (SSE) field set =       │
-     * │                      │ (NEW)                    │ {session, openSessionIds} — does NOT    │
+     * │                      │ (NEW)                    │ {session, open-tabs-list} — does NOT    │
      * │                      │                          │ cover directorySessions / childSessions │
      * │                      │                          │ / pendingQuestions / activeSessionIds.  │
      * │                      │                          │ REST archive writes 6 fields; SSE       │
@@ -988,7 +918,7 @@ class T1cSessionListComplexOwnershipTest {
      * ├──────────────────────┼──────────────────────────┼─────────────────────────────────────────┤
      * │ SLA:299-321 refresh  │ SessionsRefreshedLocal   │ BulkSessionsRefreshed REJECTED: its     │
      * │                      │ (NEW)                    │ reducer INTERSECTS activeSessionIds +   │
-     * │                      │                          │ OVERWRITES openSessionIds + does        │
+     * │                      │                          │ OVERWRITES open-tabs-list + does        │
      * │                      │                          │ archived-subtree chat/unread cleanup.   │
      * │                      │                          │ The :299 non-archive path does NONE of  │
      * │                      │                          │ those — byte-for-byte incompatible.     │
@@ -1009,14 +939,14 @@ class T1cSessionListComplexOwnershipTest {
      *
      * TARGET — must migrate raw mutateSessionList → dispatch:
      *   Round 1 (T1cSessionListOwnershipTest): SessionUpserted (7+ sites),
-     *     SessionCreatedLocal (SMA:42-48), OpenSessionIdsChanged (SVM:247,
+     *     SessionCreatedLocal (SMA:42-48), OpenTabsChanged(removed) (SVM:247,
      *     SSC:561), BulkSessionsRefreshed +hasCompletedInitialLoad (SLA:296).
      *   Round 2 (THIS file): SessionArchivedLocal (SMA:186-202),
      *     SessionDeletedLocal (SMA:312-331), SessionStatusPatched (SMA:452),
      *     SessionsRefreshedLocal (SLA:299-321), SessionsPageAppended
      *     (SLA:548-566), SessionTreeHydrated (STH:107).
      *
-     * DEFERRED — NOT in T1c (no sessions/openSessionIds write, or already
+     * DEFERRED — NOT in T1c (no sessions/open-tabs-list write, or already
      * migrated). See T1cSessionListOwnershipTest Group F table for the full
      * non-target inventory (SLA:704/853/926/966/1011/1101/1188, MessageActions,
      * OrchestratorViewModel, SSC various, ConnectionActions, etc.).
@@ -1025,7 +955,7 @@ class T1cSessionListComplexOwnershipTest {
     fun `DOCUMENTATION - complex write-site reuse decisions and T1c inventory`() {
         // Audit anchor:
         //   rg -n 'mutateSessionList' app/src/main | grep -v '.slim/'
-        // Every site that writes `sessions` or `openSessionIds` via a raw
+        // Every site that writes `sessions` or `open-tabs-list` via a raw
         // mutateSessionList MUST be in the TARGET table (round 1 or 2). After
         // impl, rev-gpt's "sessions 唯一 writer" check MUST pass: the only
         // `sessions` writes in app/src/main go through AppAction dispatch

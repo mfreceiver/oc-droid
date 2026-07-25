@@ -63,6 +63,25 @@ internal fun launchLoadMessages(
      * same [cn.vectory.ocdroid.data.repository.MessagesPage] shape.
      */
     forceInitialWindow: Boolean = false,
+    /**
+     * §chat-list-detail §7.2 B0.5-rework: the route-instance token captured at
+     * load-START (navigateToChat → openForRoute → VerifyAndHydrate → HERE).
+     * Threaded UNCHANGED across the REST suspension. Guards the ENTIRE
+     * completion transaction:
+     *  - content commit (ChatContentLoaded vs MessagesMerged dispatch)
+     *  - isLoadingMessages clear (finally block)
+     *  - error emission (onFailure)
+     *  - cache-window write
+     *  - auto-expand launch
+     * A stale A→B→A load (same sessionId, older token) is rejected BEFORE any
+     * side effect fires — it cannot clear a newer load's isLoadingMessages,
+     * emit a stale error, poison the cache, or overwrite newer content.
+     *
+     * `0L` = legacy (switchTo path) → dispatches MessagesMerged (no token guard).
+     * `> 0L` = route-aware (openForRoute path) → dispatches ChatContentLoaded
+     * (the reducer CAS-validates expectedRouteInstance == chatRouteInstance).
+     */
+    expectedRouteInstance: Long = 0L,
 ) {
 
     // Coalesce concurrent loads. ADB showed startup triggers message loads from
@@ -126,8 +145,18 @@ internal fun launchLoadMessages(
                 // compound key INSIDE the lock in case the user switched
                 // session/host while waiting.
                 slices.messageLoadCoordinator.withSessionLock(sessionId) {
+                    // §chat-list-detail §7.2 B0.5-rework: TRIPLE guard —
+                    // session + fp + route-instance token. A stale A→B→A load
+                    // (same sessionId, older token) is rejected BEFORE any side
+                    // effect fires (no content write, no isLoadingMessages clear,
+                    // no error, no cache, no auto-expand). This is the oracle's
+                    // PRIMARY RISK mitigation: the token guards the ENTIRE
+                    // completion transaction, not just the content CAS.
+                    val routeTokenValid = expectedRouteInstance == 0L ||
+                        expectedRouteInstance == slices.store.stateFlow.value.chatRouteInstance
                     if (sessionId == slices.chat.value.currentSessionId &&
-                        expectedServerGroupFp == currentServerGroupFp()
+                        expectedServerGroupFp == currentServerGroupFp() &&
+                        routeTokenValid
                     ) {
                         // §preserveUnfetched (mirrors opencode-web reconcileFetched):
                         // a periodic reload (resetLimit=false) fetches the latest
@@ -194,9 +223,13 @@ internal fun launchLoadMessages(
                         // from the bottom (reverseLayout tail) until the next
                         // reload. newerKept is its own bucket so it does NOT pollute
                         // historyAlreadyPaged (which must stay older-only).
-                        val olderKept = srcMessages.filter { m ->
-                            m.id !in fetchedIds && oldestFetchedCreated != null &&
-                                m.time?.created != null && m.time.created < oldestFetchedCreated
+                        val olderKept = if (forceInitialWindow) {
+                            emptyList()
+                        } else {
+                            srcMessages.filter { m ->
+                                m.id !in fetchedIds && oldestFetchedCreated != null &&
+                                    m.time?.created != null && m.time.created < oldestFetchedCreated
+                            }
                         }
                         val olderKeptIds = olderKept.map { m -> m.id }.toHashSet()
                         // newerKept: not-fetched AND not-already-older (id check via
@@ -206,10 +239,14 @@ internal fun launchLoadMessages(
                         // at the newest end (reverseLayout bottom), matching the just-arrived
                         // SSE message semantic — it must NOT be classed older (which would
                         // shove it to the history front).
-                        val newerKept = srcMessages.filter { m ->
-                            m.id !in fetchedIds && m.id !in olderKeptIds &&
-                                (m.time?.created == null || newestFetchedCreated == null ||
-                                    m.time.created >= newestFetchedCreated)
+                        val newerKept = if (forceInitialWindow) {
+                            emptyList()
+                        } else {
+                            srcMessages.filter { m ->
+                                m.id !in fetchedIds && m.id !in olderKeptIds &&
+                                    (m.time?.created == null || newestFetchedCreated == null ||
+                                        m.time.created >= newestFetchedCreated)
+                            }
                         }
                         val newerKeptIds = newerKept.map { m -> m.id }.toHashSet()
                         val keptIds = olderKeptIds + newerKeptIds
@@ -359,32 +396,60 @@ internal fun launchLoadMessages(
                         val newModel = inferCurrentModel(mergedMessages)
 
                         val beforeMergeSize = srcMessages.size
-                        // T1b: full 8-field merge in ONE dispatch (no torn intermediate).
-                        // isLoadingMessages=false is unconditional inside the reducer.
-                        slices.store.dispatch(
-                            AppAction.MessagesMerged(
-                                messages = mergedMessages,
-                                partsByMessage = mergedParts,
-                                streamingPartTexts = newStreamingTexts,
-                                streamingReasoningPart = newStreamingReasoning,
-                                olderMessagesCursor = newCursor,
-                                hasMoreMessages = newHasMore,
-                                currentModel = newModel,
-                                authoritative = authoritative,
+                        // §chat-list-detail §7.2 B0.5-rework: route-aware path
+                        // dispatches ChatContentLoaded (the reducer CAS-validates
+                        // expectedRouteInstance AND atomically commits BOTH
+                        // LoadedContent + the flat mirror). Legacy path
+                        // (expectedRouteInstance == 0) dispatches MessagesMerged
+                        // (flat fields only — the bare-chat path).
+                        if (expectedRouteInstance > 0L) {
+                            slices.store.dispatch(
+                                AppAction.ChatContentLoaded(
+                                    sessionId = sessionId,
+                                    expectedRouteInstance = expectedRouteInstance,
+                                    messages = mergedMessages,
+                                    partsByMessage = mergedParts,
+                                    streamingPartTexts = newStreamingTexts,
+                                    streamingReasoningPart = newStreamingReasoning,
+                                    olderMessagesCursor = newCursor,
+                                    hasMoreMessages = newHasMore,
+                                    currentModel = newModel,
+                                    authoritative = authoritative,
+                                )
                             )
-                        )
+                        } else {
+                            // T1b: full 8-field merge in ONE dispatch (no torn intermediate).
+                            // isLoadingMessages=false is unconditional inside the reducer.
+                            slices.store.dispatch(
+                                AppAction.MessagesMerged(
+                                    messages = mergedMessages,
+                                    partsByMessage = mergedParts,
+                                    streamingPartTexts = newStreamingTexts,
+                                    streamingReasoningPart = newStreamingReasoning,
+                                    olderMessagesCursor = newCursor,
+                                    hasMoreMessages = newHasMore,
+                                    currentModel = newModel,
+                                    authoritative = authoritative,
+                                )
+                            )
+                        }
                         // §defect-B-2B: auto-expand omitted tool output for the
                         // freshly loaded messages (bounded to the most-recent
                         // window, streaming-guarded, single-flight per load).
                         // Launches into the same scope; its own CAS guards
                         // (session+fp+streaming+isLoading) no-op if the session
                         // switched / went streaming before the launch resumes.
+                        // §B4 round-2 (rev-gpt MAJOR): thread expectedRouteInstance
+                        // so a stale A→B→A incarnation's auto-expand cannot
+                        // pollute the newer incarnation's partExpandStates (the
+                        // token guard complements the existing session+fp CAS).
                         launchAutoExpandOmittedParts(
                             scope = scope,
                             repository = repository,
                             store = slices.store,
                             sessionId = sessionId,
                             currentServerGroupFp = currentServerGroupFp,
+                            expectedRouteInstance = expectedRouteInstance,
                         )
                         // §chat-ux-batch T8 (B3): the legacy global←per-session
                         // selectedAgentName backfill (sync the settings slice
@@ -422,17 +487,31 @@ internal fun launchLoadMessages(
                 // session-guarded finally. Only surface the user-facing error when
                 // this is still the current session (a stale failure belongs to a
                 // session the user already left).
-                if (sessionId == slices.chat.value.currentSessionId) {
+                // §chat-list-detail §7.2 B0.5-rework: ALSO check the route token —
+                // a stale A→B→A failure must NOT emit an error for the newer load.
+                val tokenValid = expectedRouteInstance == 0L ||
+                    expectedRouteInstance == slices.store.stateFlow.value.chatRouteInstance
+                if (sessionId == slices.chat.value.currentSessionId && tokenValid) {
                     emit.emit(UiEvent.Error(R.string.error_load_messages_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
             }
 
         // Best-effort: load session todos after messages (matches iOS behavior).
         // Fails silently in test mocks where the endpoint isn't set up.
+        // §B4 round-2 (rev-gpt MAJOR): guard the async todos dispatch with
+        // the route-token freshness CAS — a stale A→B→A incarnation must NOT
+        // pollute the newer incarnation's sessionTodos map (the prior token
+        // guard only covered the content commit / error emit / flag clear /
+        // cache write / auto-expand launch; the todos dispatch was unguarded,
+        // so a stale completion could clobber the newer incarnation's todos).
         try {
             repository.getSessionTodos(sessionId)
                 .onSuccess { todos ->
-                    slices.mutateSessionList { sl -> sl.copy(sessionTodos = sl.sessionTodos + (sessionId to todos)) }
+                    val todosTokenValid = expectedRouteInstance == 0L ||
+                        expectedRouteInstance == slices.store.stateFlow.value.chatRouteInstance
+                    if (todosTokenValid) {
+                        slices.mutateSessionList { sl -> sl.copy(sessionTodos = sl.sessionTodos + (sessionId to todos)) }
+                    }
                 }
         } catch (e: Exception) {
             // R-14: never swallow structured concurrency cancellation — re-throw
@@ -452,7 +531,17 @@ internal fun launchLoadMessages(
             // leave it stuck and block all future loads), session-guarded so a
             // stale response doesn't clobber a new session's flag. Idempotent —
             // the success/else/failure branches above already clear it normally.
+            //
+            // §chat-list-detail §7.2 B0.5-rework: ALSO guard on the route token.
+            // A stale A→B→A load (same sessionId, older token) must NOT clear
+            // the newer load's isLoadingMessages — doing so would un-block the
+            // loading indicator while the newer load is still in flight,
+            // confusing the user. The token check ensures only the CURRENT
+            // incarnation's load can clear the flag.
+            val tokenValid = expectedRouteInstance == 0L ||
+                expectedRouteInstance == slices.store.stateFlow.value.chatRouteInstance
             if (sessionId == slices.chat.value.currentSessionId &&
+                tokenValid &&
                 slices.chat.value.isLoadingMessages
             ) {
                 slices.mutateChat { c -> c.copy(isLoadingMessages = false) }
@@ -498,6 +587,7 @@ internal fun launchLoadMoreMessages(
      */
     currentServerGroupFp: () -> String = { "" },
     onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> },
+    expectedRouteInstance: Long = 0L,
 ) {
 
     // §history-load-fix: OWN flag (isLoadingMoreMessages) — decoupled from the
@@ -512,8 +602,29 @@ internal fun launchLoadMoreMessages(
     // `before` cursor and PREPEND it — no longer re-downloading the latest
     // window with an ever-growing limit (the old O(n²) anti-pattern that caused
     // both cellular blowup and OOM). Stops when there's no next cursor.
-    val cursor = slices.chat.value.olderMessagesCursor
-    if (cursor == null || !slices.chat.value.hasMoreMessages) return
+    //
+    // §B2 rev-gpt #5 / BLOCK fix: the route-aware path
+    // (expectedRouteInstance != 0L) sources cursor/hasMore from the route-
+    // owned LoadedContent (the authoritative surface for chat/{sessionId});
+    // the legacy bare-chat overload (expectedRouteInstance == 0L) keeps
+    // reading flat state. A route-aware call REQUIRES a matching slot
+    // (sessionId + routeInstance validated) — NO Elvis fallback to flat: if
+    // the slot is absent / mismatched, or its cursor is null / hasMore is
+    // false, the call aborts cleanly BEFORE the loading-flag flip (no fetch,
+    // no stuck flag). Read once before the flag flip so the gate sees a
+    // consistent snapshot.
+    val isRouteAware = expectedRouteInstance != 0L
+    val routeContentBeforeLock = if (isRouteAware) {
+        slices.chat.value.content?.takeIf {
+            it.sessionId == sessionId && it.routeInstance == expectedRouteInstance
+        }
+    } else null
+    if (isRouteAware && routeContentBeforeLock == null) return
+    val cursor = if (isRouteAware) routeContentBeforeLock!!.olderMessagesCursor
+        else slices.chat.value.olderMessagesCursor
+    val hasMore = if (isRouteAware) routeContentBeforeLock!!.hasMoreMessages
+        else slices.chat.value.hasMoreMessages
+    if (cursor == null || !hasMore) return
     // Atomic check-and-set (mirrors launchLoadMessages): set the flag
     // synchronously BEFORE launch so a rapid second loadMore (fast scroll /
     // recomposition) can't pass the guard and fire a duplicate concurrent
@@ -541,16 +652,46 @@ internal fun launchLoadMoreMessages(
                     // same rationale as launchLoadMessages. Cross-group same-
                     // sessionId collision must not let a stale older-page response
                     // write into the wrong group's chat slice.
+                    val routeTokenValid = expectedRouteInstance == 0L ||
+                        expectedRouteInstance == slices.store.stateFlow.value.chatRouteInstance
                     if (sessionId == slices.chat.value.currentSessionId &&
-                        expectedServerGroupFp == currentServerGroupFp()
+                        expectedServerGroupFp == currentServerGroupFp() &&
+                        routeTokenValid
                     ) {
                         // Capture current chat-domain values from the slice so we
                         // can compute the post-merge values used by the cache
                         // snapshot below.
-                        val srcMessages = slices.chat.value.messages
-                        val srcParts = slices.chat.value.partsByMessage
-                        val srcCursor = slices.chat.value.olderMessagesCursor
-                        val srcHasMore = slices.chat.value.hasMoreMessages
+                        //
+                        // §B2 rev-gpt #5 / BLOCK fix: route-aware load-more
+                        // sources its merge baseline from the route-owned
+                        // LoadedContent (authoritative for chat/{sessionId});
+                        // legacy bare-chat (token=0) keeps flat reads. NO Elvis
+                        // fallback to flat on the route-aware path: if the slot
+                        // vanished between the pre-lock gate and here (concurrent
+                        // route transition), abort the merge entirely (stale —
+                        // nothing route-owned to extend; the flag is cleared by
+                        // the session-guarded finally below). Re-read INSIDE the
+                        // lock so a concurrent route transition is reflected.
+                        val liveChat = slices.chat.value
+                        val routeContent = if (expectedRouteInstance != 0L) {
+                            liveChat.content?.takeIf {
+                                it.sessionId == sessionId &&
+                                    it.routeInstance == expectedRouteInstance
+                            }
+                        } else null
+                        if (expectedRouteInstance != 0L && routeContent == null) {
+                            // Slot vanished mid-fetch — abort the merge. The
+                            // finally backstop clears the flag (session-guarded).
+                            return@withSessionLock
+                        }
+                        val srcMessages = if (expectedRouteInstance != 0L) routeContent!!.messages
+                            else liveChat.messages
+                        val srcParts = if (expectedRouteInstance != 0L) routeContent!!.partsByMessage
+                            else liveChat.partsByMessage
+                        val srcCursor = if (expectedRouteInstance != 0L) routeContent!!.olderMessagesCursor
+                            else liveChat.olderMessagesCursor
+                        val srcHasMore = if (expectedRouteInstance != 0L) routeContent!!.hasMoreMessages
+                            else liveChat.hasMoreMessages
 
                         val newMessages: List<Message>
                         val newParts: Map<String, List<Part>>
@@ -583,6 +724,8 @@ internal fun launchLoadMoreMessages(
                                 partsByMessage = newPartsFinal,
                                 olderMessagesCursor = newCursor,
                                 hasMoreMessages = newHasMore,
+                                expectedRouteInstance = expectedRouteInstance,
+                                sessionId = sessionId,
                             )
                         )
                         // §Per-session message cache (write): a loadMore result
@@ -631,7 +774,10 @@ internal fun launchLoadMoreMessages(
             // all future loads), and ONLY when this session is still current (don't
             // clobber a new session's flag). Idempotent — the success branch above
             // already cleared it on the normal path.
+            val routeTokenValid = expectedRouteInstance == 0L ||
+                expectedRouteInstance == slices.store.stateFlow.value.chatRouteInstance
             if (sessionId == slices.chat.value.currentSessionId &&
+                routeTokenValid &&
                 slices.chat.value.isLoadingMoreMessages
             ) {
                 slices.mutateChat { c -> c.copy(isLoadingMoreMessages = false) }
@@ -639,3 +785,26 @@ internal fun launchLoadMoreMessages(
         }
     }
 }
+
+/**
+ * Legacy positional-call compatibility.  The original helper exposed the
+ * cache callback as its fifth parameter, so existing callers such as the
+ * focused MessageActions tests can continue to pass a trailing lambda while
+ * the route-aware overload above keeps its token as an optional named value.
+ */
+internal fun launchLoadMoreMessages(
+    scope: CoroutineScope,
+    repository: OpenCodeRepository,
+    slices: SliceFlows,
+    sessionId: String,
+    onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit,
+) = launchLoadMoreMessages(
+    scope = scope,
+    repository = repository,
+    slices = slices,
+    sessionId = sessionId,
+    expectedServerGroupFp = "",
+    currentServerGroupFp = { "" },
+    onCacheWindow = onCacheWindow,
+    expectedRouteInstance = 0L,
+)

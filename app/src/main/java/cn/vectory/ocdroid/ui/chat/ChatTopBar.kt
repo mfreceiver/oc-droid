@@ -90,11 +90,6 @@ internal data class ChatTopBarState(
     val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle,
     val showTunnelAuth: Boolean = false,
     /**
-     * "Open" sessions (browser-tab list) rendered in the second-row dropdown.
-     * Pre-resolved from [AppState.openSessionIds] by the caller.
-     */
-    val openSessions: List<Session> = emptyList(),
-    /**
      * Session IDs with unread activity (an out-of-band message arrived
      * while the session was not the current one). Drives a small dot badge on
      * each row in the open-sessions dropdown. Projected from
@@ -213,46 +208,40 @@ internal fun rememberChatTopBarState(
     effectiveAgent: String?,
     effectiveModel: Message.ModelInfo?,
     noHostFallback: String,
-): State<ChatTopBarState> = remember(noHostFallback, effectiveAgent, effectiveModel) {
+    // §B2 rev-gpt MAJOR 1: the authoritative session id for the top-bar's
+    // session identity (title / breadcrumb / todos / selected-tab highlight).
+    // On the parameterized chat/{sessionId} route this is the route id; flat
+    // chat.currentSessionId can lag the route flip (navigateToChat commits
+    // nav.lastRoute + token in one dispatch; SessionSelected follows in a
+    // separate dispatch), so the loading window would otherwise surface the
+    // PRIOR session's title/todos/tab. Legacy bare-chat passes flat
+    // currentSessionId here (byte-for-byte). A remember key so the derived
+    // state recomputes on route switch.
+    chromeSessionId: String? = null,
+): State<ChatTopBarState> = remember(noHostFallback, effectiveAgent, effectiveModel, chromeSessionId) {
     derivedStateOf {
         val curHostProfile = currentHostProfile(
             hostState.value.hostProfiles,
             hostState.value.currentHostProfileId,
         )
-        // §nav-redesign (2026-07-13): populate openSessions for the restored
-        // SessionTabStrip (second row under ChatTopBar). openSessionIds is
-        // root-only + capped at 8 by the session domain, but we defend at
-        // the consumer too: a stale/legacy child id persisted in
-        // openSessionIds must never render as a top-level tab. Associate-by
-        // once for O(1) resolution (8 ids × ~500 sessions otherwise O(n×m)).
-        //
         // §Q14 (title union): resolve curSession through the UNION store
         // (root + directorySessions + childSessions) so a sub-agent /
         // cross-workdir current session produces its real title instead of
-        // degrading to the app name. The same map backs parentSessionTitle
-        // (parent may itself be a non-root directory/child session) and
-        // openSessions. topBarSessions appends curSession when it is not
-        // already in the root list so ChatTopBar's `state.sessions.find
-        // { it.id == currentSessionId }` (ChatTopBar.kt) hits for child
-        // sessions too — the SessionTabStrip still filters parentId==null
-        // below, so a child is never rendered as a top-level tab.
+        // degrading to the app name.
         val sessionsById = allSessionsById(
             sessionListState.value.sessions,
             sessionListState.value.directorySessions,
             sessionListState.value.childSessions,
         )
-        val curSession = chatState.value.currentSessionId?.let { sessionsById[it] }
+        val curSession = chromeSessionId?.let { sessionsById[it] }
         val topBarSessions = if (curSession != null && sessionListState.value.sessions.none { it.id == curSession.id }) {
             sessionListState.value.sessions + curSession
         } else {
             sessionListState.value.sessions
         }
-        val openSessions = sessionListState.value.openSessionIds
-            .mapNotNull { sessionsById[it] }
-            .filter { it.parentId == null && !it.isArchived }
         ChatTopBarState(
             sessions = topBarSessions,
-            currentSessionId = chatState.value.currentSessionId,
+            currentSessionId = chromeSessionId,
             sessionStatuses = sessionListState.value.sessionStatuses,
             hasMoreSessions = sessionListState.value.hasMoreSessions,
             isLoadingMoreSessions = sessionListState.value.isLoadingMoreSessions,
@@ -266,7 +255,7 @@ internal fun rememberChatTopBarState(
             // false-positive grep on the deleted field name.
             currentAgentName = effectiveAgent,
             contextUsage = cachedContextUsageState.value,
-            sessionTodos = sessionListState.value.sessionTodos[chatState.value.currentSessionId ?: ""] ?: emptyList(),
+            sessionTodos = sessionListState.value.sessionTodos[chromeSessionId ?: ""] ?: emptyList(),
             hostName = curHostProfile?.name ?: noHostFallback,
             isConnected = connectionState.value.isConnected,
             isConnecting = connectionState.value.isConnecting,
@@ -293,31 +282,30 @@ internal fun rememberChatTopBarState(
             // as the load/compact mirror consumed by
             // ChatViewModel.compactSession() — NOT deleted.
             currentModel = effectiveModel,
-            // §nav-redesign: consumed by the restored SessionTabStrip
-            // (rendered as the TopAppBar's second row, directly after
-            // ChatTopBar in the column below). Empty list short-circuits
-            // inside SessionTabStrip (PrimaryScrollableTabRow guard).
-            openSessions = openSessions,
         )
     }
 }
 
 internal data class ChatTopBarActions(
     val onSelectSession: (String) -> Unit,
-    val onCloseSession: (String) -> Unit = {},
     /**
-     * §Wave5b-Q13: dedicated callback for the子→父 breadcrumb tap. The
-     * breadcrumb MUST NOT reuse [onSelectSession] — that always dispatches a
-     * `Latest` scroll intent (the default selectSession path), which would
-     * clobber the parent's Restore checkpoint captured at openSubAgent time.
-     * This callback routes through
-     * [cn.vectory.ocdroid.ui.SessionViewModel.returnToParent] which reads
-     * [cn.vectory.ocdroid.ui.ChatState.parentReturnCheckpoints] and dispatches
-     * `Restore(checkpoint)` to land the parent at its prior viewport.
+     * §Wave5b-Q13 + §chat-list-detail §11 / G6 (B5): dedicated callback for
+     * the子→父 breadcrumb tap. The breadcrumb MUST NOT reuse [onSelectSession]
+     * — that always dispatches a `Latest` scroll intent (the default
+     * selectSession path), which would clobber the parent's Restore checkpoint
+     * captured at openSubAgent time. This callback routes through
+     * [cn.vectory.ocdroid.ui.SessionViewModel.returnToParent] which triggers
+     * `returnToExistingChat(parentId)` (B5 BLOCK-fix CRITICAL — pop-based
+     * restoration, NOT navigateToChat); the AppShell synchronizer pops the
+     * child entry + re-activates the EXISTING parent NavBackStackEntry
+     * (preserving its SavedStateHandle). The parent route entry's
+     * LaunchedEffect reads its handle and replays the captured checkpoint as
+     * a `Restore` scroll intent, landing the parent at its prior viewport.
      *
-     * If no checkpoint is on file (cold-started into child, host purge
-     * cleared the map), returnToParent falls back to Latest — so the
-     * breadcrumb still navigates back, just at the newest position.
+     * If no checkpoint is on file (cold-started into child, deep-link direct,
+     * host purge / process-death-without-handle), the parent's LaunchedEffect
+     * finds nothing in its handle → openForRoute's default Latest stands — so
+     * the breadcrumb still navigates back, just at the newest position.
      */
     val onNavigateParent: () -> Unit = {},
     val onSelectAgent: (String?) -> Unit = {},
@@ -411,11 +399,6 @@ internal fun ChatTopBar(
     state: ChatTopBarState,
     actions: ChatTopBarActions,
     modifier: Modifier = Modifier,
-    // §1B: tabVisible is no longer wired (no second-row strip). Kept on the
-    // signature so the old call sites continue compiling during the
-    // chrome swap; the new ChatScaffold passes true unconditionally.
-    @Suppress("UNUSED_PARAMETER") tabVisible: Boolean = true,
-    @Suppress("UNUSED_PARAMETER") onTabVisibilityChange: (Boolean) -> Unit = {},
     onTitleClick: () -> Unit = {},
     /**
      * §home-hub T4: phone (<600dp) ArrowBack affordance in the
@@ -672,8 +655,8 @@ internal fun ChatTopBar(
 
 /**
  * §0.8.2 P2.3: the trigger + DropdownMenu cluster rendered in the actions
- * slot. Mirrors the v0.7.6 `ContextMenuButton` pattern
- * (ChatSessionTabStrip.kt:458): a 44dp transparent Surface wraps the live
+ * slot. Mirrors the v0.7.6 `ContextMenuButton` pattern (ChatSessionTabStrip.kt
+ * was deleted in B6): a 44dp transparent Surface wraps the live
  * [ContextUsageRing] (WCAG 2.5.5 touch target while keeping the ring visual
  * at its tuned size); the [DropdownMenu] is a sibling inside the same Box
  * so it anchors below the trigger.
@@ -729,7 +712,7 @@ private fun ContextMenuCluster(
     onForceRefresh: () -> Unit,
 ) {
     Box {
-        // §v0.7-pattern (ChatSessionTabStrip.kt:458): the ring is the
+        // §v0.7-pattern (ChatSessionTabStrip.kt deleted in B6): the ring is the
         // trigger; enlarge the click target to 44dp (WCAG 2.5.5 AAA) while
         // keeping the ring visual at its tuned 28dp size (ChatUiTuning).
         // The ring is centered inside the larger transparent Surface so the

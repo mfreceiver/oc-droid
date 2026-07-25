@@ -1,12 +1,11 @@
 // SessionPickerHelpers.kt — pure JVM-testable helpers extracted from the
-// now-removed `SessionTabStrip` / `ContextMenuButton` composables (Phase 1B
-// removed the second-row session tab strip in favour of the new
-// ModalBottomSheet `SessionPickerSheet`). The two selection / layout
-// resolvers (resolveEffectiveSelectedId / resolveSessionTabLayout) and the
-// shared title-truncation helper (truncateTitle) stay here so the existing
-// JVM tests (EffectiveSelectedIdTest / SessionTabLayoutTest) keep finding
-// the symbols; nothing in this file is a @Composable so it stays in the
-// kover coverage set.
+// deleted `SessionTabStrip` / `ContextMenuButton` composables (B6 deleted
+// the second-row session tab strip). The two selection / layout resolvers
+// (resolveEffectiveSelectedId / resolveSessionTabLayout) and the shared
+// title-truncation helper (truncateTitle) stay here so the existing JVM
+// tests (EffectiveSelectedIdTest / SessionTabLayoutTest) keep finding the
+// symbols; nothing in this file is a @Composable so it stays in the kover
+// coverage set.
 
 package cn.vectory.ocdroid.ui.chat
 
@@ -32,7 +31,7 @@ internal fun truncateTitle(value: String): String =
     else value.take(SESSION_TITLE_MAX_CHARS - 1) + "…"
 
 /**
- * Pure selection resolver for the (former) session tab strip. Returns the
+ * Pure selection resolver for the (deleted B6) session tab strip. Returns the
  * session id that should read as "active" for highlight + scroll-centre:
  *  - [currentSessionId] when it is itself a root session present in
  *    [openSessions] (the normal case);
@@ -41,7 +40,7 @@ internal fun truncateTitle(value: String): String =
  *  - otherwise null (draft session with currentSessionId == null, or a
  *    multi-level orphan whose parent is itself a sub-agent not in openSessions).
  *
- * Extracted from the (now-removed) [SessionTabStrip] composable so the
+ * Extracted from the (deleted B6) [SessionTabStrip] composable so the
  * precedence + null semantics are covered by JVM unit tests
  * (EffectiveSelectedIdTest) instead of only on-device verification. Pure: no
  * Compose dependency.
@@ -64,11 +63,11 @@ internal fun resolveEffectiveSelectedId(
 }
 
 /**
- * Pure layout resolver for the (former) session tab strip's expand-then-
+ * Pure layout resolver for the (deleted B6) session tab strip's expand-then-
  * scroll behaviour. Returns the mode that should be used given
  * [contentWidth], [tabCount], and [minWidth].
  *
- * Extracted from the (now-removed) [SessionTabStrip] composable so the
+ * Extracted from the (deleted B6) [SessionTabStrip] composable so the
  * mode decision is covered by JVM unit tests (SessionTabLayoutTest).
  * Pure: no Compose dependency on the @Composable surface.
  */

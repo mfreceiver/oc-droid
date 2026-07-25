@@ -19,13 +19,13 @@ import cn.vectory.ocdroid.ui.controller.subtreeIds
 internal fun reduceDraftSessionMaterialized(state: StoreState, action: AppAction.DraftSessionMaterialized): StoreState = state.copy(
     sessionList = state.sessionList.copy(
         sessions = upsertSession(state.sessionList.sessions, action.session),
-        openSessionIds = action.openSessionIds,
         // §Q4-strict-sync: a freshly-created session is NOT yet in the
         // server's authoritative listing. Track its id as pending-create
         // so the next mergeRefreshedSessionsPreservingLocalActivity keeps
         // it alive until a REST refresh or SSE session.created confirms it
         // (or the 30 s sweep drops it). Added atomically in the SAME
         // dispatch as the session upsert (no torn intermediate).
+        // §B4: no open-tabs-list — list-detail has no tab strip.
         pendingCreateIds = state.sessionList.pendingCreateIds + action.session.id,
         pendingCreatedAt = state.sessionList.pendingCreatedAt + (action.session.id to action.viewedAt),
     ),
@@ -42,18 +42,20 @@ internal fun reduceDraftSessionMaterialized(state: StoreState, action: AppAction
 )
 
 internal fun reduceSessionArchived(state: StoreState, action: AppAction.SessionArchived): StoreState {
-    // Apply archive eviction unconditionally (upsert archived + new openIds).
+    // Apply archive eviction unconditionally (upsert archived session).
     // Apply the chat CONTENT clear IFF the archived session IS the current
     // one — derived from the snapshot, not carried on the action.
+    // §B4: no open-tabs-list rewrite; route pop is the caller's job.
     val isCurrent = state.chat.currentSessionId == action.session.id
-    val newSessionList = state.sessionList.applyArchiveEviction(action.session, action.openSessionIds).first
+    val newSessionList = state.sessionList.applyArchiveEviction(action.session).first
     // §Wave5b-Q13 blocker-2 fix: SCROLL-STATE cleanup runs UNCONDITIONALLY
     // for the archived subtree (chat content remains current-only). For
-    // the current-archived case applyArchivedChatClear already wipes both
-    // fields, so cleanScrollStateForSubtree is a no-op; for non-current
+    // the current-archived case applyArchivedChatClear already wipes the
+    // slot, so cleanScrollStateForSubtree is a no-op; for non-current
     // archived ids it cleans a stale pendingScrollRequest (target in
-    // subtree) + parentReturnCheckpoints (key in subtree) without
-    // touching messages / parts / currentSessionId.
+    // subtree) without touching messages / parts / currentSessionId.
+    // §chat-list-detail §11 / G6 (B5): checkpoint map is gone (per-entry
+    // SavedStateHandle); this helper now only sweeps pendingScrollRequest.
     val newChat = if (isCurrent) state.chat.applyArchivedChatClear().first else state.chat
     // §task5-lifecycle (final-review fix 1): the archived session's unread
     // badge + any pending question bound to it MUST NOT survive the archive.
@@ -74,9 +76,10 @@ internal fun reduceSessionArchived(state: StoreState, action: AppAction.SessionA
     val newUnread = state.unread.removeSessions(subtree)
     // §Wave5b-Q13 blocker-2: apply UNCONDITIONAL scroll-state cleanup for
     // the archived subtree (no-op for current-archived — applyArchivedChatClear
-    // above already wiped both fields; substantive for non-current archived
-    // ids that had a stale pendingScrollRequest targeting them or a
-    // parentReturnCheckpoints entry keyed by them).
+    // above already wiped the slot; substantive for non-current archived
+    // ids that had a stale pendingScrollRequest targeting them). The
+    // checkpoint map is gone (B5 §11); this helper only sweeps
+    // pendingScrollRequest.
     val newChatCleaned = newChat.cleanScrollStateForSubtree(subtree)
     // §final-gate I-3 (review-final-rev-gpt-20260719081038 §2): prune the
     // archived subtree's entries from sessionErrorsById atomically in the
@@ -122,7 +125,6 @@ internal fun reduceHostStatePurged(state: StoreState, action: AppAction.HostStat
             state.sessionList.copy(
                 sessions = emptyList(),
                 directorySessions = emptyMap(),
-                openSessionIds = emptyList(),
                 sessionStatuses = emptyMap(),
                 activeSessionIds = emptySet(),
                 sessionTodos = emptyMap(),
@@ -192,22 +194,28 @@ internal fun reduceHostStatePurged(state: StoreState, action: AppAction.HostStat
         // Mirrors the cross-group branch's clearSessionData() reset of
         // these two transient fields.
         Triple(
+            // Same-group host changes invalidate route-owned LoadedContent,
+            // but the legacy bare-chat window is deliberately retained.  The
+            // pre-B2 contract only cleared the streaming overlay here; using
+            // clearLoadedChatPayload also erased the valid flat window.
             state.chat.copy(
+                content = null,
                 streamingPartTexts = emptyMap(),
                 streamOwned = emptyMap(),
                 streamingReasoningPart = null,
                 pendingAgent = null,
                 pendingModel = null,
                 // §Wave5b-Q13: a host/profile transition invalidates any
-                // pending scroll intent + the parent-return backstack
-                // even within the same server group. The scroll slot
-                // references a session the user is navigating away from
-                // (or that may be re-laid-out differently on the new
-                // profile); the backstack is per-session navigation
-                // context that has no carry across profiles. Mirrors the
-                // cross-group branch's clearSessionData() reset.
+                // pending scroll intent even within the same server group.
+                // The scroll slot references a session the user is navigating
+                // away from (or that may be re-laid-out differently on the
+                // new profile). Mirrors the cross-group branch's
+                // clearSessionData() reset.
+                // §chat-list-detail §11 / G6 (B5): the legacy per-child
+                // checkpoint map clear is GONE — checkpoints now live on
+                // per-route-entry SavedStateHandle, so a host purge cannot
+                // leave a stale checkpoint in ChatState.
                 pendingScrollRequest = null,
-                parentReturnCheckpoints = emptyMap(),
             ),
             // §Q4-strict-sync: clear pendingCreateIds even on same-group
             // switch (the spec mandates "host switch → clear pending"). A
@@ -283,7 +291,7 @@ internal fun reduceBulkSessionsRefreshed(state: StoreState, action: AppAction.Bu
         }
     val newSessionList = state.sessionList.copy(
         sessions = action.sessions,
-        openSessionIds = action.openSessionIds,
+        // §B4: no open-tabs-list field on BulkSessionsRefreshed.
         hasMoreSessions = action.hasMoreSessions,
         isLoadingMoreSessions = false,
         isRefreshingSessions = false,
@@ -323,7 +331,7 @@ internal fun reduceBulkSessionsRefreshed(state: StoreState, action: AppAction.Bu
     val newUnread = state.unread.removeSessions(allArchivedSubtree)
     // Chat-clear is CURRENT-ONLY (non-current archived ids have no active
     // chat window). applyArchivedChatClear also wipes pendingScrollRequest
-    // + parentReturnCheckpoints (FIX-B / §Wave5b-Q13).
+    // (FIX-B / §Wave5b-Q13). The checkpoint map is gone (B5 §11).
     val newChat = if (isCurrentArchived) {
         state.chat.applyArchivedChatClear().first
     } else {
@@ -331,14 +339,284 @@ internal fun reduceBulkSessionsRefreshed(state: StoreState, action: AppAction.Bu
     }
     // §Wave5b-Q13 blocker-2: UNCONDITIONAL scroll-state cleanup for the
     // archived subtree union. For current-archived the prior
-    // applyArchivedChatClear already wiped both fields (no-op here); for
+    // applyArchivedChatClear already wiped the slot (no-op here); for
     // NON-current archived ids this drops a stale pendingScrollRequest
-    // (target in subtree) + parentReturnCheckpoints entries (key in
-    // subtree) without touching chat content.
+    // (target in subtree) without touching chat content. The checkpoint
+    // map is gone (B5 §11).
     val newChatCleaned = newChat.cleanScrollStateForSubtree(allArchivedSubtree)
     return state.copy(
         sessionList = newSessionList.copy(pendingQuestions = cleanedQuestions),
         chat = newChatCleaned,
         unread = newUnread,
     )
+}
+
+// ── §chat-list-detail §12 B0: atomic SelectConversation / CloseDetail /
+//    DetailMissing reducers (scaffolding — inert until B0.5/B1 wire the
+//    dispatch sites). Stage the §7.2 route-instance token on
+//    [StoreState.chatRouteInstance] (the freshness CAS counter that mirrors
+//    [StoreState.sseConnectedGeneration]'s STRICTLY MONOTONIC pattern — never
+//    resets, never regresses). The LoadedContent slot + render switch land in
+//    B0.5/B2; these reducers only stage the token so the CAS is ready when
+//    the content layer arrives. PURE ADDITIVE — no existing flow dispatches
+//    these actions.
+
+/**
+ * §chat-list-detail §6 D10 / §12 B0: atomic select. Stamps the new route
+ * incarnation onto [StoreState.chatRouteInstance] via [maxOf] — the reducer
+ * is the single structural seam that enforces monotonicity (§7.2 "不可复用
+ * token"): a stale/out-of-order `SelectConversation(routeInstance=N_old)`
+ * dispatched when the live counter has already advanced past it is a
+ * no-op (`maxOf(current, N_old) == current`); the current action is
+ * idempotent (`maxOf(N, N) == N`). Neither regresses the counter.
+ *
+ * A content load (B0.5+) captures the live instance at request time and
+ * stamps [LoadedContent.routeInstance] with it; the render gate (§7.1)
+ * accepts the content IFF `content.routeInstance == chatRouteInstance`
+ * (and `content.sessionId == routeId`). An older incarnation's late-
+ * arriving load (the §7.2 A→B→A race) loses the CAS and is dropped.
+ *
+ * B0: inert — no dispatch site, no [LoadedContent] slot yet. The sessionId
+ * is carried for the B0.5 content-slot wiring (then-current-id derivation
+ * + content ownership); here it is accepted and not yet applied so the
+ * action shape is frozen for the B0.5/B1 caller swap.
+ */
+internal fun reduceSelectConversation(state: StoreState, action: AppAction.SelectConversation): StoreState = state.copy(
+    chatRouteInstance = maxOf(state.chatRouteInstance, action.routeInstance),
+)
+
+/**
+ * §chat-list-detail §6 D10 / §12 B0: close the detail pane. ADVANCES the
+ * incarnation (`+1L`) rather than resetting to 0 — the counter is STRICTLY
+ * MONOTONIC across close→reopen (mirrors [StoreState.sseConnectedGeneration],
+ * which never resets). The immediate post-close invalidation is identical
+ * to a reset: a late load carrying the prior token N finds
+ * `chatRouteInstance == N + 1`, fails the CAS, and is dropped. But unlike
+ * a reset, the next open gets N + 2 (never reuses N) — closing the
+ * "close→reopen-of-same-session reuses a token" hole a 0L reset would
+ * open (§7.2 P6 "同 session 旧 incarnation 不可覆盖新内容").
+ *
+ * B0: inert.
+ */
+internal fun reduceCloseDetail(state: StoreState, action: AppAction.CloseDetail): StoreState = state.copy(
+    chatRouteInstance = state.chatRouteInstance + 1L,
+    // §chat-list-detail §10 B0.5-rework: full clear of the LoadedContent slot
+    // AND the flat mirror (the close path must not leave stale data in EITHER
+    // authority). The flat clear mirrors clearLoadedChatPayload so both paths
+    // (close + navigate) use the same reset shape. The old bare-chat render
+    // (currentSessionId != null) also gets a clean slate.
+    chat = state.chat.clearLoadedChatPayload(),
+)
+
+/**
+ * §chat-list-detail §5 P4 / §12 B0: the requested session is gone (deleted
+ * / archived / never existed / ill-formed). Stamps the incarnation via
+ * [maxOf] — same monotonicity guarantee as [reduceSelectConversation]: a
+ * stale `DetailMissing(routeInstance=N_old)` cannot regress the counter.
+ * Any in-flight load for the missing session carrying a prior token is
+ * dropped by the freshness CAS; B2's render gate then shows the Missing
+ * placeholder (routeId has no resolvable session →
+ * `ChatDetailState.Missing(routeId)`).
+ *
+ * B0: inert.
+ */
+internal fun reduceDetailMissing(state: StoreState, action: AppAction.DetailMissing): StoreState {
+    // A missing result is destructive only for the incarnation that requested
+    // it.  In particular, a late `chat/A` missing result must not clear the
+    // content already selected for B (or an A→B→A newer incarnation).
+    val routeMatchesActiveDetail = state.chat.currentSessionId == action.sessionId ||
+        state.chat.content?.sessionId == action.sessionId
+    // B0's reducer contract also permits a newer token to stamp an otherwise
+    // identity-less snapshot (the pure reducer setup has no current session or
+    // loaded content yet). Once an active route identity exists, however, a
+    // mismatched result must be ignored wholesale so it cannot invalidate the
+    // active route's freshness CAS.
+    val hasActiveDetailIdentity = state.chat.currentSessionId != null ||
+        state.chat.content != null
+    val accepted = action.routeInstance >= state.chatRouteInstance &&
+        (!hasActiveDetailIdentity || routeMatchesActiveDetail)
+    return state.copy(
+        chatRouteInstance = if (accepted) {
+            maxOf(state.chatRouteInstance, action.routeInstance)
+        } else state.chatRouteInstance,
+        chat = if (accepted) state.chat.clearLoadedChatPayload() else state.chat,
+    )
+}
+
+/**
+ * §chat-list-detail §7.1/§7.2 B0.5-rework: commit loaded content with the §7.2
+ * freshness CAS. Accepts IFF BOTH [AppAction.ChatContentLoaded.expectedRouteInstance]
+ * == the live [StoreState.chatRouteInstance] (the token hasn't advanced since
+ * the load started) AND [AppAction.ChatContentLoaded.sessionId] ==
+ * [ChatState.currentSessionId] (expected-id commit guard). A stale load (older
+ * expectedRouteInstance OR session switched away) is SILENTLY DROPPED (P6).
+ *
+ * On accept, commits BOTH:
+ *  - [LoadedContent] (the route-authoritative slot — sessionId welded to
+ *    messages, P1 structural render authority)
+ *  - the flat mirror (messages/partsByMessage/streaming/cursor/model — the
+ *    same writes [reduceMessagesMerged] does, so the legacy bare-chat render
+ *    path AND the chat/{id} path see the SAME data)
+ * atomically in ONE reducer pass (no torn intermediate). The second condition
+ * (sessionId match) is a COMMIT guard — rendering authority stays
+ * `content.sessionId == routeId` (P1), NOT currentSessionId.
+ */
+internal fun reduceChatContentLoaded(state: StoreState, action: AppAction.ChatContentLoaded): StoreState {
+    // §7.2 P6 freshness CAS + expected-id commit guard: stale load → drop.
+    if (action.expectedRouteInstance != state.chatRouteInstance) return state
+    if (action.sessionId != state.chat.currentSessionId) return state
+    // §Stage-B §3.10 streamOwned computation (mirrors reduceMessagesMerged).
+    val fetchedPartIds = action.partsByMessage.values.flatten().map { it.id }.toSet()
+    val newStreamOwned = if (action.authoritative) {
+        state.chat.streamOwned.filterKeys { it !in fetchedPartIds }
+    } else {
+        state.chat.streamOwned
+    }
+    val newStreamingPartTexts = if (action.authoritative) {
+        action.streamingPartTexts.filterKeys { it !in fetchedPartIds }
+    } else {
+        action.streamingPartTexts
+    }
+    // Atomic dual commit: LoadedContent + flat mirror in ONE pass.
+    return state.copy(
+        chat = state.chat.copy(
+            content = LoadedContent(
+                sessionId = action.sessionId,
+                messages = action.messages,
+                partsByMessage = action.partsByMessage,
+                streamingPartTexts = newStreamingPartTexts,
+                streamOwned = newStreamOwned,
+                streamingReasoningPart = action.streamingReasoningPart,
+                olderMessagesCursor = action.olderMessagesCursor,
+                hasMoreMessages = action.hasMoreMessages,
+                currentModel = action.currentModel,
+                routeInstance = action.expectedRouteInstance,
+            ),
+            // Flat mirror (same field set as reduceMessagesMerged).
+            messages = action.messages.chronological(),
+            partsByMessage = action.partsByMessage,
+            streamingPartTexts = newStreamingPartTexts,
+            streamOwned = newStreamOwned,
+            streamingReasoningPart = action.streamingReasoningPart,
+            olderMessagesCursor = action.olderMessagesCursor,
+            hasMoreMessages = action.hasMoreMessages,
+            currentModel = action.currentModel,
+            isLoadingMessages = false,
+            staleNotice = false,
+        ),
+    )
+}
+
+/**
+ * §chat-list-detail §10 B0.5-rework: focused clear of the loaded-chat payload
+ * (the fields that represent "a session's loaded content"). Used by
+ * [reduceCloseDetail] AND by [reduceDetailMissing] (both route-scoped — the
+ * legacy bare-chat path never dispatches these actions). Clears:
+ *  - [ChatState.content] (the LoadedContent slot — P1 authority for chat/{id})
+ *  - flat mirror: messages, partsByMessage, streamingPartTexts, streamOwned,
+ *    streamingReasoningPart, cursor, hasMore, model, isLoadingMessages,
+ *    isLoadingMoreMessages
+ *  - coalesce buffers: deltaBuffer, fullTextBuffer, pendingFlushPartIds
+ *
+ * §B2 rev-gpt CRITICAL + MAJOR 2: the load-more flag + coalesce buffers MUST
+ * be cleared here. An in-flight route-aware load-more's `finally` backstop is
+ * token-guarded, so once CloseDetail/DetailMissing advanced the incarnation
+ * the finally no-ops and isLoadingMoreMessages would stay `true` forever. And
+ * a late `CoalesceFlushedForPart` (legacy token=0, accepted by
+ * acceptsRouteUpdate) could resurrect streaming state for the closed route if
+ * a new overlay for the same partId is established before the scheduled flush
+ * fires — clearing the buffers leaves the late flush nothing to apply.
+ *
+ * Preserves: currentSessionId (the route-open sets it separately),
+ * isCompacting/compactStartedAt/refreshNonce (chrome), revertCutoffs,
+ * partExpandStates.
+ */
+internal fun ChatState.clearLoadedChatPayload(): ChatState = copy(
+    content = null,
+    messages = emptyList(),
+    partsByMessage = emptyMap(),
+    streamingPartTexts = emptyMap(),
+    streamOwned = emptyMap(),
+    streamingReasoningPart = null,
+    olderMessagesCursor = null,
+    hasMoreMessages = false,
+    isLoadingMessages = false,
+    isLoadingMoreMessages = false,
+    currentModel = null,
+    deltaBuffer = emptyMap(),
+    fullTextBuffer = emptyMap(),
+    pendingFlushPartIds = emptySet(),
+)
+
+/**
+ * Mirrors the live flat chat projection into the route-owned slot.  The flat
+ * fields remain the legacy reducer surface, but once a route content slot is
+ * active every transcript mutation must update both projections atomically.
+ * The slot is never created or re-attributed here: its existing owner and
+ * route token must still match the live incarnation.
+ */
+internal fun ChatState.syncLoadedContentFromFlat(
+    routeInstance: Long,
+    expectedRouteInstance: Long = 0L,
+    expectedSessionId: String? = null,
+): ChatState {
+    // `0L` is the compatibility value for the bare-chat action surface. It is
+    // deliberately NOT a route identity: legacy reducers may update the flat
+    // projection, but they must not silently mutate a route-owned slot.
+    if (expectedRouteInstance == 0L) return this
+    val loaded = content ?: return this
+    if (expectedRouteInstance != routeInstance) return this
+    if (expectedSessionId != null && expectedSessionId != loaded.sessionId) return this
+    if (loaded.routeInstance != routeInstance || loaded.sessionId != currentSessionId) return this
+    return copy(
+        content = loaded.copy(
+            messages = messages,
+            partsByMessage = partsByMessage,
+            streamingPartTexts = streamingPartTexts,
+            streamOwned = streamOwned,
+            streamingReasoningPart = streamingReasoningPart,
+            olderMessagesCursor = olderMessagesCursor,
+            hasMoreMessages = hasMoreMessages,
+            currentModel = currentModel,
+        ),
+    )
+}
+
+/**
+ * Mirror a route-aware flat-field reducer into the already-owned route slot.
+ * A zero token is intentionally a no-op for the route projection.
+ */
+internal fun StoreState.withRouteContentSynced(
+    expectedRouteInstance: Long = 0L,
+    expectedSessionId: String? = null,
+): StoreState = copy(
+    chat = chat.syncLoadedContentFromFlat(
+        routeInstance = chatRouteInstance,
+        expectedRouteInstance = expectedRouteInstance,
+        expectedSessionId = expectedSessionId,
+    ),
+)
+
+/**
+ * Acceptance guard shared by asynchronous route-owned reducer branches.
+ * Legacy actions intentionally pass `0L` and are accepted against the flat
+ * compatibility surface; a non-zero token must match the live incarnation and
+ * any supplied session owner must still be selected.
+ */
+internal fun StoreState.acceptsRouteUpdate(
+    expectedRouteInstance: Long,
+    sessionId: String? = null,
+): Boolean {
+    // Legacy (token=0) actions target the flat compatibility surface ONLY —
+    // withRouteContentSynced is a no-op for token=0 (syncLoadedContentFromFlat
+    // early-returns), so a legacy write can never mutate a route-owned slot.
+    // They MUST be accepted unconditionally to honour the pre-B2 flat-maps
+    // contract: the token-stream coordinator (and other legacy callers)
+    // dispatch session-id-bearing frames without first selecting the session
+    // in the chat slice (the unit-test engine surface AND the production
+    // bare-chat path). Cross-session / stale-incarnation protection is the
+    // responsibility of the route-owned path below (token≠0).
+    if (expectedRouteInstance == 0L) return true
+    if (sessionId != null && chat.currentSessionId != sessionId) return false
+    return expectedRouteInstance == chatRouteInstance
 }

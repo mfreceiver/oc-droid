@@ -53,7 +53,7 @@ import kotlinx.coroutines.launch
  *  - `sessionErrorsById` — sourced straight from
  *    `SessionListState.sessionErrorsById` by ChatScaffold; passed as a value.
  *
- * @param content the chat body (TopAppBar + SessionTabStrip + chat Surface
+ * @param content the chat body (TopAppBar + chat Surface; SessionTabStrip deleted in B6)
  *   + Composer). Composed verbatim inside the ModalNavigationDrawer's
  *   content slot — every local ChatScaffold read inside it is still in scope.
  */
@@ -67,6 +67,11 @@ internal fun ChatDrawerHost(
     closeDrawerAction: () -> Unit,
     onBackToHome: () -> Unit,
     onShowWorkdirPicker: () -> Unit,
+    // §B3: the drawer session-row tap is a session-OPENING entry point — the
+    // caller supplies the route-aware navigation (navigateToChat) so the drawer
+    // uses the SAME pipeline as every other entry (SessionsScreen / picker /
+    // deep-link). sessionVM stays for the new-session-in-workdir path below.
+    onNavigateToChat: (String) -> Unit,
     content: @Composable () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -168,14 +173,16 @@ internal fun ChatDrawerHost(
                 // §opuser IMPORTANT-2: recent root non-archived sessions
                 // (sessions + directorySessions merged, distinctBy id,
                 // sorted by time.updated desc) — same projection as the home
-                // page §2a Recently section. Tap = selectSession (stay in Chat).
+                // page §2a Recently section. §B3: tap = navigateToChat (the
+                // route-aware open/load pipeline), then close the drawer so
+                // the user lands on the chosen conversation.
                 sessions = sessions,
                 onSelect = { sessionId ->
-                    sessionVM.selectSession(sessionId)
+                    onNavigateToChat(sessionId)
                     // §T4-C2: close the drawer after selecting so the user
-                    // lands on the chosen conversation (stay in Chat, do NOT
-                    // navigate away). selectSession is synchronous on the
-                    // slice; the close animation runs concurrently.
+                    // lands on the chosen conversation. navigateToChat is
+                    // synchronous on the slice; the close animation runs
+                    // concurrently.
                     closeDrawerAction()
                 },
                 onBackToHome = {

@@ -97,9 +97,14 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
         // Defensive session guard: only touch the current session's chat view.
         if (eventSessionId != null && eventSessionId != host.slices.chat.value.currentSessionId) return
         if (updated != null && updated.id.isNotEmpty()) {
+            val routeInstance = eventSessionId?.let(host.slices::routeInstanceFor) ?: 0L
             val found = host.slices.chat.value.messages.any { it.id == updated.id }
             host.slices.store.dispatch(
-                AppAction.MessageUpdatedApplied(updated)
+                AppAction.MessageUpdatedApplied(
+                    message = updated,
+                    expectedRouteInstance = routeInstance,
+                    sessionId = eventSessionId,
+                )
             )
             if (found) {
                 DebugLog.d("Sync", "message.updated: patched")
@@ -137,19 +142,19 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
                 if (ownerIsUser) return
                 val fullText = deltaEvent.text
                 val delta = deltaEvent.delta
+                val routeInstance = host.slices.routeInstanceFor(deltaEvent.sessionId)
                 // §reasoning-routing-fix
                 val pType = deltaEvent.partType
                 if (isStreamablePartType(pType)) {
                     val existingParts = host.slices.chat.value.partsByMessage[msgId]
                     val hasCorrectType = existingParts?.any { it.id == pId && it.type == pType } == true
                     if (!hasCorrectType) {
-                        host.slices.store.dispatch(
-                            AppAction.PartPlaceholderEnsured(
-                                partType = pType,
-                                partId = pId,
-                                messageId = msgId,
-                                sessionId = deltaEvent.sessionId,
-                            )
+                        host.dispatchTokenStreamPlaceholder(
+                            partType = pType,
+                            partId = pId,
+                            messageId = msgId,
+                            sessionId = deltaEvent.sessionId,
+                            expectedRouteInstance = routeInstance,
                         )
                         if (STREAMING_FLICKER_DEBUG) {
                             val inStreamingTexts = key in host.slices.chat.value.streamingPartTexts
@@ -170,6 +175,7 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
                                 partType = deltaEvent.partType,
                                 messageId = msgId,
                                 sessionId = deltaEvent.sessionId,
+                                expectedRouteInstance = routeInstance,
                             )
                         )
                         host.scheduleDeltaFlush(key)
@@ -185,6 +191,12 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
                 } else if (!delta.isNullOrBlank()) {
                     if (!host.isFlushActiveForPart(key)) {
                         // Leading edge delta
+                        // §B2 rev-gpt #1: propagate the captured route token so
+                        // the parameterized chat/{sessionId} route's
+                        // LoadedContent mirror stays in sync (mirrors
+                        // handleMessagePartDelta / bridgePartToChatState).
+                        // Omitting it defaulted expectedRouteInstance=0L and
+                        // left the route-owned slot stale.
                         host.slices.store.dispatch(
                             AppAction.PartDeltaReceived(
                                 partId = key,
@@ -192,6 +204,7 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
                                 partType = deltaEvent.partType,
                                 messageId = msgId,
                                 sessionId = deltaEvent.sessionId,
+                                expectedRouteInstance = routeInstance,
                             )
                         )
                         host.scheduleDeltaFlush(key)
@@ -229,6 +242,7 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
         if (host.slices.chat.value.messages.any { it.id == msgId && it.isUser }) return
         val field = event.payload.getString("field") ?: "text"
         val delta = event.payload.getString("delta")
+        val routeInstance = host.slices.routeInstanceFor(sessionId)
         if (!delta.isNullOrEmpty()) {
             val key = partId
             val knownType = host.slices.chat.value.partsByMessage[msgId]
@@ -243,6 +257,7 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
                         partType = knownType,
                         messageId = msgId,
                         sessionId = sessionId,
+                        expectedRouteInstance = routeInstance,
                     )
                 )
                 host.scheduleDeltaFlush(key)

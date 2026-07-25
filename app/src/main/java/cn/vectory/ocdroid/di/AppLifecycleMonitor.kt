@@ -459,11 +459,7 @@ class AppLifecycleMonitor @Inject constructor(
             if (chat.isLoadingMessages) return@runSuspendCatching null
             probeSid = sid
             genAtProbe = currentLifecycleGeneration()
-            if (repository.isSlimMode) {
-                repository.probeLatestSlim(sid).messageID
-            } else {
-                repository.probeLatestMessageId(sid).getOrNull()
-            }
+            repository.probeLatestMessageIdForCurrent(sid).messageID
         }.onSuccess { serverLatest ->
             // Re-check every fence AFTER the network suspension: the slice,
             // the host/token, the foreground flag, and the generation must all

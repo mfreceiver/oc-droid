@@ -373,7 +373,11 @@ class AppCore @Inject constructor(
                             "§11 delta overflow reconcile: reloading session $sid"
                         )
                         effectBus.tryEmitEffect(
-                            ControllerEffect.LoadMessages(sid, resetLimit = true)
+                            ControllerEffect.LoadMessages(
+                                sessionId = sid,
+                                resetLimit = true,
+                                expectedRouteInstance = store.slices.routeInstanceFor(sid),
+                            )
                         )
                     }
                 }
@@ -388,18 +392,12 @@ class AppCore @Inject constructor(
         // currentSessionId null while a persisted id exists. Runs synchronously
         // (inline) BEFORE the collector below is registered, so the collector
         // sees the seeded value as the starting point (not the pre-seed null).
+        // §B4 / §10 cold start: never seed currentSessionId from disk into the
+        // detail pane (route is Sessions; content stays null). Self-heal any
+        // stale persisted id so the next launch cannot reintroduce a ghost.
         val persistedSid = settingsManager.currentSessionId
-        if (persistedSid != null && store.chatFlow.value.currentSessionId == null) {
-            // §fix-orphan-upgrade: same cold-start invariant as
-            // applySavedSettings — never seed a currentSessionId when open
-            // tabs are empty (stale upgrade data). Also self-heal disk so the
-            // fallback path cannot reintroduce the orphan on the next launch.
-            val openAtSeed = store.sessionListFlow.value.openSessionIds
-            if (openAtSeed.isEmpty()) {
-                settingsManager.currentSessionId = null
-            } else {
-                store.mutateChat { it.copy(currentSessionId = persistedSid) }
-            }
+        if (persistedSid != null) {
+            settingsManager.currentSessionId = null
         }
 
         // remove-message-persistence Task 6: the prior cold-start
@@ -528,7 +526,11 @@ class AppCore @Inject constructor(
     /** SessionSwitcher-owned effects. */
     internal fun dispatchSessionEffect(effect: ControllerEffect): Boolean = when (effect) {
         is ControllerEffect.LoadMessages -> {
-            loadMessagesForEffect(effect.sessionId, effect.resetLimit)
+            loadMessagesForEffect(
+                sessionId = effect.sessionId,
+                resetLimit = effect.resetLimit,
+                expectedRouteInstance = effect.expectedRouteInstance,
+            )
             true
         }
         is ControllerEffect.LoadChildSessions -> {
@@ -596,7 +598,15 @@ class AppCore @Inject constructor(
             // hydrate path only restores messages + parts.
             appScope.launch {
                 // Entry guard: user may have switched away before this launch
-                // even starts.
+                // even starts. §chat-list-detail §7.2 B0.5-rework: ALSO check
+                // the route-instance token — a route-aware effect (T > 0) whose
+                // token has already been superseded (the user navigated again)
+                // must not even peek the cache or launch a load.
+                val currentRouteInstance = store.stateFlow.value.chatRouteInstance
+                if (effect.expectedRouteInstance > 0L && effect.expectedRouteInstance != currentRouteInstance) {
+                    DebugLog.d(TAG, "VerifyAndHydrate dropped: route-instance token superseded (effect.T=${effect.expectedRouteInstance} current.T=$currentRouteInstance)")
+                    return@launch
+                }
                 if (effect.sessionId != store.chatFlow.value.currentSessionId) {
                     DebugLog.d(TAG, "VerifyAndHydrate dropped: session switched away (entry)")
                     return@launch
@@ -644,12 +654,14 @@ class AppCore @Inject constructor(
                             partsByMessage = cached.partsByMessage,
                             olderMessagesCursor = cached.olderMessagesCursor,
                             hasMoreMessages = cached.hasMoreMessages,
+                            expectedRouteInstance = effect.expectedRouteInstance,
+                            sessionId = effect.sessionId,
                         )
                     )
                     // resetLimit=false: keep the cached older history;
                     // loadMessages merges the latest tail non-destructively
                     // (§preserveUnfetched in MessageActions).
-                    loadMessagesForEffect(effect.sessionId, resetLimit = false)
+                    loadMessagesForEffect(effect.sessionId, resetLimit = false, expectedRouteInstance = effect.expectedRouteInstance)
                 } else {
                     // §empty-window-fix: cold-load path. This branch now covers
                     // BOTH the genuine cache miss (cached == null) AND the
@@ -659,7 +671,7 @@ class AppCore @Inject constructor(
                     // return an empty /since response.
                     // resetLimit=true wipes any partial state and seeds a
                     // fresh olderMessagesCursor.
-                    loadMessagesForEffect(effect.sessionId, resetLimit = true, forceInitialWindow = true)
+                    loadMessagesForEffect(effect.sessionId, resetLimit = true, forceInitialWindow = true, expectedRouteInstance = effect.expectedRouteInstance)
                 }
             }
             true
@@ -752,7 +764,15 @@ class AppCore @Inject constructor(
             if (store.chatFlow.value.currentSessionId == effect.sessionId) {
                 val ownedKeys = store.chatFlow.value.streamOwned.keys
                 if (ownedKeys.isNotEmpty()) {
-                    store.dispatch(AppAction.ClearTokenStreamState(ownedKeys))
+                    // §B4 route-aware clear: pass the live route token + session
+                    // so the reducer clears BOTH the flat mirror and the route
+                    // content slot (the evicted session is gone — no stale
+                    // overlay should survive in either projection).
+                    tokenStreamCoordinator.dispatchTokenStreamClear(
+                        partIds = ownedKeys,
+                        expectedRouteInstance = store.stateFlow.value.chatRouteInstance,
+                        sessionId = effect.sessionId,
+                    )
                 }
             }
             // R-20 Phase 1 (plan §3 矩阵 "用户归档 / 删除 / SSE 归档" 行):

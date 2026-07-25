@@ -26,19 +26,20 @@ import retrofit2.Retrofit
  *
  * **Two layers of proof:**
  *
- *  1. **Reflection layer** — verifies the three Retrofit instances (`api`,
- *     `mutationApi`, `commandApi`) are each backed by the expected OkHttp
+ *  1. **Bundle layer** — verifies the three Retrofit instances
+ *     (`restRetrofit`, `mutationRetrofit`, `commandRetrofit`) are each backed
+ *     by the expected OkHttp
  *     client with the expected retry / timeout config. This pins the wiring
  *     at the construction layer (the `rebuildClients` call path) and would
  *     catch a regression that, say, attached the same `restHttp` to all
  *     three Retrofit instances.
  *
- *  2. **Routing layer (mock-swap + coVerify)** — for every POST wrapper,
- *     swaps the private `mutationApi` field with a recording mockk and
- *     asserts the wrapper invoked it. The symmetric check swaps `commandApi`
- *     for `executeCommand`. This proves each wrapper ACTUALLY uses the
- *     intended Retrofit instance — catching any "left on `api`" regression
- *     that reflection-level wiring cannot detect.
+ *  2. **Routing layer (bundle API swap + coVerify)** — for every POST wrapper,
+ *     swaps the bundle's `mutationApi` with a recording mockk and asserts the
+ *     wrapper invoked it. The symmetric check swaps `commandApi` for
+ *     `executeCommand`. This proves each wrapper ACTUALLY uses the intended
+ *     API facade — catching any "left on `restApi`" regression that bundle
+ *     wiring cannot detect.
  *
  * **Why not behavioural DISCONNECT_AT_START** — OkHttp's
  * `retryOnConnectionFailure` flag fires only on connection-establishment
@@ -65,35 +66,48 @@ class OpenCodeRepositoryMutationWiringTest {
         server.shutdown()
     }
 
-    // ── Reflection helpers ───────────────────────────────────────────────────
+    // ── ClientBundle helpers ─────────────────────────────────────────────────
 
-    /** Reads a private var on [OpenCodeRepository] by name via Java reflection. */
-    private fun readField(name: String): Any? {
-        val field = OpenCodeRepository::class.java.getDeclaredField(name)
-        field.isAccessible = true
-        return field.get(repository)
+    private fun okHttp(name: String): OkHttpClient {
+        val bundle = repository.currentClientBundle()!!
+        return when (name) {
+            "restHttp" -> bundle.restHttp
+            "mutationHttp" -> bundle.mutationHttp
+            "commandHttp" -> bundle.commandHttp
+            else -> error("unknown ClientBundle OkHttp property: $name")
+        }
     }
 
-    /** Writes a private var on [OpenCodeRepository] by name via Java reflection. */
-    private fun writeField(name: String, value: Any?) {
-        val field = OpenCodeRepository::class.java.getDeclaredField(name)
-        field.isAccessible = true
-        field.set(repository, value)
+    private fun retrofit(name: String): Retrofit {
+        val bundle = repository.currentClientBundle()!!
+        return when (name) {
+            "restRetrofit" -> bundle.restRetrofit
+            "mutationRetrofit" -> bundle.mutationRetrofit
+            "commandRetrofit" -> bundle.commandRetrofit
+            else -> error("unknown ClientBundle Retrofit property: $name")
+        }
     }
 
-    private fun okHttp(name: String): OkHttpClient = readField(name) as OkHttpClient
-
-    private fun retrofit(name: String): Retrofit = readField(name) as Retrofit
+    private fun writeApiField(name: String, value: OpenCodeApi) {
+        repository.replaceClientBundleForTest { bundle ->
+            when (name) {
+                "restApi" -> bundle.withApisForTest(restApi = value)
+                "mutationApi" -> bundle.withApisForTest(mutationApi = value)
+                "commandApi" -> bundle.withApisForTest(commandApi = value)
+                else -> error("unknown ClientBundle API property: $name")
+            }
+        }
+    }
 
     /**
      * Builds a relaxed mockk [OpenCodeApi] whose POST methods all throw a
      * marker [RuntimeException]. Used for routing verification: swap one of
-     * `api` / `mutationApi` / `commandApi` with this mock, call the wrapper,
+     * `restApi` / `mutationApi` / `commandApi` with this mock, call the wrapper,
      * and the marker in the failure cause identifies which Retrofit instance
      * the wrapper actually invoked.
      *
      * Relaxed-mode defaults are left on for GET / non-POST methods so a
-     * wrapper that calls BOTH `mutationApi.X` (POST) and `api.getY` (GET)
+     * wrapper that calls BOTH `mutationApi.X` (POST) and `restApi.getY` (GET)
      * fails only on the POST marker — that's exactly the discriminator we
      * need for the routing test (POST wrappers should hit mutationApi; GET
      * wrappers should NOT hit mutationApi).
@@ -117,7 +131,7 @@ class OpenCodeRepositoryMutationWiringTest {
     /**
      * Asserts that [call]'s Result.isFailure carries [marker] in its
      * exception message — the proof that the wrapper routed through the
-     * swapped (throwing) api instance.
+     * swapped (throwing) API instance.
      */
     private fun assertRoutedVia(
         marker: String,
@@ -135,7 +149,7 @@ class OpenCodeRepositoryMutationWiringTest {
         )
     }
 
-    // ── Layer 1: OkHttp client config per declared field ────────────────────
+    // ── Layer 1: OkHttp client config per ClientBundle property ─────────────
 
     @Test
     fun `restHttp keeps retryOnConnectionFailure true`() {
@@ -175,9 +189,9 @@ class OpenCodeRepositoryMutationWiringTest {
         // `.client(...)` — pins that buildRetrofit actually attached the
         // right client to each instance.
         assertEquals(
-            "retrofit (api) MUST be backed by restHttp",
+            "restRetrofit (restApi) MUST be backed by restHttp",
             okHttp("restHttp"),
-            retrofit("retrofit").callFactory(),
+            retrofit("restRetrofit").callFactory(),
         )
         assertEquals(
             "mutationRetrofit (mutationApi) MUST be backed by mutationHttp",
@@ -194,9 +208,9 @@ class OpenCodeRepositoryMutationWiringTest {
     // ── Layer 2: per-wrapper routing proof via mock-swap ────────────────────
     //
     // For every POST wrapper: swap mutationApi with a throwing mock, assert
-    // the wrapper fails with the marker. The symmetric check swaps api (the
-    // GET client) and asserts the wrapper DOES NOT fail with mutationApi's
-    // marker — proving the wrapper is NOT accidentally routing through api.
+    // the wrapper fails with the marker. The symmetric check swaps restApi
+    // (the GET client) and asserts the wrapper DOES NOT fail with mutationApi's
+    // marker — proving the wrapper is NOT accidentally routing through restApi.
     //
     // The wrapper's failure-only-on-mutationApi-marker behaviour is the
     // single-assertion proof of routing.
@@ -204,7 +218,7 @@ class OpenCodeRepositoryMutationWiringTest {
     @Test
     fun `POST createSession routes through mutationApi`() {
         val mock = throwingApi("VIA_MUTATION_API")
-        writeField("mutationApi", mock)
+        writeApiField("mutationApi", mock)
         assertRoutedVia("VIA_MUTATION_API") {
             runBlocking { repository.createSession(title = "t") }
         }
@@ -212,10 +226,10 @@ class OpenCodeRepositoryMutationWiringTest {
     }
 
     @Test
-    fun `POST createSession does NOT route through api`() {
-        // Swap api (NOT mutationApi) with the throwing mock — the wrapper
+    fun `POST createSession does NOT route through restApi`() {
+        // Swap restApi (NOT mutationApi) with the throwing mock — the wrapper
         // should still succeed against the live MockWebServer, proving it
-        // is NOT using api.
+        // is NOT using restApi.
         val server = MockWebServer()
         try {
             server.start()
@@ -227,10 +241,10 @@ class OpenCodeRepositoryMutationWiringTest {
             // Re-configure so the live wiring hits the new server.
             repository.configure(baseUrl = server.url("/").toString().trimEnd('/'))
 
-            writeField("api", throwingApi("VIA_API"))
+            writeApiField("restApi", throwingApi("VIA_REST_API"))
             val result = runBlocking { repository.createSession(title = "t") }
             assertTrue(
-                "createSession MUST NOT route through api; should have hit MockWebServer: $result",
+                "createSession MUST NOT route through restApi; should have hit MockWebServer: $result",
                 result.isSuccess,
             )
             assertEquals("live wire call MUST have hit the server", 1, server.requestCount)
@@ -242,7 +256,7 @@ class OpenCodeRepositoryMutationWiringTest {
     @Test
     fun `POST sendMessage (promptAsync) routes through mutationApi`() {
         val mock = throwingApi("VIA_MUTATION_API")
-        writeField("mutationApi", mock)
+        writeApiField("mutationApi", mock)
         assertRoutedVia("VIA_MUTATION_API") {
             runBlocking { repository.sendMessage(sessionId = "s1", text = "hi") }
         }
@@ -252,7 +266,7 @@ class OpenCodeRepositoryMutationWiringTest {
     @Test
     fun `POST abortSession routes through mutationApi`() {
         val mock = throwingApi("VIA_MUTATION_API")
-        writeField("mutationApi", mock)
+        writeApiField("mutationApi", mock)
         assertRoutedVia("VIA_MUTATION_API") {
             runBlocking { repository.abortSession("s1") }
         }
@@ -262,7 +276,7 @@ class OpenCodeRepositoryMutationWiringTest {
     @Test
     fun `POST summarizeSession routes through mutationApi`() {
         val mock = throwingApi("VIA_MUTATION_API")
-        writeField("mutationApi", mock)
+        writeApiField("mutationApi", mock)
         assertRoutedVia("VIA_MUTATION_API") {
             runBlocking {
                 repository.summarizeSession(
@@ -280,7 +294,7 @@ class OpenCodeRepositoryMutationWiringTest {
     @Test
     fun `POST forkSession routes through mutationApi`() {
         val mock = throwingApi("VIA_MUTATION_API")
-        writeField("mutationApi", mock)
+        writeApiField("mutationApi", mock)
         assertRoutedVia("VIA_MUTATION_API") {
             runBlocking { repository.forkSession("s1", messageId = null) }
         }
@@ -290,7 +304,7 @@ class OpenCodeRepositoryMutationWiringTest {
     @Test
     fun `POST revertSession routes through mutationApi`() {
         val mock = throwingApi("VIA_MUTATION_API")
-        writeField("mutationApi", mock)
+        writeApiField("mutationApi", mock)
         assertRoutedVia("VIA_MUTATION_API") {
             runBlocking { repository.revertSession("s1", messageId = "m1", partId = null) }
         }
@@ -300,7 +314,7 @@ class OpenCodeRepositoryMutationWiringTest {
     @Test
     fun `POST respondPermission routes through mutationApi`() {
         val mock = throwingApi("VIA_MUTATION_API")
-        writeField("mutationApi", mock)
+        writeApiField("mutationApi", mock)
         assertRoutedVia("VIA_MUTATION_API") {
             runBlocking {
                 repository.respondPermission("s1", "p1", PermissionResponse.ONCE)
@@ -312,7 +326,7 @@ class OpenCodeRepositoryMutationWiringTest {
     @Test
     fun `POST replyQuestion routes through mutationApi`() {
         val mock = throwingApi("VIA_MUTATION_API")
-        writeField("mutationApi", mock)
+        writeApiField("mutationApi", mock)
         assertRoutedVia("VIA_MUTATION_API") {
             runBlocking {
                 repository.replyQuestion("r1", answers = listOf(listOf("a")), directory = null)
@@ -324,7 +338,7 @@ class OpenCodeRepositoryMutationWiringTest {
     @Test
     fun `POST rejectQuestion routes through mutationApi`() {
         val mock = throwingApi("VIA_MUTATION_API")
-        writeField("mutationApi", mock)
+        writeApiField("mutationApi", mock)
         assertRoutedVia("VIA_MUTATION_API") {
             runBlocking { repository.rejectQuestion("r1", directory = null) }
         }
@@ -334,7 +348,7 @@ class OpenCodeRepositoryMutationWiringTest {
     @Test
     fun `POST replySlimapiQuestion routes through mutationApi`() {
         val mock = throwingApi("VIA_MUTATION_API")
-        writeField("mutationApi", mock)
+        writeApiField("mutationApi", mock)
         assertRoutedVia("VIA_MUTATION_API") {
             runBlocking {
                 repository.replySlimapiQuestion(
@@ -350,7 +364,7 @@ class OpenCodeRepositoryMutationWiringTest {
     @Test
     fun `POST rejectSlimapiQuestion routes through mutationApi`() {
         val mock = throwingApi("VIA_MUTATION_API")
-        writeField("mutationApi", mock)
+        writeApiField("mutationApi", mock)
         assertRoutedVia("VIA_MUTATION_API") {
             runBlocking {
                 repository.rejectSlimapiQuestion(questionId = "q1", routeToken = null)
@@ -362,7 +376,7 @@ class OpenCodeRepositoryMutationWiringTest {
     @Test
     fun `POST respondSlimapiPermission routes through mutationApi`() {
         val mock = throwingApi("VIA_MUTATION_API")
-        writeField("mutationApi", mock)
+        writeApiField("mutationApi", mock)
         assertRoutedVia("VIA_MUTATION_API") {
             runBlocking {
                 repository.respondSlimapiPermission(
@@ -382,7 +396,7 @@ class OpenCodeRepositoryMutationWiringTest {
         // Symmetric mock-swap: commandApi gets the throwing mock; the wrapper
         // MUST fail with that marker, proving it uses commandApi.
         val cmdMock = throwingApi("VIA_COMMAND_API")
-        writeField("commandApi", cmdMock)
+        writeApiField("commandApi", cmdMock)
         assertRoutedVia("VIA_COMMAND_API") {
             runBlocking {
                 repository.executeCommand(
@@ -409,7 +423,7 @@ class OpenCodeRepositoryMutationWiringTest {
             server.enqueue(MockResponse().setResponseCode(202))
             repository.configure(baseUrl = server.url("/").toString().trimEnd('/'))
 
-            writeField("mutationApi", throwingApi("VIA_MUTATION_API"))
+            writeApiField("mutationApi", throwingApi("VIA_MUTATION_API"))
             val result = runBlocking {
                 repository.executeCommand(
                     sessionId = "s1",
@@ -434,7 +448,7 @@ class OpenCodeRepositoryMutationWiringTest {
     // If GET wrappers were accidentally re-routed to mutationApi, the
     // retry-on-failure semantics for idempotent GETs would silently
     // disappear (mutationApi has retry=false). This test pins that GETs
-    // stay on `api` / restHttp.
+    // stay on `restApi` / restHttp.
 
     @Test
     fun `control GET does NOT route through mutationApi`() {
@@ -448,7 +462,7 @@ class OpenCodeRepositoryMutationWiringTest {
             )
             repository.configure(baseUrl = server.url("/").toString().trimEnd('/'))
 
-            writeField("mutationApi", throwingApi("VIA_MUTATION_API"))
+            writeApiField("mutationApi", throwingApi("VIA_MUTATION_API"))
             val result = runBlocking { repository.getCommands() }
             assertTrue(
                 "getCommands MUST NOT route through mutationApi: $result",

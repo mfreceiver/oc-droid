@@ -1925,9 +1925,15 @@ class SessionSyncCoordinatorResyncTest {
             )
             assertTrue(
                 "B incarnation slim state must not retain A's dirty/bookmark from UI path",
-                realRepo.snapshotSlimSseState().isEmpty() ||
-                    realRepo.getSlimSessionState(sid)?.localAppliedMessageId != "m-new" ||
-                    !realRepo.isSlimCommitTokenCurrent(seedToken),
+                realRepo.snapshotSlimSseState().isEmpty(),
+            )
+            // A fresh B token proves the reconfigure completed readiness, and
+            // the old A result still did not write B's watermark.
+            val bToken = realRepo.captureSlimCommitToken()
+            assertTrue("B readiness must be armed after configure", realRepo.isSlimCommitTokenCurrent(bToken))
+            assertTrue(
+                "B local-applied watermark must remain untouched",
+                realRepo.getSlimSessionState(sid) == null,
             )
             // beginSlim + configure rotated — entry seed token is definitely stale.
             assertFalse(realRepo.isSlimCommitTokenCurrent(seedToken))

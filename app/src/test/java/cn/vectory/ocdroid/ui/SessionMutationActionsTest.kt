@@ -67,7 +67,6 @@ class SessionMutationActionsTest {
         settingsManager = mockk(relaxed = true)
         // §chat-ux-batch T8 (B3): mock setup for getAgentForSession /
         // getModelForSession removed (deleted APIs).
-        every { settingsManager.openSessionIds } returns emptyList()
         scope = TestScope(UnconfinedTestDispatcher())
         emitted = mutableListOf()
         emit = EventEmitter { event -> emitted.add(event) }
@@ -156,12 +155,12 @@ class SessionMutationActionsTest {
     // ── launchSetSessionArchived ──────────────────────────────────────────────
 
     @Test
-    fun `launchSetSessionArchived archives a single session and evicts from openIds`() = runTest {
+    fun `launchSetSessionArchived archives a single non-current session without clearing current (B4)`() = runTest {
         val session = Session(id = "s1", directory = "/x")
         store.mutateSessionList {
-            it.copy(sessions = listOf(session), openSessionIds = listOf("s1", "s2"))
+            it.copy(sessions = listOf(session))
         }
-        every { settingsManager.openSessionIds } returns listOf("s1", "s2")
+        // s1 is NOT the current session — no chat.currentSessionId set.
         val archived = session.copy(time = Session.TimeInfo(archived = 1000L))
         coEvery { repository.updateSessionArchived("s1", any()) } returns Result.success(archived)
 
@@ -169,9 +168,8 @@ class SessionMutationActionsTest {
         advanceUntilIdle()
 
         assertTrue(slices.sessionList.value.sessions.single().isArchived)
-        // s1 evicted from openSessionIds.
-        assertEquals(listOf("s2"), slices.sessionList.value.openSessionIds)
-        verify { settingsManager.openSessionIds = listOf("s2") }
+        // §B4 / §10: archiving a non-current session must NOT clear current.
+        verify(exactly = 0) { settingsManager.currentSessionId = null }
     }
 
     @Test
@@ -188,11 +186,7 @@ class SessionMutationActionsTest {
 
         assertNull(slices.chat.value.currentSessionId)
         assertTrue(slices.chat.value.messages.isEmpty())
-        // §fix-archive-persisted-null (opus review): archiving the current
-        // session must also clear the PERSISTED currentSessionId synchronously
-        // (not just rely on the async AppCore collector) so a process-death in
-        // the ms window cannot leave the archived id for applySavedSettings to
-        // re-seed on cold start.
+        // §B4 / §10 REST archive current: ChatCleared + CloseDetail + popToSessions.
         verify { settingsManager.currentSessionId = null }
     }
 
@@ -206,8 +200,8 @@ class SessionMutationActionsTest {
         advanceUntilIdle()
 
         assertFalse(slices.sessionList.value.sessions.single().isArchived)
-        // openSessionIds setter is NOT invoked when restoring.
-        verify(exactly = 0) { settingsManager.openSessionIds = any() }
+        // §B4: open-tabs-list removed — no setter to verify on restore.
+        verify(exactly = 0) { settingsManager.currentSessionId = null }
     }
 
     @Test
@@ -256,9 +250,8 @@ class SessionMutationActionsTest {
         val session = Session(id = "stale-target", directory = "/x")
         val currentSession = Session(id = "cur", directory = "/x")
         store.mutateSessionList {
-            it.copy(sessions = listOf(session, currentSession), openSessionIds = listOf("cur", "stale-target"))
+            it.copy(sessions = listOf(session, currentSession))
         }
-        every { settingsManager.openSessionIds } returns listOf("cur", "stale-target")
         store.mutateChat {
             it.copy(
                 currentSessionId = "cur",  // NOT the archived id
@@ -266,9 +259,7 @@ class SessionMutationActionsTest {
                 pendingScrollRequest = cn.vectory.ocdroid.ui.PendingScrollRequest(
                     requestId = 7L,
                     targetSessionId = "stale-target",
-                    behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest,
-                ),
-            )
+                    behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest))
         }
         val archived = session.copy(time = Session.TimeInfo(archived = 1000L))
         coEvery { repository.updateSessionArchived("stale-target", any()) } returns Result.success(archived)
@@ -282,30 +273,29 @@ class SessionMutationActionsTest {
         // Stale scroll intent wiped.
         assertNull(
             "non-current archived target's pendingScrollRequest MUST be wiped",
-            slices.chat.value.pendingScrollRequest,
-        )
+            slices.chat.value.pendingScrollRequest)
     }
 
     @Test
-    fun `Wave5b-Q13 blocker-2 - launchSetSessionArchived wipes parentReturnCheckpoints entries keyed by the archived subtree`() = runTest {
-        // Archiving a subtree (parent + child) MUST wipe any checkpoint
-        // entries keyed by the archived ids. The current session's own
-        // checkpoint entry MUST survive.
+    fun `Wave5b-Q13 blocker-2 - launchSetSessionArchived wipes pendingScrollRequest targeting the archived subtree`() = runTest {
+        // §chat-list-detail §11 / G6 (B5): parentReturnCheckpoints map is
+        // gone (per-entry SavedStateHandle); only the pendingScrollRequest
+        // sweep is asserted here. Archiving a subtree (parent + child) MUST
+        // wipe any pendingScrollRequest targeting the archived ids; a live
+        // session's unrelated slot survives.
         val parent = Session(id = "stale-parent", directory = "/x")
         val child = Session(id = "stale-child", directory = "/x", parentId = "stale-parent")
         val currentSession = Session(id = "cur", directory = "/x")
         store.mutateSessionList {
-            it.copy(sessions = listOf(parent, child, currentSession), openSessionIds = listOf("cur", "stale-parent"))
+            it.copy(sessions = listOf(parent, child, currentSession))
         }
-        every { settingsManager.openSessionIds } returns listOf("cur", "stale-parent")
         store.mutateChat {
             it.copy(
                 currentSessionId = "cur",
-                parentReturnCheckpoints = mapOf(
-                    "stale-child" to cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = "k1", fallbackIndex = 1, offset = 1),
-                    "cur" to cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = "k2", fallbackIndex = 2, offset = 2),
-                ),
-            )
+                pendingScrollRequest = cn.vectory.ocdroid.ui.PendingScrollRequest(
+                    requestId = 7L,
+                    targetSessionId = "stale-child",
+                    behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest))
         }
         coEvery { repository.updateSessionArchived("stale-parent", any()) } returns Result.success(parent.copy(time = Session.TimeInfo(archived = 1L)))
         coEvery { repository.updateSessionArchived("stale-child", any()) } returns Result.success(child.copy(time = Session.TimeInfo(archived = 1L)))
@@ -313,16 +303,10 @@ class SessionMutationActionsTest {
         launchSetSessionArchived(scope, repository, slices, settingsManager, sessionId = "stale-parent", archived = true, emit = emit)
         advanceUntilIdle()
 
-        // Subtree entries wiped; live entry preserved.
-        assertFalse(
-            "stale-child entry MUST be wiped",
-            slices.chat.value.parentReturnCheckpoints.containsKey("stale-child"),
-        )
-        assertEquals(
-            "cur entry MUST survive",
-            cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = "k2", fallbackIndex = 2, offset = 2),
-            slices.chat.value.parentReturnCheckpoints["cur"],
-        )
+        // Stale scroll intent targeting the archived subtree wiped.
+        assertNull(
+            "pendingScrollRequest targeting archived subtree MUST be wiped",
+            slices.chat.value.pendingScrollRequest)
     }
 
     @Test
@@ -332,6 +316,8 @@ class SessionMutationActionsTest {
         // runs FIRST (unconditional), then the clearCurrent branch wipes
         // currentSessionId/messages. Both must fire; the result is the same
         // as pre-fix for this case.
+        // §chat-list-detail §11 / G6 (B5): parentReturnCheckpoints map is
+        // gone (per-entry SavedStateHandle).
         val session = Session(id = "cur", directory = "/x")
         store.mutateSessionList { it.copy(sessions = listOf(session)) }
         store.mutateChat {
@@ -341,10 +327,7 @@ class SessionMutationActionsTest {
                 pendingScrollRequest = cn.vectory.ocdroid.ui.PendingScrollRequest(
                     requestId = 1L,
                     targetSessionId = "cur",
-                    behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest,
-                ),
-                parentReturnCheckpoints = mapOf("cur" to cn.vectory.ocdroid.ui.ScrollCheckpoint(null, 0, 0)),
-            )
+                    behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest))
         }
         coEvery { repository.updateSessionArchived("cur", any()) } returns Result.success(session.copy(time = Session.TimeInfo(archived = 1000L)))
 
@@ -354,7 +337,6 @@ class SessionMutationActionsTest {
         assertNull(slices.chat.value.currentSessionId)
         assertTrue(slices.chat.value.messages.isEmpty())
         assertNull(slices.chat.value.pendingScrollRequest)
-        assertTrue(slices.chat.value.parentReturnCheckpoints.isEmpty())
     }
 
     @Test
@@ -385,12 +367,8 @@ class SessionMutationActionsTest {
                 pendingQuestions = listOf(
                     QuestionRequest(
                         id = "q1", sessionId = "C",
-                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
-                    ),
-                ),
-            )
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))))))
         }
-        every { settingsManager.openSessionIds } returns emptyList()
         coEvery { repository.updateSessionArchived("A", any()) } returns Result.success(parent.copy(time = Session.TimeInfo(archived = 1L)))
         coEvery { repository.updateSessionArchived("C", any()) } returns Result.success(child.copy(time = Session.TimeInfo(archived = 1L)))
 
@@ -400,8 +378,7 @@ class SessionMutationActionsTest {
         assertFalse("archived root A removed from unread", slices.unread.value.unreadSessions.contains("A"))
         assertTrue(
             "child C pending question removed",
-            slices.sessionList.value.pendingQuestions.none { it.sessionId == "C" },
-        )
+            slices.sessionList.value.pendingQuestions.none { it.sessionId == "C" })
     }
 
     @Test
@@ -416,32 +393,19 @@ class SessionMutationActionsTest {
                     QuestionRequest(
                         id = "q-child",
                         sessionId = "C",
-                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
-                    ),
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b"))))),
                     QuestionRequest(
                         id = "q-other",
                         sessionId = "Z",
-                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
-                    ),
-                ),
-            )
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))))))
         }
         store.mutateUnread { it.copy(unreadSessions = setOf("A", "C", "Z")) }
-        every { settingsManager.openSessionIds } returns emptyList()
         coEvery { repository.updateSessionArchived("A", any()) } returns
             Result.success(parent.copy(time = Session.TimeInfo(archived = 1L)))
         coEvery { repository.updateSessionArchived("C", any()) } returns
             Result.failure(IllegalStateException("child archive failed"))
 
-        launchSetSessionArchived(
-            scope,
-            repository,
-            slices,
-            settingsManager,
-            sessionId = "A",
-            archived = true,
-            emit = emit,
-        )
+        launchSetSessionArchived(scope, repository, slices, settingsManager, sessionId = "A", archived = true, emit = emit)
         advanceUntilIdle()
 
         assertEquals(setOf("Z"), slices.sessionList.value.activeSessionIds)
@@ -462,10 +426,7 @@ class SessionMutationActionsTest {
                 pendingQuestions = listOf(
                     QuestionRequest(
                         id = "q1", sessionId = "s1",
-                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
-                    ),
-                ),
-            )
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))))))
         }
         coEvery { repository.updateSessionArchived("s1", any()) } returns Result.success(session.copy(time = Session.TimeInfo(archived = null)))
 
@@ -476,8 +437,7 @@ class SessionMutationActionsTest {
         assertTrue("unread preserved on restore", slices.unread.value.unreadSessions.contains("s1"))
         assertTrue(
             "pending question preserved on restore",
-            slices.sessionList.value.pendingQuestions.any { it.sessionId == "s1" },
-        )
+            slices.sessionList.value.pendingQuestions.any { it.sessionId == "s1" })
     }
 
     @Test
@@ -496,15 +456,11 @@ class SessionMutationActionsTest {
                 pendingQuestions = listOf(
                     QuestionRequest(
                         id = "q1", sessionId = "C",
-                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
-                    ),
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b"))))),
                     // Unrelated session's question must survive.
                     QuestionRequest(
                         id = "q2", sessionId = "Z",
-                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
-                    ),
-                ),
-            )
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))))))
         }
         // Mock simulates server cascade: deleteSession shrinks the slice's
         // session metadata so a naive post-delete read would miss the child.
@@ -523,17 +479,14 @@ class SessionMutationActionsTest {
         assertFalse("deleted child C removed from unread", slices.unread.value.unreadSessions.contains("C"))
         assertTrue(
             "child C pending question removed",
-            slices.sessionList.value.pendingQuestions.none { it.sessionId == "C" },
-        )
+            slices.sessionList.value.pendingQuestions.none { it.sessionId == "C" })
         assertTrue(
             "unrelated session Z question preserved",
-            slices.sessionList.value.pendingQuestions.any { it.sessionId == "Z" },
-        )
+            slices.sessionList.value.pendingQuestions.any { it.sessionId == "Z" })
         // Subtree also purged from sessions / directorySessions (whole subtree).
         assertTrue(
             "subtree purged from sessions",
-            slices.sessionList.value.sessions.none { it.id == "A" || it.id == "C" },
-        )
+            slices.sessionList.value.sessions.none { it.id == "A" || it.id == "C" })
     }
 
     @Test
@@ -546,8 +499,7 @@ class SessionMutationActionsTest {
         store.mutateSessionList {
             it.copy(
                 sessions = listOf(parent),
-                childSessions = mapOf("A" to listOf(child)),
-            )
+                childSessions = mapOf("A" to listOf(child)))
         }
         store.mutateUnread { it.copy(unreadSessions = setOf("A", "C")) }
         store.mutateSessionList {
@@ -555,12 +507,8 @@ class SessionMutationActionsTest {
                 pendingQuestions = listOf(
                     QuestionRequest(
                         id = "q1", sessionId = "C",
-                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))),
-                    ),
-                ),
-            )
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b")))))))
         }
-        every { settingsManager.openSessionIds } returns emptyList()
         coEvery { repository.updateSessionArchived("A", any()) } returns Result.success(parent.copy(time = Session.TimeInfo(archived = 1L)))
         coEvery { repository.updateSessionArchived("C", any()) } returns Result.success(child.copy(time = Session.TimeInfo(archived = 1L)))
 
@@ -570,12 +518,10 @@ class SessionMutationActionsTest {
         assertFalse("root A removed from unread", slices.unread.value.unreadSessions.contains("A"))
         assertFalse(
             "childSessions-only descendant C removed from unread (three-source coverage)",
-            slices.unread.value.unreadSessions.contains("C"),
-        )
+            slices.unread.value.unreadSessions.contains("C"))
         assertTrue(
             "childSessions-only descendant C pending question removed",
-            slices.sessionList.value.pendingQuestions.none { it.sessionId == "C" },
-        )
+            slices.sessionList.value.pendingQuestions.none { it.sessionId == "C" })
         // Both archive REST calls fired (subtree covered C even though it is
         // absent from the global sessions list).
         coVerify {
@@ -599,10 +545,8 @@ class SessionMutationActionsTest {
                 // C lives ONLY in childSessions — not in the global sessions
                 // list and not in directorySessions.
                 sessions = emptyList(),
-                childSessions = mapOf("parent-key" to listOf(child)),
-            )
+                childSessions = mapOf("parent-key" to listOf(child)))
         }
-        every { settingsManager.openSessionIds } returns emptyList()
         coEvery { repository.updateSessionArchived("C", any()) } returns Result.success(archivedChild)
 
         launchSetSessionArchived(scope, repository, slices, settingsManager, sessionId = "C", archived = true, emit = emit)
@@ -612,8 +556,7 @@ class SessionMutationActionsTest {
         assertEquals("C", childEntry.id)
         assertTrue(
             "childSessions entry replaced with the archived copy (time.archived > 0)",
-            childEntry.isArchived,
-        )
+            childEntry.isArchived)
     }
 
     @Test
@@ -637,12 +580,10 @@ class SessionMutationActionsTest {
         // point at C (no remaining session → currentSessionId cleared).
         assertNull(
             "currentSessionId cleared when cascade-deleted child was current",
-            slices.chat.value.currentSessionId,
-        )
+            slices.chat.value.currentSessionId)
         assertTrue(
             "deleted subtree purged from sessions",
-            slices.sessionList.value.sessions.none { it.id == "A" || it.id == "C" },
-        )
+            slices.sessionList.value.sessions.none { it.id == "A" || it.id == "C" })
     }
 
     // ── launchDeleteSession ───────────────────────────────────────────────────
@@ -653,8 +594,7 @@ class SessionMutationActionsTest {
         store.mutateSessionList {
             it.copy(
                 sessions = listOf(session),
-                directorySessions = mapOf("/x" to listOf(session)),
-            )
+                directorySessions = mapOf("/x" to listOf(session)))
         }
         coEvery { repository.deleteSession(any()) } returns Result.success(Unit)
 
@@ -666,11 +606,11 @@ class SessionMutationActionsTest {
     }
 
     @Test
-    fun `launchDeleteSession selects fallback when current session is deleted`() = runTest {
+    fun `launchDeleteSession clears to Sessions when current deleted (B4 — no fallback)`() = runTest {
         val s1 = Session(id = "s1", directory = "/x")
         val s2 = Session(id = "s2", directory = "/x")
         store.mutateSessionList {
-            it.copy(sessions = listOf(s1, s2), openSessionIds = listOf("s1", "s2"))
+            it.copy(sessions = listOf(s1, s2))
         }
         store.mutateChat { it.copy(currentSessionId = "s1") }
         coEvery { repository.deleteSession(any()) } returns Result.success(Unit)
@@ -679,8 +619,10 @@ class SessionMutationActionsTest {
         launchDeleteSession(scope, repository, slices, settingsManager, sessionId = "s1", onSelectSession = { selected = it }, emit = emit)
         advanceUntilIdle()
 
-        // §fix-delete-no-resurrect: the last remaining OPEN tab is selected.
-        assertEquals("s2", selected)
+        // §B4 / §10: deleting the current session pops to Sessions → current null.
+        // No fallback selection (onSelectSession no longer invoked on delete-current).
+        assertNull("delete-current must not auto-select fallback", selected)
+        assertNull(slices.chat.value.currentSessionId)
     }
 
     @Test
@@ -696,7 +638,7 @@ class SessionMutationActionsTest {
         val s1 = Session(id = "s1", directory = "/x")
         val s2 = Session(id = "s2", directory = "/x")
         store.mutateSessionList {
-            it.copy(sessions = listOf(s1, s2), openSessionIds = listOf("s1"))
+            it.copy(sessions = listOf(s1, s2))
         }
         store.mutateChat { it.copy(currentSessionId = "s1") }
         coEvery { repository.deleteSession(any()) } returns Result.success(Unit)
@@ -750,29 +692,24 @@ class SessionMutationActionsTest {
 
         launchSetSessionArchived(
             scope, repository, slices, settingsManager,
-            sessionId = "p", archived = true,
-            emit = emit,
+            sessionId = "p", archived = true, emit = emit,
             currentServerGroupFp = { "g-test" },
-            emitEffect = { emittedEffects.add(it) },
-        )
+            emitEffect = { emittedEffects.add(it) })
         advanceUntilIdle()
 
         val evictions = emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>()
         assertEquals(
             "archive subtree of 3 ids must emit 3 EvictSession effects (one per archived id)",
             3,
-            evictions.size,
-        )
+            evictions.size)
         assertEquals(
             "evicted ids must cover the full subtree",
             setOf("p", "c1", "c2"),
-            evictions.map { it.sessionId }.toSet(),
-        )
+            evictions.map { it.sessionId }.toSet())
         assertEquals(
             "every EvictSession must carry the currentServerGroupFp",
             setOf("g-test"),
-            evictions.map { it.serverGroupFp }.toSet(),
-        )
+            evictions.map { it.serverGroupFp }.toSet())
     }
 
     @Test
@@ -787,17 +724,14 @@ class SessionMutationActionsTest {
 
         launchSetSessionArchived(
             scope, repository, slices, settingsManager,
-            sessionId = "s1", archived = false,
-            emit = emit,
+            sessionId = "s1", archived = false, emit = emit,
             currentServerGroupFp = { "g-test" },
-            emitEffect = { emittedEffects.add(it) },
-        )
+            emitEffect = { emittedEffects.add(it) })
         advanceUntilIdle()
 
         assertTrue(
             "restore must not emit any EvictSession",
-            emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>().isEmpty(),
-        )
+            emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>().isEmpty())
     }
 
     @Test
@@ -812,16 +746,15 @@ class SessionMutationActionsTest {
 
         launchSetSessionArchived(
             scope, repository, slices, settingsManager,
-            sessionId = "s1", archived = true,
-            emit = emit,
-            // currentServerGroupFp + emitEffect intentionally omitted (legacy caller).
-        )
+            sessionId = "s1", archived = true, emit = emit,
+            // Legacy caller: null providers → no EvictSession emission.
+            currentServerGroupFp = null,
+            emitEffect = null)
         advanceUntilIdle()
 
         assertTrue(
             "legacy caller path must not emit any EvictSession",
-            emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>().isEmpty(),
-        )
+            emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>().isEmpty())
     }
 
     @Test
@@ -835,17 +768,14 @@ class SessionMutationActionsTest {
 
         launchSetSessionArchived(
             scope, repository, slices, settingsManager,
-            sessionId = "s1", archived = true,
-            emit = emit,
+            sessionId = "s1", archived = true, emit = emit,
             currentServerGroupFp = { "g-test" },
-            emitEffect = { emittedEffects.add(it) },
-        )
+            emitEffect = { emittedEffects.add(it) })
         advanceUntilIdle()
 
         assertTrue(
             "failed archive must not emit any EvictSession (no optimistic eviction)",
-            emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>().isEmpty(),
-        )
+            emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>().isEmpty())
     }
 
     @Test
@@ -860,8 +790,7 @@ class SessionMutationActionsTest {
             sessionId = "s1", onSelectSession = {},
             emit = emit,
             currentServerGroupFp = { "g-test" },
-            emitEffect = { emittedEffects.add(it) },
-        )
+            emitEffect = { emittedEffects.add(it) })
         advanceUntilIdle()
 
         val evictions = emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>()
@@ -884,14 +813,12 @@ class SessionMutationActionsTest {
             sessionId = "s1", onSelectSession = {},
             emit = emit,
             currentServerGroupFp = { "g-test" },
-            emitEffect = { emittedEffects.add(it) },
-        )
+            emitEffect = { emittedEffects.add(it) })
         advanceUntilIdle()
 
         assertTrue(
             "failed delete must not emit any EvictSession",
-            emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>().isEmpty(),
-        )
+            emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>().isEmpty())
     }
 
     // ── launchSendMessage ─────────────────────────────────────────────────────
@@ -916,8 +843,7 @@ class SessionMutationActionsTest {
             onRefreshMessages = { _, _ -> refreshMsg += 1 },
             onSuccess = { successCalled += 1 },
             onComplete = { completeCalled += 1 },
-            emit = emit,
-        )
+            emit = emit)
         advanceUntilIdle()
 
         coVerify { repository.sendMessage("s1", "hello", "build", null, any()) }
@@ -956,8 +882,7 @@ class SessionMutationActionsTest {
             onRefreshMessages = { _, _ -> refreshMsg += 1 },
             onSuccess = { successCalled += 1 },
             onComplete = { completeCalled += 1 },
-            emit = emit,
-        )
+            emit = emit)
         advanceUntilIdle()
 
         // No ghost-busy: sessionStatuses NOT written.
@@ -992,8 +917,7 @@ class SessionMutationActionsTest {
             model = null,
             onRefreshMessages = { _, _ -> refreshMsg += 1 },
             onSuccess = { successCalled += 1 },
-            emit = emit,
-        )
+            emit = emit)
         advanceUntilIdle()
 
         // Absent ≠ archived → normal path proceeds (lenient).
@@ -1027,8 +951,7 @@ class SessionMutationActionsTest {
             model = null,
             onRefreshMessages = { _, _ -> refreshMsg += 1 },
             onSuccess = { successCalled += 1 },
-            emit = emit,
-        )
+            emit = emit)
         advanceUntilIdle()
 
         // Normal path: bump + busy + refresh all fire for s1 (stillAlive).
@@ -1052,8 +975,7 @@ class SessionMutationActionsTest {
             model = null,
             onRefreshMessages = { _, _ -> },
             onComplete = { completeCalled += 1 },
-            emit = emit,
-        )
+            emit = emit)
         advanceUntilIdle()
 
         // inputText restored to the failed prompt.
@@ -1077,8 +999,7 @@ class SessionMutationActionsTest {
             agent = "build",
             model = null,
             onRefreshMessages = { _, _ -> },
-            emit = emit,
-        )
+            emit = emit)
         // User typed something newer while send was in flight.
         store.mutateComposer { it.copy(inputText = "newer draft") }
         advanceUntilIdle()
@@ -1096,8 +1017,7 @@ class SessionMutationActionsTest {
             mime = "image/png",
             filename = "p.png",
             thumbnailData = ByteArray(0),
-            byteSize = 4,
-        )
+            byteSize = 4)
 
         launchSendMessage(
             scope = scope,
@@ -1109,8 +1029,7 @@ class SessionMutationActionsTest {
             agent = "review",
             model = Message.ModelInfo("openai", "gpt-5"),
             onRefreshMessages = { _, _ -> },
-            emit = emit,
-        )
+            emit = emit)
         advanceUntilIdle()
 
         coVerify {
@@ -1119,8 +1038,7 @@ class SessionMutationActionsTest {
                 "look",
                 "review",
                 Message.ModelInfo("openai", "gpt-5"),
-                listOf(attachment),
-            )
+                listOf(attachment))
         }
     }
 
@@ -1154,9 +1072,7 @@ class SessionMutationActionsTest {
                 sessionErrorsById = mapOf(
                     "A" to SlimSessionLastError(name = "upstream_error", message = "root err"),
                     "C" to SlimSessionLastError(name = "upstream_error", message = "child err"),
-                    "Z" to SlimSessionLastError(name = "session_not_found", message = "unrelated err"),
-                ),
-            )
+                    "Z" to SlimSessionLastError(name = "session_not_found", message = "unrelated err")))
         }
         // Mock simulates server cascade: deleteSession shrinks the slice's
         // session metadata for both root and child (matches the existing
@@ -1176,20 +1092,16 @@ class SessionMutationActionsTest {
 
         assertFalse(
             "deleted root A removed from sessionErrorsById",
-            slices.sessionList.value.sessionErrorsById.containsKey("A"),
-        )
+            slices.sessionList.value.sessionErrorsById.containsKey("A"))
         assertFalse(
             "deleted child C (subtree, cascade) removed from sessionErrorsById",
-            slices.sessionList.value.sessionErrorsById.containsKey("C"),
-        )
+            slices.sessionList.value.sessionErrorsById.containsKey("C"))
         assertTrue(
             "unrelated session Z error preserved",
-            slices.sessionList.value.sessionErrorsById.containsKey("Z"),
-        )
+            slices.sessionList.value.sessionErrorsById.containsKey("Z"))
         assertEquals(
             "only the unrelated entry remains",
             1,
-            slices.sessionList.value.sessionErrorsById.size,
-        )
+            slices.sessionList.value.sessionErrorsById.size)
     }
 }

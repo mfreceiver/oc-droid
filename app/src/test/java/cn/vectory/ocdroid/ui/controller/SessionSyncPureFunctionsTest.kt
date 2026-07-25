@@ -131,8 +131,7 @@ class SessionSyncPureFunctionsTest {
     fun `session created confirmation removes pending id and registration timestamp`() {
         val state = SessionListState(
             pendingCreateIds = setOf("new", "other"),
-            pendingCreatedAt = mapOf("new" to 10L, "other" to 20L),
-        )
+            pendingCreatedAt = mapOf("new" to 10L, "other" to 20L))
 
         val (next, _) = state.applySessionCreated(Session(id = "new", directory = "/tmp"))
 
@@ -144,8 +143,7 @@ class SessionSyncPureFunctionsTest {
     fun `session created with unresolved parent invalidates every complete root`() {
         val state = SessionListState(
             sessions = listOf(Session(id = "A", directory = "/x")),
-            completeRootIds = setOf("A", "B"),
-        )
+            completeRootIds = setOf("A", "B"))
         val unknownGrandchild = Session(id = "G", directory = "/x", parentId = "missing-parent")
 
         val (next, _) = state.applySessionCreated(unknownGrandchild)
@@ -220,8 +218,7 @@ class SessionSyncPureFunctionsTest {
     fun `session updated confirmation removes pending id and registration timestamp`() {
         val state = SessionListState(
             pendingCreateIds = setOf("s1", "other"),
-            pendingCreatedAt = mapOf("s1" to 10L, "other" to 20L),
-        )
+            pendingCreatedAt = mapOf("s1" to 10L, "other" to 20L))
 
         val (next, _) = state.applySessionUpsert(Session(id = "s1", directory = "/tmp"))
 
@@ -230,21 +227,18 @@ class SessionSyncPureFunctionsTest {
     }
 
     @Test
-    fun `applyArchiveEviction drops the archived id from openSessionIds and upserts`() {
+    fun `applyArchiveEviction drops the archived id from open-tabs-list and upserts`() {
         val state = SessionListState(
-            sessions = listOf(Session(id = "s1", directory = "/tmp")),
-            openSessionIds = listOf("s1", "s2", "s3")
-        )
+            sessions = listOf(Session(id = "s1", directory = "/tmp")))
         val archived = Session(
             id = "s2",
             directory = "/tmp",
             time = Session.TimeInfo(archived = 1_700_000_000_000)
         )
 
-        val (next, _) = state.applyArchiveEviction(archived, listOf("s1", "s3"))
+        val (next, _) = state.applyArchiveEviction(archived)
 
         assertTrue(next.sessions.any { it.id == "s2" && it.isArchived })
-        assertEquals(listOf("s1", "s3"), next.openSessionIds)
     }
 
     @Test
@@ -1200,40 +1194,34 @@ class SessionSyncPureFunctionsTest {
         assertEquals(listOf("x", "y"), next.sessions.map { it.id })
     }
 
-    // === applyArchiveEviction: openSessionIds rewrite ====================
+    // === applyArchiveEviction: open-tabs-list rewrite ====================
 
     @Test
-    fun `applyArchiveEviction when archived id is absent from openSessionIds`() {
+    fun `applyArchiveEviction when archived id is absent from open-tabs-list`() {
         val state = SessionListState(
-            sessions = listOf(Session(id = "s1", directory = "/tmp")),
-            openSessionIds = listOf("s1", "s3")
-        )
+            sessions = listOf(Session(id = "s1", directory = "/tmp")))
         val archived = Session(
             id = "sX", directory = "/tmp",
             time = Session.TimeInfo(archived = 1L)
         )
 
-        val (next, _) = state.applyArchiveEviction(archived, listOf("s1", "s3"))
+        val (next, _) = state.applyArchiveEviction(archived)
 
-        // openSessionIds unchanged (sX was never open); session upserted.
-        assertEquals(listOf("s1", "s3"), next.openSessionIds)
+        // open-tabs-list unchanged (sX was never open); session upserted.
         assertTrue(next.sessions.any { it.id == "sX" })
     }
 
     @Test
     fun `applyArchiveEviction with empty newOpenIds yields empty list`() {
         val state = SessionListState(
-            sessions = emptyList(),
-            openSessionIds = listOf("s1")
-        )
+            sessions = emptyList())
         val archived = Session(
             id = "s1", directory = "/tmp",
             time = Session.TimeInfo(archived = 1L)
         )
 
-        val (next, _) = state.applyArchiveEviction(archived, emptyList())
+        val (next, _) = state.applyArchiveEviction(archived)
 
-        assertTrue(next.openSessionIds.isEmpty())
     }
 
     @Test
@@ -1244,7 +1232,7 @@ class SessionSyncPureFunctionsTest {
             time = Session.TimeInfo(archived = 1_700_000_000_000L)
         )
 
-        val (next, _) = state.applyArchiveEviction(archived, emptyList())
+        val (next, _) = state.applyArchiveEviction(archived)
 
         val upserted = next.sessions.first { it.id == "s2" }
         assertEquals("Got archived", upserted.title)
@@ -1261,7 +1249,7 @@ class SessionSyncPureFunctionsTest {
             time = Session.TimeInfo(archived = 1L)
         )
 
-        val (next, _) = state.applyArchiveEviction(archived, listOf("keep"))
+        val (next, _) = state.applyArchiveEviction(archived)
 
         assertEquals(listOf("arc", "keep"), next.sessions.map { it.id })
     }
@@ -1318,46 +1306,36 @@ class SessionSyncPureFunctionsTest {
     // pre-Wave5b design.
 
     @Test
-    fun `FIX-B applyArchivedChatClear wipes pendingScrollRequest + parentReturnCheckpoints`() {
+    fun `FIX-B applyArchivedChatClear wipes pendingScrollRequest`() {
+        // §chat-list-detail §11 / G6 (B5): parentReturnCheckpoints map is
+        // gone (per-entry SavedStateHandle); only the pendingScrollRequest
+        // sweep is asserted here.
         val state = ChatState(
             currentSessionId = "s1",
             messages = listOf(Message(id = "m1", role = "user")),
             pendingScrollRequest = cn.vectory.ocdroid.ui.PendingScrollRequest(
                 requestId = 7L,
                 targetSessionId = "s1",
-                behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest,
-            ),
-            parentReturnCheckpoints = mapOf(
-                "s1" to cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = null, fallbackIndex = 0, offset = 0),
-            ),
-        )
+                behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest))
 
         val (next, _) = state.applyArchivedChatClear()
 
         assertNull(
             "FIX-B / §Wave5b-Q13: pendingScrollRequest must be wiped so the intent does not survive archive",
-            next.pendingScrollRequest,
-        )
-        assertTrue(
-            "FIX-B / §Wave5b-Q13: parentReturnCheckpoints must be wiped",
-            next.parentReturnCheckpoints.isEmpty(),
-        )
+            next.pendingScrollRequest)
         assertNull(next.currentSessionId)
         assertTrue(next.messages.isEmpty())
     }
 
     @Test
-    fun `FIX-B applyArchivedChatClear wipes pendingScrollRequest + parentReturnCheckpoints even when already empty`() {
+    fun `FIX-B applyArchivedChatClear wipes pendingScrollRequest even when already empty`() {
         val state = ChatState(
             currentSessionId = "s1",
-            pendingScrollRequest = null,
-            parentReturnCheckpoints = emptyMap(),
-        )
+            pendingScrollRequest = null)
 
         val (next, _) = state.applyArchivedChatClear()
 
         assertNull(next.pendingScrollRequest)
-        assertTrue(next.parentReturnCheckpoints.isEmpty())
     }
 
     // === applySessionStatus: every status type branch ====================
@@ -2519,8 +2497,7 @@ class SessionSyncPureFunctionsTest {
         val byId = allSessionsById(
             sessions = listOf(root),
             directorySessions = mapOf("w" to listOf(dirChild)),
-            childSessions = mapOf("A" to listOf(childStoreChild)),
-        )
+            childSessions = mapOf("A" to listOf(childStoreChild)))
         assertEquals(root, byId["A"])
         assertEquals(dirChild, byId["C"])
         assertEquals(childStoreChild, byId["E"])
@@ -2534,8 +2511,7 @@ class SessionSyncPureFunctionsTest {
         val byId = allSessionsById(
             sessions = listOf(primary),
             directorySessions = mapOf("w" to listOf(dirDup)),
-            childSessions = mapOf("A" to listOf(childDup)),
-        )
+            childSessions = mapOf("A" to listOf(childDup)))
         assertEquals(1, byId.size)
         assertEquals("primary", byId["A"]?.title)
     }
@@ -2545,8 +2521,7 @@ class SessionSyncPureFunctionsTest {
         val byId = mapOf(
             "A" to Session(id = "A", directory = "/d", parentId = null),
             "B" to Session(id = "B", directory = "/d", parentId = "A"),
-            "C" to Session(id = "C", directory = "/d", parentId = "B"),
-        )
+            "C" to Session(id = "C", directory = "/d", parentId = "B"))
         assertEquals("A", rootIdOf("C", byId))
         assertEquals("A", rootIdOf("A", byId))
         assertNull(rootIdOf("X", byId))
@@ -2556,8 +2531,7 @@ class SessionSyncPureFunctionsTest {
     fun `rootIdOf_cycle_returns_null`() {
         val byId = mapOf(
             "A" to Session(id = "A", directory = "/d", parentId = "B"),
-            "B" to Session(id = "B", directory = "/d", parentId = "A"),
-        )
+            "B" to Session(id = "B", directory = "/d", parentId = "A"))
         assertNull(rootIdOf("A", byId))
     }
 
@@ -2567,8 +2541,7 @@ class SessionSyncPureFunctionsTest {
             "A" to Session(id = "A", directory = "/d", parentId = null),
             "B" to Session(id = "B", directory = "/d", parentId = "A"),
             "C" to Session(id = "C", directory = "/d", parentId = "B"),
-            "Z" to Session(id = "Z", directory = "/d", parentId = null),
-        )
+            "Z" to Session(id = "Z", directory = "/d", parentId = null))
         assertEquals(setOf("A", "B", "C"), treeIds("A", byId))
     }
 
@@ -2581,8 +2554,7 @@ class SessionSyncPureFunctionsTest {
             "A",
             listOf(root),
             mapOf("w" to listOf(dirChild)),
-            mapOf("A" to listOf(childStoreChild)),
-        )
+            mapOf("A" to listOf(childStoreChild)))
         assertEquals(setOf("A", "C", "E"), ids)
     }
 
@@ -2592,8 +2564,7 @@ class SessionSyncPureFunctionsTest {
     fun `questionRootIds_aggregates_child_question_to_root`() {
         val byId = mapOf(
             "A" to Session(id = "A", directory = "/d", parentId = null),
-            "C" to Session(id = "C", directory = "/d", parentId = "A"),
-        )
+            "C" to Session(id = "C", directory = "/d", parentId = "A"))
         val qs = listOf(QuestionRequest(id = "q1", sessionId = "C", questions = emptyList()))
         assertEquals(setOf("A"), questionRootIds(qs, byId))
     }
@@ -2604,13 +2575,11 @@ class SessionSyncPureFunctionsTest {
             "A" to Session(id = "A", directory = "/d", parentId = null),
             "B" to Session(id = "B", directory = "/d", parentId = "A"),
             "C" to Session(id = "C", directory = "/d", parentId = "A"),
-            "Z" to Session(id = "Z", directory = "/d", parentId = null),
-        )
+            "Z" to Session(id = "Z", directory = "/d", parentId = null))
         val qs = listOf(
             QuestionRequest(id = "q1", sessionId = "B", questions = emptyList()),
             QuestionRequest(id = "q2", sessionId = "C", questions = emptyList()),
-            QuestionRequest(id = "q3", sessionId = "Z", questions = emptyList()),
-        )
+            QuestionRequest(id = "q3", sessionId = "Z", questions = emptyList()))
         assertEquals(setOf("A", "Z"), questionRootIds(qs, byId))
     }
 
@@ -2620,12 +2589,10 @@ class SessionSyncPureFunctionsTest {
         // out (no root to surface them on). The Sessions tab cannot render a
         // marker for an unknown id, so dropping is the only sane behaviour.
         val byId = mapOf(
-            "A" to Session(id = "A", directory = "/d", parentId = null),
-        )
+            "A" to Session(id = "A", directory = "/d", parentId = null))
         val qs = listOf(
             QuestionRequest(id = "q1", sessionId = "A", questions = emptyList()),
-            QuestionRequest(id = "q2", sessionId = "Ghost", questions = emptyList()),
-        )
+            QuestionRequest(id = "q2", sessionId = "Ghost", questions = emptyList()))
         assertEquals(setOf("A"), questionRootIds(qs, byId))
     }
 
@@ -2638,12 +2605,10 @@ class SessionSyncPureFunctionsTest {
     fun `questionsInTree_returns_child_questions_preserving_id`() {
         val byId = mapOf(
             "A" to Session(id = "A", directory = "/d", parentId = null),
-            "C" to Session(id = "C", directory = "/d", parentId = "A"),
-        )
+            "C" to Session(id = "C", directory = "/d", parentId = "A"))
         val qs = listOf(
             QuestionRequest(id = "q1", sessionId = "C", questions = emptyList()),
-            QuestionRequest(id = "q2", sessionId = "Z", questions = emptyList()),
-        )
+            QuestionRequest(id = "q2", sessionId = "Z", questions = emptyList()))
         val inTree = questionsInTree("A", qs, byId)
         assertEquals(1, inTree.size)
         assertEquals("q1", inTree[0].id)
@@ -2653,11 +2618,9 @@ class SessionSyncPureFunctionsTest {
     @Test
     fun `questionsInTree_includes_root_session_own_question`() {
         val byId = mapOf(
-            "A" to Session(id = "A", directory = "/d", parentId = null),
-        )
+            "A" to Session(id = "A", directory = "/d", parentId = null))
         val qs = listOf(
-            QuestionRequest(id = "q1", sessionId = "A", questions = emptyList()),
-        )
+            QuestionRequest(id = "q1", sessionId = "A", questions = emptyList()))
         val inTree = questionsInTree("A", qs, byId)
         assertEquals(1, inTree.size)
         assertEquals("A", inTree[0].sessionId)
@@ -2669,12 +2632,10 @@ class SessionSyncPureFunctionsTest {
             "A" to Session(id = "A", directory = "/d", parentId = null),
             "B" to Session(id = "B", directory = "/d", parentId = "A"),
             "Z" to Session(id = "Z", directory = "/d", parentId = null),
-            "Y" to Session(id = "Y", directory = "/d", parentId = "Z"),
-        )
+            "Y" to Session(id = "Y", directory = "/d", parentId = "Z"))
         val qs = listOf(
             QuestionRequest(id = "q1", sessionId = "B", questions = emptyList()),
-            QuestionRequest(id = "q2", sessionId = "Y", questions = emptyList()),
-        )
+            QuestionRequest(id = "q2", sessionId = "Y", questions = emptyList()))
         val inTreeA = questionsInTree("A", qs, byId)
         assertEquals(listOf("q1"), inTreeA.map { it.id })
         val inTreeZ = questionsInTree("Z", qs, byId)
@@ -2685,8 +2646,7 @@ class SessionSyncPureFunctionsTest {
     fun `questionsInTree_empty_input_returns_empty_list`() {
         assertEquals(
             emptyList<QuestionRequest>(),
-            questionsInTree("A", emptyList(), emptyMap()),
-        )
+            questionsInTree("A", emptyList(), emptyMap()))
     }
 
     // ── §task7-coverage: applyMessageTimestampBump directorySessions branch ─
@@ -2696,9 +2656,7 @@ class SessionSyncPureFunctionsTest {
         val state = SessionListState(
             sessions = listOf(Session(id = "other", directory = "/tmp")),
             directorySessions = mapOf("/d" to listOf(
-                Session(id = "target", directory = "/d", time = Session.TimeInfo(updated = 10L)),
-            )),
-        )
+                Session(id = "target", directory = "/d", time = Session.TimeInfo(updated = 10L)))))
 
         val (next, _) = state.applyMessageTimestampBump("target", 99L)
 
@@ -2713,14 +2671,12 @@ class SessionSyncPureFunctionsTest {
         val original = Session(id = "s1", directory = "/d", title = "old")
         val state = SessionListState(
             sessions = listOf(original),
-            directorySessions = mapOf("/d" to listOf(original)),
-        )
+            directorySessions = mapOf("/d" to listOf(original)))
         val archived = original.copy(
             time = Session.TimeInfo(archived = 1L),
-            title = "archived-title",
-        )
+            title = "archived-title")
 
-        val (next, _) = state.applyArchiveEviction(archived, listOf("s1"))
+        val (next, _) = state.applyArchiveEviction(archived)
 
         val dirEntry = next.directorySessions["/d"]!!.first { it.id == "s1" }
         assertTrue(dirEntry.isArchived)
@@ -2731,15 +2687,12 @@ class SessionSyncPureFunctionsTest {
     fun `applyArchiveEviction leaves non-matching sessions inside directorySessions untouched`() {
         val state = SessionListState(
             directorySessions = mapOf("/d" to listOf(
-                Session(id = "other", directory = "/d", title = "keep-me"),
-            )),
-        )
+                Session(id = "other", directory = "/d", title = "keep-me"))))
         val archived = Session(
             id = "arc", directory = "/d",
-            time = Session.TimeInfo(archived = 1L),
-        )
+            time = Session.TimeInfo(archived = 1L))
 
-        val (next, _) = state.applyArchiveEviction(archived, emptyList())
+        val (next, _) = state.applyArchiveEviction(archived)
 
         val other = next.directorySessions["/d"]!!.first { it.id == "other" }
         assertEquals("keep-me", other.title)
@@ -2750,9 +2703,7 @@ class SessionSyncPureFunctionsTest {
     fun `applyMessageTimestampBump does not touch non-matching sessions in directorySessions`() {
         val state = SessionListState(
             directorySessions = mapOf("/d" to listOf(
-                Session(id = "unrelated", directory = "/d", time = Session.TimeInfo(updated = 50L)),
-            )),
-        )
+                Session(id = "unrelated", directory = "/d", time = Session.TimeInfo(updated = 50L)))))
 
         val (next, _) = state.applyMessageTimestampBump("target", 99L)
 
@@ -2776,16 +2727,13 @@ class SessionSyncPureFunctionsTest {
             pendingScrollRequest = cn.vectory.ocdroid.ui.PendingScrollRequest(
                 requestId = 1L,
                 targetSessionId = "stale-target",
-                behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest,
-            ),
-        )
+                behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest))
 
         val next = state.cleanScrollStateForSubtree(setOf("stale-target", "other"))
 
         assertNull(
             "pendingScrollRequest MUST be wiped when targetSessionId is in subtree",
-            next.pendingScrollRequest,
-        )
+            next.pendingScrollRequest)
         // Content untouched (the helper is scroll-state-only).
         assertEquals("cur", next.currentSessionId)
         assertEquals(1, next.messages.size)
@@ -2797,8 +2745,7 @@ class SessionSyncPureFunctionsTest {
         val liveReq = cn.vectory.ocdroid.ui.PendingScrollRequest(
             requestId = 9L,
             targetSessionId = "live",
-            behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest,
-        )
+            behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest)
         val state = ChatState(pendingScrollRequest = liveReq)
 
         val next = state.cleanScrollStateForSubtree(setOf("archived-1", "archived-2"))
@@ -2806,26 +2753,12 @@ class SessionSyncPureFunctionsTest {
         assertEquals(liveReq, next.pendingScrollRequest)
     }
 
-    @Test
-    fun `cleanScrollStateForSubtree wipes only parentReturnCheckpoints entries keyed by the subtree`() {
-        val keep = cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = "k-live", fallbackIndex = 1, offset = 1)
-        val drop = cn.vectory.ocdroid.ui.ScrollCheckpoint(anchorKey = "k-stale", fallbackIndex = 2, offset = 2)
-        val state = ChatState(
-            parentReturnCheckpoints = mapOf(
-                "live-child" to keep,
-                "stale-child" to drop,
-                "stale-grandchild" to drop,
-            ),
-        )
-
-        val next = state.cleanScrollStateForSubtree(setOf("stale-child", "stale-grandchild"))
-
-        assertEquals(
-            "live entry preserved",
-            mapOf("live-child" to keep),
-            next.parentReturnCheckpoints,
-        )
-    }
+    // §chat-list-detail §11 / G6 (B5): the per-child
+    // `cleanScrollStateForSubtree wipes only parentReturnCheckpoints entries
+    // keyed by the subtree` test is REMOVED — the parentReturnCheckpoints
+    // map is gone (per-entry SavedStateHandle); the helper now only sweeps
+    // pendingScrollRequest. Idempotency / no-op / preserve-content
+    // properties are still covered by the tests below.
 
     @Test
     fun `cleanScrollStateForSubtree empty subtree is a no-op (preserves reference)`() {
@@ -2835,9 +2768,7 @@ class SessionSyncPureFunctionsTest {
         // be cheap.
         val state = ChatState(
             currentSessionId = "cur",
-            pendingScrollRequest = null,
-            parentReturnCheckpoints = emptyMap(),
-        )
+            pendingScrollRequest = null)
 
         val next = state.cleanScrollStateForSubtree(emptySet())
 
@@ -2846,38 +2777,30 @@ class SessionSyncPureFunctionsTest {
 
     @Test
     fun `cleanScrollStateForSubtree already-clean chat also returns the same instance`() {
-        // Subtree non-empty but no fields would change (slot already null +
-        // checkpoints already empty) → no allocation either.
+        // Subtree non-empty but no fields would change (slot already null)
+        // → no allocation either.
         val state = ChatState(
             currentSessionId = "cur",
-            pendingScrollRequest = null,
-            parentReturnCheckpoints = emptyMap(),
-        )
+            pendingScrollRequest = null)
 
         val next = state.cleanScrollStateForSubtree(setOf("archived"))
 
         assertSame(
             "no-op cleanup MUST return the same instance (no allocation)",
             state,
-            next,
-        )
+            next)
     }
 
     @Test
     fun `cleanScrollStateForSubtree is idempotent`() {
         // Calling twice yields the same result. Important because BOTH the
         // reducer's applyArchivedChatClear AND cleanScrollStateForSubtree can
-        // touch the same fields for the current-archived case.
+        // touch the same slot for the current-archived case.
         val state = ChatState(
             pendingScrollRequest = cn.vectory.ocdroid.ui.PendingScrollRequest(
                 requestId = 1L,
                 targetSessionId = "drop",
-                behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest,
-            ),
-            parentReturnCheckpoints = mapOf(
-                "drop" to cn.vectory.ocdroid.ui.ScrollCheckpoint(null, 0, 0),
-            ),
-        )
+                behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest))
         val subtree = setOf("drop")
 
         val once = state.cleanScrollStateForSubtree(subtree)
@@ -2885,7 +2808,6 @@ class SessionSyncPureFunctionsTest {
 
         assertEquals(once, twice)
         assertNull(twice.pendingScrollRequest)
-        assertTrue(twice.parentReturnCheckpoints.isEmpty())
     }
 
     @Test
@@ -2907,9 +2829,7 @@ class SessionSyncPureFunctionsTest {
             pendingScrollRequest = cn.vectory.ocdroid.ui.PendingScrollRequest(
                 requestId = 1L,
                 targetSessionId = "stale",
-                behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest,
-            ),
-        )
+                behavior = cn.vectory.ocdroid.ui.ScrollBehavior.Latest))
 
         val next = state.cleanScrollStateForSubtree(setOf("stale"))
 

@@ -6,8 +6,6 @@ import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
-import javax.inject.Inject
-import javax.inject.Singleton
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocketFactory
@@ -151,8 +149,14 @@ internal fun buildTofuPinnedConfig(spkiHex: String): SslConfig.TofuPinned {
 
 /**
  * §tofu R2: resolves the [SslConfig] for a given host:port / client cert.
- * `@Singleton` holding the cached mTLS config (configure-time) + the injected
+ * Holds the cached mTLS config (configure-time) + the injected
  * [TofuPinStore].
+ *
+ * P11 §4 / T2A.3-C1: no longer `@Singleton` / `@Inject` — this is a
+ * graph-internal leaf owned by [cn.vectory.ocdroid.data.repository.RepositoryNetworkGraph],
+ * constructed manually so the singleton guarantee comes from the graph
+ * (one graph per [cn.vectory.ocdroid.data.repository.OpenCodeRepository]
+ * singleton), not from Hilt.
  *
  *  - `sslConfigFor(hostPort)` (live clients): mTLS (client cert) priority; else
  *    TofuPinned if a pin exists for [hostPort]; else SystemDefault (public-CA
@@ -161,8 +165,7 @@ internal fun buildTofuPinnedConfig(spkiHex: String): SslConfig.TofuPinned {
  *    but NEVER reads the held mTLS cache (so probing an unrelated profile can't
  *    leak the live client cert / private-CA trust — v3-gpter R2#1 阻断).
  */
-@Singleton
-class SslConfigFactory @Inject constructor(
+class SslConfigFactory(
     private val tofuStore: TofuPinStore
 ) {
 

@@ -79,6 +79,16 @@ fun SessionsScreen(
     repository: OpenCodeRepository,
     onSwitchToChat: () -> Unit = {},
     /**
+     * §chat-list-detail §12 B0.5: the ONE entry on the new route-driven
+     * architecture. When non-empty, the session-row tap calls this INSTEAD
+     * of [onSwitchToChat] — it drives [OrchestratorViewModel.navigateToChat]
+     * (route chat/{id} + LoadedContent + freshness token). The other entries
+     * (new-session / Files / picker / drawer) still use [onSwitchToChat] (B3
+     * migrates them). Default empty → falls back to the old path (backward-
+     * compatible for any caller that doesn't pass it).
+     */
+    onNavigateToChat: (String) -> Unit = {},
+    /**
      * Opens the Files destination for a workdir (Attached-Project row's
      * "browse files" IconButton).
      */
@@ -261,10 +271,15 @@ fun SessionsScreen(
         }
     }
 
-    // Navigate to Chat tab after selecting / creating a session.
+    // §chat-list-detail §12 B0.5-rework: the ONE migrated entry. The session-
+    // row tap calls ONLY navigateToChat — the route-aware open/load pipeline
+    // (navigateToChat → openForRoute → VerifyAndHydrate(expectedRouteInstance=T)
+    // → launchLoadMessages → ChatContentLoaded). No separate selectSession —
+    // openForRoute handles the FULL session housekeeping (draft, SessionSelected,
+    // unread). The old selectSession + onSwitchToChat path is
+    // the FALLBACK for non-migrated entries (onNavigateToChat defaults to {}).
     fun onSessionClick(sessionId: String) {
-        viewModel.selectSession(sessionId)
-        onSwitchToChat()
+        onNavigateToChat(sessionId)
     }
 
     // §sessux #3 / #new3: shared new-session flow. 0 connected workdirs → the
@@ -541,9 +556,14 @@ fun SessionsScreen(
                                     viewModel.createSessionInWorkdir(workdir)
                                     onSwitchToChat()
                                 },
+                                // §B3: route the workdir-group session-row tap
+                                // through the SAME route-aware pipeline as the
+                                // main session list (onNavigateToChat →
+                                // openForRoute → VerifyAndHydrate). The legacy
+                                // selectSession + onSwitchToChat path is retired
+                                // for session-OPENING entry points.
                                 onSelectSession = { sessionId ->
-                                    viewModel.selectSession(sessionId)
-                                    onSwitchToChat()
+                                    onNavigateToChat(sessionId)
                                 },
                                 sessionStatuses = sessionListState.sessionStatuses,
                                 unreadSessions = unreadSessions,

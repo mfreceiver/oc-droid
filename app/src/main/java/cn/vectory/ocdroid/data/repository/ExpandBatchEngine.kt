@@ -18,6 +18,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeout
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.ceil
 import kotlin.math.log2
@@ -35,16 +36,12 @@ import kotlin.math.log2
  *
  * ## Preserved invariants (L4a0 invariant map)
  *
- * **I3 (CRITICAL) — per-call client reference.** The expand flow reads
- * `api.getSlimapiMessagesFullBatch` / `api.getSlimapiMessageFull`. In OCR
- * these were direct reads of the `api` field, which `rebuildClients()`
- * reassigns on `configure()`. To preserve this, the engine receives
- * [apiProvider] (`() -> OpenCodeApi`) and re-reads the current client
- * **on every call** (`apiProvider().getSlimapiMessagesFullBatch(...)`).
- * OCR wires `apiProvider = { api }` — a lambda that captures `this` and
- * reads the `api` field fresh per invocation, so a `configure()` rebuild
- * takes effect on the NEXT expand call. The client is NEVER cached at
- * construction (caching would freeze a stale client past a host switch).
+ * **I3 (CRITICAL) — operation-bound client reference.** The expand flow reads
+ * `api.getSlimapiMessagesFullBatch` / `api.getSlimapiMessageFull`. The API is
+ * selected from the operation's [OpenCodeRepository.SlimCommitToken], so a
+ * reconfigure cannot make an in-flight operation switch to a later client
+ * generation. The token is checked after network suspension and before the
+ * final outcome is returned.
  *
  * **hostPort-live.** [hostPortProvider] (`() -> String`) returns
  * `hostConfig.hostPort ?: ""` live each call; a host switch re-keys both
@@ -75,11 +72,13 @@ import kotlin.math.log2
  */
 internal class ExpandBatchEngine(
     /**
-     * §I3: returns the CURRENT `api` (re-read each call). OCR wires this to
-     * `{ api }` so `configure()`'s `rebuildClients()` reassignment is visible
-     * to the next expand call. MUST be per-call — never cached.
+     * §I3: resolves the API captured by the operation token. The fallback to
+     * the repository facade is retained for compatibility with tokens created
+     * before a bundle is published.
      */
-    private val apiProvider: () -> OpenCodeApi,
+    private val apiProvider: (OpenCodeRepository.SlimCommitToken) -> OpenCodeApi,
+    /** Validates the operation token against the live repository incarnation. */
+    private val requireSlimTokenCurrent: (OpenCodeRepository.SlimCommitToken) -> Unit,
     /** hostPort-live: returns `hostConfig.hostPort ?: ""` each call. */
     private val hostPortProvider: () -> String,
     /** §I16: OCR's shared error-code parser (also used by drain/health/status). */
@@ -101,8 +100,10 @@ internal class ExpandBatchEngine(
     private var thinRouteNotFoundCache: MutableMap<String, Long> = ConcurrentHashMap<String, Long>()
 
     /**
-     * §O-A: single-flight map keyed by `"$hostPort:$sessionId:$messageId"`.
-     * Ensures ≤1 in-flight request per mid across concurrent expand calls.
+     * §O-A: single-flight map keyed by host, captured client generation /
+     * endpoint / identity epoch, session, and message id. Ensures ≤1
+     * in-flight request per mid within one client incarnation while preventing
+     * a new incarnation from joining an old request.
      *
      * §I10/I11: NOT cleared on configure() — see class KDoc (latent leak).
      */
@@ -129,10 +130,15 @@ internal class ExpandBatchEngine(
     suspend fun expandMessagesFullBatch(
         sessionId: String,
         ids: Collection<String>,
+        token: OpenCodeRepository.SlimCommitToken,
     ): ExpandOutcome {
+        requireSlimTokenCurrent(token)
         // Step 1: dedup preserve order, coerce 1..20.
         val deduped = ids.toCollection(LinkedHashSet()).toList()
-        if (deduped.isEmpty()) return ExpandOutcome.Failed(sessionId, code = null, exhausted = false)
+        if (deduped.isEmpty()) {
+            requireSlimTokenCurrent(token)
+            return ExpandOutcome.Failed(sessionId, code = null, exhausted = false)
+        }
         val capped = if (deduped.size > EXPAND_BATCH_MAX_IDS) {
             DebugLog.w(
                 TAG,
@@ -144,13 +150,11 @@ internal class ExpandBatchEngine(
             deduped
         }
         lastExpandBudgetCounters = null
-        val deadline = java.lang.System.currentTimeMillis() + EXPAND_MAX_WALLCLOCK_MS
-        val counters = ExpandBudgetCounters(
-            peakConcurrentPartitionRequests = 0,
-            totalHttpAttempts = 0,
-            partitionNodesCreated = 0,
-            wallClockMs = 0L,
-        )
+        val startNanos = java.lang.System.nanoTime()
+        val deadlineNanos = startNanos + TimeUnit.MILLISECONDS.toNanos(EXPAND_MAX_WALLCLOCK_MS)
+        val peakAtomic = AtomicInteger(0)
+        val totalHttpAtomic = AtomicInteger(0)
+        val nodesCreatedAtomic = AtomicInteger(0)
         val requestSemaphore = Semaphore(PARTITION_MAX_CONCURRENT)
         val concurrentRequests = AtomicInteger(0)
         val globalMaxDepth = ceil(log2(capped.size.toDouble())).toInt().coerceAtLeast(1)
@@ -163,10 +167,13 @@ internal class ExpandBatchEngine(
                         ids = capped,
                         depth = 0,
                         globalMaxDepth = globalMaxDepth,
-                        deadline = deadline,
-                        counters = counters,
+                        deadlineNanos = deadlineNanos,
+                        peakConcurrent = peakAtomic,
+                        totalHttpAttempts = totalHttpAtomic,
+                        partitionNodesCreated = nodesCreatedAtomic,
                         singleFlightMap = singleFlightMap,
                         hostPort = hostPort,
+                        token = token,
                         requestSemaphore = requestSemaphore,
                         concurrentRequests = concurrentRequests,
                     )
@@ -175,8 +182,14 @@ internal class ExpandBatchEngine(
         } catch (e: TimeoutCancellationException) {
             exhaustedOutcome(sessionId, capped)
         }
-        // Log counters
-        counters.wallClockMs = java.lang.System.currentTimeMillis() - (deadline - EXPAND_MAX_WALLCLOCK_MS)
+        requireSlimTokenCurrent(token)
+        val elapsedMs = TimeUnit.NANOSECONDS.toMillis(java.lang.System.nanoTime() - startNanos)
+        val counters = ExpandBudgetCounters(
+            peakConcurrentPartitionRequests = peakAtomic.get(),
+            totalHttpAttempts = totalHttpAtomic.get(),
+            partitionNodesCreated = nodesCreatedAtomic.get(),
+            wallClockMs = elapsedMs,
+        )
         DebugLog.i(
             TAG,
             "expandMessagesFullBatch done: peakConcurrent=${counters.peakConcurrentPartitionRequests} " +
@@ -192,8 +205,10 @@ internal class ExpandBatchEngine(
      *
      * @param ids the message ids assigned to this partition node (non-empty).
      * @param depth current tree depth (root = 0); used for max-depth check.
-     * @param deadline wall-clock deadline in epoch ms.
-     * @param counters mutable counters for the operation.
+     * @param deadlineNanos monotonic deadline in System.nanoTime() ticks.
+     * @param peakConcurrent atomic peak-concurrency counter (updateAndGet maxOf).
+     * @param totalHttpAttempts atomic total-HTTP-attempts counter.
+     * @param partitionNodesCreated atomic partition-nodes-created counter.
      * @param singleFlightMap shared map keyed by host+sid+mid for single-flight.
      * @param hostPort the current host:port authority for single-flight key.
      * @param requestSemaphore semaphore bounding concurrent HTTP requests.
@@ -204,17 +219,20 @@ internal class ExpandBatchEngine(
         ids: List<String>,
         depth: Int,
         globalMaxDepth: Int,
-        deadline: Long,
-        counters: ExpandBudgetCounters,
+        deadlineNanos: Long,
+        peakConcurrent: AtomicInteger,
+        totalHttpAttempts: AtomicInteger,
+        partitionNodesCreated: AtomicInteger,
 
 
         singleFlightMap: ConcurrentHashMap<String, CompletableDeferred<Result<MessageWithParts>>>,
         hostPort: String,
+        token: OpenCodeRepository.SlimCommitToken,
         requestSemaphore: Semaphore,
         concurrentRequests: AtomicInteger,
     ): ExpandOutcome {
-        // Budget guard
-        if (java.lang.System.currentTimeMillis() > deadline) {
+        // Budget guard (monotonic)
+        if (java.lang.System.nanoTime() > deadlineNanos) {
             return exhaustedOutcome(sessionId, ids)
         }
 
@@ -223,8 +241,8 @@ internal class ExpandBatchEngine(
             return exhaustedOutcome(sessionId, ids)
         }
 
-        // Increment node count
-        counters.partitionNodesCreated++
+        // Increment node count (atomic)
+        partitionNodesCreated.incrementAndGet()
 
         // m8 thin-route cache: if hostPort known and cache hit within TTL, skip probe
         if (hostPort.isNotEmpty()) {
@@ -235,7 +253,7 @@ internal class ExpandBatchEngine(
                 val ttl = thinRouteTtlMsForTest ?: THIN_ROUTE_NOT_FOUND_TTL_MS
                 if (elapsed >= 0L && elapsed < ttl) {
                     // Within TTL — skip probe, go direct to fallbackSingleFull
-                    return fallbackSingleFull(sessionId, ids, singleFlightMap)
+                    return fallbackSingleFull(sessionId, ids, singleFlightMap, hostPort, token)
                 }
             }
         }
@@ -248,24 +266,23 @@ internal class ExpandBatchEngine(
         val terminalFailures = mutableListOf<ExpandOutcome.MessageFailure>()
         val unknownFailures = mutableListOf<ExpandOutcome.MessageFailure>()
         while (attempts <= EXPAND_MAX_503_RETRIES) {
-            if (java.lang.System.currentTimeMillis() > deadline) {
+            requireSlimTokenCurrent(token)
+            if (java.lang.System.nanoTime() > deadlineNanos) {
                 return exhaustedOutcome(sessionId, ids)
             }
 
             // Acquire concurrency semaphore
             requestSemaphore.acquire()
             val cur = concurrentRequests.incrementAndGet()
-            // Update peak
-            if (cur > counters.peakConcurrentPartitionRequests) {
-                counters.peakConcurrentPartitionRequests = cur
-            }
+            // Update peak (atomic)
+            peakConcurrent.updateAndGet { maxOf(it, cur) }
             try {
-                resp = apiProvider().getSlimapiMessagesFullBatch(
+                resp = apiProvider(token).getSlimapiMessagesFullBatch(
                     sessionId = sessionId,
                     ids = currentIds.joinToString(","),
                     mode = "full",
                 )
-                counters.totalHttpAttempts++
+                totalHttpAttempts.incrementAndGet()
                 attempts++
             } catch (e: CancellationException) {
                 requestSemaphore.release()
@@ -277,7 +294,9 @@ internal class ExpandBatchEngine(
             } catch (e: IOException) {
                 requestSemaphore.release()
                 concurrentRequests.decrementAndGet()
-                counters.totalHttpAttempts++
+                if (e is OpenCodeRepository.StaleSlimCommitException) throw e
+                requireSlimTokenCurrent(token)
+                totalHttpAttempts.incrementAndGet()
                 DebugLog.w(TAG, "drivePartition IOException ids=$ids sid=$sessionId " +
                     "cause=${e.javaClass.simpleName}: ${e.message} — not retried (§5.4)")
                 // §5 G6 / §5.4: transport failure (no HTTP status) is NOT retried —
@@ -289,11 +308,17 @@ internal class ExpandBatchEngine(
             } catch (e: Exception) {
                 requestSemaphore.release()
                 concurrentRequests.decrementAndGet()
+                if (e is OpenCodeRepository.StaleSlimCommitException) throw e
+                requireSlimTokenCurrent(token)
                 // Defensive — collapse to exhausted to avoid hard crash
                 return exhaustedOutcome(sessionId, ids)
             }
             requestSemaphore.release()
             concurrentRequests.decrementAndGet()
+
+            // The response belongs to the captured generation only if the
+            // token still passes all marker/identity/bundle checks.
+            requireSlimTokenCurrent(token)
 
             // HTTP call succeeded — branch on status
             when {
@@ -375,7 +400,7 @@ internal class ExpandBatchEngine(
                                 // Only set if absent, to avoid rewriting with fresh timestamp on each fallback
                                 thinRouteNotFoundCache.putIfAbsent(hostPort, now)
                             }
-                            return fallbackSingleFull(sessionId, currentIds, singleFlightMap)
+                            return fallbackSingleFull(sessionId, currentIds, singleFlightMap, hostPort, token)
                         }
                         else -> {
                             return ExpandOutcome.Failed(sessionId, code, exhausted = false)
@@ -410,10 +435,13 @@ internal class ExpandBatchEngine(
                                 ids = currentIds.subList(0, mid),
                                 depth = depth + 1,
                                 globalMaxDepth = globalMaxDepth,
-                                deadline = deadline,
-                                counters = counters,
+                                deadlineNanos = deadlineNanos,
+                                peakConcurrent = peakConcurrent,
+                                totalHttpAttempts = totalHttpAttempts,
+                                partitionNodesCreated = partitionNodesCreated,
                                 singleFlightMap = singleFlightMap,
                                 hostPort = hostPort,
+                                token = token,
                                 requestSemaphore = requestSemaphore,
                                 concurrentRequests = concurrentRequests,
                             )
@@ -424,10 +452,13 @@ internal class ExpandBatchEngine(
                                 ids = currentIds.subList(mid, currentIds.size),
                                 depth = depth + 1,
                                 globalMaxDepth = globalMaxDepth,
-                                deadline = deadline,
-                                counters = counters,
+                                deadlineNanos = deadlineNanos,
+                                peakConcurrent = peakConcurrent,
+                                totalHttpAttempts = totalHttpAttempts,
+                                partitionNodesCreated = partitionNodesCreated,
                                 singleFlightMap = singleFlightMap,
                                 hostPort = hostPort,
+                                token = token,
                                 requestSemaphore = requestSemaphore,
                                 concurrentRequests = concurrentRequests,
                             )
@@ -544,20 +575,26 @@ internal class ExpandBatchEngine(
         sessionId: String,
         ids: List<String>,
         singleFlightMap: ConcurrentHashMap<String, CompletableDeferred<Result<MessageWithParts>>>,
+        hostPort: String,
+        token: OpenCodeRepository.SlimCommitToken,
     ): ExpandOutcome.Ok = coroutineScope {
+        requireSlimTokenCurrent(token)
         val sem = Semaphore(EXPAND_FALLBACK_CONCURRENCY)
-        val hostPort = hostPortProvider()
         val results = ids.map { id ->
             async {
                 sem.withPermit {
-                    val key = "$hostPort:$sessionId:$id"
+                    // A hostPort can stay unchanged across a reconfigure, so
+                    // bind single-flight ownership to the captured client
+                    // generation and identity epoch as well.
+                    val key = "$hostPort:${token.capturedClientBundleGeneration}:" +
+                        "${token.capturedEndpointFp}:${token.capturedIdentityEpoch}:$sessionId:$id"
                     // Single-flight: use computeIfAbsent atomically.
                     val newDeferred = CompletableDeferred<Result<MessageWithParts>>()
                     val existing = singleFlightMap.computeIfAbsent(key) { newDeferred }
                     if (existing === newDeferred) {
                         // We won — make the call and complete the deferred
                         try {
-                            val result = fetchSingleFullWithRetry(sessionId, id)
+                            val result = fetchSingleFullWithRetry(sessionId, id, token)
                             newDeferred.complete(result)
                             id to result
                         } finally {
@@ -570,6 +607,7 @@ internal class ExpandBatchEngine(
                 }
             }
         }.awaitAll()
+        requireSlimTokenCurrent(token)
         val items = mutableListOf<MessageWithParts>()
         val failures = mutableListOf<ExpandOutcome.MessageFailure>()
         for ((id, r) in results) {
@@ -599,15 +637,22 @@ internal class ExpandBatchEngine(
     private suspend fun fetchSingleFullWithRetry(
         sessionId: String,
         id: String,
+        token: OpenCodeRepository.SlimCommitToken,
     ): Result<MessageWithParts> {
         var attempts = 0
         while (true) {
             attempts++
+            requireSlimTokenCurrent(token)
             try {
-                return Result.success(apiProvider().getSlimapiMessageFull(sessionId, id))
+                val result = Result.success(apiProvider(token).getSlimapiMessageFull(sessionId, id))
+                requireSlimTokenCurrent(token)
+                return result
             } catch (ce: CancellationException) {
                 throw ce
+            } catch (e: OpenCodeRepository.StaleSlimCommitException) {
+                throw e
             } catch (e: retrofit2.HttpException) {
+                requireSlimTokenCurrent(token)
                 if (e.code() == 503 && attempts <= EXPAND_MAX_503_RETRIES) {
                     val retryAfterMs = retryAfterHeaderToMs(e.response()?.headers()?.get("Retry-After"))
                     val delayMs = if (retryAfterMs > 0L) retryAfterMs else backoffMs(attempts)
@@ -616,6 +661,7 @@ internal class ExpandBatchEngine(
                 }
                 return Result.failure(e)
             } catch (e: Throwable) {
+                requireSlimTokenCurrent(token)
                 return Result.failure(e)
             }
         }
@@ -689,8 +735,8 @@ internal class ExpandBatchEngine(
  * `repository.lastExpandBudgetCounters`), so the promotion is source-compatible.
  */
 data class ExpandBudgetCounters(
-    var peakConcurrentPartitionRequests: Int,
-    var totalHttpAttempts: Int,
-    var partitionNodesCreated: Int,
-    var wallClockMs: Long,
+    val peakConcurrentPartitionRequests: Int,
+    val totalHttpAttempts: Int,
+    val partitionNodesCreated: Int,
+    val wallClockMs: Long,
 )

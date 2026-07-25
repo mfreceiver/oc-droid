@@ -12,10 +12,13 @@ import cn.vectory.ocdroid.data.repository.SlimSessionState
 import cn.vectory.ocdroid.data.repository.needsCatchUp
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.ChatState
+import cn.vectory.ocdroid.ui.NavState
+import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.lenientJson
 import cn.vectory.ocdroid.ui.reportNonFatalIssue
+import cn.vectory.ocdroid.ui.routeChatSessionId
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineDispatcher
@@ -133,6 +136,8 @@ internal data class SlimReconcileAttempt(
     val outcome: SlimReconcileOutcome,
     val token: OpenCodeRepository.SlimCommitToken?,
     val mode: SlimReconcileMode,
+    /** Route incarnation captured at workflow entry; 0L is legacy. */
+    val routeInstance: Long = 0L,
 )
 
 // ── §3.5 Digest dispatch protocol ─────────────────────────────────────────
@@ -159,6 +164,7 @@ internal data class SlimDigestReconcileRequest(
     val mode: SlimReconcileMode,
     val digest: SlimSessionDigest,
     val token: OpenCodeRepository.SlimCommitToken,
+    val routeInstance: Long = 0L,
 )
 
 // ── §4.1 Repository/token port ────────────────────────────────────────────
@@ -194,6 +200,16 @@ internal interface SlimReconcileRepositoryPort {
         sid: String,
         token: OpenCodeRepository.SlimCommitToken,
     ): Result<List<MessageWithParts>>
+
+    /**
+     * Token-bound probe entry.  The one-argument method remains the frozen
+     * compatibility seam for existing test ports; real adapters validate the
+     * operation token on both sides of this network suspension.
+     */
+    suspend fun probeLatest(
+        sid: String,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): ProbeResult = probeLatest(sid)
 }
 
 /**
@@ -243,6 +259,20 @@ internal class OpenCodeSlimReconcileRepositoryPort(
     override suspend fun probeLatest(sid: String): ProbeResult =
         delegate.probeLatestSlim(sid)
 
+    override suspend fun probeLatest(
+        sid: String,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): ProbeResult {
+        // Keep the existing probe facade (and its compatibility/test seam),
+        // but make the crossing suspend explicitly token-bound.  The captured
+        // ClientBundle is used by the subsequent token-threaded slim fetch;
+        // this pre/post gate ensures a probe from A cannot drive B state.
+        delegate.requireSlimTokenCurrent(token)
+        val result = delegate.probeLatestSlim(sid)
+        delegate.requireSlimTokenCurrent(token)
+        return result
+    }
+
     override fun markDeleted(sid: String, token: OpenCodeRepository.SlimCommitToken): Boolean =
         delegate.markSlimSessionDeleted(sid, token)
 
@@ -281,27 +311,28 @@ internal class OpenCodeSlimReconcileRepositoryPort(
  */
 internal interface SlimReconcileStorePort {
     fun currentChat(): ChatState
+    /** Active parameterized-route token, or 0L for the legacy surface. */
+    fun routeInstanceFor(sessionId: String): Long = 0L
     fun currentSessionList(): SessionListState
     fun mutateSessionList(transform: (SessionListState) -> SessionListState)
     fun dispatch(action: AppAction)
-    fun persistOpenSessionIds(ids: List<String>)
+    /** §B4: lastRoute string for route-id archive/delete decisions. */
+    fun lastRoute(): String
+    fun mutateNav(transform: (NavState) -> NavState)
+    fun clearPersistedCurrentSession()
+    fun forceNavigateToSessions()
 }
 
 /**
  * P4 §4.2: the default adapter over the coordinator's [SliceFlows] +
- * [SettingsManager]. Verified:
- *  - `SliceFlows.chat: StateFlow<ChatState>` (AppStateSlices.kt L881).
- *  - `SliceFlows.sessionList: StateFlow<SessionListState>` (L886).
- *  - `SliceFlows.mutateSessionList(transform)` (L896 → SharedStateStore L146).
- *  - `SliceFlows.store: SharedStateStore` (internal, AppStateSlices.kt L875)
- *    + `SharedStateStore.dispatch(action)` (the existing reducer entry).
- *  - `SettingsManager.openSessionIds: List<String>` (var, SettingsManager.kt L278).
+ * [SettingsManager]. §B4: open-tabs-list persistence removed.
  */
 internal class DefaultSlimReconcileStorePort(
     private val slices: SliceFlows,
     private val settingsManager: SettingsManager,
 ) : SlimReconcileStorePort {
     override fun currentChat(): ChatState = slices.chat.value
+    override fun routeInstanceFor(sessionId: String): Long = slices.routeInstanceFor(sessionId)
     override fun currentSessionList(): SessionListState = slices.sessionList.value
     override fun mutateSessionList(transform: (SessionListState) -> SessionListState) {
         slices.mutateSessionList(transform)
@@ -309,8 +340,22 @@ internal class DefaultSlimReconcileStorePort(
     override fun dispatch(action: AppAction) {
         slices.store.dispatch(action)
     }
-    override fun persistOpenSessionIds(ids: List<String>) {
-        settingsManager.openSessionIds = ids
+    override fun lastRoute(): String = slices.store.stateFlow.value.nav.lastRoute
+    override fun mutateNav(transform: (NavState) -> NavState) {
+        slices.store.mutateNav(transform)
+    }
+    override fun clearPersistedCurrentSession() {
+        settingsManager.currentSessionId = null
+    }
+    override fun forceNavigateToSessions() {
+        settingsManager.lastRoute = NavRoute.Sessions.route
+        slices.store.mutateNav {
+            it.copy(
+                lastRoute = NavRoute.Sessions.route,
+                lastNavPage = NavRoute.Sessions.legacyPage,
+                navEpoch = it.navEpoch + 1L,
+            )
+        }
     }
 }
 
@@ -357,6 +402,21 @@ internal class SlimSessionReconciler(
     private val tag: String = "SessionSyncCoordinator",
     private val reportNonFatal: (String) -> Unit = { reportNonFatalIssue(tag, it) },
 ) {
+    /**
+     * §B4 / §10: if [sessionId] is the active chat/{id} route or residual
+     * currentSessionId, CloseDetail + force popToSessions. Used after
+     * SessionArchived dispatch so the list-detail pane cannot stay on a
+     * deleted/archived conversation.
+     */
+    private fun popDetailIfActive(sessionId: String) {
+        val routeId = routeChatSessionId(store.lastRoute())
+        val currentId = store.currentChat().currentSessionId
+        if (routeId != sessionId && currentId != sessionId) return
+        store.dispatch(AppAction.CloseDetail)
+        store.clearPersistedCurrentSession()
+        store.forceNavigateToSessions()
+    }
+
     // ── §5: applyDigestLastErrorToBanner (StorePort.mutateSessionList) ────
 
     /**
@@ -482,12 +542,9 @@ internal class SlimSessionReconciler(
         // the stripe, before the reconcile body).
         //
         // Archived / deleted eviction (slim stand-in for session.updated archived).
+        // §B4: no open-tabs-list prune; route pop when route/current matches.
         if (digest.deleted == true || (digest.archived != null && digest.archived > 0L)) {
             val currentList = store.currentSessionList()
-            val newOpenIds = currentList.openSessionIds.filter { id -> id != digest.sessionId }
-            if (newOpenIds != currentList.openSessionIds) {
-                store.persistOpenSessionIds(newOpenIds)
-            }
             val archivedSession = Session(
                 id = digest.sessionId,
                 directory = digest.directory
@@ -498,12 +555,8 @@ internal class SlimSessionReconciler(
                     archived = digest.archived?.takeIf { it > 0L } ?: if (digest.deleted == true) 1L else null,
                 ),
             )
-            store.dispatch(
-                AppAction.SessionArchived(
-                    session = archivedSession,
-                    openSessionIds = newOpenIds,
-                )
-            )
+            store.dispatch(AppAction.SessionArchived(session = archivedSession))
+            popDetailIfActive(digest.sessionId)
             effects.tryEmitEffect(
                 ControllerEffect.EvictSession(currentServerGroupFp(), digest.sessionId)
             )
@@ -566,6 +619,7 @@ internal class SlimSessionReconciler(
             mode = mode,
             digest = digest,
             token = commitToken,
+            routeInstance = store.routeInstanceFor(sid),
         )
         // SSC owns the coroutine launch + command interpretation; the
         // reconciler performs the reducer apply + reconcile body + UI fold
@@ -614,6 +668,7 @@ internal class SlimSessionReconciler(
                 outcome = SlimReconcileOutcome(SlimReconcileResult.Stale(request.sid)),
                 token = request.token,
                 mode = request.mode,
+                routeInstance = request.routeInstance,
             )
         }
         val outcome = withContext(reconcileDispatcher) {
@@ -636,7 +691,12 @@ internal class SlimSessionReconciler(
                 )
             }
         }
-        return SlimReconcileAttempt(outcome = outcome, token = request.token, mode = request.mode)
+        return SlimReconcileAttempt(
+            outcome = outcome,
+            token = request.token,
+            mode = request.mode,
+            routeInstance = request.routeInstance,
+        )
     }
 
     // ── §5 + §6.2: reconcileSession (internal entry) ─────────────────────
@@ -670,6 +730,7 @@ internal class SlimSessionReconciler(
         // C-D3 v2 §1.8: public workflow entry captures once before its
         // first suspend point. Every nested suspend call and every commit
         // surface receives this exact token — NO recapture inside.
+        val routeInstance = store.routeInstanceFor(sid)
         val token = repo.captureCommitToken()
 
         val outcome = reconcileSessionWithToken(
@@ -678,7 +739,12 @@ internal class SlimSessionReconciler(
             token = token,
             isStillCurrent = { true },
         )
-        return SlimReconcileAttempt(outcome = outcome, token = token, mode = mode)
+        return SlimReconcileAttempt(
+            outcome = outcome,
+            token = token,
+            mode = mode,
+            routeInstance = routeInstance,
+        )
     }
 
     // ── §5 + §6.5: reconcileSessionWithToken (stripe + dispatcher) ───────
@@ -763,7 +829,7 @@ internal class SlimSessionReconciler(
         if (!supportsWatermarkResync()) return SlimReconcileOutcome(SlimReconcileResult.NoRepository(sid))
 
         val state = repo.getSessionState(sid) ?: SlimSessionState(sessionId = sid)
-        val probe = repo.probeLatest(sid)
+        val probe = repo.probeLatest(sid, token)
 
         // ── probe failure branches (uniform across all modes) ────────────
         if (!probe.ok) {
@@ -973,6 +1039,7 @@ internal class SlimSessionReconciler(
         result: SlimReconcileResult,
         token: OpenCodeRepository.SlimCommitToken,
         mode: SlimReconcileMode = SlimReconcileMode.DIGEST_BACKGROUND,
+        expectedRouteInstance: Long = 0L,
     ): SlimReconcileResult {
         val repo = repository ?: return SlimReconcileResult.NoRepository(result.sid)
 
@@ -991,7 +1058,13 @@ internal class SlimSessionReconciler(
         val committed = withContext(Dispatchers.Main.immediate) {
             repo.commitIfTokenCurrent(token) {
                 val liveSessionId = store.currentChat().currentSessionId
-                applyCurrentReconcileResult(result, token, liveSessionId, mode)
+                applyCurrentReconcileResult(
+                    result = result,
+                    token = token,
+                    liveSessionId = liveSessionId,
+                    mode = mode,
+                    expectedRouteInstance = expectedRouteInstance,
+                )
             }
         }
         return if (committed) result else SlimReconcileResult.Stale(result.sid)
@@ -1008,7 +1081,12 @@ internal class SlimSessionReconciler(
             // token == null ⇒ NoRepository path — mirror the primary
             // overload's early-return (no repo to commit against).
             ?: return SlimReconcileResult.NoRepository(attempt.outcome.result.sid)
-        return applyReconcileResult(attempt.outcome.result, token, attempt.mode)
+        return applyReconcileResult(
+            result = attempt.outcome.result,
+            token = token,
+            mode = attempt.mode,
+            expectedRouteInstance = attempt.routeInstance,
+        )
     }
 
     // ── §5: applyCurrentReconcileResult (repo port + store port + SlimEffectsPort) ─
@@ -1034,22 +1112,18 @@ internal class SlimSessionReconciler(
         token: OpenCodeRepository.SlimCommitToken,
         liveSessionId: String? = store.currentChat().currentSessionId,
         mode: SlimReconcileMode = SlimReconcileMode.DIGEST_BACKGROUND,
+        expectedRouteInstance: Long = 0L,
     ) {
         when (result) {
             is SlimReconcileResult.MarkDeleted -> {
                 val sid = result.sid
                 val currentList = store.currentSessionList()
-                val newOpenIds = currentList.openSessionIds.filter { it != sid }
-
-                if (newOpenIds != currentList.openSessionIds) {
-                    store.persistOpenSessionIds(newOpenIds)
-                }
-
                 val directory = currentList.sessions
                     .firstOrNull { it.id == sid }
                     ?.directory
                     .orEmpty()
 
+                // §B4: no open-tabs-list prune.
                 store.dispatch(
                     AppAction.SessionArchived(
                         session = Session(
@@ -1057,9 +1131,9 @@ internal class SlimSessionReconciler(
                             directory = directory,
                             time = Session.TimeInfo(archived = 1L),
                         ),
-                        openSessionIds = newOpenIds,
                     )
                 )
+                popDetailIfActive(sid)
 
                 effects.tryEmitEffect(
                     ControllerEffect.EvictSession(currentServerGroupFp(), sid),
@@ -1077,7 +1151,20 @@ internal class SlimSessionReconciler(
                 if (liveSessionId == sid) {
                     // T1b: content-only wipe (messages + partsByMessage);
                     // streaming overlay / cursor / model preserved.
-                    store.dispatch(AppAction.SlimChatContentCleared)
+                    // Use the workflow token captured before the REST work;
+                    // recapturing here would let a stale A result adopt a
+                    // newer A incarnation after A→B→A.
+                    val routeInstance = expectedRouteInstance
+                    if (routeInstance > 0L) {
+                        store.dispatch(
+                            AppAction.SlimChatContentClearedForRoute(
+                                expectedRouteInstance = routeInstance,
+                                sessionId = sid,
+                            )
+                        )
+                    } else {
+                        store.dispatch(AppAction.SlimChatContentCleared)
+                    }
                 }
 
                 effects.tryEmitEffect(
@@ -1097,7 +1184,12 @@ internal class SlimSessionReconciler(
                         sid = result.sid,
                         sessionStatuses = store.currentSessionList().sessionStatuses,
                     )
-                    mergeSlimMessagesIntoChat(result.items, authoritative)
+                    mergeSlimMessagesIntoChat(
+                        items = result.items,
+                        authoritative = authoritative,
+                        expectedRouteInstance = expectedRouteInstance,
+                        sessionId = result.sid,
+                    )
                 }
                 // T11 round-2 (oracle D1 — cache-coupled non-focus resync):
                 // if this Reconciled was for a NON-current session, write
@@ -1184,11 +1276,27 @@ internal class SlimSessionReconciler(
      * P4 §7.1: SSC's cold-start snapshot path delegates here (no duplicate
      * impl); the method is therefore `internal`, not `private`.
      */
-    internal fun mergeSlimMessagesIntoChat(items: List<MessageWithParts>, authoritative: Boolean = false) {
+    internal fun mergeSlimMessagesIntoChat(
+        items: List<MessageWithParts>,
+        authoritative: Boolean = false,
+        expectedRouteInstance: Long? = null,
+        sessionId: String? = null,
+    ) {
         if (items.isEmpty()) return
         // T1d P1-2: slim-only state write — fail-fast in legacy mode.
         requireSlimOnlyStateWrite(supportsWatermarkResync(), "merge-slim-messages")
-        store.dispatch(AppAction.SlimMessagesMerged(items, authoritative))
+        val targetSessionId = sessionId ?: store.currentChat().currentSessionId
+        val routeInstance = expectedRouteInstance
+            ?: targetSessionId?.let(store::routeInstanceFor)
+            ?: 0L
+        store.dispatch(
+            AppAction.SlimMessagesMerged(
+                items = items,
+                authoritative = authoritative,
+                expectedRouteInstance = routeInstance,
+                sessionId = targetSessionId,
+            )
+        )
     }
 }
 

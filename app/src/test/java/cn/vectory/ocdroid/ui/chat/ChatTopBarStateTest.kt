@@ -54,7 +54,6 @@ class ChatTopBarStateTest {
         assertEquals(null, s.currentHostProfileId)
         assertEquals(TunnelActivationState.Idle, s.tunnelActivationState)
         assertEquals(false, s.showTunnelAuth)
-        assertEquals(emptyList<Session>(), s.openSessions)
         assertEquals(emptySet<String>(), s.unreadSessions)
         assertEquals(null, s.draftWorkdir)
         assertEquals(null, s.parentSessionId)
@@ -104,7 +103,6 @@ class ChatTopBarStateTest {
             currentHostProfileId = "h1",
             tunnelActivationState = TunnelActivationState.Loading,
             showTunnelAuth = true,
-            openSessions = listOf(session),
             unreadSessions = setOf("s1"),
             draftWorkdir = "/draft",
             parentSessionId = "parent",
@@ -136,7 +134,6 @@ class ChatTopBarStateTest {
         assertEquals("h1", s.currentHostProfileId)
         assertEquals(TunnelActivationState.Loading, s.tunnelActivationState)
         assertEquals(true, s.showTunnelAuth)
-        assertEquals(listOf(session), s.openSessions)
         assertEquals(setOf("s1"), s.unreadSessions)
         assertEquals("/draft", s.draftWorkdir)
         assertEquals("parent", s.parentSessionId)
@@ -175,14 +172,10 @@ class ChatTopBarStateTest {
     fun `ChatTopBarActions default callbacks are no-ops`() {
         // §1B: the defaults for the optional callbacks are no-op lambdas —
         // invoking them MUST NOT throw. Required callbacks
-        // (onSelectSession / onCloseSession / onSelectAgent) are not defaulted
-        // and not invoked here. §1B also renames the navigation callback to
-        // `onOpenSessionPicker` (the new affordance is a ModalBottomSheet,
-        // not a page navigation), and adds the new `onOpenOverflow` (for
-        // the conversation overflow menu) — both are no-op by default.
+        // (onSelectSession / onSelectAgent) are not defaulted and not invoked
+        // here. §B6: onCloseSession removed (SessionTabStrip deleted).
         val a = ChatTopBarActions(
             onSelectSession = {},
-            onCloseSession = {},
             onSelectAgent = {},
         )
 
@@ -198,7 +191,6 @@ class ChatTopBarStateTest {
     @Test
     fun `ChatTopBarActions callbacks invoke the supplied lambdas`() {
         var selectSessionCalls = mutableListOf<String>()
-        var closeSessionCalls = mutableListOf<String>()
         var selectAgentCalls = mutableListOf<String?>()
         var navSettings = 0
         var selectHost = ""
@@ -208,12 +200,9 @@ class ChatTopBarStateTest {
         var openOverflow = 0
         var switchModel = ""
 
-        // §1B: onNavigateToSessions is gone (the navigation icon now opens
-        // a sheet); onOpenSessionPicker + onOpenOverflow are the new
-        // affordances. The test asserts the new shape.
+        // §B6: onCloseSession removed (SessionTabStrip deleted).
         val a = ChatTopBarActions(
             onSelectSession = { selectSessionCalls += it },
-            onCloseSession = { closeSessionCalls += it },
             onSelectAgent = { selectAgentCalls += it },
             onNavigateToSettings = { navSettings += 1 },
             onSelectHost = { selectHost = it },
@@ -225,7 +214,6 @@ class ChatTopBarStateTest {
         )
 
         a.onSelectSession("s1")
-        a.onCloseSession("s2")
         a.onSelectAgent("code")
         a.onNavigateToSettings()
         a.onSelectHost("h1")
@@ -236,7 +224,6 @@ class ChatTopBarStateTest {
         a.onSwitchModel("p", "m")
 
         assertEquals(listOf("s1"), selectSessionCalls)
-        assertEquals(listOf("s2"), closeSessionCalls)
         assertEquals(listOf("code"), selectAgentCalls)
         assertEquals(1, navSettings)
         assertEquals("h1", selectHost)
@@ -251,7 +238,6 @@ class ChatTopBarStateTest {
     fun `ChatTopBarActions data-class equals and copy`() {
         val a1 = ChatTopBarActions(
             onSelectSession = {},
-            onCloseSession = {},
             onSelectAgent = {},
         )
         // Same required callbacks (different lambda instances, but

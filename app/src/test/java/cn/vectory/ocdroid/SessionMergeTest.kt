@@ -29,9 +29,7 @@ class SessionMergeTest {
 
         val merged = mergeRefreshedSessionsPreservingLocalActivity(
             refreshed, local,
-            currentSessionId = null,
-            openSessionIds = emptySet()
-        )
+            currentSessionId = null)
 
         assertEquals("Server Authoritative", merged.single().title)
         assertEquals(2_000L, merged.single().time?.updated)
@@ -60,9 +58,7 @@ class SessionMergeTest {
 
         val merged = mergeRefreshedSessionsPreservingLocalActivity(
             refreshed, local,
-            currentSessionId = null,
-            openSessionIds = emptySet()
-        )
+            currentSessionId = null)
 
         // Local newer time is preserved (original protection: keeps ordering/activity).
         assertEquals(5_000L, merged.single().time?.updated)
@@ -93,9 +89,7 @@ class SessionMergeTest {
 
         val merged = mergeRefreshedSessionsPreservingLocalActivity(
             refreshed, local,
-            currentSessionId = null,
-            openSessionIds = emptySet()
-        )
+            currentSessionId = null)
 
         assertEquals(
             "Pythagorean theorem: history, proof, engineering",
@@ -121,9 +115,7 @@ class SessionMergeTest {
 
         val merged = mergeRefreshedSessionsPreservingLocalActivity(
             refreshed, local,
-            currentSessionId = null,
-            openSessionIds = emptySet()
-        )
+            currentSessionId = null)
 
         assertEquals("Real Title", merged.single().title)
         assertEquals(2_000L, merged.single().time?.updated)
@@ -141,9 +133,7 @@ class SessionMergeTest {
 
         val merged = mergeRefreshedSessionsPreservingLocalActivity(
             refreshed, local,
-            currentSessionId = null,
-            openSessionIds = emptySet()
-        )
+            currentSessionId = null)
 
         assertEquals("Server", merged.single().title)
     }
@@ -151,7 +141,7 @@ class SessionMergeTest {
     @Test
     fun `preserve appends local-only pending-create session even when absent from refreshed`() {
         // §Q4-strict-sync: the preserve pass now keys on pendingCreateIds
-        // (not currentSessionId / openSessionIds). A freshly-created session
+        // (not currentSessionId / open-tabs-list). A freshly-created session
         // whose id is pending-create survives a refresh that has not yet
         // propagated it to the listing.
         val refreshed = listOf(
@@ -164,9 +154,7 @@ class SessionMergeTest {
         val merged = mergeRefreshedSessionsPreservingLocalActivity(
             refreshed, local,
             currentSessionId = "s2",
-            openSessionIds = emptySet(),
-            pendingCreateIds = setOf("s2"),
-        )
+            pendingCreateIds = setOf("s2"))
 
         val byId = merged.associateBy { it.id }
         assertTrue("pending-create session must be preserved", byId.containsKey("s2"))
@@ -188,9 +176,7 @@ class SessionMergeTest {
 
         val merged = mergeRefreshedSessionsPreservingLocalActivity(
             refreshed, local,
-            currentSessionId = null,
-            openSessionIds = emptySet()
-        )
+            currentSessionId = null)
 
         assertEquals(listOf("s1"), merged.map { it.id })
     }
@@ -200,7 +186,7 @@ class SessionMergeTest {
         // §Q4-strict-sync (strict ghost removal): the defining behavior change.
         // A session that WAS current/open locally but is NOT in the server's
         // refreshed list AND is NOT pending-create is now DROPPED. Pre-Q4 the
-        // currentSessionId / openSessionIds check kept it alive indefinitely
+        // currentSessionId / open-tabs-list check kept it alive indefinitely
         // (ghost). Now only pendingCreateIds can preserve it.
         val refreshed = listOf(
             Session(id = "s1", directory = "/tmp/project", title = "Refreshed")
@@ -212,9 +198,7 @@ class SessionMergeTest {
         val merged = mergeRefreshedSessionsPreservingLocalActivity(
             refreshed, local,
             currentSessionId = "s2",
-            openSessionIds = setOf("s2"),
-            pendingCreateIds = emptySet(),
-        )
+            pendingCreateIds = emptySet())
 
         // s2 is current AND open, but NOT pending-create → dropped (strict-sync).
         assertEquals(listOf("s1"), merged.map { it.id })
@@ -234,9 +218,7 @@ class SessionMergeTest {
         val merged = mergeRefreshedSessionsPreservingLocalActivity(
             refreshed, local,
             currentSessionId = null,
-            openSessionIds = emptySet(),
-            pendingCreateIds = setOf("s2", "s3"),
-        )
+            pendingCreateIds = setOf("s2", "s3"))
 
         val ids = merged.map { it.id }.toSet()
         assertTrue("s2 in pendingCreateIds preserved", "s2" in ids)
@@ -271,9 +253,7 @@ class SessionMergeTest {
 
         val merged = mergeRefreshedSessionsPreservingLocalActivity(
             refreshed, local,
-            currentSessionId = null,
-            openSessionIds = emptySet()
-        )
+            currentSessionId = null)
 
         assertEquals(revertX, merged.single().revert)
     }

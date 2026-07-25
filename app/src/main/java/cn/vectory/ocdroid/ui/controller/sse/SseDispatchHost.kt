@@ -82,10 +82,10 @@ interface SseDispatchHost {
     fun sseClock(): Long
 
     /**
-     * Whether the current runtime is in slim mode. Used by the
-     * `session.error` branch for the slim-only durable banner write.
+     * Whether the session-error handler may persist its durable banner.
+     * This is a semantic capability, not a transport-mode read.
      */
-    fun slimMode(): Boolean
+    fun supportsDurableSessionErrorBanner(): Boolean
 
     /**
      * Checks whether a delta-flush job is currently active for [partId].
@@ -101,4 +101,16 @@ interface SseDispatchHost {
      * Keeps the host as the single owner of the reconcile state machine.
      */
     fun handleSessionDigest(event: SSEEvent)
+
+    /**
+     * Dispatches a token-stream placeholder with a stamp captured under the
+     * repository bundle-commit monitor. Returns false when no bundle is live.
+     */
+    fun dispatchTokenStreamPlaceholder(
+        partType: String,
+        partId: String,
+        messageId: String,
+        sessionId: String,
+        expectedRouteInstance: Long,
+    ): Boolean
 }

@@ -16,8 +16,9 @@ import androidx.compose.runtime.remember
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.NavRoute
+import cn.vectory.ocdroid.ui.OrchestratorViewModel
+import cn.vectory.ocdroid.ui.isNavigableChatSessionId
 import cn.vectory.ocdroid.ui.chat.LocalWindowSizeClass
 import cn.vectory.ocdroid.ui.shell.AppShell
 import cn.vectory.ocdroid.ui.theme.OpenCodeTheme
@@ -167,14 +168,38 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleSessionExtra(intent: Intent?) {
-        val sessionId = intent?.getStringExtra(EXTRA_SESSION_ID) ?: return
+        val sessionId = intent?.getStringExtra(EXTRA_SESSION_ID)
         // Consume the extra so configuration changes (rotation) do not
         // re-trigger the deep-link navigation.
-        intent.removeExtra(EXTRA_SESSION_ID)
-        // The shell observes this stable route key. Set it before selecting the
-        // session so notification taps always land on Chat, including warm starts.
-        mainViewModel?.setLastRoute(NavRoute.Chat)
-        mainViewModel?.openSessionFromDeepLink(sessionId)
+        intent?.removeExtra(EXTRA_SESSION_ID)
+        // §B3: route the notification/deep-link entry through the SAME
+        // route-aware pipeline as every other session-OPENING entry point
+        // (navigateToChat → openForRoute → VerifyAndHydrate(expectedRouteInstance=T)
+        // → load). navigateToChat mints the freshness token, persists
+        // nav.lastRoute = "chat/$sid", and dispatches openForRoute — replacing
+        // the legacy setLastRoute(Chat) + openSessionFromDeepLink
+        // (selectSessionForEffect) path that bypassed the §7.2 CAS.
+        //
+        // Fail-safe (B3-C1 / B3-C2): an intent WITHOUT a usable session id
+        // MUST NOT land on a stale chat — fall back to Sessions so a malformed/
+        // empty notification does not surface the last-opened conversation.
+        // Uses [isNavigableChatSessionId] which validates the id through the
+        // FULL [parseRoute] grammar (trailing-segment guard + brand check),
+        // catching path separators (`ses_foo/bar`), spaces, bare prefix, and
+        // unbranded garbage — not just the brand-level [isValidSessionId]
+        // predicate which is intentionally lenient on tail charset and cannot
+        // protect against id values that would create a multi-segment route.
+        //
+        // The fallback uses [forceNavigateToSessions] instead of [setLastRoute]
+        // to guarantee the synchronizer fires even when [NavState.lastRoute]
+        // already equals "sessions" (which it does while on Files/Git — those
+        // destinations do not update navState). [setLastRoute] would short-
+        // circuit in that case, leaving the user on the wrong screen.
+        if (!isNavigableChatSessionId(sessionId)) {
+            mainViewModel?.forceNavigateToSessions()
+            return
+        }
+        mainViewModel?.navigateToChat(sessionId)
     }
 
     companion object {

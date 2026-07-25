@@ -84,7 +84,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         chatVM = ChatViewModel(core)
 
         // Wire the expand call to our controlled deferred.
-        coEvery { repository.expandMessagesFullBatch(any(), any()) } coAnswers {
+        coEvery { repository.expandMessagesFullBatch(any(), any(), any()) } coAnswers {
             expandDeferred.await()
         }
     }
@@ -106,7 +106,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
 
         val states = core.store.chatFlow.value.partExpandStates
         assertEquals(PartExpandState.Loading, states[PartKey("m1", "p1")])
-        coVerify(exactly = 1) { repository.expandMessagesFullBatch(s1, setOf("m1")) }
+        coVerify(exactly = 1) { repository.expandMessagesFullBatch(s1, setOf("m1"), any()) }
     }
 
     /**
@@ -181,7 +181,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
 
         // Second call (retry) → Loading.
         val expandDeferred2 = CompletableDeferred<ExpandOutcome>()
-        coEvery { repository.expandMessagesFullBatch(any(), any()) } coAnswers {
+        coEvery { repository.expandMessagesFullBatch(any(), any(), any()) } coAnswers {
             expandDeferred2.await()
         }
         chatVM.expandParts(s1, listOf(p1))
@@ -357,7 +357,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         val deferred1 = CompletableDeferred<ExpandOutcome>()
         val deferred2 = CompletableDeferred<ExpandOutcome>()
         var callCount = 0
-        coEvery { repository.expandMessagesFullBatch(any(), any()) } coAnswers {
+        coEvery { repository.expandMessagesFullBatch(any(), any(), any()) } coAnswers {
             callCount++
             if (callCount == 1) deferred1.await() else deferred2.await()
         }
@@ -407,7 +407,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         seedSession(s1, Message(id = "m1", role = "assistant"), listOf(p1, p2))
 
         val deferred = CompletableDeferred<ExpandOutcome>()
-        coEvery { repository.expandMessagesFullBatch(any(), any()) } coAnswers {
+        coEvery { repository.expandMessagesFullBatch(any(), any(), any()) } coAnswers {
             deferred.await()
         }
 
@@ -453,7 +453,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         seedSession(s1, Message(id = "m1", role = "assistant"), listOf(p1))
 
         val deferred = CompletableDeferred<ExpandOutcome>()
-        coEvery { repository.expandMessagesFullBatch(any(), any()) } coAnswers {
+        coEvery { repository.expandMessagesFullBatch(any(), any(), any()) } coAnswers {
             deferred.await()
         }
 
@@ -491,7 +491,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         seedSession(s1, Message(id = "m1", role = "assistant"), listOf(p1))
 
         val deferred = CompletableDeferred<ExpandOutcome>()
-        coEvery { repository.expandMessagesFullBatch(any(), any()) } coAnswers {
+        coEvery { repository.expandMessagesFullBatch(any(), any(), any()) } coAnswers {
             deferred.await()
         }
 
@@ -535,7 +535,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         seedSession(s1, Message(id = "m1", role = "assistant"), listOf(p1))
 
         val deferred = CompletableDeferred<ExpandOutcome>()
-        coEvery { repository.expandMessagesFullBatch(any(), any()) } coAnswers {
+        coEvery { repository.expandMessagesFullBatch(any(), any(), any()) } coAnswers {
             deferred.await()
         }
 
@@ -546,7 +546,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         mainDispatcherRule.dispatcher.scheduler.runCurrent()
 
         // Only one repository call.
-        coVerify(exactly = 1) { repository.expandMessagesFullBatch(s1, setOf("m1")) }
+        coVerify(exactly = 1) { repository.expandMessagesFullBatch(s1, setOf("m1"), any()) }
 
         // Complete.
         deferred.complete(ExpandOutcome.Ok(
@@ -578,7 +578,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         val deferred = CompletableDeferred<ExpandOutcome>()
 
         coEvery {
-            repository.expandMessagesFullBatch(sessionId, setOf("m1"))
+            repository.expandMessagesFullBatch(sessionId, setOf("m1"), any())
         } coAnswers {
             deferred.await()
         }
@@ -648,7 +648,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         val deferred = CompletableDeferred<ExpandOutcome>()
 
         coEvery {
-            repository.expandMessagesFullBatch(sessionId, setOf("m1"))
+            repository.expandMessagesFullBatch(sessionId, setOf("m1"), any())
         } coAnswers {
             deferred.await()
         }
@@ -714,7 +714,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
         val releaseFailure = CompletableDeferred<Unit>()
 
         coEvery {
-            repository.expandMessagesFullBatch(sessionId, setOf("m1"))
+            repository.expandMessagesFullBatch(sessionId, setOf("m1"), any())
         } coAnswers {
             releaseFailure.await()
             throw IOException("delayed failure")
@@ -791,7 +791,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
             listOf(placeholder),
         )
         val deferred = CompletableDeferred<ExpandOutcome>()
-        coEvery { repository.expandMessagesFullBatch(sessionId, any()) } coAnswers {
+        coEvery { repository.expandMessagesFullBatch(sessionId, any(), any()) } coAnswers {
             deferred.await()
         }
 
@@ -843,7 +843,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
             listOf(skeletonP1, unrelated),
         )
         val deferred = CompletableDeferred<ExpandOutcome>()
-        coEvery { repository.expandMessagesFullBatch(sessionId, any()) } coAnswers {
+        coEvery { repository.expandMessagesFullBatch(sessionId, any(), any()) } coAnswers {
             deferred.await()
         }
 
@@ -895,7 +895,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
             listOf(skeletonP1),
         )
         val deferred = CompletableDeferred<ExpandOutcome>()
-        coEvery { repository.expandMessagesFullBatch(sessionId, any()) } coAnswers {
+        coEvery { repository.expandMessagesFullBatch(sessionId, any(), any()) } coAnswers {
             deferred.await()
         }
 
@@ -939,7 +939,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
             listOf(skeletonP1),
         )
         val deferred = CompletableDeferred<ExpandOutcome>()
-        coEvery { repository.expandMessagesFullBatch(sessionId, any()) } coAnswers {
+        coEvery { repository.expandMessagesFullBatch(sessionId, any(), any()) } coAnswers {
             deferred.await()
         }
 
@@ -997,7 +997,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
             listOf(skeletonP1),
         )
         val deferred = CompletableDeferred<ExpandOutcome>()
-        coEvery { repository.expandMessagesFullBatch(sessionId, any()) } coAnswers {
+        coEvery { repository.expandMessagesFullBatch(sessionId, any(), any()) } coAnswers {
             deferred.await()
         }
 
@@ -1052,7 +1052,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
             listOf(omittedSkeleton),
         )
         val deferred = CompletableDeferred<ExpandOutcome>()
-        coEvery { repository.expandMessagesFullBatch(sessionId, any()) } coAnswers {
+        coEvery { repository.expandMessagesFullBatch(sessionId, any(), any()) } coAnswers {
             deferred.await()
         }
 
@@ -1105,7 +1105,7 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
             listOf(skeletonP1),
         )
         val deferred = CompletableDeferred<ExpandOutcome>()
-        coEvery { repository.expandMessagesFullBatch(sessionId, any()) } coAnswers {
+        coEvery { repository.expandMessagesFullBatch(sessionId, any(), any()) } coAnswers {
             deferred.await()
         }
 

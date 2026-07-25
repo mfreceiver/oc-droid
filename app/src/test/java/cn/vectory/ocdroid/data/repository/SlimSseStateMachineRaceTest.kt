@@ -4,6 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import cn.vectory.ocdroid.data.api.OpenCodeApi
+import cn.vectory.ocdroid.data.api.SSEClient
+import cn.vectory.ocdroid.data.api.v2.OpenCodeApiV2
+import cn.vectory.ocdroid.data.repository.http.SslConfig
+import io.mockk.mockk
+import okhttp3.OkHttpClient
+import retrofit2.Retrofit
 
 /**
  * Race-condition regression test for P2 (D3 host-switch race fix).
@@ -20,7 +28,11 @@ class SlimSseStateMachineRaceTest {
     @Test
     fun `epoch check rejects stale token after epoch bump`() {
         val epoch = AtomicLong(0L)
-        val machine = SlimSseStateMachine(Any()) { epoch.get() }
+        val machine = SlimSseStateMachine(
+            Any(),
+            epochProvider = { epoch.get() },
+            clientBundleProvider = { null },
+        )
 
         val tokenA = machine.captureSlimCommitToken()
 
@@ -39,7 +51,11 @@ class SlimSseStateMachineRaceTest {
     @Test
     fun `epoch check still passes for current token`() {
         val epoch = AtomicLong(42L)
-        val machine = SlimSseStateMachine(Any()) { epoch.get() }
+        val machine = SlimSseStateMachine(
+            Any(),
+            epochProvider = { epoch.get() },
+            clientBundleProvider = { null },
+        )
 
         val token = machine.captureSlimCommitToken()
 
@@ -55,7 +71,11 @@ class SlimSseStateMachineRaceTest {
     @Test
     fun `token not registered with provider returns false`() {
         val epoch = AtomicLong(0L)
-        val machine = SlimSseStateMachine(Any()) { epoch.get() }
+        val machine = SlimSseStateMachine(
+            Any(),
+            epochProvider = { epoch.get() },
+            clientBundleProvider = { null },
+        )
 
         // Create a token bypassing capture (simulate a token from before
         // epoch provider was added, or a token manufactured by reflection).
@@ -91,7 +111,11 @@ class SlimSseStateMachineRaceTest {
     @Test
     fun `beginSlimReconfigure clears token epochs`() {
         val epoch = AtomicLong(0L)
-        val machine = SlimSseStateMachine(Any()) { epoch.get() }
+        val machine = SlimSseStateMachine(
+            Any(),
+            epochProvider = { epoch.get() },
+            clientBundleProvider = { null },
+        )
 
         val tokenA = machine.captureSlimCommitToken()
         epoch.incrementAndGet()
@@ -115,4 +139,51 @@ class SlimSseStateMachineRaceTest {
         assertFalse("tokenA should remain stale after completeSlimReconfigure",
             machine.commitIfSlimTokenCurrent(tokenA) {})
     }
+
+    @Test
+    fun `published client generation rejects token even when slim marker and identity epoch stay current`() {
+        val bundle = AtomicReference(bundle(generation = 1L, endpoint = "a.example"))
+        val machine = SlimSseStateMachine(
+            slimStateLock = Any(),
+            epochProvider = { 7L },
+            clientBundleProvider = { bundle.get() },
+        )
+
+        val tokenA = machine.captureSlimCommitToken()
+        bundle.set(bundle(generation = 2L, endpoint = "b.example"))
+
+        var committed = false
+        assertFalse(
+            "a result must be stale after the published bundle changes",
+            machine.commitIfSlimTokenCurrent(tokenA) { committed = true },
+        )
+        assertFalse(committed)
+    }
+
+    private fun bundle(generation: Long, endpoint: String): ClientBundle = ClientBundle(
+        generation = generation,
+        hostSnapshot = HostSnapshot(
+            baseUrl = "http://$endpoint",
+            hostPort = endpoint,
+            username = null,
+            password = null,
+            slimHost = true,
+        ),
+        effectiveSslConfig = SslConfig.SystemDefault,
+        clientCertError = null,
+        restHttp = mockk(),
+        restRetrofit = mockk(),
+        restApi = mockk<OpenCodeApi>(),
+        sseHttp = mockk(),
+        sseClient = mockk<SSEClient>(),
+        commandHttp = mockk<OkHttpClient>(),
+        commandRetrofit = mockk<Retrofit>(),
+        commandApi = mockk<OpenCodeApi>(),
+        mutationHttp = mockk<OkHttpClient>(),
+        mutationRetrofit = mockk<Retrofit>(),
+        mutationApi = mockk<OpenCodeApi>(),
+        v2Retrofit = mockk<Retrofit>(),
+        apiV2 = mockk<OpenCodeApiV2>(),
+        ownedClients = emptyList(),
+    )
 }

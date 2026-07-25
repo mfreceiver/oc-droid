@@ -7,8 +7,6 @@ import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.ui.AppAction
-import cn.vectory.ocdroid.ui.ScrollBehavior
-import cn.vectory.ocdroid.ui.ScrollCheckpoint
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.controller.ComposerController
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
@@ -107,196 +105,214 @@ class SessionViewModel @Inject constructor(
     }
 
     /**
-     * §Wave5b-Q13: open a sub-agent session. Captures the PARENT's scroll
-     * checkpoint (passed in synchronously by the Compose layer — see
-     * ChatMessageList's onOpenSubAgent wrapper) into
-     * [ChatState.parentReturnCheckpoints] under the child id key, then
-     * selects the child with the default Latest behavior.
+     * §Wave5b-Q13 + §chat-list-detail §11 / G6 (B5): open a sub-agent session.
      *
-     * The checkpoint MUST be supplied by the caller (Compose layer), NOT
-     * derived inside the VM: the VM has no listState handle and the async
-     * savedPositions mirror cannot guarantee the last pre-navigation frame
-     * (oracle ruling). The synchronous capture at the click site is the
-     * authoritative source.
+     * **B5 redesign**: the parent's scroll checkpoint is no longer stored in
+     * a global ChatState per-child checkpoint map. Instead it lives on the
+     * parent route entry's [androidx.lifecycle.SavedStateHandle]. The
+     * checkpoint write happens INSIDE [onNavigateToChild] (the success
+     * callback) — NOT before this method is invoked. This avoids leaving a
+     * stale checkpoint when the child fetch fails (B5 BLOCK-fix rev-gpt
+     * MAJOR 1).
      *
-     * Sequence:
-     *  1. dispatch [AppAction.ParentCheckpointStored] — adds the entry.
-     *  2. (existing sub-agent load + upsert + selectSession) — selectSession
-     *     → switchTo(childId, Latest) writes the child's pendingScrollRequest.
+     * The navigation itself is delegated to [onNavigateToChild] (typically
+     * `routeSavedStateHandle.set(checkpointKeyForChild(id), cp);
+     * orchestratorVM.navigateToChat(id)`). The checkpoint + navigation only
+     * fire when the child fetch resolves successfully AND the parent route is
+     * still the active route-instance (route-instance CAS guard below).
      *
-     * If the child cannot be resolved (rare), the checkpoint is still stored
-     * (cheap; harmless if unused; cleared on host purge / archive).
+     * §B5 BLOCK-fix (rev-gpt MAJOR 1): capture the parent's route id +
+     * route-instance token at call time; re-validate BOTH after the async
+     * fetch completes. If the user navigated away mid-fetch (e.g., tapped
+     * another sub-agent, system-back, host purge), the route id or token will
+     * have changed and the callback MUST NOT fire — otherwise we'd push a
+     * child route onto a stack whose top is no longer the parent, leaking
+     * both the checkpoint and the route.
+     *
+     * §R18 Phase 3 Wave 2 (drift #6 / P1-7): user-triggered open-sub-agent
+     * → viewModelScope. The launch body's `if (!isActive) return@launch`
+     * guards bail out before touching captured state if the VM is cleared
+     * mid-fetch.
+     *
+     * @param childSessionId the sub-agent session id (resolved by the caller
+     *   from the sub-agent card's session reference).
+     * @param checkpoint the parent's scroll viewport captured synchronously
+     *   by the Compose layer (ChatMessageContent's listState live-read).
+     *   Carried through to [onNavigateToChild] so the callback can write it
+     *   to the parent's SavedStateHandle in the SAME atomic step as the nav.
+     * @param onNavigateToChild callback invoked with `(resolvedChildId,
+     *   checkpoint)` on the success path. Implementations write the
+     *   checkpoint to the parent route entry's SavedStateHandle and trigger
+     *   route-aware navigation to the child.
      */
-    fun openSubAgent(childSessionId: String, parentCheckpoint: ScrollCheckpoint) {
-        val parentId = store.chatFlow.value.currentSessionId
-        // §Wave5b-Q13: store the parent checkpoint BEFORE the sub-agent load
-        // so it is on file by the time selectSession flips currentSessionId.
-        // Synchronous dispatch — no coroutine hop, the entry is committed
-        // before the launch below runs.
-        store.dispatch(AppAction.ParentCheckpointStored(childSessionId, parentCheckpoint))
-        // §R18 Phase 3 Wave 2 (drift #6 / P1-7): user-triggered open-sub-agent
-        // → viewModelScope. Closure captures `this@SessionViewModel` (via the
-        // selectSession call below) — viewModelScope keeps it alive exactly as
-        // long as the VM.
-        // §R-19 #9: P1-7 closure-self-ref guard added — if the VM is cleared
-        // before the repository getSession call resolves, bail out before
-        // touching the captured selectSession / slice writes. Without the
-        // guard, viewModelScope cancellation would throw CancellationException
-        // out of the launch body (which is fine), but the closure would still
-        // hold a strong ref to the cleared VM until GC; the explicit guard
-        // makes the no-op intent obvious + defensive against any future
-        // restructuring that moves the body off viewModelScope.
+    fun openSubAgent(
+        childSessionId: String,
+        checkpoint: ScrollCheckpoint,
+        onNavigateToChild: (resolvedChildId: String, checkpoint: ScrollCheckpoint) -> Unit,
+    ) {
+        // §B5 BLOCK-fix MINOR: prefer the route id (the §B2 authority) over
+        // the lagging flat currentSessionId. The route flip commits before
+        // SessionSelected flips currentSessionId, so a bare currentSessionId
+        // read can target the PRIOR session during the transition window.
+        val parentId = routeChatSessionId(store.navFlow.value.lastRoute)
+            ?: store.chatFlow.value.currentSessionId
+            ?: return
+        // §B5 BLOCK-fix MAJOR 1: capture the parent's route-instance token at
+        // call time. After the async fetch resolves, re-validate that the
+        // route is STILL the same parent with the SAME token. If the user
+        // navigated away mid-fetch, the token will differ and we silently
+        // drop the openSubAgent (no callback fire, no checkpoint write).
+        val capturedRouteInstance = store.slices.routeInstanceFor(parentId)
         viewModelScope.launch {
             if (!isActive) return@launch
             val child = store.sessionListFlow.value.sessions.firstOrNull { it.id == childSessionId }
-                ?: parentId?.let { pid -> store.sessionListFlow.value.childSessions[pid]?.find { it.id == childSessionId } }
+                ?: parentId.let { pid -> store.sessionListFlow.value.childSessions[pid]?.find { it.id == childSessionId } }
                 ?: store.sessionListFlow.value.childSessions.values.flatten().firstOrNull { it.id == childSessionId }
                 ?: runSuspendCatching { repository.getSession(childSessionId).getOrNull() }.getOrNull()
             if (!isActive) return@launch
+            // §B5 BLOCK-fix MAJOR 1: re-validate the parent route AFTER the
+            // async fetch. Two failure modes:
+            //  - routeChatSessionId(nav.lastRoute) != parentId → user navigated
+            //    to a different route (system back, drawer tap, host purge).
+            //  - routeInstanceFor(parentId) != capturedRouteInstance → the
+            //    parent was re-entered via a fresh navigateToChat (token
+            //    advanced); the prior openSubAgent is stale.
+            // In either case the callback MUST NOT fire — the checkpoint
+            // write + nav would land on the wrong route entry.
+            val stillOnParent = routeChatSessionId(store.navFlow.value.lastRoute) == parentId
+            val tokenUnchanged = store.slices.routeInstanceFor(parentId) == capturedRouteInstance
+            if (!stillOnParent || !tokenUnchanged) return@launch
             if (child != null) {
-                // T1c: SessionUpserted owns sessions-only upsert.
+                // T1c: SessionUpserted owns sessions-only upsert. Done BEFORE
+                // the callback so the caller's navigateToChat(childId) →
+                // openForRoute's sessions+directorySessions lookup succeeds.
                 store.dispatch(AppAction.SessionUpserted(child))
-                selectSession(childSessionId)
+                // §11 sequence step 3-4: write checkpoint + route-aware nav +
+                // hydrate. Each child gets its own NavBackStackEntry, giving
+                // the parent's SavedStateHandle a distinct lifecycle
+                // counterpart (per §11 protocol 2).
+                onNavigateToChild(childSessionId, checkpoint)
             } else {
+                // §B5 BLOCK-fix MAJOR 1: fetch failed → no checkpoint write,
+                // no nav. Caller's captured checkpoint is dropped (it was
+                // never persisted to the handle).
                 effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_child_session_unavailable))
             }
         }
     }
 
     /**
-     * §Wave5b-Q13: navigate from a child session back to its parent, restoring
-     * the parent's scroll position captured at the corresponding openSubAgent
-     * call.
+     * §Wave5b-Q13 + §chat-list-detail §11 / G6 (B5): navigate from a child
+     * session back to its parent via pop-based restoration.
      *
-     * Sequence:
-     *  1. Read `parentReturnCheckpoints[currentSessionId]` (the child's id).
-     *  2. If an entry exists → dispatch [AppAction.ParentCheckpointConsumed]
-     *     (removes the entry) AND switchTo(parentId, Restore(checkpoint)).
-     *  3. If NO entry exists (e.g. cold-started into a child, or the entry
-     *     was cleared by a host purge) → fallback to switchTo(parentId,
-     *     Latest) so the user still gets back to the parent (just at the
-     *     newest message instead of a remembered position).
-     *  4. If there is no parent (parentId == null) → no-op (the user is on
-     *     a root session; returnToParent is not callable from the UI in that
-     *     case anyway — BackHandler is gated on `parent != null`).
+     * **B5 BLOCK-fix (rev-gpt CRITICAL)**: this method invokes
+     * [onReturnToExisting] (typically `orchestratorVM.returnToExistingChat(pid)`),
+     * which is DISTINCT from `navigateToChat`. The VM-side effects mirror
+     * navigateToChat (mint token, write navState, call openForRoute), but
+     * AppShell's synchronizer detects the pop-restore case
+     * (target == previousBackStackEntry.sessionId) and executes
+     * `popBackStack()` instead of `navigate()` — restoring the EXISTING
+     * parent NavBackStackEntry (and its SavedStateHandle, which carries the
+     * openSubAgent checkpoint). The parent's ChatScaffold LaunchedEffect then
+     * reads + consumes the checkpoint → Restore fires.
      *
-     * parentId resolution: looks up the current session in the union store
-     * (sessions + directorySessions + childSessions) so a sub-agent that
-     * lives only in childSessions is still resolved.
+     * The prior B5 implementation called `navigateToChat(parentId)`, which
+     * PUSHED a new parent entry on top of the child, producing
+     * `[Sessions, parent(old handle), child, parent(NEW handle)]`. The NEW
+     * parent's fresh handle had no checkpoint → Restore never fired.
+     *
+     * The single-scroll-intent contract (§11) is preserved: Restore vs
+     * Latest is decided in exactly one place (the parent's LaunchedEffect),
+     * based on checkpoint presence, consumed exactly once.
+     *
+     * §B5 BLOCK-fix MINOR: prefer `routeChatSessionId(nav.lastRoute)` over
+     * the flat `currentSessionId` for the current id resolution (the route is
+     * the §B2 authority). Falls back to flat currentSessionId on the legacy
+     * bare-chat path.
+     *
+     * Returns true iff the navigation was dispatched; false on no-current /
+     * no-parent / no-resolve (the call site's `parent != null` UI gate makes
+     * these rare in production, but the guards stay defensive).
      */
-    fun returnToParent() {
-        val currentId = store.chatFlow.value.currentSessionId ?: return
+    fun returnToParent(onReturnToExisting: (String) -> Unit): Boolean {
+        // §B5 BLOCK-fix MINOR: route id first (§B2 authority), flat
+        // currentSessionId as legacy fallback.
+        val currentId = routeChatSessionId(store.navFlow.value.lastRoute)
+            ?: store.chatFlow.value.currentSessionId
+            ?: return false
         val sl = store.sessionListFlow.value
         val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
-        val cur = sessionsById[currentId] ?: return
-        val parentId = cur.parentId ?: return
-        val stored = store.chatFlow.value.parentReturnCheckpoints[currentId]
-        if (stored != null) {
-            store.dispatch(AppAction.ParentCheckpointConsumed(currentId))
-            sessionSwitcher.switchTo(parentId, ScrollBehavior.Restore(stored))
-        } else {
-            // Fallback: no checkpoint on file (cold-start into child, host
-            // purge cleared the map, etc.). Still navigate to the parent —
-            // just at the latest position rather than a remembered one.
-            sessionSwitcher.switchTo(parentId, ScrollBehavior.Latest)
+        val cur = sessionsById[currentId] ?: return false
+        val parentId = cur.parentId ?: return false
+        // §B5 BLOCK-fix CRITICAL: pop-based return — invoke the dedicated
+        // returnToExistingChat callback (NOT navigateToChat). The VM-side
+        // housekeeping is identical (caller mints token + openForRoute); the
+        // pop semantics are decided at the NavController level.
+        onReturnToExisting(parentId)
+        return true
+    }
+
+    /**
+     * §B4 / §10 close (return to list): route-driven leave of the detail pane.
+     * No open-tabs-list filter / sibling-tab switch — list-detail has a single
+     * detail. Close the CURRENT session → flush draft → ChatCleared + CloseDetail
+     * → force pop to Sessions (unless mid-composition draft). Close a NON-current
+     * session is a no-op (the tab-strip concept is gone — only the active route's
+     * leave triggers chat clear + pop-to-Sessions).
+     *
+     * [sessionId] is retained for the tab-strip / top-bar close-X call sites
+     * (B6 still hosts the strip UI); the close is route-scoped, not tab-list-
+     * scoped.
+     */
+    fun closeSession(sessionId: String) {
+        val curId = store.chatFlow.value.currentSessionId
+        val routeId = routeChatSessionId(store.navFlow.value.lastRoute)
+        val isCurrent = curId == sessionId || routeId == sessionId
+        // §B4 / §10: non-current close is a no-op — list-detail has a single
+        // detail pane. Only the active route's leave triggers chat clear +
+        // pop-to-Sessions.
+        if (!isCurrent) return
+        if (curId != null) {
+            val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+            settingsManager.setDraftText(fp, curId, store.composerFlow.value.inputText)
+            settingsManager.flushDraftText()
+        }
+        store.mutateUnread { it.copy(unreadSessions = it.unreadSessions - sessionId) }
+
+        val hasDraft = store.composerFlow.value.draftWorkdir != null
+        // Clear chat content / current pointer — we are leaving the active tree.
+        store.dispatch(AppAction.ChatCleared)
+        store.dispatch(AppAction.CloseDetail)
+        settingsManager.currentSessionId = null
+        if (!hasDraft) {
+            // §1B-FIX (I4): chips must not leak onto the empty / home surface.
+            store.mutateComposer {
+                it.copy(
+                    inputText = "",
+                    imageAttachments = emptyList(),
+                    fileReferences = emptyList(),
+                )
+            }
+            // §B4 / §10: force popToSessions (navEpoch bump covers Files/Git
+            // equal-value trap — same as OrchestratorViewModel.forceNavigateToSessions).
+            forceNavigateToSessionsInternal()
         }
     }
 
-    fun closeSession(sessionId: String) {
-        // §fix-close-subagent: the close-X only renders on the selected tab,
-        // and the tab strip's effectiveSelectedId falls back to the ROOT when
-        // the current session is a sub-agent (child). So the user CAN close a
-        // root tab while currentSessionId points at one of its descendants.
-        // The pre-fix `isCurrent = currentSessionId == sessionId` check missed
-        // that case (childId != rootId → isCurrent=false) and left
-        // currentSessionId pointing at a now-orphaned child, so the chat body
-        // kept rendering after every tab was closed. `closingCurrentTree`
-        // treats "closing the root of the current session's tree" the same as
-        // "closing the current session itself".
-        //
-        // rootIdOf fails closed (returns null on unknown id / parentId cycle /
-        // cold-start where the child isn't in childSessions yet): in that case
-        // isDescendant=false and we fall back to the strict isCurrent check
-        // (preserving the original behaviour for the unresolvable edge).
-        val curId = store.chatFlow.value.currentSessionId
-        val isCurrent = curId == sessionId
-        val isDescendant = if (curId != null && !isCurrent) {
-            val sl = store.sessionListFlow.value
-            val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
-            rootIdOf(curId, sessionsById) == sessionId
-        } else {
-            false
-        }
-        val closingCurrentTree = isCurrent || isDescendant
-        if (closingCurrentTree && curId != null) {
-            // glm-3 🟡#1: single-read fp.
-            val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
-            // §fix-close-subagent: persist the draft under the ACTUAL current
-            // session id (curId), not the closed tab's root id. The user was
-            // editing in the child's context, so the draft belongs to curId;
-            // keying it on the root would lose / mis-restore it.
-            settingsManager.setDraftText(fp, curId, store.composerFlow.value.inputText)
-            // §C1: flush the closing session's draft so it is durable BEFORE
-            // the tab strip updates / a sibling session becomes current. The
-            // closing tab's composer is about to be torn down; a pending
-            // debounced write could otherwise be coalesced away by the next
-            // session's edits or lost on a crash → draft loss for the closed tab.
-            settingsManager.flushDraftText()
-        }
-        // §fix-close-all-slice-source: openSessionIds AUTHORITATIVE source is
-        // the session-list slice (same as SessionSwitcher.append). Pre-fix
-        // this filtered settingsManager.openSessionIds (disk), which could
-        // diverge from the runtime tab strip and leave a ghost nextId (or
-        // skip clearing) after the last visible tab was closed.
-        val updated = store.sessionListFlow.value.openSessionIds.filter { it != sessionId }
-        settingsManager.openSessionIds = updated
-        val nextId = updated.lastOrNull()
-        // T1c: OpenSessionIdsChanged owns openSessionIds-only write.
-        store.dispatch(AppAction.OpenSessionIdsChanged(updated))
-        store.mutateUnread { it.copy(unreadSessions = it.unreadSessions - sessionId) }
-        if (updated.isEmpty()) {
-            // §fix-close-all-empty-tabs-home: ANY path that empties open tabs
-            // (close last current, close last non-current while current was
-            // already null, close last residual open id) must honor empty-tabs
-            // intent — not only `closingCurrentTree`. Matches ChatScaffold's
-            // empty openSessionIds → home rule (draftWorkdir is the sole
-            // stay-on-Chat exception for mid-composition).
-            val hasDraft = store.composerFlow.value.draftWorkdir != null
-            // Defensive: no open tab may leave a residual currentSessionId
-            // (orphan current after non-current last-close, or race residue).
-            if (store.chatFlow.value.currentSessionId != null) {
-                // T1b residual: ChatCleared (3-field clear).
-                store.dispatch(AppAction.ChatCleared)
-                // §fix-close-all-residual: ALSO clear the PERSISTED
-                // currentSessionId synchronously (belt-and-suspenders with the
-                // AppCore null-persistence collector).
-                settingsManager.currentSessionId = null
-            }
-            if (!hasDraft) {
-                // §1B-FIX (I4): chips must not leak onto the empty / home
-                // surface when leaving Chat entirely.
-                store.mutateComposer {
-                    it.copy(
-                        inputText = "",
-                        imageAttachments = emptyList(),
-                        fileReferences = emptyList(),
-                    )
-                }
-                // Domain half of leave-Chat: AppShell's
-                // LaunchedEffect(requestedRoute) hops to Sessions. Compose
-                // ChatScaffold snapshotFlow empty-tabs → onBackToHome remains
-                // belt-and-suspenders (also handles popBackStack).
-                val sessionsRoute = NavRoute.Sessions
-                settingsManager.lastRoute = sessionsRoute.route
-                store.mutateNav {
-                    it.copy(
-                        lastRoute = sessionsRoute.route,
-                        lastNavPage = sessionsRoute.legacyPage,
-                    )
-                }
-            }
-        } else if (closingCurrentTree) {
-            selectSession(nextId!!)
+    /**
+     * §B4: shared pop-to-Sessions transition used by close / delete-current /
+     * archive-current / host-switch. Mirrors
+     * [OrchestratorViewModel.forceNavigateToSessions] without depending on
+     * that VM (SessionViewModel must stay AppCore-free).
+     */
+    private fun forceNavigateToSessionsInternal() {
+        settingsManager.lastRoute = NavRoute.Sessions.route
+        store.mutateNav {
+            it.copy(
+                lastRoute = NavRoute.Sessions.route,
+                lastNavPage = NavRoute.Sessions.legacyPage,
+                navEpoch = it.navEpoch + 1L,
+            )
         }
     }
 

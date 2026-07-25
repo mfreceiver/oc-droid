@@ -1,33 +1,25 @@
 package cn.vectory.ocdroid.data.repository
 
+import androidx.annotation.VisibleForTesting
 import cn.vectory.ocdroid.data.api.OpenCodeApi
 import cn.vectory.ocdroid.data.api.SSEClient
 import cn.vectory.ocdroid.data.api.*
 import cn.vectory.ocdroid.data.api.v2.OpenCodeApiV2
 import cn.vectory.ocdroid.data.api.v2.ModelInfoV2
 import cn.vectory.ocdroid.data.model.*
-import cn.vectory.ocdroid.data.repository.http.AuthInterceptor
-import cn.vectory.ocdroid.data.repository.http.CacheControlInterceptor
-import cn.vectory.ocdroid.data.repository.http.CachePathSanitizer
-import cn.vectory.ocdroid.data.repository.http.DirectoryHeaderInterceptor
 import cn.vectory.ocdroid.data.repository.http.HttpHeaders
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
-import cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory
-import cn.vectory.ocdroid.data.repository.http.ResponseSizeGuardInterceptor
 import cn.vectory.ocdroid.data.repository.http.SlimapiContract
 import cn.vectory.ocdroid.data.repository.http.SlimapiErrorCodes
 import cn.vectory.ocdroid.data.repository.http.SslConfig
-import cn.vectory.ocdroid.data.repository.http.SslConfigFactory
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.data.repository.http.TofuFailureReason
 import cn.vectory.ocdroid.data.repository.http.TofuPinStore
 import cn.vectory.ocdroid.data.repository.http.TofuValidation
 import cn.vectory.ocdroid.data.repository.http.InMemoryTofuPinStore
-import cn.vectory.ocdroid.data.repository.http.SlimapiVersionInterceptor
-import cn.vectory.ocdroid.data.repository.http.SlimapiDebugInterceptor
 import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
+import cn.vectory.ocdroid.data.repository.http.buildTofuPinnedConfig
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
-import cn.vectory.ocdroid.data.repository.http.TrafficCountingInterceptor
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.TrafficLogger
 import cn.vectory.ocdroid.util.TrafficTracker
@@ -59,6 +51,7 @@ import java.security.cert.X509Certificate
 import javax.inject.Inject
 import javax.inject.Singleton
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 
 // MessagesPage, SLIMAPI_DEFAULT_PAGE_LIMIT, SLIMAPI_LOCAL_HISTORY_BOUND moved to MessagesPage.kt
 
@@ -88,7 +81,7 @@ class OpenCodeRepository @Inject constructor(
      * [cn.vectory.ocdroid.di.TofuModule]; [InMemoryTofuPinStore] in unit tests).
      * Held so [applyTofuDecision] can write Accept-once / Trust decisions and
      * [captureServerCert] / [checkHealthFor] can read pinned state via the
-     * shared [sslConfigFactory]. Defaults to [InMemoryTofuPinStore] so the
+     * shared [networkGraph.sslConfigFactory]. Defaults to [InMemoryTofuPinStore] so the
      * test-locked 2-arg `OpenCodeRepository(mockk(), mockk())` construction
      * keeps compiling (Hilt ignores Kotlin defaults and injects the bound
      * [EspTofuPinStore][cn.vectory.ocdroid.data.repository.http.EspTofuPinStore]
@@ -145,128 +138,99 @@ class OpenCodeRepository @Inject constructor(
         get() = expandBatchEngine.thinRouteTtlMsForTest
         set(value) { expandBatchEngine.thinRouteTtlMsForTest = value }
 
-    // R-18: host profile + OkHttp composition extracted to dedicated classes.
-    // Wired manually (rather than via Hilt) so the public constructor
-    // signature stays `(TrafficTracker, TrafficLogger)` and the existing
-    // `OpenCodeRepositoryTest` setup `OpenCodeRepository(mockk(), mockk())`
-    // keeps working unchanged. The extracted components themselves are
-    // `@Inject constructor @Singleton` for reuse / future DI migration.
-    private val hostConfig = HostConfig()
-    private val cachePathSanitizer = CachePathSanitizer(hostConfig)
-    private val directoryHeaderInterceptor = DirectoryHeaderInterceptor()
-    // R8 slim-mode foundation / M1: 版本头拦截器读 hostConfig.slim——必须在
-    // hostConfig 之后实例化（构造顺序），但 hostConfig 的延迟初始化由 configure()
-    // 完成，此处只持有引用。
-    private val slimapiVersionInterceptor = SlimapiVersionInterceptor(hostConfig)
-    // POST-RELEASE instrumentation: slimapi DEBUG-only logging interceptor.
-    // Constructor-injected into OkHttpClientFactory just AFTER the version
-    // interceptor (so the injected X-Slimapi-Version header is observable).
-    private val slimapiDebugInterceptor = SlimapiDebugInterceptor()
-    private val authInterceptor = AuthInterceptor(hostConfig)
-    private val cacheControlInterceptor = CacheControlInterceptor(hostConfig, cachePathSanitizer)
-    private val trafficCountingInterceptor = TrafficCountingInterceptor(trafficTracker, trafficLogger)
-    private val responseSizeGuardInterceptor = ResponseSizeGuardInterceptor()
-    // §2.4: 持有同一个 [SslConfigFactory] 实例——既给 clientFactory 构建 OkHttp client
-    // （live REST/SSE/command/tunnel），也供本类的 [configure]/[checkHealthFor]/
-    // [currentSslConfig] 解析 mTLS / TOFU pin。原先 inline `OkHttpClientFactory(
-    // SslConfigFactory(), ...)` 每次构造一个独立 factory，configure 时注入的客户端
-    // 证书无法被 healthClient 旧重载读到，也无法集中观测
-    // [SslConfigFactory.lastClientCertError]。
-    // §tofu R2: SslConfigFactory 现在需要 [TofuPinStore]——传入构造函数注入的 store，
-    // 使生产 (ESP) / 测试 (InMemory) 都走同一 graph。
-    private val sslConfigFactory = SslConfigFactory(tofuStore)
-    private val clientFactory = OkHttpClientFactory(
-        sslConfigFactory,
-        directoryHeaderInterceptor,
-        slimapiVersionInterceptor,
-        slimapiDebugInterceptor,
-        authInterceptor,
-        cacheControlInterceptor,
-        trafficCountingInterceptor,
-        responseSizeGuardInterceptor
+    // P11 §4 (Option B): the OkHttp / SSL / interceptor construction graph
+    // is consolidated in [RepositoryNetworkGraph] (internal, non-Hilt).
+    // The single volatile bundle below is the only client-generation
+    // publication point; all API/client accessors are derived from it.
+    private val networkGraph = RepositoryNetworkGraph(
+        trafficTracker,
+        trafficLogger,
+        tofuStore,
+        serverCompatProfile,
     )
 
-    private var restHttp: OkHttpClient = clientFactory.restClient(hostConfig.hostPort)
-    private var sseHttp: OkHttpClient = clientFactory.sseClient(hostConfig.hostPort)
-    private var retrofit: Retrofit = buildRetrofit(restHttp, hostConfig.baseUrl)
-    @Volatile private var api: OpenCodeApi = retrofit.create(OpenCodeApi::class.java)
-    @Volatile private var sseClient: SSEClient = SSEClient(sseHttp)  // 🟡-2 sibling: rebuildClients(@Synchronized) 写 / connectSSE lock-free 读 → @Volatile 保可见性(同 api 家族)
+    /** The sole volatile publication point for all network clients and APIs. */
+    @Volatile
+    private var currentClientBundle: ClientBundle? = buildClientBundle(
+        hostSnapshot = networkGraph.hostConfig.snapshot(),
+        generation = 0L,
+        effectiveSslConfig = networkGraph.sslConfigFactory.sslConfigFor(networkGraph.hostConfig.hostPort),
+    )
+
+    /** Called while the repository monitor is held after a new bundle is published. */
+    @Volatile
+    internal var onBundlePublished: ((Long, String) -> Unit)? = null
+
+    private val api: OpenCodeApi get() = requireClientBundle().restApi
+    private val sseClient: SSEClient get() = requireClientBundle().sseClient
+    private val commandApi: OpenCodeApi get() = requireClientBundle().commandApi
+    private val mutationApi: OpenCodeApi get() = requireClientBundle().mutationApi
+    private val apiV2: OpenCodeApiV2 get() = requireClientBundle().apiV2
+
+    internal fun currentClientBundle(): ClientBundle? = currentClientBundle
 
     /**
-     * §grouping-rewrite item 4: dedicated OkHttp client + Retrofit instance
-     * for `executeCommand` (POST /session/{id}/command). Built on
-     * [OkHttpClientFactory.commandClient] (read timeout 300 s vs [restHttp]'s
-     * 30 s) so a slow synchronous server-side command step does not blow past
-     * the read timeout and surface as a false-negative command-failed error
-     * (SSE still carries the results). The [commandApi] reuses the SAME
-     * [OpenCodeApi] interface, baseUrl, JSON converter and interceptor chain
-     * (auth / directory / cache / traffic) as [api]; only the OkHttp client
-     * differs. All other API methods stay on [api] / [mutationApi].
-     *
-     * **T14-C3** (`commandClient` retry): `executeCommand` is a POST, so
-     * [commandHttp] sets `retryOnConnectionFailure = false` (see
-     * [OkHttpClientFactory.commandClient]) — a network blip after the
-     * server ran the slash command but before the ACK was read would
-     * otherwise trigger a silent re-POST that re-runs the command.
+     * Test-only API-facade substitution at the same volatile publication
+     * boundary used by production. The replacement must retain every
+     * generation/resource field; this prevents routing tests from creating a
+     * mixed client generation or accidentally retiring clients they still
+     * need. The seam never retires the old object because both bundles share
+     * the same generation-owned resources.
      */
-    private var commandHttp: OkHttpClient = clientFactory.commandClient(hostConfig.hostPort)
-    private var commandRetrofit: Retrofit = buildRetrofit(commandHttp, hostConfig.baseUrl)
-    @Volatile private var commandApi: OpenCodeApi = commandRetrofit.create(OpenCodeApi::class.java)
+    @VisibleForTesting
+    @Synchronized
+    internal fun replaceClientBundleForTest(transform: (ClientBundle) -> ClientBundle) {
+        val current = requireClientBundle()
+        val replacement = transform(current)
+        check(replacement.generation == current.generation) {
+            "test bundle replacement must keep generation"
+        }
+        check(replacement.hostSnapshot === current.hostSnapshot) {
+            "test bundle replacement must keep host snapshot"
+        }
+        check(replacement.effectiveSslConfig === current.effectiveSslConfig) {
+            "test bundle replacement must keep SSL config"
+        }
+        check(replacement.clientCertError == current.clientCertError) {
+            "test bundle replacement must keep certificate state"
+        }
+        check(replacement.restHttp === current.restHttp) {
+            "test bundle replacement must keep rest client"
+        }
+        check(replacement.restRetrofit === current.restRetrofit) {
+            "test bundle replacement must keep rest Retrofit"
+        }
+        check(replacement.sseHttp === current.sseHttp) {
+            "test bundle replacement must keep SSE client"
+        }
+        check(replacement.sseClient === current.sseClient) {
+            "test bundle replacement must keep SSE facade"
+        }
+        check(replacement.commandHttp === current.commandHttp) {
+            "test bundle replacement must keep command client"
+        }
+        check(replacement.commandRetrofit === current.commandRetrofit) {
+            "test bundle replacement must keep command Retrofit"
+        }
+        check(replacement.mutationHttp === current.mutationHttp) {
+            "test bundle replacement must keep mutation client"
+        }
+        check(replacement.mutationRetrofit === current.mutationRetrofit) {
+            "test bundle replacement must keep mutation Retrofit"
+        }
+        check(replacement.v2Retrofit === current.v2Retrofit) {
+            "test bundle replacement must keep v2 Retrofit"
+        }
+        check(replacement.apiV2 === current.apiV2) {
+            "test bundle replacement must keep v2 API"
+        }
+        currentClientBundle = replacement
+    }
 
-    /**
-     * T14 (CLIENT_CHANGES "mutation 只发一次，不因超时向 direct 重发"):
-     * dedicated OkHttp client + Retrofit instance for **every POST wrapper
-     * EXCEPT `executeCommand`** (which has its own [commandApi] for the 300 s
-     * heavy-server-work window). Built on
-     * [OkHttpClientFactory.mutationClient] (30 s read timeout — same as
-     * [restHttp] for normal mutation latency; mutations don't need
-     * command's 300 s window) + `retryOnConnectionFailure = false`.
-     *
-     * **Why a third Retrofit instance** — OkHttp's default
-     * `retryOnConnectionFailure = true` can double-send a POST when a
-     * connection breaks after the server applied the mutation but before
-     * the client read the ACK. Routing POSTs through [restHttp] (which
-     * keeps retry=true for safe idempotent GET retries) would re-introduce
-     * that hazard. The [mutationApi] reuses the SAME [OpenCodeApi]
-     * interface, baseUrl, JSON converter and interceptor chain (auth /
-     * directory / slimapi-version / cache / traffic) as [api] — only the
-     * OkHttp client's retry flag differs.
-     *
-     * **Routing table** (single source of truth, see
-     * [OkHttpClientFactory.mutationClient]):
-     *  - GET (every `api.getX` / `apiV2.getX`) → [api] / [apiV2]
-     *    ([restHttp], retry=true).
-     *  - POST `executeCommand` → [commandApi] ([commandHttp], 300 s,
-     *    retry=false).
-     *  - Every other POST → **[mutationApi]** ([mutationHttp], 30 s,
-     *    retry=false). The 12 methods routed here: `createSession`,
-     *    `promptAsync`, `abortSession`, `summarizeSession`, `forkSession`,
-     *    `revertSession`, `respondPermission`, `replyQuestion`,
-     *    `rejectQuestion`, `replySlimapiQuestion`, `rejectSlimapiQuestion`,
-     *    `respondSlimapiPermission`.
-     *
-     * PATCH (`updateSession`/`updateSessionArchived`) and DELETE
-     * (`deleteSession`) are NOT POSTs and stay on [api] — the T14 contract
-     * is scoped to POST double-send risk; flag if a PATCH/DELETE double-send
-     * hazard needs the same treatment in a follow-up.
-     */
-    private var mutationHttp: OkHttpClient = clientFactory.mutationClient(hostConfig.hostPort)
-    private var mutationRetrofit: Retrofit = buildRetrofit(mutationHttp, hostConfig.baseUrl)
-    @Volatile private var mutationApi: OpenCodeApi = mutationRetrofit.create(OpenCodeApi::class.java)
+    internal fun hostSnapshot(): HostSnapshot = requireClientBundle().hostSnapshot
 
-    /**
-     * §model-selection: a SECOND Retrofit instance rooted at
-     * `<baseUrl>/api/` for the v2 model list endpoint (GET /api/model). Built
-     * with the SAME OkHttp [restHttp] client as [api] so auth / cache / traffic
-     * interceptors apply uniformly. Lives on its own interface ([OpenCodeApiV2])
-     * and its own Retrofit root so the legacy message path ([api].getMessages /
-     * promptAsync) is untouched. (The previous `POST /api/session/{id}/model`
-     * switch endpoint was removed to align with the official packages/app
-     * V1-per-prompt model — the model is now attached per-prompt via
-     * PromptRequest.model, not switched server-side per session.)
-     */
-    private var v2Retrofit: Retrofit = buildV2Retrofit(restHttp, hostConfig.baseUrl)
-    @Volatile private var apiV2: OpenCodeApiV2 = v2Retrofit.create(OpenCodeApiV2::class.java)
+    private fun requireClientBundle(): ClientBundle =
+        currentClientBundle ?: error("OpenCodeRepository has no published ClientBundle")
 
     /**
      * Task 11 round-2 (oracle I3 — atomic state mutation boundary): the
@@ -310,17 +274,13 @@ class OpenCodeRepository @Inject constructor(
      * / [markSlimReconcileAligned] / [clearSlimLocalMessages] for the
      * re-evaluation sites.
      *
-     * # D3 (epoch check) — release-gate gap
+     * # D3 (epoch / generation check)
      *
-     * TODO(release-gate): epoch check before commit (see
-     * `.ocmar/workflows/slimapi-client-v1/problem-report-wip.md` C-D3). The
-     * atomic boundary guarantees in-process consistency but does NOT
-     * validate that the host epoch is still current at commit time. A host
-     * switch mid-reconcile can land a stale-state `put` into the NEW host's
-     * `slimSseState`. The fix requires the caller to capture an epoch /
-     * [ConnectionIdentity] and the boundary to validate it before write —
-     * out of scope for T11 (cross-cutting concurrency hardening; flagged
-     * for a post-T18 hardening mini-task).
+     * Every token carries the operation-entry [ConnectionIdentity] epoch and
+     * the published [ClientBundle] generation separately from the slim
+     * marker. The state-machine boundary validates all three while holding
+     * [slimStateLock], immediately before the in-memory write. A result from
+     * an old host therefore cannot land in the new host's state.
      */
     private val slimStateLock = Any()
 
@@ -331,12 +291,22 @@ class OpenCodeRepository @Inject constructor(
     @Inject lateinit var identityStore: ConnectionIdentityStore
 
     /**
+     * Plain unit-test constructions do not receive Hilt field injection. Keep
+     * token capture usable for those callers while production still replaces
+     * this with the process-shared injected store before any work starts.
+     */
+    private val fallbackIdentityStore = ConnectionIdentityStore()
+
+    private fun identityStoreOrFallback(): ConnectionIdentityStore =
+        if (::identityStore.isInitialized) identityStore else fallbackIdentityStore
+
+    /**
      * Epoch provider for the slim state machine. Reads from [identityStore] lazily.
      * Defined as a field (not inline lambda) so it can be referenced in both
      * [slimStateMachine] construction and any future usage.
      */
     private val epochProvider: () -> Long = {
-        identityStore.currentEpoch()
+        identityStoreOrFallback().currentEpoch()
     }
 
     /**
@@ -347,6 +317,8 @@ class OpenCodeRepository @Inject constructor(
     private val slimStateMachine = SlimSseStateMachine(
         slimStateLock = slimStateLock,
         epochProvider = epochProvider,
+        identityCaptureProvider = { identityStoreOrFallback().capture() },
+        clientBundleProvider = { currentClientBundle },
     )
 
     /**
@@ -363,6 +335,16 @@ class OpenCodeRepository @Inject constructor(
     class SlimCommitToken internal constructor(
         internal val marker: Any,
         internal val issuedReady: Boolean,
+        /** ConnectionIdentity captured at slim-operation entry. */
+        internal val capturedConnectionIdentity: ConnectionIdentity? = null,
+        /** IdentityStore epoch captured independently of the slim marker. */
+        internal val capturedIdentityEpoch: Long? = null,
+        /** Published ClientBundle generation captured independently of the slim marker. */
+        internal val capturedClientBundleGeneration: Long? = null,
+        /** Endpoint fingerprint belonging to the captured ClientBundle. */
+        internal val capturedEndpointFp: String? = null,
+        /** Immutable transport/API bundle used by this operation, when available. */
+        internal val capturedClientBundle: ClientBundle? = null,
     )
 
     class StaleSlimCommitException internal constructor() :
@@ -516,7 +498,7 @@ class OpenCodeRepository @Inject constructor(
      * Returns the live [HostConfig.slim] value (volatile read), so it
      * reflects the most recent [configure] call.
      */
-     val isSlimMode: Boolean get() = hostConfig.slim
+     val isSlimMode: Boolean get() = requireClientBundle().hostSnapshot.slimHost
 
     // ── ι-A capability access surface (forwarders → ServerCompatProfile) ──
     // L4+ 消费者（协调/service/UI，多数已持 repository 句柄，部分以函数参数接收）
@@ -535,6 +517,117 @@ class OpenCodeRepository @Inject constructor(
 
     /** ι-A: StatusAggregator 是否走 slim 扇出（vs legacy bulk `/session/status`）。 */
     val usesSlimStatusFanOut: Boolean get() = serverCompatProfile.usesSlimStatusFanOut
+
+    private data class CandidateSsl(
+        val config: SslConfig,
+        val clientCertError: String?,
+    )
+
+    /** Resolve candidate TLS without mutating the factory used by the live bundle. */
+    private fun resolveCandidateSsl(
+        hostPort: String?,
+        clientCert: ClientCertMaterial?,
+    ): CandidateSsl {
+        val preparedClientCert = clientCert?.let { material ->
+            runCatching { buildMutualTlsConfig(material) }
+        }
+        val config = preparedClientCert?.getOrNull()
+            ?: hostPort?.let { tofuStore.pinnedSpki(it) }?.let(::buildTofuPinnedConfig)
+            ?: SslConfig.SystemDefault
+        return CandidateSsl(
+            config = config,
+            clientCertError = preparedClientCert?.exceptionOrNull()?.message,
+        )
+    }
+
+    private fun buildClientBundle(
+        hostSnapshot: HostSnapshot,
+        generation: Long,
+        effectiveSslConfig: SslConfig,
+        clientCertError: String? = null,
+    ): ClientBundle {
+        val factory = networkGraph.clientFactoryFor(hostSnapshot, effectiveSslConfig)
+        val ownedClients = mutableListOf<OkHttpClient>()
+        return try {
+            val restHttp = factory.restClient(hostSnapshot.hostPort)
+            ownedClients += restHttp
+            val restRetrofit = buildRetrofit(restHttp, hostSnapshot.baseUrl)
+            val restApi = restRetrofit.create(OpenCodeApi::class.java)
+
+            val sseHttp = factory.sseClient(hostSnapshot.hostPort)
+            ownedClients += sseHttp
+            val sseClient = SSEClient(sseHttp)
+
+            val commandHttp = factory.commandClient(hostSnapshot.hostPort)
+            ownedClients += commandHttp
+            val commandRetrofit = buildRetrofit(commandHttp, hostSnapshot.baseUrl)
+            val commandApi = commandRetrofit.create(OpenCodeApi::class.java)
+
+            val mutationHttp = factory.mutationClient(hostSnapshot.hostPort)
+            ownedClients += mutationHttp
+            val mutationRetrofit = buildRetrofit(mutationHttp, hostSnapshot.baseUrl)
+            val mutationApi = mutationRetrofit.create(OpenCodeApi::class.java)
+
+            val v2Retrofit = buildV2Retrofit(restHttp, hostSnapshot.baseUrl)
+            val apiV2 = v2Retrofit.create(OpenCodeApiV2::class.java)
+
+            ClientBundle(
+                generation = generation,
+                hostSnapshot = hostSnapshot,
+                effectiveSslConfig = effectiveSslConfig,
+                clientCertError = clientCertError,
+                restHttp = restHttp,
+                restRetrofit = restRetrofit,
+                restApi = restApi,
+                sseHttp = sseHttp,
+                sseClient = sseClient,
+                commandHttp = commandHttp,
+                commandRetrofit = commandRetrofit,
+                commandApi = commandApi,
+                mutationHttp = mutationHttp,
+                mutationRetrofit = mutationRetrofit,
+                mutationApi = mutationApi,
+                v2Retrofit = v2Retrofit,
+                apiV2 = apiV2,
+                ownedClients = ownedClients,
+            )
+        } catch (error: Throwable) {
+            ownedClients.forEach { client ->
+                client.dispatcher.cancelAll()
+                client.connectionPool.evictAll()
+            }
+            throw error
+        }
+    }
+
+    @Synchronized
+    private fun publishClientBundle(
+        candidate: ClientBundle,
+        hostSnapshot: HostSnapshot,
+        clientCert: ClientCertMaterial? = null,
+        updateClientCert: Boolean = false,
+    ) {
+        val previous = currentClientBundle
+        // This is the sole client-generation publication write.
+        currentClientBundle = candidate
+        // C3: publish the StoreState stamp under the same repository monitor as
+        // the volatile bundle write. Token-stream reducers therefore cannot
+        // observe a new bundle paired with the previous stamp.
+        onBundlePublished?.invoke(candidate.generation, candidate.endpointFp)
+        networkGraph.hostConfig.configure(
+            baseUrl = hostSnapshot.baseUrl,
+            username = hostSnapshot.username,
+            password = hostSnapshot.password,
+            hostPort = hostSnapshot.hostPort,
+            slim = hostSnapshot.slimHost,
+        )
+        // This mirror is updated only after the immutable bundle is published;
+        // active clients and getters use the bundle's effective SSL value.
+        if (updateClientCert) {
+            networkGraph.sslConfigFactory.configureClientCert(clientCert)
+        }
+        previous?.retire()
+    }
 
     private fun buildRetrofit(client: OkHttpClient, baseUrl: String): Retrofit {
         val url = if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl"
@@ -563,24 +656,14 @@ class OpenCodeRepository @Inject constructor(
 
     @Synchronized
     private fun rebuildClients() {
-        restHttp = clientFactory.restClient(hostConfig.hostPort)
-        sseHttp = clientFactory.sseClient(hostConfig.hostPort)
-        retrofit = buildRetrofit(restHttp, hostConfig.baseUrl)
-        api = retrofit.create(OpenCodeApi::class.java)
-        // §grouping-rewrite item 4: rebuild the command-side client + Retrofit
-        // so a host switch (configure) refreshes baseUrl / auth on it too.
-        commandHttp = clientFactory.commandClient(hostConfig.hostPort)
-        commandRetrofit = buildRetrofit(commandHttp, hostConfig.baseUrl)
-        commandApi = commandRetrofit.create(OpenCodeApi::class.java)
-        // T14: same for the mutation-side client + Retrofit — every POST
-        // wrapper except `executeCommand` goes through mutationApi, so a host
-        // switch MUST refresh baseUrl / auth / TOFU on it too.
-        mutationHttp = clientFactory.mutationClient(hostConfig.hostPort)
-        mutationRetrofit = buildRetrofit(mutationHttp, hostConfig.baseUrl)
-        mutationApi = mutationRetrofit.create(OpenCodeApi::class.java)
-        v2Retrofit = buildV2Retrofit(restHttp, hostConfig.baseUrl)
-        apiV2 = v2Retrofit.create(OpenCodeApiV2::class.java)
-        sseClient = SSEClient(sseHttp)
+        val current = requireClientBundle()
+        val candidate = buildClientBundle(
+            hostSnapshot = current.hostSnapshot,
+            generation = current.generation + 1L,
+            effectiveSslConfig = networkGraph.sslConfigFactory.sslConfigFor(current.hostSnapshot.hostPort),
+            clientCertError = current.clientCertError,
+        )
+        publishClientBundle(candidate, current.hostSnapshot)
     }
 
     /**
@@ -611,7 +694,7 @@ class OpenCodeRepository @Inject constructor(
         clientCert: ClientCertMaterial? = null,
         /**
          * R8 slim-mode foundation: 当前 profile 是否启用省流模式（指向 oc-slimapi
-         * sidecar）。透传给 [hostConfig.slim]，由 [SlimapiVersionInterceptor] 与
+         * sidecar）。透传给 [networkGraph.hostConfig.slim]，由 [SlimapiVersionInterceptor] 与
          * [checkHealth] / [checkHealthFor] / [captureServerCert] 路由使用。
          *
          * 默认 false（legacy 直连 opencode）——保持现有调用方（ui / service）行为
@@ -647,14 +730,32 @@ class OpenCodeRepository @Inject constructor(
         // propagates the failure.
         requireCurrentReconfigureTicket(ticket)
         try {
-            // §2.4: MUST precede hostConfig.configure / rebuildClients so the
-            // shared sslConfigFactory holds the new mTLS material when the live
-            // REST/SSE/command clients are rebuilt (they read sslConfigFor(...)).
-            sslConfigFactory.configureClientCert(clientCert)
-            hostConfig.configure(baseUrl, username, password, hostPort, slim = slim)
-            // Cluster A / T11: slim bookmarks were already cleared in
-            // beginSlimReconfigure under slimStateLock. Only network rewire remains.
-            rebuildClients()
+            // P11: build every component from one immutable candidate snapshot.
+            // Neither HostConfig nor the held SSL certificate state is changed
+            // until this complete build succeeds.
+            val candidateSnapshot = HostSnapshot.from(
+                baseUrl = baseUrl,
+                username = username,
+                password = password,
+                hostPort = hostPort,
+                slimHost = slim,
+            )
+            val candidateSsl = resolveCandidateSsl(candidateSnapshot.hostPort, clientCert)
+            val current = requireClientBundle()
+            val candidate = buildClientBundle(
+                hostSnapshot = candidateSnapshot,
+                generation = current.generation + 1L,
+                effectiveSslConfig = candidateSsl.config,
+                clientCertError = candidateSsl.clientCertError,
+            )
+            // Atomic client publication, then old-generation retirement. The
+            // source/readiness publication below remains after completion.
+            publishClientBundle(
+                candidate = candidate,
+                hostSnapshot = candidateSnapshot,
+                clientCert = clientCert,
+                updateClientCert = true,
+            )
             // C-D3 rev-3 readiness bit: only after every ssl/host/client step
             // succeeds do new tokens become valid. On throw, readiness stays
             // false (fail-forward) — no token can commit until a later
@@ -687,14 +788,14 @@ class OpenCodeRepository @Inject constructor(
             // 事务全成功后——与 completeSlimReconfigure 的「readiness 仅每步成功后才发布」
             // 纪律一致（见上注释）。throw 时 slimConnection 保持先前值（= 仍 live 的旧连接
             // mode；新 mode 从未 live，故不应发布）。configure() 是 fail-forward（不回滚旧
-            // hostConfig），但能力模型只反映"最近一次成功 live 的 mode"，与 readiness 同语义。
+            // networkGraph.hostConfig），但能力模型只反映"最近一次成功 live 的 mode"，与 readiness 同语义。
             //
             // 受管写点（I8 扩展）：本行是 setSlimConnection 的唯一受管调用方；与 probe
             // 写点（update/updateSlimapi，由 checkHealthFor / probeSlimapiHealth 尾部调用）
             // 并列。仍在 configure() @Synchronized monitor 内（I5/I6/I7 不变量保持）。
             // reconfigure 中途（新栈未确认前）slimConnection 仍报旧 mode = 仍 operative 的
             // 旧连接；L4+ 无锁读到的始终是"当前仍 live 的 mode"。mode 在此刻 authoritatively
-            // 确立（= hostConfig.slim），不能从 serverCompatProfile 现有字段推导（legacy 模式
+            // 确立（= networkGraph.hostConfig.slim），不能从 serverCompatProfile 现有字段推导（legacy 模式
             // 下 slimapi* 全 null；slim 模式首次 health 成功前 slimapi* 也全 null）。
             serverCompatProfile.setSlimConnection(slim)
         } catch (error: Throwable) {
@@ -712,14 +813,14 @@ class OpenCodeRepository @Inject constructor(
      * over TOFU pin, SystemDefault safe fallback). Callers
      * ([HttpImageHolder] / cold-start image sync) use this to mirror the same
      * trust policy onto the markdown image client. `@Synchronized` because it
-     * reads the mutable [sslConfigFactory] state that [configure] writes under
+     * reads the mutable [networkGraph.sslConfigFactory] state that [configure] writes under
      * the same monitor (v3-glmer R2).
      *
      * §tofu R2: resolves via [SslConfigFactory.sslConfigFor] keyed by the
      * current [HostConfig.hostPort] (was `allowInsecure`).
      */
     @Synchronized
-    fun currentSslConfig(): SslConfig = sslConfigFactory.sslConfigFor(hostConfig.hostPort)
+    fun currentSslConfig(): SslConfig = requireClientBundle().effectiveSslConfig
 
     /**
      * §tofu fix: 当前 live SSL 配置是否走 mTLS 路径（客户端证书已配置并加载）。
@@ -731,7 +832,7 @@ class OpenCodeRepository @Inject constructor(
 
     /**
      * §tokenstream-mtls-fix: build a token-stream OkHttp client via THIS repository's
-     * [clientFactory] (whose [sslConfigFactory] holds the mTLS material loaded by
+     * [networkGraph.clientFactory] (whose [networkGraph.sslConfigFactory] holds the mTLS material loaded by
      * [configure]), so the token-stream SSE trusts the same server CA as REST/SSE.
      *
      * Before this, the token stream was wired (in [cn.vectory.ocdroid.di.ControllerModule]
@@ -740,7 +841,7 @@ class OpenCodeRepository @Inject constructor(
      * back to [SslConfig.SystemDefault] → "Trust anchor for certification path not
      * found" under mTLS + slim (REST/SSE worked because they read THIS factory).
      *
-     * Delegates to [OkHttpClientFactory.tokenStreamClient]; [sslConfigFactory] is read
+     * Delegates to [OkHttpClientFactory.tokenStreamClient]; [networkGraph.sslConfigFactory] is read
      * live on each call (a fresh [OkHttpClient] is built per open), so a post-configure
      * open always picks up the current mTLS / host state — the same live-host-config
      * invariant the DI provider already honours by resolving the URL at open time.
@@ -748,8 +849,21 @@ class OpenCodeRepository @Inject constructor(
      * Additive public method — does NOT change the constructor (the
      * [T3RepositoryExtractFreezeTest] JVM-arity freeze stays GREEN).
      */
-    fun tokenStreamClient(hostPort: String?): OkHttpClient =
-        clientFactory.tokenStreamClient(hostPort)
+    fun tokenStreamClient(hostPort: String?): OkHttpClient {
+        val bundle = requireClientBundle()
+        return networkGraph.clientFactoryFor(bundle.hostSnapshot, bundle.effectiveSslConfig)
+            .tokenStreamClient(hostPort)
+    }
+
+    /**
+     * Token-stream construction bound to a previously captured immutable
+     * bundle. Unlike the compatibility overload above, this method never
+     * re-reads the published bundle, so resolve-time URL/client/SSL identity
+     * stays coherent across a concurrent configure.
+     */
+    internal fun tokenStreamClient(bundle: ClientBundle): OkHttpClient =
+        networkGraph.clientFactoryFor(bundle.hostSnapshot, bundle.effectiveSslConfig)
+            .tokenStreamClient(bundle.hostSnapshot.hostPort)
 
     /**
      * §fix-3 (gro-1#2/gpt-2#2/max-1 M1): 转发 [SslConfigFactory.lastClientCertError]。
@@ -758,7 +872,7 @@ class OpenCodeRepository @Inject constructor(
      * 据此显示「证书加载失败」而非泛化连接失败（防 fail-open 静默降级）。null = ok 或
      * 未配置 mTLS。
      */
-    val lastClientCertError: String? get() = sslConfigFactory.lastClientCertError
+    val lastClientCertError: String? get() = requireClientBundle().clientCertError
 
     /**
      * §L4a1 (plan v3, Wave ζ): the extracted TOFU concern (capture probe +
@@ -769,13 +883,13 @@ class OpenCodeRepository @Inject constructor(
      * resolves unchanged.
      *
      * **I4** — constructed with the SAME [tofuStore] passed to
-     * [sslConfigFactory], so pin writes here are immediately visible to the
+     * [networkGraph.sslConfigFactory], so pin writes here are immediately visible to the
      * pin lookup in `SslConfigFactory.sslConfigFor`.
      *
      * **I9 / I7** — [TofuRepository] receives an [TofuRepository]`-wired`
      * `onTofuApplied` callback that calls this class's `@Synchronized`
      * [rebuildClients] **synchronously** (no coroutine dispatch) guarded by
-     * `hostConfig.hostPort == hostPort` (original L857 semantics), so the pin
+     * `networkGraph.hostConfig.hostPort == hostPort` (original L857 semantics), so the pin
      * takes effect on the next SSL handshake and the rebuild stays serialized
      * with [configure]. [applyTofuDecision] is also `@Synchronized` on this
      * monitor — the delegate holds this monitor across write+rebuild, fully
@@ -790,7 +904,7 @@ class OpenCodeRepository @Inject constructor(
             // @Synchronized on this monitor; since applyTofuDecision's
             // delegate is also @Synchronized on this monitor, the call is
             // reentrant and pin-then-rebuild is atomic w.r.t. configure().
-            if (hostConfig.hostPort == hostPort) {
+            if (currentClientBundle()?.hostSnapshot?.hostPort == hostPort) {
                 rebuildClients()
             }
         }
@@ -803,13 +917,11 @@ class OpenCodeRepository @Inject constructor(
      * [expandMessagesFullBatch] delegate below so every existing caller
      * (PartExpandState / ExpandPartsUseCase / all tests) resolves unchanged.
      *
-     * **I3** — `apiProvider = { api }` re-reads the `api` field on EVERY
-     * expand call (a lambda that captures `this`, not a cached snapshot), so
-     * [configure]'s [rebuildClients] reassignment of `api` takes effect on
-     * the next expand. Caching `api` at construction would freeze a stale
-     * client past a host switch (silent stale-client bug).
+     * **I3** — the token-aware provider selects the immutable REST API from
+     * the operation's captured [ClientBundle]. A reconfigure therefore cannot
+     * make an in-flight expand switch to a later generation.
      *
-     * **hostPort-live** — `hostPortProvider = { hostConfig.hostPort ?: "" }`
+     * **hostPort-live** — `hostPortProvider = { networkGraph.hostConfig.hostPort ?: "" }`
      * re-reads live; host switches re-key the engine's single-flight + cache.
      *
      * **I16** — `parseErrorCode` / `parseErrorCodeFromRaw` are passed in as
@@ -817,8 +929,9 @@ class OpenCodeRepository @Inject constructor(
      * drain / health / status paths) and MUST stay in OCR.
      */
     private val expandBatchEngine = ExpandBatchEngine(
-        apiProvider = { api },
-        hostPortProvider = { hostConfig.hostPort ?: "" },
+        apiProvider = { token -> token.capturedClientBundle?.restApi ?: api },
+        requireSlimTokenCurrent = { token -> requireSlimTokenCurrent(token) },
+        hostPortProvider = { currentClientBundle()?.hostSnapshot?.hostPort ?: "" },
         parseErrorCode = { parseErrorCode(it) },
         parseErrorCodeFromRaw = { parseErrorCodeFromRaw(it) },
         retryAfterHeaderToMs = { retryAfterHeaderToMs(it) },
@@ -829,10 +942,9 @@ class OpenCodeRepository @Inject constructor(
      * See [SlimSyncEngine] for the full contract. Field-init mirrors the
      * [expandBatchEngine] pattern.
      *
-     * **I3** — `apiProvider = { api }` re-reads the `api` field on EVERY
-     * call (a lambda that captures `this`, not a cached snapshot), so
-     * [configure]'s [rebuildClients] reassignment of `api` takes effect on
-     * the next message sync operation.
+     * **I3** — `apiProvider = { token -> ... }` binds each message-sync
+     * operation to its captured client bundle, while the token-aware
+     * generation guard rejects stale results.
      *
      * **slimStateMachine** — injected directly (not lambda) because it is a
      * stable singleton that outlives any host config cycle.
@@ -843,7 +955,7 @@ class OpenCodeRepository @Inject constructor(
      */
     private val slimSyncEngine by lazy {
         SlimSyncEngine(
-            apiProvider = { api },
+            apiProvider = { token -> token.capturedClientBundle?.restApi ?: api },
             slimStateMachine = slimStateMachine,
             parseErrorCode = { parseErrorCode(it) },
             retryAfterHeaderToMs = { retryAfterHeaderToMs(it) },
@@ -856,7 +968,7 @@ class OpenCodeRepository @Inject constructor(
      *
      * ι-4: @Volatile — 此为并发路由位([configure] @Synchronized monitor 内写,
      * [getSessions]/[getSessionsForDirectory] 无锁读);volatile 保证 reader 线程
-     * 可见最新选束,接替原 isSlimMode(读 hostConfig._slim @Volatile)的并发路由职责。
+     * 可见最新选束,接替原 isSlimMode(读 networkGraph.hostConfig._slim @Volatile)的并发路由职责。
      * (rev-4/rev-10 stage 收尾加固)
      */
     @Volatile
@@ -918,7 +1030,7 @@ class OpenCodeRepository @Inject constructor(
      * OCR-level serialization preserved, not merely the callback path). The
      * synchronous rebuild (I9) fires inside the delegate via the
      * `onTofuApplied` callback wired into [tofuRepository], which re-checks
-     * `hostConfig.hostPort == hostPort` (original L857 guard) and calls this
+     * `networkGraph.hostConfig.hostPort == hostPort` (original L857 guard) and calls this
      * class's [rebuildClients] — reentrant under this same held monitor.
      */
     @Synchronized
@@ -928,7 +1040,7 @@ class OpenCodeRepository @Inject constructor(
     /**
      * §tofu R2 / §L4a1: query the current pinned SPKI for [hostPort] —
      * DELEGATES to [tofuRepository.pinnedSpkiFor] (reads the SAME shared
-     * [tofuStore] that [sslConfigFactory] reads during SSL negotiation — I4).
+     * [tofuStore] that [networkGraph.sslConfigFactory] reads during SSL negotiation — I4).
      */
     fun pinnedSpkiFor(hostPort: String): String? = tofuRepository.pinnedSpkiFor(hostPort)
 
@@ -976,12 +1088,18 @@ class OpenCodeRepository @Inject constructor(
      * M1 门闩对所有 `/slimapi/` 下路径生效，含 health。
      */
     suspend fun checkHealth(): Result<HealthResponse> = runSuspendCatching {
-        if (!hostConfig.slim) {
+        val bundle = requireClientBundle()
+        if (!bundle.hostSnapshot.slimHost) {
             // legacy：行为字节级不变。
-            api.getHealth()
+            bundle.restApi.getHealth()
         } else {
             // C3 fix：探 sidecar 自身 health，不经 catch-all 透传。
-            probeSlimapiHealth(hostConfig.baseUrl, hostConfig.username, hostConfig.password)
+            probeSlimapiHealth(
+                baseUrl = bundle.hostSnapshot.baseUrl,
+                username = bundle.hostSnapshot.username,
+                password = bundle.hostSnapshot.password,
+                sslConfig = bundle.effectiveSslConfig,
+            )
         }
     }
 
@@ -989,7 +1107,7 @@ class OpenCodeRepository @Inject constructor(
      * R8 slim-mode foundation / C3 fix（共用实现）：裸 OkHttp `GET {baseUrl}/slimapi/health`
      * 带 `X-Slimapi-Version` 头，把 sidecar 响应适配为 [HealthResponse]。
      *
-     * - 用 [clientFactory.healthClient]（无 base 链拦截器——避免 Directory / Auth /
+     * - 用 [networkGraph.clientFactory.healthClient]（无 base 链拦截器——避免 Directory / Auth /
      *   Cache-Control 干扰一次性探针；版本头显式注入，因为 healthClient 不挂
      *   [SlimapiVersionInterceptor]）。
      * - Basic Auth 同步注入（与 [checkHealthFor] 一致语义）。
@@ -999,11 +1117,12 @@ class OpenCodeRepository @Inject constructor(
     private suspend fun probeSlimapiHealth(
         baseUrl: String,
         username: String?,
-        password: String?
+        password: String?,
+        sslConfig: SslConfig? = null,
     ): HealthResponse = withContext(Dispatchers.IO) {
         val resolvedHostPort = hostPortFromUrl(baseUrl)
-        val cfg = sslConfigFactory.sslConfigFor(resolvedHostPort)
-        val client = clientFactory.healthClient(cfg)
+        val cfg = sslConfig ?: networkGraph.sslConfigFactory.sslConfigFor(resolvedHostPort)
+        val client = networkGraph.clientFactory.healthClient(cfg)
         val normalizedUrl = (if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl")
             .trimEnd('/') + SlimapiContract.SLIMAPI_HEALTH_PATH
         val requestBuilder = Request.Builder()
@@ -1138,8 +1257,8 @@ class OpenCodeRepository @Inject constructor(
             // 的缓存，误出示其客户端证书 / 只信其私有 CA，甚至泄漏客户端身份给无关 host。
             // §tofu R2: hostPort 替代 allowInsecure，探测也走 TOFU pin 查询。
             val resolvedHostPort = hostPort ?: hostPortFromUrl(baseUrl)
-            val cfg: SslConfig = sslConfigFactory.resolveProbe(resolvedHostPort, clientCert)
-            val client = clientFactory.healthClient(cfg)
+            val cfg: SslConfig = networkGraph.sslConfigFactory.resolveProbe(resolvedHostPort, clientCert)
+            val client = networkGraph.clientFactory.healthClient(cfg)
             // R8 slim-mode foundation / C3: slim=true → /slimapi/health（带版本头）;
             // slim=false → /global/health（行为字节级不变）。
             val healthPath = if (slim) SlimapiContract.SLIMAPI_HEALTH_PATH
@@ -1424,13 +1543,44 @@ class OpenCodeRepository @Inject constructor(
 
     /**
      * §Phase1B lightweight tail probe: fetches only the single newest message
-     * id for [sessionId] (limit=1, desc default).
+     * id for [sessionId] (limit=1, desc default), using the active transport
+     * route without exposing its raw mode flag to callers.
      */
     suspend fun probeLatestMessageId(sessionId: String): Result<String?> = runSuspendCatching {
         val response = api.getMessages(sessionId, limit = 1, before = null)
         if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
         response.body()?.firstOrNull()?.info?.id
     }
+
+    /**
+     * Boundary facade for callers that only need the current route's latest
+     * message probe. Route selection stays inside the repository and both
+     * implementations expose the same [ProbeResult] contract.
+     */
+    suspend fun probeLatestMessageIdForCurrent(sessionId: String): ProbeResult =
+        if (requireClientBundle().hostSnapshot.slimHost) {
+            probeLatestSlim(sessionId)
+        } else {
+            probeLatestMessageId(sessionId).toProbeResult()
+        }
+
+    private fun Result<String?>.toProbeResult(): ProbeResult = fold(
+        onSuccess = { messageId ->
+            ProbeResult(
+                ok = true,
+                empty = messageId == null,
+                messageID = messageId,
+            )
+        },
+        onFailure = { error ->
+            ProbeResult(
+                ok = false,
+                httpStatus = error.message
+                    ?.removePrefix("HTTP ")
+                    ?.toIntOrNull(),
+            )
+        },
+    )
 
     /**
      * §slimapi-client-impl-v1 §4 (G3 probeLatestMessageId 收敛): slim-mode
@@ -1759,8 +1909,8 @@ class OpenCodeRepository @Inject constructor(
     suspend fun getPendingPermissions(): Result<List<PermissionRequest>> = runSuspendCatching {
         // 🟡-1 fix (rev-opus): 读 serverCompatProfile.slimConnection（lazy 发布，
         // 与 sessionSource/messageSource/setSlimConnection 同 publish point——均在
-        // configure() completeSlimReconfigure 之后），而非裸 isSlimMode（=hostConfig.slim，
-        // eager 在 hostConfig.configure 即写）。使 permissions 路由与 session/message
+        // configure() completeSlimReconfigure 之后），而非裸 isSlimMode（=networkGraph.hostConfig.slim，
+        // eager 在 networkGraph.hostConfig.configure 即写）。使 permissions 路由与 session/message
         // 路由在 configure 失败/重配窄窗内一致（同读 OLD live mode，不分裂）。
         // 稳态（configure 成功）slimConnection ≡ isSlimMode，行为不变。
         if (serverCompatProfile.slimConnection) {
@@ -2006,13 +2156,15 @@ class OpenCodeRepository @Inject constructor(
      * argument is IGNORED in slim mode (the sidecar is instance-level).
      */
     fun connectSSE(directory: String?): Flow<Result<SSEEvent>> =
-        sseClient.connect(
-            baseUrl = hostConfig.baseUrl,
-            username = hostConfig.username,
-            password = hostConfig.password,
+        requireClientBundle().let { bundle ->
+            bundle.sseClient.connect(
+            baseUrl = bundle.hostSnapshot.baseUrl,
+            username = bundle.hostSnapshot.username,
+            password = bundle.hostSnapshot.password,
             directory = directory,
-            slimMode = hostConfig.slim,
-        )
+            slimMode = bundle.hostSnapshot.slimHost,
+            )
+        }
 
     /**
      * Activates a tunnel by POSTing the password to the tunnel endpoint.
@@ -2030,7 +2182,7 @@ class OpenCodeRepository @Inject constructor(
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runSuspendCatching {
             try {
-                val client = clientFactory.tunnelClient(hostPort)
+                val client = networkGraph.clientFactory.tunnelClient(hostPort)
                 val formBody = FormBody.Builder()
                     .add("persist_auth", "off")
                     .add("pw", password)
@@ -2189,7 +2341,20 @@ class OpenCodeRepository @Inject constructor(
     suspend fun expandMessagesFullBatch(
         sessionId: String,
         ids: Collection<String>,
-    ): ExpandOutcome = expandBatchEngine.expandMessagesFullBatch(sessionId, ids)
+    ): ExpandOutcome = expandMessagesFullBatch(sessionId, ids, captureSlimCommitToken())
+
+    /**
+     * Token-aware expand entry point. The operation uses the immutable API
+     * bundle captured in [token] and is rejected if the slim incarnation,
+     * connection identity, or client-bundle generation changes while it is in
+     * flight. The two-argument overload above remains the compatibility
+     * wrapper for existing callers.
+     */
+    internal suspend fun expandMessagesFullBatch(
+        sessionId: String,
+        ids: Collection<String>,
+        token: SlimCommitToken,
+    ): ExpandOutcome = expandBatchEngine.expandMessagesFullBatch(sessionId, ids, token)
 
     /** §B1: extract Retry-After header value as capped ms (pure, no IO). */
     internal fun retryAfterHeaderToMs(header: String?): Long {
@@ -2599,9 +2764,9 @@ class OpenCodeRepository @Inject constructor(
      *    returns true → dirty ratchets to true here so the next reconcile
      *    pass actually re-fetches.
      *
-     * Atomic: holds [slimStateLock] for the in-memory derive+write.
-     * TODO(release-gate, C-D3): epoch check before commit (see
-     * .ocmar/workflows/slimapi-client-v1/problem-report-wip.md).
+     * Atomic: holds [slimStateLock] for the in-memory derive+write. D3 token
+     * validation includes the captured identity epoch and ClientBundle
+     * generation before this write.
      */
     fun invalidateSlimLocalApplied(
         sessionId: String,
@@ -2620,9 +2785,9 @@ class OpenCodeRepository @Inject constructor(
      * [ControllerEffect.WriteSessionWindow]). In that case the reconciler
      * must RE-RATCHET dirty so the next pass retries the fetch.
      *
-     * Atomic: holds [slimStateLock] for the in-memory derive+write.
-     * TODO(release-gate, C-D3): epoch check before commit (see
-     * .ocmar/workflows/slimapi-client-v1/problem-report-wip.md).
+     * Atomic: holds [slimStateLock] for the in-memory derive+write. D3 token
+     * validation includes the captured identity epoch and ClientBundle
+     * generation before this write.
      */
     fun markSlimDirty(
         sessionId: String,

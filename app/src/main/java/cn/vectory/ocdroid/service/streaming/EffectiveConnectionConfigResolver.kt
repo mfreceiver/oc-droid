@@ -1,12 +1,26 @@
 package cn.vectory.ocdroid.service.streaming
 
 import cn.vectory.ocdroid.data.model.HostProfile
+import cn.vectory.ocdroid.data.repository.ClientBundle
 import cn.vectory.ocdroid.data.repository.HostProfileStore
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.SettingsManager
 import javax.inject.Inject
 import javax.inject.Singleton
 
 enum class EffectiveConnectionSource { Manual, Profile }
+
+/**
+ * Immutable endpoint identity captured from one published repository bundle.
+ * The internal [bundle] keeps the exact immutable bundle reference available
+ * to the token-stream provider without weakening the type at the boundary.
+ */
+data class ResolvedEndpoint internal constructor(
+    val baseUrl: String,
+    val endpointFp: String,
+    val bundleGeneration: Long,
+    internal val bundle: ClientBundle,
+)
 
 /**
  * R8 slim-mode foundation / Cluster B: 服务层透传的「当前生效连接配置」。
@@ -51,18 +65,40 @@ data class EffectiveConnectionConfig(
 
 interface EffectiveConnectionConfigResolver {
     fun resolve(): EffectiveConnectionConfig?
+
     fun activateManual(url: String, username: String? = null, password: String? = null)
     fun activateProfile(profileId: String)
+}
+
+/** Typed C6 endpoint/generation source; avoids implementation casts at DI use sites. */
+interface BundleEndpointResolver {
+    fun resolveEndpoint(repository: OpenCodeRepository): ResolvedEndpoint?
 }
 
 @Singleton
 class DefaultEffectiveConnectionConfigResolver @Inject constructor(
     private val settingsManager: SettingsManager,
     private val hostProfileStore: HostProfileStore,
-) : EffectiveConnectionConfigResolver {
+) : EffectiveConnectionConfigResolver, BundleEndpointResolver {
     override fun resolve(): EffectiveConnectionConfig? = when (resolvedSource()) {
         EffectiveConnectionSource.Manual -> resolveManual()
         EffectiveConnectionSource.Profile -> resolveProfile()
+    }
+
+    override fun resolveEndpoint(repository: OpenCodeRepository): ResolvedEndpoint? {
+        // Keep the explicit no-effective-config fail-closed contract while
+        // taking the published client bundle exactly once for endpoint,
+        // identity, and generation.
+        if (resolve() == null) return null
+        val bundle = repository.currentClientBundle() ?: return null
+        val baseUrl = bundle.hostSnapshot.baseUrl
+        if (baseUrl.isBlank()) return null
+        return ResolvedEndpoint(
+            baseUrl = baseUrl,
+            endpointFp = bundle.endpointFp,
+            bundleGeneration = bundle.generation,
+            bundle = bundle,
+        )
     }
 
     override fun activateManual(url: String, username: String?, password: String?) {

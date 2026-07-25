@@ -11,6 +11,7 @@ import cn.vectory.ocdroid.data.repository.http.SlimapiErrorCodes
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.exponentialBackoffMs
 import cn.vectory.ocdroid.util.runSuspendCatching
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
@@ -33,7 +34,8 @@ import cn.vectory.ocdroid.data.repository.MessagesPage
  * the [ExpandBatchEngine] injection pattern. No helper is re-defined here.
  */
 class SlimSyncEngine internal constructor(
-    private val apiProvider: () -> OpenCodeApi,
+    /** Resolve the API from the operation token, never from a later bundle. */
+    private val apiProvider: (OpenCodeRepository.SlimCommitToken) -> OpenCodeApi,
     private val slimStateMachine: SlimSseStateMachine,
     private val parseErrorCode: (retrofit2.Response<*>) -> String?,
     private val retryAfterHeaderToMs: (String?) -> Long,
@@ -60,8 +62,8 @@ class SlimSyncEngine internal constructor(
         limit: Int? = null,
         before: String? = null,
         token: OpenCodeRepository.SlimCommitToken,
-    ): Result<List<MessageWithParts>> = runSuspendCatching {
-        val response = apiProvider().getSlimapiMessagesSince(sessionId, since, limit, before)
+    ): Result<List<MessageWithParts>> = runSlimStaleAwareCatching(token) {
+        val response = apiProvider(token).getSlimapiMessagesSince(sessionId, since, limit, before)
 
         slimStateMachine.requireSlimTokenCurrent(token)
 
@@ -112,8 +114,8 @@ class SlimSyncEngine internal constructor(
         mode: String? = "skeleton",
         bumpBookmark: Boolean = true,
         token: OpenCodeRepository.SlimCommitToken,
-    ): Result<MessagesPage> = runSuspendCatching {
-        val response = apiProvider().getSlimapiMessages(sessionId, limit, before, mode)
+    ): Result<MessagesPage> = runSlimStaleAwareCatching(token) {
+        val response = apiProvider(token).getSlimapiMessages(sessionId, limit, before, mode)
 
         slimStateMachine.requireSlimTokenCurrent(token)
 
@@ -180,8 +182,12 @@ class SlimSyncEngine internal constructor(
                 directories = directories,
                 roots = true,
                 limit = SLIM_COLDSTART_SESSION_LIMIT,
-            ).getOrNull()
-        }.getOrNull()
+                token = token,
+            ).getOrElse { throw it }
+        }.getOrElse { error ->
+            if (error is OpenCodeRepository.StaleSlimCommitException) throw error
+            null
+        }
 
         // §slim-envelope: /questions + /permissions return {items, errors};
         // flatten `.items` for UI. Per-directory `errors` are logged here
@@ -193,7 +199,7 @@ class SlimSyncEngine internal constructor(
         // rethrows out of this block; coldStartSlimSync returns
         // Result.failure(StaleSlimCommitException) instead.
         val questions = runSuspendCatching {
-            val agg = apiProvider().getSlimapiQuestions(directories)
+            val agg = apiProvider(token).getSlimapiQuestions(directories)
 
             slimStateMachine.requireSlimTokenCurrent(token)
 
@@ -213,7 +219,7 @@ class SlimSyncEngine internal constructor(
         }
 
         val permissions = runSuspendCatching {
-            val agg = apiProvider().getSlimapiPermissions(directories)
+            val agg = apiProvider(token).getSlimapiPermissions(directories)
 
             slimStateMachine.requireSlimTokenCurrent(token)
 
@@ -241,15 +247,15 @@ class SlimSyncEngine internal constructor(
             val bookmark = slimStateMachine.readBookmarkOrThrowIfStale(sid, token)
 
             if (bookmark != null) {
-                runSuspendCatching {
-                    val response = apiProvider().getSlimapiMessagesSince(
+                runSlimStaleAwareCatching(token) {
+                    val response = apiProvider(token).getSlimapiMessagesSince(
                         sid, bookmark, limit = SLIMAPI_DEFAULT_PAGE_LIMIT,
                     )
 
                     slimStateMachine.requireSlimTokenCurrent(token)
 
                     if (!response.isSuccessful) {
-                        return@runSuspendCatching null
+                        return@runSlimStaleAwareCatching null
                     }
 
                     val items = response.body() ?: emptyList()
@@ -264,7 +270,7 @@ class SlimSyncEngine internal constructor(
                     null
                 }
             } else {
-                runSuspendCatching {
+                runSlimStaleAwareCatching(token) {
                     drainSlimapiMessagesBounded(
                         sessionId = sid,
                         pageLimit = SLIMAPI_DEFAULT_PAGE_LIMIT,
@@ -514,14 +520,50 @@ class SlimSyncEngine internal constructor(
                 // distinguishable failure so the reconciler preserves
                 // dirty AND the next reconcile re-enters the cursor
                 // drain from the same pre-drain watermark.
+                if (outcome.cause is CancellationException &&
+                    outcome.cause !is TimeoutCancellationException
+                ) {
+                    throw outcome.cause
+                }
+                if (!slimStateMachine.isSlimCommitTokenCurrent(token)) {
+                    throw OpenCodeRepository.StaleSlimCommitException()
+                }
                 throw OpenCodeRepository.SlimCursorPartialException(outcome.cause)
             }
 
             is SlimDrainOutcome.Degraded -> {
                 // G-F1 loop/zero-progress detection — same contract as Partial:
                 // keep dirty, no watermark advance.
+                if (outcome.cause is CancellationException &&
+                    outcome.cause !is TimeoutCancellationException
+                ) {
+                    throw outcome.cause
+                }
+                if (!slimStateMachine.isSlimCommitTokenCurrent(token)) {
+                    throw OpenCodeRepository.StaleSlimCommitException()
+                }
                 throw OpenCodeRepository.SlimCursorPartialException(outcome.cause)
             }
+        }
+    }
+
+    /**
+     * Converts a transport failure from a retired generation into the slim
+     * incarnation failure promised by the token contract. A current token
+     * keeps the original transport error so transient network failures are
+     * not mislabeled as reconfigure races. Cancellation is always propagated.
+     */
+    private inline fun <T> runSlimStaleAwareCatching(
+        token: OpenCodeRepository.SlimCommitToken,
+        block: () -> T,
+    ): Result<T> {
+        val result = runSuspendCatching(block)
+        val error = result.exceptionOrNull() ?: return result
+        if (error is CancellationException) throw error
+        return if (slimStateMachine.isSlimCommitTokenCurrent(token)) {
+            result
+        } else {
+            Result.failure<T>(OpenCodeRepository.StaleSlimCommitException())
         }
     }
 
@@ -545,10 +587,15 @@ class SlimSyncEngine internal constructor(
         directories: List<String>?,
         roots: Boolean?,
         limit: Int?,
+        token: OpenCodeRepository.SlimCommitToken,
     ): Result<SlimSessionsPage> = runSuspendCatching {
         var lastException: HttpException? = null
         for (attempts in 1..3) {
-            val resp = apiProvider().getSlimapiSessions(directories, roots, limit, null)
+            val resp = apiProvider(token).getSlimapiSessions(directories, roots, limit, null)
+            // The sessions route is also a cross-network suspend.  Validate
+            // immediately on return, before retry/degrade handling can turn an
+            // old-generation response into a seemingly ordinary null piece.
+            slimStateMachine.requireSlimTokenCurrent(token)
             if (resp.isSuccessful) {
                 val sessions = resp.body() ?: emptyList()
                 val headers = resp.headers()

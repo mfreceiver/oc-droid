@@ -1,14 +1,13 @@
 package cn.vectory.ocdroid.data.repository.http
 
 import cn.vectory.ocdroid.BuildConfig
+import cn.vectory.ocdroid.data.repository.HostSnapshot
 import okhttp3.Cache
 import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import java.io.File
 import java.util.concurrent.TimeUnit
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * R-18: unified factory for the OkHttp clients used by
@@ -54,8 +53,7 @@ import javax.inject.Singleton
  * `/slimapi/`. SSE coverage is critical (`/slimapi/events`); a separate
  * SSE-only wiring would be a leak hazard.
  */
-@Singleton
-class OkHttpClientFactory @Inject constructor(
+class OkHttpClientFactory private constructor(
     private val sslConfigFactory: SslConfigFactory,
     private val directoryHeaderInterceptor: DirectoryHeaderInterceptor,
     private val slimapiVersionInterceptor: SlimapiVersionInterceptor,
@@ -63,8 +61,33 @@ class OkHttpClientFactory @Inject constructor(
     private val authInterceptor: AuthInterceptor,
     private val cacheControlInterceptor: CacheControlInterceptor,
     private val trafficCountingInterceptor: TrafficCountingInterceptor,
-    private val responseSizeGuardInterceptor: ResponseSizeGuardInterceptor
+    private val responseSizeGuardInterceptor: ResponseSizeGuardInterceptor,
+    private val sharedResources: SharedHttpResources = SharedHttpResources(),
+    private val effectiveSslConfig: SslConfig? = null,
 ) {
+
+    /** Compatibility constructor retained for existing direct unit tests. */
+    constructor(
+        sslConfigFactory: SslConfigFactory,
+        directoryHeaderInterceptor: DirectoryHeaderInterceptor,
+        slimapiVersionInterceptor: SlimapiVersionInterceptor,
+        slimapiDebugInterceptor: SlimapiDebugInterceptor,
+        authInterceptor: AuthInterceptor,
+        cacheControlInterceptor: CacheControlInterceptor,
+        trafficCountingInterceptor: TrafficCountingInterceptor,
+        responseSizeGuardInterceptor: ResponseSizeGuardInterceptor,
+    ) : this(
+        sslConfigFactory = sslConfigFactory,
+        directoryHeaderInterceptor = directoryHeaderInterceptor,
+        slimapiVersionInterceptor = slimapiVersionInterceptor,
+        slimapiDebugInterceptor = slimapiDebugInterceptor,
+        authInterceptor = authInterceptor,
+        cacheControlInterceptor = cacheControlInterceptor,
+        trafficCountingInterceptor = trafficCountingInterceptor,
+        responseSizeGuardInterceptor = responseSizeGuardInterceptor,
+        sharedResources = SharedHttpResources(),
+        effectiveSslConfig = null,
+    )
 
     /**
      * §16.1(a): OkHttp HTTP cache singleton. Lives as a `by lazy` field on
@@ -85,18 +108,30 @@ class OkHttpClientFactory @Inject constructor(
      * `returnDefaultValues` / mocking — the pre-existing repository had no
      * Log usage and we preserve that invariant.
      */
-    private val httpCache: Cache? by lazy {
-        val baseDir = System.getProperty("java.io.tmpdir")?.let(::File) ?: return@lazy null
-        if (!baseDir.exists() && !baseDir.mkdirs()) return@lazy null
-        val cacheDir = File(baseDir, "okhttp")
-        // §key-leak-purge (P1 1A'): one-time, fail-safe purge — see
-        // [applyCachePurgeIfNeeded]. Best-effort here; the marker is written
-        // only when the cache dir is verified gone, so a failed delete retries
-        // on the next launch rather than permanently skipping the purge while
-        // key-bearing residue remains.
-        applyCachePurgeIfNeeded(File(baseDir, "okhttp-cache-purged-v1"), cacheDir)
-        runCatching { Cache(cacheDir, HTTP_CACHE_SIZE_BYTES) }
-            .getOrNull()
+    private val httpCache: Cache? get() = sharedResources.httpCache
+
+    /**
+     * Create the generation-specific interceptor chain while retaining the
+     * graph-owned cache and host-independent collaborators. No interceptor in
+     * this returned factory reads a mutable HostConfig.
+     */
+    internal fun forSnapshot(
+        snapshot: HostSnapshot,
+        sslConfig: SslConfig,
+    ): OkHttpClientFactory {
+        val sanitizer = CachePathSanitizer(snapshot)
+        return OkHttpClientFactory(
+            sslConfigFactory = sslConfigFactory,
+            directoryHeaderInterceptor = directoryHeaderInterceptor,
+            slimapiVersionInterceptor = SlimapiVersionInterceptor(snapshot),
+            slimapiDebugInterceptor = slimapiDebugInterceptor,
+            authInterceptor = AuthInterceptor(snapshot),
+            cacheControlInterceptor = CacheControlInterceptor(snapshot, sanitizer),
+            trafficCountingInterceptor = trafficCountingInterceptor,
+            responseSizeGuardInterceptor = responseSizeGuardInterceptor,
+            sharedResources = sharedResources,
+            effectiveSslConfig = sslConfig,
+        )
     }
 
     /**
@@ -115,7 +150,7 @@ class OkHttpClientFactory @Inject constructor(
             .apply {
                 // R-01 / §tofu R2: SSL via the single shared entry point —
                 // resolves TOFU pin for [hostPort] when present.
-                applySsl(sslConfigFactory.sslConfigFor(hostPort))
+                applySsl(effectiveSslConfig ?: sslConfigFactory.sslConfigFor(hostPort))
                 // §16.1(a): attach the singleton cache (if resolvable) so
                 // it is reused across host switches rather than rebuilt
                 // per client.
@@ -134,7 +169,7 @@ class OkHttpClientFactory @Inject constructor(
             .addInterceptor(slimapiVersionInterceptor)
             // I-R5-CAP-DUPLICATES: slimapi capability 选入头（B2 Opt-A），紧接版本头
             // 之后，同样位于 auth 之前。门闩同版本头：仅 slim=true + /slimapi/ 路径。
-            .addInterceptor(SlimapiCapabilitiesInterceptor(slimapiVersionInterceptor.hostConfig))
+            .addInterceptor(SlimapiCapabilitiesInterceptor(slimapiVersionInterceptor.hostSnapshot))
             // POST-RELEASE instrumentation (slimapi-client-v1): dedicated
             // slimapi DEBUG interceptor — logs method/encodedPath/version
             // header/directory query/round-trip ms + best-effort error code
@@ -370,8 +405,12 @@ class OkHttpClientFactory @Inject constructor(
     fun tokenStreamClient(hostPort: String?): OkHttpClient =
         OkHttpClient.Builder()
             .apply {
-                // §tofu R2: TOFU pin / mTLS resolution via the single entry point.
-                applySsl(sslConfigFactory.sslConfigFor(hostPort))
+                // Use the generation-captured config when this factory was
+                // created by forSnapshot(). In particular, token streams must
+                // retain the candidate bundle's mTLS socket factory instead of
+                // re-resolving mutable graph state. The fallback preserves the
+                // compatibility constructor's live-resolution behavior.
+                applySsl(effectiveSslConfig ?: sslConfigFactory.sslConfigFor(hostPort))
                 // NO cache(tokenStreamClient) — see kdoc above.
             }
             .addInterceptor(HttpLoggingInterceptor().apply {
@@ -388,9 +427,16 @@ class OkHttpClientFactory @Inject constructor(
             .retryOnConnectionFailure(true)
             .build()
 
-    companion object {
-        /** §16.1(a): HTTP cache size cap (50 MB) per the redesign plan. */
-        private const val HTTP_CACHE_SIZE_BYTES = 50L * 1024 * 1024
+}
+
+/** Repository-graph lifetime resources shared by all client generations. */
+private class SharedHttpResources {
+    val httpCache: Cache? by lazy {
+        val baseDir = System.getProperty("java.io.tmpdir")?.let(::File) ?: return@lazy null
+        if (!baseDir.exists() && !baseDir.mkdirs()) return@lazy null
+        val cacheDir = File(baseDir, "okhttp")
+        applyCachePurgeIfNeeded(File(baseDir, "okhttp-cache-purged-v1"), cacheDir)
+        runCatching { Cache(cacheDir, 50L * 1024 * 1024) }.getOrNull()
     }
 }
 

@@ -3,12 +3,10 @@ package cn.vectory.ocdroid.ui
 /**
  * Wave 2 lane L2: session-list-domain [reduce] branch bodies extracted as
  * pure helper functions. Covers T1c sessionList-only branches (sessions /
- * openSessionIds / pending* / sessionStatuses / etc.). Same package as
- * [AppAction] / [StoreState] — zero-import dispatch from [reduce].
+ * pending* / sessionStatuses / etc.). Same package as [AppAction] /
+ * [StoreState] — zero-import dispatch from [reduce].
  *
- * Each helper is a verbatim lift of the original `when`-arm body (comments +
- * early `return state` guards preserved). Behavior-preserving: no field
- * added / removed / reordered.
+ * §B4: open-tabs-list / OpenTabsChanged(removed) removed (list-detail D9).
  */
 
 // ── T1c sessionList ownership reduce ───────────────────────────────────
@@ -27,12 +25,6 @@ internal fun reduceSessionCreatedLocal(state: StoreState, action: AppAction.Sess
     ),
 )
 
-internal fun reduceOpenSessionIdsChanged(state: StoreState, action: AppAction.OpenSessionIdsChanged): StoreState = state.copy(
-    sessionList = state.sessionList.copy(
-        openSessionIds = action.openSessionIds,
-    ),
-)
-
 internal fun reduceSessionArchivedLocal(state: StoreState, action: AppAction.SessionArchivedLocal): StoreState {
     val id = action.session.id
     return state.copy(
@@ -46,7 +38,6 @@ internal fun reduceSessionArchivedLocal(state: StoreState, action: AppAction.Ses
             childSessions = state.sessionList.childSessions.mapValues { (_, list) ->
                 list.map { if (it.id == id) action.session else it }
             },
-            openSessionIds = action.openSessionIds,
             pendingQuestions = action.pendingQuestions,
             activeSessionIds = state.sessionList.activeSessionIds - action.activeSessionIdsToRemove,
         ),

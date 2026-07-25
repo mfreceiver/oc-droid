@@ -5,9 +5,8 @@
 // titles ("Recent"/"By workdir"), HorizontalDividers, a 480dp hard cap and
 // a footer "New session" ExtendedFloatingActionButton. All of that is gone
 // per the locked decision (Q3): the user just wants to switch between recent
-// sessions quickly. The SessionTabStrip remains the fast switcher between
-// open root sessions; this sheet (opened via the ChatTopBar title tap) is the
-// fuller recent-list.
+// sessions quickly. The SessionTabStrip was deleted in B6 (the sheet, opened
+// via the ChatTopBar title tap, is now the sole session-switching surface).
 //
 // §picker-trim: the per-row selection check (PickerTrailingCheck) and the
 // `⋮` Archive/Unarchive overflow have been removed — selection is conveyed
@@ -67,7 +66,7 @@ import cn.vectory.ocdroid.util.workdirBasename
  * desc). Selecting a row invokes [onSelect].
  *
  * **Filtering**: `parentId == null` (sub-agents are reached via the in-chat
- * sub-agent breadcrumb, parity with `SessionTabStrip`) AND `!isArchived`
+ * sub-agent breadcrumb; SessionTabStrip deleted in B6) AND `!isArchived`
  * (matches the old strip's filter; archived sessions are out of the default
  * scope).
  *
@@ -80,7 +79,7 @@ import cn.vectory.ocdroid.util.workdirBasename
  * **`onNewSession`**: kept in the signature for ChatScaffold-source
  * compatibility but unused in the body — the footer "New session" FAB was
  * deleted per the locked WT1 decision (Q3). The "new session" path is
- * surfaced elsewhere (the top-bar overflow / SessionTabStrip's own affordance).
+ * surfaced elsewhere (the top-bar overflow).
  *
  * @param questionSessionIds per-session "pending question" flag — rendered
  *   as a `?` glyph in the trailing slot (tinted with the workdir tone).
@@ -115,8 +114,8 @@ fun SessionPickerSheet(
 
     // Resolved "selected" id: current root session when present, otherwise
     // the parent root session when the user is currently viewing a
-    // sub-agent (I3 parity fix — the old SessionTabStrip highlighted the
-    // parent tab while a sub-agent was open).
+    // sub-agent (I3 parity fix — the old SessionTabStrip, deleted in B6,
+    // highlighted the parent tab while a sub-agent was open).
     val effectiveSelectedId = resolveEffectiveSelectedId(
         openSessions = recent,
         currentSessionId = currentSessionId,

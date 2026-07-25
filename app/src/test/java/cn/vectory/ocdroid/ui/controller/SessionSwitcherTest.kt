@@ -45,7 +45,7 @@ import org.junit.Test
  * ([switchTo] / [clearSessionWindowCache] / [peekSessionWindow] /
  * [sessionWindowCacheSize] / [writeSessionWindow]) and asserted via:
  *  - a mockk [SettingsManager] whose setDraftText / currentSessionId setter /
- *    openSessionIds setter / sessionCache setter calls are captured into the
+ *    open-tabs-list setter / sessionCache setter calls are captured into the
  *    [RecordingCallbacks] facade (so test bodies keep referencing the same
  *    accessor names as before),
  *  - a mockk [OpenCodeRepository] (Phase 2-E step 2: setCurrentDirectory
@@ -193,7 +193,6 @@ class SessionSwitcherTest {
                 pendingQuestions = s.pendingQuestions,
                 childSessions = s.childSessions,
                 directorySessions = s.directorySessions,
-                openSessionIds = s.openSessionIds,
                 sessionTodos = s.sessionTodos
             )
         }
@@ -360,13 +359,11 @@ class SessionSwitcherTest {
                         id = "img1", filename = "x.png", mime = "image/png",
                         dataUrl = "data:,",
                         thumbnailData = ByteArray(0),
-                        byteSize = 0,
-                    )
+                        byteSize = 0)
                 ),
                 fileReferences = listOf(
                     cn.vectory.ocdroid.ui.ComposerFileReference(path = "/leaked.kt")
-                ),
-            )
+                ))
         }
 
         switcher.switchTo("s2")
@@ -617,9 +614,7 @@ class SessionSwitcherTest {
                 idleSince = mapOf("root" to 1_000L),
                 sessions = listOf(
                     Session(id = "root", directory = "/d"),
-                    Session(id = "child", directory = "/d", parentId = "root"),
-                ),
-            )
+                    Session(id = "child", directory = "/d", parentId = "root")))
         }
         nowMs = 50_000L
 
@@ -640,10 +635,8 @@ class SessionSwitcherTest {
                 unreadSessions = setOf("A", "B"),
                 sessions = listOf(
                     Session(id = "A", directory = "/d"),
-                    Session(id = "B", directory = "/d"),
-                ),
-                sessionStatuses = mapOf("A" to busyStatus, "B" to busyStatus),
-            )
+                    Session(id = "B", directory = "/d")),
+                sessionStatuses = mapOf("A" to busyStatus, "B" to busyStatus))
         }
 
         switcher.switchTo("A")
@@ -692,78 +685,48 @@ class SessionSwitcherTest {
         assertNull("draftWorkdir cleared in state mirror", slices.composer.value.draftWorkdir)
     }
 
-    // ── Step 8c: openSessionIds append (new tab joins from the RIGHT) ────────
+    // ── Step 8c: §B4 open-tabs list removed (list-detail) ──────────────────
 
     @Test
-    fun `switchTo appends new session to the end of openSessionIds`() {
+    fun `switchTo does NOT write open-tabs prefs (B4)`() {
         seed {
             it.copy(
-            currentSessionId = null,
-            openSessionIds = listOf("existing-1", "existing-2"),
-            sessions = listOf(Session(id = "new-tab", directory = "/d"))
+                currentSessionId = null,
+                sessions = listOf(Session(id = "new-tab", directory = "/d")),
             )
         }
-
         switcher.switchTo("new-tab")
-
-        // 新 tab 在末尾（右侧），而非开头
-        assertEquals(listOf("existing-1", "existing-2", "new-tab"), slices.sessionList.value.openSessionIds)
-        assertEquals(1, callbacks.setOpenSessionIdsCalls.size)
-        assertEquals(listOf("existing-1", "existing-2", "new-tab"), callbacks.setOpenSessionIdsCalls[0])
+        assertTrue(
+            "B4: switchTo must not touch open-tabs prefs",
+            callbacks.setOpenSessionIdsCalls.isEmpty(),
+        )
+        assertEquals("new-tab", slices.chat.value.currentSessionId)
     }
 
     @Test
-    fun `switchTo does NOT append already-open session`() {
+    fun `switchTo still persists session cache for root session (B4)`() {
         seed {
             it.copy(
-            currentSessionId = null,
-            openSessionIds = listOf("already-open", "other"),
-            sessions = listOf(Session(id = "already-open", directory = "/d"))
+                currentSessionId = null,
+                sessions = listOf(Session(id = "s1", directory = "/d")),
             )
         }
-
-        switcher.switchTo("already-open")
-
-        // openSessionIds should be unchanged (no reorder, no duplicate)
-        assertEquals(listOf("already-open", "other"), slices.sessionList.value.openSessionIds)
-        assertTrue("no setOpenSessionIds call", callbacks.setOpenSessionIdsCalls.isEmpty())
+        switcher.switchTo("s1")
+        assertEquals(1, callbacks.persistSessionCacheCalls.size)
+        assertTrue(callbacks.persistSessionCacheCalls[0].cache.any { it.id == "s1" })
     }
 
     @Test
-    fun `switchTo does NOT append sub-agent sessions`() {
+    fun `switchTo does NOT persist cache for sub-agent sessions (B4)`() {
         val childSession = Session(id = "child-1", directory = "/d", parentId = "parent-1")
         seed {
             it.copy(
-            currentSessionId = null,
-            openSessionIds = emptyList(),
-            sessions = listOf(childSession)
+                currentSessionId = null,
+                sessions = listOf(childSession),
             )
         }
-
         switcher.switchTo("child-1")
-
-        // Sub-agents (parentId != null) should not pollute openSessionIds
-        assertTrue("sub-agent not appended", slices.sessionList.value.openSessionIds.isEmpty())
-    }
-
-    @Test
-    fun `switchTo caps openSessionIds at 8 keeping newest on the right`() {
-        seed {
-            it.copy(
-            currentSessionId = null,
-            openSessionIds = listOf("s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"),
-            sessions = listOf(Session(id = "s9", directory = "/d"))
-            )
-        }
-
-        switcher.switchTo("s9")
-
-        // 满 8 时丢最旧 s1，新 s9 在最右
-        assertEquals(8, slices.sessionList.value.openSessionIds.size)
-        assertEquals(
-            listOf("s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9"),
-            slices.sessionList.value.openSessionIds,
-        )
+        assertTrue(callbacks.persistSessionCacheCalls.isEmpty())
     }
 
     // ── Step 8d: persistSessionCache ────────────────────────────────────────
@@ -773,7 +736,6 @@ class SessionSwitcherTest {
         seed {
             it.copy(
             currentSessionId = null,
-            openSessionIds = emptyList(),
             sessions = listOf(Session(id = "s1", directory = "/d"))
             )
         }
@@ -786,24 +748,24 @@ class SessionSwitcherTest {
         assertEquals(1, callbacks.persistSessionCacheCalls.size)
         val call = callbacks.persistSessionCacheCalls[0]
         assertTrue(call.cache.any { it.id == "s1" })
-        // The openIds that were passed to persistSessionCache equal the
-        // current settingsManager.openSessionIds (set earlier in Step 8).
-        assertEquals(listOf("s1"), callbacks.setOpenSessionIdsCalls.single())
+        // §B4: no open-tabs prefs write
+        assertTrue(callbacks.setOpenSessionIdsCalls.isEmpty())
     }
 
     @Test
     fun `switchTo does NOT persist cache when session already open`() {
+        // Same-session guard triggers (currentSessionId == "s1") → early return
+        // before any persistSessionCache call.
         seed {
             it.copy(
-            currentSessionId = null,
-            openSessionIds = listOf("s1"),
+            currentSessionId = "s1",
             sessions = listOf(Session(id = "s1", directory = "/d"))
             )
         }
 
         switcher.switchTo("s1")
 
-        assertTrue("no persistSessionCache when already open", callbacks.persistSessionCacheCalls.isEmpty())
+        assertTrue("no persistSessionCache when already open (same-session guard)", callbacks.persistSessionCacheCalls.isEmpty())
     }
 
     // ── LRU cache behavior ──────────────────────────────────────────────────
@@ -854,8 +816,7 @@ class SessionSwitcherTest {
             messages = listOf(Message(id = "m1", role = "user")),
             partsByMessage = mapOf("m1" to emptyList()),
             olderMessagesCursor = "cursor-x",
-            hasMoreMessages = true,
-        )
+            hasMoreMessages = true)
         switcher.writeSessionWindow("test-fp", "s1", window)
 
         val hit = switcher.peekSessionWindow("s1")
@@ -866,8 +827,7 @@ class SessionSwitcherTest {
 
         assertNull(
             "unwritten session must return null (VerifyAndHydrate cold-start path)",
-            switcher.peekSessionWindow("never-written"),
-        )
+            switcher.peekSessionWindow("never-written"))
     }
 
     @Test
@@ -924,8 +884,7 @@ class SessionSwitcherTest {
             messages = listOf(existingMsg),
             partsByMessage = mapOf("m1" to emptyList()),
             olderMessagesCursor = "cursor-keep",
-            hasMoreMessages = true,
-        ))
+            hasMoreMessages = true))
 
         // Append a new message with parts.
         val newPart = Part(id = "p-new", type = "text")
@@ -934,8 +893,7 @@ class SessionSwitcherTest {
             serverGroupFp = "test-fp",
             sessionId = "s1",
             message = newMsg,
-            parts = listOf(newPart),
-        )
+            parts = listOf(newPart))
 
         val hit = switcher.peekSessionWindow("s1")
         assertNotNull("window still resident after append", hit)
@@ -943,13 +901,11 @@ class SessionSwitcherTest {
         assertEquals(
             "appended message must be the tail of messages",
             listOf("m1", "m2"),
-            window.messages.map { it.id },
-        )
+            window.messages.map { it.id })
         assertEquals(
             "parts merged under the new message.id",
             listOf("p-new"),
-            window.partsByMessage["m2"]?.map { it.id },
-        )
+            window.partsByMessage["m2"]?.map { it.id })
         // Cursor / hasMoreMessages are preserved (append does NOT touch them).
         assertEquals("cursor-keep", window.olderMessagesCursor)
         assertTrue(window.hasMoreMessages)
@@ -965,18 +921,15 @@ class SessionSwitcherTest {
             serverGroupFp = "test-fp",
             sessionId = "s-cold",
             message = Message(id = "m-x", role = "assistant"),
-            parts = emptyList(),
-        )
+            parts = emptyList())
 
         assertEquals(
             "no-op on miss: cache size must not change (cold-start sessions do not proactively build a cache)",
             beforeSize,
-            switcher.sessionWindowCacheSize(),
-        )
+            switcher.sessionWindowCacheSize())
         assertNull(
             "no-op on miss: window must not be created",
-            switcher.peekSessionWindow("s-cold"),
-        )
+            switcher.peekSessionWindow("s-cold"))
     }
 
     @Test
@@ -986,16 +939,14 @@ class SessionSwitcherTest {
             messages = listOf(Message(id = "m1", role = "user")),
             partsByMessage = emptyMap(),
             olderMessagesCursor = null,
-            hasMoreMessages = false,
-        ))
+            hasMoreMessages = false))
 
         // Append under a FOREIGN fp — there is no (other-fp, s-shared) entry.
         switcher.appendMessageIfCached(
             serverGroupFp = "other-fp",
             sessionId = "s-shared",
             message = Message(id = "m-foreign", role = "assistant"),
-            parts = emptyList(),
-        )
+            parts = emptyList())
 
         val hit = switcher.peekSessionWindow("s-shared")
         // peekSessionWindow reads under currentServerGroupFp() = "test-fp".
@@ -1003,8 +954,7 @@ class SessionSwitcherTest {
         assertEquals(
             "test-fp window untouched by foreign-fp append",
             listOf("m1"),
-            hit!!.messages.map { it.id },
-        )
+            hit!!.messages.map { it.id })
     }
 
     // ── review-fix round 1: ID-aware upsert regression ─────────────────────
@@ -1026,8 +976,7 @@ class SessionSwitcherTest {
             messages = listOf(existingMsg),
             partsByMessage = mapOf("m-dup" to listOf(existingPart)),
             olderMessagesCursor = "cursor-keep",
-            hasMoreMessages = true,
-        ))
+            hasMoreMessages = true))
 
         // The effect handler fires LATE (a write-back or fetch completion
         // landed first). It delivers the same message id with empty parts —
@@ -1038,20 +987,17 @@ class SessionSwitcherTest {
             serverGroupFp = "test-fp",
             sessionId = "s1",
             message = replayedMsg,
-            parts = emptyList(),
-        )
+            parts = emptyList())
 
         val window = switcher.peekSessionWindow("s1")!!
         assertEquals(
             "duplicate-id append must NOT grow list cardinality (replace, not append)",
             listOf("m-dup"),
-            window.messages.map { it.id },
-        )
+            window.messages.map { it.id })
         assertEquals(
             "existing parts must be preserved when incoming parts are empty (effect's empty list is not a clear instruction)",
             listOf("p-keep"),
-            window.partsByMessage["m-dup"]?.map { it.id },
-        )
+            window.partsByMessage["m-dup"]?.map { it.id })
         // Cursor / hasMoreMessages preserved (upsert does NOT touch them).
         assertEquals("cursor-keep", window.olderMessagesCursor)
         assertTrue(window.hasMoreMessages)
@@ -1079,8 +1025,7 @@ class SessionSwitcherTest {
             settingsManager = settingsManager,
             repository = repository,
             effects = effects,
-            currentServerGroupFp = { "new-fp" },
-        )
+            currentServerGroupFp = { "new-fp" })
         // switcher2 shares the same sessionWindowCache (same store/controller instance pair)?
         // No — each SessionSwitcher has its own LRU. So we verify on `switcher`:
         // the entry is under old-fp.
@@ -1093,8 +1038,7 @@ class SessionSwitcherTest {
         assertEquals(
             "writes under different fps create independent LRU entries",
             2,
-            switcher.sessionWindowCacheSize(),
-        )
+            switcher.sessionWindowCacheSize())
     }
 
     // ── R-20 Phase 1 review-fix #3: directorySessions createdAt lookup ─────
@@ -1159,8 +1103,7 @@ class SessionSwitcherTest {
     private class RecordingCallbacks(
         settingsManager: SettingsManager,
         repository: OpenCodeRepository,
-        private val collectedEffects: MutableList<ControllerEffect>,
-    ) {
+        private val collectedEffects: MutableList<ControllerEffect>) {
         val drafts = mutableMapOf<String, String>()
         val saveDraftCalls = mutableListOf<Pair<String, String>>()
         val setCurrentSessionIdCalls = mutableListOf<String?>()
@@ -1185,10 +1128,7 @@ class SessionSwitcherTest {
             setCurrentSessionIdCalls.add(firstArg())
             callOrder += "setCurrentSessionId"
         }
-        every { settingsManager.openSessionIds = any() } answers {
-            setOpenSessionIdsCalls.add(firstArg())
-            callOrder += "setOpenSessionIds"
-        }
+        // §B4: open-tabs-list removed — no openSessionIds setter to mock.
         every { settingsManager.sessionCache = any() } answers {
             persistSessionCacheCalls.add(PersistCall(firstArg()))
             callOrder += "persistSessionCache"
@@ -1238,9 +1178,7 @@ class SessionSwitcherTest {
                 currentSessionId = "session-A",
                 sessions = listOf(
                     Session(id = "session-A", directory = "/tmp/a"),
-                    Session(id = "session-B", directory = "/tmp/b"),
-                ),
-            )
+                    Session(id = "session-B", directory = "/tmp/b")))
         }
 
         switcher.switchTo("session-B")
@@ -1259,9 +1197,7 @@ class SessionSwitcherTest {
                 currentSessionId = "child",
                 sessions = listOf(
                     Session(id = "parent", directory = "/p"),
-                    Session(id = "child", directory = "/p", parentId = "parent"),
-                ),
-            )
+                    Session(id = "child", directory = "/p", parentId = "parent")))
         }
         val checkpoint = ScrollCheckpoint(anchorKey = "msg-7", fallbackIndex = 5, offset = 42)
 
@@ -1283,16 +1219,14 @@ class SessionSwitcherTest {
         seed {
             it.copy(
                 currentSessionId = "only",
-                sessions = listOf(Session(id = "only", directory = "/x")),
-            )
+                sessions = listOf(Session(id = "only", directory = "/x")))
         }
 
         switcher.switchTo("only")
 
         assertNull(
             "same-session switchTo must NOT generate a new PendingScrollRequest",
-            slices.chat.value.pendingScrollRequest,
-        )
+            slices.chat.value.pendingScrollRequest)
     }
 
     @Test
@@ -1306,9 +1240,7 @@ class SessionSwitcherTest {
                 sessions = listOf(
                     Session(id = "A", directory = "/a"),
                     Session(id = "B", directory = "/b"),
-                    Session(id = "C", directory = "/c"),
-                ),
-            )
+                    Session(id = "C", directory = "/c")))
         }
 
         switcher.switchTo("B")
@@ -1322,8 +1254,7 @@ class SessionSwitcherTest {
         assertEquals("C", secondReq!!.targetSessionId)
         assertTrue(
             "the new intent's requestId MUST differ from the prior (single-slot overwrite)",
-            secondReq.requestId != firstReq.requestId,
-        )
+            secondReq.requestId != firstReq.requestId)
     }
 
     @Test
@@ -1334,8 +1265,7 @@ class SessionSwitcherTest {
         seed {
             it.copy(
                 currentSessionId = "current",
-                sessions = listOf(Session(id = "current", directory = "/x")),
-            )
+                sessions = listOf(Session(id = "current", directory = "/x")))
         }
 
         switcher.requestLatestScroll("current")
@@ -1364,8 +1294,7 @@ class SessionSwitcherTest {
         seed {
             it.copy(
                 currentSessionId = "x",
-                sessions = listOf(Session(id = "x", directory = "/x")),
-            )
+                sessions = listOf(Session(id = "x", directory = "/x")))
         }
 
         switcher.requestLatestScroll("x")
@@ -1389,9 +1318,7 @@ class SessionSwitcherTest {
                 sessions = listOf(
                     Session(id = "A", directory = "/a"),
                     Session(id = "B", directory = "/b"),
-                    Session(id = "C", directory = "/c"),
-                ),
-            )
+                    Session(id = "C", directory = "/c")))
         }
 
         switcher.switchTo("B")
@@ -1407,8 +1334,7 @@ class SessionSwitcherTest {
         assertEquals(
             "stale clear MUST NOT wipe C's newer intent",
             cReq,
-            slices.chat.value.pendingScrollRequest,
-        )
+            slices.chat.value.pendingScrollRequest)
 
         // C's matching consumer fires — clears correctly.
         store.dispatch(cn.vectory.ocdroid.ui.AppAction.ScrollConsumed(cReq.requestId))
@@ -1431,9 +1357,7 @@ class SessionSwitcherTest {
                 currentSessionId = "session-A",
                 sessions = listOf(
                     Session(id = "session-A", directory = "/tmp/a"),
-                    Session(id = "session-B", directory = "/tmp/b"),
-                ),
-            )
+                    Session(id = "session-B", directory = "/tmp/b")))
         }
 
         val seen = mutableListOf<cn.vectory.ocdroid.ui.StoreState>()
@@ -1461,8 +1385,7 @@ class SessionSwitcherTest {
                     "atomicity violated: pendingScrollRequest set but currentSessionId is stale " +
                         "(targetSessionId=${req.targetSessionId}, currentSessionId=${s.chat.currentSessionId})",
                     req.targetSessionId,
-                    s.chat.currentSessionId,
-                )
+                    s.chat.currentSessionId)
             }
         }
 

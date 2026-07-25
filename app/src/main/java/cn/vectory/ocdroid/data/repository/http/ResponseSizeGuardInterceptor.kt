@@ -8,8 +8,6 @@ import okio.BufferedSource
 import okio.ForwardingSource
 import okio.buffer
 import java.io.IOException
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * §OOM P0: response-size guard (REST client only). The
@@ -31,21 +29,14 @@ import javax.inject.Singleton
  *     chunked-bypass OOM.
  *
  * Extracted from `OpenCodeRepository.buildRestClient` in R-18; behavior
- * preserved byte-for-byte. The `cap` is fixed at [MAX_RESPONSE_BYTES] for
- * production; an `internal` secondary constructor lets unit tests exercise
- * the trip path with small bodies.
+ * preserved byte-for-byte. The `cap` defaults to [MAX_RESPONSE_BYTES] for
+ * production; passing an explicit `cap` lets unit tests exercise the trip
+ * path with small bodies.
  */
-@Singleton
-class ResponseSizeGuardInterceptor @Inject constructor() : Interceptor {
+class ResponseSizeGuardInterceptor(cap: Long = MAX_RESPONSE_BYTES) : Interceptor {
 
     @Volatile
-    private var maxBytes: Long = MAX_RESPONSE_BYTES
-
-    /** Test-only: lower the cap to exercise the trip path with small bodies. */
-    @Suppress("unused") // used by ResponseSizeGuardInterceptorTest
-    internal constructor(cap: Long) : this() {
-        maxBytes = cap
-    }
+    private var maxBytes: Long = cap
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val response = chain.proceed(chain.request())

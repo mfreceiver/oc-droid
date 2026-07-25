@@ -43,6 +43,16 @@ import javax.inject.Singleton
 @Singleton
 class ConnectionIdentityStore @Inject constructor() {
 
+    /**
+     * An operation-entry snapshot.  The identity and epoch are read under the
+     * same monitor so a caller never captures an old identity paired with a
+     * newer epoch while [beginReconfigure] is clearing the connection.
+     */
+    data class Capture(
+        val identity: ConnectionIdentity?,
+        val epoch: Long,
+    )
+
     private val currentEpochAtomic = AtomicLong(0L)
     private val currentIdentityAtomic = AtomicReference<ConnectionIdentity?>(null)
     private val _currentIdentity = MutableStateFlow<ConnectionIdentity?>(null)
@@ -81,6 +91,14 @@ class ConnectionIdentityStore @Inject constructor() {
      * (FGS spec §2 «关键约束»).
      */
     fun currentEpoch(): Long = currentEpochAtomic.get()
+
+    /** Capture the current identity and its guard epoch atomically. */
+    fun capture(): Capture = synchronized(lock) {
+        Capture(
+            identity = currentIdentityAtomic.get(),
+            epoch = currentEpochAtomic.get(),
+        )
+    }
 
     /**
      * SYNCHRONOUSLY increments [currentEpoch] AND invalidates the old identity

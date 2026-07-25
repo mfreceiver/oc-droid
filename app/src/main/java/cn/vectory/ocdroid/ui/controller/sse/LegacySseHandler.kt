@@ -8,6 +8,8 @@ import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.service.status.SessionStatusKey
 import cn.vectory.ocdroid.service.status.toSessionBusyStatus
 import cn.vectory.ocdroid.ui.AppAction
+import cn.vectory.ocdroid.ui.NavRoute
+import cn.vectory.ocdroid.ui.routeChatSessionId
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.SseSideEffect
 import cn.vectory.ocdroid.ui.controller.allSessionsById
@@ -86,16 +88,25 @@ class LegacySseHandler(private val host: SseDispatchHost) : SseEventHandler {
         val updated = parseSessionUpdatedEvent(event)
         if (updated != null) {
             if (updated.isArchived) {
-                val newOpenIds = host.slices.sessionList.value.openSessionIds.filter { id -> id != updated.id }
-                if (newOpenIds != host.slices.sessionList.value.openSessionIds) {
-                    host.settingsManager.openSessionIds = newOpenIds
-                }
+                // §B4: no open-tabs-list prune. SessionArchived clears chat
+                // when current matches; route pop when route id matches.
                 host.slices.store.dispatch(
-                    AppAction.SessionArchived(
-                        session = updated,
-                        openSessionIds = newOpenIds,
-                    )
+                    AppAction.SessionArchived(session = updated)
                 )
+                val routeId = routeChatSessionId(host.slices.store.stateFlow.value.nav.lastRoute)
+                val currentId = host.slices.chat.value.currentSessionId
+                if (routeId == updated.id || currentId == updated.id) {
+                    host.slices.store.dispatch(AppAction.CloseDetail)
+                    host.settingsManager.currentSessionId = null
+                    host.settingsManager.lastRoute = NavRoute.Sessions.route
+                    host.slices.store.mutateNav {
+                        it.copy(
+                            lastRoute = NavRoute.Sessions.route,
+                            lastNavPage = NavRoute.Sessions.legacyPage,
+                            navEpoch = it.navEpoch + 1L,
+                        )
+                    }
+                }
                 host.effects.tryEmitEffect(
                     ControllerEffect.EvictSession(host.serverGroupFp(), updated.id)
                 )

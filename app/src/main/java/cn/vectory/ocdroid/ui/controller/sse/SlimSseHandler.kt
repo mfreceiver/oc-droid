@@ -62,12 +62,14 @@ class SlimSseHandler(private val host: SseDispatchHost) : SseEventHandler {
         if (sid != null && sid == host.slices.chat.value.currentSessionId) {
             host.slices.store.dispatch(
                 AppAction.LastAssistantErrorAttached(
-                    Message.MessageError(name = name, data = data),
+                    error = Message.MessageError(name = name, data = data),
+                    expectedRouteInstance = host.slices.routeInstanceFor(sid),
+                    sessionId = sid,
                 )
             )
         }
         // T12-C1 (slim-only, sid-required): durable banner
-        if (sid != null && host.slimMode()) {
+        if (sid != null && host.supportsDurableSessionErrorBanner()) {
             val banner = SlimSessionLastError(
                 name = name ?: "Unknown",
                 message = rawMsg,

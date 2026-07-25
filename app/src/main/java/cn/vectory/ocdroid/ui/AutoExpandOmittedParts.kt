@@ -66,6 +66,15 @@ internal fun launchAutoExpandOmittedParts(
     sessionId: String,
     currentServerGroupFp: () -> String,
     recentMessageBudget: Int = DEFAULT_RECENT_MESSAGE_BUDGET,
+    /**
+     * §B4 round-2 (rev-gpt MAJOR): the route-instance token captured at
+     * load-START (mirrors [launchLoadMessages.expectedRouteInstance]).
+     * Threaded into every CAS dispatch point so a stale A→B→A incarnation
+     * (same sessionId, prior token) cannot pollute the newer incarnation's
+     * `partExpandStates`. Default `0L` → token guard is a no-op (legacy
+     * callers / tests preserve prior behaviour).
+     */
+    expectedRouteInstance: Long = 0L,
 ) {
     // P4: capture host identity ONCE (no TOCTOU) — mirrors ChatViewModel.expandParts.
     val capturedFp = currentServerGroupFp()
@@ -76,6 +85,18 @@ internal fun launchAutoExpandOmittedParts(
 
         // Step 3: session guard.
         if (startState.currentSessionId != sessionId) return@launch
+
+        // §B4 round-2 (rev-gpt MAJOR): route-token freshness guard. A stale
+        // A→B→A incarnation (same sessionId, prior token) must NOT launch
+        // auto-expand — its CAS writes would carry the stale token and the
+        // downstream re-checks below would still let them through on a pure
+        // session+fp match. Bail BEFORE any state mutation. Token=0 (legacy)
+        // skips this guard (no route context — backward compat).
+        if (expectedRouteInstance != 0L &&
+            expectedRouteInstance != store.stateFlow.value.chatRouteInstance
+        ) {
+            return@launch
+        }
 
         // Step 4 (§defect-B-2B / G6 root-cause fix): NEVER auto-expand while
         // the session is actively being written. An expand in-flight while SSE
@@ -140,6 +161,10 @@ internal fun launchAutoExpandOmittedParts(
         store.mutateChat { current ->
             if (current.currentSessionId != sessionId) return@mutateChat current
             if (currentServerGroupFp() != capturedFp) return@mutateChat current
+            // §B4 round-2 (rev-gpt MAJOR): route-token freshness CAS.
+            if (expectedRouteInstance != 0L &&
+                expectedRouteInstance != store.stateFlow.value.chatRouteInstance
+            ) return@mutateChat current
 
             val loadingUpdates = keysToLoad
                 .filter { key ->
@@ -157,6 +182,11 @@ internal fun launchAutoExpandOmittedParts(
         // Step 8: abort if identity changed during the CAS (before network call).
         if (store.chatFlow.value.currentSessionId != sessionId) return@launch
         if (currentServerGroupFp() != capturedFp) return@launch
+        // §B4 round-2 (rev-gpt MAJOR): also re-check the route token (an A→B→A
+        // switch mid-CAS bumps chatRouteInstance past expectedRouteInstance).
+        if (expectedRouteInstance != 0L &&
+            expectedRouteInstance != store.stateFlow.value.chatRouteInstance
+        ) return@launch
 
         // Step 9: invoke usecase (non-mutating, CE discipline).
         val outcome = ExpandPartsUseCase(repository)
@@ -177,6 +207,10 @@ internal fun launchAutoExpandOmittedParts(
                 store.mutateChat { current ->
                     if (current.currentSessionId != sessionId) return@mutateChat current
                     if (currentServerGroupFp() != capturedFp) return@mutateChat current
+                    // §B4 round-2 (rev-gpt MAJOR): route-token freshness CAS.
+                    if (expectedRouteInstance != 0L &&
+                        expectedRouteInstance != store.stateFlow.value.chatRouteInstance
+                    ) return@mutateChat current
 
                     val updatedStates = current.partExpandStates.toMutableMap()
                     keysToLoad.forEach { key ->
@@ -205,6 +239,12 @@ internal fun launchAutoExpandOmittedParts(
         store.mutateChat { current ->
             if (current.currentSessionId != sessionId) return@mutateChat current
             if (currentServerGroupFp() != capturedFp) return@mutateChat current
+            // §B4 round-2 (rev-gpt MAJOR): route-token freshness CAS — a stale
+            // A→B→A incarnation's success must NOT reconcile into the newer
+            // incarnation's partExpandStates.
+            if (expectedRouteInstance != 0L &&
+                expectedRouteInstance != store.stateFlow.value.chatRouteInstance
+            ) return@mutateChat current
             val status = store.sessionListFlow.value.sessionStatuses[sessionId]
             val activelyWriting = current.streamingPartTexts.isNotEmpty() ||
                 current.hasActiveTokenStreamOwner() ||
