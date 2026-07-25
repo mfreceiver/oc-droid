@@ -31,8 +31,8 @@
 ```bash
 # 把 docker/ci-android/Dockerfile 放到 Unraid 可访问处(从仓库拉,或 git clone 后)
 cd /path/to/ocdroid
-docker build -t ocdroid-ci-android:35-jdk21 docker/ci-android/
-docker images | grep ocdroid-ci-android   # 确认
+docker build -t universal-ci-android:35-jdk21 docker/ci-android/
+docker images | grep universal-ci-android   # 确认
 ```
 镜像含 JDK 21 + Android SDK(platform-35 / build-tools 35.0.0 / cmdline-tools),约 3–4GB。act_runner 与本镜像**同一 Docker daemon**即可,无需 registry。
 
@@ -58,7 +58,7 @@ curl -sf -H "Authorization: token $GITEA_TOKEN" -X POST \
 | Env `GITEA_INSTANCE_URL` | `https://git.vectory.cn:18443` |
 | Env `GITEA_RUNNER_REGISTRATION_TOKEN` | <2.2 取到的 token> |
 | Env `GITEA_RUNNER_NAME` | `unraid-android-01` |
-| Env `GITEA_RUNNER_LABELS` | `android:docker://ocdroid-ci-android:35-jdk21` |
+| Env `GITEA_RUNNER_LABELS` | `android:docker://universal-ci-android:35-jdk21` |
 | Env `CONFIG_FILE` | `/config.yaml`(让 act_runner 读你挂的配置) |
 
 > 注:若 Unraid 模板不便挂 config,先不挂 `/config.yaml`、不设 `CONFIG_FILE`,让 act_runner 自动生成默认配置;**仅当 job 报「pull image 失败」(本地镜像被尝试 pull)时**,再按 2.4 挂上 `--pull=never` 配置。
@@ -74,7 +74,7 @@ runner:
 cache:
   enabled: true          # actions/cache 后端
 container:
-  options: "--pull=never"   # 用本地构建好的 ocdroid-ci-android:35-jdk21,不去 registry pull
+  options: "--pull=never"   # 用本地构建好的 universal-ci-android:35-jdk21,不去 registry pull
   valid_volumes:
     - "**"
 ```
@@ -165,4 +165,4 @@ push 后到 Gitea → Actions 看 `branch-check` 是否触发、`runs-on: androi
 - **撤 CI**:删 `.gitea/workflows/*.yml`(仓库即时停);runner 容器 `stop` 即停接单。
 - **轮换签名**:重新 `pass` 生成新 key → 重建 keystore → 覆盖 Gitea Secret `RELEASE_KEYSTORE` + 3 密码。
 - **磁盘**:定期清 `/mnt/cache/appdata/gitea-act-runner` 下旧 job cache;Gitea Actions artifacts 按仓库 Settings 设保留期。
-- **升级 CI 镜像**:`docker build --no-cache -t ocdroid-ci-android:35-jdk21 docker/ci-android/`(SDK/AGP 升级时同步改 Dockerfile 版本)。
+- **升级 CI 镜像**:`docker build --no-cache -t universal-ci-android:35-jdk21 docker/ci-android/`(SDK/AGP 升级时同步改 Dockerfile 版本)。

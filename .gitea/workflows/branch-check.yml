@@ -17,7 +17,7 @@ on:
 
 jobs:
   build:
-    runs-on: android   # → act_runner label android:docker://ocdroid-ci-android:35-jdk21
+    runs-on: android   # → act_runner label android:docker://universal-ci-android:35-jdk21
     steps:
       - name: Checkout(直连 Gitea,无外部 action)
         env:

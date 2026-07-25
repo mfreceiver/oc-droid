@@ -1,9 +1,9 @@
 # ocdroid Android CI 镜像。
 # 在 Unraid 宿主(act_runner 同一 Docker daemon)上构建:
-#   docker build -t ocdroid-ci-android:35-jdk21 docker/ci-android/
+#   docker build -t universal-ci-android:35-jdk21 docker/ci-android/
 # 版本须与 gradle/libs.versions.toml + app/build.gradle.kts 对齐:
 #   JDK 21 / compileSdk 35 / build-tools 35.0.0。Gradle 由项目 ./gradlew 自带(不在镜像内)。
-# act_runner 标签映射: android:docker://ocdroid-ci-android:35-jdk21
+# act_runner 标签映射: android:docker://universal-ci-android:35-jdk21
 FROM eclipse-temurin:21-jdk-jammy
 
 ARG CMDLINE_TOOLS=11076708
