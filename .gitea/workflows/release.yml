@@ -1,7 +1,8 @@
 # release: 受保护 v* tag push 触发,独立 release runner 出签名包。
 # 签名密钥经 Gitea Secrets 注入(RELEASE_KEYSTORE base64 + 3 密码);agent / 普通 runner 不可读。
 # 产物:APK / AAB / mapping.txt / SHA256SUMS → Gitea Release(由 scripts/gitea/publish-release.sh 上传)。
-# 注:android-release runner 属 Phase 5;未部署前可临时把 runs-on 改回 android 验证流程。
+# 注:Gitea Actions secrets 是 repo 级而非 runner 级,独立 release runner 无额外安全增益,
+# 直接用 android runner 即可。若未来要做 secrets 隔离,改用 Gitea Environments。
 # 无外部 action(不依赖 github.com)。
 name: release
 
@@ -12,7 +13,7 @@ on:
 
 jobs:
   release:
-    runs-on: android-release
+    runs-on: android
     steps:
       - name: Checkout(直连 Gitea,完整历史 + tag)
         env:
