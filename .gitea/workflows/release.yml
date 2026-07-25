@@ -1,0 +1,58 @@
+# release: 受保护 v* tag push 触发,独立 release runner 出签名包。
+# 签名密钥经 Gitea Secrets 注入(RELEASE_KEYSTORE base64 + 3 密码);agent / 普通 runner 不可读。
+# 产物:APK / AAB / mapping.txt / SHA256SUMS → Gitea Release。
+# 注:android-release runner 属 Phase 5;未部署前可临时把 runs-on 改回 android 验证流程。
+name: release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: android-release
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: 恢复临时 keystore(从 Secrets)
+        env:
+          RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KS="$RUNNER_TEMP/release.keystore"
+          printf '%s' "$RELEASE_KEYSTORE" | base64 -d > "$KS"
+          {
+            printf 'sdk.dir=%s\n' "$ANDROID_HOME"
+            printf 'release.storeFile=%s\n' "$KS"
+            printf 'release.storePassword=%s\n' "$RELEASE_STORE_PASSWORD"
+            printf 'release.keyAlias=%s\n' "$RELEASE_KEY_ALIAS"
+            printf 'release.keyPassword=%s\n' "$RELEASE_KEY_PASSWORD"
+          } > local.properties
+          chmod 600 local.properties "$KS"
+
+      - name: release-check(clean + lintRelease + testRelease + assemble/bundleRelease)
+        run: ./scripts/ci/release-check.sh
+
+      - name: 上传产物到 Gitea Release
+        env:
+          # Gitea Actions 自动注入 GITHUB_TOKEN(contents: write,可建 release / 上传 asset)。
+          # 若 403,改用自建 secret RELEASE_GITEA_TOKEN(个人 token,release 权限)。
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: ./scripts/gitea/publish-release.sh "$TAG"
+
+      - name: 清理临时 keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore" local.properties

@@ -1,0 +1,53 @@
+# branch-check: agent/** / feature/** / fix/** 分支 push 时触发。
+# 干净 CI 容器中跑 lint + 单测 + assembleDebug,验证任务分支可构建。
+# 通过 ≠ 可发布,仅表示该分支远端验证 OK。详见 docs/specs/gitea-cicd.md。
+name: branch-check
+
+on:
+  push:
+    branches:
+      - agent/**
+      - feature/**
+      - fix/**
+      - ci/**
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: android   # → act_runner label android:docker://ocdroid-ci-android:35-jdk21
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # app/build.gradle.kts 配置期 git describe 需要 tag + 完整历史
+
+      - name: Gradle / wrapper 缓存
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: local.properties(指向 CI SDK)
+        run: printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+
+      - name: remote-check(lint + test + assembleDebug)
+        run: ./scripts/ci/remote-check.sh
+
+      - name: 上传 Debug APK
+        uses: actions/upload-artifact@v3
+        with:
+          name: debug-apk-${{ github.sha }}
+          path: artifacts/*.apk
+          retention-days: 14
+
+      - name: 上传测试 / Lint 报告
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: reports-${{ github.sha }}
+          path: |
+            app/build/reports/tests/
+            app/build/reports/lint-results-*.html
+          retention-days: 14
