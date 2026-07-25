@@ -24,6 +24,11 @@ concurrency:
 jobs:
   build:
     runs-on: android   # → act_runner label android:docker://universal-ci-android:35-jdk21
+    # GRADLE_USER_HOME 改容器内临时目录,避开 runner container.options 的
+    # /root/.gradle bind mount(并发 job 共享会触发 journal-1.lock 冲突)。
+    # 代价:每 job 重新下载 Gradle deps(~3min),换稳定性。
+    env:
+      GRADLE_USER_HOME: /tmp/gradle-home
     steps:
       - name: Checkout(LAN 直连 Gitea,绕过公网 TLS)
         env:
