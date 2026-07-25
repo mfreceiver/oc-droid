@@ -1,3 +1,5 @@
+> **规范路径**：本文件描述本机构建/签名细节。**生产发版的权威流程是 Gitea CI**（见 [`docs/specs/gitea-cicd.md`](gitea-cicd.md)）；本文件主要用于本地调试与离线场景。
+
 # 本地构建测试 APK 指南
 
 > 本文是本机（Linux）**实测记录**。构建/签名/发版的**权威规则**见 `.opencode/policies/build-signing.md`；版本号规则见 `.opencode/policies/versioning.md`；改动校验与发版入口见 `scripts/check.sh`、`scripts/release.sh`。本文与脚本若有冲突，以脚本和 policy 为准。
