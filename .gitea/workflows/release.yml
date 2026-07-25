@@ -37,7 +37,7 @@ jobs:
         run: |
           set -euo pipefail
           KS="$RUNNER_TEMP/release.keystore"
-          printf '%s' "$RELEASE_KEYSTORE" | base64 -d > "$KS"
+          printf '%s' "$RELEASE_KEYSTORE" | base64 -di > "$KS"
           {
             printf 'sdk.dir=%s\n' "$ANDROID_HOME"
             printf 'release.storeFile=%s\n' "$KS"
