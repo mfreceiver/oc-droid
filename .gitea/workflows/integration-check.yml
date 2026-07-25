@@ -1,0 +1,32 @@
+# integration-check: main / integration/** / validation/** 变更跑全量校验。
+# clean + 全量 lint + 全量测试 + assembleDebug + kover 覆盖率门控(与本地 check.sh --full 一致)。
+# 模拟器插桩测试(需 kvm runner)留作后续阶段。无外部 action(不依赖 github.com)。
+name: integration-check
+
+on:
+  push:
+    branches: [ main, integration/**, validation/** ]
+  workflow_dispatch:
+
+jobs:
+  full-check:
+    runs-on: android
+    steps:
+      - name: Checkout(直连 Gitea)
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          printf 'https://x-access-token:%s@git.vectory.cn:18443\n' "$TOKEN" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+          git config --global credential.helper store
+          git config --global advice.detachedHead false
+          git clone https://git.vectory.cn:18443/mfreceiver/oc-droid.git .
+          git fetch --tags --force
+          git checkout -q "${{ github.sha }}"
+      - name: local.properties
+        run: printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+      - name: clean + lint + test + assembleDebug
+        run: ./gradlew --no-daemon --stacktrace clean lintDebug testDebugUnitTest assembleDebug
+      - name: kover 覆盖率门控
+        run: ./gradlew --no-daemon koverVerify
