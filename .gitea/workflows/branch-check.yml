@@ -19,16 +19,16 @@ jobs:
   build:
     runs-on: android   # → act_runner label android:docker://universal-ci-android:35-jdk21
     steps:
-      - name: Checkout(直连 Gitea,无外部 action)
+      - name: Checkout(LAN 直连 Gitea,绕过公网 TLS)
         env:
           TOKEN: ${{ github.token }}
         run: |
           set -e
-          printf 'https://x-access-token:%s@git.vectory.cn:18443\n' "$TOKEN" > ~/.git-credentials
+          printf 'http://x-access-token:%s@192.168.3.252:11330\n' "$TOKEN" > ~/.git-credentials
           chmod 600 ~/.git-credentials
           git config --global credential.helper store
           git config --global advice.detachedHead false
-          git clone https://git.vectory.cn:18443/mfreceiver/oc-droid.git .
+          git clone http://192.168.3.252:11330/mfreceiver/oc-droid.git .
           git fetch --tags --force
           git checkout -q "${{ github.sha }}"
           echo "HEAD: $(git rev-parse --short HEAD) / $(git describe --tags --always 2>/dev/null)"

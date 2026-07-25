@@ -15,16 +15,16 @@ jobs:
   release:
     runs-on: android
     steps:
-      - name: Checkout(直连 Gitea,完整历史 + tag)
+      - name: Checkout(LAN 直连 Gitea,绕过公网 TLS)
         env:
           TOKEN: ${{ github.token }}
         run: |
           set -e
-          printf 'https://x-access-token:%s@git.vectory.cn:18443\n' "$TOKEN" > ~/.git-credentials
+          printf 'http://x-access-token:%s@192.168.3.252:11330\n' "$TOKEN" > ~/.git-credentials
           chmod 600 ~/.git-credentials
           git config --global credential.helper store
           git config --global advice.detachedHead false
-          git clone https://git.vectory.cn:18443/mfreceiver/oc-droid.git .
+          git clone http://192.168.3.252:11330/mfreceiver/oc-droid.git .
           git fetch --tags --force
           git checkout -q "${{ github.sha }}"
 
@@ -55,6 +55,7 @@ jobs:
           # Gitea Actions 自动注入 GITHUB_TOKEN(contents: write)。
           # 若 asset 上传 403,改用自建 secret RELEASE_GITEA_TOKEN(个人 token,release 权限)。
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITEA_URL: http://192.168.3.252:11330   # LAN 直连,publish-release.sh 用此调 API
           TAG: ${{ github.ref_name }}
         run: ./scripts/gitea/publish-release.sh "$TAG"
 
