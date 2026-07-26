@@ -30,6 +30,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -266,7 +271,40 @@ fun Composer(
                     BasicTextField(
                         value = text,
                         onValueChange = onTextChange,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 24.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 24.dp)
+                            // §ctrl-enter-send (2026-07-26): Ctrl+Enter (or
+                            // Cmd+Enter on Mac Bluetooth keyboards) sends the
+                            // message — same path as the send IconButton.
+                            // onPreviewKeyEvent fires BEFORE the TextField's
+                            // own key processing, so returning true consumes
+                            // the event (no stray newline is inserted).
+                            // Plain Enter remains a newline (multi-line input
+                            // preserved). Guarded by `canSend && !questionPending`
+                            // — identical to the send button's enabled state
+                            // (Ctrl+Enter does NOT trigger the stop/abort path;
+                            // that requires the stop confirm dialog).
+                            .onPreviewKeyEvent { event ->
+                                val native = event.nativeKeyEvent
+                                if (event.type == KeyEventType.KeyDown &&
+                                    event.key == Key.Enter &&
+                                    (native.isCtrlPressed || native.isMetaPressed) &&
+                                    canSend && !questionPending
+                                ) {
+                                    handleComposerSend(
+                                        text = text,
+                                        availableCommands = availableCommands,
+                                        allowCommand = !isBusy,
+                                        onSendMessage = onSend,
+                                        onExecuteCommand = onExecuteCommand,
+                                        onCompact = chatVM::compactSession,
+                                    )
+                                    true
+                                } else {
+                                    false
+                                }
+                            },
                         enabled = !questionPending,
                         textStyle = LocalTextStyle.current.copy(
                             color = MaterialTheme.colorScheme.onSurface

@@ -226,6 +226,74 @@ class TokenStreamReducerTest {
         assertTrue(effects.isEmpty())
     }
 
+    // ── orphan delta → snapshot transitions (rev-gpt concern #1 + #4) ──────
+
+    @Test
+    fun `orphan deltas then snapshot done=false with shorter text preserves accumulated`() {
+        // §orphan-delta-guard: multiple orphan deltas accumulate into a
+        // provisional entry. A delayed initial snapshot(done=false) arrives
+        // with SHORTER text (stale/empty initial snapshot). The accumulated
+        // delta text MUST be preserved — token streaming is append-only, so
+        // the authoritative snapshot should always be ≥ the accumulated text.
+        // If shorter, it's stale; keep the existing.
+        var state = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            delta(text = "Hello "),
+        ).first
+        state = TokenStreamReducer.reduce(state, delta(text = "World")).first
+        assertEquals("Hello World", state.parts["p1"]?.text)
+        // Delayed stale snapshot with empty text.
+        state = TokenStreamReducer.reduce(state, snapshot(text = "", done = false)).first
+        assertEquals("Hello World", state.parts["p1"]?.text)
+        assertEquals(TokenPartStreamState.STREAMING, state.parts["p1"]?.state)
+    }
+
+    @Test
+    fun `orphan deltas then snapshot done=false with longer text uses snapshot`() {
+        // Normal case: the snapshot's text is LONGER than accumulated deltas
+        // (it includes text from deltas the client missed). The snapshot
+        // wins — it's the authoritative superset.
+        var state = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            delta(text = "Hel"),
+        ).first
+        state = TokenStreamReducer.reduce(state, delta(text = "lo")).first
+        assertEquals("Hello", state.parts["p1"]?.text)
+        // Authoritative snapshot with full text.
+        state = TokenStreamReducer.reduce(state, snapshot(text = "Hello World!", done = false)).first
+        assertEquals("Hello World!", state.parts["p1"]?.text)
+        assertEquals(TokenPartStreamState.STREAMING, state.parts["p1"]?.state)
+    }
+
+    @Test
+    fun `orphan delta then snapshot done=true with final text replaces`() {
+        // Terminal snapshot(done=true) with explicit final text → the final
+        // text is authoritative regardless of what was accumulated. The part
+        // transitions to DONE.
+        var state = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            delta(text = "partial"),
+        ).first
+        assertEquals("partial", state.parts["p1"]?.text)
+        state = TokenStreamReducer.reduce(state, snapshot(text = "final answer", done = true)).first
+        assertEquals("final answer", state.parts["p1"]?.text)
+        assertEquals(TokenPartStreamState.DONE, state.parts["p1"]?.state)
+    }
+
+    @Test
+    fun `orphan delta then snapshot done=true with null text preserves accumulated`() {
+        // Terminal snapshot(done=true) with text=null → the server signals
+        // completion but provides no terminal text. The accumulated delta
+        // text is the best available content — keep it and mark DONE.
+        var state = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            delta(text = "streamed text"),
+        ).first
+        state = TokenStreamReducer.reduce(state, snapshot(text = null, done = true)).first
+        assertEquals("streamed text", state.parts["p1"]?.text)
+        assertEquals(TokenPartStreamState.DONE, state.parts["p1"]?.state)
+    }
+
     @Test
     fun `late delta after DONE is dropped and counted`() {
         val done = TokenStreamReducer.reduce(

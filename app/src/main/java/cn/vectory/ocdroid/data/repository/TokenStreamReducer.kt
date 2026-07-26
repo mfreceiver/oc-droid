@@ -180,11 +180,30 @@ object TokenStreamReducer {
             return state.copy(parts = state.parts + (frame.partId to terminal)) to emptyList()
         }
         // snapshot(done=false, truncated=false) → REPLACE buffer + STREAMING.
+        // §orphan-delta-guard (rev-gpt concern #1): if a provisional entry
+        // from orphan deltas already has LONGER accumulated text than the
+        // snapshot, the snapshot is a stale/partial view (a delayed initial
+        // empty snapshot arriving after the deltas already streamed). Token
+        // streaming is append-only, so the authoritative snapshot should
+        // ALWAYS be ≥ the accumulated delta text. If it's shorter, keep the
+        // existing text to prevent "vanishing tokens" (the user would see
+        // text disappear and never come back — the subsequent deltas were
+        // already consumed and won't replay).
+        val existingEntry = state.parts[frame.partId]
+        val snapshotText = frame.text ?: ""
+        val effectiveText = if (existingEntry != null &&
+            existingEntry.state == TokenPartStreamState.STREAMING &&
+            existingEntry.text.length > snapshotText.length
+        ) {
+            existingEntry.text
+        } else {
+            snapshotText
+        }
         val acc = TokenPartAcc(
             sessionId = frame.sessionId,
             messageId = frame.messageId,
             partId = frame.partId,
-            text = frame.text ?: "",
+            text = effectiveText,
             state = TokenPartStreamState.STREAMING,
         )
         return state.copy(parts = state.parts + (frame.partId to acc)) to emptyList()
