@@ -172,6 +172,12 @@ internal fun reduceSessionSelected(state: StoreState, action: AppAction.SessionS
         currentModel = null,
         pendingAgent = null,
         pendingModel = null,
+        // §isCompacting-leak-fix (2026-07-26): reset compaction flags on
+        // session switch. Without this, isCompacting=true from session A
+        // leaks to session B → composer disabled ("busy"), phantom
+        // compacting indicator shown on a session that isn't compacting.
+        isCompacting = false,
+        compactStartedAt = 0L,
         // §B4 rev-gpt round3 CRITICAL: clear coalesce buffers on EVERY
         // SessionSelected — including same-session route re-entry (navigateToChat
         // → openForRoute → performSwitch ALWAYS dispatches SessionSelected, no

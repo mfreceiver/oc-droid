@@ -288,8 +288,7 @@ internal data class ChatTopBarActions(
      * §Wave5b-Q13 + §chat-list-detail §11 / G6 (B5): dedicated callback for
      * the子→父 breadcrumb tap. Routes through
      * [cn.vectory.ocdroid.ui.SessionViewModel.returnToParent] which triggers
-     * `returnToExistingChat(parentId)` (B5 BLOCK-fix CRITICAL — pop-based
-     * restoration, NOT navigateToChat); the AppShell synchronizer pops the
+     * `navigateToChat(parentId)`; the AppShell synchronizer pops the
      * child entry + re-activates the EXISTING parent NavBackStackEntry
      * (preserving its SavedStateHandle). The parent route entry's
      * LaunchedEffect reads its handle and replays the captured checkpoint as

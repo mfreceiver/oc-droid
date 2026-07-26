@@ -84,14 +84,35 @@ class SessionMetadataPoller @Inject constructor(
         store.mutateSessionList { current ->
             // Atomic backstop: if gate changed during the poll's lifetime, skip commit
             if (generation != pollGeneration) current
-            else current.copy(
-                sessions = mergeRefreshedSessionsPreservingLocalActivity(
+            else {
+                // §title-sync-fix (rev-gpt reviewed): patch ONLY title for
+                // existing entries in each directory bucket — do NOT run the
+                // full merge. `refreshed` is a global cross-directory snapshot;
+                // running mergeRefreshedSessionsPreservingLocalActivity against
+                // each bucket would inject other directories' sessions and
+                // remove entries absent from the top-N global list.
+                val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(
                     refreshed = refreshed,
                     local = current.sessions,
                     currentSessionId = store.chatFlow.value.currentSessionId,
                     pendingCreateIds = current.pendingCreateIds,
                 )
-            )
+                val refreshedById = refreshed.associateBy { it.id }
+                val mergedDirectorySessions = current.directorySessions.mapValues { (_, list) ->
+                    list.map { existing ->
+                        val remote = refreshedById[existing.id]
+                        if (remote != null && existing.title == null && remote.title != null) {
+                            existing.copy(title = remote.title)
+                        } else {
+                            existing
+                        }
+                    }
+                }
+                current.copy(
+                    sessions = mergedSessions,
+                    directorySessions = mergedDirectorySessions,
+                )
+            }
         }
     }
 

@@ -254,11 +254,19 @@ internal fun mergeRefreshedSessionsPreservingLocalActivity(
             // mutated locally; if the fresher local copy is missing them (e.g.
             // it came from a pre-fix cache entry), backfill from the remote
             // snapshot so the context menu isn't left blank after the refresh.
+            // §title-sync-fix (2026-07-26): also backfill title — on the slim
+            // protocol, session.digest bumps local time.updated WITHOUT
+            // carrying a title, so the fresher-wins guard keeps the local
+            // copy (title=null) and discards the server's LLM-generated title.
+            // Backfilling title here ensures the REST poll's title reaches the
+            // UI even when the local timestamp was inflated by digest bumps.
             if ((localSession.agent == null && remote.agent != null) ||
-                (localSession.model == null && remote.model != null)) {
+                (localSession.model == null && remote.model != null) ||
+                (localSession.title == null && remote.title != null)) {
                 localSession.copy(
                     agent = localSession.agent ?: remote.agent,
                     model = localSession.model ?: remote.model,
+                    title = localSession.title ?: remote.title,
                 )
             } else {
                 localSession

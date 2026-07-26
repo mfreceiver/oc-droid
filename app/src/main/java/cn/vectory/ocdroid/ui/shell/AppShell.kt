@@ -143,8 +143,9 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
     // so [lastRoute] stays `"sessions"`). Without [navEpoch], the
     // [DerivedStateFlow] would not emit (equals unchanged) and the
     // synchronizer would never fire, trapping the user on Files/Git.
-    // [setLastRoute] does NOT touch [navEpoch]; only the force-path bumps it,
-    // so normal route transitions are unaffected.
+    // [setLastRoute] does NOT touch [navEpoch]; navigateToChat and
+    // forceNavigateToSessions both bump it, so normal route transitions
+    // are unaffected.
     //
     // Guard: skip navigation when the NavController is already at the target.
     // For parameterized chat/{sessionId}, compares the sessionId arg; for
@@ -171,7 +172,7 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
     //  (1) PUSH (openSubAgent child push): target=child, previousBackStackEntry
     //      is the parent (sessionId != target) → plain navigate() without
     //      popUpTo. Stack: [Sessions, parent, child].
-    //  (2) POP-RESTORE (returnToExistingChat parent): target=parent,
+    //  (2) POP-RESTORE (navigateToChat parent): target=parent,
     //      previousBackStackEntry.sessionId == target → popBackStack().
     //      Stack: [Sessions, parent]. The OLD parent entry (with its
     //      SavedStateHandle checkpoint) is re-activated — Restore fires via
@@ -200,8 +201,8 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
         if (!alreadyThere) {
             val chatToChat = currentDest?.route == "chat/{sessionId}" && target.startsWith("chat/")
             // §B5 BLOCK-fix: pop-restore when target matches the immediately-
-            // previous back-stack entry. This is the returnToExistingChat
-            // path — the parent entry is one pop away.
+            // previous back-stack entry. This is the子→父 return path —
+            // the parent entry is one pop away.
             val targetSid = target.removePrefix("chat/").takeIf { chatToChat }
             val previousSid = navController.previousBackStackEntry
                 ?.arguments?.getString("sessionId")

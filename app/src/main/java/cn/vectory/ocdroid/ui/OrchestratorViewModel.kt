@@ -182,11 +182,19 @@ class OrchestratorViewModel @Inject constructor(
         // Persist the parameterized route (safe — cold start ignores it per §5 P3).
         core.settingsManager.lastRoute = route
         // 1. Atomic CAS: mint token + write navState.lastRoute + clear content.
+        // §navEpoch-fix (2026-07-26): bump navEpoch alongside lastRoute.
+        // Without this, re-selecting a previously-visited session (after
+        // backToHome) leaves navState structurally unchanged (lastRoute
+        // already "chat/$sid") → DerivedStateFlow doesn't emit →
+        // LaunchedEffect doesn't re-fire → NavController never navigates.
         core.store.mutateState {
             val next = it.chatRouteInstance + 1L
             it.copy(
                 chatRouteInstance = next,
-                nav = it.nav.copy(lastRoute = route),
+                nav = it.nav.copy(
+                    lastRoute = route,
+                    navEpoch = it.nav.navEpoch + 1L,
+                ),
                 chat = it.chat.copy(content = null),
             )
         }
@@ -216,70 +224,12 @@ class OrchestratorViewModel @Inject constructor(
         core.store.dispatch(AppAction.CloseDetail)
     }
 
-    /**
-     * §chat-list-detail §11 / G6 (B5 BLOCK-fix): return to an EXISTING parent
-     * chat route via pop-based restoration. Used by [SessionViewModel.returnToParent]
-     * when the user navigates子→父.
-     *
-     * # Why a separate API (not navigateToChat)
-     *
-     * `navigateToChat(parentId)` would push a NEW `chat/{parentId}` entry on
-     * top of the child, producing `[Sessions, parent(old handle), child,
-     * parent(NEW handle)]`. The NEW parent entry's SavedStateHandle is fresh —
-     * the openSubAgent checkpoint (stored on the OLD parent entry's handle) is
-     * unreachable, so Restore never fires. The OLD parent entry is also
-     * stranded on the back-stack, leaking.
-     *
-     * This method's VM-side effects MIRROR navigateToChat (mint a new
-     * route-instance token, write navState.lastRoute, clear content, call
-     * openForRoute → SessionSelected dispatch flips currentSessionId +
-     * VerifyAndHydrate re-hydrates the parent's session window from the LRU
-     * cache). The DIFFERENCE is at the NavController level: AppShell's
-     * synchronizer detects that `previousBackStackEntry.sessionId == parentId`
-     * and executes `popBackStack()` instead of `navigate()`. The pop
-     * re-activates the EXISTING parent NavBackStackEntry, preserving its
-     * SavedStateHandle (and the checkpoint) — so the parent's ChatScaffold
-     * LaunchedEffect reads + consumes the checkpoint → Restore fires.
-     *
-     * # Why mint a new token if we're "returning"
-     *
-     * The current chatState.content was CLEARED when openSubAgent pushed the
-     * child (`navigateToChat(childId)` cleared it). A new token + openForRoute
-     * triggers VerifyAndHydrate, which peeks the LRU for the parent's cached
-     * window and re-hydrates synchronously (no REST round-trip in the common
-     * case). Without this, ChatDetailSlice would render Loading forever
-     * (no path populates content).
-     *
-     * # Bump navEpoch (in addition to lastRoute)
-     *
-     * The synchronizer observes `(lastRoute, navEpoch)`. lastRoute IS
-     * structurally changing (chat/child → chat/parent) so the synchronizer
-     * would fire on lastRoute alone; navEpoch++ is defensive (covers any
-     * future same-route return path).
-     */
-    fun returnToExistingChat(parentId: String) {
-        val route = "chat/$parentId"
-        core.settingsManager.lastRoute = route
-        // Atomic CAS: mint token + write navState.lastRoute + bump navEpoch +
-        // clear content (mirror navigateToChat; the load pipeline repopulates
-        // content via VerifyAndHydrate → LRU peek or REST fetch).
-        core.store.mutateState {
-            val next = it.chatRouteInstance + 1L
-            it.copy(
-                chatRouteInstance = next,
-                nav = it.nav.copy(
-                    lastRoute = route,
-                    navEpoch = it.nav.navEpoch + 1L,
-                ),
-                chat = it.chat.copy(content = null),
-            )
-        }
-        val mintedToken = core.store.stateFlow.value.chatRouteInstance
-        // Same route-aware open as navigateToChat. The pop semantics are
-        // decided at the NavController level (AppShell synchronizer's
-        // previousBackStackEntry check) — not the VM.
-        core.sessionSwitcher.openForRoute(parentId, mintedToken)
-    }
+    // §unified-nav (2026-07-26): returnToExistingChat was merged into
+    // navigateToChat. Both had identical VM-side logic (mint token +
+    // lastRoute + navEpoch++ + clear content + openForRoute). The push-
+    // vs-pop decision is made by AppShell's synchronizer (popRestore
+    // check: previousBackStackEntry.sessionId == targetSid), not the VM.
+    // All former returnToExistingChat callers now use navigateToChat.
 
     /** Emits a same-tab selection without mutating persisted navigation state. */
     fun emitReselect(route: NavRoute) {

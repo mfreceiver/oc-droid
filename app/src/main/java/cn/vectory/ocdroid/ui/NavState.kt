@@ -20,20 +20,18 @@ package cn.vectory.ocdroid.ui
  * `setLastRoute(...)` calls (deeplink / notification / in-session navigation)
  * still mutate this slice and re-fire the hop.
  *
- * @property navEpoch §B3-C2: monotonic counter bumped by [forceNavigateToSessions]
+ * @property navEpoch §B3-C2: monotonic counter bumped by
+ *   [forceNavigateToSessions] and [OrchestratorViewModel.navigateToChat]
  *   so the [DerivedStateFlow] emits even when [lastRoute] (and the rest of the
- *   data class) is structurally equal to the previous value — which happens
- *   when the user is on Files/Git (those routes do NOT update [NavState], so
- *   [lastRoute] stays `"sessions"`) and a no-id/malformed notification fallback
- *   needs to force the AppShell synchronizer to re-fire. [setLastRoute] does
- *   NOT touch [navEpoch] (its short-circuit guard is intentional for the
- *   Chat/Settings clean-exit path); only the force-path bumps this counter.
+ *   data class) is structurally equal to the previous value. [setLastRoute]
+ *   does NOT touch [navEpoch] (its short-circuit guard is intentional for the
+ *   Chat/Settings clean-exit path).
  */
 data class NavState(
     val lastRoute: String = NavRoute.Sessions.route,
     /** §B6: lastNavPage 是 lastRoute 的旧整数镜像，不再作为导航权威。保留以不破坏现有写点。 */
     @Deprecated("保留仅因 SettingsManager/OrchestratorVM 仍有写点；导航权威是 lastRoute")
     val lastNavPage: Int = NavRoute.Sessions.legacyPage,
-    /** §B3-C2: monotonic force-home epoch. Bumped only by [forceNavigateToSessions]. */
+    /** §B3-C2: monotonic nav epoch. Bumped by forceNavigateToSessions and navigateToChat. */
     val navEpoch: Long = 0L,
 )

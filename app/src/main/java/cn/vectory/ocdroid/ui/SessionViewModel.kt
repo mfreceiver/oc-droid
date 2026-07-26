@@ -205,15 +205,12 @@ class SessionViewModel @Inject constructor(
      * §Wave5b-Q13 + §chat-list-detail §11 / G6 (B5): navigate from a child
      * session back to its parent via pop-based restoration.
      *
-     * **B5 BLOCK-fix (rev-gpt CRITICAL)**: this method invokes
-     * [onReturnToExisting] (typically `orchestratorVM.returnToExistingChat(pid)`),
-     * which is DISTINCT from `navigateToChat`. The VM-side effects mirror
-     * navigateToChat (mint token, write navState, call openForRoute), but
-     * AppShell's synchronizer detects the pop-restore case
-     * (target == previousBackStackEntry.sessionId) and executes
-     * `popBackStack()` instead of `navigate()` — restoring the EXISTING
-     * parent NavBackStackEntry (and its SavedStateHandle, which carries the
-     * openSubAgent checkpoint). The parent's ChatScaffold LaunchedEffect then
+     * **B5 BLOCK-fix**: this method invokes [onReturnToExisting] (typically
+     * `orchestratorVM.navigateToChat(pid)`). AppShell's synchronizer detects
+     * the pop-restore case (target == previousBackStackEntry.sessionId) and
+     * executes `popBackStack()` instead of `navigate()` — restoring the
+     * EXISTING parent NavBackStackEntry (and its SavedStateHandle, which
+     * carries the openSubAgent checkpoint). The parent's ChatScaffold LaunchedEffect then
      * reads + consumes the checkpoint → Restore fires.
      *
      * The prior B5 implementation called `navigateToChat(parentId)`, which
@@ -244,10 +241,10 @@ class SessionViewModel @Inject constructor(
         val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
         val cur = sessionsById[currentId] ?: return false
         val parentId = cur.parentId ?: return false
-        // §B5 BLOCK-fix CRITICAL: pop-based return — invoke the dedicated
-        // returnToExistingChat callback (NOT navigateToChat). The VM-side
-        // housekeeping is identical (caller mints token + openForRoute); the
-        // pop semantics are decided at the NavController level.
+        // §B5 BLOCK-fix: pop-based return — navigateToChat writes
+        // navState.lastRoute; AppShell's synchronizer decides pop vs push
+        // based on previousBackStackEntry.sessionId. The pop-restore path
+        // preserves the parent's SavedStateHandle + checkpoint.
         onReturnToExisting(parentId)
         return true
     }

@@ -582,15 +582,13 @@ fun ChatScaffold(
     var lastParent by remember { mutableStateOf<String?>(null) }
     if (parent != null) lastParent = parent
     BackHandler(enabled = parent != null) {
-        // §chat-list-detail §11 / G6 (B5 BLOCK-fix CRITICAL): 子→父 via
-        // Android Back. Routes through returnToExistingChat (NOT
-        // navigateToChat) so the AppShell synchronizer pops to the EXISTING
-        // parent entry — preserving its SavedStateHandle + the openSubAgent
-        // checkpoint. A plain navigateToChat(parentId) would push a NEW
-        // parent entry, stranding both the checkpoint and the old entry.
-        // The parent's ChatScaffold LaunchedEffect then consumes the
-        // checkpoint → Restore scroll intent fires.
-        sessionVM.returnToParent { pid -> orchestratorVM.returnToExistingChat(pid) }
+        // §chat-list-detail §11 / G6 (B5 BLOCK-fix): 子→父 via Android Back.
+        // navigateToChat writes navState.lastRoute; the AppShell synchronizer
+        // detects previousBackStackEntry.sessionId == parentId and executes
+        // popBackStack() (NOT navigate) — preserving the parent entry's
+        // SavedStateHandle + openSubAgent checkpoint. The parent's
+        // ChatScaffold LaunchedEffect then consumes the checkpoint → Restore.
+        sessionVM.returnToParent { pid -> orchestratorVM.navigateToChat(pid) }
     }
 
     val errorMessage = stringResource(R.string.chat_error_occurred)
@@ -785,14 +783,13 @@ fun ChatScaffold(
         // own "Compress context" button (see showContextDialog below).
         //
         ChatTopBarActions(
-            // §chat-list-detail §11 / G6 (B5 BLOCK-fix): dedicated子→父
-            // callback for the breadcrumb — routes through
-            // SessionViewModel.returnToParent (which calls
-            // returnToExistingChat; the parent entry's LaunchedEffect
-            // replays the Restore checkpoint from its SavedStateHandle).
-            // Wired here so ChatTopBar's breadcrumb Text.clickable can call
-            // actions.onNavigateParent().
-            onNavigateParent = { sessionVM.returnToParent { pid -> orchestratorVM.returnToExistingChat(pid) } },
+            // §chat-list-detail §11 / G6: dedicated子→父 callback for the
+            // breadcrumb — routes through SessionViewModel.returnToParent →
+            // navigateToChat; AppShell's popRestore detects the parent on the
+            // previous back-stack entry and popBackStack()s to it, preserving
+            // its SavedStateHandle. The parent's LaunchedEffect replays the
+            // Restore checkpoint.
+            onNavigateParent = { sessionVM.returnToParent { pid -> orchestratorVM.navigateToChat(pid) } },
             onOpenContextDialog = { showContextDialog = true },
             onOpenTodoDialog = { showTodoDialog = true },
             onOpenAgentPicker = { showAgentPicker = true },

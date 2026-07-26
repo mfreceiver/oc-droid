@@ -113,10 +113,29 @@ internal fun launchLoadMessages(
         // watermark that would return an empty /since response and preserve an
         // empty UI window. Both methods return the same MessagesPage shape, so
         // the merge / cursor-seeding logic below is shared verbatim.
-        val pageResult = if (forceInitialWindow) {
+        // §stale-retry-fix (2026-07-26): when the repository is mid-reconfigure
+        // (common on SSE reconnect / app resume / host switch), getMessagesPaged
+        // returns Result.failure(StaleSlimCommitException). Without retry, the
+        // REST GET fails → no LoadedContent created → new session shows nothing.
+        // The user's "new conversation first message doesn't render" bug was
+        // caused by this: the log showed loadMessages failing 3× with stale token
+        // during the SSE reconnect catch-up window. Retry up to 2 times with
+        // 500ms delay — the reconfigure typically completes within 1s.
+        var pageResult = if (forceInitialWindow) {
             repository.getMessagesPagedUnanchored(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
         } else {
             repository.getMessagesPaged(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
+        }
+        var staleAttempts = 0
+        while (pageResult.exceptionOrNull() is OpenCodeRepository.StaleSlimCommitException && staleAttempts < 2) {
+            staleAttempts++
+            DebugLog.d("Sync", "loadMessages stale token (attempt $staleAttempts/2), retrying in 500ms")
+            kotlinx.coroutines.delay(500)
+            pageResult = if (forceInitialWindow) {
+                repository.getMessagesPagedUnanchored(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
+            } else {
+                repository.getMessagesPaged(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
+            }
         }
         pageResult
             .onSuccess { page ->
