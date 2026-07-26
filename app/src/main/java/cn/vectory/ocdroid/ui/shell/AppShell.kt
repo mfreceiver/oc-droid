@@ -424,6 +424,7 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                     savedStateHandle = routeEntry.savedStateHandle,
                     initialSessionId = sessionId,
                     initialWorkdir = workdir,
+                    onBack = { backToHome() },
                 )
             }
             composable(NavRoute.Settings.route) {

@@ -598,14 +598,22 @@ fun ChatScaffold(
     val staleNoticeMessage = stringResource(R.string.chat_stale_notice)
     val staleNoticeActionLabel = stringResource(R.string.common_refresh)
 
-    // §home-hub T4 (C4): root-session Back now navigates Home instead of the
-    // legacy "再按退出" double-tap-confirm snackbar (pendingExit machinery
-    // removed). The `parent == null` gate preserves the parent-session
-    // handler above (子→父) — when the current session IS a sub-agent, Back
-    // still returns to the parent; only ROOT-session Back goes Home.
-    BackHandler(enabled = parent == null) {
-        onBackToHome()
-    }
+    // §predictive-back-fix (2026-07-26): the root-session BackHandler was
+    // REMOVED. Previously this intercepted the system back gesture with a
+    // custom BackHandler → onBackToHome(), which registered an
+    // OnBackInvokedCallback that the system treated as generic (no
+    // destination preview) — predictive back animation didn't fire for
+    // Chat → Sessions (while Git → Sessions worked because AppShell's
+    // BackHandler is composed outside the NavHost).
+    //
+    // Now: when no narrower handler is active (drawer closed, root session),
+    // NO BackHandler is enabled → the NavHost's native predictive back
+    // handler fires → popBackStack with the system's "shrink + reveal"
+    // animation. The parent-session (line 584) and drawer (line 619)
+    // BackHandlers stay — they have narrower `enabled` conditions and
+    // preempt the NavHost handler when active (LIFO: ChatScaffold handlers
+    // are composed inside NavHost → registered after NavController's own
+    // callback → higher priority when enabled).
 
     // §home-hub T4 (IMPORTANT-2 fix): drawer-open BackHandler MUST be composed
     // AFTER the parent/root handlers. Compose dispatches back in REVERSE

@@ -68,6 +68,7 @@ import androidx.compose.runtime.saveable.SaveableStateHolder
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -358,7 +359,19 @@ internal fun BoxScope.StatusSlot(
         // → no wrong-response on the exiting card).
         contentKey = { it::class },
         modifier = modifier
-            .align(Alignment.TopCenter),
+            .align(Alignment.TopCenter)
+            // §thinking-bubble-gap (2026-07-26): offset the status capsule
+            // downward by half its OWN height so it breathes below the
+            // TopAppBar instead of touching it. The custom layout measures
+            // the content once, then places it at y = height/2 — single pass,
+            // no chicken-and-egg (onSizeChanged would flash on first frame).
+            .layout { measurable, constraints ->
+                val placeable = measurable.measure(constraints)
+                val gap = placeable.height / 2
+                layout(placeable.width, placeable.height + gap) {
+                    placeable.placeRelative(0, gap)
+                }
+            },
     ) { active ->
         when (active) {
             is StatusSlotContent.Permission -> {

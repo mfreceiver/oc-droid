@@ -108,9 +108,12 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onNavigateSection: (String) -> Unit,
 ) {
-    // §P5b-A (5.1): Settings is now a top-level screen — no back affordance
-    // on its TopAppBar. The `onBack` param stays in the signature so the
-    // AppShell call site is unchanged, but is no longer rendered here.
+    // §back-unify (2026-07-26): re-enabled the back affordance on the main
+    // Settings TopAppBar. It was removed in P5b-A ("Settings is now a top-level
+    // screen — no back affordance"), but the user requirement is that all
+    // non-root screens (Git, Settings, Files, Chat) show a unified ArrowBack.
+    // The `onBack` param was already in the signature (line 108) — just
+    // rendering it now.
     Scaffold(
         // §bug-5.1: zero contentWindowInsets — the TopAppBar already consumes
         // the status-bar inset via its own TopAppBarDefaults.windowInsets, so
@@ -123,6 +126,14 @@ fun SettingsScreen(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.chat_back_to_home),
+                        )
+                    }
+                },
                 title = { Text(stringResource(R.string.settings_title)) },
             )
         },

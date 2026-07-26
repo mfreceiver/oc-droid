@@ -4,8 +4,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -61,6 +64,7 @@ fun GitScreen(
     // §files-git-readonly-workdir: retained for AppShell call-site stability.
     // No longer invoked from this screen (the WorkdirControl is read-only).
     @Suppress("UNUSED_PARAMETER") onWorkdirSelected: (String) -> Unit = {},
+    onBack: () -> Unit = {},
 ) {
     val host by hostVM.hostFlow.collectAsStateWithLifecycle()
     val chat by sessionVM.chatFlow.collectAsStateWithLifecycle()
@@ -129,6 +133,14 @@ fun GitScreen(
     Scaffold(
         topBar = {
             TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.chat_back_to_home),
+                        )
+                    }
+                },
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(stringResource(R.string.nav_git))
