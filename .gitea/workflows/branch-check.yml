@@ -30,16 +30,20 @@ jobs:
     env:
       GRADLE_USER_HOME: /tmp/gradle-home
     steps:
-      - name: Checkout(LAN 直连 Gitea,绕过公网 TLS)
+      - name: Checkout(优先 LAN,空时回退公网;见 docs/specs/gitea-lan-bypass.md)
         env:
           TOKEN: ${{ github.token }}
+          GITEA_LAN_URL: ${{ vars.MY_GITEA_LAN_URL }}
         run: |
           set -e
-          printf 'http://x-access-token:%s@192.168.3.252:11330\n' "$TOKEN" > ~/.git-credentials
+          GITEA_URL="${GITEA_LAN_URL:-https://git.vectory.cn:18443}"
+          SCHEME="${GITEA_URL%%://*}"
+          HOST="${GITEA_URL#*://}"
+          printf '%s://x-access-token:%s@%s\n' "$SCHEME" "$TOKEN" "$HOST" > ~/.git-credentials
           chmod 600 ~/.git-credentials
           git config --global credential.helper store
           git config --global advice.detachedHead false
-          git clone http://192.168.3.252:11330/mfreceiver/oc-droid.git .
+          git clone "$GITEA_URL/mfreceiver/oc-droid.git" .
           git fetch --tags --force
           git checkout -q "${{ github.sha }}"
           echo "HEAD: $(git rev-parse --short HEAD) / $(git describe --tags --always 2>/dev/null)"
