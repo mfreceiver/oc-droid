@@ -205,13 +205,24 @@ class TokenStreamReducerTest {
     // ── delta drop: orphan + late ────────────────────────────────────────
 
     @Test
-    fun `orphan delta before any snapshot is dropped and counted`() {
+    fun `orphan delta before any snapshot creates provisional STREAMING entry`() {
+        // §orphan-delta-fix (2026-07-26): the server sends deltas BEFORE the
+        // initial snapshot. The reducer MUST create a provisional STREAMING
+        // entry from the delta (sessionId/messageId/partId/text are all on the
+        // wire frame) so the UI renders live text. The old behavior dropped
+        // orphan deltas — the user saw NO streaming, only the REST-completed
+        // message seconds later.
         val (state, effects) = TokenStreamReducer.reduce(
             TokenStreamReducerState(),
             delta(text = "stray"),
         )
-        assertTrue(state.parts.isEmpty())
-        assertEquals(1L, state.droppedDeltaCount)
+        val acc = state.parts["p1"]
+        assertEquals("stray", acc?.text)
+        assertEquals(TokenPartStreamState.STREAMING, acc?.state)
+        assertEquals("s1", acc?.sessionId)
+        assertEquals("m1", acc?.messageId)
+        // NOT counted as dropped — it was used.
+        assertEquals(0L, state.droppedDeltaCount)
         assertTrue(effects.isEmpty())
     }
 
@@ -232,16 +243,24 @@ class TokenStreamReducerTest {
     }
 
     @Test
-    fun `delta after truncated-cleared part is dropped and counted as orphan`() {
+    fun `delta after truncated-cleared part creates new provisional entry`() {
+        // §orphan-delta-fix (2026-07-26): after truncation clears the part,
+        // a subsequent delta is an orphan — but now it creates a NEW
+        // provisional STREAMING entry (same fix as the cold-start orphan
+        // case). The old behavior dropped it; now the UI can resume live
+        // rendering immediately.
         val streaming = TokenStreamReducer.reduce(
             TokenStreamReducerState(),
             snapshot(text = "p"),
         ).first
         val truncated = TokenStreamReducer.reduce(streaming, snapshot(truncated = true)).first
-        // Part is gone → a subsequent delta is an orphan.
+        // Part is gone → a subsequent delta creates a fresh provisional entry.
         val (state, _) = TokenStreamReducer.reduce(truncated, delta(text = "z"))
-        assertTrue(state.parts.isEmpty())
-        assertEquals(1L, state.droppedDeltaCount)
+        val acc = state.parts["p1"]
+        assertEquals("z", acc?.text)
+        assertEquals(TokenPartStreamState.STREAMING, acc?.state)
+        // NOT counted as dropped.
+        assertEquals(0L, state.droppedDeltaCount)
     }
 
     // ── resync → clear-all-sid + effects + reconnect flag ────────────────

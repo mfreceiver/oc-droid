@@ -195,13 +195,40 @@ object TokenStreamReducer {
         frame: TokenStreamFrame.PartDelta,
     ): Pair<TokenStreamReducerState, List<TokenStreamCoordinatorEffect>> {
         val existing = state.parts[frame.partId]
-        // Append ONLY when the part is currently STREAMING. Two drop cases:
-        //  (a) orphan — no snapshot has established the part yet (delta
-        //      arrived first). The wire delta has no type, so we cannot
-        //      type-filter; silently absorb (server C3 semantics).
-        //  (b) late — the part already transitioned to DONE; a straggler
-        //      delta after the terminal snapshot is stale, drop it.
-        if (existing == null || existing.state != TokenPartStreamState.STREAMING) {
+        if (existing == null) {
+            // §orphan-delta-fix (2026-07-26): the server sends
+            // `message.part.delta` frames BEFORE the initial
+            // `message.part.snapshot` that establishes the part's metadata.
+            // The old code dropped ALL orphan deltas (existing==null →
+            // droppedDeltaCount++), which meant the user saw NO live
+            // streaming — just a loading spinner until the REST poll
+            // (session.digest → probe → /messages fetch) picked up the
+            // completed message seconds later.
+            //
+            // The PartDelta wire frame carries sessionId / messageId /
+            // partId / text — enough to create a provisional STREAMING
+            // entry. The bridge (bridgePartToChatState) hardcodes
+            // partType="text" for PartPlaceholderEnsured regardless, so no
+            // type information is lost. When the snapshot arrives later,
+            // reduceSnapshot's REPLACE semantics overwrite this provisional
+            // entry with the server-authoritative text (if any).
+            //
+            // Log evidence: first delta at 11:07:00.570, snapshot at
+            // 11:07:01.382 — 812ms gap, ~11 deltas ALL dropped by the old
+            // guard. After this fix, each delta creates/appends to the
+            // provisional entry and the UI renders live token-by-token text.
+            val provisional = TokenPartAcc(
+                sessionId = frame.sessionId,
+                messageId = frame.messageId,
+                partId = frame.partId,
+                text = frame.text,
+                state = TokenPartStreamState.STREAMING,
+            )
+            return state.copy(parts = state.parts + (frame.partId to provisional)) to emptyList()
+        }
+        // Late delta after DONE — a straggler delta after the terminal
+        // snapshot is stale, drop it.
+        if (existing.state != TokenPartStreamState.STREAMING) {
             return state.copy(droppedDeltaCount = state.droppedDeltaCount + 1) to emptyList()
         }
         val appended = existing.copy(text = existing.text + frame.text)
