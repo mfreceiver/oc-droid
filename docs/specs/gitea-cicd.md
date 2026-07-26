@@ -20,7 +20,7 @@
 |---|---|---|
 | 本机 | `./scripts/ci/local-check.sh`(=`compileDebugKotlin + testDebugUnitTest`) | 开发期几十秒挡低级错误 |
 | 远端分支 | `branch-check.yml` → `remote-check.sh`(`lintDebug + testDebugUnitTest + assembleDebug`) | 干净容器验证任务分支可构建 |
-| 远端整合 | `integration-check.yml`(`clean + lint + test + assembleDebug + koverVerify`) | 验证与主干组合 + 覆盖率门控 |
+| 远端整合 | `integration-check.yml`(`clean + lint + test + assembleDebug + koverVerify`) | 全量校验 + 覆盖率门控；**仅手动触发**（发版时 release.yml 已含等价检查） |
 | 远端 Release | `release.yml` → `release-check.sh`(`clean + lintRelease + testRelease + bundleRelease + assembleRelease`) | CI 签名出 APK/AAB/mapping/SHA256SUMS |
 
 ---
@@ -159,7 +159,7 @@ push 后到 Gitea → Actions 看 `branch-check` 是否触发、`runs-on: androi
 - [ ] 修复后新 commit 触发新 run,旧失败结果不污染。
 - [ ] `v*` tag → `release.yml` 出**签名** APK/AAB + mapping + SHA256SUMS,建 Gitea Release。
 - [ ] 普通 `android` runner / Primary agent 无法读 `RELEASE_*` Secrets。
-- [ ] `integration-check` 在 main 触发,含 `koverVerify` 门控。
+- [ ] `integration-check` 仅手动触发(`workflow_dispatch`),含 `koverVerify` 门控。
 
 ## 7. 回滚 / 维护
 - **撤 CI**:删 `.gitea/workflows/*.yml`(仓库即时停);runner 容器 `stop` 即停接单。

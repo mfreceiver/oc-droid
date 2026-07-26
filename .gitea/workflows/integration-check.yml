@@ -1,17 +1,10 @@
-# integration-check: main / integration/** / validation/** 变更跑全量校验。
-# clean + 全量 lint + 全量测试 + assembleDebug + kover 覆盖率门控(与本地 check.sh --full 一致)。
+# integration-check: 全量校验（clean + lint + test + assembleDebug + kover 覆盖率门控）。
+# 仅手动触发（workflow_dispatch）——发版时 release.yml 已含等价全量校验，
+# 平时每次提交不再自动跑，避免重复劳动；需要时在 Gitea Actions 面板手动点。
 # 模拟器插桩测试(需 kvm runner)留作后续阶段。无外部 action(不依赖 github.com)。
 name: integration-check
 
 on:
-  push:
-    branches: [ main, integration/**, validation/** ]
-    # docs-only / .opencode 治理文件改动不触发(无源码/构建配置变更,跑 CI 浪费 ~15min)。
-    # 混合改动(同时动 docs 和 app/)仍触发 —— 任意非 ignored path 命中即触发。
-    paths-ignore:
-      - 'docs/**'
-      - '.opencode/**'
-      - '**/*.md'
   workflow_dispatch:
 
 # 全局串行:runner 共用 gradle cache bind mount(/root/.gradle),并发 job 会锁冲突。
