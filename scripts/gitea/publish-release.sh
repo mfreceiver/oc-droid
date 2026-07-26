@@ -4,7 +4,9 @@
 # 环境:GITEA_TOKEN(release 读写权限;release.yml 注入 auto GITHUB_TOKEN)、GITEA_URL。
 # 产物目录:artifacts/(APK + AAB + mapping.txt + SHA256SUMS)。
 # Changelog:增量=上一 tag 到本 tag 之间的 commit(--no-merges);首版=本 tag 最近 50 条。
-# 注:本机发版仍走 scripts/upload-release.sh(读 tea config);本脚本是 CI 侧对应物。
+# 注:CI/CD(release.yml push tag 触发)是发版的主路径——本脚本在 runner 内
+# 用 Gitea Secrets 注入的正式 keystore 构建签名包并上传。scripts/upload-release.sh
+# 是 CI/CD 故障时的本机 fallback(读 tea config,本机临时签名),正常流程不使用。
 set -euo pipefail
 TAG="${1:?用法: publish-release.sh <tag>}"
 REPO="mfreceiver/oc-droid"

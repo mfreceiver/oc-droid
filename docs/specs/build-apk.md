@@ -166,44 +166,36 @@ APK/
 
 归档由 gradle `archiveReleaseApk` task 自动命名（`release.sh` 与手动重建都走它），无需手 grep `versionName`。
 
-### 6.3 发版到自建 Gitea（git push + curl REST API）
+### 6.3 发版到自建 Gitea（push tag → CI/CD 自动构建签名包 + 上传）
 
-不再依赖 `tea` CLI（曾遇 flag 语法错位 + 大 APK 上传超时）。改用**原生 git push** + **curl Gitea REST API**，封装在 `scripts/upload-release.sh`。
-
-**前提**：Gitea token 可从两处取（脚本自动）：① 环境变量 `GITEA_TOKEN`；② 本机 `~/.config/tea/config.yml`（tea 登录残留，仅读 token，不调 tea）。
+**主流程**：push tag 后 `.gitea/workflows/release.yml` 自动完成签名构建 + 上传 + 企微通知。Agent / 开发者**不需要手动上传 APK**。
 
 ```bash
-VERSION="0.5.0"   # versionName，与 release.sh 打的 tag 一致
-TAG="v$VERSION"
+TAG="v0.14.5"
 
-# 1) push main + tag（Gitea 收到 tag 后自动建 release 占位）
+# 1) release.sh 本地构建 + 打 tag（版本由 git 派生，仅用于本地冒烟）
+./scripts/release.sh patch
+
+# 2) push main + tag → CI/CD 触发
 git push origin main && git push origin "$TAG"
-
-# 2) 上传 APK + 更新 release notes（建/找 release → POST assets → PATCH body）
-./scripts/upload-release.sh "$VERSION"
+# ⇒ CI/CD 自动：签名构建(release keystore from Gitea Secrets)
+#   → 上传 APK + AAB + mapping.txt + SHA256SUMS
+#   → 更新 release notes → 企微通知
 ```
 
-`upload-release.sh` 内部三步（纯 curl，可单独复用）：
+**⚠️ 不要手动跑 `upload-release.sh`**——CI/CD 已用 Gitea Secrets 里的正式签名 keystore 构建并上传。手动上传的本机 APK 签名不同，用户混装会签名冲突。如果 release 页面出现两份 APK（一份 7 字符 hash = 本机，一份 8 字符 hash = CI/CD），删除本机那份。
+
+**CI/CD 故障时的 fallback**（仅当 runner 宕机且急需发版时）：
 
 ```bash
-GITEA_TOKEN="$(grep 'token:' ~/.config/tea/config.yml | head -1 | awk '{print $2}')"
-API="https://git.vectory.cn:18443/api/v1/repos/mfreceiver/oc-droid/releases"
-# 找 release id（Gitea 自动建的）
-RID=$(curl -s -H "Authorization: token $GITEA_TOKEN" "$API?name=$VERSION" \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["id"])')
-# 上传 APK 附件
-curl -X POST "$API/$RID/assets?name=oc-droid-$VERSION.apk" \
-  -H "Authorization: token $GITEA_TOKEN" -H "Content-Type: application/octet-stream" \
-  --data-binary @"APK/oc-droid-$VERSION.apk"
-# 更新 release notes
-curl -X PATCH "$API/$RID" -H "Authorization: token $GITEA_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "$(python3 -c 'import json;print(json.dumps({"body":open("APK/oc-droid-VERSION.md").read()}))')"
+# upload-release.sh 读 tea config 的 Gitea token，curl REST API 上传本机 APK。
+# 本机 APK 未用正式 keystore 签名——仅应急，正常流程不要用。
+./scripts/upload-release.sh "$VERSION"
 ```
 
 - `main` 分支为开发主线，tag 打在 `main` 的发布提交上。
 - 应用名称为 **OC Droid**；`origin` = `https://git.vectory.cn:18443/mfreceiver/oc-droid.git`。
-- 若 `tea` 仍可用作 fallback，旧命令 `/home/mar/tools/tea/tea releases create -r mfreceiver/oc-droid --tag $TAG -t $TAG -f APK/oc-droid-$VERSION.md -a APK/oc-droid-$VERSION.apk`（注意 `releases delete` 不接 `--tag`，要用 release id）。
+- CI/CD runner 用 `scripts/gitea/publish-release.sh`（CI 侧上传脚本，注入 `${{ secrets.GITHUB_TOKEN }}`）。
 
 ---
 
