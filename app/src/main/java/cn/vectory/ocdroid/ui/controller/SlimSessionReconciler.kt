@@ -828,7 +828,26 @@ internal class SlimSessionReconciler(
         if (!supportsWatermarkResync()) return SlimReconcileOutcome(SlimReconcileResult.NoRepository(sid))
 
         val state = repo.getSessionState(sid) ?: SlimSessionState(sessionId = sid)
-        val probe = repo.probeLatest(sid, token)
+        // §stale-crash-fix-2 (2026-07-26): probeLatest calls
+        // requireSlimTokenCurrent(token) which throws StaleSlimCommitException
+        // if the incarnation rotated between the token capture (prepareSessionDigest
+        // / reconcileSession entry) and this point (after acquiring the stripe lock).
+        // The TOCTOU gap means ANY session.digest SSE event arriving after a host
+        // reconfigure (common when switching back from background) hits this path.
+        // Without this catch, the throw escapes reconcileSessionLocked →
+        // reconcileDigest → handleSessionDigest's scope.launch (no catch) →
+        // UiApplicationScope (SupervisorJob + Dispatchers.Main.immediate, no
+        // CoroutineExceptionHandler) → app crash. This is the SAME class of bug
+        // as the per-sid catch fixed earlier in SessionSyncCoordinator:1632, but
+        // on a different entry path (digest vs resync). Catching here covers ALL
+        // three callers (digest, reconcileSession, reconcileSessionWithToken)
+        // because they all funnel through reconcileSessionLocked.
+        val probe = try {
+            repo.probeLatest(sid, token)
+        } catch (e: OpenCodeRepository.StaleSlimCommitException) {
+            DebugLog.d("Sync", "reconcileSessionLocked sid=$sid stale token — incarnation rotated (TOCTOU)")
+            return SlimReconcileOutcome(SlimReconcileResult.Stale(sid))
+        }
 
         // ── probe failure branches (uniform across all modes) ────────────
         if (!probe.ok) {

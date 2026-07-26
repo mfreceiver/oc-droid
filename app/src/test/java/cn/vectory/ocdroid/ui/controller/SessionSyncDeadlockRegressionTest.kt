@@ -304,13 +304,17 @@ class SessionSyncDeadlockRegressionTest {
                 "unexpected reconcile exception must not be consumed by the test harness",
                 unexpectedException.isCompleted,
             )
-            // With D3 semantics the reconcile throws StaleSlimCommitException.
-            // Assert that it was captured either directly or by the scope-level
-            // handler when the throw originated in an internal child.
-            val thrown = withTimeoutOrNull(DEADLINE_MS) { staleException.await() }
-            assertNotNull(
-                "reconcile must have thrown StaleSlimCommitException (D3 semantics)",
-                thrown,
+            // §stale-crash-fix-2 (2026-07-26): the reconcile NO LONGER throws
+            // StaleSlimCommitException — it's caught inside reconcileSessionLocked
+            // (SlimSessionReconciler.kt probeLatest try-catch) and returns
+            // SlimReconcileResult.Stale. The test's deadlock assertions
+            // (captureSlimCommitToken + beginSlimReconfigure complete promptly)
+            // are the primary purpose and remain valid. The stale exception
+            // was a secondary confirmation that the incarnation rotated —
+            // with the fix, the reconcile handles it gracefully (no throw).
+            assertFalse(
+                "no stale exception should escape — caught internally by reconcileSessionLocked",
+                staleException.isCompleted,
             )
         } finally {
             // Cancel and join the parent so the coordinator's persistent

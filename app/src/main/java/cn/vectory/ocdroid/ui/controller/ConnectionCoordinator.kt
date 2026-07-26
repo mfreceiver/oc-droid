@@ -617,8 +617,13 @@ class ConnectionCoordinator(
                     ConnectionPhase.Disconnected
                 }
                 writeConnection {
+                    // §degraded-connected-fix (2026-07-26): same fix as
+                    // ConnectionHealthProbe — REST is connected (we got here
+                    // through the connection flow), only SSE failed. Write
+                    // isConnected=true (green dot, non-breathing) instead of
+                    // false (red dot) so the user knows the server is reachable.
                     it.copy(
-                        isConnected = false,
+                        isConnected = true,
                         isConnecting = false,
                         connectionPhase = phase,
                     )

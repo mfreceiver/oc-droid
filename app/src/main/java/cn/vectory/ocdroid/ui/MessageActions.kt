@@ -239,14 +239,24 @@ internal fun launchLoadMessages(
                         // at the newest end (reverseLayout bottom), matching the just-arrived
                         // SSE message semantic — it must NOT be classed older (which would
                         // shove it to the history front).
-                        val newerKept = if (forceInitialWindow) {
-                            emptyList()
-                        } else {
-                            srcMessages.filter { m ->
-                                m.id !in fetchedIds && m.id !in olderKeptIds &&
-                                    (m.time?.created == null || newestFetchedCreated == null ||
-                                        m.time.created >= newestFetchedCreated)
-                            }
+                        // §newerKept-force-window-fix (2026-07-26): previously
+                        // `if (forceInitialWindow) emptyList()` — this unconditionally
+                        // discarded SSE-delivered messages (user echo, assistant parts)
+                        // that arrived WHILE the initial REST GET was in flight. For a
+                        // new conversation, the REST GET returns empty (no history yet),
+                        // and the SSE messages that arrived during the flight were
+                        // silently dropped → "first message doesn't render until re-enter".
+                        //
+                        // forceInitialWindow=true means "fetch UNANCHORED (since=0L)" —
+                        // it controls the FETCH URL, not the merge semantics. The
+                        // olderKept clearing above (line 226-232) is correct (a fresh
+                        // window discards stale history), but newerKept MUST always be
+                        // preserved: those are live SSE messages that the REST snapshot
+                        // cannot contain. See exp-1 trace for the full timeline.
+                        val newerKept = srcMessages.filter { m ->
+                            m.id !in fetchedIds && m.id !in olderKeptIds &&
+                                (m.time?.created == null || newestFetchedCreated == null ||
+                                    m.time.created >= newestFetchedCreated)
                         }
                         val newerKeptIds = newerKept.map { m -> m.id }.toHashSet()
                         val keptIds = olderKeptIds + newerKeptIds

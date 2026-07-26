@@ -1039,7 +1039,7 @@ class ConnectionCoordinatorTest {
             ConnectionPhase.SseDisabled,
             connectionFlow.value.connectionPhase,
         )
-        assertFalse("not connected", connectionFlow.value.isConnected)
+        assertTrue("degraded connected — REST works, SSE disabled", connectionFlow.value.isConnected)
     }
 
     @Test
@@ -1090,7 +1090,7 @@ class ConnectionCoordinatorTest {
         runPending()
 
         assertEquals(listOf(false), settled)
-        assertFalse(connectionFlow.value.isConnected)
+        assertTrue("degraded connected — REST works, SSE refused", connectionFlow.value.isConnected)
         assertFalse(connectionFlow.value.connectionPhase is ConnectionPhase.Connected)
     }
 

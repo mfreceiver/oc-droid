@@ -670,8 +670,25 @@ internal class ConnectionHealthProbe(
                                 } else {
                                     ConnectionPhase.Disconnected
                                 }
+                                // §degraded-connected-fix (2026-07-26): we are in the
+                                // Success branch — engine.bootstrap() SUCCEEDED (REST
+                                // health check passed: catalog, /sessions, /children all
+                                // return 200). Only the SSE transport (Stage 2 ensureStarted)
+                                // failed (Refused). Previously this wrote isConnected=false
+                                // → red dot, even though REST is fully functional. The user
+                                // saw "server unreachable" while messages/catalog worked
+                                // fine, and force-refresh cycled through the same path
+                                // (REST success → SSE fail → red again) without recovery.
+                                //
+                                // Fix: REST success means the server IS reachable.
+                                // isConnected=true → green dot (non-breathing, since
+                                // isSseConnected stays false — no live streaming, but
+                                // REST polling + send still work). The phase (SseDisabled
+                                // / Disconnected) signals SSE status for diagnostics.
+                                // SSE reconnection continues in the background via the
+                                // SessionStreamingService's internal watchdog/heartbeat.
                                 it.copy(
-                                    isConnected = false,
+                                    isConnected = true,
                                     isConnecting = false,
                                     connectionPhase = phase,
                                 )
