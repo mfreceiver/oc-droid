@@ -6,6 +6,12 @@ name: integration-check
 on:
   push:
     branches: [ main, integration/**, validation/** ]
+    # docs-only / .opencode 治理文件改动不触发(无源码/构建配置变更,跑 CI 浪费 ~15min)。
+    # 混合改动(同时动 docs 和 app/)仍触发 —— 任意非 ignored path 命中即触发。
+    paths-ignore:
+      - 'docs/**'
+      - '.opencode/**'
+      - '**/*.md'
   workflow_dispatch:
 
 # 全局串行:runner 共用 gradle cache bind mount(/root/.gradle),并发 job 会锁冲突。
