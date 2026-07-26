@@ -59,7 +59,7 @@ jobs:
           } > local.properties
           chmod 600 local.properties "$KS"
 
-      - name: release-check(clean + lintRelease + testRelease + assemble/bundleRelease)
+      - name: release-check(clean + lintRelease + testRelease + assembleRelease)
         run: ./scripts/ci/release-check.sh
 
       - name: 上传产物到 Gitea Release
@@ -71,6 +71,24 @@ jobs:
           GITEA_URL: ${{ vars.MY_GITEA_LAN_URL }}
           TAG: ${{ github.ref_name }}
         run: ./scripts/gitea/publish-release.sh "$TAG"
+
+      - name: 更新 latest 标签（指向最新发版）
+        # 每次 tag push 后,将 mutable `latest` tag force-move 到当前发版提交。
+        # 用户/脚本可通过 `latest` tag 快速获取最新版,无需查 release 页面找版本号。
+        env:
+          TOKEN: ${{ github.token }}
+          GITEA_LAN_URL: ${{ vars.MY_GITEA_LAN_URL }}
+        run: |
+          set -e
+          GITEA_URL="${GITEA_LAN_URL:-https://git.vectory.cn:18443}"
+          SCHEME="${GITEA_URL%%://*}"
+          HOST="${GITEA_URL#*://}"
+          printf '%s://x-access-token:%s@%s\n' "$SCHEME" "$TOKEN" "$HOST" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+          git config --global credential.helper store
+          git tag -f latest "${{ github.sha }}"
+          git push origin latest --force
+          echo "✅ latest → ${{ github.ref_name }} (${{ github.sha }})"
 
       - name: 清理临时 keystore
         if: always()

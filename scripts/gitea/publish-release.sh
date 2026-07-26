@@ -2,7 +2,7 @@
 # scripts/gitea/publish-release.sh — CI 内把 release-check 产物上传到 Gitea Release。
 # 用法: publish-release.sh <tag>     (tag 形如 v1.2.3;由 release.yml 调用)
 # 环境:GITEA_TOKEN(release 读写权限;release.yml 注入 auto GITHUB_TOKEN)、GITEA_URL。
-# 产物目录:artifacts/(APK + AAB + mapping.txt + SHA256SUMS)。
+# 产物目录:artifacts/(APK + mapping.txt + SHA256SUMS)。不生成 AAB —— 项目不上架 Play Store。
 # Changelog:增量=上一 tag 到本 tag 之间的 commit(--no-merges);首版=本 tag 最近 50 条。
 # 注:CI/CD(release.yml push tag 触发)是发版的主路径——本脚本在 runner 内
 # 用 Gitea Secrets 注入的正式 keystore 构建签名包并上传。scripts/upload-release.sh
