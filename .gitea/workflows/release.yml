@@ -72,9 +72,12 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: ./scripts/gitea/publish-release.sh "$TAG"
 
-      - name: 更新 latest 标签（指向最新发版）
-        # 每次 tag push 后,将 mutable `latest` tag force-move 到当前发版提交。
-        # 用户/脚本可通过 `latest` tag 快速获取最新版,无需查 release 页面找版本号。
+      - name: 更新 latest 标签 + 上传 APK 到 latest Release
+        # 每次 tag push 后:
+        # 1) force-move mutable `latest` git tag 到当前发版提交
+        # 2) 删除旧 latest Gitea Release (清 stale assets)
+        # 3) 建新 latest Release + 上传同一批 artifacts
+        # 用户/脚本可通过 latest Release 页面直接下载最新 APK,无需找版本号。
         env:
           TOKEN: ${{ github.token }}
           GITEA_LAN_URL: ${{ vars.MY_GITEA_LAN_URL }}
@@ -86,9 +89,29 @@ jobs:
           printf '%s://x-access-token:%s@%s\n' "$SCHEME" "$TOKEN" "$HOST" > ~/.git-credentials
           chmod 600 ~/.git-credentials
           git config --global credential.helper store
+          # 1) Force-move latest git tag
           git tag -f latest "${{ github.sha }}"
           git push origin latest --force
-          echo "✅ latest → ${{ github.ref_name }} (${{ github.sha }})"
+          # 2) Delete old latest Release (clears stale assets from prior versions)
+          API="$GITEA_URL/api/v1/repos/mfreceiver/oc-droid/releases"
+          AUTH="Authorization: token $TOKEN"
+          OLD_RID=$(curl -sf -H "$AUTH" "$API/tags/latest" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' 2>/dev/null || true)
+          if [[ -n "$OLD_RID" ]]; then
+            curl -sf -X DELETE "$API/$OLD_RID" -H "$AUTH" >/dev/null 2>&1 || true
+            echo "==> deleted old latest release #$OLD_RID"
+          fi
+          # 3) Create new latest Release + upload artifacts
+          PAYLOAD=$(python3 -c 'import json;print(json.dumps({"tag_name":"latest","name":"Latest","body":"Always points to the most recent release (${{ github.ref_name }}).","draft":False,"prerelease":False}))')
+          NEW_RID=$(curl -sf -X POST "$API" -H "$AUTH" -H "Content-Type: application/json" -d "$PAYLOAD" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+          echo "==> created latest release #$NEW_RID"
+          for f in artifacts/*; do
+            [[ -f "$f" ]] || continue
+            curl -sf -X POST "$API/$NEW_RID/assets?name=$(basename "$f")" \
+              -H "$AUTH" -H "Content-Type: application/octet-stream" \
+              --data-binary @"$f" >/dev/null
+            echo "  uploaded $(basename "$f")"
+          done
+          echo "✅ latest → ${{ github.ref_name }} (${{ github.sha }}) + assets uploaded"
 
       - name: 清理临时 keystore
         if: always()
