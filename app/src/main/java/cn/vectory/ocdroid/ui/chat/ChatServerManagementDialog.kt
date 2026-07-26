@@ -134,7 +134,19 @@ internal fun ServerManagementDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    IconButton(onClick = { onNavigateToSettings(); onDismiss() }) {
+                    // §dialog-dismiss-race-fix (2026-07-26): previously
+                    // `onNavigateToSettings(); onDismiss()` — the synchronous
+                    // onDismiss() destroyed the AlertDialog popup window on
+                    // the current frame, but navigation is async (StateFlow →
+                    // LaunchedEffect in AppShell). When dialog teardown won
+                    // the frame race, the navigation was silently lost — the
+                    // "settings button intermittently unresponsive" bug.
+                    // Fix: only call onNavigateToSettings(). When navigation
+                    // replaces SessionsScreen with SettingsScreen in the
+                    // NavHost, the ServerStatusIconButton (and its
+                    // `if (showDialog)` block) leaves composition → dialog
+                    // auto-dismisses as a side effect of navigation. No race.
+                    IconButton(onClick = onNavigateToSettings) {
                         Icon(
                             Icons.Default.Settings,
                             contentDescription = stringResource(R.string.server_dialog_system_settings),
