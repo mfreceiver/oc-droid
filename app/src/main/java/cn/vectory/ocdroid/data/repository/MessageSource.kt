@@ -75,8 +75,13 @@ internal fun extractNextCursor(
         val query = url.substringAfter("?", "")
         for (param in query.split("&")) {
             if (param.startsWith("before=")) {
-                return param.substring("before=".length)
+                val value = param.substring("before=".length)
+                // §rev-gpt: an empty `before=` (no value) is NOT a valid
+                // cursor — return null so hasMore stays false instead of
+                // triggering an invalid/repeated load-more request.
+                if (value.isNotEmpty()) return value
             }
+            // Also handle bare `?before` (no `=`) → not a valid cursor.
         }
     }
     return null
