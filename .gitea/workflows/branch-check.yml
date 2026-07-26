@@ -24,22 +24,23 @@ concurrency:
 jobs:
   build:
     runs-on: android   # → act_runner label android:docker://universal-ci-android:35-jdk21
-    # GRADLE_USER_HOME 改容器内临时目录,避开 runner container.options 的
-    # /root/.gradle bind mount(并发 job 共享会触发 journal-1.lock 冲突)。
-    # 代价:每 job 重新下载 Gradle deps(~3min),换稳定性。
-    env:
-      GRADLE_USER_HOME: /tmp/gradle-home
+    # Gradle dist 已预装在 image /root/.gradle/wrapper/dists/(image 内只读,
+    # 每容器从 layer 拿,无锁冲突)。Maven deps 每 job 重下(~2.5min)。
     steps:
-      - name: Checkout(LAN 直连 Gitea,绕过公网 TLS)
+      - name: Checkout(优先 LAN,空时回退公网;见 docs/specs/gitea-lan-bypass.md)
         env:
           TOKEN: ${{ github.token }}
+          GITEA_LAN_URL: ${{ vars.MY_GITEA_LAN_URL }}
         run: |
           set -e
-          printf 'http://x-access-token:%s@192.168.3.252:11330\n' "$TOKEN" > ~/.git-credentials
+          GITEA_URL="${GITEA_LAN_URL:-https://git.vectory.cn:18443}"
+          SCHEME="${GITEA_URL%%://*}"
+          HOST="${GITEA_URL#*://}"
+          printf '%s://x-access-token:%s@%s\n' "$SCHEME" "$TOKEN" "$HOST" > ~/.git-credentials
           chmod 600 ~/.git-credentials
           git config --global credential.helper store
           git config --global advice.detachedHead false
-          git clone http://192.168.3.252:11330/mfreceiver/oc-droid.git .
+          git clone "$GITEA_URL/mfreceiver/oc-droid.git" .
           git fetch --tags --force
           git checkout -q "${{ github.sha }}"
           echo "HEAD: $(git rev-parse --short HEAD) / $(git describe --tags --always 2>/dev/null)"
