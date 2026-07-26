@@ -12,7 +12,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.DonutLarge
-import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.outlined.Memory
@@ -26,7 +25,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
@@ -37,7 +35,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -405,14 +402,17 @@ internal fun ChatTopBar(
      */
     onBackToHome: () -> Unit = {},
     /**
-     * §home-hub T4: tablet (≥600dp) Menu affordance in the
-     * `navigationIcon` slot — opens the [RecentSessionsDrawer] wired by
-     * ChatScaffold's `ModalNavigationDrawer`. Defaults to `{}`; ChatScaffold
-     * overrides it to open its owned `drawerState`. Only invoked on tablet
-     * form factors (`isWide`); phone renders the [onBackToHome] ArrowBack
-     * instead.
+     * §tablet-back-unify (2026-07-26): RETAINED but no longer rendered.
+     * Previously the tablet (≥600dp) Menu affordance in the `navigationIcon`
+     * slot — opened the [RecentSessionsDrawer] wired by ChatScaffold's
+     * `ModalNavigationDrawer`. The top-left affordance is now ArrowBack on
+     * every form factor (see [navigationIcon]); quick session-switch is via
+     * the title tap ([onTitleClick] → SessionPickerSheet). The param stays
+     * so the ChatScaffold call site is unchanged; ChatScaffold still owns
+     * + composes the drawer wrapper (always-composed, now unreachable from
+     * the top bar — same as the prior phone path).
      */
-    onOpenDrawer: () -> Unit = {},
+    @Suppress("UNUSED_PARAMETER") onOpenDrawer: () -> Unit = {},
     /**
      * §context-compact: optional callback formerly wired through to the
      * ServerManagementDialog's "压缩" button. §0.8.2 P2 removed that dialog
@@ -424,16 +424,17 @@ internal fun ChatTopBar(
      */
     @Suppress("UNUSED_PARAMETER") onContextCompact: (() -> Unit)? = null,
 ) {
-    // §home-hub T4: responsive top-left affordance. Mirrors the `isWide`
-    // pattern at ChatScaffold.kt (§B3 wide-screen card wrap): prefer the M3
-    // WindowSizeClass provided by [LocalWindowSizeClass] (ChatScreen.kt:26,
-    // computed once in MainActivity via calculateWindowSizeClass); fall back
-    // to a screenWidthDp ≥ 600 check when no provider is present (previews /
-    // unit tests). Phone (Compact) → ArrowBack → [onBackToHome]; tablet
-    // (Medium/Expanded) → Menu → [onOpenDrawer].
-    val isWide = LocalWindowSizeClass.current
-        ?.let { it.widthSizeClass != WindowWidthSizeClass.Compact }
-        ?: (LocalConfiguration.current.screenWidthDp >= 600)
+    // §tablet-back-unify (2026-07-26): the top-left affordance is now
+    // ArrowBack → [onBackToHome] on BOTH phone and tablet. Previously
+    // tablet (Medium/Expanded) rendered a hamburger Menu button that
+    // opened the RecentSessionsDrawer; the user requirement is that
+    // tablet mirrors phone ("平板模式和普通手机一样"), with quick
+    // session-switch via tapping the title slot (already wired through
+    // [onTitleClick] → SessionPickerSheet in ChatScaffold). The drawer
+    // wrapper in ChatScaffold is retained (always-composed, same as the
+    // prior phone path) but is now unreachable from the top bar on every
+    // form factor — mirroring phone behaviour. The `onOpenDrawer` param
+    // stays in the signature so the ChatScaffold call site is unchanged.
     val currentSession = state.sessions.find { it.id == state.currentSessionId }
     // §new2 (2026-07-13): cache the package's versionName once per composition
     // ( PackageManager.getPackageInfo is a binder call; wrap in remember so a
@@ -464,30 +465,17 @@ internal fun ChatTopBar(
     TopAppBar(
         modifier = modifier,
         windowInsets = TopAppBarDefaults.windowInsets,
-        // §home-hub T4: top-left navigation icon branches on width.
-        //   phone (<600dp): ArrowBack → onBackToHome (pop back to Home).
-        //   tablet (≥600dp): Menu     → onOpenDrawer (open RecentSessionsDrawer).
-        // Both icons use Dimens.iconStd (24dp) — IconButton content tier —
-        // with contentDescription from the T4 string resources for
-        // accessibility (TalkBack announces the affordance's destination,
-        // not "button").
+        // §tablet-back-unify (2026-07-26): ArrowBack → onBackToHome on BOTH
+        // phone and tablet (previously tablet branched to a Menu button that
+        // opened the drawer). The 24dp icon tier + contentDescription are
+        // unchanged; only the form-factor branch was removed.
         navigationIcon = {
-            if (isWide) {
-                IconButton(onClick = onOpenDrawer) {
-                    Icon(
-                        imageVector = Icons.Filled.Menu,
-                        contentDescription = stringResource(R.string.chat_open_sessions_drawer),
-                        modifier = Modifier.size(Dimens.iconStd),
-                    )
-                }
-            } else {
-                IconButton(onClick = onBackToHome) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = stringResource(R.string.chat_back_to_home),
-                        modifier = Modifier.size(Dimens.iconStd),
-                    )
-                }
+            IconButton(onClick = onBackToHome) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = stringResource(R.string.chat_back_to_home),
+                    modifier = Modifier.size(Dimens.iconStd),
+                )
             }
         },
         title = {

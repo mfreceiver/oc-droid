@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteSweep
@@ -445,14 +445,23 @@ internal fun LicenseSection() {
     Spacer(modifier = Modifier.height(Dimens.spacing4))
 
     // Third-party dependencies
+    // §about-crash-fix: previously a LazyColumn, but this section is nested
+    // inside SettingsAboutRoute's Column(modifier = verticalScroll), and a
+    // LazyColumn measured inside a vertically-unbounded parent throws
+    // `IllegalStateException: Vertically scrollable component was measured
+    // with an infinity maximum height constraints` at runtime — the
+    // Settings-About crash. `userScrollEnabled = false` did NOT prevent the
+    // measurement crash. The dependency list is small + curated (no grow-
+    // bound), so a plain Column + forEach is correct and shares the parent's
+    // scroll. Each row is a ListItem (M3 spacing) so the visual matches the
+    // prior LazyColumn row-for-row.
     AppSectionHeader(text = stringResource(R.string.settings_license_third_party))
-    LazyColumn(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = Dimens.spacing4),
-        userScrollEnabled = false,
     ) {
-        items(licenseData) { (name, license) ->
+        licenseData.forEach { (name, license) ->
             ListItem(
                 headlineContent = { Text(name) },
                 supportingContent = { Text(license) },

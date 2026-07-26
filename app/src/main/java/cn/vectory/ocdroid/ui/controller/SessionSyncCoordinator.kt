@@ -1637,6 +1637,35 @@ class SessionSyncCoordinator(
                                 DebugLog.w(tag, "reconcileSession sid=$sid RESYNC timed out after ${perSidDeadlineMs}ms")
                                 SlimReconcileOutcome(SlimReconcileResult.TimedOut(sid))
                             }
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            // §stale-crash-fix (2026-07-26): CE must propagate —
+                            // never swallow scope cancellation. The broadened
+                            // Exception catch below would otherwise absorb it,
+                            // breaking structured concurrency.
+                            throw e
+                        } catch (e: OpenCodeRepository.StaleSlimCommitException) {
+                            // §stale-crash-fix (2026-07-26): the repository
+                            // incarnation rotated mid-reconcile (host reconfigure
+                            // / cold-start race). The entry token is no longer
+                            // current, so the results would be meaningless
+                            // anyway. Return Stale (same as the at-gate check)
+                            // instead of letting the throw escape the per-sid
+                            // launch → supervisorScope → uncaught on
+                            // Dispatchers.Main.immediate → app crash. This was
+                            // the root cause of the "打开应用时闪退" crash:
+                            // `reconcileSessionWithToken` → `probeLatest(token)`
+                            // → `requireSlimTokenCurrent` throws directly, and
+                            // the old catch only handled TimeoutCancellation.
+                            DebugLog.d(tag, "reconcileSession sid=$sid RESYNC stale token — incarnation rotated")
+                            SlimReconcileOutcome(SlimReconcileResult.Stale(sid))
+                        } catch (e: Exception) {
+                            // §stale-crash-fix: defense-in-depth — ANY other
+                            // exception from the reconcile path (network, parse,
+                            // unexpected runtime) must not escape the per-sid
+                            // launch. Log + return Failed so the sweep
+                            // completes cleanly. CE is re-thrown above.
+                            DebugLog.w(tag, "reconcileSession sid=$sid RESYNC failed: ${e::class.simpleName} ${e.message}")
+                            SlimReconcileOutcome(SlimReconcileResult.Failure(sid))
                         }
                         // §6.5: execute the command (if any) AFTER the
                         // timeout block. RESYNC never produces a command,

@@ -103,13 +103,35 @@ class TokenStreamClient(
                 // Residual-in-pipeline guard (cf. SSEClient): a frame queued in
                 // OkHttp's pipeline may arrive after the consumer cancelled.
                 if (closed.get()) return
+                // §sse-diag (Path A): frame-reception observability. Gated behind
+                // the Settings → Debug "详细日志" toggle (DebugLog.verboseDiagEnabled)
+                // — same gate as SseDiag/SendDiag/etc. Without this, "socket up
+                // but UI empty" is invisible: Oracle's analysis flagged that
+                // silent drops at the reducer route-token CAS / bundle-stamp
+                // guard can ONLY be distinguished from "no frames received" by
+                // adding this transport-layer log. Default OFF = zero per-frame
+                // alloc cost in release.
+                if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
+                    DebugLog.d("TokenStream", "event sid=$sessionId type=$type dataLen=${data.length}")
+                }
                 // parse() returns null for unknown events + malformed frames;
                 // those are silently skipped (forward compatibility). A null
                 // result MUST NOT complete the flow — the stream stays open.
-                val frame = TokenStreamFrame.parse(type, data) ?: return
+                val frame = TokenStreamFrame.parse(type, data) ?: run {
+                    if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
+                        DebugLog.d("TokenStream", "parse null sid=$sessionId type=$type — unknown/malformed (skipped)")
+                    }
+                    return
+                }
                 // Re-check after the (cheap but real) parse work.
                 if (closed.get()) return
-                trySend(frame)
+                val result = trySend(frame)
+                if (result.isFailure) {
+                    // trySend failure is a real problem (channel closed/cancelled
+                    // mid-frame) — kept UNGATED + WARN so it surfaces even with
+                    // verbose diag OFF. Low frequency by nature.
+                    DebugLog.w("TokenStream", "trySend failed sid=$sessionId type=$type result=$result — channel closed/cancelled?")
+                }
             }
 
             override fun onClosed(eventSource: EventSource) {
@@ -124,12 +146,36 @@ class TokenStreamClient(
                 t: Throwable?,
                 response: okhttp3.Response?,
             ) {
-                DebugLog.w(
-                    "TokenStream",
-                    "failure sid=$sessionId ${t?.message ?: "code=${response?.code}"}",
-                )
-                if (closed.compareAndSet(false, true)) {
+                // §sse-noise-fix (Path B): distinguish EXPECTED supersede
+                // cancellation from REAL transport failures. When the consumer
+                // cancels (coordinator supersede → awaitClose sets closed=true
+                // → eventSource.cancel()), OkHttp fires onFailure("Socket
+                // closed"). The CAS below fails (closed already true), so close()
+                // is NOT re-invoked — but the unconditional WARN log was
+                // printing for EVERY supersede, creating the false impression
+                // that SSE "won't connect" (the user-reported "Socket closed"
+                // noise during session switching).
+                //
+                // Fix: log WARN only for REAL failures (CAS succeeds = the
+                // failure was not self-induced). When closed is already true
+                // (consumer cancelled / superseded), log at DEBUG behind the
+                // verbose-diag gate — it is expected, not a connection problem.
+                val firstClose = closed.compareAndSet(false, true)
+                if (firstClose) {
+                    DebugLog.w(
+                        "TokenStream",
+                        "failure sid=$sessionId ${t?.message ?: "code=${response?.code}"}",
+                    )
                     close(t ?: Exception("token stream failed (code=${response?.code})"))
+                } else {
+                    // Expected: consumer (supersede) already closed the channel.
+                    // Verbose-diag-gated (Settings → Debug "详细日志").
+                    if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
+                        DebugLog.d(
+                            "TokenStream",
+                            "failure (expected — superseded) sid=$sessionId ${t?.message ?: "code=${response?.code}"}",
+                        )
+                    }
                 }
             }
         }

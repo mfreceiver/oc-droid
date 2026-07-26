@@ -315,6 +315,22 @@ internal fun MessageRow(
         val omittedCardEnabled = rememberOmittedContentCardEnabled()
         val expandEligible = parts.filter {
             it.hasFull == true && it.omitted != null && it.messageId != null
+        }.filterNot { part ->
+            // §omitted-card-noise-filter: exclude parts whose content is
+            // ALREADY represented by another card in this row, otherwise the
+            // OmittedContentCard is pure noise:
+            //  - type=text: streaming text is rendered inline (live token
+            //    buffer merges into the message body); an "expand omitted"
+            //    affordance under "生成中…" is redundant and confusing.
+            //  - tool=task: the sub-agent task already has its own SubAgent /
+            //    ToolRun card (rendered above in the part loop) showing
+            //    state.input / state.output; the OmittedContentCard alongside
+            //    it just echoes "state.input" — the user-reported
+            //    `tool=task id=prt_…` noise card.
+            // The OmittedContentCard machinery + SettingsManager toggle are
+            // KEPT for genuinely omitted content (long tool outputs of other
+            // tool types, file diffs held back by the sidecar, etc.).
+            part.type == "text" || part.isSubAgentTask
         }
         if (omittedCardEnabled && expandEligible.isNotEmpty()) {
             DebugCardIdentity(name = "OmittedContentCard", source = "MessageRow:285", part = expandEligible.firstOrNull()) {
