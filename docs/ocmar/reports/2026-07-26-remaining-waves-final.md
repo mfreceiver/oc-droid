@@ -190,9 +190,10 @@ fixer 不跑 build，以下可见性级联由 orchestrator 在 check.sh 迭代�
 
 ## 8. 发版
 
-- **Tag**: `v0.0.1`（pushed to origin）
-- **APK**: `APK/oc-droid-0.0.1-457f3fa.apk`（11.8 MB）
-- 发版脚本因 `v0.0.0-ci-smoke` tag 导致 semver 解析失败 → Cat5 修复
+- **Tag**: `v0.14.2`（patch from `v0.14.1`，pushed to origin）
+- **APK**: `APK/oc-droid-0.14.2-3e0b682.apk`
+- **Changelog**: `APK/oc-droid-0.14.2-3e0b682.md`（自 v0.14.1 以来）
+- **版本号修正**：初始误从 `v0.0.0-ci-smoke`（CI 测试 tag）派生 `v0.0.1`，发现后删除错误 tag，由 `release.sh patch` 正确从 `v0.14.1` 派生 `v0.14.2`
 
 ---
 
