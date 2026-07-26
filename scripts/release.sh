@@ -96,8 +96,8 @@ print(rr if rr else '')
 fi
 
 # --- 2. 质量门禁 ---
-echo "==> 质量门禁：编译 + 单测"
-./scripts/check.sh
+echo "==> 质量门禁：编译 + 单测 + lint"
+./scripts/check.sh --lint
 
 # --- 3. 由最新 tag 推算下一版本 ---
 # 取最高 semver release tag（严格 vX.Y.Z，排除 -ci-smoke/-dirty 等非 release tag）
