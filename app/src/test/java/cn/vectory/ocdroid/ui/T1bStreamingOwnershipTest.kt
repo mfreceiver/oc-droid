@@ -128,7 +128,7 @@ class T1bStreamingOwnershipTest {
             c.applyPartFullTextLeadingEdge("p1", "hello", "text", "p1", "m1", "sess-A").first
                 .markFlushPending("p1").first
         }
-        newStore.dispatch(AppAction.PartFullTextReceived("p1", "hello", "text", "m1", "sess-A"))
+        newStore.dispatch(AppAction.PartFullTextReceived("p1", "hello", "text", "m1", "sess-A", bundleStamp = BundleStamp(0L, "")))
 
         assertEquals(
             "PartFullTextReceived MUST equal legacy applyPartFullTextLeadingEdge + markFlushPending",
@@ -145,7 +145,7 @@ class T1bStreamingOwnershipTest {
             c.applyPartDeltaLeadingEdge("p1", "delta-chunk", "text", "m1", "sess-A").first
                 .markFlushPending("p1").first
         }
-        newStore.dispatch(AppAction.PartDeltaReceived("p1", "delta-chunk", "text", "m1", "sess-A"))
+        newStore.dispatch(AppAction.PartDeltaReceived("p1", "delta-chunk", "text", "m1", "sess-A", bundleStamp = BundleStamp(0L, "")))
 
         assertEquals(
             "PartDeltaReceived MUST equal legacy applyPartDeltaLeadingEdge + markFlushPending",
@@ -339,7 +339,7 @@ class T1bStreamingOwnershipTest {
         )
 
         // Phase 2: leading-edge delta (SSC:1539 — the second mutateChat).
-        store.dispatch(AppAction.PartDeltaReceived("p1", "hello", "text", "m1", "sess-A"))
+        store.dispatch(AppAction.PartDeltaReceived("p1", "hello", "text", "m1", "sess-A", bundleStamp = BundleStamp(0L, "")))
         advanceUntilIdle()
 
         assertEquals(
@@ -382,7 +382,7 @@ class T1bStreamingOwnershipTest {
 
         store.dispatch(AppAction.PartPlaceholderEnsured("reasoning", "p1", "m1", "sess-A", bundleStamp = BundleStamp(0L, "")))
         advanceUntilIdle()
-        store.dispatch(AppAction.PartFullTextReceived("p1", "thinking...", "reasoning", "m1", "sess-A"))
+        store.dispatch(AppAction.PartFullTextReceived("p1", "thinking...", "reasoning", "m1", "sess-A", bundleStamp = BundleStamp(0L, "")))
         advanceUntilIdle()
 
         assertEquals(
@@ -418,7 +418,7 @@ class T1bStreamingOwnershipTest {
         // Apply a PartDeltaReceived (the highest-touch streaming action —
         // writes streamingPartTexts + partsByMessage + streamingReasoningPart
         // + pendingFlushPartIds).
-        store.dispatch(AppAction.PartDeltaReceived("p1", "delta", "text", "m1", "sess-A"))
+        store.dispatch(AppAction.PartDeltaReceived("p1", "delta", "text", "m1", "sess-A", bundleStamp = BundleStamp(0L, "")))
 
         val out = store.stateFlow.value
         // Non-chat slices untouched.

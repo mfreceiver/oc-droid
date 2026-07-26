@@ -234,7 +234,8 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         assertEquals(NavRoute.Sessions.route, core.navFlow.value.lastRoute)
-        assertEquals(NavRoute.Sessions.legacyPage, core.navFlow.value.lastNavPage)
+        // lastNavPage is a deprecated mirror; force-home no longer co-writes it.
+        // Authority is lastRoute + navEpoch.
         verify { settingsManager.lastRoute = NavRoute.Sessions.route }
     }
 

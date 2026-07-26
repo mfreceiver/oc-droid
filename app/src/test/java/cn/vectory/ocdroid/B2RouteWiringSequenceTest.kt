@@ -115,22 +115,12 @@ class B2RouteWiringSequenceTest {
         override fun supportsDurableSessionErrorBanner(): Boolean = false
         override fun isFlushActiveForPart(partId: String): Boolean = false
         override fun handleSessionDigest(event: SSEEvent) {}
-        override fun dispatchTokenStreamPlaceholder(
-            partType: String,
-            partId: String,
-            messageId: String,
-            sessionId: String,
-            expectedRouteInstance: Long,
+        override fun dispatchBundleBound(
+            actionFactory: (cn.vectory.ocdroid.ui.BundleStamp) -> cn.vectory.ocdroid.ui.AppAction,
         ): Boolean {
+            val state = slices.store.stateFlow.value
             slices.store.dispatch(
-                cn.vectory.ocdroid.ui.AppAction.PartPlaceholderEnsured(
-                    partType = partType,
-                    partId = partId,
-                    messageId = messageId,
-                    sessionId = sessionId,
-                    expectedRouteInstance = expectedRouteInstance,
-                    bundleStamp = cn.vectory.ocdroid.ui.BundleStamp(0L, ""),
-                ),
+                actionFactory(cn.vectory.ocdroid.ui.BundleStamp(state.liveBundleGeneration, state.liveEndpointFp)),
             )
             return true
         }
@@ -429,7 +419,7 @@ class B2RouteWiringSequenceTest {
         //    routeInstanceFor("A") value (=5) explicitly.
         coordinator.dispatchEpochFrame(
             "A", epoch, gen, snapshot(text = "hello"), store.slices.routeInstanceFor("A"),
-            bundleRepository.currentClientBundle(),
+            bundleRepository.currentClientBundle()!!,
         )
         assertEquals(
             "live snapshot must reach route-owned streamingPartTexts",
@@ -451,7 +441,7 @@ class B2RouteWiringSequenceTest {
             "A", epoch, gen,
             TokenStreamFrame.Resync(ResyncReason.SESSION_IDLE, "A"),
             store.slices.routeInstanceFor("A"),
-            bundleRepository.currentClientBundle(),
+            bundleRepository.currentClientBundle()!!,
         )
         runPending()
 
@@ -556,7 +546,7 @@ class B2RouteWiringSequenceTest {
             "A", coordinator.epochOf("A"), coordinator.genOf("A"),
             snapshot(messageId = "live-mA", partId = "pLive", text = "live-token"),
             store.slices.routeInstanceFor("A"),
-            bundleRepository.currentClientBundle(),
+            bundleRepository.currentClientBundle()!!,
         )
         assertEquals(
             "coordinator must bridge the live snapshot into the active A@T3 slot",

@@ -4,6 +4,8 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
+import cn.vectory.ocdroid.ui.AppAction
+import cn.vectory.ocdroid.ui.BundleStamp
 import cn.vectory.ocdroid.ui.controller.SseSideEffect
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.util.SettingsManager
@@ -102,15 +104,6 @@ interface SseDispatchHost {
      */
     fun handleSessionDigest(event: SSEEvent)
 
-    /**
-     * Dispatches a token-stream placeholder with a stamp captured under the
-     * repository bundle-commit monitor. Returns false when no bundle is live.
-     */
-    fun dispatchTokenStreamPlaceholder(
-        partType: String,
-        partId: String,
-        messageId: String,
-        sessionId: String,
-        expectedRouteInstance: Long,
-    ): Boolean
+    /** Dispatches a bundle-bound action with its stamp captured under the lock. */
+    fun dispatchBundleBound(actionFactory: (BundleStamp) -> AppAction): Boolean
 }

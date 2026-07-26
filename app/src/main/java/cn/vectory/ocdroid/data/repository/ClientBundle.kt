@@ -18,9 +18,9 @@ import retrofit2.Retrofit
  * object once through its single volatile publication point; callers must not
  * cache individual fields outside the bundle.
  */
-internal class ClientBundle(
+class ClientBundle internal constructor(
     val generation: Long,
-    val hostSnapshot: HostSnapshot,
+    internal val hostSnapshot: HostSnapshot,
     val effectiveSslConfig: SslConfig,
     val clientCertError: String?,
     val restHttp: OkHttpClient,

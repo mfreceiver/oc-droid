@@ -2,7 +2,7 @@
 # scripts/release.sh — ocdroid 发版唯一入口（打 semver tag）。
 # 详见 .opencode/policies/versioning.md 与 docs/specs/build-apk.md §6。
 #
-# 用法: ./scripts/release.sh <patch|minor|major> [--allow-dirty]
+# 用法: ./scripts/release.sh <patch|minor|major> [--allow-dirty] [--ocmar-workflow <slug>]
 #
 # 版本模型（go-around pattern）：版本号不写在任何文件里，唯一来源是 git——
 #   versionName = git describe --tags --always --dirty（见 app/build.gradle.kts）
@@ -30,14 +30,17 @@ source "$(dirname "$0")/env.sh"
 
 TYPE=""
 ALLOW_DIRTY=0
-for arg in "$@"; do
-  case "$arg" in
+OCMAR_SLUG=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --allow-dirty) ALLOW_DIRTY=1 ;;
-    patch|minor|major) TYPE="$arg" ;;
-    *) echo "❌ 未知参数: $arg（用法: release.sh <patch|minor|major> [--allow-dirty]）"; exit 1 ;;
+    --ocmar-workflow) shift; OCMAR_SLUG="$1" ;;
+    patch|minor|major) TYPE="$1" ;;
+    *) echo "❌ 未知参数: $1（用法: release.sh <patch|minor|major> [--allow-dirty] [--ocmar-workflow <slug>]）"; exit 1 ;;
   esac
+  shift
 done
-[[ -n "$TYPE" ]] || { echo "用法: release.sh <patch|minor|major> [--allow-dirty]"; exit 1; }
+[[ -n "$TYPE" ]] || { echo "用法: release.sh <patch|minor|major> [--allow-dirty] [--ocmar-workflow <slug>]"; exit 1; }
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$REPO_ROOT"
@@ -64,18 +67,52 @@ if [[ -n "$(git status --porcelain)" ]]; then
   fi
 fi
 
+# --- 1b. ocmar 交付闭环检查（仅 --ocmar-workflow 模式）---
+if [[ -n "$OCMAR_SLUG" ]]; then
+  # ocmar release 禁止 dirty——里程碑 tag 必须干净树
+  if [[ "$ALLOW_DIRTY" -eq 1 ]]; then
+    echo "❌ --ocmar-workflow 与 --allow-dirty 互斥：ocmar 发版要求干净树"
+    exit 1
+  fi
+  OCMAR_STATE=".ocmar/workflows/$OCMAR_SLUG/state.json"
+  if [[ ! -f "$OCMAR_STATE" ]]; then
+    echo "❌ ocmar state 不存在: $OCMAR_STATE"
+    exit 1
+  fi
+  # 检查 release_ready 字段
+  RELEASE_READY=$(python3 -c "
+import json, sys
+with open('$OCMAR_STATE') as f:
+    s = json.load(f)
+rr = s.get('release_ready')
+print(rr if rr else '')
+" 2>/dev/null)
+  if [[ -z "$RELEASE_READY" ]]; then
+    echo "❌ ocmar workflow '$OCMAR_SLUG' 尚未 mark-release-ready"
+    echo "   先完成: ocmar-state <dir> mark-release-ready --report <report-path> --owner <sid>"
+    exit 1
+  fi
+  echo "✅ ocmar 交付闭环: $OCMAR_SLUG release_ready=$RELEASE_READY"
+fi
+
 # --- 2. 质量门禁 ---
 echo "==> 质量门禁：编译 + 单测"
 ./scripts/check.sh
 
 # --- 3. 由最新 tag 推算下一版本 ---
-PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+# 取最高 semver release tag（严格 vX.Y.Z，排除 -ci-smoke/-dirty 等非 release tag）
+PREV_TAG=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V -r | head -1)
 if [[ -z "$PREV_TAG" ]]; then
-  echo "❌ 仓库无任何 tag，无法推断基线版本；请先手动 git tag v0.1.0"
+  echo "❌ 仓库无严格 semver tag（vX.Y.Z），无法推断基线版本；请先手动 git tag v0.1.0"
   exit 1
 fi
 BASE="${PREV_TAG#v}"
 IFS='.' read -r MAJOR MINOR PATCH <<<"$BASE"
+# Ignore pre-release suffixes on CI/smoke tags (e.g. 0-ci-smoke → 0)
+# before arithmetic expansion under `set -u`.
+MAJOR="${MAJOR%%-*}"
+MINOR="${MINOR%%-*}"
+PATCH="${PATCH%%-*}"
 case "$TYPE" in
   patch) PATCH=$((PATCH+1)) ;;
   minor) MINOR=$((MINOR+1)); PATCH=0 ;;
@@ -83,6 +120,17 @@ case "$TYPE" in
 esac
 VERSION="$MAJOR.$MINOR.$PATCH"
 TAG="v$VERSION"
+# 单调性校验：候选版本必须 > 最高已有 tag（防回退如 v0.14.1 → v0.0.1）
+HIGHEST_TAG="$PREV_TAG"
+HIGHEST_BASE="${HIGHEST_TAG#v}"
+HIGHEST_MAJOR=""; HIGHEST_MINOR=""; HIGHEST_PATCH=""
+IFS='.' read -r HIGHEST_MAJOR HIGHEST_MINOR HIGHEST_PATCH <<<"$HIGHEST_BASE"
+if (( MAJOR < HIGHEST_MAJOR || (MAJOR == HIGHEST_MAJOR && (MINOR < HIGHEST_MINOR || (MINOR == HIGHEST_MINOR && PATCH <= HIGHEST_PATCH))) )); then
+  echo "❌ 候选版本 $TAG <= 最高已有 tag $HIGHEST_TAG（版本回退）"
+  echo "   当前最高: $HIGHEST_TAG → 候选: $TAG"
+  echo "   请确认 bump 类型（patch/minor/major）或检查是否误选了低版本 tag 作为基线"
+  exit 1
+fi
 # 短 hash = release 构建嵌入 versionName + APK 文件名的 commit 锚点（与 gradle
 # archiveReleaseApk 一致：二者都取 HEAD 的 git rev-parse --short）。
 SHORT=$(git rev-parse --short HEAD)

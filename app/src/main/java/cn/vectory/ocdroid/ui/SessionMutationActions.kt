@@ -197,7 +197,6 @@ internal fun launchSetSessionArchived(
                         slices.store.mutateNav {
                             it.copy(
                                 lastRoute = NavRoute.Sessions.route,
-                                lastNavPage = NavRoute.Sessions.legacyPage,
                                 navEpoch = it.navEpoch + 1L,
                             )
                         }
@@ -286,7 +285,6 @@ internal fun launchDeleteSession(
                     slices.store.mutateNav {
                         it.copy(
                             lastRoute = NavRoute.Sessions.route,
-                            lastNavPage = NavRoute.Sessions.legacyPage,
                             navEpoch = it.navEpoch + 1L,
                         )
                     }

@@ -284,8 +284,17 @@ object ControllerModule {
         bundleEndpointResolver: cn.vectory.ocdroid.service.streaming.BundleEndpointResolver,
         settingsManager: cn.vectory.ocdroid.util.SettingsManager,
     ): TokenStreamCoordinator {
-        repository.onBundlePublished = { generation, endpointFp ->
-            store.dispatch(AppAction.BundlePublished(generation, endpointFp))
+        synchronized(repository) {
+            repository.onBundlePublished = { generation, endpointFp ->
+                store.dispatch(AppAction.BundlePublished(generation, endpointFp))
+            }
+            // The repository creates its initial generation-0 bundle before
+            // this callback can be installed. Publish that baseline now so
+            // bundle-bound reducer actions have a valid StoreState stamp
+            // before the first host reconfiguration or token frame.
+            repository.currentClientBundle()?.let { bundle ->
+                store.dispatch(AppAction.BundlePublished(bundle.generation, bundle.endpointFp))
+            }
         }
         val streamConnectionProvider: (String, String?) -> TokenStreamConnection = { sid, directory ->
             val resolved = bundleEndpointResolver.resolveEndpoint(repository)

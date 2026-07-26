@@ -287,13 +287,9 @@ internal fun rememberChatTopBarState(
 }
 
 internal data class ChatTopBarActions(
-    val onSelectSession: (String) -> Unit,
     /**
      * §Wave5b-Q13 + §chat-list-detail §11 / G6 (B5): dedicated callback for
-     * the子→父 breadcrumb tap. The breadcrumb MUST NOT reuse [onSelectSession]
-     * — that always dispatches a `Latest` scroll intent (the default
-     * selectSession path), which would clobber the parent's Restore checkpoint
-     * captured at openSubAgent time. This callback routes through
+     * the子→父 breadcrumb tap. Routes through
      * [cn.vectory.ocdroid.ui.SessionViewModel.returnToParent] which triggers
      * `returnToExistingChat(parentId)` (B5 BLOCK-fix CRITICAL — pop-based
      * restoration, NOT navigateToChat); the AppShell synchronizer pops the
@@ -519,15 +515,12 @@ internal fun ChatTopBar(
                                 .weight(1f, fill = false)
                                 .clickable {
                                     // §Wave5b-Q13: route through the DEDICATED
-                                    // onNavigateParent callback, NOT
-                                    // onSelectSession. The latter always lands
-                                    // Latest (clobbering the parent's Restore
-                                    // checkpoint captured at openSubAgent);
-                                    // onNavigateParent routes through
-                                    // SessionViewModel.returnToParent which
+                                    // onNavigateParent callback, which
+                                    // routes through
+                                    // SessionViewModel.returnToParent and
                                     // dispatches Restore(checkpoint) so the
                                     // parent re-opens at the user's prior
-                                    // viewport.
+                                    // viewport (rather than Latest).
                                     actions.onNavigateParent()
                                 }
                         )

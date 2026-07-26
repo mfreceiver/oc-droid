@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.ui.controller.sse
 
 import cn.vectory.ocdroid.data.model.ResyncReason
 import cn.vectory.ocdroid.data.model.TokenStreamFrame
+import cn.vectory.ocdroid.data.repository.ClientBundle
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.NavRoute
@@ -56,6 +57,7 @@ class TokenStreamCoordinatorIdempotencyTest {
     private lateinit var slices: SliceFlows
     private lateinit var stateStore: SharedStateStore
     private lateinit var fake: FakeStreamProvider
+    private lateinit var bundleRepository: OpenCodeRepository
     private lateinit var coordinator: TokenStreamCoordinator
 
     @Before
@@ -64,6 +66,12 @@ class TokenStreamCoordinatorIdempotencyTest {
         stateStore = SharedStateStore()
         slices = stateStore.slices
         fake = FakeStreamProvider()
+        bundleRepository = OpenCodeRepository(
+            mockk<TrafficTracker>(relaxed = true),
+            mockk<TrafficLogger>(relaxed = true),
+        )
+        val bundle = bundleRepository.currentClientBundle()!!
+        stateStore.dispatch(AppAction.BundlePublished(bundle.generation, bundle.endpointFp))
         // Large watchdog so runPending (= runCurrent) does not trip the timeout
         // → reconnect loop in non-watchdog tests.
         coordinator = buildCoordinator(watchdogMs = 10_000L)
@@ -74,13 +82,14 @@ class TokenStreamCoordinatorIdempotencyTest {
         openDebounceMs: Long = 0L,
         streamProvider: (String, String?) -> Flow<TokenStreamFrame> = fake.provider,
         streamConnectionProvider: ((String, String?) -> TokenStreamConnection)? = null,
-        currentBundleProvider: () -> Any? = { null },
+        currentBundleProvider: () -> ClientBundle? = { bundleRepository.currentClientBundle() },
         initialBackoffMs: Long = 50L,
     ): TokenStreamCoordinator = TokenStreamCoordinator(
         scope = scope,
         slices = slices,
         streamProvider = streamProvider,
         streamConnectionProvider = streamConnectionProvider,
+        bundleCommitLock = bundleRepository,
         currentBundleProvider = currentBundleProvider,
         triggerSinceFetch = { _, _ -> },
         openDebounceMs = openDebounceMs,
@@ -97,6 +106,11 @@ class TokenStreamCoordinatorIdempotencyTest {
     }
 
     private fun runPending() = scope.runCurrent()
+
+    private fun publishBundle(baseUrl: String): ClientBundle {
+        bundleRepository.configure(baseUrl = baseUrl, slim = true)
+        return bundleRepository.currentClientBundle()!!
+    }
 
     // ── T1.1-C1: active + same sid + same dir → idempotent skip ────────────
 
@@ -314,7 +328,7 @@ class TokenStreamCoordinatorIdempotencyTest {
 
     @Test
     fun `same sid and dir with a newly published bundle supersedes the old lifecycle`() {
-        val publishedBundle = AtomicReference<Any>("bundle-a")
+        val publishedBundle = AtomicReference(bundleRepository.currentClientBundle()!!)
         val bundleAware = buildCoordinator(
             streamProvider = { _, _ -> error("bundle-aware provider must be used") },
             streamConnectionProvider = { _, _ ->
@@ -328,7 +342,7 @@ class TokenStreamCoordinatorIdempotencyTest {
         val oldJob = bundleAware.currentStreamJobSnapshot()
         assertTrue(oldJob!!.isActive)
 
-        publishedBundle.set("bundle-b")
+        publishedBundle.set(publishBundle("http://bundle-b.test"))
         bundleAware.open("s1", "/work")
         runPending()
 
@@ -342,10 +356,10 @@ class TokenStreamCoordinatorIdempotencyTest {
 
     @Test
     fun `bundle is revalidated after the open guard snapshot before skipping`() {
-        val bundleA = Any()
-        val bundleB = Any()
+        val bundleA = bundleRepository.currentClientBundle()!!
+        val bundleB = publishBundle("http://bundle-b.test")
         val bundleReads = AtomicInteger(0)
-        val boundBundles = mutableListOf<Any?>()
+        val boundBundles = mutableListOf<ClientBundle>()
         val guardRace = buildCoordinator(
             streamProvider = { _, _ -> error("bundle-aware provider must be used") },
             streamConnectionProvider = { _, _ ->
@@ -438,7 +452,7 @@ class TokenStreamCoordinatorIdempotencyTest {
         }
         repository.configure(baseUrl = "http://host-a.test", slim = true)
         val bundleA = repository.currentClientBundle()!!
-        val resolvedBundle = AtomicReference<Any?>(null)
+        val resolvedBundle = AtomicReference<ClientBundle?>(null)
 
         val debounced = buildCoordinator(
             openDebounceMs = 50L,
@@ -484,7 +498,7 @@ class TokenStreamCoordinatorIdempotencyTest {
         )
         repository.configure(baseUrl = "http://host-a.test", slim = true)
         val published = repository.currentClientBundle()!!
-        val resolved = ConcurrentLinkedQueue<Any>()
+        val resolved = ConcurrentLinkedQueue<ClientBundle>()
         val concurrent = buildCoordinator(
             streamProvider = { _, _ -> flow { } },
             currentBundleProvider = {
@@ -511,7 +525,7 @@ class TokenStreamCoordinatorIdempotencyTest {
 
     @Test
     fun `T3-3-C3 C7 frame from a retired bundle is dropped before reducer or chat commit`() {
-        val publishedBundle = AtomicReference<Any>("bundle-a")
+        val publishedBundle = AtomicReference(bundleRepository.currentClientBundle()!!)
         val bundleAware = buildCoordinator(
             streamProvider = { _, _ -> error("bundle-aware provider must be used") },
             streamConnectionProvider = { _, _ ->
@@ -526,7 +540,7 @@ class TokenStreamCoordinatorIdempotencyTest {
         val epoch = bundleAware.epochOf("s1")
         val generation = bundleAware.genOf("s1")
 
-        publishedBundle.set("bundle-b")
+        publishedBundle.set(publishBundle("http://bundle-b.test"))
         bundleAware.dispatchEpochFrame(
             sid = "s1",
             epoch = epoch,

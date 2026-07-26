@@ -8,7 +8,7 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.ui.chat.ExpandPartsOutcome
 
-internal data class BundleStamp(
+data class BundleStamp(
     val generation: Long,
     val endpointFp: String,
 )
@@ -46,7 +46,7 @@ internal data class BundleStamp(
  * failure-restoration writeComposer stay separate (oracle: those are
  * intentional, not part of the success-path atomic commit).
  */
-internal sealed interface AppAction {
+sealed interface AppAction {
     /**
      * materializeDraftSession success path: a freshly-created [session] is
      * wired into sessionList (upsert), chat.currentSessionId is set, the new
@@ -237,13 +237,14 @@ internal sealed interface AppAction {
         val messageId: String,
         val sessionId: String,
         val expectedRouteInstance: Long = 0L,
-        val bundleStamp: BundleStamp,
+        val bundleStamp: BundleStamp? = null,
     ) : AppAction
 
     /**
      * T1b two-phase leading edge — fullText (SSC:1397). REPLACE into
      * streamingPartTexts + streamingReasoningPart + partsByMessage placeholder
-     * + pendingFlushPartIds. Caller still schedules [scheduleDeltaFlush].
+     * + pendingFlushPartIds. A null [bundleStamp] is rejected by the reducer;
+     * callers still schedule [scheduleDeltaFlush] after a successful dispatch.
      */
     data class PartFullTextReceived(
         val partId: String,
@@ -252,12 +253,14 @@ internal sealed interface AppAction {
         val messageId: String,
         val sessionId: String,
         val expectedRouteInstance: Long = 0L,
+        val bundleStamp: BundleStamp? = null,
     ) : AppAction
 
     /**
      * T1b two-phase leading edge — delta (SSC:1436 / :1539). APPEND into
      * streamingPartTexts + streamingReasoningPart + partsByMessage placeholder
-     * + pendingFlushPartIds. Uses the 5-arg [applyPartDeltaLeadingEdge].
+     * + pendingFlushPartIds. A null [bundleStamp] is rejected by the reducer.
+     * Uses the 5-arg [applyPartDeltaLeadingEdge].
      */
     data class PartDeltaReceived(
         val partId: String,
@@ -266,6 +269,7 @@ internal sealed interface AppAction {
         val messageId: String,
         val sessionId: String,
         val expectedRouteInstance: Long = 0L,
+        val bundleStamp: BundleStamp? = null,
     ) : AppAction
 
     /** T1b trailing coalesce fullText REPLACE (SSC:1421). */
@@ -785,8 +789,10 @@ private fun AppAction.acceptsBundle(state: StoreState): Boolean {
         is AppAction.CoalesceFlushedForPart -> bundleStamp
         is AppAction.ClearTokenStreamState -> bundleStamp
         is AppAction.TokenStreamPartUpdated -> bundleStamp
+        is AppAction.PartFullTextReceived -> bundleStamp
+        is AppAction.PartDeltaReceived -> bundleStamp
         else -> return true
-    }
+    } ?: return false
     return state.liveBundleGeneration == expected.generation &&
         state.liveEndpointFp == expected.endpointFp
 }

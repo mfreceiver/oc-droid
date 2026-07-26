@@ -1179,31 +1179,12 @@ class SessionSyncCoordinator(
         }
     }
 
-    override fun dispatchTokenStreamPlaceholder(
-        partType: String,
-        partId: String,
-        messageId: String,
-        sessionId: String,
-        expectedRouteInstance: Long,
-    ): Boolean {
-        return dispatchBundleBound { stamp ->
-                AppAction.PartPlaceholderEnsured(
-                    partType = partType,
-                    partId = partId,
-                    messageId = messageId,
-                    sessionId = sessionId,
-                    expectedRouteInstance = expectedRouteInstance,
-                    bundleStamp = stamp,
-                )
-        }
-    }
-
     /**
      * Shared bundle-bound dispatch gate for SSE-owned streaming actions. The
      * bundle read, stamp construction, and StoreState CAS all occur under the
      * same repository monitor used by configure/publish.
      */
-    private fun dispatchBundleBound(actionFactory: (BundleStamp) -> AppAction): Boolean {
+    override fun dispatchBundleBound(actionFactory: (BundleStamp) -> AppAction): Boolean {
         val repo = repository ?: return false
         synchronized(repo) {
             val bundle = repo.currentClientBundle() ?: return false

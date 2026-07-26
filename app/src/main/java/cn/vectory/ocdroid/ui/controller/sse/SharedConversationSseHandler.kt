@@ -149,13 +149,16 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
                     val existingParts = host.slices.chat.value.partsByMessage[msgId]
                     val hasCorrectType = existingParts?.any { it.id == pId && it.type == pType } == true
                     if (!hasCorrectType) {
-                        host.dispatchTokenStreamPlaceholder(
-                            partType = pType,
-                            partId = pId,
-                            messageId = msgId,
-                            sessionId = deltaEvent.sessionId,
-                            expectedRouteInstance = routeInstance,
-                        )
+                        host.dispatchBundleBound { stamp ->
+                            AppAction.PartPlaceholderEnsured(
+                                partType = pType,
+                                partId = pId,
+                                messageId = msgId,
+                                sessionId = deltaEvent.sessionId,
+                                expectedRouteInstance = routeInstance,
+                                bundleStamp = stamp,
+                            )
+                        }
                         if (STREAMING_FLICKER_DEBUG) {
                             val inStreamingTexts = key in host.slices.chat.value.streamingPartTexts
                             Log.w(
@@ -168,7 +171,7 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
                 if (!fullText.isNullOrBlank()) {
                     if (!host.isFlushActiveForPart(key)) {
                         // Leading edge fullText
-                        host.slices.store.dispatch(
+                        host.dispatchBundleBound { stamp ->
                             AppAction.PartFullTextReceived(
                                 partId = key,
                                 fullText = fullText,
@@ -176,8 +179,9 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
                                 messageId = msgId,
                                 sessionId = deltaEvent.sessionId,
                                 expectedRouteInstance = routeInstance,
+                                bundleStamp = stamp,
                             )
-                        )
+                        }
                         host.scheduleDeltaFlush(key)
                         if (STREAMING_FLICKER_DEBUG) {
                             Log.w(FLICKER_TAG, "first fullText staged partId=$key msgId=$msgId")
@@ -197,7 +201,7 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
                         // handleMessagePartDelta / bridgePartToChatState).
                         // Omitting it defaulted expectedRouteInstance=0L and
                         // left the route-owned slot stale.
-                        host.slices.store.dispatch(
+                        host.dispatchBundleBound { stamp ->
                             AppAction.PartDeltaReceived(
                                 partId = key,
                                 delta = delta,
@@ -205,8 +209,9 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
                                 messageId = msgId,
                                 sessionId = deltaEvent.sessionId,
                                 expectedRouteInstance = routeInstance,
+                                bundleStamp = stamp,
                             )
-                        )
+                        }
                         host.scheduleDeltaFlush(key)
                         if (STREAMING_FLICKER_DEBUG) {
                             Log.w(FLICKER_TAG, "first delta staged partId=$key msgId=$msgId")
@@ -250,7 +255,7 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
             if (!isStreamablePartType(knownType)) return
             if (!host.isFlushActiveForPart(key)) {
                 // Leading edge
-                host.slices.store.dispatch(
+                host.dispatchBundleBound { stamp ->
                     AppAction.PartDeltaReceived(
                         partId = key,
                         delta = delta,
@@ -258,8 +263,9 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
                         messageId = msgId,
                         sessionId = sessionId,
                         expectedRouteInstance = routeInstance,
+                        bundleStamp = stamp,
                     )
-                )
+                }
                 host.scheduleDeltaFlush(key)
             } else {
                 // Trailing coalesce

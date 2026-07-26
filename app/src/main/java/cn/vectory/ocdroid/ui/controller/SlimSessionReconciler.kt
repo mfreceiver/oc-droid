@@ -352,7 +352,6 @@ internal class DefaultSlimReconcileStorePort(
         slices.store.mutateNav {
             it.copy(
                 lastRoute = NavRoute.Sessions.route,
-                lastNavPage = NavRoute.Sessions.legacyPage,
                 navEpoch = it.navEpoch + 1L,
             )
         }

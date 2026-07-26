@@ -170,12 +170,10 @@ class ChatTopBarStateTest {
 
     @Test
     fun `ChatTopBarActions default callbacks are no-ops`() {
-        // §1B: the defaults for the optional callbacks are no-op lambdas —
-        // invoking them MUST NOT throw. Required callbacks
-        // (onSelectSession / onSelectAgent) are not defaulted and not invoked
-        // here. §B6: onCloseSession removed (SessionTabStrip deleted).
+        // §1B: defaults for the optional callbacks are no-op lambdas —
+        // invoking them MUST NOT throw. §B6: onCloseSession removed
+        // (SessionTabStrip deleted).
         val a = ChatTopBarActions(
-            onSelectSession = {},
             onSelectAgent = {},
         )
 
@@ -190,7 +188,6 @@ class ChatTopBarStateTest {
 
     @Test
     fun `ChatTopBarActions callbacks invoke the supplied lambdas`() {
-        var selectSessionCalls = mutableListOf<String>()
         var selectAgentCalls = mutableListOf<String?>()
         var navSettings = 0
         var selectHost = ""
@@ -202,7 +199,6 @@ class ChatTopBarStateTest {
 
         // §B6: onCloseSession removed (SessionTabStrip deleted).
         val a = ChatTopBarActions(
-            onSelectSession = { selectSessionCalls += it },
             onSelectAgent = { selectAgentCalls += it },
             onNavigateToSettings = { navSettings += 1 },
             onSelectHost = { selectHost = it },
@@ -213,7 +209,6 @@ class ChatTopBarStateTest {
             onSwitchModel = { p, m -> switchModel = "$p/$m" },
         )
 
-        a.onSelectSession("s1")
         a.onSelectAgent("code")
         a.onNavigateToSettings()
         a.onSelectHost("h1")
@@ -223,7 +218,6 @@ class ChatTopBarStateTest {
         a.onOpenOverflow()
         a.onSwitchModel("p", "m")
 
-        assertEquals(listOf("s1"), selectSessionCalls)
         assertEquals(listOf("code"), selectAgentCalls)
         assertEquals(1, navSettings)
         assertEquals("h1", selectHost)
@@ -237,14 +231,12 @@ class ChatTopBarStateTest {
     @Test
     fun `ChatTopBarActions data-class equals and copy`() {
         val a1 = ChatTopBarActions(
-            onSelectSession = {},
             onSelectAgent = {},
         )
-        // Same required callbacks (different lambda instances, but
-        // ChatTopBarActions is a data class so equals is structural — the
+        // ChatTopBarActions is a data class so equals is structural —
         // lambda fields are compared by reference, so a1 != a1.copy() with
-        // different lambdas. Verify copy() preserves identity for required
-        // callbacks when no override is given).
+        // different lambdas. Verify copy() preserves identity for callbacks
+        // when no override is given.
         val a2 = a1.copy()
         // a1 and a2 share the same lambda references (copy() with no overrides).
         assertEquals(a1, a2)

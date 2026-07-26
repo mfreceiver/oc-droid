@@ -85,14 +85,17 @@ class OrchestratorViewModel @Inject constructor(
         core.settingsManager.lastNavPage = clamped
         val route = NavRoute.fromLegacyPage(clamped)
         core.settingsManager.lastRoute = route.route
+        // TODO: migrate to lastRoute
         core.store.mutateNav { it.copy(lastRoute = route.route, lastNavPage = clamped) }
     }
 
     fun setLastRoute(route: NavRoute) {
         val state = core.store.navFlow.value
-        if (state.lastRoute == route.route && state.lastNavPage == route.legacyPage) return
+        // Authority is lastRoute only; lastNavPage is a deprecated mirror and is
+        // intentionally not co-written by the lastRoute-only migration paths.
+        if (state.lastRoute == route.route) return
         core.settingsManager.lastRoute = route.route
-        core.store.mutateNav { it.copy(lastRoute = route.route, lastNavPage = route.legacyPage) }
+        core.store.mutateNav { it.copy(lastRoute = route.route) }
     }
 
     /**
@@ -119,7 +122,7 @@ class OrchestratorViewModel @Inject constructor(
         core.store.mutateNav {
             it.copy(
                 lastRoute = NavRoute.Sessions.route,
-                lastNavPage = NavRoute.Sessions.legacyPage,
+                // lastNavPage omitted — authority is lastRoute
                 navEpoch = it.navEpoch + 1L, // Always changes → StateFlow emits
             )
         }
@@ -183,7 +186,7 @@ class OrchestratorViewModel @Inject constructor(
             val next = it.chatRouteInstance + 1L
             it.copy(
                 chatRouteInstance = next,
-                nav = it.nav.copy(lastRoute = route, lastNavPage = NavRoute.Chat.legacyPage),
+                nav = it.nav.copy(lastRoute = route),
                 chat = it.chat.copy(content = null),
             )
         }
@@ -266,7 +269,6 @@ class OrchestratorViewModel @Inject constructor(
                 chatRouteInstance = next,
                 nav = it.nav.copy(
                     lastRoute = route,
-                    lastNavPage = NavRoute.Chat.legacyPage,
                     navEpoch = it.nav.navEpoch + 1L,
                 ),
                 chat = it.chat.copy(content = null),

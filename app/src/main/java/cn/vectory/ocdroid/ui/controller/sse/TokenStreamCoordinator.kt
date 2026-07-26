@@ -99,12 +99,12 @@ import java.util.concurrent.atomic.AtomicReference
  */
 /**
  * A stream flow together with the exact immutable client bundle that created
- * it. [bundle] is opaque at the public transport boundary, but the
- * coordinator retains it by reference for generation/endpoint validation.
+ * it. The strongly typed [bundle] is retained by reference for
+ * generation/endpoint validation.
  */
 data class TokenStreamConnection(
     val flow: kotlinx.coroutines.flow.Flow<TokenStreamFrame>,
-    val bundle: Any?,
+    val bundle: ClientBundle,
 )
 
 class TokenStreamCoordinator(
@@ -170,7 +170,7 @@ class TokenStreamCoordinator(
      /** Shared with [OpenCodeRepository.configure]'s @Synchronized monitor. */
      private val bundleCommitLock: Any = Any(),
      /** Published bundle identity used by all lifecycle/result guards. */
-     private val currentBundleProvider: () -> Any? = { null },
+     private val currentBundleProvider: () -> ClientBundle? = { null },
 ) {
     // ── State ───────────────────────────────────────────────────────────────
     //
@@ -191,12 +191,12 @@ class TokenStreamCoordinator(
      */
     private data class StreamLifecycle(
         val job: Job,
-        val bundle: Any? = null,
+        val bundle: ClientBundle,
     ) {
-        val boundBundleGeneration: Long?
-            get() = (bundle as? ClientBundle)?.generation
-        val boundEndpointFp: String?
-            get() = (bundle as? ClientBundle)?.endpointFp
+        val boundBundleGeneration: Long
+            get() = bundle.generation
+        val boundEndpointFp: String
+            get() = bundle.endpointFp
     }
 
     private val currentLifecycle = AtomicReference<StreamLifecycle?>(null)
@@ -246,17 +246,26 @@ class TokenStreamCoordinator(
      */
     private val degradedSids: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    private fun requireBundleStamp(bundle: Any?): BundleStamp? {
-        val clientBundle = bundle as? ClientBundle
-        if (clientBundle == null) {
-            DebugLog.w(TAG, "bundle-bound dispatch rejected: missing ClientBundle")
-            return null
-        }
-        return BundleStamp(clientBundle.generation, clientBundle.endpointFp)
-    }
-
-    private fun dispatchBound(action: AppAction) {
+    private fun dispatchBound(boundBundle: ClientBundle, action: AppAction) {
         synchronized(bundleCommitLock) {
+            if (currentBundleProvider() !== boundBundle) {
+                DebugLog.d(TAG, "bundle-bound dispatch rejected: superseded bundle")
+                return
+            }
+            val liveStamp = BundleStamp(boundBundle.generation, boundBundle.endpointFp)
+            val stampMatches = when (action) {
+                is AppAction.PartPlaceholderEnsured -> action.bundleStamp == liveStamp
+                is AppAction.PartFullTextReceived -> action.bundleStamp == liveStamp
+                is AppAction.PartDeltaReceived -> action.bundleStamp == liveStamp
+                is AppAction.CoalesceFlushedForPart -> action.bundleStamp == liveStamp
+                is AppAction.ClearTokenStreamState -> action.bundleStamp == liveStamp
+                is AppAction.TokenStreamPartUpdated -> action.bundleStamp == liveStamp
+                else -> true
+            }
+            if (!stampMatches) {
+                DebugLog.d(TAG, "bundle-bound dispatch rejected: stamp mismatch")
+                return
+            }
             slices.store.dispatch(action)
         }
     }
@@ -268,8 +277,9 @@ class TokenStreamCoordinator(
         sessionId: String?,
     ): Boolean {
         synchronized(bundleCommitLock) {
-            val bundle = currentBundleProvider() as? ClientBundle ?: return false
+            val bundle = currentBundleProvider() ?: return false
             dispatchBound(
+                bundle,
                 AppAction.ClearTokenStreamState(
                     partIds = partIds,
                     expectedRouteInstance = expectedRouteInstance,
@@ -455,8 +465,7 @@ class TokenStreamCoordinator(
                 DebugLog.i(TAG, "open($capturedSid) skipped — degraded (503 cap reached)")
                 return@launchStreamLifecycle
             }
-            val epoch = epochBySid.computeIfAbsent(capturedSid) { AtomicLong(0L) }.incrementAndGet()
-            val gen = beginSession(capturedSid)
+            val (epoch, gen) = beginStreamIncarnation(capturedSid)
             try {
                 runStream(capturedSid, capturedDir, epoch, gen, isReconnect = false, capturedRouteInstance)
             } catch (ce: CancellationException) {
@@ -483,6 +492,7 @@ class TokenStreamCoordinator(
      * Does NOT reset capability-degrade state (use [resetDegraded] for that).
      */
     fun close(sid: String) {
+        synchronized(bundleCommitLock) {
         if (currentSid.get() == sid) {
             // §MF-1 (gate r1 S1): close cancels the current/pending lifecycle
             // job — whether it's an active collector OR a reconnect-in-backoff
@@ -503,6 +513,7 @@ class TokenStreamCoordinator(
         reducerStateBySid.remove(sid)
         attemptBySid.remove(sid)
         consecutive503BySid.remove(sid)
+        }
     }
 
     /**
@@ -534,7 +545,9 @@ class TokenStreamCoordinator(
      * frames via [dispatchEpochFrame]).
      */
     internal fun bumpEpochForTest(sid: String): Long =
-        epochBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
+        synchronized(bundleCommitLock) {
+            epochBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
+        }
 
     /**
      * §MF-1 (gate r2) test seam: directly sets the reconnect sentinel to
@@ -581,7 +594,16 @@ class TokenStreamCoordinator(
      * generation become stale.
      */
     internal fun beginSession(sid: String): Long =
-        genBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
+        synchronized(bundleCommitLock) {
+            genBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
+        }
+
+    private fun beginStreamIncarnation(sid: String): Pair<Long, Long> =
+        synchronized(bundleCommitLock) {
+            val epoch = epochBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
+            val generation = genBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
+            epoch to generation
+        }
 
     /**
      * Records that [partId] is owned by stream ([sid], [gen]). Only records
@@ -589,9 +611,11 @@ class TokenStreamCoordinator(
      * a cancelled collector whose gen lags behind beginSession) is dropped.
      */
     internal fun onPartOwned(sid: String, gen: Long, partId: String) {
-        val currentGen = genBySid[sid]?.get() ?: return
-        if (currentGen != gen) return
-        ownerByPartId[partId] = OwnerTag(sid, gen)
+        synchronized(bundleCommitLock) {
+            val currentGen = genBySid[sid]?.get() ?: return
+            if (currentGen != gen) return
+            ownerByPartId[partId] = OwnerTag(sid, gen)
+        }
     }
 
     /**
@@ -606,19 +630,21 @@ class TokenStreamCoordinator(
      * Side-effect: removes allowed-and-owned entries from [ownerByPartId].
      */
     internal fun filterClearByGeneration(sid: String, gen: Long, partIds: Set<String>): Set<String> {
-        if (partIds.isEmpty()) return emptySet()
-        val allowed = mutableSetOf<String>()
-        for (partId in partIds) {
-            val tag = ownerByPartId[partId]
-            if (tag == null) {
-                allowed += partId
-            } else if (tag.sid == sid && tag.gen == gen) {
-                allowed += partId
-                ownerByPartId.remove(partId)
+        synchronized(bundleCommitLock) {
+            if (partIds.isEmpty()) return emptySet()
+            val allowed = mutableSetOf<String>()
+            for (partId in partIds) {
+                val tag = ownerByPartId[partId]
+                if (tag == null) {
+                    allowed += partId
+                } else if (tag.sid == sid && tag.gen == gen) {
+                    allowed += partId
+                    ownerByPartId.remove(partId)
+                }
+                // else: stale — a newer stream owns this partId. Drop.
             }
-            // else: stale — a newer stream owns this partId. Drop.
+            return allowed
         }
-        return allowed
     }
 
     // ── Epoch-tagged frame dispatch (unit-testable surface) ──────────────────
@@ -660,8 +686,10 @@ class TokenStreamCoordinator(
         gen: Long,
         frame: TokenStreamFrame,
         capturedRouteInstance: Long,
-        boundBundle: Any? = null,
+        boundBundle: ClientBundle,
     ) {
+        val deferredEffects = mutableListOf<() -> Unit>()
+        synchronized(bundleCommitLock) {
         if (!isBundleCurrentForCommit(boundBundle)) return
         val currentEpoch = epochBySid[sid]?.get() ?: return
         if (currentEpoch != epoch) {
@@ -729,8 +757,19 @@ class TokenStreamCoordinator(
 
         val directory = currentDirectory.get()
         for (effect in effects) {
-            handleEffect(sid, epoch, gen, directory, effect, capturedRouteInstance, boundBundle)
+            handleEffect(
+                sid,
+                epoch,
+                gen,
+                directory,
+                effect,
+                capturedRouteInstance,
+                boundBundle,
+                deferredEffects,
+            )
         }
+        }
+        deferredEffects.forEach { it() }
     }
 
     /**
@@ -744,13 +783,13 @@ class TokenStreamCoordinator(
         partId: String,
         state: TokenStreamReducerState,
         capturedRouteInstance: Long,
-        boundBundle: Any?,
+        boundBundle: ClientBundle,
     ) {
         if (!isBundleCurrentForCommit(boundBundle)) return
         val acc = state.parts[partId] ?: return
         if (!isBundleCurrentForCommit(boundBundle)) return
         onPartOwned(sid, gen, partId)
-        val stamp = requireBundleStamp(boundBundle) ?: return
+        val stamp = BundleStamp(boundBundle.generation, boundBundle.endpointFp)
         // §E2 PartPlaceholderEnsured from bridge: when a NEW partId arrives that is
         // NOT yet in partsByMessage[messageId], dispatch PartPlaceholderEnsured BEFORE
         // the TokenStreamPartUpdated, so MessageCard has a stable list key.
@@ -758,6 +797,7 @@ class TokenStreamCoordinator(
         if (slices.chat.value.partsByMessage[msgId]?.none { it.id == partId } != false) {
             if (!isBundleCurrentForCommit(boundBundle)) return
             dispatchBound(
+                boundBundle,
                 AppAction.PartPlaceholderEnsured(
                     partType = "text",
                     partId = partId,
@@ -774,6 +814,7 @@ class TokenStreamCoordinator(
         }
         if (!isBundleCurrentForCommit(boundBundle)) return
         dispatchBound(
+            boundBundle,
             AppAction.TokenStreamPartUpdated(
                 partId = partId,
                 text = acc.text,
@@ -802,7 +843,8 @@ class TokenStreamCoordinator(
         directory: String?,
         effect: TokenStreamCoordinatorEffect,
         capturedRouteInstance: Long,
-        boundBundle: Any?,
+        boundBundle: ClientBundle,
+        deferredEffects: MutableList<() -> Unit>,
     ) {
         if (!isBundleCurrentForCommit(boundBundle)) return
         when (effect) {
@@ -811,8 +853,9 @@ class TokenStreamCoordinator(
                 if (!isBundleCurrentForCommit(boundBundle)) return
                 if (allowed.isNotEmpty()) {
                     if (!isBundleCurrentForCommit(boundBundle)) return
-                    val stamp = requireBundleStamp(boundBundle) ?: return
+                    val stamp = BundleStamp(boundBundle.generation, boundBundle.endpointFp)
                     dispatchBound(
+                        boundBundle,
                         AppAction.ClearTokenStreamState(
                             allowed,
                             expectedRouteInstance = capturedRouteInstance,
@@ -828,7 +871,9 @@ class TokenStreamCoordinator(
                 // sessionId == null (backpressure overflow omits it per the
                 // handoff contract). Infer from the active connection's sid.
                 val resolvedSid = effect.sessionId.takeIf { it.isNotBlank() } ?: sid
-                triggerSinceFetch(resolvedSid, effect.authoritative)
+                deferredEffects += {
+                    triggerSinceFetch(resolvedSid, effect.authoritative)
+                }
             }
             is TokenStreamCoordinatorEffect.Reconnect -> {
                 if (!isBundleCurrentForCommit(boundBundle)) return
@@ -889,11 +934,13 @@ class TokenStreamCoordinator(
     ) {
         if (isReconnect && sid in degradedSids) return
         val connection = try {
-            streamConnectionProvider?.invoke(sid, directory)
-                ?: TokenStreamConnection(
+            streamConnectionProvider?.invoke(sid, directory) ?: run {
+                val bundle = currentBundleProvider() ?: return
+                TokenStreamConnection(
                     flow = streamProvider(sid, directory),
-                    bundle = currentBundleProvider(),
+                    bundle = bundle,
                 )
+            }
         } catch (e: Throwable) {
             // Provider itself threw synchronously (test fake misconfig or a
             // production TokenStreamClient constructor blow-up). Treat as a
@@ -992,28 +1039,37 @@ class TokenStreamCoordinator(
         gen: Long,
         directory: String?,
         capturedRouteInstance: Long,
-        boundBundle: Any?,
+        boundBundle: ClientBundle,
     ) {
-        if (!isBundleCurrentForCommit(boundBundle)) return
-        val parts = ownedPartsForSid(sid)
-        val allowed = filterClearByGeneration(sid, gen, parts)
-        if (allowed.isNotEmpty()) {
+        var shouldFetch = false
+        var shouldReconnect = false
+        synchronized(bundleCommitLock) {
             if (!isBundleCurrentForCommit(boundBundle)) return
-            // §B4 lifecycle token: clear uses the value threaded from
-            // runStream's entry-time capture (rev-gpt C2).
-            val stamp = requireBundleStamp(boundBundle) ?: return
-            dispatchBound(
-                AppAction.ClearTokenStreamState(
-                    allowed,
-                    expectedRouteInstance = capturedRouteInstance,
-                    sessionId = sid,
-                    bundleStamp = stamp,
-                ),
-            )
+            val stamp = BundleStamp(boundBundle.generation, boundBundle.endpointFp)
+            val parts = ownedPartsForSid(sid)
+            val allowed = filterClearByGeneration(sid, gen, parts)
+            if (allowed.isNotEmpty()) {
+                // Keep the ownership removal and its ChatState clear in this
+                // same monitor acquisition; a superseding publication cannot
+                // slip between them.
+                dispatchBound(
+                    boundBundle,
+                    AppAction.ClearTokenStreamState(
+                        allowed,
+                        expectedRouteInstance = capturedRouteInstance,
+                        sessionId = sid,
+                        bundleStamp = stamp,
+                    ),
+                )
+            }
+            if (!isBundleCurrentForCommit(boundBundle)) return
+            shouldFetch = true
+            shouldReconnect = true
         }
-        if (!isBundleCurrentForCommit(boundBundle)) return
-        triggerSinceFetch(sid, true)
-        if (isBundleCurrentForCommit(boundBundle)) {
+        if (shouldFetch) {
+            triggerSinceFetch(sid, true)
+        }
+        if (shouldReconnect) {
             scheduleReconnect(sid, directory)
         }
     }
@@ -1062,8 +1118,7 @@ class TokenStreamCoordinator(
                         delay(retryAfter503Ms)
                         if (currentSid.get() != sid) return@launchStreamLifecycle
                         if (sid in degradedSids) return@launchStreamLifecycle
-                        val epoch = epochBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
-                        val gen = beginSession(sid)
+                        val (epoch, gen) = beginStreamIncarnation(sid)
                         try {
                             runStream(sid, directory, epoch, gen, isReconnect = true, retryRouteInstance)
                         } catch (ce: CancellationException) {
@@ -1120,8 +1175,7 @@ class TokenStreamCoordinator(
             // CancellationException and we never reach here).
             if (currentSid.get() != sid) return@launchStreamLifecycle
             if (sid in degradedSids) return@launchStreamLifecycle
-            val epoch = epochBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
-            val gen = beginSession(sid)
+            val (epoch, gen) = beginStreamIncarnation(sid)
             try {
                 runStream(sid, directory, epoch, gen, isReconnect = true, reconnectRouteInstance)
             } catch (ce: CancellationException) {
@@ -1142,7 +1196,7 @@ class TokenStreamCoordinator(
      * one CAS. A lifecycle superseded while its provider is resolving cannot
      * publish its bundle into the replacement lifecycle.
      */
-    private suspend fun bindCurrentLifecycleBundle(bundle: Any?): Boolean {
+    private suspend fun bindCurrentLifecycleBundle(bundle: ClientBundle): Boolean {
         val currentJob = currentCoroutineContext()[Job] ?: return false
         while (true) {
             val current = currentLifecycle.get() ?: return false
@@ -1160,7 +1214,7 @@ class TokenStreamCoordinator(
      * Generation/endpoint values are derived from [StreamLifecycle.bundle]
      * (see its computed properties), never from a second mutable counter.
      */
-    private suspend fun isCurrentLifecycleBundle(bundle: Any?): Boolean {
+    private suspend fun isCurrentLifecycleBundle(bundle: ClientBundle): Boolean {
         val currentJob = currentCoroutineContext()[Job] ?: return false
         val lifecycle = currentLifecycle.get() ?: return false
         return lifecycle.job === currentJob &&
@@ -1168,7 +1222,7 @@ class TokenStreamCoordinator(
             bundle === currentBundleProvider()
     }
 
-    private fun isBundleCurrentForCommit(bundle: Any?): Boolean =
+    private fun isBundleCurrentForCommit(bundle: ClientBundle): Boolean =
         bundle === currentBundleProvider()
 
     /**
@@ -1202,13 +1256,16 @@ class TokenStreamCoordinator(
      * (no further suspension points matter); the outer completes as
      * Cancelled. The INNER job is the sole tracked lifecycle job.
      */
-    private fun launchStreamLifecycle(sid: String, reason: String, block: suspend () -> Unit): Job {
+    private fun launchStreamLifecycle(sid: String, reason: String, block: suspend () -> Unit): Job? {
         synchronized(bundleCommitLock) {
+        val publishedBundle = currentBundleProvider() ?: run {
+            DebugLog.d(TAG, "skip lifecycle sid=$sid reason=$reason: no published bundle")
+            return null
+        }
         val job = scope.launch(start = CoroutineStart.LAZY) { block() }
         // Set currentStreamJob + cancel the prior BEFORE starting the body,
         // so a nested launchStreamLifecycle inside the body sees the correct
         // prior (this job) and supersedes IT, not the stale pre-outer value.
-        val publishedBundle = currentBundleProvider()
         val prior = currentLifecycle.getAndSet(StreamLifecycle(job, publishedBundle))
         // §sse-self-cancel T1.3: 冒烟枪 (smoking gun) — priorActive==true means a
         // supersede just cancelled an ACTIVE collector (the self-cancel-loop

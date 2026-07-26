@@ -80,4 +80,33 @@ class AppActionBundleGenerationTest {
         assertEquals(emptyMap<String, String>(), store.chatFlow.value.streamingPartTexts)
         assertEquals(emptyMap<String, StreamOwnedState>(), store.chatFlow.value.streamOwned)
     }
+
+    @Test
+    fun `stale leading-edge fullText and delta actions are rejected`() {
+        val store = SharedStateStore()
+        store.dispatch(AppAction.BundlePublished(2L, "https://host-b"))
+
+        store.dispatch(
+            AppAction.PartFullTextReceived(
+                partId = "p1",
+                fullText = "stale-full",
+                partType = "text",
+                messageId = "m1",
+                sessionId = "s1",
+                bundleStamp = BundleStamp(1L, "https://host-a"),
+            ),
+        )
+        store.dispatch(
+            AppAction.PartDeltaReceived(
+                partId = "p1",
+                delta = "stale-delta",
+                partType = "text",
+                messageId = "m1",
+                sessionId = "s1",
+                bundleStamp = BundleStamp(1L, "https://host-a"),
+            ),
+        )
+
+        assertEquals(emptyMap<String, String>(), store.chatFlow.value.streamingPartTexts)
+    }
 }

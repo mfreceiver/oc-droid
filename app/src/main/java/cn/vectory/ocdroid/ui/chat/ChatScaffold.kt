@@ -99,9 +99,8 @@ import kotlinx.coroutines.launch
  *
  * @param onNavigateToSettings forwards to the new AppShell — the overflow
  *        menu's "System settings" entry.
- * @param onNavigateToSessions is no longer used directly (the session-history
- *        icon opens a ModalBottomSheet instead); kept on the signature so the
- *        AppShell wiring remains unchanged. Reserved for Phase 2.
+ * @param onNavigateToSessions called when the user taps the session list
+ *        entry point in [ChatEmptyState] to navigate to the session list.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -115,12 +114,11 @@ fun ChatScaffold(
     settingsVM: SettingsViewModel,
     onNavigateToSettings: () -> Unit = {},
     /**
-     * §new2 (2026-07-13): forwarded to [ChatEmptyState] so the "all tabs
-     * closed" empty-state can deep-link the user to the Sessions screen
-     * (one-tap recover from "I closed every tab"). The AppShell wiring
-     * already passes `orchestratorVM.setLastRoute(NavRoute.Sessions)` —
-     * previously this parameter was unused (the SessionPickerSheet was the
-     * only session-switching surface); it now has a second consumer.
+     * Called when the user taps the session-list entry point in [ChatEmptyState]
+     * (all-tabs-closed empty state) to return to the Sessions home hub. AppShell
+     * wires this to `backToHome()` (setLastRoute Sessions + popBackStack).
+     * Session switching itself is NOT this callback — SessionPicker goes through
+     * [ChatOverlayHost] → navigateToChat.
      */
     onNavigateToSessions: () -> Unit = {},
     /**
@@ -779,7 +777,6 @@ fun ChatScaffold(
         // own "Compress context" button (see showContextDialog below).
         //
         ChatTopBarActions(
-            onSelectSession = sessionVM::selectSession,
             // §chat-list-detail §11 / G6 (B5 BLOCK-fix): dedicated子→父
             // callback for the breadcrumb — routes through
             // SessionViewModel.returnToParent (which calls

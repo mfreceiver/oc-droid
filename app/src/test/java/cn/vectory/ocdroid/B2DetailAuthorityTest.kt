@@ -226,6 +226,7 @@ class B2DetailAuthorityTest {
                 messageId = "m2",
                 sessionId = "A",
                 expectedRouteInstance = 11L,
+                bundleStamp = BundleStamp(0L, ""),
             ),
         )
         assertTrue(afterPart.chat.content?.streamingPartTexts?.get("p1") == "live")

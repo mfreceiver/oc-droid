@@ -16,11 +16,12 @@ enum class EffectiveConnectionSource { Manual, Profile }
  * to the token-stream provider without weakening the type at the boundary.
  */
 data class ResolvedEndpoint internal constructor(
-    val baseUrl: String,
-    val endpointFp: String,
-    val bundleGeneration: Long,
     internal val bundle: ClientBundle,
-)
+) {
+    val baseUrl: String get() = bundle.hostSnapshot.baseUrl
+    val endpointFp: String get() = bundle.endpointFp
+    val bundleGeneration: Long get() = bundle.generation
+}
 
 /**
  * R8 slim-mode foundation / Cluster B: 服务层透传的「当前生效连接配置」。
@@ -91,12 +92,8 @@ class DefaultEffectiveConnectionConfigResolver @Inject constructor(
         // identity, and generation.
         if (resolve() == null) return null
         val bundle = repository.currentClientBundle() ?: return null
-        val baseUrl = bundle.hostSnapshot.baseUrl
-        if (baseUrl.isBlank()) return null
+        if (bundle.hostSnapshot.baseUrl.isBlank()) return null
         return ResolvedEndpoint(
-            baseUrl = baseUrl,
-            endpointFp = bundle.endpointFp,
-            bundleGeneration = bundle.generation,
             bundle = bundle,
         )
     }
