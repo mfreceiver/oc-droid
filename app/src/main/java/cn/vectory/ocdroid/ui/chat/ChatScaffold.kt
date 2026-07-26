@@ -1164,7 +1164,20 @@ fun ChatScaffold(
         providers = settings.providers,
         disabledModels = settings.disabledModels,
         currentModel = effectiveModel,
-        sessions = sessionList.sessions,
+        // §session-picker-all-dirs (2026-07-26): merge sessions from ALL
+        // attached directories (sessions + directorySessions), not just the
+        // current workdir's sessions. Previously only `sessionList.sessions`
+        // was passed, which meant the quick-switch picker showed only
+        // sessions the user had opened in the current directory — while the
+        // Home SessionsScreen shows sessions from every attached project.
+        // Now both surfaces share the same merged source. The SessionPickerSheet's
+        // internal filter (parentId==null, !isArchived, sort, take 10) handles
+        // the presentation narrowing. Mirrors the recentSessionsForDrawer
+        // derivation at ~L842 and the SessionsScreen merge at ~L215.
+        sessions = remember(sessionList.sessions, sessionList.directorySessions) {
+            (sessionList.sessions + sessionList.directorySessions.values.flatten())
+                .distinctBy { it.id }
+        },
         sessionStatuses = sessionList.sessionStatuses,
         activeSessionIds = sessionList.activeSessionIds,
         currentSessionId = chromeSessionId,
