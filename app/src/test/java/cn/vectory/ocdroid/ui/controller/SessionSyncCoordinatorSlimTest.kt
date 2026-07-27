@@ -14,6 +14,7 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
 import cn.vectory.ocdroid.data.model.SlimapiQuestionEntry
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SlimSinceStageAOutcome
 import cn.vectory.ocdroid.data.repository.ProbeResult
 import cn.vectory.ocdroid.data.repository.SlimColdStartSnapshot
 import cn.vectory.ocdroid.data.repository.SlimFetchMessages
@@ -60,6 +61,18 @@ import java.util.concurrent.TimeUnit
  */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionSyncCoordinatorSlimTest {
+
+    /** §11.1 stage A test helper: wrap items as a Staged outcome. */
+    private fun stagedSince(
+        items: List<cn.vectory.ocdroid.data.model.MessageWithParts>,
+        completeHeader: Boolean? = null,
+        statusCode: Int = 200,
+    ): SlimSinceStageAOutcome = SlimSinceStageAOutcome.Staged(
+        items = items,
+        completeHeader = completeHeader,
+        statusCode = statusCode,
+        transportComplete = true,
+    )
 
     @get:org.junit.Rule
     val mainDispatcherRule = MainDispatcherRule(UnconfinedTestDispatcher())
@@ -166,7 +179,7 @@ class SessionSyncCoordinatorSlimTest {
             messageID = "m1",
             updatedAt = 1000L,
         )
-        coEvery { repository.getSlimapiMessagesSince("sess-1", 0L, any(), any(), any()) } returns Result.success(
+        coEvery { repository.fetchSinceForStageA("sess-1", 0L, any(), any(), any()) } returns stagedSince(
             listOf(
                 MessageWithParts(
                     info = Message(id = "m1", role = "assistant", sessionId = "sess-1"),
@@ -180,9 +193,15 @@ class SessionSyncCoordinatorSlimTest {
         scope.testScheduler.advanceUntilIdle()
 
         verify { repository.applySlimDigest(match { it.sessionId == "sess-1" && it.updatedAt == 1000L }, any()) }
-        coVerify(exactly = 1) { repository.getSlimapiMessagesSince("sess-1", 0L, any(), any(), any()) }
-        assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
-        assertEquals("hi", slices.chat.value.partsByMessage["m1"]?.firstOrNull()?.text)
+        coVerify(exactly = 1) { repository.fetchSinceForStageA("sess-1", 0L, any(), any(), any()) }
+        // §11.1 fix-6 P0-1: `/since` path is staging-only → Staged maps to
+        // RefreshRow (no items). Messages do NOT appear in the chat from the
+        // `/since` path; only a complete full/cursor candidate committed via
+        // commitAuthoritative may merge items.
+        assertTrue(
+            "/since staging-only → no items in chat (got ${slices.chat.value.messages.map { it.id }})",
+            slices.chat.value.messages.none { it.id == "m1" },
+        )
         assertEquals("busy", slices.sessionList.value.sessionStatuses["sess-1"]?.type)
     }
 
@@ -199,7 +218,7 @@ class SessionSyncCoordinatorSlimTest {
         scope.testScheduler.advanceUntilIdle()
 
         verify { repository.applySlimDigest(any(), any()) }
-        coVerify(exactly = 0) { repository.getSlimapiMessagesSince(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.fetchSinceForStageA(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -1298,7 +1317,7 @@ class SessionSyncCoordinatorSlimTest {
             messageID = "m1",
             updatedAt = 1000L,
         )
-        coEvery { repository.getSlimapiMessagesSince("sess-1", 0L, any(), any(), any()) } returns Result.success(
+        coEvery { repository.fetchSinceForStageA("sess-1", 0L, any(), any(), any()) } returns stagedSince(
             listOf(
                 MessageWithParts(
                     info = Message(id = "m1", role = "assistant", sessionId = "sess-1"),
@@ -1311,10 +1330,12 @@ class SessionSyncCoordinatorSlimTest {
         c.handleEvent(digestEvent("sess-1", status = "busy", updatedAt = 1000L, messageId = "m1"))
         scope.testScheduler.advanceUntilIdle()
 
-        assertEquals(
-            "slim messages landed via digest→REST (proves the slim flow ran)",
-            listOf("m1"),
-            slices.chat.value.messages.map { it.id },
+        // §11.1 fix-6 P0-1: `/since` path is staging-only → Staged maps to
+        // RefreshRow (no items). Messages do NOT appear in the chat from the
+        // `/since` path.
+        assertTrue(
+            "/since staging-only → no items in chat (got ${slices.chat.value.messages.map { it.id }})",
+            slices.chat.value.messages.none { it.id == "m1" },
         )
         assertEquals(
             "slim digest→reconcile MUST NOT write the legacy expandedParts fold map",

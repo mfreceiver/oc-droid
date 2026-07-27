@@ -30,6 +30,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Ignore
 import org.junit.Test
 import java.util.concurrent.TimeUnit
 
@@ -349,7 +350,22 @@ class OpenCodeRepositorySlimapiEndpointsTest {
     // ── /slimapi/messages/{sid}/since/{ts} (§5 A2=A) ───────────────────────
 
     @Test
-    fun `getSlimapiMessagesSince hits since path and returns skeletons`() = runBlocking {
+    fun `getSlimapiMessagesSince facade returns staging-only failure after stage A`() = runBlocking {
+        // §11.1 stage A: the legacy facade is retained for source/test binary
+        // compatibility but is NO LONGER a reliability path. It returns
+        // Result.failure(SlimSinceStagingOnlyException) unconditionally and
+        // performs NO bookmark / localApplied / dirty mutation.
+        val result = repository.getSlimapiMessagesSince("sess-1", since = 150L, token = token())
+
+        assertTrue("facade must return failure", result.isFailure)
+        assertTrue(
+            "cause must be SlimSinceStagingOnlyException (got ${result.exceptionOrNull()?.javaClass?.name})",
+            result.exceptionOrNull() is SlimSinceStagingOnlyException,
+        )
+    }
+
+    @Test
+    fun `fetchSinceForStageA hits since path and returns Staged`() = runBlocking {
         val skeleton = MessageWithParts(
             info = Message(
                 id = "m1",
@@ -359,12 +375,13 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         )
         server.enqueue(jsonResponse(json.encodeToString(listOf(skeleton))))
 
-        val result = repository.getSlimapiMessagesSince("sess-1", since = 150L, token = token())
+        val outcome = repository.fetchSinceForStageA("sess-1", since = 150L, token = token())
 
-        assertTrue(result.isSuccess)
-        assertEquals(1, result.getOrThrow().size)
-        assertEquals("m1", result.getOrThrow()[0].info.id)
-        assertEquals(200L, result.getOrThrow()[0].info.time?.updated)
+        assertTrue("Staged outcome expected", outcome is SlimSinceStageAOutcome.Staged)
+        val staged = outcome as SlimSinceStageAOutcome.Staged
+        assertEquals(1, staged.items.size)
+        assertEquals("m1", staged.items[0].info.id)
+        assertEquals(200L, staged.items[0].info.time?.updated)
 
         val request = server.takeRequest()
         assertEquals("GET", request.method)
@@ -375,8 +392,8 @@ class OpenCodeRepositorySlimapiEndpointsTest {
     }
 
     @Test
-    fun `getSlimapiMessagesSince bumps local bookmark to max time updated`() = runBlocking {
-        // Two skeletons: max time.updated = 300.
+    fun `fetchSinceForStageA does NOT bump local bookmark`() = runBlocking {
+        // §11.1 stage A: staging-only — no bookmark advancement.
         val s1 = MessageWithParts(
             info = Message(id = "m1", role = "assistant",
                 time = Message.TimeInfo(updated = 200L))
@@ -387,34 +404,58 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         )
         server.enqueue(jsonResponse(json.encodeToString(listOf(s1, s2))))
 
-        repository.getSlimapiMessagesSince("sess-1", since = 0L, token = token())
+        repository.fetchSinceForStageA("sess-1", since = 0L, token = token())
 
-        // Bookmark should now be 300L.
+        // Bookmark MUST NOT be advanced (stage A staging-only).
         val state = repository.snapshotSlimSseState()["sess-1"]
-        assertNotNull("bookmark entry should be created", state)
-        assertEquals(300L, state!!.updatedAt)
+        assertTrue("no bookmark entry should be created by staging fetch", state == null || state.updatedAt != 300L)
     }
 
     @Test
-    fun `getSlimapiMessagesSince surfaces HTTP error as failure`() = runBlocking {
+    fun `fetchSinceForStageA surfaces HTTP error as Failed outcome`() = runBlocking {
         server.enqueue(jsonResponse("nope", 500))
 
-        val result = repository.getSlimapiMessagesSince("sess-1", since = 0L, token = token())
+        val outcome = repository.fetchSinceForStageA("sess-1", since = 0L, token = token())
 
-        assertTrue(result.isFailure)
+        assertTrue("Failed outcome expected", outcome is SlimSinceStageAOutcome.Failed)
         val request = server.takeRequest()
         assertEquals("/slimapi/messages/sess-1/since/0", request.path)
     }
 
     @Test
-    fun `getSlimapiMessagesSince forwards limit and before cursor`() = runBlocking {
+    fun `fetchSinceForStageA forwards limit and before cursor`() = runBlocking {
         server.enqueue(jsonResponse("[]"))
 
-        repository.getSlimapiMessagesSince("sess-1", since = 100L, limit = 50, before = "abc", token = token())
+        repository.fetchSinceForStageA("sess-1", since = 100L, limit = 50, before = "abc", token = token())
 
         val request = server.takeRequest()
         assertTrue("limit forwarded: ${request.path}", request.path!!.contains("limit=50"))
         assertTrue("before forwarded: ${request.path}", request.path!!.contains("before=abc"))
+    }
+
+    @Test
+    fun `fetchSinceForStageA reads X-Since-Complete header but stays staging-only`() = runBlocking {
+        val skeleton = MessageWithParts(
+            info = Message(id = "m1", role = "assistant",
+                time = Message.TimeInfo(updated = 200L))
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody(json.encodeToString(listOf(skeleton)))
+                .setHeader("Content-Type", "application/json")
+                .setHeader("X-Since-Complete", "true")
+        )
+
+        val outcome = repository.fetchSinceForStageA("sess-1", since = 0L, token = token())
+
+        assertTrue("Staged expected even with X-Since-Complete: true", outcome is SlimSinceStageAOutcome.Staged)
+        val staged = outcome as SlimSinceStageAOutcome.Staged
+        assertEquals("completeHeader must be parsed as true", true, staged.completeHeader)
+        assertEquals(200, staged.statusCode)
+        assertTrue("transportComplete must be true", staged.transportComplete)
+        // NO bookmark bump even when complete=true.
+        val state = repository.snapshotSlimSseState()["sess-1"]
+        assertTrue("no bookmark entry", state == null || state.updatedAt != 200L)
     }
 
     // ── applySlimDigest + fetch trigger ────────────────────────────────────
@@ -735,32 +776,51 @@ class OpenCodeRepositorySlimapiEndpointsTest {
     }
 
     @Test
-    fun `coldStartSlimSync with openSessionId also fetches messages since bookmark`() = runBlocking {
-        // Seed bookmark at 100.
+    fun `coldStartSlimSync with openSessionId anchored since is staging-only after stage A`() = runBlocking {
+        // §11.1 stage A: cold-start's anchored `/since` branch maps
+        // Staged / Incomplete / Failed to `messages = null` (keep prior).
+        // NO bookmark bump, NO authoritative commit on the `/since` path.
+        // §11.1 fix-6 P0-5: seed LOCAL-applied bookmark at 100 (not remote).
+        // The anchor uses localAppliedUpdatedAt only — remoteUpdatedAt alone
+        // does NOT trigger the anchored path.
+        val seedToken = token()
         repository.applySlimDigest(
             SlimSessionDigest(sessionId = "sess-1", updatedAt = 100L),
-            token = token(),
+            token = seedToken,
+        )
+        // Simulate a successful prior reconcile that advanced localApplied*.
+        // bumpSlimBookmarkFromItems derives the tuple from items via onReconcileSuccess.
+        assertTrue(
+            "seed bump must succeed",
+            repository.bumpSlimBookmarkFromItems(
+                "sess-1",
+                listOf(
+                    MessageWithParts(info = Message(id = "m-seed", role = "assistant", time = Message.TimeInfo(updated = 100L)))
+                ),
+                seedToken,
+            ),
         )
         server.enqueue(jsonResponse("[]"))               // sessions
         server.enqueue(jsonResponse("""{"items":[],"errors":[]}"""))   // questions
         server.enqueue(jsonResponse("""{"items":[],"errors":[]}"""))   // permissions
-        server.enqueue(jsonResponse("[]"))               // messages since 100
+        server.enqueue(jsonResponse("[]"))               // messages since 100 (staging-only)
 
         val result = repository.coldStartSlimSync(openSessionId = "sess-1", token = token())
 
         assertTrue(result.isSuccess)
         val snapshot = result.getOrThrow()
-        assertNotNull("openSessionId supplied → messages list (possibly empty)", snapshot.messages)
-        assertEquals(0, snapshot.messages!!.size)
+        // §11.1 stage A: anchored /since is staging-only → messages = null.
+        assertNull(
+            "anchored /since is staging-only → messages = null (keep prior)",
+            snapshot.messages,
+        )
 
-        // 4 requests in total. Find the messages one.
-        // §slim-v1-paging: cold-start now sends `?limit=50` on the since call,
-        // so the path is `/slimapi/messages/sess-1/since/100?limit=50`; match
-        // by prefix to keep the test resilient to paging-default changes.
+        // 4 requests in total. The anchored /since request IS still issued
+        // (for staging/diagnostics), but its result is discarded.
         val paths = mutableListOf<String>()
         repeat(4) { paths += server.takeRequest().path!! }
         assertTrue(
-            "messages since bookmark hit: $paths",
+            "anchored /since request still issued (staging): $paths",
             paths.any { it.startsWith("/slimapi/messages/sess-1/since/100") }
         )
     }
@@ -1535,49 +1595,81 @@ class OpenCodeRepositorySlimapiEndpointsTest {
     // ── T3: getMessagesPaged ───────────────────────────────────────────────
 
     @Test
-    fun `getMessagesPaged slim mode hits slimapi since path with bookmark anchor`() = runBlocking {
-        // Seed the local bookmark at 1234 — getMessagesPaged MUST derive
-        // `since=1234` from slimSseState and pass it on the URL.
+    fun `getMessagesPaged slim mode with before cursor routes through single-page cursor endpoint`() = runBlocking {
+        // §11.1 fix-10 P0-1: getMessagesPaged slim mode with `before != null`
+        // routes through getSlimapiMessagesPage (single-page cursor fetch),
+        // NOT the drain. The HTTP path is /slimapi/messages/{sid} with
+        // before cursor forwarded. A terminal-page response surfaces items
+        // via Result.success(MessagesPage).
         val repo = makeRepository(slim = true)
-        repo.applySlimDigest(SlimSessionDigest(sessionId = "sess-1", updatedAt = 1234L), token = repo.captureSlimCommitToken())
-        server.enqueue(jsonResponse("[]"))
+        val seedToken = repo.captureSlimCommitToken()
+        assertTrue(
+            "seed bump must succeed",
+            repo.bumpSlimBookmarkFromItems(
+                "sess-1",
+                listOf(MessageWithParts(info = Message(id = "m-seed", role = "assistant", time = Message.TimeInfo(updated = 500L)))),
+                seedToken,
+            ),
+        )
+        val s1 = MessageWithParts(info = Message(id = "m1", role = "assistant", time = Message.TimeInfo(updated = 1000L)))
+        val s2 = MessageWithParts(info = Message(id = "m2", role = "assistant", time = Message.TimeInfo(updated = 2000L)))
+        val s3 = MessageWithParts(info = Message(id = "m3", role = "assistant", time = Message.TimeInfo(updated = 3000L)))
+        // Single page response (no drain — single-page cursor fetch).
+        server.enqueue(jsonResponse(json.encodeToString(listOf(s1, s2, s3))))
 
         val result = repo.getMessagesPaged("sess-1", limit = 30, before = "cur")
 
-        assertTrue(result.isSuccess)
+        assertTrue(
+            "P0-1: slim getMessagesPaged with before MUST succeed (got ${result.exceptionOrNull()})",
+            result.isSuccess,
+        )
         val page = result.getOrThrow()
-        assertEquals(0, page.items.size)
-        // T5 (G5) regression: slim since path now surfaces the X-Next-Cursor
-        // header (was: hardcoded null). No header enqueued → null here.
-        assertNull("no X-Next-Cursor header enqueued → null nextCursor", page.nextCursor)
-
-        val request = server.takeRequest()
-        assertEquals("GET", request.method)
-        assertTrue(
-            "slim since path with bookmark anchor: ${request.path}",
-            request.path!!.startsWith("/slimapi/messages/sess-1/since/1234"),
+        assertEquals(
+            listOf("m1", "m2", "m3"),
+            page.items.map { it.info.id },
         )
-        assertTrue("limit forwarded: ${request.path}", request.path!!.contains("limit=30"))
-        assertTrue("before cursor forwarded: ${request.path}", request.path!!.contains("before=cur"))
-    }
-
-    @Test
-    fun `getMessagesPaged slim mode with no bookmark anchors on zero`() = runBlocking {
-        // No prior digest → since=0 (cold path).
-        server.enqueue(jsonResponse("[]"))
-
-        makeRepository(slim = true).getMessagesPaged("fresh-sess")
 
         val request = server.takeRequest()
+        // P0-1: HTTP path is the cursor endpoint with before forwarded.
         assertTrue(
-            "cold slim path anchored at 0: ${request.path}",
-            request.path!!.startsWith("/slimapi/messages/fresh-sess/since/0"),
+            "P0-1: slim path is cursor endpoint (NOT /since/{ts}): ${request.path}",
+            request.path!!.startsWith("/slimapi/messages/sess-1") &&
+                !request.path!!.contains("/since/"),
+        )
+        assertTrue(
+            "P0-1: before cursor forwarded: ${request.path}",
+            request.path!!.contains("before=cur"),
         )
     }
 
     @Test
-    fun `getMessagesPaged slim mode bumps bookmark to max time updated`() = runBlocking {
-        // Round-trip: items returned by slimapi feed back into the bookmark.
+    fun `getMessagesPaged slim mode with no bookmark drains cursor endpoint`() = runBlocking {
+        // §11.1 fix-9 P0-6: the slim getMessagesPaged path (anchored OR
+        // non-anchored, with OR without a prior bookmark) routes through
+        // the skeleton cursor drain + commit. The HTTP path is the cursor
+        // endpoint /slimapi/messages/{sid} (mode=skeleton), NOT /since/0.
+        server.enqueue(jsonResponse(json.encodeToString(skeletons(1..2))))
+
+        val result = makeRepository(slim = true).getMessagesPaged("fresh-sess")
+
+        assertTrue(
+            "P0-6: slim getMessagesPaged drains + commits successfully",
+            result.isSuccess,
+        )
+        val request = server.takeRequest()
+        assertTrue(
+            "P0-6: path is cursor endpoint (NOT /since/0): ${request.path}",
+            request.path!!.startsWith("/slimapi/messages/fresh-sess") &&
+                !request.path!!.contains("/since/"),
+        )
+    }
+
+    @Test
+    fun `getMessagesPaged slim mode advances localApplied via commit on terminal page`() = runBlocking {
+        // §11.1 fix-9 P0-6: a terminal-page drain drives commitAuthoritative,
+        // which advances localApplied* to the tuple-max of the drained
+        // items. The watermark advance happens inside the committer's
+        // token-guarded critical section (P1-3 — no per-page bump).
         val repo = makeRepository(slim = true)
         val s1 = MessageWithParts(
             info = Message(id = "m1", role = "assistant",
@@ -1589,11 +1681,34 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         )
         server.enqueue(jsonResponse(json.encodeToString(listOf(s1, s2))))
 
-        repo.getMessagesPaged("sess-1")
+        val result = repo.getMessagesPaged("sess-1")
 
+        // §11.1 fix-9 P0-6: drain Success + commit Committed — the result
+        // MUST be a success (the drain surfaces items to the UI).
+        assertTrue(
+            "P0-6: getMessagesPaged slim MUST succeed via drain (got ${result.exceptionOrNull()})",
+            result.isSuccess,
+        )
+        val page = result.getOrThrow()
+        assertEquals(
+            "P0-6: drained items surfaced",
+            listOf("m1", "m2"),
+            page.items.map { it.info.id },
+        )
+
+        // §11.1 fix-9 P0-6: drain Success + commit Committed advances
+        // localApplied* to the tuple-max of the drained items (m2/900L).
         val state = repo.snapshotSlimSseState()["sess-1"]
-        assertNotNull("bookmark entry created", state)
-        assertEquals(900L, state!!.updatedAt)
+        assertEquals(
+            "P0-6: localAppliedUpdatedAt advanced via commit to drain max (got ${state?.localAppliedUpdatedAt})",
+            900L,
+            state?.localAppliedUpdatedAt,
+        )
+        assertEquals(
+            "P0-6: localAppliedMessageId advanced via commit (got ${state?.localAppliedMessageId})",
+            "m2",
+            state?.localAppliedMessageId,
+        )
     }
 
     @Test
@@ -2049,41 +2164,55 @@ class OpenCodeRepositorySlimapiEndpointsTest {
     //     SLIMAPI_LOCAL_HISTORY_BOUND items even if cursor keeps going).
 
     @Test
-    fun `getMessagesPaged slim mode surfaces X-Next-Cursor header value as nextCursor`() = runBlocking {
-        // T5-C1 positive: header present → nextCursor == header value.
-        // The slim branch used to hardcode nextCursor=null (single-page
-        // decision); G5 flips that and surfaces the header so the upper
-        // layer can decide whether to follow.
+    fun `getMessagesPaged slim mode drains cursor endpoint returning empty body as terminal page`() = runBlocking {
+        // §11.1 fix-9 P0-6: slim getMessagesPaged drains the cursor
+        // endpoint. An empty body with NO X-Next-Cursor header is a
+        // terminal page (Success) — the drain returns the empty list and
+        // the commit clears localApplied* (cold-start of an empty
+        // session). Result: success with empty items + null nextCursor.
         server.enqueue(
             MockResponse().setResponseCode(200)
                 .setBody("[]")
                 .setHeader("Content-Type", "application/json")
-                .setHeader("X-Next-Cursor", "m1")
         )
 
         val result = makeRepository(slim = true).getMessagesPaged("sess-1")
 
-        assertTrue(result.isSuccess)
+        assertTrue(
+            "P0-6: empty body terminal page MUST succeed (got ${result.exceptionOrNull()})",
+            result.isSuccess,
+        )
+        val page = result.getOrThrow()
+        assertTrue(
+            "P0-6: empty session returns empty items",
+            page.items.isEmpty(),
+        )
         assertEquals(
-            "slim branch MUST surface X-Next-Cursor header (G5 flips the single-page decision)",
-            "m1",
-            result.getOrThrow().nextCursor,
+            "P0-6: drain terminal → nextCursor is null",
+            null,
+            page.nextCursor,
         )
     }
 
     @Test
-    fun `getMessagesPaged slim mode returns null nextCursor when header absent`() = runBlocking {
-        // T5-C1 negative: no header → null. Mirrors the legacy branch's
-        // `response.headers()["X-Next-Cursor"]` semantics (Retrofit returns
-        // null for a missing header).
-        server.enqueue(jsonResponse("[]"))
+    fun `getMessagesPaged slim mode terminal drain returns null nextCursor`() = runBlocking {
+        // §11.1 fix-9 P0-6: drain reaches a terminal page (no
+        // X-Next-Cursor header) → MessagesPage.nextCursor is null
+        // (the drain exhausted the cursor window).
+        server.enqueue(jsonResponse(json.encodeToString(skeletons(1..3))))
 
         val result = makeRepository(slim = true).getMessagesPaged("sess-1")
 
-        assertTrue(result.isSuccess)
-        assertNull(
-            "no X-Next-Cursor header → null nextCursor",
-            result.getOrThrow().nextCursor,
+        assertTrue(
+            "P0-6: terminal drain MUST succeed (got ${result.exceptionOrNull()})",
+            result.isSuccess,
+        )
+        val page = result.getOrThrow()
+        assertEquals(3, page.items.size)
+        assertEquals(
+            "P0-6: drain terminal → nextCursor is null",
+            null,
+            page.nextCursor,
         )
     }
 
@@ -2186,18 +2315,23 @@ class OpenCodeRepositorySlimapiEndpointsTest {
     }
 
     @Test
-    fun `coldStartSlimSync no bookmark stops cursor-follow at SLIMAPI_LOCAL_HISTORY_BOUND`() = runBlocking {
-        // T5-C5: bound reached → stop following, even if the sidecar would
-        // keep returning cursors. The bound (SLIMAPI_LOCAL_HISTORY_BOUND)
-        // is sourced from the existing per-session pagination strategy
-        // (RevertCutoffCoordinator.MAX_PAGES * PAGE_SIZE = 5 * 50 = 250);
-        // product rationale: a cold-start should not pull more history
-        // than the existing cap that bounds user-visible history in the
-        // revert-cutoff walk.
+    fun `coldStartSlimSync no bookmark itemBound with non-null cursor degrades to null (not partial items)`() = runBlocking {
+        // §11.5: itemBound is a SAFETY limit, NOT completeness proof.
+        // Hitting it while `X-Next-Cursor` is non-null → Partial → the
+        // List façade ([drainSlimapiMessagesBounded]) throws
+        // [OpenCodeRepository.SlimCursorPartialException] → coldStart's
+        // no-bookmark branch degrades to `messages = null` ("keep prior").
+        // Partial items are NOT exposed to the cold-start merge; the
+        // watermark is NOT advanced (no-bump-on-partial).
+        //
+        // This SUPERSEDES the pre-§11.5 behavior where hitting itemBound
+        // returned Success with the capped aggregate (bumping the
+        // watermark + clearing dirty on an incomplete window).
         //
         // Test shape: with SLIMAPI_DEFAULT_PAGE_LIMIT=200 + bound=250,
-        // page 1 (200 items) + page 2 (≥50 items) reaches the bound →
-        // exactly 2 message requests, exactly 250 items aggregated.
+        // page 1 (200 items + cursor) + page 2 (101 items, m200 overlap +
+        // cursor) → aggregated dedup = 300 ≥ 250 with non-null cursor →
+        // Partial → coldStart messages=null.
         val page1 = (1..200).map { MessageWithParts(info = Message(id = "m$it", role = "user")) }
         val page2 = (200..300).map { MessageWithParts(info = Message(id = "m$it", role = "user")) }
 
@@ -2219,17 +2353,25 @@ class OpenCodeRepositorySlimapiEndpointsTest {
 
         val result = repository.coldStartSlimSync(openSessionId = "sess-1", token = token())
 
-        assertTrue(result.isSuccess)
-        val messages = result.getOrThrow().messages!!
-        assertEquals(
-            "bound caps aggregation at SLIMAPI_LOCAL_HISTORY_BOUND items: ${messages.size}",
-            SLIMAPI_LOCAL_HISTORY_BOUND,
-            messages.size,
+        assertTrue("coldStart itself succeeds (partial → null degradation)", result.isSuccess)
+        val snapshot = result.getOrThrow()
+        assertNull(
+            "itemBound + non-null cursor → Partial → coldStart MUST degrade to null messages " +
+                "(NOT expose partial items); messages=${snapshot.messages?.size}",
+            snapshot.messages,
         )
+        // Watermark NOT advanced (no-bump-on-partial).
+        val state = repository.getSlimSessionState("sess-1")
+        assertNull(
+            "Partial MUST NOT advance localAppliedUpdatedAt; state=$state",
+            state?.localAppliedUpdatedAt,
+        )
+        // Exactly 2 message pages (item bound stops the follow before page 3).
+        val requests = (1..5).map { server.takeRequest() }
         assertEquals(
-            "exactly 2 message pages (bound stops the follow before page 3)",
+            "exactly 2 message pages: ${requests.map { it.path }}",
             2,
-            (1..5).map { server.takeRequest() }.count { it.path!!.startsWith("/slimapi/messages/sess-1") },
+            requests.count { it.path!!.startsWith("/slimapi/messages/sess-1") },
         )
     }
 
@@ -2364,27 +2506,25 @@ class OpenCodeRepositorySlimapiEndpointsTest {
     }
 
     @Test
-    fun `coldStartSlimSync no bookmark transport failure mid-drain bumps bookmark from partial aggregate`() = runBlocking {
-        // rev-gpt round-2 IMPORTANT: under Option A (per-page bump suppressed
-        // in drain), the transport-failure path MUST bump the bookmark from
-        // whatever was aggregated BEFORE returning. Without the bump, suc-
-        // cessfully-fetched pages' watermark is lost and the next digest
-        // re-drives from the pre-walk bookmark, re-fetching already-acquired
-        // history — contradicting the drain KDoc's "next digest re-drives
-        // from the new bookmark" promise.
+    fun `coldStartSlimSync no bookmark transport failure mid-drain degrades to null and does NOT bump`() = runBlocking {
+        // §11.5: transport failure mid-drain → Partial → the List façade
+        // ([drainSlimapiMessagesBounded]) throws
+        // [OpenCodeRepository.SlimCursorPartialException] → coldStart's
+        // no-bookmark branch degrades to `messages = null`. The watermark
+        // is NOT advanced (no-bump-on-partial); the next reconcile
+        // retries the full cursor window from the prior watermark.
+        //
+        // This SUPERSEDES the rev-gpt round-2 "bump-on-partial" behavior:
+        // bumping the watermark from a partial aggregate let the next
+        // reconcile short-circuit to /since/{partial-watermark},
+        // permanently losing the older pages that failed. The §11.5
+        // contract is stricter: Partial NEVER bumps, NEVER exposes items
+        // via the List façade.
         //
         // Test shape: page 1 succeeds (m1@200, m2@300) + X-Next-Cursor →
         // drain continues; page 2 returns HTTP 503 → drain's getOrElse
-        // fires. The partial aggregate (m1, m2) MUST be returned AND the
-        // bookmark MUST equal max(200, 300) = 300 (NOT the pre-walk value
-        // of absent / 0).
-        //
-        // Discriminating power: under the UNFIXED code (`getOrElse { return
-        // aggregated }` with no bump), the snapshot.messages assertion
-        // still passes (aggregated IS returned), but the bookmark assertion
-        // fails — `snapshotSlimSseState()["sess-1"]` is null because no
-        // bump ever ran (per-page suppressed by Option A; transport-failure
-        // path skipped the bump). The test pins exactly this regression.
+        // fires → Partial. coldStart degrades to messages=null; the
+        // watermark stays absent (NOT bumped to 300).
         val m1 = MessageWithParts(
             info = Message(id = "m1", role = "user",
                 time = Message.TimeInfo(updated = 200L))
@@ -2404,32 +2544,28 @@ class OpenCodeRepositorySlimapiEndpointsTest {
                 .setHeader("Content-Type", "application/json")
                 .setHeader("X-Next-Cursor", "page2-cursor")
         )
-        // Page 2: HTTP 503 → drain's getOrElse { bump; return aggregated }.
+        // Page 2: HTTP 503 → drain Partial (no bump, partial items NOT exposed).
         server.enqueue(jsonResponse("""{"code":"upstream_unavailable"}""", 503))
 
         val result = repository.coldStartSlimSync(openSessionId = "sess-1", token = token())
 
-        assertTrue("partial aggregate is a success (runSuspendCatching swallows HTTP)", result.isSuccess)
+        assertTrue("coldStart itself succeeds (partial → null degradation)", result.isSuccess)
         val snapshot = result.getOrThrow()
-        val messages = snapshot.messages!!
-        assertEquals(
-            "partial aggregate from page 1 returned: ${messages.map { it.info.id }}",
-            listOf("m1", "m2"),
-            messages.map { it.info.id },
+        assertNull(
+            "transport failure → Partial → coldStart MUST degrade to null messages " +
+                "(NOT expose partial items); messages=${snapshot.messages?.map { it.info.id }}",
+            snapshot.messages,
         )
 
-        // Bookmark invariant: bumped to max(page 1 items' time.updated) = 300.
-        // Under the bug (no bump on transport-failure path), this entry
-        // would be null (no bookmark for sess-1 — never written).
-        val bookmark = repository.snapshotSlimSseState()["sess-1"]
-        assertNotNull(
-            "bookmark entry created from partial aggregate (NOT lost on transport failure): $bookmark",
-            bookmark,
+        // THE discriminating assertion: watermark NOT advanced (no-bump-on-partial).
+        val state = repository.getSlimSessionState("sess-1")
+        assertNull(
+            "Partial transport failure MUST NOT advance localAppliedUpdatedAt; state=$state",
+            state?.localAppliedUpdatedAt,
         )
-        assertEquals(
-            "bookmark = max(updated) of partial aggregate: $bookmark",
-            300L,
-            bookmark!!.updatedAt,
+        assertNull(
+            "Partial transport failure MUST NOT advance localAppliedMessageId; state=$state",
+            state?.localAppliedMessageId,
         )
 
         // Exactly 2 message requests: page 1 (success) + page 2 (failure).
@@ -3089,9 +3225,9 @@ class OpenCodeRepositorySlimapiEndpointsTest {
      * go `/since/{partial-watermark}`, losing older pages permanently.
      *
      * Discriminating regression test: this test FAILS under the round-3
-     * buggy code (temp-flip `bumpBookmarkOnPartialFailure = true` in the
-     * façade → first Partial call advances watermark → second call's
-     * path starts with `/slimapi/messages/` but the URL contains
+     * buggy code (the pre-§11.5 drain bumped `localApplied*` on Partial
+     * unconditionally → first Partial call advances watermark → second
+     * call's path starts with `/slimapi/messages/` but the URL contains
      * `/since/` because the bookmark is now non-null → assertion fails
      * because no `/since/{partial-watermark}` request was expected).
      */
@@ -3204,25 +3340,493 @@ class OpenCodeRepositorySlimapiEndpointsTest {
             secondRequest.path!!.contains("/since/"),
         )
 
-        // After clean Success, localAppliedUpdatedAt IS advanced (Success
-        // bumps the watermark). Confirms the no-bump-on-partial fix
-        // doesn't accidentally prevent Success bumps.
-        val stateAfterSuccess = repository.getSlimSessionState("sid")!!
-        assertEquals(
-            "clean Success advances localAppliedUpdatedAt to max items' updated",
-            200L,
-            stateAfterSuccess.localAppliedUpdatedAt,
+        // §11.1 fix-6 P0-3: the drain does NOT advance localAppliedUpdatedAt
+        // internally. The caller MUST drive commitAuthoritative to bump the
+        // watermark atomically. Confirms the no-bump-on-partial fix doesn't
+        // accidentally prevent Success bumps.
+        val stateAfterDrain = repository.getSlimSessionState("sid")
+        assertTrue(
+            "drain must NOT bump bookmark (P0-3)",
+            stateAfterDrain == null || stateAfterDrain.localAppliedUpdatedAt == null,
         )
-        assertEquals("m2", stateAfterSuccess.localAppliedMessageId)
+
+        // The caller drives commitAuthoritative to advance the watermark.
+        val (ts, id) = maxMessageTuple(secondResult.getOrThrow())
+            ?.let { it.first to it.second } ?: (null to null)
+        val candidate = SlimAuthoritativeCandidate(
+            sessionId = "sid",
+            token = token(),
+            messages = secondResult.getOrThrow(),
+            localAppliedUpdatedAt = ts,
+            localAppliedMessageId = id,
+        )
+        val commitResult = repository.commitAuthoritative(candidate)
+        assertEquals("commit must succeed", SlimAuthoritativeCommitResult.Committed, commitResult)
+
+        val stateAfterCommit = repository.getSlimSessionState("sid")!!
+        assertEquals(
+            "commit advances localAppliedUpdatedAt to max items' updated",
+            200L,
+            stateAfterCommit.localAppliedUpdatedAt,
+        )
+        assertEquals("m2", stateAfterCommit.localAppliedMessageId)
+    }
+
+    // ── §11.5 unified bounded-drain state contract ──────────────────────────
+
+    /**
+     * §11.5 helper: enqueue a 200 page with items + optional cursor.
+     */
+    private fun enqueuePage(items: List<MessageWithParts>, nextCursor: String? = null) {
+        val resp = MockResponse().setResponseCode(200)
+            .setBody(json.encodeToString(items))
+            .setHeader("Content-Type", "application/json")
+        if (nextCursor != null) resp.setHeader("X-Next-Cursor", nextCursor)
+        server.enqueue(resp)
+    }
+
+    /**
+     * §11.5: when [itemBound] is reached while `X-Next-Cursor` is still
+     * non-null, the drain MUST return [SlimDrainOutcome.Partial]
+     * (cause = [SlimDrainBoundExceededException]) — the item bound is a
+     * SAFETY limit, NOT completeness proof. The facade surfaces this as
+     * `Result.failure(SlimCursorPartialException)`; the watermark is NOT
+     * advanced.
+     */
+    @Test
+    fun `itemBoundWithNonNullCursorReturnsPartial`() = runBlocking {
+        // itemBound=250, pageLimit=200 → page1 (200 items + cursor),
+        // page2 (50 items + cursor) → aggregated=250, cursor non-null.
+        enqueuePage(skeletons(1..200), nextCursor = "c2")
+        enqueuePage(skeletons(201..250), nextCursor = "c3")
+
+        val result = repository.fetchSlimInitialWindowBounded("sid", token = token())
+
+        assertTrue("item bound + non-null cursor MUST be Result.failure", result.isFailure)
+        val cause = result.exceptionOrNull()
+        assertTrue(
+            "cause must be SlimCursorPartialException (got ${cause?.javaClass?.name})",
+            cause is OpenCodeRepository.SlimCursorPartialException,
+        )
+        // THE discriminating assertion: watermark NOT advanced.
+        val state = repository.getSlimSessionState("sid")
+        assertNull(
+            "Partial MUST NOT advance localAppliedUpdatedAt; state=$state",
+            state?.localAppliedUpdatedAt,
+        )
+        assertNull(
+            "Partial MUST NOT advance localAppliedMessageId; state=$state",
+            state?.localAppliedMessageId,
+        )
+    }
+
+    /**
+     * §11.5: when the page-count cap exhausts while `X-Next-Cursor` is
+     * still non-null, the drain MUST return [SlimDrainOutcome.Partial]
+     * (cause = [SlimDrainBoundExceededException]). Same no-bump invariant.
+     */
+    @Test
+    fun `pageCapWithNonNullCursorReturnsPartial`() = runBlocking {
+        // maxPages = (250+199)/200 + 1 = 3. Three small pages, each with a
+        // non-null cursor and aggregated.size < itemBound → repeat exhausts
+        // → Partial (page bound).
+        enqueuePage(skeletons(1..1), nextCursor = "c2")
+        enqueuePage(skeletons(2..2), nextCursor = "c3")
+        enqueuePage(skeletons(3..3), nextCursor = "c4")
+
+        val result = repository.fetchSlimInitialWindowBounded("sid", token = token())
+
+        assertTrue("page cap + non-null cursor MUST be Result.failure", result.isFailure)
+        val cause = result.exceptionOrNull()
+        assertTrue(
+            "cause must be SlimCursorPartialException (got ${cause?.javaClass?.name})",
+            cause is OpenCodeRepository.SlimCursorPartialException,
+        )
+        val state = repository.getSlimSessionState("sid")
+        assertNull(
+            "page-cap Partial MUST NOT advance localAppliedUpdatedAt; state=$state",
+            state?.localAppliedUpdatedAt,
+        )
+    }
+
+    /**
+     * §11.5: if the aggregate hits [itemBound] EXACTLY on a page whose
+     * `nextCursor` is null (server signalled end-of-history), the result
+     * is [SlimDrainOutcome.Success] — the terminal-page signal overrides
+     * the bound. §11.1 fix-6 P0-3: the drain does NOT advance the watermark
+     * internally — the caller MUST drive commitAuthoritative.
+     *
+     * Discriminates against `itemBoundWithNonNullCursorReturnsPartial`:
+     * same item count, different cursor → different outcome.
+     */
+    @Test
+    fun `terminalPageExactlyAtItemBoundIsSuccess`() = runBlocking {
+        // page1 (200 items + cursor), page2 (50 items, NO cursor) →
+        // aggregated=250, nextCursor=null → Success.
+        enqueuePage(skeletons(1..200), nextCursor = "c2")
+        enqueuePage(skeletons(201..250), nextCursor = null)
+
+        val token = token()
+        val result = repository.fetchSlimInitialWindowBounded("sid", token = token)
+
+        assertTrue(
+            "terminal page (cursor null) at itemBound MUST be Result.success " +
+                "(got: ${result.exceptionOrNull()?.javaClass?.name}: ${result.exceptionOrNull()?.message})",
+            result.isSuccess,
+        )
+        assertEquals(
+            "all 250 items returned on Success",
+            250,
+            result.getOrThrow().size,
+        )
+        // §11.1 fix-6 P0-3: the drain does NOT advance the watermark internally.
+        val stateAfterDrain = repository.getSlimSessionState("sid")
+        assertTrue(
+            "drain must NOT bump bookmark (P0-3)",
+            stateAfterDrain == null || stateAfterDrain.localAppliedUpdatedAt == null,
+        )
+
+        // The caller MUST drive commitAuthoritative to advance the watermark.
+        val (ts, id) = maxMessageTuple(result.getOrThrow())
+            ?.let { it.first to it.second } ?: (null to null)
+        val candidate = SlimAuthoritativeCandidate(
+            sessionId = "sid",
+            token = token,
+            messages = result.getOrThrow(),
+            localAppliedUpdatedAt = ts,
+            localAppliedMessageId = id,
+        )
+        val commitResult = repository.commitAuthoritative(candidate)
+        assertEquals("commit must succeed", SlimAuthoritativeCommitResult.Committed, commitResult)
+
+        // After commit, the watermark IS advanced.
+        val stateAfterCommit = repository.getSlimSessionState("sid")!!
+        assertEquals(250L, stateAfterCommit.localAppliedUpdatedAt)
+        assertEquals("m250", stateAfterCommit.localAppliedMessageId)
+    }
+
+    /**
+     * §11.5: a mid-walk HTTP failure returns [SlimDrainOutcome.Partial];
+     * the facade surfaces `Result.failure(SlimCursorPartialException)`;
+     * the watermark is NOT advanced (no-bump-on-partial). Uses HTTP 500
+     * (no OkHttp auto-retry, unlike socket disconnect).
+     */
+    @Test
+    fun `partialTransportFailureDoesNotBumpBookmark`() = runBlocking {
+        enqueuePage(skeletons(1..1), nextCursor = "c2")
+        // Page 2: HTTP 500 → IOException("HTTP 500") → Partial.
+        server.enqueue(MockResponse().setResponseCode(500))
+
+        val result = repository.fetchSlimInitialWindowBounded("sid", token = token())
+
+        assertTrue("transport failure MUST be Result.failure", result.isFailure)
+        assertTrue(
+            "cause must be SlimCursorPartialException",
+            result.exceptionOrNull() is OpenCodeRepository.SlimCursorPartialException,
+        )
+        val state = repository.getSlimSessionState("sid")
+        assertNull(
+            "Partial transport failure MUST NOT advance localAppliedUpdatedAt; state=$state",
+            state?.localAppliedUpdatedAt,
+        )
+        assertNull(
+            "Partial transport failure MUST NOT advance localAppliedMessageId; state=$state",
+            state?.localAppliedMessageId,
+        )
+    }
+
+    /**
+     * §11.5: wall-clock timeout (30 s `withTimeout`) surfaces as
+     * [SlimDrainOutcome.Partial] with a [kotlinx.coroutines.TimeoutCancellationException]
+     * cause; the facade returns `Result.failure(SlimCursorPartialException)`;
+     * the watermark is NOT advanced.
+     *
+     * IGNORED: the drain's `withTimeout(30_000L)` duration is NOT injectable
+     * without a signature change (out of §11.5 scope). A real wall-clock
+     * test would take >30s — too slow for the unit suite. The timeout
+     * catch arm (`catch (e: TimeoutCancellationException) { Partial(...) }`)
+     * feeds the SAME Partial→no-bump path as
+     * `partialTransportFailureDoesNotBumpBookmark`, which covers the
+     * contract. Re-enable once the timeout duration is injectable
+     * (precedent: `ExpandBatchEngine.expandWallClockBudgetMsForTest`).
+     */
+    @Ignore("§11.5: drain timeout (30s) not injectable; covered by partial-transport no-bump test")
+    @Test
+    fun `timeoutDoesNotBumpBookmark`() = runBlocking {
+        // Would need a >30s body delay to trip withTimeout.
+    }
+
+    /**
+     * §11.5: cursor loop (server returns the same opaque cursor again)
+     * surfaces as [SlimDrainOutcome.Degraded]; the facade returns
+     * `Result.failure(SlimCursorPartialException)`; the watermark is NOT
+     * advanced.
+     */
+    @Test
+    fun `cursorLoopDoesNotBumpBookmark`() = runBlocking {
+        // Page 1: [m1] + cursor "c2" → before becomes "c2".
+        enqueuePage(skeletons(1..1), nextCursor = "c2")
+        // Page 2: [m1 dup] + SAME cursor "c2" → loop detected
+        // (before != null && nextCursor == before). aggregated=[m1]
+        // non-empty → Degraded.
+        enqueuePage(skeletons(1..1), nextCursor = "c2")
+
+        val result = repository.fetchSlimInitialWindowBounded("sid", token = token())
+
+        assertTrue("cursor loop MUST be Result.failure", result.isFailure)
+        assertTrue(
+            "cause must be SlimCursorPartialException",
+            result.exceptionOrNull() is OpenCodeRepository.SlimCursorPartialException,
+        )
+        val state = repository.getSlimSessionState("sid")
+        assertNull(
+            "Degraded loop MUST NOT advance localAppliedUpdatedAt; state=$state",
+            state?.localAppliedUpdatedAt,
+        )
+    }
+
+    /**
+     * §11.5: a page whose `X-Next-Cursor` is null is the ONLY terminal
+     * condition that returns [SlimDrainOutcome.Success]. §11.1 fix-6 P0-3:
+     * the drain does NOT advance the watermark internally — the caller MUST
+     * drive commitAuthoritative. Discriminates against the bound/cap/loop/
+     * transport paths which all return Partial/Degraded.
+     */
+    @Test
+    fun `nullCursorIsTheOnlySuccessTerminalCondition`() = runBlocking {
+        // Single page, no cursor → Success.
+        enqueuePage(skeletons(1..2), nextCursor = null)
+
+        val token = token()
+        val result = repository.fetchSlimInitialWindowBounded("sid", token = token)
+
+        assertTrue("null cursor MUST be Result.success", result.isSuccess)
+        assertEquals(listOf("m1", "m2"), result.getOrThrow().map { it.info.id })
+
+        // §11.1 fix-6 P0-3: the drain does NOT advance the watermark internally.
+        val stateAfterDrain = repository.getSlimSessionState("sid")
+        assertTrue(
+            "drain must NOT bump bookmark (P0-3)",
+            stateAfterDrain == null || stateAfterDrain.localAppliedUpdatedAt == null,
+        )
+
+        // The caller MUST drive commitAuthoritative to advance the watermark.
+        val (ts, id) = maxMessageTuple(result.getOrThrow())
+            ?.let { it.first to it.second } ?: (null to null)
+        val candidate = SlimAuthoritativeCandidate(
+            sessionId = "sid",
+            token = token,
+            messages = result.getOrThrow(),
+            localAppliedUpdatedAt = ts,
+            localAppliedMessageId = id,
+        )
+        val commitResult = repository.commitAuthoritative(candidate)
+        assertEquals("commit must succeed", SlimAuthoritativeCommitResult.Committed, commitResult)
+
+        // After commit, the watermark IS advanced.
+        val stateAfterCommit = repository.getSlimSessionState("sid")!!
+        assertEquals(2L, stateAfterCommit.localAppliedUpdatedAt)
+        assertEquals("m2", stateAfterCommit.localAppliedMessageId)
+    }
+
+    /**
+     * §11.5: [CancellationException] (non-timeout) propagates out of the
+     * facade as a thrown CE (NOT as `Result.failure(CE)`). A scope cancel
+     * mid-walk terminates the cursor follow cleanly without landing a
+     * partial state mutation.
+     */
+    @Test
+    fun `cancellationPropagates`() = runBlocking {
+        // Enqueue nothing — the page fetch hangs waiting for a response.
+        val testScope = CoroutineScope(Dispatchers.Unconfined)
+        var capturedException: Throwable? = null
+        val tok = token()
+        val job = testScope.launch {
+            try {
+                repository.fetchSlimInitialWindowBounded("sid", token = tok)
+            } catch (e: Throwable) {
+                capturedException = e
+            }
+        }
+        // Let the coroutine reach the suspend point.
+        delay(300L)
+        job.cancelAndJoin()
+
+        assertNotNull(
+            "CE must propagate (not be swallowed into Result.failure); capturedException was null",
+            capturedException,
+        )
+        assertTrue(
+            "captured exception must be CancellationException (got ${capturedException?.javaClass?.name})",
+            capturedException is CancellationException,
+        )
+        // No watermark mutation on cancel.
+        val state = repository.getSlimSessionState("sid")
+        assertNull(
+            "cancel MUST NOT advance localAppliedUpdatedAt; state=$state",
+            state?.localAppliedUpdatedAt,
+        )
+    }
+
+    /**
+     * §11.5: the `drainSlimapiMessagesBounded` List facade MUST NOT
+     * expose Partial/Degraded aggregate items. On Partial it throws
+     * [OpenCodeRepository.SlimCursorPartialException]; the cold-start
+     * no-bookmark caller ([coldStartSlimSync]) degrades the throw to a
+     * null piece ("keep prior") — partial items never reach the merge.
+     *
+     * Drives the real List facade via [coldStartSlimSync]'s no-bookmark
+     * branch: a partial drain MUST yield `snapshot.messages == null`
+     * (NOT the partial m1 item). Under the old buggy facade (`...outcome.items`
+     * unconditionally), cold-start would have received the partial [m1].
+     */
+    @Test
+    fun `boundedListFacadeDoesNotExposePartialItems`() = runBlocking {
+        // coldStartSlimSync enqueues sessions + questions + permissions, then
+        // the cursor drain pages (no-bookmark branch → List facade).
+        server.enqueue(jsonResponse("[]")) // sessions
+        server.enqueue(jsonResponse("""{"items":[],"errors":[]}""")) // questions
+        server.enqueue(jsonResponse("""{"items":[],"errors":[]}""")) // permissions
+        // Page 1: success + cursor.
+        enqueuePage(skeletons(1..1), nextCursor = "c2")
+        // Page 2: HTTP 500 → Partial → List facade throws.
+        server.enqueue(MockResponse().setResponseCode(500))
+
+        val result = repository.coldStartSlimSync(
+            openSessionId = "sid",
+            directories = null,
+            token = token(),
+        )
+
+        assertTrue("coldStart itself succeeds (per-piece null degradation)", result.isSuccess)
+        val snapshot = result.getOrThrow()
+        assertNull(
+            "Partial drain MUST degrade to null messages (NOT expose partial items); " +
+                "messages=${snapshot.messages?.map { it.info.id }}",
+            snapshot.messages,
+        )
+        // Watermark NOT advanced.
+        val state = repository.getSlimSessionState("sid")
+        assertNull(
+            "Partial List-facade throw MUST NOT advance localAppliedUpdatedAt; state=$state",
+            state?.localAppliedUpdatedAt,
+        )
+    }
+
+    /**
+     * §11.5 facade contract: transport failure → `Result.failure(SlimCursorPartialException)`.
+     */
+    @Test
+    fun `partialTransportFacadeFailure`() = runBlocking {
+        enqueuePage(skeletons(1..1), nextCursor = "c2")
+        server.enqueue(MockResponse().setResponseCode(500))
+
+        val result = repository.fetchSlimInitialWindowBounded("sid", token = token())
+
+        assertTrue("transport facade failure MUST be Result.failure", result.isFailure)
+        assertTrue(
+            "cause must be SlimCursorPartialException",
+            result.exceptionOrNull() is OpenCodeRepository.SlimCursorPartialException,
+        )
+    }
+
+    /**
+     * §11.5 facade contract: cursor loop → `Result.failure(SlimCursorPartialException)`.
+     */
+    @Test
+    fun `cursorLoopFacadeFailure`() = runBlocking {
+        enqueuePage(skeletons(1..1), nextCursor = "c2")
+        enqueuePage(skeletons(1..1), nextCursor = "c2")
+
+        val result = repository.fetchSlimInitialWindowBounded("sid", token = token())
+
+        assertTrue("loop facade failure MUST be Result.failure", result.isFailure)
+        assertTrue(
+            "cause must be SlimCursorPartialException",
+            result.exceptionOrNull() is OpenCodeRepository.SlimCursorPartialException,
+        )
+    }
+
+    /**
+     * §11.5 facade contract: wall-clock timeout →
+     * `Result.failure(SlimCursorPartialException)`.
+     *
+     * IGNORED: see `timeoutDoesNotBumpBookmark` — the 30s `withTimeout`
+     * duration is not injectable. Re-enable once the drain accepts a
+     * test-timeout hook.
+     */
+    @Ignore("§11.5: drain timeout (30s) not injectable; covered by partial-transport facade test")
+    @Test
+    fun `timeoutFacadeFailure`() = runBlocking {
+        // Would need a >30s body delay to trip withTimeout.
+    }
+
+    /**
+     * §11.5 facade contract: terminal cursor-null → `Result.success(items)`.
+     */
+    @Test
+    fun `terminalCursorNullFacadeSuccess`() = runBlocking {
+        enqueuePage(skeletons(1..2), nextCursor = null)
+
+        val result = repository.fetchSlimInitialWindowBounded("sid", token = token())
+
+        assertTrue("terminal cursor-null MUST be Result.success", result.isSuccess)
+        assertEquals(listOf("m1", "m2"), result.getOrThrow().map { it.info.id })
+    }
+
+    /**
+     * §11.5: a 2xx page with a null body is INCOMPLETE —
+     * [getSlimapiMessagesPage] throws [SlimPageIncompleteException]; the
+     * drain classifies it as [SlimDrainOutcome.Partial]; the facade
+     * returns `Result.failure(SlimCursorPartialException)`; the watermark
+     * is NOT advanced.
+     *
+     * The null body is produced by a JSON literal `"null"` (Retrofit
+     * deserializes it to `response.body() == null`).
+     */
+    @Test
+    fun `pageWithNullBodyIsIncompleteAndDoesNotAdvanceBookmark`() = runBlocking {
+        // Page 1: 200 with body "null" → response.body() == null →
+        // SlimPageIncompleteException → drain Partial.
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody("null")
+                .setHeader("Content-Type", "application/json")
+                .setHeader("X-Next-Cursor", "c2"),
+        )
+
+        val result = repository.fetchSlimInitialWindowBounded("sid", token = token())
+
+        assertTrue("null body MUST be Result.failure (incomplete)", result.isFailure)
+        val cause = result.exceptionOrNull()
+        assertTrue(
+            "cause must be SlimCursorPartialException (got ${cause?.javaClass?.name})",
+            cause is OpenCodeRepository.SlimCursorPartialException,
+        )
+        // THE discriminating assertion: watermark NOT advanced.
+        val state = repository.getSlimSessionState("sid")
+        assertNull(
+            "null-body Partial MUST NOT advance localAppliedUpdatedAt; state=$state",
+            state?.localAppliedUpdatedAt,
+        )
     }
 
     // ── C-D3 v2 real-incarnation discriminators ────────────────────────────
 
     /**
      * T3.3-C3/C7 REST merge: real repository + MockWebServer. Request starts under
-     * tokenA → configure rotates marker mid-flight → delayed response
-     * completes → Result.failure(StaleSlimCommitException) and B state is
-     * empty (no watermark from A's payload).
+     * tokenA → configure rotates marker mid-flight AND retires the old client.
+     * The in-flight HTTP call is canceled (IOException: Canceled) when the old
+     * client is retired; [fetchSinceForStageA] classifies this as
+     * [SlimSinceStageAOutcome.Failed] (per §11.1's "other transport/IO
+     * exception → Failed" contract). B state stays empty (no watermark from
+     * A's payload).
+     *
+     * §11.1 stage A: migrated from the legacy `getSlimapiMessagesSince` facade
+     * to `fetchSinceForStageA`. The mid-flight rejection now manifests as a
+     * transport failure (client retirement cancels the call) rather than a
+     * post-response StaleSlimCommitException — both are "no bookmark advance"
+     * outcomes, but the failure mode differs.
      *
      * Does NOT mock captureSlimCommitToken / isSlimCommitTokenCurrent.
      */
@@ -3242,14 +3846,15 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         // EventLoop would deadlock if takeRequest blocked the only thread
         // that can advance the Retrofit call.
         val deferred = async(Dispatchers.IO) {
-            repository.getSlimapiMessagesSince("sess-a", since = 0L, token = tokenA)
+            repository.fetchSinceForStageA("sess-a", since = 0L, token = tokenA)
         }
 
         // Prove network started before rotation.
         val started = server.takeRequest(5, TimeUnit.SECONDS)
         assertNotNull("request must start under tokenA before configure", started)
 
-        // Rotate incarnation (host B). Clears slim state + marker.
+        // Rotate incarnation (host B). Clears slim state + marker + retires
+        // the old client (which cancels the in-flight HTTP call).
         repository.configure(
             baseUrl = server.url("/").toString().trimEnd('/'),
             slim = true,
@@ -3260,10 +3865,16 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         )
 
         val result = deferred.await()
-        assertTrue("stale mid-flight must fail", result.isFailure)
+        // §11.1: the in-flight HTTP call is canceled when configure retires the
+        // old client. fetchSinceForStageA classifies this as Failed(IOException).
         assertTrue(
-            "cause must be StaleSlimCommitException (got ${result.exceptionOrNull()})",
-            result.exceptionOrNull() is OpenCodeRepository.StaleSlimCommitException,
+            "mid-flight configure must return Failed outcome (got $result)",
+            result is SlimSinceStageAOutcome.Failed,
+        )
+        val cause = (result as SlimSinceStageAOutcome.Failed).cause
+        assertTrue(
+            "cause must be IOException (client retirement cancels the call), got ${cause.javaClass.name}",
+            cause is java.io.IOException,
         )
         assertTrue(
             "new incarnation must not retain A watermark/state",
@@ -3337,7 +3948,9 @@ class OpenCodeRepositorySlimapiEndpointsTest {
 
     /**
      * Control for §4.2: without configure, the same two-page drain succeeds
-     * and bumps the watermark once to max(updated).
+     * and returns the aggregated items. §11.1 fix-6 P0-3: the drain does NOT
+     * bump the bookmark internally — the caller MUST drive
+     * commitAuthoritative to advance the watermark atomically.
      */
     @Test
     fun `CD3-v2 cursor two-page control completes and bumps once`() = runBlocking {
@@ -3360,9 +3973,31 @@ class OpenCodeRepositorySlimapiEndpointsTest {
 
         assertTrue(result.isSuccess)
         assertEquals(listOf("m1", "m2"), result.getOrThrow().map { it.info.id })
-        val state = repository.getSlimSessionState("sid")
-        assertEquals(200L, state?.localAppliedUpdatedAt)
-        assertEquals("m2", state?.localAppliedMessageId)
+
+        // §11.1 fix-6 P0-3: the drain does NOT bump the bookmark internally.
+        val stateAfterDrain = repository.getSlimSessionState("sid")
+        assertTrue(
+            "drain must NOT bump bookmark (P0-3)",
+            stateAfterDrain == null || stateAfterDrain.localAppliedUpdatedAt == null,
+        )
+
+        // The caller MUST drive commitAuthoritative to advance the watermark.
+        val (ts, id) = maxMessageTuple(result.getOrThrow())
+            ?.let { it.first to it.second } ?: (null to null)
+        val candidate = SlimAuthoritativeCandidate(
+            sessionId = "sid",
+            token = token,
+            messages = result.getOrThrow(),
+            localAppliedUpdatedAt = ts,
+            localAppliedMessageId = id,
+        )
+        val commitResult = repository.commitAuthoritative(candidate)
+        assertEquals("commit must succeed", SlimAuthoritativeCommitResult.Committed, commitResult)
+
+        // After commit, the watermark IS advanced.
+        val stateAfterCommit = repository.getSlimSessionState("sid")
+        assertEquals(200L, stateAfterCommit?.localAppliedUpdatedAt)
+        assertEquals("m2", stateAfterCommit?.localAppliedMessageId)
     }
 
     // ── C-D3 rev-3 reconfigure-boundary discriminators ─────────────────────
@@ -3404,8 +4039,14 @@ class OpenCodeRepositorySlimapiEndpointsTest {
      * C-D3 rev-3 Critical: reconfigure-transaction ordering —
      * hold old-token mid-flight network → beginSlimReconfigure →
      * (simulated HostStatePurged: no UI here) → configure → release
-     * delayed response. Assert StaleSlimCommitException and empty slim
+     * delayed response. Assert Failed(IOException) and empty slim
      * state (no A watermark).
+     *
+     * §11.1 stage A: migrated from the legacy `getSlimapiMessagesSince`
+     * facade (which now returns SlimSinceStagingOnlyException unconditionally
+     * without making the HTTP call) to `fetchSinceForStageA`, which DOES
+     * make the HTTP call. When configure retires the old client, the in-flight
+     * HTTP call is canceled → [SlimSinceStageAOutcome.Failed](IOException).
      */
     @Test
     fun `CD3-rev3 reconfigure transaction beginSlim then configure rejects mid-flight since`() = runBlocking {
@@ -3420,14 +4061,15 @@ class OpenCodeRepositorySlimapiEndpointsTest {
 
         val tokenA = repository.captureSlimCommitToken()
         val deferred = async(Dispatchers.IO) {
-            repository.getSlimapiMessagesSince("sess-a", since = 0L, token = tokenA)
+            repository.fetchSinceForStageA("sess-a", since = 0L, token = tokenA)
         }
 
         val started = server.takeRequest(5, TimeUnit.SECONDS)
         assertNotNull("request must start under tokenA", started)
 
         // Transaction order: marker rotate FIRST (as HostProfileController
-        // does before HostStatePurged), then configure rewires host.
+        // does before HostStatePurged), then configure rewires host + retires
+        // the old client (which cancels the in-flight HTTP call).
         repository.beginSlimReconfigure()
         assertFalse(repository.isSlimCommitTokenCurrent(tokenA))
         repository.configure(
@@ -3436,10 +4078,16 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         )
 
         val result = deferred.await()
-        assertTrue("mid-flight after beginSlim must fail", result.isFailure)
+        // §11.1: configure retires the old client → in-flight HTTP call
+        // canceled → Failed(IOException).
         assertTrue(
-            "cause must be StaleSlimCommitException (got ${result.exceptionOrNull()})",
-            result.exceptionOrNull() is OpenCodeRepository.StaleSlimCommitException,
+            "mid-flight after beginSlim must return Failed outcome (got $result)",
+            result is SlimSinceStageAOutcome.Failed,
+        )
+        val cause = (result as SlimSinceStageAOutcome.Failed).cause
+        assertTrue(
+            "cause must be IOException (client retirement), got ${cause.javaClass.name}",
+            cause is java.io.IOException,
         )
         assertTrue(
             "new incarnation must not retain A watermark/state",
@@ -3807,8 +4455,327 @@ class OpenCodeRepositorySlimapiEndpointsTest {
                 time = Message.TimeInfo(created = updated, updated = updated),
             ),
         )
-}
 
+    /** Bulk skeleton generator: m<id> with updated=<id>, for itemBound tests. */
+    private fun skeletons(idRange: IntRange): List<MessageWithParts> =
+        idRange.map { skeleton("m$it", it.toLong()) }
+
+    // ── §11.1 fix-10 P0-1: pagination contract (before split) ────────────
+
+    /**
+     * §11.1 fix-10 P0-1: getMessagesPaged slim mode with `before != null`
+     * (load-more) routes through getSlimapiMessagesPage — a SINGLE-PAGE
+     * cursor fetch that forwards `before` to the HTTP query and surfaces
+     * `X-Next-Cursor` as MessagesPage.nextCursor. NO authoritative commit.
+     */
+    @Test
+    fun `§11_1 fix-10 P0-1 getMessagesPaged slim load-more forwards before and returns nextCursor`() = runBlocking {
+        val repo = makeRepository(slim = true)
+        val s1 = skeleton("m1", 1000L)
+        val s2 = skeleton("m2", 2000L)
+        server.enqueue(
+            jsonResponse(json.encodeToString(listOf(s1, s2)))
+                .setHeader("X-Next-Cursor", "next-cursor-abc"),
+        )
+
+        val result = repo.getMessagesPaged("sess-1", limit = 30, before = "cursor-prev")
+
+        assertTrue("load-more MUST succeed (got ${result.exceptionOrNull()})", result.isSuccess)
+        val page = result.getOrThrow()
+        assertEquals(listOf("m1", "m2"), page.items.map { it.info.id })
+        assertEquals("nextCursor preserved from response header", "next-cursor-abc", page.nextCursor)
+
+        val request = server.takeRequest()
+        assertTrue(
+            "P0-1: before cursor forwarded to HTTP query: ${request.path}",
+            request.path!!.contains("before=cursor-prev"),
+        )
+        assertTrue(
+            "P0-1: limit forwarded to HTTP query: ${request.path}",
+            request.path!!.contains("limit=30"),
+        )
+    }
+
+    /**
+     * §11.1 fix-10 P0-1: getMessagesPaged slim mode with `before != null`
+     * does NOT advance localApplied (no drain / no commit — it's a
+     * single-page history pagination, not a completeness sync).
+     */
+    @Test
+    fun `§11_1 fix-10 P0-1 getMessagesPaged slim load-more does NOT advance localApplied`() = runBlocking {
+        val repo = makeRepository(slim = true)
+        // Seed a low localApplied so we can detect if it changes.
+        val seedToken = repo.captureSlimCommitToken()
+        repo.bumpSlimBookmarkFromItems(
+            "sess-1",
+            listOf(MessageWithParts(info = Message(id = "m-seed", role = "assistant", time = Message.TimeInfo(updated = 500L)))),
+            seedToken,
+        )
+        val stateBefore = repo.getSlimSessionState("sess-1")
+        assertEquals(500L, stateBefore?.localAppliedUpdatedAt)
+
+        // Load-more with before cursor.
+        server.enqueue(jsonResponse(json.encodeToString(listOf(skeleton("m1", 1000L)))))
+        repo.getMessagesPaged("sess-1", limit = 10, before = "cursor-prev")
+
+        val stateAfter = repo.getSlimSessionState("sess-1")
+        assertEquals(
+            "P0-1: load-more MUST NOT advance localAppliedUpdatedAt (no commit)",
+            500L,
+            stateAfter?.localAppliedUpdatedAt,
+        )
+    }
+
+    /**
+     * §11.1 fix-10 P0-1: getMessagesPaged slim mode with `before == null`
+     * (initial/reload) IGNORES the UI [limit] and uses the drain safety
+     * bound (SLIMAPI_LOCAL_HISTORY_BOUND). The drain's per-page size is
+     * SLIMAPI_DEFAULT_PAGE_LIMIT.
+     */
+    @Test
+    fun `§11_1 fix-10 P0-1 getMessagesPaged slim initial ignores UI limit uses drain bound`() = runBlocking {
+        val repo = makeRepository(slim = true)
+        // The drain's per-page size is SLIMAPI_DEFAULT_PAGE_LIMIT=200.
+        // Enqueue a terminal page with 5 items — the drain succeeds.
+        // The UI limit=5 is IGNORED (not forwarded as a query param).
+        server.enqueue(jsonResponse(json.encodeToString(skeletons(1..5))))
+
+        val result = repo.getMessagesPaged("sess-1", limit = 5, before = null)
+
+        assertTrue("initial drain MUST succeed (got ${result.exceptionOrNull()})", result.isSuccess)
+        val request = server.takeRequest()
+        // The drain's per-page limit is the default (200), NOT the UI
+        // limit (5). Assert that limit=5 is NOT in the query.
+        assertFalse(
+            "P0-1: UI limit=5 must NOT be forwarded as query param on initial drain: ${request.path}",
+            request.path!!.contains("limit=5"),
+        )
+    }
+
+    /**
+     * §11.1 fix-10 P0-1: getMessagesPaged slim mode with `before == null`
+     * (initial) on a long session whose history exceeds the drain bound →
+     * Result.failure (Partial drain — the known trade-off per §11.5).
+     */
+    @Test
+    fun `§11_1 fix-10 P0-1 getMessagesPaged slim initial long history returns Partial failure`() = runBlocking {
+        val repo = makeRepository(slim = true)
+        // First page: 200 items + non-terminal cursor.
+        // SLIMAPI_DEFAULT_PAGE_LIMIT=200, SLIMAPI_LOCAL_HISTORY_BOUND=250.
+        // The drain fetches page 1 (200 items, cursor set), then page 2
+        // (50 more items, cursor still set → itemBound hit → Partial).
+        // 2 pages enqueued:
+        // page 1: 200 items + X-Next-Cursor
+        // page 2: at least 1 item + X-Next-Cursor (so the bound is hit
+        // while cursor is non-null → Partial)
+        server.enqueue(
+            jsonResponse(json.encodeToString(skeletons(1..200)))
+                .setHeader("X-Next-Cursor", "cursor-page-1"),
+        )
+        server.enqueue(
+            jsonResponse(json.encodeToString(skeletons(201..251)))
+                .setHeader("X-Next-Cursor", "cursor-page-2"),
+        )
+
+        val result = repo.getMessagesPaged("sess-1", limit = 20, before = null)
+
+        // Partial drain → Result.failure(SlimCursorPartialException)
+        // (itemBound=250 reached while cursor is still non-null).
+        assertTrue(
+            "P0-1: long history exceeding drain bound MUST be Result.failure (Partial) — got ${result.exceptionOrNull()?.let { it::class.simpleName }}",
+            result.isFailure,
+        )
+    }
+
+    /**
+     * §11.1 fix-10 P0-1: consecutive load-more pages produce the expected
+     * sequence of cursors. Page 1 → nextCursor=A, Page 2 (before=A) →
+     * nextCursor=null (end of history).
+     */
+    @Test
+    fun `§11_1 fix-10 P0-1 getMessagesPaged slim load-more consecutive pages`() = runBlocking {
+        val repo = makeRepository(slim = true)
+
+        // Page 1 (before=cursor-1): items m1/m2, nextCursor=cursor-2.
+        server.enqueue(
+            jsonResponse(json.encodeToString(listOf(skeleton("m1", 1000L), skeleton("m2", 2000L))))
+                .setHeader("X-Next-Cursor", "cursor-2"),
+        )
+        val page1 = repo.getMessagesPaged("sess-1", limit = 30, before = "cursor-1").getOrThrow()
+        assertEquals(listOf("m1", "m2"), page1.items.map { it.info.id })
+        assertEquals("cursor-2", page1.nextCursor)
+
+        // Page 2 (before=cursor-2): items m3, nextCursor=null (end).
+        server.enqueue(jsonResponse(json.encodeToString(listOf(skeleton("m3", 3000L)))))
+        val page2 = repo.getMessagesPaged("sess-1", limit = 30, before = page1.nextCursor).getOrThrow()
+        assertEquals(listOf("m3"), page2.items.map { it.info.id })
+        assertEquals(null, page2.nextCursor)
+    }
+
+    // ── §11.1 fix-9 P0-4: dirty re-evaluation after commit ───────────────
+
+    /**
+     * §11.1 fix-9 P0-4: after a successful commit advances localApplied*
+     * to the candidate tuple, the commit MUST re-evaluate dirty against
+     * the session's remote* tuple. If remote* > localApplied* (a digest
+     * arrived mid-drain and advanced remote past what we just applied),
+     * dirty MUST be re-set to `true`. This test seeds a high remote via
+     * a digest, then runs a drain whose max tuple is BELOW remote. The
+     * commit succeeds (candidate > prior-localApplied of null) BUT dirty
+     * is re-set to true post-commit (remote > localApplied).
+     */
+    @Test
+    fun `§11_1 fix-9 P0-4 dirty re-eval keeps dirty true when remote exceeds committed localApplied`() = runBlocking {
+        val repo = makeRepository(slim = true)
+        val token = repo.captureSlimCommitToken()
+        // Seed remote* via a full-tuple digest (remote=5000/m_remote).
+        // localApplied stays null. dirty ratchets to true via reducer.
+        repo.applySlimDigest(
+            SlimSessionDigest(sessionId = "sess-1", updatedAt = 5000L, messageId = "m_remote"),
+            token = token,
+        )
+        val seeded = repo.getSlimSessionState("sess-1")!!
+        assertEquals(5000L, seeded.remoteUpdatedAt)
+        assertEquals("m_remote", seeded.remoteMessageId)
+        assertNull(seeded.localAppliedUpdatedAt)
+        assertTrue("dirty ratchets after remote advance", seeded.dirty)
+
+        // Drain + commit a candidate whose max tuple (3000/m3) is strictly
+        // less than remote (5000/m_remote). The candidate IS strictly
+        // greater than prior-localApplied (null) so monotonic check passes.
+        val s1 = skeleton("m1", 1000L)
+        val s2 = skeleton("m2", 2000L)
+        val s3 = skeleton("m3", 3000L)
+        server.enqueue(jsonResponse(json.encodeToString(listOf(s1, s2, s3))))
+
+        val result = repo.getMessagesPaged("sess-1")
+        assertTrue("drain succeeds (got ${result.exceptionOrNull()})", result.isSuccess)
+
+        val post = repo.getSlimSessionState("sess-1")!!
+        assertEquals(3000L, post.localAppliedUpdatedAt)
+        assertEquals("m3", post.localAppliedMessageId)
+        // P0-4: dirty MUST be re-set to true post-commit because
+        // remote (5000/m_remote) > localApplied (3000/m3).
+        assertTrue(
+            "P0-4: dirty MUST be true post-commit when remote > localApplied (got dirty=${post.dirty})",
+            post.dirty,
+        )
+    }
+
+    // ── §11.1 fix-9 P0-5: reconfigure clears authoritative/visible stores ─
+
+    /**
+     * §11.1 fix-9 P0-5: a host switch (configure → beginSlimReconfigure)
+     * MUST clear the authoritative + visible message stores so a cross-
+     * host same-sessionId collision does NOT leak the old host's messages
+     * into the new host. captureAuthoritativeMessages must return empty
+     * after reconfigure.
+     */
+    @Test
+    fun `§11_1 fix-9 P0-5 reconfigure clears authoritative and visible stores`() = runBlocking {
+        val repo = makeRepository(slim = true)
+        val s1 = skeleton("m1", 1000L)
+        val s2 = skeleton("m2", 2000L)
+        // Drain + commit terminal page to populate authoritative store.
+        server.enqueue(jsonResponse(json.encodeToString(listOf(s1, s2))))
+        val initialResult = repo.getMessagesPaged("sess-1")
+        assertTrue("initial drain succeeds", initialResult.isSuccess)
+        // The authoritative store now has m1 + m2.
+        val beforeReconfigure = repo.captureAuthoritativeMessages("sess-1")
+        assertEquals(
+            "authoritative store populated by initial commit",
+            listOf("m1", "m2"),
+            beforeReconfigure.map { it.info.id },
+        )
+
+        // Trigger reconfigure (simulates a host switch).
+        repo.beginSlimReconfigure()
+
+        // P0-5: authoritative store cleared.
+        val afterReconfigure = repo.captureAuthoritativeMessages("sess-1")
+        assertTrue(
+            "P0-5: authoritative store MUST be empty after reconfigure (got ${afterReconfigure.map { it.info.id }})",
+            afterReconfigure.isEmpty(),
+        )
+    }
+
+    // ── rev-ogpt P1-1 / P1-2: commit's atomic hasConflict dirty decision ──
+
+    /**
+     * rev-ogpt P1-1 + P1-2: a candidate with hasConflict=true committed via
+     * the REAL repository + real [SlimSseStateMachine] keeps dirty=true
+     * ATOMICALLY (no separate forceSlimDirty post-write critical section).
+     *
+     * Setup: seed the session with a digest that aligns remote == localApplied
+     * (so needsReconcile=false post-commit — the only thing keeping dirty=true
+     * is the hasConflict flag, threaded atomically through the commit's
+     * critical section). Without the fix, the reconciler path's `markDirty`
+     * was a NO-OP here (needsReconcile gates it to false on aligned watermark).
+     */
+    @Test
+    fun `rev-ogpt P1-1 commit with hasConflict true keeps dirty true atomically`() = runBlocking {
+        val sid = "sess-conflict"
+        val token = repository.captureSlimCommitToken()
+
+        // Seed: remote == localApplied == 200 ⇒ needsReconcile=false post-commit.
+        // (Remote via a digest, localApplied via a prior commit.)
+        val seedDigest = SlimSessionDigest(
+            sessionId = sid,
+            updatedAt = 200L,
+            messageId = "m-seed",
+        )
+        repository.applySlimDigest(seedDigest, token)
+        // First commit (no conflict) seeds localApplied=200.
+        val seedCandidate = SlimAuthoritativeCandidate(
+            sessionId = sid,
+            token = token,
+            messages = listOf(skeleton("m-seed", 200L)),
+            localAppliedUpdatedAt = 200L,
+            localAppliedMessageId = "m-seed",
+            hasConflict = false,
+        )
+        val seedResult = repository.commitAuthoritative(seedCandidate)
+        assertEquals("seed commit must succeed", SlimAuthoritativeCommitResult.Committed, seedResult)
+
+        // After seed: remote=200, localApplied=200, dirty=false (aligned).
+        val stateAfterSeed = repository.getSlimSessionState(sid)!!
+        assertEquals("seed: localApplied advanced", 200L, stateAfterSeed.localAppliedUpdatedAt)
+        assertFalse(
+            "seed: dirty cleared (remote == localApplied, no conflict)",
+            stateAfterSeed.dirty,
+        )
+
+        // Now commit a CONFLICTING candidate (same tuple, hasConflict=true).
+        // The watermark is already aligned (200), so needsReconcile=false.
+        // The ONLY thing keeping dirty=true post-commit is hasConflict.
+        val conflictCandidate = SlimAuthoritativeCandidate(
+            sessionId = sid,
+            token = token,
+            messages = listOf(skeleton("m-seed", 200L)),
+            localAppliedUpdatedAt = 200L,
+            localAppliedMessageId = "m-seed",
+            hasConflict = true,
+        )
+        val conflictResult = repository.commitAuthoritative(conflictCandidate)
+        assertEquals(
+            "hasConflict=true commit must still succeed",
+            SlimAuthoritativeCommitResult.Committed,
+            conflictResult,
+        )
+
+        val stateAfterConflict = repository.getSlimSessionState(sid)!!
+        assertTrue(
+            "P1-1: hasConflict=true MUST keep dirty=true ATOMICALLY after commit " +
+                "(state=$stateAfterConflict)",
+            stateAfterConflict.dirty,
+        )
+        assertEquals(
+            "P1-2: localApplied watermark is unchanged (idempotent tuple)",
+            200L,
+            stateAfterConflict.localAppliedUpdatedAt,
+        )
+    }
+}
 /**
  * Task 3 helper — extracts the `?ids=…` query from a MockWebServer
  * RecordedRequest path and URL-decodes it back to a List<String>.

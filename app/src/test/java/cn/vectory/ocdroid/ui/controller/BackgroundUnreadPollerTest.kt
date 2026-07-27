@@ -7,6 +7,7 @@ import cn.vectory.ocdroid.di.NotificationDedup
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
@@ -33,6 +34,7 @@ class BackgroundUnreadPollerTest {
         isBackground: () -> Boolean = { true },
         lifecycleGeneration: () -> Long = { 0L },
     ): BackgroundUnreadPoller {
+        every { repository.usesSlimStatusFanOut } returns false
         coEvery { repository.getActiveSessionIds() } returns Result.success(emptySet())
         return BackgroundUnreadPoller(
         repository = repository,
@@ -196,6 +198,39 @@ class BackgroundUnreadPollerTest {
             "idle:server-1::A",
             idleNotificationKey("server-1", null, "A"),
         )
+    }
+
+    @Test
+    fun `slim mode routes status to per-workdir slim fan-out and skips legacy endpoints`() = runTest {
+        // §T-R1 (slimapi R1): BackgroundUnreadPoller MUST route around the
+        // legacy getSessionStatus / getActiveSessionIds when
+        // usesSlimStatusFanOut is true. Before the fix the legacy paths are
+        // called unconditionally; this test verifies the slim routing patch
+        // redirects to getSlimapiSessionsStatus and preserves the store's
+        // existing activeSessionIds (null → fail-closed fallback).
+        every { repository.usesSlimStatusFanOut } returns true
+        every { settings.currentWorkdir } returns "/repo"
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(root("A", updated = 500L)))
+        coEvery { repository.getChildren("A") } returns Result.success(emptyList())
+        // Stub ONLY the slim endpoint, NOT the legacy getSessionStatus.
+        // Before the fix, the unstubbed getSessionStatus throws MockKException → RED.
+        coEvery { repository.getSlimapiSessionsStatus("/repo") } returns Result.success(
+            mapOf("A" to SessionStatus("idle"))
+        )
+
+        val poller = BackgroundUnreadPoller(
+            repository = repository,
+            settingsManager = settings,
+            store = store,
+            clock = { now },
+            isBackground = { true },
+            lifecycleGeneration = { 0L },
+        )
+        assertTrue(authoritativeAlerts(poller.poll()).isEmpty())
+
+        // GREEN: legacy endpoints NOT called; slim endpoint IS called.
+        coVerify(exactly = 0) { repository.getSessionStatus() }
+        coVerify(exactly = 1) { repository.getSlimapiSessionsStatus("/repo") }
     }
 
     @Test

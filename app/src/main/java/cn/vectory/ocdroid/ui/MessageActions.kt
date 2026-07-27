@@ -82,6 +82,22 @@ internal fun launchLoadMessages(
      * (the reducer CAS-validates expectedRouteInstance == chatRouteInstance).
      */
     expectedRouteInstance: Long = 0L,
+    /**
+     * §11.1 fix-9 P0-7 + fix-10 P1-2 (sse-sync-degradation-remediation.md
+     * P0-2): SSE liveness predicate — invoked at retry-decision time to
+     * decide whether a non-stale first-fetch IOException should retry once.
+     * Defaults to `{ true }` (treat SSE as live — no retry, preserves
+     * legacy behavior for tests/legacy callers). When the predicate reports
+     * SSE-off (`isSseLive() == false`) AND the failure is an IOException
+     * (NOT CancellationException / StaleSlimCommitException /
+     * SlimSinceStagingOnlyException) AND `resetLimit == true` (cold-load),
+     * the retry loop fires ONE extra `getMessagesPagedUnanchored` call after
+     * a short delay. CancellationException propagates verbatim through the
+     * delay (handled by the outer try/catch). Production callers
+     * (AppCoreOrchestration, ChatViewModel) wire this to
+     * `{ store.slices.sseConnected }`.
+     */
+    isSseLive: () -> Boolean = { true },
 ) {
 
     // Coalesce concurrent loads. ADB showed startup triggers message loads from
@@ -136,6 +152,44 @@ internal fun launchLoadMessages(
             } else {
                 repository.getMessagesPaged(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
             }
+        }
+        // §11.1 fix-9 P0-7 (sse-sync-degradation-remediation.md P0-2):
+        // SSE-off first-fetch retry. When the SSE transport is NOT live
+        // (SseDisabled / terminal exhaustion / never-connected) AND the
+        // failure is NOT a stale-token case (already exhausted above) AND
+        // this is a cold-load (resetLimit == true), retry ONCE via the
+        // unanchored path. Rationale: under SSE-off the digest relay is
+        // not delivering updates, so the only way to surface messages is
+        // REST; a transient transport failure (503 / network blip) should
+        // not leave the user staring at a blank screen. The retry uses
+        // getMessagesPagedUnanchored to force a fresh authoritative load
+        // (slim mode: drain+commit; legacy mode: unanchored since=0).
+        // CancellationException propagates through `delay` verbatim
+        // (R-14) — the outer try/catch re-throws it.
+        // §11.1 fix-10 P1-2: narrow the retry condition to IOException
+        // ONLY (not arbitrary exceptions like programming errors / cast
+        // failures). CancellationException MUST propagate verbatim —
+        // check it first and re-throw. The stale-token and staging-only
+        // exclusions remain (those are handled by their own retry loops).
+        DebugLog.d("Sync", "loadMessages P0-7 retry check: isFailure=${pageResult.isFailure} resetLimit=$resetLimit sseLive=${isSseLive()} cause=${pageResult.exceptionOrNull()?.let { it::class.simpleName }}")
+        val retryCause = pageResult.exceptionOrNull()
+        if (retryCause is kotlin.coroutines.cancellation.CancellationException) {
+            throw retryCause
+        }
+        if (pageResult.isFailure &&
+            resetLimit &&
+            retryCause is java.io.IOException &&
+            retryCause !is OpenCodeRepository.StaleSlimCommitException &&
+            retryCause !is OpenCodeRepository.SlimSinceStagingOnlyException &&
+            !isSseLive()
+        ) {
+            DebugLog.d("Sync", "loadMessages SSE-off first-fetch failure (cause=${pageResult.exceptionOrNull()?.let { it::class.simpleName }}), retrying once via unanchored in 500ms")
+            kotlinx.coroutines.delay(500)
+            pageResult = repository.getMessagesPagedUnanchored(
+                sessionId,
+                MainViewModelTimings.initialMessagePageSize,
+                before = null,
+            )
         }
         pageResult
             .onSuccess { page ->
@@ -518,9 +572,16 @@ internal fun launchLoadMessages(
                 // session the user already left).
                 // §chat-list-detail §7.2 B0.5-rework: ALSO check the route token —
                 // a stale A→B→A failure must NOT emit an error for the newer load.
+                // §11.1 fix-8 P1-2: the slim anchored `/since` path now returns
+                // SlimSinceStagingOnlyException (conservative staging). This is
+                // NOT a real transport failure — REST reload is intentionally
+                // unavailable in slim stage-A (SSE drives updates). Suppress the
+                // UiEvent.Error surface for this typed exception; treat it as
+                // "REST reload skipped, keep current UI state".
                 val tokenValid = expectedRouteInstance == 0L ||
                     expectedRouteInstance == slices.store.stateFlow.value.chatRouteInstance
-                if (sessionId == slices.chat.value.currentSessionId && tokenValid) {
+                val isStagingOnly = error is OpenCodeRepository.SlimSinceStagingOnlyException
+                if (sessionId == slices.chat.value.currentSessionId && tokenValid && !isStagingOnly) {
                     emit.emit(UiEvent.Error(R.string.error_load_messages_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
             }

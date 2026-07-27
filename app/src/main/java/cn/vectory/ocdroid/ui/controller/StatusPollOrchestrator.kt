@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.SessionStatusLoadTrigger
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.reportNonFatalIssue
@@ -36,6 +37,58 @@ internal object StatusPollOrchestrator {
     // 把先完成者的 REST 写入误判为"SSE 在途变化"而保留(并发粘 busy 边角)。
     private val statusLoadEpoch = java.util.concurrent.atomic.AtomicLong(0)
 
+    /**
+     * 冻结方案 P0-1 (rev-1, transport-grounded): is the slim digest `status`
+     * relay (the SSE-driven steady-state status source) currently EFFECTIVE —
+     * i.e. may the slim foreground SWEEP be a zero-REST no-op because SSE is
+     * delivering status?
+     *
+     * False (→ the sweep must fall through to the slim REST fan-out) when SSE
+     * transport is NOT delivering frames. The PRIMARY signal is the
+     * TRANSPORT-DELIVERY axis [SliceFlows.sseConnected] (mirror of
+     * StoreState.isSseConnected): true iff the live
+     * ServiceSseConnectionOwner collector has proven transport delivery with
+     * at least one valid current-identity frame AND has not since torn down.
+     * This axis goes false during the inter-retry gap and on every closing
+     * path, even while [ConnectionPhase] may read `Reconnecting` /
+     * `ReconnectingAttempt` — so the predicate MUST NOT infer transport health
+     * from phase alone (that would short-circuit during a reconnect gap and
+     * freeze status).
+     *
+     * The phase check is defensive: terminal phases (`SseDisabled` /
+     * `Disconnected`) always have `isSseConnected == false` (their teardown
+     * stamps it false), so they fall through to REST naturally; the explicit
+     * phase guard documents intent and protects against a transient
+     * `isSseConnected=true` read during teardown.
+     *
+     * Reads [SliceFlows.sseConnected] + [SliceFlows.connection] (synchronous
+     * StateFlow `.value` off the aggregate), so this is safe to call on the
+     * sweep entry path before any epoch bump.
+     *
+     * ## State-machine rules (transport-grounded, NOT phase-inferred):
+     *
+     * | Condition | Predicate | Behavior |
+     * |-----------|-----------|----------|
+     * | `isSseConnected == true` + any non-terminal phase | `true` | sweep no-op — digest relay is delivering |
+     * | `isSseConnected == false` + `Connected` phase | `false` | REST fallback — transport down despite healthy phase |
+     * | `isSseConnected == false` + `Reconnecting` | `false` | REST fallback — reconnect gap |
+     * | `isSseConnected == false` + `ReconnectingAttempt` | `false` | REST fallback — reconnect gap |
+     * | `isSseConnected == false` + `Connecting` | `false` | REST fallback — transport not yet up |
+     * | `isSseConnected == false` + `SseDisabled` | `false` | REST fallback (terminal, debug toggle) |
+     * | `isSseConnected == false` + `Disconnected` | `false` | REST fallback (terminal, retries exhausted) |
+     *
+     * The only legal short-circuit is when the transport itself reports
+     * delivery (`isSseConnected == true`). Every other state — including
+     * transient reconnect phases that the prior impl wrongly treated as
+     * "SSE will deliver soon" — falls through to REST so status cannot freeze.
+     */
+    private fun sseDigestRelayEffective(slices: SliceFlows): Boolean {
+        if (!slices.sseConnected) return false
+        val phase = slices.connection.value.connectionPhase
+        return phase !is ConnectionPhase.SseDisabled &&
+            phase !is ConnectionPhase.Disconnected
+    }
+
     internal fun launchLoadSessionStatus(
         scope: CoroutineScope,
         repository: OpenCodeRepository,
@@ -57,17 +110,46 @@ internal object StatusPollOrchestrator {
         // UnreadSoakController's Main-thread fields (no suspension, no launch), and
         // the caller runs on appScope (Main.immediate) — no thread hop, so it
         // completes well within the 15s timeout job.
-        if (repository.usesSlimStatusFanOut && trigger == SessionStatusLoadTrigger.SWEEP) {
+        //
+        // 🔴 冻结方案 P0-1 (rev-1, transport-grounded): the no-op is correct
+        // ONLY when SSE transport is actually delivering frames — the slim
+        // digest `status` relay (SessionSyncCoordinator.handleSessionDigest →
+        // applySessionStatus) is the steady-state status source, so a periodic
+        // sweep would be pure waste. When the transport is NOT delivering there
+        // is NO digest relay to keep status fresh, so the sweep MUST fall
+        // through to the existing slim REST fan-out
+        // (launchLoadSessionStatusSlim below). This mirrors the §sse-rest-
+        // fallback design: REST is the fallback transport whenever SSE cannot
+        // deliver.
+        //
+        // The predicate reads the TRANSPORT-DELIVERY axis
+        // (SliceFlows.sseConnected → StoreState.isSseConnected): the live
+        // ServiceSseConnectionOwner collector has proven transport delivery.
+        // This axis goes false during the inter-retry gap and on every closing
+        // path, even while phase may read Reconnecting/ReconnectingAttempt —
+        // so the predicate MUST NOT infer transport health from phase alone
+        // (that would short-circuit during a reconnect gap and freeze status).
+        // Terminal phases (SseDisabled / Disconnected) always have
+        // isSseConnected == false (their teardown stamps it false), so they
+        // fall through to REST naturally; the explicit phase guard is
+        // defensive. The epoch-order landmine is preserved verbatim: the no-op
+        // still runs BEFORE the epoch bump on the SSE-healthy path.
+        if (repository.usesSlimStatusFanOut &&
+            trigger == SessionStatusLoadTrigger.SWEEP &&
+            sseDigestRelayEffective(slices)
+        ) {
             onComplete(true)
             return
         }
         val myEpoch = statusLoadEpoch.incrementAndGet()
         val hostAtRequestStart = slices.host.value.currentHostProfileId
-        // T-R1 (slimapi R1) 方案A: in slim mode the only path that reaches here is
-        // COLD_START (the SWEEP no-op returned above). It routes through the slim
-        // bulk cold-start fetch (one call per workdir) and MUST NOT hit the legacy
-        // /session/status + /api/session/active endpoints. Steady-state status
-        // arrives via the slim digest `status` relay
+        // T-R1 (slimapi R1) 方案A: in slim mode the paths that reach here are
+        // COLD_START (app/session/host-connect init) AND, per P0-1 above, a SWEEP
+        // that fell through because SSE is effectively OFF (SseDisabled /
+        // Disconnected — no digest relay to keep status fresh). Both route
+        // through the slim bulk fetch (one call per workdir) and MUST NOT hit the
+        // legacy /session/status + /api/session/active endpoints. Steady-state
+        // status (SSE-healthy) arrives via the slim digest `status` relay
         // (SessionSyncCoordinator.handleSessionDigest → applySessionStatus).
         // Legacy transport behavior remains byte-for-byte unchanged.
         if (repository.usesSlimStatusFanOut) {
@@ -236,15 +318,46 @@ internal object StatusPollOrchestrator {
                 // count, which is small — typically 1–3). Each failure is tolerated
                 // (the digest relay is the steady-state source); we fold whatever
                 // succeeded into one merged map.
+                //
+                // §11.1 fix-10 P0-2: track anySuccess — if ALL directory
+                // requests failed, we MUST NOT mutate the session statuses
+                // (an empty merged map would be treated as "all idle",
+                // masking the transport failure). Instead, preserve the
+                // prior snapshot and complete(false).
+                //
+                // §11.1 fix-11a P0-1 (rev-ogpt): track SUCCESS / FAILURE per
+                // directory — "partial failure" (some dirs succeeded, some
+                // failed) MUST NOT let the failed-directory sessions be
+                // normalized to idle. Only sessions whose directory fetch
+                // SUCCEEDED are authoritative-normalized downstream;
+                // failed-directory sessions preserve their prior
+                // sessionStatuses (matches OpenCodeRepository
+                // .getSlimapiSessionsStatus failure semantics: "keep prior
+                // snapshot"). fix-10 closed the all-failed gap; this closes
+                // the partial-failure gap.
+                val successfulDirs = mutableSetOf<String>()
                 val merged: Map<String, SessionStatus> = coroutineScope {
-                    val results = directories.map { dir ->
+                    val dirList = directories.toList()
+                    val results = dirList.map { dir ->
                         async { repository.getSlimapiSessionsStatus(dir) }
                     }.awaitAll()
                     val acc = mutableMapOf<String, SessionStatus>()
-                    for (result in results) {
-                        result.getOrNull()?.let { acc.putAll(it) }
+                    dirList.zip(results).forEach { (dir, result) ->
+                        result.getOrNull()?.let {
+                            acc.putAll(it)
+                            successfulDirs += dir
+                        }
                     }
                     acc
+                }
+                // §11.1 fix-10 P0-2: if every directory request failed,
+                // do NOT apply the empty merged as authoritative —
+                // preserve the prior snapshot and signal failure so the
+                // caller can retry / fall back.
+                if (successfulDirs.isEmpty()) {
+                    DebugLog.w("Sync", "launchLoadSessionStatusSlim: all directory requests failed — preserving prior snapshot")
+                    complete(false)
+                    return@launch
                 }
                 var applied = false
                 slices.mutateSessionList { current ->
@@ -255,13 +368,31 @@ internal object StatusPollOrchestrator {
                         DebugLog.d("Sync", "launchLoadSessionStatusSlim: stale epoch/host, discarding snapshot")
                         return@mutateSessionList current
                     }
-                    val authoritativeIds = allSessionsById(
+                    val authoritative = allSessionsById(
                         current.sessions,
                         current.directorySessions,
                         current.childSessions,
-                    ).keys
-                    val normalized = normalizeAuthoritativeStatusSnapshot(merged, authoritativeIds)
-                    val nextStatuses = mergeStatusSnapshot(localBefore, current.sessionStatuses, normalized)
+                    )
+                    val authoritativeIds = authoritative.keys
+                    // §11.1 fix-11a P0-1 (rev-ogpt): sessions whose directory
+                    // fetch FAILED must NOT be authoritative-normalized to
+                    // idle. Build the covered set = authoritative sessions
+                    // whose directory is in successfulDirs; sessions of
+                    // failed directories preserve their prior
+                    // sessionStatuses (pre-seed the restSnapshot so
+                    // mergeStatusSnapshot does not drop them). Sessions with
+                    // a blank directory were never queried and retain their
+                    // original normalize-to-idle behavior (unchanged).
+                    val failedDirSessionIds = authoritative.values
+                        .asSequence()
+                        .filter { s -> s.directory.isNotBlank() && s.directory !in successfulDirs }
+                        .map { it.id }
+                        .toSet()
+                    val coveredAuthoritativeIds = authoritativeIds - failedDirSessionIds
+                    val normalized = normalizeAuthoritativeStatusSnapshot(merged, coveredAuthoritativeIds)
+                    val preservedFromFailure = current.sessionStatuses.filterKeys { it in failedDirSessionIds }
+                    val restSnapshot = normalized + preservedFromFailure
+                    val nextStatuses = mergeStatusSnapshot(localBefore, current.sessionStatuses, restSnapshot)
                     applied = true
                     current.copy(
                         sessionStatuses = nextStatuses,

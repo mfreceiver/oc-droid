@@ -107,7 +107,7 @@ class OpenCodeRepositoryEpochWiringTest {
                     repository.requireSlimTokenCurrent(tokenA)
                     repository.commitIfSlimTokenCurrent(tokenA) {
                         repository.applySlimDigest(
-                            SlimSessionDigest(sessionId = "b-session", updatedAt = 99L),
+                            SlimSessionDigest(sessionId = "b-session", updatedAt = 99L, messageId = "m99"),
                             tokenA,
                         )
                     }
@@ -124,7 +124,7 @@ class OpenCodeRepositoryEpochWiringTest {
                     repository.isSlimCommitTokenCurrent(tokenB),
                 )
                 repository.applySlimDigest(
-                    SlimSessionDigest(sessionId = "b-session", updatedAt = 7L),
+                    SlimSessionDigest(sessionId = "b-session", updatedAt = 7L, messageId = "m7"),
                     tokenB,
                 )
 

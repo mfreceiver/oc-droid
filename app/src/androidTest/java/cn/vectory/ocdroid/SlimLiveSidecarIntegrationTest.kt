@@ -230,7 +230,9 @@ class SlimLiveSidecarIntegrationTest {
             limit = 50,
             before = null,
             mode = "skeleton",
-            bumpBookmark = false,  // read-only instrumentation; do not mutate repository watermark
+            // §11.1 fix-8 P1-3: bumpBookmark parameter removed — the
+            // single-page fetch never bumps the slim SSE watermark
+            // (completeness proof belongs to the caller).
             token = repository.captureSlimCommitToken(),
         )
         assertTrue("getSlimapiMessagesPage failed: ${result.exceptionOrNull()}", result.isSuccess)

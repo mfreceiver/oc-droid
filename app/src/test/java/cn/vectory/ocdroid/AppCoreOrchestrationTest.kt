@@ -1080,9 +1080,19 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
 
     @Test
     fun `loadMessagesForEffect routes through launchLoadMessages and emits error on failure`() = runTest {
+        // §11.1 fix-9 P0-7: loadMessagesForEffect now wires the SSE liveness
+        // predicate to store.slices.sseConnected. To preserve the original
+        // test intent (first-fetch failure → UiEvent.Error), we explicitly
+        // mark SSE as LIVE so the P0-7 retry does NOT engage (otherwise the
+        // retry would call getMessagesPagedUnanchored which the relaxed mock
+        // returns success for, suppressing the error). The P0-7 retry path
+        // is covered by MessageActionsTest directly.
         coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.failure(IllegalStateException("500"))
         coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
         val core = wire()
+        // Mark SSE as live to disable the P0-7 retry (we want to test the
+        // pure first-fetch failure → error emission path here).
+        core.store.mutateSseConnected(value = true, generation = 1L)
         core.writeChat { it.copy(currentSessionId = "s1") }
 
         core.loadMessagesForEffect("s1", resetLimit = true)
@@ -1096,7 +1106,8 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
 
     @Test
     fun `catchUpAfterDisconnectOrForeground probes and reloads when newer exists`() = runTest {
-        coEvery { repository.probeLatestMessageId(any()) } returns Result.success("server-new")
+        coEvery { repository.probeLatestMessageIdForCurrent(any()) } returns
+            cn.vectory.ocdroid.data.repository.ProbeResult(ok = true, messageID = "server-new", updatedAt = 200L)
         val fetched = listOf(MessageWithParts(info = Message(id = "new1", role = "user")))
         coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(fetched, null))
         val core = wire()
@@ -1119,7 +1130,8 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         // Probe says nothing new → reload skipped; we just verify the workdir
         // fan-out side-effect on foregroundCatchUpController (computed via the
         // shared computeQuestionFanOutWorkdirs helper, same as site 1).
-        coEvery { repository.probeLatestMessageId(any()) } returns Result.success("anchor")
+        coEvery { repository.probeLatestMessageIdForCurrent(any()) } returns
+            cn.vectory.ocdroid.data.repository.ProbeResult(ok = true, messageID = "anchor", updatedAt = 100L)
         // §issue-1 Fix B: recent_workdirs (per-fp) now part of the catch-up fan-out.
         every { settingsManager.getRecentWorkdirs(any()) } returns listOf("/recent-1")
         // Capture the EXACT workdir set passed to
@@ -1175,7 +1187,8 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
             serverUrl = "http://b",
             serverGroupFp = "fp-B")
         every { hostProfileStore.currentProfile() } returns originalProfile
-        coEvery { repository.probeLatestMessageId(any()) } returns Result.success("server-new")
+        coEvery { repository.probeLatestMessageIdForCurrent(any()) } returns
+            cn.vectory.ocdroid.data.repository.ProbeResult(ok = true, messageID = "server-new", updatedAt = 200L)
         // The probe-page REST: simulate the host switch DURING the suspend.
         // Before the page returns, flip hostProfileStore so the live
         // core.currentServerGroupFp() provider returns fp-B.
@@ -1201,6 +1214,81 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
             core.chatFlow.value.messages.map { it.id })
         // Loading flag cleared on the early return.
         assertFalse(core.chatFlow.value.isLoadingMessages)
+    }
+
+    // ── §P0-3: SSE-liveness wiring (catchUpAfterDisconnectOrForeground) ─────
+    //
+    // REST-health [ConnectionState.isConnected] is a SEPARATE axis from real
+    // SSE transport liveness ([StoreState.isSseConnected]). During a transient
+    // SSE outage (inter-retry gap), isConnected can still read true (no health
+    // failure yet — the REST baseline is committed) while isSseConnected is
+    // false (no live frame has proven delivery). The catch-up coverage gate
+    // must gate on the SSE-liveness axis, NOT the REST-health axis: otherwise
+    // the gate short-circuits the REST probe based on a feed that is NOT
+    // actually delivering, and updates that arrived during the outage are
+    // silently missed.
+    @Test
+    fun `P0-3 catchUpAfterDisconnectOrForeground probes when isConnected=true but SSE transport is down`() = runTest {
+        // Probe + page stubs so a fired probe can complete. We assert the
+        // probe WAS fired (coVerify), not the merge result.
+        coEvery { repository.probeLatestMessageIdForCurrent(any()) } returns
+            cn.vectory.ocdroid.data.repository.ProbeResult(ok = true, messageID = "server-new", updatedAt = 200L)
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        val core = wire()
+        core.writeChat {
+            it.copy(currentSessionId = "s1", messages = listOf(Message(id = "anchor", role = "user")))
+        }
+        every { settingsManager.currentWorkdir } returns "/repo"
+        // Mark s1 cold-snapshotted so the coverage gate's ONLY remaining
+        // discriminator is the SSE-liveness axis (sseCurrentWorkdir). With the
+        // session snapshotted, a live SSE feed for "/repo" would short-circuit
+        // the probe; the test asserts it does NOT when SSE is actually down.
+        core.sessionSyncCoordinator.markSessionColdSnapshotted("s1")
+
+        // REST health: connected (green dot). SSE transport: DOWN (inter-retry
+        // gap — a frame has not proven delivery). These two are intentionally
+        // divergent — the exact window the bug hides in.
+        core.writeConnection { it.copy(isConnected = true) }
+        assertTrue("precondition: REST health isConnected must be true", core.store.connectionFlow.value.isConnected)
+        core.store.mutateSseConnected(value = false, generation = 1L)
+        assertFalse("precondition: SSE transport isSseConnected must be false", core.store.sseConnectedFlow.value)
+
+        core.catchUpAfterDisconnectOrForeground("s1")
+        advanceUntilIdle()
+
+        // The REST probe MUST fire: the SSE feed is NOT actually delivering,
+        // so the coverage gate must NOT short-circuit even though isConnected=true.
+        coVerify(exactly = 1) { repository.probeLatestMessageIdForCurrent("s1") }
+    }
+
+    @Test
+    fun `P0-3 catchUpAfterDisconnectOrForeground short-circuits when SSE transport is live and workdir matches`() = runTest {
+        // Complementary positive case to the RED test above: when the SSE feed IS
+        // transport-live (isSseConnected=true) AND attached to the current workdir
+        // AND the session has a cold-snapshot baseline, the coverage gate MUST
+        // short-circuit — no REST probe. This pins the non-regression direction:
+        // gating on isSseConnected must not over-fire and skip probes that the
+        // legacy isConnected gate would correctly elide.
+        coEvery { repository.probeLatestMessageIdForCurrent(any()) } returns
+            cn.vectory.ocdroid.data.repository.ProbeResult(ok = true, messageID = "server-new", updatedAt = 200L)
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        val core = wire()
+        core.writeChat {
+            it.copy(currentSessionId = "s1", messages = listOf(Message(id = "anchor", role = "user")))
+        }
+        every { settingsManager.currentWorkdir } returns "/repo"
+        core.sessionSyncCoordinator.markSessionColdSnapshotted("s1")
+
+        // SSE transport is LIVE (isSseConnected=true) and the feed is attached to /repo.
+        core.store.mutateSseConnected(value = true, generation = 1L)
+        assertTrue("precondition: SSE transport isSseConnected must be true", core.store.sseConnectedFlow.value)
+
+        core.catchUpAfterDisconnectOrForeground("s1")
+        advanceUntilIdle()
+
+        // The SSE feed is live for this workdir AND the session is cold-snapshotted
+        // → the coverage gate short-circuits → NO REST probe.
+        coVerify(exactly = 0) { repository.probeLatestMessageIdForCurrent(any()) }
     }
 
     // ─────────── §grouping-rewrite Round-3 N1: classifyCommandPostError ────

@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui.controller
 import android.util.Log
 import cn.vectory.ocdroid.MainDispatcherRule
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SlimSinceStageAOutcome
 import cn.vectory.ocdroid.data.repository.ProbeResult
 import cn.vectory.ocdroid.data.repository.SlimSessionState
 import cn.vectory.ocdroid.ui.SharedEffectBus
@@ -671,8 +672,8 @@ class SessionSyncDeadlockRegressionTest {
         every { repo.invalidateSlimLocalApplied(any(), any()) } returns true
         every { repo.applySlimDigest(any(), any()) } returns null
         coEvery {
-            repo.getSlimapiMessagesSince(any(), any(), any(), any(), any())
-        } returns Result.success(emptyList())
+            repo.fetchSinceForStageA(any(), any(), any(), any(), any())
+        } returns SlimSinceStageAOutcome.Staged(items = emptyList(), completeHeader = null, statusCode = 200, transportComplete = true)
         coEvery { repo.fetchSlimInitialWindowBounded(any(), any()) } returns Result.success(emptyList())
         every { repo.snapshotSlimSseState() } returns emptyMap()
     }

@@ -66,12 +66,21 @@ internal const val SLIMAPI_LOCAL_HISTORY_BOUND = 250
 /**
  * Outcome of a bounded cursor-walk drain.
  *
- *  - [Success]: drained cleanly (cursor-null, item-bound, or page-count cap).
- *  - [Partial]: mid-walk transport/page failure. Items are partial aggregate;
- *    caller should keep dirty / retry.
- *  - [Degraded]: loop detected (same cursor returned OR zero-new-items page)
- *    — the server is misbehaving but partial aggregate is still useful.
- *    Caller should keep dirty / retry, same as Partial.
+ *  - [Success]: all pages succeeded and the final page had
+ *    `nextCursor == null`. An item/page bound reached while the cursor is
+ *    non-null is [Partial], NOT success. The local watermark is advanced
+ *    ONCE after the complete aggregate.
+ *  - [Partial]: HTTP/transport/page failure, timeout, item cap reached
+ *    before cursor exhaustion, or page-count cap reached before cursor
+ *    exhaustion. [items] is a partial aggregate (staging/diagnostics
+ *    only — it MUST NOT be fed into cold-start/reconciler/visible-content
+ *    merge via the [SlimSyncEngine.drainSlimapiMessagesBounded] List
+ *    facade); caller MUST keep dirty / retry. The local watermark is NOT
+ *    advanced.
+ *  - [Degraded]: loop detected (same cursor returned OR zero-new-items
+ *    page) — the server is misbehaving; [items] is staging/diagnostics
+ *    only. Caller MUST keep dirty / retry, same contract as [Partial].
+ *    The local watermark is NOT advanced.
  */
 sealed interface SlimDrainOutcome {
     val items: List<MessageWithParts>
@@ -93,3 +102,22 @@ sealed interface SlimDrainOutcome {
  * the [cause] inside [SlimDrainOutcome.Degraded] / [Partial].
  */
 class SlimDrainLoopException(message: String) : java.io.IOException(message)
+
+/**
+ * §11.5: the drain hit [SLIMAPI_LOCAL_HISTORY_BOUND] (item cap) or the
+ * page-count cap while the server still returned a non-null
+ * `X-Next-Cursor`. Bounds are SAFETY limits, NOT completeness proof —
+ * the caller MUST treat this as [SlimDrainOutcome.Partial] (preserve
+ * dirty, NO bookmark advance, retry from the same pre-drain watermark).
+ * Carried as the [cause] inside [SlimDrainOutcome.Partial].
+ */
+internal class SlimDrainBoundExceededException(message: String) : java.io.IOException(message)
+
+/**
+ * §11.5: the slimapi `/messages` page returned a 2xx with a null body.
+ * Thrown by [cn.vectory.ocdroid.data.repository.SlimSyncEngine.getSlimapiMessagesPage];
+ * the drain classifies it as [SlimDrainOutcome.Partial] (NO bookmark
+ * advance). Distinct from a transport failure so diagnostics can tell
+ * "server replied but the body was empty" from "transport dropped".
+ */
+internal class SlimPageIncompleteException(message: String) : java.io.IOException(message)

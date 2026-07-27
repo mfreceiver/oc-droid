@@ -8,7 +8,13 @@ import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ProbeResult
+import cn.vectory.ocdroid.data.repository.SlimAuthoritativeCandidate
+import cn.vectory.ocdroid.data.repository.SlimAuthoritativeCommitResult
+import cn.vectory.ocdroid.data.repository.SlimAuthoritativeCommitter
 import cn.vectory.ocdroid.data.repository.SlimSessionState
+import cn.vectory.ocdroid.data.repository.SlimSinceStageAOutcome
+import cn.vectory.ocdroid.data.repository.maxMessageTuple
+import cn.vectory.ocdroid.data.repository.mergeSlimMessageSetWithConflict
 import cn.vectory.ocdroid.data.repository.needsCatchUp
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.ChatState
@@ -191,15 +197,66 @@ internal interface SlimReconcileRepositoryPort {
     fun clearLocal(sid: String, token: OpenCodeRepository.SlimCommitToken): Boolean
     fun markAligned(sid: String, token: OpenCodeRepository.SlimCommitToken): Boolean
     fun markDirty(sid: String, token: OpenCodeRepository.SlimCommitToken): Boolean
-    suspend fun fetchSince(
+    /**
+     * §11.1 fix-12b P1-2: UNCONDITIONALLY set `dirty = true` for [sid],
+     * bypassing the [OpenCodeRepository.markSlimDirty] `needsReconcile`
+     * gate. Used by the cache-retention failure paths in
+     * [SlimSessionReconciler.applyCurrentReconcileResult] to re-ratchet
+     * dirty when a non-focus `Reconciled` result's
+     * [ControllerEffect.WriteSessionWindow] was dropped, filtered to
+     * nothing, or arrived empty — so the next reconcile pass retries the
+     * fetch instead of stranding the user with no cached window.
+     *
+     * Returns false (no-op) when the session has no state or token is
+     * stale; still bound to the SlimCommitToken guard.
+     */
+    fun forceDirty(sid: String, token: OpenCodeRepository.SlimCommitToken): Boolean
+    /**
+     * §11.1 stage A: anchored `/since` staging fetch. Replaces the legacy
+     * `fetchSince(...): Result<List<MessageWithParts>>` port, which returned
+     * an authoritative-success path that stage A closes. The anchored `/since`
+     * response is staging-only at every surface — the reconciler MUST NOT
+     * advance the watermark / clear dirty / replace authoritative memory on
+     * any [SlimSinceStageAOutcome] variant.
+     */
+    suspend fun fetchSinceStageA(
         sid: String,
         since: Long,
         token: OpenCodeRepository.SlimCommitToken,
-    ): Result<List<MessageWithParts>>
+    ): SlimSinceStageAOutcome
     suspend fun fetchInitialWindow(
         sid: String,
         token: OpenCodeRepository.SlimCommitToken,
     ): Result<List<MessageWithParts>>
+
+    /**
+     * §11.1 fix-6 P0-4: authoritative commit for a complete full/cursor
+     * drain candidate. The ONLY path that may advance localApplied* / clear
+     * dirty / replace visible content — atomically inside the committer's
+     * token-guarded critical section.
+     *
+     * The reconciler constructs a [SlimAuthoritativeCandidate] from the
+     * drained items (using [maxMessageTuple] for the localApplied* pair) and
+     * calls this method. Only a [SlimAuthoritativeCommitResult.Committed]
+     * result permits the reconciler to return [SlimReconcileResult.Reconciled]
+     * (items for UI merge). All other results map to Stale/Failure.
+     */
+    suspend fun commitAuthoritative(
+        candidate: SlimAuthoritativeCandidate,
+    ): SlimAuthoritativeCommitResult
+
+    /**
+     * §11.1 fix-8 P1-6: snapshot the current authoritative message list for
+     * [sid] — the input to [mergeSlimMessageSet] when constructing a fresh
+     * [SlimAuthoritativeCandidate]. Returns an empty list when no
+     * authoritative view exists yet (cold path). The list is a defensive
+     * copy; the caller may mutate freely.
+     *
+     * The reconciler uses this to merge the drain items onto the existing
+     * authoritative set with `complete = true` semantics (missing ≠ deleted,
+     * older tuple ignored, equal-tuple-different-parts kept authoritative).
+     */
+    fun captureAuthoritativeMessages(sid: String): List<MessageWithParts>
 
     /**
      * Token-bound probe entry.  The one-argument method remains the frozen
@@ -222,7 +279,7 @@ internal interface SlimReconcileRepositoryPort {
  *    `applySlimDigest(digest, token)` / `probeLatestSlim(sid)` /
  *    `markSlimSessionDeleted(sid, token)` / `markSlimReconcileFailure(sid, token)` /
  *    `clearSlimLocalMessages(sid, token)` / `markSlimReconcileAligned(sid, token)` /
- *    `markSlimDirty(sid, token)` all exist with these exact signatures.
+ *    `markSlimDirty(sid, token)` / `forceSlimDirty(sid, token)` all exist with these exact signatures.
  *  - `getSlimapiMessagesSince(sessionId, since, limit?, before?, token)` — the
  *    adapter passes `token = token` (named) and lets `limit` / `before`
  *    default to null, matching current call-site usage.
@@ -288,18 +345,29 @@ internal class OpenCodeSlimReconcileRepositoryPort(
     override fun markDirty(sid: String, token: OpenCodeRepository.SlimCommitToken): Boolean =
         delegate.markSlimDirty(sid, token)
 
-    override suspend fun fetchSince(
+    override fun forceDirty(sid: String, token: OpenCodeRepository.SlimCommitToken): Boolean =
+        delegate.forceSlimDirty(sid, token)
+
+    override suspend fun fetchSinceStageA(
         sid: String,
         since: Long,
         token: OpenCodeRepository.SlimCommitToken,
-    ): Result<List<MessageWithParts>> =
-        delegate.getSlimapiMessagesSince(sid, since, token = token)
+    ): SlimSinceStageAOutcome =
+        delegate.fetchSinceForStageA(sessionId = sid, since = since, token = token)
 
     override suspend fun fetchInitialWindow(
         sid: String,
         token: OpenCodeRepository.SlimCommitToken,
     ): Result<List<MessageWithParts>> =
         delegate.fetchSlimInitialWindowBounded(sid, token)
+
+    override suspend fun commitAuthoritative(
+        candidate: SlimAuthoritativeCandidate,
+    ): SlimAuthoritativeCommitResult =
+        delegate.commitAuthoritative(candidate)
+
+    override fun captureAuthoritativeMessages(sid: String): List<MessageWithParts> =
+        delegate.captureAuthoritativeMessages(sid)
 }
 
 // ── §4.2 Store/chat mutation port ─────────────────────────────────────────
@@ -974,29 +1042,133 @@ internal class SlimSessionReconciler(
         }
 
         // Watermark-branched fetch (oracle I2):
-        //   - localAppliedUpdatedAt != null → /since/{ts}
+        //   - localAppliedUpdatedAt != null → /since/{ts} (stage A staging-only)
         //   - localAppliedUpdatedAt == null → bounded cursor drain façade
-        val fetchResult = if (state.localAppliedUpdatedAt != null) {
+        //     (the ONLY authoritative watermark-advancement path)
+        return if (state.localAppliedUpdatedAt != null) {
+            // §11.1 stage A: anchored `/since` is staging-only. The reconciler
+            // MUST NOT advance the watermark / clear dirty / replace
+            // authoritative memory on any [SlimSinceStageAOutcome] variant.
+            // StaleSlimCommitException (thrown by fetchSinceStageA on stale
+            // incarnation) is caught here and mapped to Stale (mirrors the
+            // probeLatest TOCTOU catch above).
             val since = state.localAppliedUpdatedAt!!
-            val result = repo.fetchSince(sid, since, token)
-            foldRestFetch(sid, mode, result, token)
+            val outcome = try {
+                repo.fetchSinceStageA(sid, since, token)
+            } catch (e: OpenCodeRepository.StaleSlimCommitException) {
+                DebugLog.d("Sync", "reconcileSessionLocked sid=$sid stage-A fetch stale — incarnation rotated (TOCTOU)")
+                return SlimReconcileOutcome(SlimReconcileResult.Stale(sid))
+            }
+            val folded = foldStageAFetch(sid, mode, outcome, token)
+            SlimReconcileOutcome(folded)
         } else {
             // Cold path: no local watermark yet. Use the bounded cursor
-            // drain façade (reuses T5's drainSlimapiMessagesBounded).
+            // drain façade (reuses T5's drainSlimapiMessagesBounded). This is
+            // the authoritative path — full/cursor drain Success may advance
+            // the watermark (and stage-A fix-4 drives commitAuthoritative).
             val result = repo.fetchInitialWindow(sid, token)
-            foldRestFetch(sid, mode, result, token)
+            val folded = foldRestFetch(sid, mode, result, token)
+            SlimReconcileOutcome(folded)
         }
-        return SlimReconcileOutcome(fetchResult)
+    }
+
+    // ── §11.1 stage A: foldStageAFetch (anchored /since staging path) ──────
+
+    /**
+     * §11.1 stage A: fold the anchored `/since` [SlimSinceStageAOutcome] into
+     * a [SlimReconcileResult]. The anchored `/since` response is staging-only
+     * — this fold MUST NOT advance the watermark / clear dirty / call
+     * bumpSlimBookmarkFromItems / markSlimReconcileAligned / onReconcileSuccess
+     * / clearLocal. Staged items MUST NOT leak into the UI merge path
+     * (fix-6 P0-1); they are temporary staging/diagnostics only.
+     *
+     *  - [SlimSinceStageAOutcome.Staged] → [SlimReconcileResult.RefreshRow]
+     *    (NO items carried to UI merge; the staged items are temporary
+     *    staging-only). The watermark is NOT advanced. dirty stays whatever
+     *    it was. Only a complete full/cursor candidate committed via
+     *    [SlimAuthoritativeCommitter.commitAuthoritative] may merge items.
+     *  - [SlimSinceStageAOutcome.Incomplete] → [SlimReconcileResult.RefreshRow]
+     *    (keep dirty; no items; no watermark advance).
+     *  - [SlimSinceStageAOutcome.Failed] → [SlimReconcileResult.Failure] (mark
+     *    failure preserves dirty) unless the token went stale (Stale).
+     */
+    private suspend fun foldStageAFetch(
+        sid: String,
+        mode: SlimReconcileMode,
+        outcome: SlimSinceStageAOutcome,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): SlimReconcileResult {
+        val repo = repository ?: return SlimReconcileResult.NoRepository(sid)
+        return when (outcome) {
+            is SlimSinceStageAOutcome.Staged -> {
+                // §11.1 fix-6 P0-1: Staged items are temporary staging-only.
+                // They MUST NOT leak into the UI merge path. Only a complete
+                // full/cursor candidate committed via commitAuthoritative may
+                // produce a Reconciled result that carries items to the chat.
+                DebugLog.d(
+                    tag,
+                    "reconcileSession sid=$sid mode=$mode stage-A /since staged " +
+                        "items=${outcome.items.size} completeHeader=${outcome.completeHeader} " +
+                        "→ staging-only (no UI merge)",
+                )
+                if (!repo.isCommitTokenCurrent(token)) SlimReconcileResult.Stale(sid)
+                else SlimReconcileResult.RefreshRow(sid)
+            }
+
+            is SlimSinceStageAOutcome.Incomplete -> {
+                // null body or other incompleteness — keep dirty, no items.
+                DebugLog.d(
+                    tag,
+                    "reconcileSession sid=$sid mode=$mode stage-A /since incomplete " +
+                        "reason=${outcome.reason} → keep dirty",
+                )
+                SlimReconcileResult.RefreshRow(sid)
+            }
+
+            is SlimSinceStageAOutcome.Failed -> {
+                if (!repo.isCommitTokenCurrent(token)) {
+                    SlimReconcileResult.Stale(sid)
+                } else {
+                    val marked = repo.markFailure(sid, token)
+                    if (!marked) {
+                        SlimReconcileResult.Stale(sid)
+                    } else {
+                        DebugLog.w(
+                            tag,
+                            "reconcileSession sid=$sid mode=$mode stage-A /since failed: ${outcome.cause.message}",
+                        )
+                        SlimReconcileResult.Failure(sid)
+                    }
+                }
+            }
+        }
     }
 
     // ── §5: foldRestFetch (repo port) ────────────────────────────────────
 
     /**
-     * P4-B (moved from SSC): shared fold for both fetch paths (/since and
-     * cursor-drain). On success: return Reconciled (items carried for the
-     * caller's chat-merge / cache-write). On failure: keep dirty + return
-     * Failure. The watermark advancement + dirty clear happens INSIDE the
-     * repo atomic boundary (`bumpSlimBookmarkFromItems`) — NOT here.
+     * P4-B (moved from SSC): shared fold for the full/cursor drain path.
+     *
+     * §11.1 fix-6 P0-4: the full/cursor drain success path MUST construct a
+     * [SlimAuthoritativeCandidate] and drive
+     * [SlimAuthoritativeCommitter.commitAuthoritative] — the ONLY path that
+     * may advance localApplied* / clear dirty / replace visible content.
+     * Only a [SlimAuthoritativeCommitResult.Committed] result permits a
+     * [SlimReconcileResult.Reconciled] (items for UI merge). All other
+     * committer results map to Stale/Failure.
+     *
+     * §11.1 fix-8 P1-6: the candidate's [SlimAuthoritativeCandidate.messages]
+     * is constructed via [mergeSlimMessageSet]`(..., complete = true)` — the
+     * drain produces a phase-B-frozen complete cursor snapshot, so the
+     * complete-merge contract applies. The incoming drain items are merged
+     * onto the current authoritative set (read from the repo's
+     * [OpenCodeRepository.captureCurrentVisibleMessages] equivalent — fetched
+     * via [captureAuthoritativeMessages]) so that:
+     *   - missing-from-incoming ids are RETAINED (no tombstone → no spurious
+     *     deletion),
+     *   - older same-id tuples in incoming do NOT overwrite newer authoritative,
+     *   - equal-tuple-different-parts does NOT silently overwrite (kept for
+     *     a later full/cursor reconcile).
      *
      * C-D3 v2 §1.9: Stale ≠ Failure. A stale cursor result must NOT call
      * markSlimReconcileFailure (that pollutes error state for the new
@@ -1012,8 +1184,77 @@ internal class SlimSessionReconciler(
 
         return result.fold(
             onSuccess = { items ->
-                if (!repo.isCommitTokenCurrent(token)) SlimReconcileResult.Stale(sid)
-                else SlimReconcileResult.Reconciled(sid, items)
+                if (!repo.isCommitTokenCurrent(token)) return@fold SlimReconcileResult.Stale(sid)
+                // §11.1 fix-8 P1-6: merge the drain items onto the current
+                // authoritative set via mergeSlimMessageSet(complete = true).
+                // The drain produces a complete cursor snapshot (terminal
+                // page reached, no cap hit), so the complete-merge contract
+                // applies. Missing-from-incoming ids are retained (no
+                // tombstone), older tuples ignored, equal-tuple-different-
+                // parts kept authoritative.
+                val authoritative = repo.captureAuthoritativeMessages(sid)
+                val mergeResult = mergeSlimMessageSetWithConflict(
+                    authoritative = authoritative,
+                    incoming = items,
+                    complete = true,
+                )
+                val merged = mergeResult.messages
+                // §11.1 fix-6 P0-4: construct candidate + commit atomically.
+                // The drain no longer bumps the bookmark internally — the
+                // watermark advance happens inside commitAuthoritative.
+                // The candidate carries the MERGED messages; the watermark
+                // tuple is derived from the merged set so the watermark
+                // corresponds to a real message in the committed view.
+                val (ts, id) = maxMessageTuple(merged)
+                    ?.let { it.first to it.second } ?: (null to null)
+                val candidate = SlimAuthoritativeCandidate(
+                    sessionId = sid,
+                    token = token,
+                    messages = merged,
+                    localAppliedUpdatedAt = ts,
+                    localAppliedMessageId = id,
+                    // §11.1 fix-10 P1-1 / rev-ogpt P1-1: thread the merge's
+                    // conflict signal into the commit's atomic dirty decision.
+                    // The commit's replaceLocalAppliedAndClearDirtyLocked will
+                    // set dirty=true UNCONDITIONALLY when hasConflict=true —
+                    // inside the SAME critical section that writes localApplied*,
+                    // no separate markDirty post-write (which was a NO-OP when
+                    // needsReconcile returned false on an aligned watermark,
+                    // which is exactly the same-tuple-conflict case).
+                    hasConflict = mergeResult.hasConflict,
+                )
+                when (val commitResult = repo.commitAuthoritative(candidate)) {
+                    is SlimAuthoritativeCommitResult.Committed -> {
+                        // §11.1 fix-10 P1-1 / rev-ogpt P1-1: the conflict's
+                        // dirty decision is now ATOMIC with the commit — no
+                        // separate markDirty call here. The commit's critical
+                        // section already set dirty=true iff mergeResult.hasConflict
+                        // (or remote > localApplied via P0-4). Removing the
+                        // post-commit markDirty closes the P1-1 hole: the prior
+                        // markSlimDirty was gated by needsReconcile, which
+                        // returns FALSE on a same-tuple conflict (remote ==
+                        // localApplied), so the dirty flag never landed.
+                        SlimReconcileResult.Reconciled(sid, merged)
+                    }
+                    is SlimAuthoritativeCommitResult.StaleToken ->
+                        SlimReconcileResult.Stale(sid)
+                    is SlimAuthoritativeCommitResult.CacheWriteFailed -> {
+                        DebugLog.w(
+                            tag,
+                            "reconcileSession sid=$sid mode=$mode commit CacheWriteFailed: " +
+                                "${commitResult.cause.message}",
+                        )
+                        SlimReconcileResult.Failure(sid)
+                    }
+                    is SlimAuthoritativeCommitResult.MergeRejected -> {
+                        DebugLog.w(
+                            tag,
+                            "reconcileSession sid=$sid mode=$mode commit MergeRejected: " +
+                                "${commitResult.reason}",
+                        )
+                        SlimReconcileResult.Failure(sid)
+                    }
+                }
             },
             onFailure = { error ->
                 if (repo.isStaleFailure(error) || !repo.isCommitTokenCurrent(token)) {
@@ -1221,10 +1462,24 @@ internal class SlimSessionReconciler(
                 // `bumpSlimBookmarkFromItems` (via `onReconcileSuccess`)
                 // during the fetch. If the cache-retention step below
                 // fails (empty result / filtered-to-nothing / bus drop),
-                // we RE-RATCHET dirty via markSlimDirty so the next
+                // we RE-RATCHET dirty via forceDirty so the next
                 // pass retries the fetch. Without this binding, dirty
                 // could clear without a retained window — leaving the
                 // user with no cached messages and no scheduled retry.
+                //
+                // §11.1 fix-12b P1-2 (rev-ogpt): the prior code called
+                // `markDirty`, which is gated by `needsReconcile`. In
+                // the normal steady state (authoritative commit just
+                // landed, remote aligned, no conflict), `needsReconcile`
+                // returns FALSE, so `markDirty` returned `true` but left
+                // `dirty = false` — a semantic NO-OP. `forceDirty`
+                // bypasses that gate, unconditionally setting `dirty`
+                // (still under the SlimCommitToken guard). The other
+                // `markDirty` call sites (the committer path) are
+                // unaffected: their conflict decision is now atomic with
+                // the commit via `SlimAuthoritativeCandidate.hasConflict`,
+                // which is why this method was retained in fix-11b for
+                // exactly this retention path.
                 val sid = result.sid
                 val isCurrent = liveSessionId == sid
 
@@ -1250,16 +1505,16 @@ internal class SlimSessionReconciler(
                         )
 
                         if (!retained) {
-                            DebugLog.w(tag, "applyReconcileResult sid=$sid WriteSessionWindow dropped → re-ratchet dirty")
-                            repository?.markDirty(sid, token)
+                            DebugLog.w(tag, "applyReconcileResult sid=$sid WriteSessionWindow dropped → re-ratchet dirty (forceDirty)")
+                            repository?.forceDirty(sid, token)
                         }
                     } else {
-                        DebugLog.w(tag, "applyReconcileResult sid=$sid filtered-to-nothing → re-ratchet dirty")
-                        repository?.markDirty(sid, token)
+                        DebugLog.w(tag, "applyReconcileResult sid=$sid filtered-to-nothing → re-ratchet dirty (forceDirty)")
+                        repository?.forceDirty(sid, token)
                     }
                 } else if (!isCurrent && result.items.isEmpty()) {
-                    DebugLog.d(tag, "applyReconcileResult sid=$sid empty non-focus result → re-ratchet dirty")
-                    repository?.markDirty(sid, token)
+                    DebugLog.d(tag, "applyReconcileResult sid=$sid empty non-focus result → re-ratchet dirty (forceDirty)")
+                    repository?.forceDirty(sid, token)
                 }
                 // For the CURRENT session, items are already merged into
                 // the chat slice (retention = chat slice itself); no

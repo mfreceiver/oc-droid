@@ -101,7 +101,10 @@ internal fun launchCatchUp(
         // §R-17 batch2 step e final: slice-only read.
         // Order-independent newest message (messages is oldest-first per ora-2).
         val anchor = slices.chat.value.messages.maxByOrNull { it.time?.created ?: -1L }
-        val serverNewestId = repository.probeLatestMessageId(sessionId).getOrNull()
+        // §P1-lane (slim probe routing): use the boundary facade that routes
+        // to probeLatestSlim under slim (sidecar) vs probeLatestMessageId under
+        // legacy — the legacy method is byte-for-byte unchanged.
+        val serverNewestId = repository.probeLatestMessageIdForCurrent(sessionId).messageID
 
         // No newer message on the server → skip the probe-page reload entirely.
         if (anchor != null && serverNewestId != null && anchor.id == serverNewestId) {
@@ -171,8 +174,14 @@ internal fun launchCatchUp(
                 }
             }
             .onFailure {
-                DebugLog.w("Sync", "catch-up probe-page failed: ${it.message}")
-                if (sessionId == slices.chat.value.currentSessionId) {
+                // §11.1 fix-8 P1-2: SlimSinceStagingOnlyException is
+                // "conservative staging" — REST catch-up reload is
+                // intentionally unavailable in slim stage-A (SSE drives
+                // updates). Suppress the Failure surface for this typed
+                // exception; treat it as "REST catch-up skipped".
+                val isStagingOnly = it is OpenCodeRepository.SlimSinceStagingOnlyException
+                DebugLog.w("Sync", "catch-up probe-page failed (stagingOnly=$isStagingOnly): ${it.message}")
+                if (sessionId == slices.chat.value.currentSessionId && !isStagingOnly) {
                     reportNonFatalIssue("MainViewModel", "Catch-up tail reload failed")
                 }
                 // §history-load-fix round-2 (gpter 🟠): flag clear deferred to

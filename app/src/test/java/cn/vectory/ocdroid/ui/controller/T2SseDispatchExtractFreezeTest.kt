@@ -9,6 +9,7 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SlimSinceStageAOutcome
 import cn.vectory.ocdroid.data.repository.ProbeResult
 import cn.vectory.ocdroid.data.repository.SlimFetchMessages
 import cn.vectory.ocdroid.data.repository.SlimSessionState
@@ -182,7 +183,8 @@ class T2SseDispatchExtractFreezeTest {
     //
     //   sealed interface ModeDomain { data object Legacy; data object Slim }
     //   data class SseDispatchContext(currentSessionId, mode, serverGroupFp)
-    //   sealed interface SseDispatchResult { Ignored; Handled(actions, effects) }
+    //   sealed interface SseDispatchResult {
+// Ignored; Handled(actions, effects) }
     //   interface SseEventHandler { supports(type); handle(event, ctx) }
     //   class SharedConversationSseHandler(reducer)   // message.updated / message.part.*
     //   class LegacySseHandler(reducer)               // session.created/updated/status, permission/question
@@ -208,6 +210,18 @@ class T2SseDispatchExtractFreezeTest {
      * running GREEN today. Reflection keeps the file compilable while still
      * failing the test until the extract surface materializes.
      */
+    /** §11.1 stage A test helper: wrap items as a Staged outcome. */
+    private fun stagedSince(
+        items: List<cn.vectory.ocdroid.data.model.MessageWithParts>,
+        completeHeader: Boolean? = null,
+        statusCode: Int = 200,
+    ): SlimSinceStageAOutcome = SlimSinceStageAOutcome.Staged(
+        items = items,
+        completeHeader = completeHeader,
+        statusCode = statusCode,
+        transportComplete = true,
+    )
+
     @Test
     fun `Contract 1a - T2 extract surface types MUST exist in ui controller sse package`() {
         val expectedTypes = listOf(
@@ -587,7 +601,7 @@ class T2SseDispatchExtractFreezeTest {
             messageID = "m1",
             updatedAt = 1000L,
         )
-        coEvery { repository.getSlimapiMessagesSince("sess-1", 0L, any(), any(), any()) } returns Result.success(
+        coEvery { repository.fetchSinceForStageA("sess-1", 0L, any(), any(), any()) } returns stagedSince(
             listOf(
                 MessageWithParts(
                     info = Message(id = "m1", role = "assistant", sessionId = "sess-1"),
@@ -601,15 +615,13 @@ class T2SseDispatchExtractFreezeTest {
         c.handleEvent(digestEvent("sess-1", status = "busy", updatedAt = 1000L, messageId = "m1"))
         scope.testScheduler.advanceUntilIdle()
 
-        assertEquals(
-            "slim session.digest merged the assistant message (digest→REST path = slim content source)",
-            listOf("m1"),
-            slices.chat.value.messages.map { it.id },
-        )
-        assertEquals(
-            "slim session.digest merged the part text (skeleton/full, NOT token streaming)",
-            "hi",
-            slices.chat.value.partsByMessage["m1"]?.firstOrNull()?.text,
+        // §11.1 fix-6 P0-1: `/since` path is staging-only → Staged maps to
+        // RefreshRow (no items). Messages do NOT appear in the chat from the
+        // `/since` path; only a complete full/cursor candidate committed via
+        // commitAuthoritative may merge items.
+        assertTrue(
+            "/since staging-only → no items in chat (got ${slices.chat.value.messages.map { it.id }})",
+            slices.chat.value.messages.none { it.id == "m1" },
         )
         // session.digest did NOT populate streamingPartTexts — slim has no
         // token-level streaming overlay (content is authoritative REST, not

@@ -19,6 +19,72 @@ import retrofit2.HttpException
 import cn.vectory.ocdroid.data.repository.MessagesPage
 
 /**
+ * §11.1 (slim message reliability joint plan — stage A): repository-layer
+ * staging classification of a stage-A `/since` response. The `/since` endpoint
+ * is NOT an authoritative completeness signal in stage A — even when the sidecar
+ * returns `X-Since-Complete: true`, the response is staging-only (no bookmark
+ * advance, no dirty clear, no authoritative cache replacement).
+ *
+ * # Variants
+ *
+ *  - [Staged] — HTTP 2xx with a non-null body. [completeHeader] carries the
+ *    parsed `X-Since-Complete` header (`true`/`false`/`null` for absent or
+ *    unparseable). Stage A does NOT commit on this variant regardless of the
+ *    header — the caller may stage the items for display but MUST NOT advance
+ *    the watermark / clear dirty / replace authoritative memory.
+ *  - [Incomplete] — HTTP 2xx with a null body (reason = `"null_body"`). No
+ *    items; the caller MUST NOT advance the watermark.
+ *  - [Failed] — transport / serialization / IO error, OR a non-2xx HTTP
+ *    status (wrapped as `IOException("HTTP ${code}")`). The caller treats this
+ *    as a reconcile failure (preserve dirty). [CancellationException] and
+ *    [OpenCodeRepository.StaleSlimCommitException] are NOT folded into this
+ *    variant — they propagate as thrown exceptions from
+ *    [SlimSyncEngine.fetchSinceForStageA].
+ *
+ * See [SlimSyncEngine.fetchSinceForStageA] for the exception-classification
+ * contract.
+ */
+internal sealed interface SlimSinceStageAOutcome {
+    data class Staged(
+        val items: List<MessageWithParts>,
+        val completeHeader: Boolean?,
+        val statusCode: Int,
+        val transportComplete: Boolean,
+    ) : SlimSinceStageAOutcome
+
+    data class Incomplete(
+        val items: List<MessageWithParts>,
+        val reason: String,
+        val statusCode: Int?,
+    ) : SlimSinceStageAOutcome
+
+    data class Failed(
+        val cause: Throwable,
+    ) : SlimSinceStageAOutcome
+}
+
+/**
+ * §11.1: typed exception returned (as `Result.failure`) by the legacy
+ * [SlimSyncEngine.getSlimapiMessagesSince] / [OpenCodeRepository.getSlimapiMessagesSince]
+ * facades once stage A closes the old authoritative `/since` reliability path.
+ *
+ * Stage A retains the old signatures for source/test binary compatibility, but
+ * their implementations NO LONGER constitute a reliability path: they return
+ * `Result.failure(SlimSinceStagingOnlyException)` unconditionally and perform
+ * NO bookmark / localApplied / dirty mutation. New reliability callers MUST
+ * use [SlimSyncEngine.fetchSinceForStageA] (returning [SlimSinceStageAOutcome])
+ * and, for authoritative commits, the full/cursor drain +
+ * [SlimAuthoritativeCommitter.commitAuthoritative] path.
+ *
+ * §11.1 fix-8 P1-2: this is now a thin typealias-equivalent subclass of
+ * [OpenCodeRepository.SlimSinceStagingOnlyException] so consumers in the
+ * `ui` package can detect the typed staging-only signal via
+ * `error is OpenCodeRepository.SlimSinceStagingOnlyException`.
+ */
+internal class SlimSinceStagingOnlyException(message: String) :
+    OpenCodeRepository.SlimSinceStagingOnlyException(message)
+
+/**
  * §P1: Extracted slim message-sync engine from [OpenCodeRepository].
  * Holds the message page/since fetch, cold-start + bounded-drain algorithm,
  * and slim sync result construction.
@@ -39,6 +105,37 @@ class SlimSyncEngine internal constructor(
     private val slimStateMachine: SlimSseStateMachine,
     private val parseErrorCode: (retrofit2.Response<*>) -> String?,
     private val retryAfterHeaderToMs: (String?) -> Long,
+    /**
+     * §11.1 fix-4 wiring: the authoritative committer used by the
+     * full/cursor drain `Success` path in [drainAndCommitAuthoritative]
+     * (called by [coldStartSlimSync] and
+     * [OpenCodeRepository.getMessagesPagedUnanchored]) to advance the
+     * in-memory authoritative state (visible content, authoritative cache,
+     * localApplied watermark, dirty clear). Null when no committer is
+     * wired (tests / legacy construction) — [drainAndCommitAuthoritative]
+     * throws [OpenCodeRepository.SlimAuthoritativeCommitFailedException]
+     * in that case (the call cannot commit).
+     *
+     * §11.1 fix-8 P0-2: a non-null committer returning a non-Committed
+     * result ([StaleToken] / [CacheWriteFailed] / [MergeRejected]) causes
+     * [drainAndCommitAuthoritative] to throw — the drained items are NOT
+     * surfaced to the caller (coldStartSlimSync folds the throw to
+     * `messages = null`; getMessagesPagedUnanchored surfaces
+     * `Result.failure`). The drain's per-page code path NEVER bumps the
+     * watermark (P1-3); the watermark advances ONLY inside
+     * [SlimAuthoritativeCommitter.commitAuthoritative] on a Committed result.
+     */
+    private val authoritativeCommitter: SlimAuthoritativeCommitter? = null,
+    /**
+     * §11.1 fix-9 P1-2: read-only provider of the current authoritative
+     * message list for [sessionId], used by [drainAndCommitAuthoritative]
+     * as the `authoritative` input to [mergeSlimMessageSet]. Backed by
+     * [OpenCodeRepository.captureAuthoritativeMessages] in production.
+     * Null in tests / legacy construction — [drainAndCommitAuthoritative]
+     * falls back to `emptyList()` (no merge — the candidate carries the
+     * raw drain items).
+     */
+    private val authoritativeMessagesProvider: ((String) -> List<MessageWithParts>)? = null,
 ) {
     // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -49,10 +146,97 @@ class SlimSyncEngine internal constructor(
     // ── Public API: anchored /since fetch ──────────────────────────────────────
 
     /**
-     * §slim-v1-page (Task 5 / G5 cursor): anchored fetch from a [since]
-     * bookmark timestamp. Atomically bumps the local SSE state watermark on
-     * success — the digest / degrade / resync protocol invariants depend on
-     * this being the sole bookmark advancement path for the anchored branch.
+     * §11.1 (stage A): the NEW staging `/since` fetch. Performs the HTTP call,
+     * classifies the response into a [SlimSinceStageAOutcome], and performs NO
+     * bookmark / localApplied / dirty / authoritative-cache mutation. Stage A
+     * treats every `/since` response (including `X-Since-Complete: true`) as
+     * staging-only.
+     *
+     * # Exception classification contract (plan §11.1)
+     *
+     *  - [CancellationException]: thrown, NOT wrapped, NOT downgraded to
+     *    [SlimSinceStageAOutcome.Failed]. A scope cancel propagates cleanly.
+     *  - [OpenCodeRepository.StaleSlimCommitException]: thrown, NOT downgraded
+     *    to [SlimSinceStageAOutcome.Failed]. A stale incarnation invalidates
+     *    the entire attempt — the caller MUST NOT stage the result.
+     *  - Other transport / serialization / IO exceptions: [SlimSinceStageAOutcome.Failed]`(cause)`.
+     *  - Non-2xx HTTP: [SlimSinceStageAOutcome.Failed]`(IOException("HTTP ${code}"))`.
+     *  - 2xx null body: [SlimSinceStageAOutcome.Incomplete]`(items = [], reason = "null_body", statusCode)`.
+     *  - 2xx non-null body: [SlimSinceStageAOutcome.Staged], EVEN when
+     *    `X-Since-Complete: true` — stage A does NOT authoritative-commit.
+     *
+     * # `X-Since-Complete` header parsing
+     *
+     * `"true" → true`, `"false" → false`, anything else / absent → `null`.
+     * The header is surfaced on [SlimSinceStageAOutcome.Staged.completeHeader]
+     * for diagnostics; stage A does NOT act on it.
+     */
+    internal suspend fun fetchSinceForStageA(
+        sessionId: String,
+        since: Long,
+        limit: Int?,
+        before: String?,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): SlimSinceStageAOutcome {
+        val response = try {
+            apiProvider(token).getSlimapiMessagesSince(
+                sessionId = sessionId,
+                sinceTimestamp = since,
+                limit = limit,
+                before = before,
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: OpenCodeRepository.StaleSlimCommitException) {
+            throw e
+        } catch (e: Throwable) {
+            return SlimSinceStageAOutcome.Failed(e)
+        }
+
+        slimStateMachine.requireSlimTokenCurrent(token)
+
+        if (!response.isSuccessful) {
+            return SlimSinceStageAOutcome.Failed(
+                java.io.IOException("HTTP ${response.code()}"),
+            )
+        }
+
+        val body = response.body()
+            ?: return SlimSinceStageAOutcome.Incomplete(
+                items = emptyList(),
+                reason = "null_body",
+                statusCode = response.code(),
+            )
+
+        val completeHeader = response.headers()["X-Since-Complete"]?.let { raw ->
+            when (raw.trim().lowercase()) {
+                "true" -> true
+                "false" -> false
+                else -> null
+            }
+        }
+
+        // Stage A: even true is staging-only.
+        return SlimSinceStageAOutcome.Staged(
+            items = body,
+            completeHeader = completeHeader,
+            statusCode = response.code(),
+            transportComplete = true,
+        )
+    }
+
+    /**
+     * §11.1 (stage A): the LEGACY anchored `/since` facade. **Stage A closes
+     * this as a reliability path.** The signature is retained for source /
+     * test binary compatibility, but the implementation returns
+     * `Result.failure(SlimSinceStagingOnlyException)` unconditionally and
+     * performs NO bookmark / localApplied / dirty mutation.
+     *
+     * New reliability callers MUST use [fetchSinceForStageA] (returning
+     * [SlimSinceStageAOutcome]) for staging, and the full/cursor drain +
+     * [SlimAuthoritativeCommitter.commitAuthoritative] path for authoritative
+     * commits. No production reconcile / cold-start / MessageSource caller may
+     * consume this facade's `Result.success` to judge authoritative success.
      *
      * Pass [since] = 0L for the cold-start path (no prior bookmark).
      */
@@ -62,32 +246,18 @@ class SlimSyncEngine internal constructor(
         limit: Int? = null,
         before: String? = null,
         token: OpenCodeRepository.SlimCommitToken,
-    ): Result<List<MessageWithParts>> = runSlimStaleAwareCatching(token) {
-        val response = apiProvider(token).getSlimapiMessagesSince(sessionId, since, limit, before)
-
-        slimStateMachine.requireSlimTokenCurrent(token)
-
-        if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
-        val items = response.body() ?: emptyList()
-        if (!slimStateMachine.bumpSlimBookmarkFromItems(sessionId, items, token)) {
-            throw OpenCodeRepository.StaleSlimCommitException()
-        }
-        // POST-RELEASE instrumentation: per-resync fetch outcome for the
-        // SlimapiResync diagnostic surface. One line per anchored fetch.
-        DebugLog.d(
-            "SlimapiResync",
-            "since sid=$sessionId since=$since drained=${items.size} " +
-                "newest=${items.lastOrNull()?.info?.id ?: "-"}",
-        )
-        items
-    }
+    ): Result<List<MessageWithParts>> = Result.failure(
+        SlimSinceStagingOnlyException(
+            "stage A: getSlimapiMessagesSince is staging-only; use fetchSinceForStageA + commitAuthoritative (sid=$sessionId, since=$since)",
+        ),
+    )
 
     /**
      * §slim-v1-paging (Task 5 / G5 cursor): Cluster A cursor-paginated
      * skeleton fetch (`GET /slimapi/messages/{sid}?limit=…&before=…&mode=…`).
      * Used for the no-bookmark cold-start branch in [coldStartSlimSync]
-     * (which cursor-follows via [drainSlimapiMessagesBounded]) and any
-     * future caller that wants to walk older history without an anchor ts.
+     * (which cursor-follows via [drainSlimapiMessagesBoundedOutcome]) and
+     * any caller that wants to walk older history without an anchor ts.
      *
      * Surfaces BOTH the items AND the `X-Next-Cursor` response header on
      * the returned [MessagesPage] (was: the pre-G5 [getSlimapiMessagesPaged]
@@ -95,24 +265,23 @@ class SlimSyncEngine internal constructor(
      * cursor was discarded; that method was unused and is replaced here).
      * The legacy non-slim analogue is [getMessagesPaged] (legacy branch).
      *
-     * Bookmark invariant (rev-gpt MINOR #2, Option A): when [bumpBookmark]
-     * is true (default), bumps the local slim SSE watermark to
-     * `max(time.updated)` over the returned items — mirrors
-     * [getSlimapiMessagesSince] / [getMessagesPaged] slim branch so single-
-     * page callers keep the invariant for free. The cursor-following drain
-     * ([drainSlimapiMessagesBounded]) passes `bumpBookmark = false` and
-     * bumps ONCE at termination from the aggregated items — otherwise each
-     * page would bump individually and the "single bump" claim in the
-     * drain's KDoc would be inaccurate (the result is correct either way
-     * because [bumpSlimBookmarkFromItems] is monotonic, but the doc/code
-     * should agree).
+     * §11.1 fix-8 P1-3: the `bumpBookmark` parameter was REMOVED. The
+     * single-page fetch NEVER bumps the slim SSE watermark — completeness
+     * proof belongs to the caller (the bounded drain bumps ONCE at
+     * terminal page via [SlimAuthoritativeCommitter.commitAuthoritative];
+     * a single-page caller has no completeness claim). Watermark advance
+     * is the exclusive job of [SlimAuthoritativeCommitter.commitAuthoritative]
+     * inside its token-guarded critical section. The `bumpBookmark = true`
+     * path (single-page callers advancing the watermark from a non-terminal
+     * cursor) was a P1-3 violation: it could advance `localApplied*` past a
+     * page whose `X-Next-Cursor` was still non-null, treating an item-bound
+     * mid-walk page as authoritative.
      */
     suspend fun getSlimapiMessagesPage(
         sessionId: String,
         limit: Int? = null,
         before: String? = null,
         mode: String? = "skeleton",
-        bumpBookmark: Boolean = true,
         token: OpenCodeRepository.SlimCommitToken,
     ): Result<MessagesPage> = runSlimStaleAwareCatching(token) {
         val response = apiProvider(token).getSlimapiMessages(sessionId, limit, before, mode)
@@ -120,17 +289,158 @@ class SlimSyncEngine internal constructor(
         slimStateMachine.requireSlimTokenCurrent(token)
 
         if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
-        val items = response.body() ?: emptyList()
-        if (bumpBookmark) {
-            if (!slimStateMachine.bumpSlimBookmarkFromItems(sessionId, items, token)) {
-                throw OpenCodeRepository.StaleSlimCommitException()
-            }
-        }
+        // §11.5: a 2xx with null body is INCOMPLETE — the drain must
+        // classify it as Partial (no bookmark advance). Throw a typed
+        // signal so diagnostics can distinguish "empty body" from a
+        // transport drop (both become Partial, but the cause differs).
+        val items = response.body() ?: throw SlimPageIncompleteException("null_body")
+        // §11.1 fix-8 P1-3: NO bookmark bump here — single-page fetch is
+        // NOT a completeness proof. The drain bumps ONCE at terminal page
+        // via commitAuthoritative; an item-bound mid-walk page must NOT
+        // advance localApplied*.
         val nextCursor = response.headers()["X-Next-Cursor"]
         MessagesPage(items = items, nextCursor = nextCursor)
     }
 
     // ── Cold-start + bounded drain ──────────────────────────────────────────────
+
+    /**
+     * §11.1 fix-8 P0-1 + fix-9 P0-6 + P1-2: skeleton cursor drain +
+     * authoritative commit. The ONLY path that may surface items to the
+     * UI as a successful cold-load / reload (replacing both the legacy
+     * `getMessagesPagedUnanchored` and `getMessagesPaged` slim `/since`
+     * branches, which are now staging-only).
+     *
+     * # Behavior
+     *
+     *  1. Runs [drainSlimapiMessagesBoundedOutcome] (page limit
+     *     [SLIMAPI_DEFAULT_PAGE_LIMIT], item bound [itemBound] which
+     *     defaults to [SLIMAPI_LOCAL_HISTORY_BOUND] for cold-start and
+     *     may be tightened for anchored tail reloads).
+     *  2. §11.1 fix-9 P1-2: on [SlimDrainOutcome.Success], the drain
+     *     items are MERGED onto the current authoritative set via
+     *     [mergeSlimMessageSet]`(..., complete = true)` before the
+     *     candidate is constructed. Missing-from-incoming ids are
+     *     RETAINED (no tombstone), older tuples ignored, equal-tuple-
+     *     different-parts kept authoritative. The merge input is read
+     *     via [authoritativeMessagesProvider] (the OCR's per-session
+     *     authoritative store).
+     *  3. Constructs a [SlimAuthoritativeCandidate] from the merged
+     *     aggregate + [maxMessageTuple], then drives
+     *     [SlimAuthoritativeCommitter.commitAuthoritative].
+     *      - [SlimAuthoritativeCommitResult.Committed] → returns the
+     *        committed items (caller may surface them as a successful
+     *        page).
+     *      - Any non-Committed result ([StaleToken] / [CacheWriteFailed] /
+     *        [MergeRejected]) → throws [OpenCodeRepository.SlimAuthoritativeCommitFailedException]
+     *        carrying the result. P0-2 / coldStartSlimSync maps this to
+     *        `messages = null` (keep prior, preserve dirty); the public
+     *        [OpenCodeRepository.getMessagesPagedUnanchored] /
+     *        [OpenCodeRepository.getMessagesPaged] surfaces map it to
+     *        `Result.failure`. NEITHER exposes Partial items to the UI.
+     *  4. On [SlimDrainOutcome.Partial] / [SlimDrainOutcome.Degraded]:
+     *     throws [OpenCodeRepository.SlimCursorPartialException] (NO
+     *     items exposed via the success channel).
+     *  5. [CancellationException] / [OpenCodeRepository.StaleSlimCommitException]
+     *     propagate verbatim.
+     *
+     * Stage A: this is a SKELETON-only drain — the items are not expanded
+     * (parts lazy-loaded by the UI). The committed `messages` list is the
+     * sole authoritative view; subsequent SSE updates advance the remote
+     * watermark + set dirty via the digest reducer. When the SSE-driven
+     * reconciler ([SlimSessionReconciler]) sees `localAppliedUpdatedAt != null`
+     * (the session already has a watermark), it goes staging-only via
+     * `/since/{ts}` ([fetchSinceForStageA]) — it does NOT drive a separate
+     * drain+commit. Only the cold path (no watermark yet) routes through
+     * this method via [coldStartSlimSync]. The SSE-driven reconciler's
+     * authoritative commit happens via [foldRestFetch] on the cold-path
+     * branch of `reconcileSessionLocked`. Stage-A SSE does NOT directly
+     * merge into authoritative — the authoritative store is updated ONLY
+     * via the commit protocol (this method or [SlimSessionReconciler.foldRestFetch]).
+     */
+    internal suspend fun drainAndCommitAuthoritative(
+        sessionId: String,
+        token: OpenCodeRepository.SlimCommitToken,
+        itemBound: Int = SLIMAPI_LOCAL_HISTORY_BOUND,
+    ): List<MessageWithParts> {
+        val outcome = drainSlimapiMessagesBoundedOutcome(
+            sessionId = sessionId,
+            pageLimit = SLIMAPI_DEFAULT_PAGE_LIMIT,
+            itemBound = itemBound,
+            token = token,
+        )
+        val items = when (outcome) {
+            is SlimDrainOutcome.Success -> outcome.items
+            is SlimDrainOutcome.Partial ->
+                throw OpenCodeRepository.SlimCursorPartialException(outcome.cause)
+            is SlimDrainOutcome.Degraded ->
+                throw OpenCodeRepository.SlimCursorPartialException(outcome.cause)
+        }
+        // §11.1 fix-9 P1-2 + fix-10 P1-1: merge drain items onto the
+        // current authoritative set BEFORE constructing the candidate. The
+        // drain is a complete cursor snapshot (terminal page reached), so
+        // the complete-merge contract applies. Missing-from-incoming ids
+        // are RETAINED (no tombstone), older tuples ignored, equal-tuple-
+        // different-parts kept authoritative + hasConflict flag set.
+        val authoritative = authoritativeMessagesProvider?.invoke(sessionId) ?: emptyList()
+        val mergeResult = mergeSlimMessageSetWithConflict(
+            authoritative = authoritative,
+            incoming = items,
+            complete = true,
+        )
+        val merged = mergeResult.messages
+        // Construct candidate from the merged aggregate.
+        val (ts, id) = maxMessageTuple(merged)?.let { it.first to it.second }
+            ?: (null to null)
+        val candidate = SlimAuthoritativeCandidate(
+            sessionId = sessionId,
+            token = token,
+            messages = merged,
+            localAppliedUpdatedAt = ts,
+            localAppliedMessageId = id,
+            // §11.1 fix-10 P1-1 / rev-ogpt P1-2: thread the merge's conflict
+            // signal into the commit's atomic dirty decision. The commit's
+            // replaceLocalAppliedAndClearDirtyLocked will set dirty=true
+            // UNCONDITIONALLY when hasConflict=true — inside the SAME critical
+            // section that writes localApplied*, no separate forceSlimDirty
+            // post-write (which had a non-atomic window between commit and
+            // forceDirty).
+            hasConflict = mergeResult.hasConflict,
+        )
+        val committer = authoritativeCommitter
+            ?: throw OpenCodeRepository.SlimAuthoritativeCommitFailedException(
+                "no authoritativeCommitter wired (sessionId=$sessionId); " +
+                    "stage-A commit unavailable",
+                SlimAuthoritativeCommitResult.MergeRejected("no committer"),
+            )
+        return when (val commitResult = committer.commitAuthoritative(candidate)) {
+            is SlimAuthoritativeCommitResult.Committed -> {
+                // §11.1 fix-10 P1-1 / rev-ogpt P1-2: the conflict's dirty
+                // decision is now ATOMIC with the commit — no separate
+                // forceSlimDirty call here. The commit's critical section
+                // already set dirty=true iff mergeResult.hasConflict (or
+                // remote > localApplied via P0-4). Removing the post-commit
+                // forceSlimDirty closes the P1-2 atomicity window (commit
+                // completed → dirty=false briefly → then forceSlimDirty
+                // re-set dirty=true in a SEPARATE critical section).
+                merged
+            }
+            is SlimAuthoritativeCommitResult.StaleToken,
+            is SlimAuthoritativeCommitResult.CacheWriteFailed,
+            is SlimAuthoritativeCommitResult.MergeRejected -> {
+                DebugLog.w(
+                    "SlimapiResync",
+                    "drainAndCommitAuthoritative non-Committed sid=$sessionId " +
+                        "result=${commitResult::class.simpleName}",
+                )
+                throw OpenCodeRepository.SlimAuthoritativeCommitFailedException(
+                    "authoritative commit did not succeed (sessionId=$sessionId, " +
+                        "result=${commitResult::class.simpleName})",
+                    commitResult,
+                )
+            }
+        }
+    }
 
     /**
      * §slim-reconcile-lane-repo (T11 round-3): cold-start snapshot fetch.
@@ -247,38 +557,53 @@ class SlimSyncEngine internal constructor(
             val bookmark = slimStateMachine.readBookmarkOrThrowIfStale(sid, token)
 
             if (bookmark != null) {
-                runSlimStaleAwareCatching(token) {
-                    val response = apiProvider(token).getSlimapiMessagesSince(
-                        sid, bookmark, limit = SLIMAPI_DEFAULT_PAGE_LIMIT,
-                    )
-
-                    slimStateMachine.requireSlimTokenCurrent(token)
-
-                    if (!response.isSuccessful) {
-                        return@runSlimStaleAwareCatching null
-                    }
-
-                    val items = response.body() ?: emptyList()
-
-                    if (!slimStateMachine.bumpSlimBookmarkFromItems(sid, items, token)) {
-                        throw OpenCodeRepository.StaleSlimCommitException()
-                    }
-
-                    items
-                }.getOrElse { error ->
-                    if (error is OpenCodeRepository.StaleSlimCommitException) throw error
-                    null
-                }
+                // §11.1 stage A: anchored `/since` is staging-only.
+                // Staged / Incomplete / Failed ALL map to `messages = null`
+                // (keep prior). NO bookmark bump, NO authoritative commit,
+                // NO clearLocal / markSlimReconcileSuccess / onReconcileSuccess.
+                // CancellationException + StaleSlimCommitException propagate
+                // out of fetchSinceForStageA (per its exception contract) and
+                // are handled by the outer runSuspendCatching.
+                val outcome = fetchSinceForStageA(
+                    sessionId = sid,
+                    since = bookmark,
+                    limit = SLIMAPI_DEFAULT_PAGE_LIMIT,
+                    before = null,
+                    token = token,
+                )
+                DebugLog.d(
+                    "SlimapiResync",
+                    "coldStartSlimSync anchored /since staging-only sid=$sid " +
+                        "since=$bookmark outcome=${outcome::class.simpleName} " +
+                        "items=${(outcome as? SlimSinceStageAOutcome.Staged)?.items?.size ?: 0}",
+                )
+                null
             } else {
+                // §11.5 + §11.2 fix-4 + fix-8 P0-2: full/cursor drain is the
+                // ONLY path that may advance the watermark authoritatively.
+                // The drain + commit happens inside [drainAndCommitAuthoritative];
+                // a non-Committed result ([StaleToken] / [CacheWriteFailed] /
+                // [MergeRejected]) throws [SlimAuthoritativeCommitFailedException]
+                // which we degrade to `messages = null` (keep prior visible
+                // content + preserve dirty — §11.2 failure-branch invariant).
+                // Partial / Degraded drain likewise throws
+                // [SlimCursorPartialException] → degrade to null. The drained
+                // items NEVER reach the cold-start merge on a non-Committed /
+                // Partial / Degraded outcome (P0-2).
                 runSlimStaleAwareCatching(token) {
-                    drainSlimapiMessagesBounded(
+                    drainAndCommitAuthoritative(
                         sessionId = sid,
-                        pageLimit = SLIMAPI_DEFAULT_PAGE_LIMIT,
-                        itemBound = SLIMAPI_LOCAL_HISTORY_BOUND,
                         token = token,
                     )
                 }.getOrElse { error ->
                     if (error is OpenCodeRepository.StaleSlimCommitException) throw error
+                    // P0-2: log the specific failure for diagnostics, then
+                    // degrade to null. The caller folds null as "keep prior";
+                    // dirty stays true so the next reconcile retries.
+                    DebugLog.w(
+                        "SlimapiResync",
+                        "coldStartSlimSync drain+commit sid=$sid failed: ${error::class.simpleName} ${error.message}",
+                    )
                     null
                 }
             }
@@ -313,9 +638,23 @@ class SlimSyncEngine internal constructor(
 
     /**
      * Bounded skeleton-cursor drain façade that wraps [drainSlimapiMessagesBoundedOutcome]
-     * in a plain `List` (throws on partial / degraded). Used by the cold-start
-     * path when no bookmark exists (the no-bookmark branch of
-     * [coldStartSlimSync]).
+     * in a plain `List`. Used by the cold-start path when no bookmark exists
+     * (the no-bookmark branch of [coldStartSlimSync]).
+     *
+     * §11.5 unified state contract — ONLY [SlimDrainOutcome.Success] is
+     * surfaced as a return value. [SlimDrainOutcome.Partial] /
+     * [SlimDrainOutcome.Degraded] throw [OpenCodeRepository.SlimCursorPartialException]
+     * so the partial aggregate is NEVER fed into cold-start / reconciler /
+     * visible-content merge via this List façade. (The cold-start path's
+     * [coldStartSlimSync] no-bookmark branch degrades this throw to a null
+     * piece — "keep prior" — so partial items never reach the merge.)
+     * Diagnostic consumers that WANT the partial aggregate MUST call
+     * [drainSlimapiMessagesBoundedOutcome] directly and write it to
+     * temporary staging.
+     *
+     * §11.1 fix-6 P0-3: this façade does NOT bump the bookmark. The caller
+     * MUST drive [SlimAuthoritativeCommitter.commitAuthoritative] to advance
+     * the watermark atomically with the visible-content replacement.
      *
      * See [drainSlimapiMessagesBoundedOutcome] for the full contract.
      */
@@ -324,12 +663,20 @@ class SlimSyncEngine internal constructor(
         pageLimit: Int,
         itemBound: Int,
         token: OpenCodeRepository.SlimCommitToken,
-    ): List<MessageWithParts> = drainSlimapiMessagesBoundedOutcome(
-        sessionId = sessionId,
-        pageLimit = pageLimit,
-        itemBound = itemBound,
-        token = token,
-    ).items
+    ): List<MessageWithParts> = when (
+        val outcome = drainSlimapiMessagesBoundedOutcome(
+            sessionId = sessionId,
+            pageLimit = pageLimit,
+            itemBound = itemBound,
+            token = token,
+        )
+    ) {
+        is SlimDrainOutcome.Success -> outcome.items
+        is SlimDrainOutcome.Partial ->
+            throw OpenCodeRepository.SlimCursorPartialException(outcome.cause)
+        is SlimDrainOutcome.Degraded ->
+            throw OpenCodeRepository.SlimCursorPartialException(outcome.cause)
+    }
 
     /**
      * Bounded skeleton-cursor drain (G5 cursor follow).
@@ -340,39 +687,58 @@ class SlimSyncEngine internal constructor(
      * whichever hits first.
      *
      * Returns ONE OF:
-     *  - [SlimDrainOutcome.Success] — the walk terminated cleanly
-     *    (cursor-null, item-bound hit, or page-count cap). The local
-     *    watermark is advanced ONCE after the aggregated items (single bump).
-     *  - [SlimDrainOutcome.Partial] — a mid-walk transport / page failure
-     *    (HTTP timeout / 5xx) that MAY carry partial [items] — the local
-     *    watermark is NOT advanced (preservation of dirty). Per the
-     *    T11 round-4 contract, [bumpBookmarkOnPartialFailure] controls
-     *    whether the bookmark is bumped (default = true, but the T11
-     *    reconcile façade [fetchSlimInitialWindowBounded] passes `false`
-     *    to NOT bump on partial).
+     *  - [SlimDrainOutcome.Success] — all pages succeeded and the final
+     *    page had `nextCursor == null`. The local watermark is NOT advanced
+     *    by the drain — the caller MUST construct a
+     *    [SlimAuthoritativeCandidate] and drive
+     *    [SlimAuthoritativeCommitter.commitAuthoritative] to advance the
+     *    watermark / clear dirty / replace visible content atomically.
+     *  - [SlimDrainOutcome.Partial] — HTTP / transport / page failure,
+     *    wall-clock timeout, OR a safety bound ([itemBound] / page-count
+     *    cap) reached while the server still returned a non-null
+     *    `X-Next-Cursor`. [items] is a partial aggregate for staging /
+     *    diagnostics only. The local watermark is NOT advanced.
      *  - [SlimDrainOutcome.Degraded] — loop / zero-progress detection.
-     *    Same contract as Partial: no watermark advance.
+     *    Same contract as Partial: no watermark advance, staging-only
+     *    items.
      *
-     * BOOKMARK INVARIANT: The watermark is bumped ONCE from the aggregated
-     * [items] irrespective of how many pages contributed (single bump).
-     * The internal pages all pass `bumpBookmark = false` so each page does
-     * NOT individually bump, avoiding the over-bump hazard if a page failure
-     * had already bumped before the drain restarted. The final bump occurs
-     * in the Success/Partial/Degraded arm.
+     * §11.5 unified state contract — [itemBound] and the page-count cap
+     * are SAFETY limits, NOT completeness proof. If either bound is hit
+     * while the server's `X-Next-Cursor` is non-null, the result MUST be
+     * [SlimDrainOutcome.Partial] (cause =
+     * [SlimDrainBoundExceededException]); the walk may NOT return Success
+     * and may NOT bump the bookmark. Only an explicit terminal page
+     * (`nextCursor == null`) is Success.
      *
-     * G-F1 safety: wall-clock bound of 30 s. On timeout, surface as Partial
-     * (accumulated items preserved, dirty preserved, watermark NOT advanced —
-     * even for the T11 façade, so the next reconcile's `needsCatchUp`
-     * (which compares probe vs `localApplied*`, NOT dirty) could see
-     * "aligned" if the partial window included the server's latest, then
-     * `markSlimReconcileAligned` cleared dirty and the cursor walk switched
-     * to `/since/{partial-watermark}` → older pages permanently lost.
+     * Implementation shape (page-level check, NOT per-item):
+     *   1. fetch + aggregate the FULL page (dedup by message id)
+     *   2. check `nextCursor`:
+     *      - null → Success (NO bookmark bump — caller commits atomically)
+     *      - non-null AND `aggregated.size >= itemBound` → Partial
+     *        (SlimDrainBoundExceededException, NO bump)
+     *   3. advance `before` and loop; if the page-count cap exhausts with
+     *      a non-null cursor still pending → Partial
+     *      (SlimDrainBoundExceededException, NO bump)
+     * The per-item loop MUST NOT return Success based on `aggregated.size`
+     * alone — the page's `nextCursor` is the only completeness signal.
+     *
+     * BOOKMARK INVARIANT (fix-6 P0-3): The drain NEVER bumps the bookmark.
+     * Only [SlimAuthoritativeCommitter.commitAuthoritative] advances
+     * `localApplied*` / clears `dirty` / replaces `visibleContent` — all
+     * inside one token-guarded critical section. This guarantees that a
+     * CacheWriteFailed / StaleToken / MergeRejected leaves the old
+     * `localApplied*` / `visibleContent` / `dirty` unchanged.
+     *
+     * CE discipline: [CancellationException] (non-timeout) propagates
+     * out of [getSlimapiMessagesPage] via [runSuspendCatching] and is NOT
+     * caught here — it surfaces to the caller as a thrown CE (not as a
+     * Partial). Only [TimeoutCancellationException] (the 30 s wall-clock
+     * bound) is caught and mapped to Partial.
      */
     internal suspend fun drainSlimapiMessagesBoundedOutcome(
         sessionId: String,
         pageLimit: Int,
         itemBound: Int,
-        bumpBookmarkOnPartialFailure: Boolean = true,
         token: OpenCodeRepository.SlimCommitToken,
     ): SlimDrainOutcome {
         val aggregated = mutableListOf<MessageWithParts>()
@@ -380,12 +746,6 @@ class SlimSyncEngine internal constructor(
         var before: String? = null
         // +1 slack page for the trailing partial; ceil via Int math.
         val maxPages = (itemBound + pageLimit - 1) / pageLimit + 1
-
-        fun commitBookmarkOrThrow() {
-            if (!slimStateMachine.bumpSlimBookmarkFromItems(sessionId, aggregated, token)) {
-                throw OpenCodeRepository.StaleSlimCommitException()
-            }
-        }
 
         // G-F1: wall-clock bound for the entire cursor walk (30s). On timeout
         // surface as Partial (preserve dirty, retain aggregated items).
@@ -398,7 +758,6 @@ class SlimSyncEngine internal constructor(
                         limit = pageLimit,
                         before = before,
                         mode = "skeleton",
-                        bumpBookmark = false,
                         token = token,
                     ).getOrElse { error ->
                         // Stale incarnation is NOT an ordinary partial transport
@@ -407,10 +766,10 @@ class SlimSyncEngine internal constructor(
                             throw error
                         }
 
-                        if (bumpBookmarkOnPartialFailure) {
-                            commitBookmarkOrThrow()
-                        }
-
+                        // §11.5: Partial transport / null-body / HTTP failure —
+                        // NO bookmark bump (preserve dirty; next reconcile
+                        // retries the full cursor window from the prior
+                        // watermark).
                         return@withTimeout SlimDrainOutcome.Partial(
                             items = aggregated.toList(),
                             cause = error,
@@ -428,6 +787,7 @@ class SlimSyncEngine internal constructor(
                         (before != null && page.nextCursor == before) ||
                             (page.nextCursor != null && page.items.all { it.info.id in seen })
                     if (loopDetected) {
+                        // §11.5: NO bookmark bump on Degraded/loop-Partial.
                         // If no items aggregated at all, this is a complete failure;
                         // if some items exist, this is a degraded walk.
                         return@withTimeout if (aggregated.isEmpty()) {
@@ -444,29 +804,58 @@ class SlimSyncEngine internal constructor(
                         }
                     }
 
+                    // ── §11.5 page-level aggregate (NOT per-item cap) ───────────────
+                    // First dedup + aggregate the FULL page; do NOT return mid-item.
                     for (item in page.items) {
                         if (seen.add(item.info.id)) {
                             aggregated += item
-
-                            if (aggregated.size >= itemBound) {
-                                commitBookmarkOrThrow()
-                                return@withTimeout SlimDrainOutcome.Success(aggregated.toList())
-                            }
                         }
                     }
 
-                    if (page.nextCursor == null) {
-                        commitBookmarkOrThrow()
-                        return@withTimeout SlimDrainOutcome.Success(aggregated.toList())
+                    // ── §11.5 page-level terminal check (nextCursor FIRST) ──────────
+                    // nextCursor is the ONLY completeness signal. itemBound / page
+                    // cap are SAFETY limits, NOT proof.
+                    when {
+                        page.nextCursor == null -> {
+                            // Explicit terminal page → Success. Even if the
+                            // aggregate happens to hit itemBound on this exact
+                            // page, the server signalled end-of-history → success.
+                            // §11.1 fix-6 P0-3: do NOT bump bookmark here — the
+                            // watermark advance happens atomically inside
+                            // commitAuthoritative (via replaceLocalAppliedAndClearDirty).
+                            // Bumping here would split the "classify → commit"
+                            // atomicity: a CacheWriteFailed/StaleToken/MergeRejected
+                            // after the bump would leave localApplied advanced but
+                            // visibleContent/authoritativeLocal/dirty unchanged.
+                            return@withTimeout SlimDrainOutcome.Success(aggregated.toList())
+                        }
+
+                        aggregated.size >= itemBound -> {
+                            // Item safety bound hit while cursor is STILL non-null
+                            // → Partial. The bound is not completeness proof; the
+                            // walk has NOT exhausted history. NO bookmark bump.
+                            return@withTimeout SlimDrainOutcome.Partial(
+                                items = aggregated.toList(),
+                                cause = SlimDrainBoundExceededException(
+                                    "item bound reached before cursor exhaustion",
+                                ),
+                            )
+                        }
                     }
 
                     before = page.nextCursor
                 }
-                // Page-count safety cap reached (repeat exhausted maxPages).
-                commitBookmarkOrThrow()
-                SlimDrainOutcome.Success(aggregated.toList())
+                // Page-count safety cap exhausted with a non-null cursor still
+                // pending → Partial (NO bump; bound is not completeness proof).
+                SlimDrainOutcome.Partial(
+                    items = aggregated.toList(),
+                    cause = SlimDrainBoundExceededException(
+                        "page bound reached before cursor exhaustion",
+                    ),
+                )
             }
         } catch (e: TimeoutCancellationException) {
+            // §11.5: wall-clock timeout → Partial, NO bookmark bump.
             SlimDrainOutcome.Partial(aggregated.toList(), e)
         }
     }
@@ -478,15 +867,19 @@ class SlimSyncEngine internal constructor(
      * [drainSlimapiMessagesBoundedOutcome] in a **STRICT [Result] type** so
      * the coordinator can distinguish:
      *
-     *  - `Result.success(items)` — bounded skeleton cursor drain completed
-     *    cleanly (cursor-null, item-bound, or page-count cap). The local
-     *    watermark was advanced inside the drain via
-     *    [bumpSlimBookmarkFromItems] (single bump from aggregated items).
-     *  - `Result.failure(SlimCursorPartialException)` — mid-walk transport /
-     *    page failure detected (including loop/zero-progress), OR the
-     *    drain's max-page cap was reached with a non-null cursor still
-     *    pending (the partial cross-page aggregate is NOT surfaced — the
-     *    reconciler treats any Partial the same: preserve dirty). The local
+     * §11.1 fix-8 final contract (supersedes "cursor-null, item-bound, or
+     * page-count cap" semantics from earlier rounds):
+     *
+     *  - `Result.success(items)` — bounded skeleton cursor drain reached a
+     *    TERMINAL page (`nextCursor == null`). The local watermark is NOT
+     *    advanced by the drain — the caller MUST drive
+     *    [SlimAuthoritativeCommitter.commitAuthoritative] to advance it
+     *    atomically. An item-bound / page-count cap hit while the cursor is
+     *    STILL non-null is a [SlimDrainOutcome.Partial] (NOT Success) per
+     *    §11.5 — the cap is a SAFETY limit, not a completeness proof.
+     *  - `Result.failure(SlimCursorPartialException)` — mid-walk transport
+     *    / page failure detected (including loop / zero-progress / timeout
+     *    / item-bound / page-bound with non-null cursor). The local
      *    watermark is NOT advanced (no-bump-on-partial). The next reconcile
      *    re-enters the cursor walk from the same pre-drain watermark.
      *
@@ -505,7 +898,6 @@ class SlimSyncEngine internal constructor(
                 sessionId = sessionId,
                 pageLimit = SLIMAPI_DEFAULT_PAGE_LIMIT,
                 itemBound = SLIMAPI_LOCAL_HISTORY_BOUND,
-                bumpBookmarkOnPartialFailure = false,
                 token = token,
             )
         ) {

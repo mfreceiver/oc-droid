@@ -738,11 +738,20 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
     val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
     // G6 inputs: SSE coverage baseline + the live SSE workdir (drives shouldProbeCatchUp).
     val sseSnap = sessionSyncCoordinator.sseSyncStateSnapshot()
-    val sseWorkdir = store.connectionFlow.value.isConnected.let { connected ->
-        // The SSE feed is attached to the current workdir when connected; null
-        // when disconnected (no live feed → never SSE-covered).
-        if (connected) settingsManager.currentWorkdir else null
-    }
+    // §P0-3 (SSE-liveness wiring): gate the coverage short-circuit on REAL SSE
+    // transport liveness ([StoreState.isSseConnected]), NOT REST-health
+    // [ConnectionState.isConnected]. The two are a SEPARATE axis:
+    //  - `isConnected` reflects HEALTH-SETTLE (ConnectionHealthProbe writes the
+    //    committed REST baseline) — it can read true during a transient SSE
+    //    outage (inter-retry gap) because no health failure has occurred yet.
+    //  - `isSseConnected` reflects TRANSPORT delivery (a frame reached the
+    //    owner) — it goes false the moment the live feed tears down / gaps.
+    // Gating on `isConnected` made the coverage short-circuit believe the SSE
+    // feed was covering this workdir while it was actually NOT delivering → the
+    // REST probe was skipped → updates that arrived during the outage were
+    // missed. The SSE feed is attached to the current workdir when transport-
+    // live; null when down (no live frame → never SSE-covered).
+    val sseWorkdir = if (store.sseConnectedFlow.value) settingsManager.currentWorkdir else null
     launchCatchUp(
         scope = appScope,
         repository = repository,
@@ -856,6 +865,13 @@ internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolea
         // launchLoadMessages. 0L = legacy (MessagesMerged); > 0L = route-aware
         // (ChatContentLoaded with CAS). Guards the ENTIRE completion txn.
         expectedRouteInstance = expectedRouteInstance,
+        // §11.1 fix-9 P0-7: SSE liveness predicate — when SSE transport is
+        // NOT delivering (SseDisabled / terminal exhaustion), a first-fetch
+        // failure (non-stale IOException) retries once via unanchored REST
+        // so the user doesn't stare at a silent blank under SSE-off /
+        // degraded transport. Reads the live transport axis
+        // (StoreState.isSseConnected) via SliceFlows.
+        isSseLive = { store.slices.sseConnected },
     )
     // §Stage-D2 §5.8 B-1 busy-open: the SHARED load entry for all production
     // message loads (session switch via SessionSwitcher/VerifyAndHydrate,

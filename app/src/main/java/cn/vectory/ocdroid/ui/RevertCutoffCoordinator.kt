@@ -34,7 +34,27 @@ class RevertCutoffCoordinator(private val core: AppCore) {
                 var cursor = core.store.chatFlow.value.olderMessagesCursor
                 repeat(MAX_PAGES) {
                     if (cursor == null || terminalState != null) return@repeat
-                    val page = core.repository.getMessagesPaged(sessionId, PAGE_SIZE, cursor).getOrElse {
+                    // §11.1 fix-8 P1-2: in slim mode the anchored `/since`
+                    // facade returns SlimSinceStagingOnlyException. The
+                    // revert-cutoff walk needs OLDER history via the cursor
+                    // endpoint (NOT a /since anchored fetch), so route via
+                    // getSlimapiMessagesPage when the active connection is
+                    // slim. legacy mode keeps the original getMessagesPaged
+                    // call. The typed staging-only exception is mapped to
+                    // Failed (the revert-cutoff coordinator cannot resolve
+                    // via REST in slim stage-A without the cursor endpoint).
+                    val pageResult = if (core.repository.supportsWatermarkResync) {
+                        core.repository.getSlimapiMessagesPage(
+                            sessionId = sessionId,
+                            limit = PAGE_SIZE,
+                            before = cursor,
+                            mode = "skeleton",
+                            token = core.repository.captureSlimCommitToken(),
+                        )
+                    } else {
+                        core.repository.getMessagesPaged(sessionId, PAGE_SIZE, cursor)
+                    }
+                    val page = pageResult.getOrElse {
                         terminalState = RevertCutoffState.Failed
                         return@repeat
                     }

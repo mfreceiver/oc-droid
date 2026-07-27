@@ -7,7 +7,10 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.MessagesPage
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
+import cn.vectory.ocdroid.util.TrafficLogger
+import cn.vectory.ocdroid.util.TrafficTracker
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -15,10 +18,13 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -74,8 +80,12 @@ class CatchUpActionsTest {
         // Local newest message id m_new.
         val localNewest = Message(id = "m_new", role = "assistant", time = Message.TimeInfo(created = 100L))
         store.mutateChat { it.copy(currentSessionId = "s1", messages = listOf(localNewest)) }
-        // Server reports the same newest.
-        coEvery { repository.probeLatestMessageId("s1") } returns Result.success("m_new")
+        // Server reports the same newest (via boundary facade).
+        coEvery { repository.probeLatestMessageIdForCurrent("s1") } returns cn.vectory.ocdroid.data.repository.ProbeResult(
+            ok = true,
+            messageID = "m_new",
+            updatedAt = 100L,
+        )
 
         launchCatchUp(
             scope = scope,
@@ -100,7 +110,7 @@ class CatchUpActionsTest {
         launchCatchUp(scope, repository, slices, "s1")
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { repository.probeLatestMessageId(any()) }
+        coVerify(exactly = 0) { repository.probeLatestMessageIdForCurrent(any()) }
         assertTrue(slices.chat.value.isLoadingMessages)
     }
 
@@ -108,7 +118,11 @@ class CatchUpActionsTest {
     fun `launchCatchUp reloads tail and clears staleNotice on success`() = runTest {
         val anchor = Message(id = "anchor", role = "assistant", time = Message.TimeInfo(created = 50L))
         store.mutateChat { it.copy(currentSessionId = "s1", messages = listOf(anchor), staleNotice = true) }
-        coEvery { repository.probeLatestMessageId("s1") } returns Result.success("server-newer")
+        coEvery { repository.probeLatestMessageIdForCurrent("s1") } returns cn.vectory.ocdroid.data.repository.ProbeResult(
+            ok = true,
+            messageID = "server-newer",
+            updatedAt = 200L,
+        )
         // Fetched contains anchor (2 msgs, < probe page) → contiguous / NoGap.
         val fetched = listOf(
             MessageWithParts(info = Message(id = "anchor", role = "assistant", time = Message.TimeInfo(created = 50L))),
@@ -133,7 +147,11 @@ class CatchUpActionsTest {
         // "load more" pager, not via an automatic backfill).
         val anchor = Message(id = "anchor", role = "assistant", time = Message.TimeInfo(created = 50L))
         store.mutateChat { it.copy(currentSessionId = "s1", messages = listOf(anchor)) }
-        coEvery { repository.probeLatestMessageId("s1") } returns Result.success("server-newer")
+        coEvery { repository.probeLatestMessageIdForCurrent("s1") } returns cn.vectory.ocdroid.data.repository.ProbeResult(
+            ok = true,
+            messageID = "server-newer",
+            updatedAt = 200L,
+        )
         val fetched = (1..5).map { i ->
             MessageWithParts(info = Message(id = "new$i", role = "user", time = Message.TimeInfo(created = 100L + i)))
         }
@@ -160,7 +178,11 @@ class CatchUpActionsTest {
     @Test
     fun `launchCatchUp does not write messages for a non-current session`() = runTest {
         store.mutateChat { it.copy(currentSessionId = "current") }
-        coEvery { repository.probeLatestMessageId("other") } returns Result.success("server-new")
+        coEvery { repository.probeLatestMessageIdForCurrent("other") } returns cn.vectory.ocdroid.data.repository.ProbeResult(
+            ok = true,
+            messageID = "server-new",
+            updatedAt = 200L,
+        )
         val fetched = listOf(MessageWithParts(info = Message(id = "x", role = "user")))
         coEvery { repository.getMessagesPaged("other", any(), any()) } returns Result.success(MessagesPage(fetched, null))
 
@@ -180,7 +202,10 @@ class CatchUpActionsTest {
     @Test
     fun `launchCatchUp failure clears loading flag`() = runTest {
         store.mutateChat { it.copy(currentSessionId = "s1") }
-        coEvery { repository.probeLatestMessageId("s1") } returns Result.failure(IllegalStateException("probe failed"))
+        coEvery { repository.probeLatestMessageIdForCurrent("s1") } returns cn.vectory.ocdroid.data.repository.ProbeResult(
+            ok = false,
+            httpStatus = 500,
+        )
         coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.failure(IllegalStateException("tail fail"))
 
         launchCatchUp(scope, repository, slices, "s1")
@@ -198,7 +223,11 @@ class CatchUpActionsTest {
                 hasMoreMessages = true,
             )
         }
-        coEvery { repository.probeLatestMessageId("s1") } returns Result.success("server-new")
+        coEvery { repository.probeLatestMessageIdForCurrent("s1") } returns cn.vectory.ocdroid.data.repository.ProbeResult(
+            ok = true,
+            messageID = "server-new",
+            updatedAt = 200L,
+        )
         val fetched = listOf(MessageWithParts(info = Message(id = "new1", role = "user")))
         coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, null))
 
@@ -228,7 +257,7 @@ class CatchUpActionsTest {
         )
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { repository.probeLatestMessageId(any()) }
+        coVerify(exactly = 0) { repository.probeLatestMessageIdForCurrent(any()) }
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
@@ -253,7 +282,11 @@ class CatchUpActionsTest {
                 partsByMessage = mapOf("m_mid" to listOf(partOld)),
             )
         }
-        coEvery { repository.probeLatestMessageId("s1") } returns Result.success("m_new")
+        coEvery { repository.probeLatestMessageIdForCurrent("s1") } returns cn.vectory.ocdroid.data.repository.ProbeResult(
+            ok = true,
+            messageID = "m_new",
+            updatedAt = 200L,
+        )
         val fetched = listOf(
             MessageWithParts(info = Message(id = "m_mid", role = "assistant", time = Message.TimeInfo(created = 50L)), parts = listOf(partNew)),
             MessageWithParts(info = Message(id = "m_new", role = "user", time = Message.TimeInfo(created = 100L)), parts = listOf(partNew2)),
@@ -285,7 +318,11 @@ class CatchUpActionsTest {
         // marks the cold-snapshot baseline when this is the current session.
         val localNewest = Message(id = "m_new", role = "assistant", time = Message.TimeInfo(created = 100L))
         store.mutateChat { it.copy(currentSessionId = "s1", messages = listOf(localNewest)) }
-        coEvery { repository.probeLatestMessageId("s1") } returns Result.success("m_new")
+        coEvery { repository.probeLatestMessageIdForCurrent("s1") } returns cn.vectory.ocdroid.data.repository.ProbeResult(
+            ok = true,
+            messageID = "m_new",
+            updatedAt = 100L,
+        )
         val snapshotted = mutableListOf<String>()
 
         launchCatchUp(scope, repository, slices, "s1", onColdSnapshot = { snapshotted += it })
@@ -299,7 +336,11 @@ class CatchUpActionsTest {
     fun `launchCatchUp marks onColdSnapshot after a successful tail merge`() = runTest {
         val anchor = Message(id = "anchor", role = "assistant", time = Message.TimeInfo(created = 50L))
         store.mutateChat { it.copy(currentSessionId = "s1", messages = listOf(anchor)) }
-        coEvery { repository.probeLatestMessageId("s1") } returns Result.success("server-newer")
+        coEvery { repository.probeLatestMessageIdForCurrent("s1") } returns cn.vectory.ocdroid.data.repository.ProbeResult(
+            ok = true,
+            messageID = "server-newer",
+            updatedAt = 200L,
+        )
         val fetched = listOf(MessageWithParts(info = Message(id = "new1", role = "user", time = Message.TimeInfo(created = 100L))))
         coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = null))
         val snapshotted = mutableListOf<String>()
@@ -313,7 +354,11 @@ class CatchUpActionsTest {
     @Test
     fun `launchCatchUp does not mark onColdSnapshot on a session mismatch`() = runTest {
         store.mutateChat { it.copy(currentSessionId = "current") }
-        coEvery { repository.probeLatestMessageId("other") } returns Result.success("server-new")
+        coEvery { repository.probeLatestMessageIdForCurrent("other") } returns cn.vectory.ocdroid.data.repository.ProbeResult(
+            ok = true,
+            messageID = "server-new",
+            updatedAt = 200L,
+        )
         coEvery { repository.getMessagesPaged("other", any(), any()) } returns Result.success(
             MessagesPage(listOf(MessageWithParts(info = Message(id = "x", role = "user"))), nextCursor = null),
         )
@@ -328,7 +373,10 @@ class CatchUpActionsTest {
     @Test
     fun `launchCatchUp does not mark onColdSnapshot on a probe failure`() = runTest {
         store.mutateChat { it.copy(currentSessionId = "s1") }
-        coEvery { repository.probeLatestMessageId("s1") } returns Result.failure(IllegalStateException("probe failed"))
+        coEvery { repository.probeLatestMessageIdForCurrent("s1") } returns cn.vectory.ocdroid.data.repository.ProbeResult(
+            ok = false,
+            httpStatus = 500,
+        )
         coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.failure(IllegalStateException("tail fail"))
         val snapshotted = mutableListOf<String>()
 
@@ -336,5 +384,271 @@ class CatchUpActionsTest {
         advanceUntilIdle()
 
         assertTrue("probe failure must not establish a baseline", snapshotted.isEmpty())
+    }
+
+    // ── Task 1 (P1 lane): slim-mode probe routing ──────────────────────────
+
+    /**
+     * P1-T1: launchCatchUp MUST route the latest-message probe through the
+     * boundary facade [OpenCodeRepository.probeLatestMessageIdForCurrent] so
+     * that slim-mode hosts hit the sidecar's
+     * `GET /slimapi/messages/{sid}?limit=1&mode=skeleton` (NOT the legacy
+     * `GET /session/{sid}/message?limit=1` direct-opencode path).
+     *
+     * This test uses a REAL [OpenCodeRepository] + MockWebServer configured in
+     * slim mode and pins the actual wire path. Before the fix, the code calls
+     * `probeLatestMessageId` directly → the request hits the legacy path →
+     * this test REDs (the legacy path is never enqueued, so takeRequest
+     * times out / the path assertion fails).
+     */
+    @Test
+    fun `launchCatchUp slimMode uses slim probe path not legacy`() = runTest {
+        val server = MockWebServer()
+        server.start()
+        try {
+            DebugLog.clear()
+            val realRepo = OpenCodeRepository(
+                mockk(relaxed = true),
+                mockk(relaxed = true),
+            )
+            realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
+            realRepo.configure(
+                baseUrl = server.url("/").toString().trimEnd('/'),
+                slim = true,
+            )
+
+            // Slim-mode probe response: 200 + empty array (session exists, no
+            // messages). probeLatestSlim → ProbeResult(ok=true, empty=true).
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody("[]")
+                    .setHeader("Content-Type", "application/json"),
+            )
+
+            val localNewest = Message(id = "m_local", role = "assistant", time = Message.TimeInfo(created = 100L))
+            val testStore = SharedStateStore()
+            testStore.mutateChat { it.copy(currentSessionId = "s1", messages = listOf(localNewest)) }
+
+            launchCatchUp(
+                scope = scope,
+                repository = realRepo,
+                slices = testStore.slices,
+                sessionId = "s1",
+            )
+            advanceUntilIdle()
+
+            val request = server.takeRequest()
+            assertEquals(
+                "slim-mode probe MUST hit the sidecar path, NOT legacy /session/{sid}/message",
+                "GET",
+                request.method,
+            )
+            assertTrue(
+                "path must be slim /slimapi/messages/{sid}?limit=1&mode=skeleton, got: ${request.path}",
+                request.path!!.startsWith("/slimapi/messages/s1?"),
+            )
+            assertTrue(
+                "path must contain mode=skeleton, got: ${request.path}",
+                request.path!!.contains("mode=skeleton"),
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    // ── Task 5 (P1 lane): four-combination JVM contract test ───────────────
+
+    /**
+     * P1-T5: real JVM contract test that verifies the four call-path routings
+     * against a REAL [OpenCodeRepository] + MockWebServer configured in slim
+     * mode. Pins the exact wire paths for:
+     *
+     * 1. status  → `GET /slimapi/sessions/status?directory=` (NOT legacy `/session/status`)
+     * 2. message → `GET /slimapi/messages/{sid}/since/{ts}` (NOT legacy `/session/{sid}/message`)
+     * 3. probe   → `GET /slimapi/messages/{sid}?limit=1&mode=skeleton` (NOT legacy)
+     * 4. REST fallback → thin_route_not_found triggers single-full fallback
+     *
+     * Avoids empty-assertion enumeration: each combination asserts BOTH the
+     * path hit AND a meaningful behavioral outcome (e.g. message count,
+     * status map shape).
+     */
+    @Test
+    fun `four-combination contract - status uses slim path`() = runTest {
+        val server = MockWebServer()
+        server.start()
+        try {
+            DebugLog.clear()
+            val realRepo = OpenCodeRepository(
+                mockk(relaxed = true),
+                mockk(relaxed = true),
+            )
+            realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
+            realRepo.configure(
+                baseUrl = server.url("/").toString().trimEnd('/'),
+                slim = true,
+            )
+
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .setBody("""{"s1":{"type":"idle"},"s2":{"type":"busy"}}""")
+                    .setHeader("Content-Type", "application/json"),
+            )
+            val statusResult = realRepo.getSlimapiSessionsStatus("/proj")
+            assertTrue("status call must succeed: ${statusResult.exceptionOrNull()}", statusResult.isSuccess)
+            val statusMap = statusResult.getOrThrow()
+            assertEquals("status map carries both sessions", 2, statusMap.size)
+            assertEquals("idle", statusMap["s1"]?.type)
+            assertEquals("busy", statusMap["s2"]?.type)
+            val statusReq = server.takeRequest()
+            assertTrue(
+                "status path must be slim /slimapi/sessions/status, got: ${statusReq.path}",
+                statusReq.path!!.startsWith("/slimapi/sessions/status"),
+            )
+            assertTrue(
+                "status path must carry directory param, got: ${statusReq.path}",
+                statusReq.path!!.contains("directory=%2Fproj"),
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `four-combination contract - message since uses slim path`() = runTest {
+        val server = MockWebServer()
+        server.start()
+        try {
+            DebugLog.clear()
+            val realRepo = OpenCodeRepository(
+                mockk(relaxed = true),
+                mockk(relaxed = true),
+            )
+            realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
+            realRepo.configure(
+                baseUrl = server.url("/").toString().trimEnd('/'),
+                slim = true,
+            )
+
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .setBody("""[{"info":{"id":"m1","role":"assistant","time":{"created":100,"updated":200}},"parts":[]}]""")
+                    .setHeader("Content-Type", "application/json"),
+            )
+            val token = realRepo.captureSlimCommitToken()
+            val msgResult = realRepo.fetchSinceForStageA("s1", since = 150L, limit = 50, token = token)
+            assertTrue("message since call must succeed: $msgResult", msgResult is cn.vectory.ocdroid.data.repository.SlimSinceStageAOutcome.Staged)
+            val msgs = (msgResult as cn.vectory.ocdroid.data.repository.SlimSinceStageAOutcome.Staged).items
+            assertEquals("fetched 1 message", 1, msgs.size)
+            assertEquals("m1", msgs[0].info.id)
+            val msgReq = server.takeRequest()
+            assertTrue(
+                "message path must be slim /slimapi/messages/{sid}/since/{ts}, got: ${msgReq.path}",
+                msgReq.path!!.startsWith("/slimapi/messages/s1/since/150"),
+            )
+            assertTrue(
+                "message since must forward limit, got: ${msgReq.path}",
+                msgReq.path!!.contains("limit=50"),
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `four-combination contract - probe uses slim path`() = runTest {
+        val server = MockWebServer()
+        server.start()
+        try {
+            DebugLog.clear()
+            val realRepo = OpenCodeRepository(
+                mockk(relaxed = true),
+                mockk(relaxed = true),
+            )
+            realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
+            realRepo.configure(
+                baseUrl = server.url("/").toString().trimEnd('/'),
+                slim = true,
+            )
+
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .setBody("""[{"info":{"id":"m_newest","role":"assistant","time":{"created":300,"updated":400}},"parts":[]}]""")
+                    .setHeader("Content-Type", "application/json"),
+            )
+            val probeResult = realRepo.probeLatestSlim("s1")
+            assertTrue("probe must be ok", probeResult.ok)
+            assertEquals("m_newest", probeResult.messageID)
+            assertEquals(400L, probeResult.updatedAt)
+            val probeReq = server.takeRequest()
+            assertTrue(
+                "probe path must be slim /slimapi/messages/{sid}?limit=1&mode=skeleton, got: ${probeReq.path}",
+                probeReq.path!!.startsWith("/slimapi/messages/s1?"),
+            )
+            assertTrue(
+                "probe must contain mode=skeleton, got: ${probeReq.path}",
+                probeReq.path!!.contains("mode=skeleton"),
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `four-combination contract - REST fallback thin_route_not_found`() = runBlocking {
+        // Real OpenCodeRepository + MockWebServer socket IO + production
+        // withTimeout budget — must use runBlocking (real time), not runTest
+        // virtual time. Same discipline as OpenCodeRepositoryExpandBudgetTest /
+        // OpenCodeRepositorySlimapiEndpointsTest expand cases.
+        val server = MockWebServer()
+        server.start()
+        try {
+            DebugLog.clear()
+            val realRepo = OpenCodeRepository(
+                mockk(relaxed = true),
+                mockk(relaxed = true),
+            )
+            realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
+            realRepo.configure(
+                baseUrl = server.url("/").toString().trimEnd('/'),
+                slim = true,
+            )
+
+            // thin_route_not_found → single-full fallback
+            server.enqueue(
+                MockResponse().setResponseCode(404)
+                    .setBody("""{"code":"thin_route_not_found"}""")
+                    .setHeader("Content-Type", "application/json"),
+            )
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .setBody("""{"info":{"id":"m_full","role":"user"},"parts":[{"id":"p1","type":"text","text":"expanded"}]}""")
+                    .setHeader("Content-Type", "application/json"),
+            )
+
+            // Capture token BEFORE the call to avoid token rotation issues
+            val token = realRepo.captureSlimCommitToken()
+            val expandResult = realRepo.expandMessagesFullBatch(sessionId = "s1", ids = listOf("m_full"), token = token)
+            assertTrue(
+                "thin_route_not_found must fall back to single-full (Ok). Actual: ${expandResult::class.simpleName} $expandResult",
+                expandResult is cn.vectory.ocdroid.data.repository.ExpandOutcome.Ok,
+            )
+            val ok = expandResult as cn.vectory.ocdroid.data.repository.ExpandOutcome.Ok
+            assertFalse("fallback path must mark usedBatch=false", ok.usedBatch)
+            assertEquals("m_full loaded via fallback", listOf("m_full"), ok.items.map { it.info.id })
+            val batchReq = server.takeRequest()
+            assertTrue(
+                "batch probe path must be /slimapi/messages/{sid}/full?ids=, got: ${batchReq.path}",
+                batchReq.path!!.startsWith("/slimapi/messages/s1/full?ids="),
+            )
+            val fallbackReq = server.takeRequest()
+            assertEquals(
+                "fallback single-full path, got: ${fallbackReq.path}",
+                "/slimapi/messages/s1/full/m_full",
+                fallbackReq.path,
+            )
+        } finally {
+            server.shutdown()
+        }
     }
 }

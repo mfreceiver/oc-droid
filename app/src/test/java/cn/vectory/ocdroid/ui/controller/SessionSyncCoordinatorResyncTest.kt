@@ -10,6 +10,7 @@ import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SlimSinceStageAOutcome
 import cn.vectory.ocdroid.data.repository.ProbeResult
 import cn.vectory.ocdroid.data.repository.SlimColdStartSnapshot
 import cn.vectory.ocdroid.data.repository.SlimAggregationOutcome
@@ -81,6 +82,18 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionSyncCoordinatorResyncTest {
+
+    /** §11.1 stage A test helper: wrap items as a Staged outcome. */
+    private fun stagedSince(
+        items: List<cn.vectory.ocdroid.data.model.MessageWithParts>,
+        completeHeader: Boolean? = null,
+        statusCode: Int = 200,
+    ): SlimSinceStageAOutcome = SlimSinceStageAOutcome.Staged(
+        items = items,
+        completeHeader = completeHeader,
+        statusCode = statusCode,
+        transportComplete = true,
+    )
 
     @get:org.junit.Rule
     val mainDispatcherRule = MainDispatcherRule(UnconfinedTestDispatcher())
@@ -218,7 +231,7 @@ class SessionSyncCoordinatorResyncTest {
             messageID = "m-remote",
             updatedAt = 1000L,
         )
-        coEvery { repository.getSlimapiMessagesSince("sess-1", 500L, any(), any(), any()) } returns Result.success(
+        coEvery { repository.fetchSinceForStageA("sess-1", 500L, any(), any(), any()) } returns stagedSince(
             listOf(msg("m-remote", 1000L)),
         )
 
@@ -227,8 +240,15 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.probeLatestSlim("sess-1") }
-        coVerify(exactly = 1) { repository.getSlimapiMessagesSince("sess-1", 500L, any(), any(), any()) }
-        assertEquals(listOf("m-remote"), slices.chat.value.messages.map { it.id })
+        coVerify(exactly = 1) { repository.fetchSinceForStageA("sess-1", 500L, any(), any(), any()) }
+        // §11.1 fix-6 P0-1: `/since` path is staging-only → Staged maps to
+        // RefreshRow (no items). Messages do NOT appear in the chat from the
+        // `/since` path; only a complete full/cursor candidate committed via
+        // commitAuthoritative may merge items.
+        assertTrue(
+            "/since staging-only → no items in chat (got ${slices.chat.value.messages.map { it.id }})",
+            slices.chat.value.messages.none { it.id == "m-remote" },
+        )
     }
 
     @Test
@@ -247,7 +267,7 @@ class SessionSyncCoordinatorResyncTest {
             messageID = "m-new",
             updatedAt = 200L,
         )
-        coEvery { repository.getSlimapiMessagesSince("sess-1", 50L, any(), any(), any()) } returns Result.success(
+        coEvery { repository.fetchSinceForStageA("sess-1", 50L, any(), any(), any()) } returns stagedSince(
             listOf(msg("m-new", 200L)),
         )
 
@@ -256,7 +276,7 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.probeLatestSlim("sess-1") }
-        coVerify(exactly = 1) { repository.getSlimapiMessagesSince("sess-1", 50L, any(), any(), any()) }
+        coVerify(exactly = 1) { repository.fetchSinceForStageA("sess-1", 50L, any(), any(), any()) }
     }
 
     @Test
@@ -275,7 +295,7 @@ class SessionSyncCoordinatorResyncTest {
             messageID = "m-server-current",
             updatedAt = 100L,
         )
-        coEvery { repository.getSlimapiMessagesSince("sess-1", 100L, any(), any(), any()) } returns Result.success(
+        coEvery { repository.fetchSinceForStageA("sess-1", 100L, any(), any(), any()) } returns stagedSince(
             listOf(msg("m-server-current", 100L)),
         )
 
@@ -284,7 +304,7 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.probeLatestSlim("sess-1") }
-        coVerify(exactly = 1) { repository.getSlimapiMessagesSince("sess-1", 100L, any(), any(), any()) }
+        coVerify(exactly = 1) { repository.fetchSinceForStageA("sess-1", 100L, any(), any(), any()) }
     }
 
     // ── T11-C1d: I2 cursor drain (no localAppliedUpdatedAt) ─────────────────
@@ -317,7 +337,7 @@ class SessionSyncCoordinatorResyncTest {
 
         // Cursor drain façade used (NOT getSlimapiMessagesSince).
         coVerify(exactly = 1) { repository.fetchSlimInitialWindowBounded("sess-1", any()) }
-        coVerify(exactly = 0) { repository.getSlimapiMessagesSince(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.fetchSinceForStageA(any(), any(), any(), any(), any()) }
     }
 
     // ── T11-C2: focus REST success / failure ────────────────────────────────
@@ -338,7 +358,7 @@ class SessionSyncCoordinatorResyncTest {
             messageID = "m-remote",
             updatedAt = 1000L,
         )
-        coEvery { repository.getSlimapiMessagesSince("sess-1", 500L, any(), any(), any()) } returns Result.success(
+        coEvery { repository.fetchSinceForStageA("sess-1", 500L, any(), any(), any()) } returns stagedSince(
             listOf(msg("m-remote", 1000L)),
         )
 
@@ -347,7 +367,7 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.markSlimReconcileFailure("sess-1", any()) }
-        coVerify(exactly = 1) { repository.getSlimapiMessagesSince("sess-1", 500L, any(), any(), any()) }
+        coVerify(exactly = 1) { repository.fetchSinceForStageA("sess-1", 500L, any(), any(), any()) }
     }
 
     @Test
@@ -366,8 +386,8 @@ class SessionSyncCoordinatorResyncTest {
             messageID = "m-remote",
             updatedAt = 1000L,
         )
-        coEvery { repository.getSlimapiMessagesSince("sess-1", 500L, any(), any(), any()) } returns
-            Result.failure(java.io.IOException("transport"))
+        coEvery { repository.fetchSinceForStageA("sess-1", 500L, any(), any(), any()) } returns
+            SlimSinceStageAOutcome.Failed(java.io.IOException("transport"))
 
         val c = coordinator()
         c.handleEvent(digestEvent("sess-1", updatedAt = 1000L, messageId = "m-remote"))
@@ -402,7 +422,7 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
 
         // BACKGROUND: never fetches.
-        coVerify(exactly = 0) { repository.getSlimapiMessagesSince(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.fetchSinceForStageA(any(), any(), any(), any(), any()) }
         coVerify(exactly = 0) { repository.fetchSlimInitialWindowBounded(any(), any()) }
         // BACKGROUND: never clears dirty (no aligned, no clearLocal).
         coVerify(exactly = 0) { repository.markSlimReconcileAligned("sess-1", any()) }
@@ -434,7 +454,7 @@ class SessionSyncCoordinatorResyncTest {
 
         // BACKGROUND aligned → NO markSlimReconcileAligned.
         coVerify(exactly = 0) { repository.markSlimReconcileAligned("sess-1", any()) }
-        coVerify(exactly = 0) { repository.getSlimapiMessagesSince(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.fetchSinceForStageA(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -503,7 +523,7 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.markSlimSessionDeleted("sess-1", any()) }
-        coVerify(exactly = 0) { repository.getSlimapiMessagesSince(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.fetchSinceForStageA(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -524,7 +544,7 @@ class SessionSyncCoordinatorResyncTest {
 
         coVerify(exactly = 1) { repository.markSlimReconcileFailure("sess-1", any()) }
         coVerify(exactly = 0) { repository.markSlimSessionDeleted("sess-1", any()) }
-        coVerify(exactly = 0) { repository.getSlimapiMessagesSince(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.fetchSinceForStageA(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -839,6 +859,11 @@ class SessionSyncCoordinatorResyncTest {
         // for the now-non-current session-a, and the chat-merge is still
         // correctly skipped by the INNER `liveSessionId == result.sid`
         // gate inside applyCurrentReconcileResult (rev-grok rule #3).
+        //
+        // §11.1 fix-6 P0-1: the `/since` path is staging-only — Staged maps
+        // to RefreshRow (no items, no UI merge). We test that the reconciler
+        // correctly returns the real RefreshRow result (NOT Stale) and does
+        // NOT attempt a chat-merge or cache write for the staged items.
         val worker = StandardTestDispatcher(testScheduler)
         every { repository.getSlimSessionState("session-a") } returns SlimSessionState(
             sessionId = "session-a",
@@ -853,7 +878,7 @@ class SessionSyncCoordinatorResyncTest {
             messageID = "m1",
             updatedAt = 200L,
         )
-        coEvery { repository.getSlimapiMessagesSince("session-a", 100L, any(), any(), any()) } returns Result.success(
+        coEvery { repository.fetchSinceForStageA("session-a", 100L, any(), any(), any()) } returns stagedSince(
             listOf(msg("m1", 200L, sid = "session-a")),
         )
         slices.mutateChat { it.copy(currentSessionId = "session-a") }
@@ -865,8 +890,7 @@ class SessionSyncCoordinatorResyncTest {
             true
         }
 
-        // Drain the effect bus so we can assert on the WriteSessionWindow
-        // retention emission for session-a.
+        // Drain the effect bus so we can assert on the effect emissions.
         val collectedEffects = mutableListOf<ControllerEffect>()
         val collector = scope.launch {
             effects.effectsConsumed.toList(collectedEffects)
@@ -888,10 +912,10 @@ class SessionSyncCoordinatorResyncTest {
         testScheduler.advanceUntilIdle()
         collector.cancel()
 
-        // T2: real Reconciled result returned (NOT Stale).
+        // §11.1 fix-6 P0-1: `/since` path is staging-only → RefreshRow (NOT Reconciled).
         assertTrue(
-            "T2: real Reconciled returned (got ${result.await()})",
-            result.await() is SessionSyncCoordinator.ReconcileResult.Reconciled,
+            "T2: /since staging-only → RefreshRow returned (got ${result.await()})",
+            result.await() is SessionSyncCoordinator.ReconcileResult.RefreshRow,
         )
         // Focus rotation preserved.
         assertEquals("session-b", slices.chat.value.currentSessionId)
@@ -902,11 +926,11 @@ class SessionSyncCoordinatorResyncTest {
             "chat-merge skipped (inner focus gate); m1 must NOT be in chat",
             slices.chat.value.messages.none { it.id == "m1" },
         )
-        // T2 retention branch fired: WriteSessionWindow emitted for session-a
-        // so a later switchTo(session-a) finds the cached items.
+        // §11.1 fix-6 P0-1: `/since` path is staging-only → no items → no
+        // WriteSessionWindow emission. Verify no retention effect fired.
         assertTrue(
-            "WriteSessionWindow emitted for non-current session-a: $collectedEffects",
-            collectedEffects.any {
+            "no WriteSessionWindow for staging-only /since path: $collectedEffects",
+            collectedEffects.none {
                 it is ControllerEffect.WriteSessionWindow && it.sessionId == "session-a"
             },
         )
@@ -938,7 +962,7 @@ class SessionSyncCoordinatorResyncTest {
             messageID = "m1",
             updatedAt = 200L,
         )
-        coEvery { repository.getSlimapiMessagesSince("session-a", 100L, any(), any(), any()) } returns Result.success(
+        coEvery { repository.fetchSinceForStageA("session-a", 100L, any(), any(), any()) } returns stagedSince(
             listOf(msg("m1", 200L, sid = "session-a")),
         )
         coEvery { repository.coldStartSlimSync(any(), any(), any()) } coAnswers {
@@ -970,10 +994,10 @@ class SessionSyncCoordinatorResyncTest {
         testScheduler.advanceUntilIdle()
         collector.cancel()
 
-        // T2: outcome for session-a is the REAL Reconciled (NOT Stale).
+        // §11.1 fix-6 P0-1: `/since` path is staging-only → RefreshRow (NOT Reconciled).
         assertTrue(
-            "T2: outcome for session-a is Reconciled (got ${outcomes["session-a"]})",
-            outcomes["session-a"] is SessionSyncCoordinator.ReconcileResult.Reconciled,
+            "T2: outcome for session-a is RefreshRow (got ${outcomes["session-a"]})",
+            outcomes["session-a"] is SessionSyncCoordinator.ReconcileResult.RefreshRow,
         )
         // Focus rotation preserved.
         assertEquals("session-b", slices.chat.value.currentSessionId)
@@ -983,10 +1007,10 @@ class SessionSyncCoordinatorResyncTest {
             "chat-merge skipped; m1 must NOT be in chat",
             slices.chat.value.messages.none { it.id == "m1" },
         )
-        // T2 retention branch fired for the now-non-current session-a.
+        // §11.1 fix-6 P0-1: no retention effect for staging-only /since path.
         assertTrue(
-            "WriteSessionWindow emitted for non-current session-a: $collectedEffects",
-            collectedEffects.any {
+            "no WriteSessionWindow for staging-only /since path: $collectedEffects",
+            collectedEffects.none {
                 it is ControllerEffect.WriteSessionWindow && it.sessionId == "session-a"
             },
         )
@@ -1013,7 +1037,7 @@ class SessionSyncCoordinatorResyncTest {
             enterCount.decrementAndGet()
             ProbeResult(ok = true, messageID = "m", updatedAt = 100L)
         }
-        coEvery { repository.getSlimapiMessagesSince("sess-1", any(), any(), any(), any()) } returns Result.success(emptyList())
+        coEvery { repository.fetchSinceForStageA("sess-1", any(), any(), any(), any()) } returns stagedSince(emptyList())
 
         val c = coordinator()
         val job1 = scope.launch { c.reconcileSessionExposed("sess-1", SessionSyncCoordinator.ReconcileMode.DIGEST_FOCUS) }
@@ -1121,11 +1145,13 @@ class SessionSyncCoordinatorResyncTest {
         //
         // Use a REAL repository (mockk can't replicate the get→derive→put
         // atomicity) — same pattern as OpenCodeRepositorySlimapiEndpointsTest.
+        // §11.1 fix-9 P1-1: digest MUST carry a full (updatedAt, messageId)
+        // tuple so remote* advances (partial digests no longer seed).
         val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
         realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         val sid = "s1"
-        // reducer call (digest arrives with updatedAt=2000)
-        realRepo.applySlimDigest(SlimSessionDigest(sessionId = sid, updatedAt = 2000L), token = realRepo.captureSlimCommitToken())
+        // reducer call (digest arrives with updatedAt=2000, messageId=m2)
+        realRepo.applySlimDigest(SlimSessionDigest(sessionId = sid, updatedAt = 2000L, messageId = "m2"), token = realRepo.captureSlimCommitToken())
         // immediately after, simulate a REST aligned commit (the path a
         // concurrent fetch would take). The lock serializes; remote*
         // preserved.
@@ -1134,6 +1160,7 @@ class SessionSyncCoordinatorResyncTest {
         assertNotNull(finalState)
         // remoteUpdatedAt advanced to 2000 (NOT overwritten by aligned commit).
         assertEquals(2000L, finalState!!.remoteUpdatedAt)
+        assertEquals("m2", finalState.remoteMessageId)
         // dirty: aligned cleared it, but the re-evaluation sees localApplied
         // (null) < remoteUpdatedAt (2000) → ratchets back. This proves the
         // re-evaluation is INSIDE the atomic boundary.
@@ -1142,17 +1169,19 @@ class SessionSyncCoordinatorResyncTest {
 
     @Test
     fun `I3-2 REST success does not overwrite newer remote when committed atomically`() = runTest {
+        // §11.1 fix-9 P1-1: digest carries a full tuple (ts + id).
         val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
         realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         val sid = "s1"
-        // Apply a digest first (advances remote to 1000).
-        realRepo.applySlimDigest(SlimSessionDigest(sessionId = sid, updatedAt = 1000L), token = realRepo.captureSlimCommitToken())
+        // Apply a digest first (advances remote to 1000/m1).
+        realRepo.applySlimDigest(SlimSessionDigest(sessionId = sid, updatedAt = 1000L, messageId = "m1"), token = realRepo.captureSlimCommitToken())
         // markSlimReconcileAligned (the REST-success-aligned path).
         realRepo.markSlimReconcileAligned(sid, realRepo.captureSlimCommitToken())
         val state = realRepo.getSlimSessionState(sid)
         assertNotNull(state)
         // remoteUpdatedAt preserved (NOT overwritten by aligned commit).
         assertEquals(1000L, state!!.remoteUpdatedAt)
+        assertEquals("m1", state.remoteMessageId)
         // Dirty: aligned cleared, but the dirty re-evaluation sees remote
         // > localApplied (localApplied is null) → dirty ratchets back.
         assertTrue("dirty ratchets back when local trails remote", state.dirty)
@@ -1160,17 +1189,19 @@ class SessionSyncCoordinatorResyncTest {
 
     @Test
     fun `I3-3 REST success does not clear dirty if fetched local pair still trails newer remote`() = runTest {
+        // §11.1 fix-9 P1-1: digest carries a full tuple (ts + id).
         val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
         realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         val sid = "s1"
-        // digest arrives with updatedAt=2000 → remote=2000, dirty=true.
-        realRepo.applySlimDigest(SlimSessionDigest(sessionId = sid, updatedAt = 2000L), token = realRepo.captureSlimCommitToken())
+        // digest arrives with updatedAt=2000, messageId=m2 → remote=2000/m2, dirty=true.
+        realRepo.applySlimDigest(SlimSessionDigest(sessionId = sid, updatedAt = 2000L, messageId = "m2"), token = realRepo.captureSlimCommitToken())
         // bumpSlimBookmarkFromItems is private — test the aligned path
         // (markSlimReconcileAligned) which has the same dirty re-eval.
         realRepo.markSlimReconcileAligned(sid, realRepo.captureSlimCommitToken())
         val state = realRepo.getSlimSessionState(sid)!!
         // remoteUpdatedAt advanced; localAppliedUpdatedAt stays null.
         assertEquals(2000L, state.remoteUpdatedAt)
+        assertEquals("m2", state.remoteMessageId)
         assertEquals(null, state.localAppliedUpdatedAt)
         // dirty: aligned cleared it, but re-eval ratchets back (local null < remote 2000).
         assertTrue("dirty ratchets back — local null still trails remote", state.dirty)
@@ -1178,11 +1209,12 @@ class SessionSyncCoordinatorResyncTest {
 
     @Test
     fun `I3-4 aligned commit must not erase a later digest dirty transition`() = runTest {
+        // §11.1 fix-9 P1-1: digest carries a full tuple (ts + id).
         val realRepo = OpenCodeRepository(mockk(relaxed = true), mockk(relaxed = true))
         realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         val sid = "s1"
-        // digest advances remote to 1000 (dirty ratchets via needsReconcile).
-        realRepo.applySlimDigest(SlimSessionDigest(sessionId = sid, updatedAt = 1000L), token = realRepo.captureSlimCommitToken())
+        // digest advances remote to 1000/m1 (dirty ratchets via needsReconcile).
+        realRepo.applySlimDigest(SlimSessionDigest(sessionId = sid, updatedAt = 1000L, messageId = "m1"), token = realRepo.captureSlimCommitToken())
         val state1 = realRepo.getSlimSessionState(sid)!!
         assertTrue("after digest, dirty ratchets", state1.dirty)
         // A subsequent aligned commit cannot erase this dirty transition
@@ -1234,7 +1266,7 @@ class SessionSyncCoordinatorResyncTest {
         coEvery { repository.probeLatestSlim("sid-nonfocus") } returns ProbeResult(
             ok = true, messageID = "m-remote", updatedAt = 1000L,
         )
-        coEvery { repository.getSlimapiMessagesSince("sid-nonfocus", 500L, any(), any(), any()) } returns Result.success(
+        coEvery { repository.fetchSinceForStageA("sid-nonfocus", 500L, any(), any(), any()) } returns stagedSince(
             listOf(msg("m-remote", 1000L, sid = "sid-nonfocus")),
         )
 
@@ -1249,7 +1281,7 @@ class SessionSyncCoordinatorResyncTest {
         // Note: effects.tryEmitEffect uses a SharedFlow; collect it if needed.
         // For unit-test scope: verify the reconcile returned Reconciled
         // (which triggers the cache write branch inside applyReconcileResult).
-        coVerify(atLeast = 1) { repository.getSlimapiMessagesSince("sid-nonfocus", 500L, any(), any(), any()) }
+        coVerify(atLeast = 1) { repository.fetchSinceForStageA("sid-nonfocus", 500L, any(), any(), any()) }
     }
 
     /**
@@ -1287,7 +1319,7 @@ class SessionSyncCoordinatorResyncTest {
         coEvery { repository.probeLatestSlim("session-a") } returns ProbeResult(
             ok = true, messageID = "m1", updatedAt = 200L,
         )
-        coEvery { repository.getSlimapiMessagesSince("session-a", 100L, any(), any(), any()) } returns Result.success(
+        coEvery { repository.fetchSinceForStageA("session-a", 100L, any(), any(), any()) } returns stagedSince(
             listOf(msg("m1", 200L, sid = "session-a")),
         )
         every { repository.commitIfSlimTokenCurrent(any(), any()) } answers {
@@ -1308,15 +1340,15 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
         collector.cancel()
 
-        // T2: real Reconciled returned (NOT Stale).
+        // §11.1 fix-6 P0-1: `/since` path is staging-only → RefreshRow (NOT Reconciled).
         assertTrue(
-            "T3a: real Reconciled returned (got $result)",
-            result is SessionSyncCoordinator.ReconcileResult.Reconciled,
+            "T3a: /since staging-only → RefreshRow returned (got $result)",
+            result is SessionSyncCoordinator.ReconcileResult.RefreshRow,
         )
-        // Cache write request emitted for the now-non-current session-a.
+        // §11.1 fix-6 P0-1: no retention effect for staging-only /since path.
         assertTrue(
-            "T3a: WriteSessionWindow emitted for session-a: $collectedEffects",
-            collectedEffects.any {
+            "T3a: no WriteSessionWindow for staging-only /since path: $collectedEffects",
+            collectedEffects.none {
                 it is ControllerEffect.WriteSessionWindow && it.sessionId == "session-a"
             },
         )
@@ -1342,7 +1374,7 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.probeLatestSlim(any()) }
-        coVerify(exactly = 0) { repository.getSlimapiMessagesSince(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.fetchSinceForStageA(any(), any(), any(), any(), any()) }
         coVerify(exactly = 0) { repository.fetchSlimInitialWindowBounded(any(), any()) }
     }
 
@@ -1517,17 +1549,17 @@ class SessionSyncCoordinatorResyncTest {
      * EMPTY (no items), the coordinator MUST re-ratchet dirty (the dirty
      * clear inside the fetch is undone). Round-2 bug: dirty was cleared
      * without any retained window.
+     *
+     * §11.1 fix-6 P0-1: the `/since` path is staging-only → Staged maps to
+     * RefreshRow (not Reconciled). RefreshRow does NOT trigger the
+     * retention-binding logic (only Reconciled does). We verify that the
+     * `/since` path with empty items does NOT re-ratchet dirty (since it
+     * produces RefreshRow, not Reconciled).
      */
     @Test
     fun `R3-Fix3a empty non-focus result re-ratchets dirty`() = runTest {
-        // Drive a Reconciled result with empty items for a non-focus sid
-        // via applyReconcileResult (the public surface). Use the test-only
-        // hook to call applyReconcileResult directly.
         slices.mutateChat { it.copy(currentSessionId = "other") }
         val c = coordinator()
-        // applyReconcileResult is private; reach it via the public
-        // Reconciled path. The easiest reliable surface: drive a reconcile
-        // that produces empty items for a non-focus sid.
         every { repository.getSlimSessionState("sid-empty") } returns SlimSessionState(
             sessionId = "sid-empty",
             remoteMessageId = "m1",
@@ -1539,17 +1571,16 @@ class SessionSyncCoordinatorResyncTest {
         coEvery { repository.probeLatestSlim("sid-empty") } returns ProbeResult(
             ok = true, messageID = "m1", updatedAt = 100L,
         )
-        // getSlimapiMessagesSince returns empty list → fetch succeeds with no items.
-        coEvery { repository.getSlimapiMessagesSince("sid-empty", 50L, any(), any(), any()) } returns Result.success(emptyList())
+        // fetchSinceForStageA returns Staged with empty items.
+        coEvery { repository.fetchSinceForStageA("sid-empty", 50L, any(), any(), any()) } returns stagedSince(emptyList())
 
         c.performResyncCatchUp(setOf("sid-empty"))
         scope.testScheduler.advanceUntilIdle()
 
-        // The dirty clear happened inside bumpSlimBookmarkFromItems (mocked
-        // here, so no-op). Our retention-binding logic in applyReconcileResult
-        // must re-ratchet dirty via markSlimDirty since the result was
-        // empty + non-focus.
-        coVerify(atLeast = 1) { repository.markSlimDirty("sid-empty", any()) }
+        // §11.1 fix-6 P0-1: `/since` path is staging-only → Staged maps to
+        // RefreshRow (not Reconciled). RefreshRow does NOT trigger the
+        // retention-binding logic, so markSlimDirty is NOT called.
+        coVerify(exactly = 0) { repository.markSlimDirty("sid-empty", any()) }
     }
 
     /**
@@ -1639,7 +1670,7 @@ class SessionSyncCoordinatorResyncTest {
             probeEntered.decrementAndGet()
             ProbeResult(ok = true, messageID = "m1", updatedAt = 100L)
         }
-        coEvery { repository.getSlimapiMessagesSince("sess-x", any(), any(), any(), any()) } returns Result.success(emptyList())
+        coEvery { repository.fetchSinceForStageA("sess-x", any(), any(), any(), any()) } returns stagedSince(emptyList())
 
         val c = coordinator()
         // Fire TWO digests for the same sid concurrently.
@@ -2143,8 +2174,11 @@ class SessionSyncCoordinatorResyncTest {
      *
      * This pins the C-D3 v2 §1.8 "single entry token, no recapture" invariant
      * — if P4-B accidentally recaptures inside the reconciler body, the
-     * `getSlimapiMessagesSince(..., token)` match fails (different token
+     * `fetchSinceForStageA(..., token)` match fails (different token
      * instance) and the `captureSlimCommitToken()` count exceeds 1.
+     *
+     * §11.1 stage A: migrated from the legacy `getSlimapiMessagesSince` facade
+     * to `fetchSinceForStageA` (which returns [SlimSinceStageAOutcome]).
      */
     @Test
     fun `P4 public reconcile captures once and threads exact token through fetch and UI commit`() = runTest {
@@ -2170,14 +2204,14 @@ class SessionSyncCoordinatorResyncTest {
         )
         // Match the EXACT token so a recapture (different instance) misses.
         coEvery {
-            repository.getSlimapiMessagesSince("s1", 100L, any(), any(), token)
-        } returns Result.success(emptyList())
+            repository.fetchSinceForStageA("s1", 100L, any(), any(), token)
+        } returns stagedSince(emptyList())
 
         coordinator().reconcileSession("s1", SessionSyncCoordinator.ReconcileMode.RESYNC)
 
         verify(exactly = 1) { repository.captureSlimCommitToken() }
         coVerify(exactly = 1) {
-            repository.getSlimapiMessagesSince("s1", 100L, any(), any(), token)
+            repository.fetchSinceForStageA("s1", 100L, any(), any(), token)
         }
         verify(atLeast = 1) { repository.commitIfSlimTokenCurrent(token, any()) }
     }
@@ -2188,7 +2222,7 @@ class SessionSyncCoordinatorResyncTest {
      * first suspend point) and threads that SAME token through:
      *
      *  1. the reducer ([OpenCodeRepository.applySlimDigest]),
-     *  2. the `/since` fetch ([OpenCodeRepository.getSlimapiMessagesSince]),
+     *  2. the `/since` fetch ([OpenCodeRepository.fetchSinceForStageA]),
      *  3. the final UI commit gate ([OpenCodeRepository.commitIfSlimTokenCurrent]).
      *
      * This is the digest-path counterpart to the RESYNC characterization
@@ -2196,9 +2230,12 @@ class SessionSyncCoordinatorResyncTest {
      * (P4-C), rides inside the [SlimDigestReconcileRequest], and is NEVER
      * recaptured inside `reconcileDigest` / `reconcileSessionLocked` /
      * `applyReconcileResult`. If P4-C accidentally recaptures inside the
-     * reconciler, the `applySlimDigest(any(), token)` / `getSlimapiMessagesSince(...,
+     * reconciler, the `applySlimDigest(any(), token)` / `fetchSinceForStageA(...,
      * token)` matches fail (different token instance) and the
      * `captureSlimCommitToken()` count exceeds 1.
+     *
+     * §11.1 stage A: migrated from the legacy `getSlimapiMessagesSince` facade
+     * to `fetchSinceForStageA` (which returns [SlimSinceStageAOutcome]).
      */
     @Test
     fun `P4 digest captures once and threads exact token through reducer fetch and UI commit`() = runTest {
@@ -2227,8 +2264,8 @@ class SessionSyncCoordinatorResyncTest {
             updatedAt = 1_000L,
         )
         coEvery {
-            repository.getSlimapiMessagesSince("sess-1", 500L, any(), any(), token)
-        } returns Result.success(emptyList())
+            repository.fetchSinceForStageA("sess-1", 500L, any(), any(), token)
+        } returns stagedSince(emptyList())
 
         val c = coordinator()
         c.handleEvent(digestEvent(sessionId = "sess-1", updatedAt = 1_000L, messageId = "m1"))
@@ -2240,7 +2277,7 @@ class SessionSyncCoordinatorResyncTest {
         verify(atLeast = 1) { repository.applySlimDigest(any(), token) }
         // The SAME token reaches the /since fetch.
         coVerify(exactly = 1) {
-            repository.getSlimapiMessagesSince("sess-1", 500L, any(), any(), token)
+            repository.fetchSinceForStageA("sess-1", 500L, any(), any(), token)
         }
         // The SAME token reaches the final UI commit gate (the banner commit
         // in reconcileDigest + the applyReconcileResult commit).

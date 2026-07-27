@@ -24,17 +24,31 @@ import cn.vectory.ocdroid.util.DebugLog
  *    digest reducer ([reduceSlimDigest]) — every digest observation
  *    ratchets these forward (or leaves them on a stale / re-emitted
  *    digest). The reducer NEVER rolls them back.
- *  - [localAppliedUpdatedAt] / [localAppliedMessageId]: advanced ONLY by
- *    [onReconcileSuccess] (pure function in [SlimapiResync]). The digest
- *    reducer NEVER touches these. This is the core invariant — "applied"
- *    means a REST fetch succeeded and the result was merged into the
- *    local message cache.
+ *  - [localAppliedUpdatedAt] / [localAppliedMessageId]: advanced by
+ *    [onReconcileSuccess] (pure function in [SlimapiResync]) AND by
+ *    [SlimSseStateMachine.replaceLocalAppliedAndClearDirtyLocked] (the
+ *    §11.2 committer's in-lock write). The digest reducer NEVER touches
+ *    these directly. This is the core invariant — "applied" means a REST
+ *    fetch succeeded and the result was committed via the authoritative
+ *    commit protocol.
  *  - [dirty]: ratcheted to `true` by the digest reducer when
  *    [needsReconcile] holds after the merge (the local view is behind the
- *    remote view). Cleared to `false` ONLY by [onReconcileSuccess].
- *    [onReconcileFailure] preserves it. Non-focus digests set `dirty`
- *    but never clear it (T6-C3) — clearing is deferred to the next
- *    reconcile pass.
+ *    remote view). Cleared to `false` by the committer
+ *    ([SlimSseStateMachine.replaceLocalAppliedAndClearDirtyLocked]),
+ *    then RE-EVALUATED ATOMICALLY inside the same critical section from
+ *    `hasConflict` + [needsReconcile] (rev-ogpt P1-1/P1-2: if the
+ *    candidate's own merge detected a same-tuple-different-parts
+ *    conflict, OR if the committer's IN-LOCK per-ID conflict-aware
+ *    merge detected a concurrent candidate's same-ID/same-tuple/
+ *    different-parts divergence at the equal global watermark —
+ *    fix-13; dirty is forced true unconditionally. Otherwise fix-9
+ *    P0-4: if remote > localApplied post-commit, dirty is re-set to
+ *    true). The conflict HOT PATH (engine + reconciler foldRestFetch)
+ *    rides this atomic decision. The cache-retention failure
+ *    production path in [SlimSessionReconciler] (post-REST retention
+ *    guard rejects the merged set — OUTSIDE the commit protocol)
+ *    forces dirty=true via [SlimSseStateMachine.forceSlimDirty];
+ *    diagnostic / test paths also use that entry point.
  *  - [lastError]: three-state merge of the digest's `lastError` field
  *    (T6-C4). [LastErrorField.Omitted] preserves the prior value (debounce
  *    tick that doesn't restate the field); [LastErrorField.Cleared] sets
@@ -85,13 +99,17 @@ data class SlimSessionState(
     /**
      * Latest `messageID` we've successfully fetched + merged via REST
      * (`/slimapi/messages/{sid}/since/…` or `?mode=skeleton` cold-start).
-     * Advanced ONLY by [onReconcileSuccess] — never by the digest reducer.
+     * Advanced by [onReconcileSuccess] AND by the stage-A authoritative
+     * committer ([SlimSseStateMachine.replaceLocalAppliedAndClearDirtyLocked],
+     * driven by [InternalSlimAuthoritativeCommitter] inside the host's
+     * token-guarded critical section). NEVER advanced by the digest reducer.
      */
     val localAppliedMessageId: String? = null,
     /**
      * Largest `info.time.updated` we've successfully fetched + merged via
-     * REST. Advanced ONLY by [onReconcileSuccess]. This is the
-     * `/since/{ts}` anchor (per contract §3: server returns
+     * REST. Advanced by [onReconcileSuccess] AND by the stage-A authoritative
+     * committer ([SlimSseStateMachine.replaceLocalAppliedAndClearDirtyLocked]).
+     * This is the `/since/{ts}` anchor (per contract §3: server returns
      * `time.updated >= ts` so the boundary message is included for
      * messageID dedup).
      */
@@ -114,26 +132,52 @@ data class SlimSessionState(
      */
     val deleted: Boolean = false,
     /**
-     * Reconcile-needed flag. Set `true` by the digest reducer when
-     * [needsReconcile] holds after a merge; cleared `false` ONLY by
-     * [onReconcileSuccess]. Sticky across non-focus digests + reconcile
-     * failures — clearing is deferred to a successful REST reconcile.
+     * Reconcile-needed flag. Set `true` by:
+     *  - the digest reducer (when [needsReconcile] holds after a merge —
+     *    the local view is behind the remote view); the reducer NEVER
+     *    clears `dirty`.
+     *  - the stage-A authoritative committer
+     *    ([SlimSseStateMachine.replaceLocalAppliedAndClearDirtyLocked]),
+     *    ATOMICALLY with the localApplied* write — either because the
+     *    candidate's `hasConflict = true` (the outer merge detected a
+     *    same-tuple-different-parts divergence; rev-ogpt P1-1/P1-2), OR
+     *    because the committer's IN-LOCK per-ID conflict-aware merge
+     *    detected a concurrent candidate's same-ID/same-tuple/different-
+     *    parts divergence at the equal global watermark (rev-ogpt P1-1
+     *    fix-13), OR because `remote > localApplied` post-write (P0-4
+     *    TOCTOU mitigation for a digest arriving mid-drain).
+     *  - [SlimSseStateMachine.forceSlimDirty] (PRODUCTION: the cache-
+     *    retention failure path in [SlimSessionReconciler] — when the
+     *    post-REST retention guard rejects the merged set, the reconciler
+     *    unconditionally forces dirty=true so a later reconcile re-fetches;
+     *    this path is OUTSIDE the commit protocol and cannot ride the
+     *    atomic hasConflict decision. Also retained for diagnostic / test
+     *    use as an unconditional dirty ratchet).
+     * Cleared `false` ONLY inside the committer's critical section when
+     * `hasConflict = false` AND `needsReconcile` returns false post-write
+     * (the normal happy-path commit clears dirty). Sticky across non-focus
+     * digests + reconcile failures — clearing is deferred to a successful
+     * REST reconcile.
      */
     val dirty: Boolean = false,
 ) {
     /**
-     * T6 transitional accessor: the most advanced known `updatedAt`
-     * across both watermarks. Prefer [localAppliedUpdatedAt] (we
-     * actually fetched it); fall back to [remoteUpdatedAt] (digest
-     * observed but not yet reconciled). Removed by T11 once call-sites
-     * are rewired to read the split field directly.
+     * §11.1 fix-9 P2 KDoc cleanup: legacy scalar accessor for the most
+     * advanced known `updatedAt` across both watermarks. Prefer
+     * [localAppliedUpdatedAt] (we actually fetched it); fall back to
+     * [remoteUpdatedAt] (digest observed but not yet reconciled). Kept for
+     * the few legacy call-sites that pre-date the T6 split; new code
+     * MUST read the split fields directly (the scalar merge masks the
+     * "remote ahead of local" state that drives dirty).
      */
     val updatedAt: Long?
         get() = localAppliedUpdatedAt ?: remoteUpdatedAt
 
     /**
-     * T6 transitional accessor: the most advanced known `messageID`
-     * across both watermarks (mirrors [updatedAt]). Removed by T11.
+     * §11.1 fix-9 P2 KDoc cleanup: legacy scalar accessor for the most
+     * advanced known `messageID` across both watermarks (mirrors
+     * [updatedAt]). Kept for legacy call-sites; new code MUST read the
+     * split fields directly.
      */
     val messageId: String?
         get() = localAppliedMessageId ?: remoteMessageId
@@ -345,24 +389,39 @@ fun reduceSlimDigest(
     // intentionally NOT copied here — invariant #2 (the reducer never advances
     // the local-applied watermark).
     //
-    // T1-C5 invariant note (slimapi v0.2.2): `remoteMessageId` is last-write-
-    // wins while `remoteUpdatedAt` is monotonic-max — an ASYMMETRY that is
-    // harmless under T1's tuple watermark semantics. Correctness depends on
-    // opencode messageID being lexicographically strictly monotonic by
-    // creation (see [compareWatermark] kdoc — id.ts ascending). A stale /
-    // out-of-order digest necessarily carries a strictly-smaller id (the
-    // counter-based prefix is monotonic), so even though last-write-wins may
-    // regress remoteMessageId relative to remoteUpdatedAt, the resulting
-    // (remoteUpdatedAt, remoteMessageId) tuple is still <= any genuinely-newer
-    // observation — [needsReconcile]'s tuple compare correctly returns
-    // negative for stale digests and never spuriously fires a reconcile.
-    // Symmetrizing this merge (e.g. dropping a digest whose id regresses) is
-    // YAGNI — grill confirmed no real-world sidecar triggers this case.
+    // §11.1 fix-8 P1-5 — remote watermark is now a proper LEXICOGRAPHIC TUPLE
+    // MAX. The prior implementation took monotonic-max on `remoteUpdatedAt`
+    // and last-write-wins on `remoteMessageId` INDEPENDENTLY, which could
+    // produce a half tuple `(new_ts, old_id)` or `(old_ts, new_id)` that did
+    // NOT correspond to any real digest observation. Under T1's tuple
+    // semantics the asymmetry was argued-safe (opencode messageID is
+    // lexicographically strictly monotonic by creation, so a regressing id
+    // at a strictly-larger ts would still tuple-compare correctly), but the
+    // ARGUMENT depended on the messageID monotonic invariant — an
+    // assumption the reducer should NOT bake in. The fix: only accept a
+    // digest's `(updatedAt, messageId)` tuple if BOTH fields are present AND
+    // the tuple strictly exceeds the current `(remoteUpdatedAt, remoteMessageId)`
+    // tuple via [compareWatermark]. A digest missing either field, OR a
+    // digest whose tuple does not strictly exceed the current, leaves BOTH
+    // `remote*` fields untouched (preserves the legal-pair invariant from
+    // §11.3: only (null, null) or (ts, id) is ever stored).
+    //
+    // When the prior state has no remote tuple yet (both null), a digest
+    // carrying both fields unconditionally adopts it (the tuple-max of
+    // (null, null) vs (ts, id) is (ts, id)). When the digest is missing
+    // either field, we fall back to the field-level merge for the sidecar's
+    // pure-status / pure-messageId digests (covered by tests).
+    val mergedRemoteTuple = mergeRemoteTuple(
+        priorTs = prev.remoteUpdatedAt,
+        priorId = prev.remoteMessageId,
+        incomingTs = digest.updatedAt,
+        incomingId = digest.messageId,
+    )
     val candidate = prev.copy(
         directory = digest.directory ?: prev.directory,
         status = digest.status ?: prev.status,
-        remoteMessageId = digest.messageId ?: prev.remoteMessageId,
-        remoteUpdatedAt = mergeUpdatedAtMonotonic(prev.remoteUpdatedAt, digest.updatedAt),
+        remoteMessageId = mergedRemoteTuple.second,
+        remoteUpdatedAt = mergedRemoteTuple.first,
         lastError = mergeLastError(prev.lastError, digest.lastError),
         archived = mergeArchivedMonotonic(prev.archived, digest.archived),
         deleted = digest.deleted ?: prev.deleted,
@@ -466,6 +525,89 @@ internal fun mergeUpdatedAtMonotonic(prior: Long?, incoming: Long?): Long? =
         prior == null -> incoming
         else -> maxOf(prior, incoming)
     }
+
+/**
+ * §11.1 fix-8 P1-5 + fix-9 P1-1: lexicographic tuple-max merge for the
+ * remote `(updatedAt, messageId)` watermark. Returns a `(Long?, String?)`
+ * pair that is the tuple-max of the prior and incoming tuples, with the
+ * §11.3 legal-pair invariant preserved — **STRICTLY**: only `(null, null)`
+ * or `(ts, id)` (both non-null) is ever returned. Half tuples
+ * `(ts, null)` / `(null, id)` are NEVER produced.
+ *
+ * # Cases
+ *
+ *  - Prior `(null, null)` AND incoming legal pair `(ts, id)` (BOTH non-null)
+ *    → adopt incoming (first observation of a legal tuple).
+ *  - Prior legal pair `(ts, id)` AND incoming legal pair `(ts', id')` →
+ *    take the lexicographic tuple-max via [compareWatermark]. A strictly-
+ *    greater incoming wins; equal or smaller incoming keeps prior
+ *    (stale / re-emit / out-of-order safe harbor). This is the core P1-5
+ *    fix — the prior implementation could form `(new_ts, old_id)` via
+ *    last-write-wins on the id, which was argued-safe under the
+ *    messageID-monotonicity invariant but baked that assumption into the
+ *    reducer. Tuple-max removes the assumption.
+ *  - Prior legal pair AND incoming missing one or both fields → keep
+ *    prior (P1-5: never overwrite one field of a legal pair with a
+ *    partial incoming — would form a half tuple).
+ *  - Prior `(null, null)` AND incoming carrying only ONE field
+ *    (`updatedAt` only OR `messageId` only) → return `(null, null)`
+ *    (P1-1 fix-9: do NOT seed a half tuple from a partial digest). The
+ *    reducer's debounce / trigger logic uses [compareWatermark] on the
+ *    digest's incoming tuple directly (not the stored tuple), so a
+ *    partial digest can still fire the fetch via
+ *    `firesOnMessageIdOnly` / `firesOnTupleTrigger` without the stored
+ *    tuple being half-formed.
+ *  - Both sides empty → `(null, null)`.
+ *
+ * Pure — no IO, no Android deps. The output is suitable for direct
+ * assignment to [SlimSessionState.remoteUpdatedAt] /
+ * [SlimSessionState.remoteMessageId].
+ */
+internal fun mergeRemoteTuple(
+    priorTs: Long?,
+    priorId: String?,
+    incomingTs: Long?,
+    incomingId: String?,
+): Pair<Long?, String?> {
+    // Both null on both sides → (null, null).
+    if (priorTs == null && priorId == null && incomingTs == null && incomingId == null) {
+        return null to null
+    }
+
+    val priorLegal = priorTs != null && priorId != null
+    val incomingLegal = incomingTs != null && incomingId != null
+
+    // Both legal → tuple-max via compareWatermark (core P1-5 fix).
+    if (priorLegal && incomingLegal) {
+        val order = compareWatermark(incomingTs, incomingId, priorTs, priorId)
+        return if (order > 0) incomingTs to incomingId else priorTs to priorId
+    }
+
+    // Incoming legal + prior not legal → incoming completes / replaces the
+    // partial prior with a full tuple observation.
+    if (incomingLegal) {
+        return incomingTs to incomingId
+    }
+
+    // Incoming partial (or empty) below.
+    //
+    // Prior legal + incoming missing one or both fields → keep prior
+    // (P1-5: never overwrite one field of a legal pair with a partial
+    // incoming — would form a half tuple).
+    if (priorLegal) {
+        return priorTs to priorId
+    }
+
+    // §11.1 fix-9 P1-1: Neither side is legal. STRICT rejection of half
+    // tuples — return (null, null) regardless of partial fields on either
+    // side. The prior fix-8 implementation did field-level monotonic-max
+    // here, which produced half tuples like (100, null) from a status-only
+    // digest against a cold session. The reducer's trigger logic reads
+    // the digest's incoming fields directly (not the stored tuple) for
+    // the fetch decision, so refusing to seed the stored tuple from
+    // partial data does NOT break the cold-start fetch trigger.
+    return null to null
+}
 
 /**
  * Cluster A (Task 6 §3): monotonic-max merge for the permanent archive

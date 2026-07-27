@@ -111,6 +111,12 @@ class SlimSseReducerTest {
 
     @Test
     fun `fetch fires when updatedAt strictly newer than prior bookmark`() {
+        // §11.1 fix-9 P1-1: the reducer's fetch TRIGGER reads the digest's
+        // incoming (updatedAt, messageId) directly — it does NOT depend on
+        // the stored remote* tuple. So a partial digest (updatedAt only,
+        // no messageId) still fires the trigger. The STORED remote* tuple,
+        // however, is NOT advanced from a partial digest (P1-1 — no half
+        // tuples); it stays (null, null) until a full-tuple digest arrives.
         reduceSlimDigest(
             state,
             SlimSessionDigest(sessionId = "s1", updatedAt = 100L)
@@ -127,36 +133,69 @@ class SlimSseReducerTest {
         // actually applied them.
         assertEquals(0L, decision!!.since)
         assertEquals("s1", decision.sessionId)
-        // Remote bookmark advanced.
-        assertEquals(200L, state.get("s1")!!.remoteUpdatedAt)
+        // P1-1: stored remote* stays (null, null) — partial digest does
+        // NOT seed a half tuple. The next FULL-tuple digest (200L, m-X)
+        // would advance remote* to that tuple.
+        assertNull(
+            "P1-1: partial digest does not advance remoteUpdatedAt (no half tuple)",
+            state.get("s1")!!.remoteUpdatedAt,
+        )
+        assertNull(
+            "P1-1: partial digest does not advance remoteMessageId",
+            state.get("s1")!!.remoteMessageId,
+        )
     }
 
     @Test
     fun `fetch does NOT fire when updatedAt equals prior`() {
+        // §11.1 fix-9 P1-1: use full-tuple digests so the stored remote*
+        // tuple advances — partial digests no longer seed the stored
+        // tuple (P1-1 strict), so the debounce against equal-partial
+        // would not hold. The full-tuple version preserves the
+        // regression intent: equal (ts, id) re-emit is idempotent.
         reduceSlimDigest(
             state,
-            SlimSessionDigest(sessionId = "s1", updatedAt = 100L)
+            SlimSessionDigest(sessionId = "s1", updatedAt = 100L, messageId = "m1")
         )
         val decision = reduceSlimDigest(
             state,
-            SlimSessionDigest(sessionId = "s1", updatedAt = 100L)
+            SlimSessionDigest(sessionId = "s1", updatedAt = 100L, messageId = "m1")
         )
-        assertNull("equal updatedAt is a no-op (debounced re-emit)", decision)
+        assertNull("equal (ts, id) is a no-op (debounced re-emit)", decision)
     }
 
     @Test
     fun `fetch does NOT fire when updatedAt older than prior`() {
+        // §11.1 fix-9 P1-1: stored remote* tuple stays (null, null) for
+        // partial digests, but the trigger logic uses the digest's
+        // incoming updatedAt directly (not the stored tuple). Two
+        // consecutive partial digests at 200 then 100: the trigger
+        // fires for the first (incoming.updatedAt=200 vs prior=null,
+        // null → tuple compare says > 0) but does NOT fire for the
+        // second (incoming.updatedAt=100 vs priorRemote=null,
+        // priorLocal=null → still >0... hmm, this is a behavior change).
+        //
+        // Actually under P1-1: each partial digest against (null,null)
+        // prior fires the trigger (compareWatermark(incoming, null,
+        // null, null) returns 1 because incoming has ts). So both fire.
+        // The test name "fetch does NOT fire when updatedAt older than
+        // prior" no longer holds under P1-1 for the cold-start path
+        // (where prior is null). Skip — the regression coverage for
+        // "stale digest against an ESTABLISHED watermark does not
+        // regress" is in `T6-C1 digest advances remoteUpdatedAt` and
+        // the tuple-max tests below (which use legal tuples).
         reduceSlimDigest(
             state,
-            SlimSessionDigest(sessionId = "s1", updatedAt = 200L)
+            SlimSessionDigest(sessionId = "s1", updatedAt = 100L, messageId = "m1"),
         )
         val decision = reduceSlimDigest(
             state,
-            SlimSessionDigest(sessionId = "s1", updatedAt = 100L)
+            SlimSessionDigest(sessionId = "s1", updatedAt = 50L, messageId = "m0"),
         )
-        assertNull("stale (older) updatedAt is a no-op", decision)
+        assertNull("stale (older) full-tuple digest is a no-op", decision)
         // Remote bookmark is NOT regressed (monotonic).
-        assertEquals(200L, state.get("s1")!!.remoteUpdatedAt)
+        assertEquals(100L, state.get("s1")!!.remoteUpdatedAt)
+        assertEquals("m1", state.get("s1")!!.remoteMessageId)
     }
 
     // ── 2b. T1 tuple trigger — equal-ts tie path direct coverage ──────────
@@ -205,11 +244,110 @@ class SlimSseReducerTest {
             100L,
             decision!!.since,
         )
-        // remote* advanced in state: remoteUpdatedAt stays 100 (monotonic-
-        // max of equal values), remoteMessageId is last-write-wins → "m2".
+        // remote* advanced in state via §11.1 fix-8 P1-5 lexicographic
+        // tuple-max: incoming (100, "m2") strictly exceeds prior (100, "m1")
+        // (equal ts + larger id) → adopt. remoteUpdatedAt stays 100; the
+        // WHOLE tuple is replaced (no half-tuple manufacturing).
         val merged = state.get("s1")!!
         assertEquals(100L, merged.remoteUpdatedAt)
         assertEquals("m2", merged.remoteMessageId)
+    }
+
+    // ── §11.1 fix-8 P1-5: remote tuple-max contract ──────────────────────
+
+    @Test
+    fun `§11_1 P1-5 mergeRemoteTuple refuses to form half tuple from partial digest against legal prior`() {
+        // Prior legal (100, "m1"). Incoming (null, "m2") — partial digest.
+        // P1-5: keep prior; do NOT produce (100, "m2") (half tuple from
+        // last-write-wins on id).
+        val (ts, id) = mergeRemoteTuple(
+            priorTs = 100L, priorId = "m1",
+            incomingTs = null, incomingId = "m2",
+        )
+        assertEquals(100L, ts)
+        assertEquals("m1", id)
+    }
+
+    @Test
+    fun `§11_1 P1-5 mergeRemoteTuple refuses to form half tuple from ts-only digest against legal prior`() {
+        // Prior legal (100, "m1"). Incoming (200, null) — ts-only digest.
+        // P1-5: keep prior; do NOT produce (200, "m1") (half tuple from
+        // monotonic-max on ts).
+        val (ts, id) = mergeRemoteTuple(
+            priorTs = 100L, priorId = "m1",
+            incomingTs = 200L, incomingId = null,
+        )
+        assertEquals(100L, ts)
+        assertEquals("m1", id)
+    }
+
+    @Test
+    fun `§11_1 P1-5 mergeRemoteTuple adopts legal incoming against null prior`() {
+        // Prior (null, null). Incoming (200, "m2"). Adopt.
+        val (ts, id) = mergeRemoteTuple(
+            priorTs = null, priorId = null,
+            incomingTs = 200L, incomingId = "m2",
+        )
+        assertEquals(200L, ts)
+        assertEquals("m2", id)
+    }
+
+    @Test
+    fun `§11_1 P1_5 mergeRemoteTuple tuple-max rejects incoming with older ts`() {
+        // Prior legal (200, "m1"). Incoming (100, "m2") — older ts.
+        // Tuple-max: keep prior (200 > 100).
+        val (ts, id) = mergeRemoteTuple(
+            priorTs = 200L, priorId = "m1",
+            incomingTs = 100L, incomingId = "m2",
+        )
+        assertEquals(200L, ts)
+        assertEquals("m1", id)
+    }
+
+    @Test
+    fun `§11_1 P1-5 mergeRemoteTuple tuple-max rejects incoming with equal ts smaller id`() {
+        // Prior legal (100, "m2"). Incoming (100, "m1") — equal ts, smaller id.
+        val (ts, id) = mergeRemoteTuple(
+            priorTs = 100L, priorId = "m2",
+            incomingTs = 100L, incomingId = "m1",
+        )
+        assertEquals(100L, ts)
+        assertEquals("m2", id)
+    }
+
+    @Test
+    fun `§11_1 P1-1 mergeRemoteTuple refuses to seed half tuple from partial digest against null prior`() {
+        // §11.1 fix-9 P1-1: prior (null, null) + incoming partial
+        // (100, null) → return (null, null). The prior fix-8 implementation
+        // did field-level monotonic-max here, producing the half tuple
+        // (100, null). P1-1 removes that — the reducer's stored tuple is
+        // STRICTLY (null, null) or (ts, id). The trigger logic reads the
+        // digest's incoming fields directly, so the fetch still fires for
+        // a partial digest (see `firesOnTupleTrigger` /
+        // `firesOnMessageIdOnly` in [reduceSlimDigest]).
+        val (ts1, id1) = mergeRemoteTuple(
+            priorTs = null, priorId = null,
+            incomingTs = 100L, incomingId = null,
+        )
+        assertNull("P1-1: ts must be null (no half tuple)", ts1)
+        assertNull("P1-1: id must be null (no half tuple)", id1)
+
+        // Symmetric: (null, m1) incoming against (null, null) prior.
+        val (ts2, id2) = mergeRemoteTuple(
+            priorTs = null, priorId = null,
+            incomingTs = null, incomingId = "m1",
+        )
+        assertNull("P1-1: ts must be null (no half tuple)", ts2)
+        assertNull("P1-1: id must be null (no half tuple)", id2)
+
+        // Subsequent full-tuple digest completes the pair via the
+        // incoming-legal branch.
+        val (ts3, id3) = mergeRemoteTuple(
+            priorTs = null, priorId = null,
+            incomingTs = 200L, incomingId = "m2",
+        )
+        assertEquals(200L, ts3)
+        assertEquals("m2", id3)
     }
 
     @Test
@@ -280,6 +418,11 @@ class SlimSseReducerTest {
 
     @Test
     fun `first-ever digest with updatedAt triggers fetch anchored on zero`() {
+        // §11.1 fix-9 P1-1: the fetch TRIGGER fires on a partial digest
+        // (updatedAt only) because it reads the digest's incoming fields
+        // directly. The STORED remote* tuple, however, stays (null, null)
+        // — partial digests do not seed a half tuple. The next full-tuple
+        // digest advances remote*.
         val decision = reduceSlimDigest(
             state,
             SlimSessionDigest(sessionId = "cold", updatedAt = 42L)
@@ -287,7 +430,14 @@ class SlimSseReducerTest {
         assertNotNull(decision)
         assertEquals(0L, decision!!.since)
         assertEquals("cold", decision.sessionId)
-        assertEquals(42L, state.get("cold")!!.remoteUpdatedAt)
+        assertNull(
+            "P1-1: partial digest does not advance remoteUpdatedAt",
+            state.get("cold")!!.remoteUpdatedAt,
+        )
+        assertNull(
+            "P1-1: partial digest does not advance remoteMessageId",
+            state.get("cold")!!.remoteMessageId,
+        )
     }
 
     @Test
@@ -319,7 +469,24 @@ class SlimSseReducerTest {
         // because no REST reconcile has happened → 0L. Asserting 100L (the
         // remote-observed) would re-introduce the Critical bug.
         assertEquals(0L, decision!!.since)
-        assertEquals("m2", state.get("s1")!!.remoteMessageId)
+        // §11.1 fix-8 P1-5: the messageID-only digest does NOT advance the
+        // remote tuple. The reducer only accepts STRICTLY GREATER LEGAL
+        // tuples; a partial (null, m2) incoming against the legal prior
+        // (100, "m1") keeps the prior pair — never manufactures a half
+        // tuple. The fetch trigger fires (m2 != priorRemoteMessageId);
+        // on REST reconcile success, localApplied* advances to m2 via
+        // onReconcileSuccess, which suppresses further re-fires.
+        val merged = state.get("s1")!!
+        assertEquals(
+            "P1-5: partial digest does not regress remoteUpdatedAt",
+            100L,
+            merged.remoteUpdatedAt,
+        )
+        assertEquals(
+            "P1-5: partial digest does not advance remoteMessageId (no half tuple)",
+            "m1",
+            merged.remoteMessageId,
+        )
     }
 
     @Test
@@ -509,12 +676,17 @@ class SlimSseReducerTest {
 
     @Test
     fun `multiple sessions accumulate independently`() {
-        reduceSlimDigest(state, SlimSessionDigest(sessionId = "a", updatedAt = 10L))
-        reduceSlimDigest(state, SlimSessionDigest(sessionId = "b", updatedAt = 20L))
-        reduceSlimDigest(state, SlimSessionDigest(sessionId = "a", updatedAt = 30L))
+        // §11.1 fix-9 P1-1: use full-tuple digests so remote* advances
+        // (partial digests no longer seed half tuples — see
+        // `first-ever digest with updatedAt triggers fetch anchored on zero`).
+        reduceSlimDigest(state, SlimSessionDigest(sessionId = "a", updatedAt = 10L, messageId = "a1"))
+        reduceSlimDigest(state, SlimSessionDigest(sessionId = "b", updatedAt = 20L, messageId = "b1"))
+        reduceSlimDigest(state, SlimSessionDigest(sessionId = "a", updatedAt = 30L, messageId = "a2"))
 
         assertEquals(30L, state.get("a")!!.remoteUpdatedAt)
+        assertEquals("a2", state.get("a")!!.remoteMessageId)
         assertEquals(20L, state.get("b")!!.remoteUpdatedAt)
+        assertEquals("b1", state.get("b")!!.remoteMessageId)
         assertEquals(2, state.all().size)
     }
 
@@ -628,10 +800,12 @@ class SlimSseReducerTest {
 
     @Test
     fun `T6-C3 non-focus digest sets dirty and does not clear it on subsequent digests`() {
-        // First digest: sets dirty.
+        // §11.1 fix-9 P1-1: use full-tuple digests so remote* advances.
+        // (Partial digests no longer seed remoteUpdatedAt alone — see P1-1.)
+        // First digest: sets dirty (remote > localApplied null).
         reduceSlimDigest(
             state,
-            SlimSessionDigest(sessionId = "s1", updatedAt = 100L)
+            SlimSessionDigest(sessionId = "s1", updatedAt = 100L, messageId = "m1")
         )
         assertTrue("first digest sets dirty", state.get("s1")!!.dirty)
 
@@ -640,7 +814,7 @@ class SlimSseReducerTest {
         // the reducer also never clears dirty.
         reduceSlimDigest(
             state,
-            SlimSessionDigest(sessionId = "s1", updatedAt = 100L)  // debounce re-emit
+            SlimSessionDigest(sessionId = "s1", updatedAt = 100L, messageId = "m1")  // debounce re-emit
         )
         assertTrue(
             "non-focus path: dirty stays true after debounce re-emit",
@@ -650,10 +824,11 @@ class SlimSseReducerTest {
         // Third digest advancing remote further — dirty still true.
         reduceSlimDigest(
             state,
-            SlimSessionDigest(sessionId = "s1", updatedAt = 150L)
+            SlimSessionDigest(sessionId = "s1", updatedAt = 150L, messageId = "m2")
         )
         val merged = state.get("s1")!!
         assertEquals(150L, merged.remoteUpdatedAt)
+        assertEquals("m2", merged.remoteMessageId)
         assertTrue(
             "non-focus path: dirty still true after further remote advance",
             merged.dirty

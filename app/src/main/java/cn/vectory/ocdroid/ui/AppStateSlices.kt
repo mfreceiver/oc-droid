@@ -970,6 +970,22 @@ class SliceFlows internal constructor(internal val store: SharedStateStore) {
     val host: StateFlow<HostState> get() = store.hostFlow
 
     /**
+     * §breathing-indicator / P0-1 liveness: the SSE-transport-up signal
+     * (StoreState.isSseConnected). True iff the live
+     * ServiceSseConnectionOwner collector has proven transport delivery with
+     * at least one valid current-identity frame AND has not since torn down.
+     * This is the TRANSPORT-DELIVERY axis — independent of connectionPhase
+     * (health-settle): it goes false during the inter-retry gap + on every
+     * closing path even while phase may read Reconnecting/ReconnectingAttempt.
+     * The StatusPollOrchestrator SWEEP short-circuit uses this to decide
+     * whether the digest relay is effectively delivering status (→ no-op) or
+     * the sweep must fall through to REST. Read synchronously off the
+     * aggregate (lag-free), safe to call on the sweep entry path before any
+     * epoch bump.
+     */
+    val sseConnected: Boolean get() = store.stateFlow.value.isSseConnected
+
+    /**
      * Captures the minted token for the currently active parameterized chat
      * route. A bare `chat` selection deliberately returns `0L`: zero is the
      * legacy compatibility scope, never a reusable route identity.

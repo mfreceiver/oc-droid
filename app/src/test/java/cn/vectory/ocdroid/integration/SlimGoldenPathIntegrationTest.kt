@@ -262,7 +262,10 @@ class SlimGoldenPathIntegrationTest {
                     typedFrame("server.connected", "{}"),
                     typedFrame(
                         "session.digest",
-                        """{"sessionID":"s1","directory":"/w","updatedAt":1000}""",
+                        // §11.1 fix-9 P1-1: include messageID (wire name)
+                        // so the reducer seeds remote* (partial digests no
+                        // longer seed a half tuple).
+                        """{"sessionID":"s1","directory":"/w","updatedAt":1000,"messageID":"m1000"}""",
                     ),
                     dataFrame(
                         """{"directory":"/w","type":"question.asked",""" +
@@ -520,28 +523,43 @@ class SlimGoldenPathIntegrationTest {
     // a second pass does NOT refetch from 0 (the incremental / A2=A contract).
     //
     // We do NOT race two session.digest frames in one SSE body to demonstrate
-    // this: the coordinator's `scope.launch { repo.getSlimapiMessagesSince }`
+    // this: the coordinator's `scope.launch { repo.fetchSinceForStageA }`
     // for the first digest would race the second digest's launch, and the
     // MockWebServer response queue is FIFO → flaky. The ServiceSseConnectionOwner
     // serialization (resyncMutex) is the production answer to that race, and
     // it's exercised by ServiceSseConnectionOwnerResyncTest. Here we drive
     // the same repository endpoint surface the Service calls into.
+    //
+    // §11.1 stage A: the anchored `/since` path in coldStartSlimSync is
+    // staging-only — Staged/Incomplete/Failed ALL map to `messages = null`
+    // and do NOT advance the bookmark. This test pins the new contract:
+    // the fetch is still anchored on the prior bookmark (since=1000), but
+    // the result is staging-only (messages=null, bookmark unchanged).
 
     @Test
     fun `bonus step 7 - coldStartSlimSync after digest fires incremental since-fetch anchored on prior bookmark`() =
         runBlocking {
-            // Pre-seed the bookmark via applySlimDigest (the in-memory reducer
-            // step that runs on every session.digest). A real resync frame
-            // would have arrived after one or more digests already advanced
-            // the bookmark — we simulate that state directly.
+            // §11.1 fix-6 P0-5: seed LOCAL-applied bookmark at 1000 (not remote).
+            // The anchor uses localAppliedUpdatedAt only — remoteUpdatedAt alone
+            // does NOT trigger the anchored path.
+            val seedToken = repository.captureSlimCommitToken()
             repository.applySlimDigest(
-                SlimSessionDigest(sessionId = "s1", updatedAt = 1000L),
-                token = repository.captureSlimCommitToken(),
+                SlimSessionDigest(sessionId = "s1", updatedAt = 1000L, messageId = "m1000"),
+                token = seedToken,
             )
-            // Sanity: the bookmark reflects the seed.
+            // Simulate a successful prior reconcile that advanced localApplied*.
+            assertTrue(
+                "seed bump must succeed",
+                repository.bumpSlimBookmarkFromItems(
+                    "s1",
+                    listOf(MessageWithParts(info = Message(id = "m-seed", role = "assistant", time = Message.TimeInfo(updated = 1000L)))),
+                    seedToken,
+                ),
+            )
+            // Sanity: the local-applied bookmark reflects the seed.
             val seeded = repository.snapshotSlimSseState()["s1"]
             assertNotNull("seed bookmark entry", seeded)
-            assertEquals(1000L, seeded!!.updatedAt)
+            assertEquals(1000L, seeded!!.localAppliedUpdatedAt)
 
             // The cold-start snapshot fan-out: 4 endpoints. The messages one
             // is only fetched when openSessionId is supplied.
@@ -565,14 +583,10 @@ class SlimGoldenPathIntegrationTest {
                 result.isSuccess,
             )
             val snapshot = result.getOrThrow()
-            assertNotNull(
-                "openSessionId supplied → messages fetched",
+            // §11.1 stage A: anchored `/since` is staging-only → messages = null.
+            assertNull(
+                "stage A: /since is staging-only → messages must be null (not a success snapshot)",
                 snapshot.messages,
-            )
-            assertEquals(
-                "incremental skeleton returned by /since/1000",
-                listOf("m2"),
-                snapshot.messages!!.map { it.info.id },
             )
 
             // Drain the 4 requests; find the messages one. The first 3
@@ -588,11 +602,16 @@ class SlimGoldenPathIntegrationTest {
                 paths.any { it.startsWith("/slimapi/messages/s1/since/1000") },
             )
 
-            // Bookmark advanced to max(1000, 2400) = 2400 (monotonic merge —
-            // bumpSlimBookmarkFromItems).
+            // §11.1 stage A: bookmark is NOT advanced on the /since path
+            // (staging-only). Authoritative advancement happens ONLY via the
+            // full/cursor drain Success path.
             val advanced = repository.snapshotSlimSseState()["s1"]
             assertNotNull(advanced)
-            assertEquals(2400L, advanced!!.updatedAt)
+            assertEquals(
+                "stage A: /since does NOT advance the bookmark (staging-only)",
+                1000L,
+                advanced!!.updatedAt,
+            )
         }
 
     // ── Phase 3 T3(d): end-to-end session-switch partial-apply semantics ──

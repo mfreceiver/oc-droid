@@ -451,11 +451,31 @@ class OpenCodeRepository @Inject constructor(
      * defense-in-depth so a forgotten call site cannot re-open the
      * host-first window inside [configure] itself.
      *
+     * §11.1 fix-9 P0-5: ALSO clears [authoritativeLocal] / [visibleContent]
+     * so a host switch cannot leak the old host's authoritative messages
+     * into the new host (the merger's "missing ≠ deletion" contract would
+     * otherwise retain them). The clear is atomic w.r.t. the incarnation
+     * rotation (under [slimStateLock]); in-flight committers that already
+     * passed their token pre-check fail the in-lock recheck and short-
+     * circuit without writing.
+     *
      * @return a [SlimReconfigureTicket] identifying this transaction's
      *   not-yet-ready incarnation.
      */
-    fun beginSlimReconfigure(): SlimReconfigureTicket =
-        slimStateMachine.beginSlimReconfigure()
+    fun beginSlimReconfigure(): SlimReconfigureTicket {
+        val ticket = slimStateMachine.beginSlimReconfigure()
+        // §11.1 fix-9 P0-5: clear authoritative stores atomically with
+        // the incarnation rotation. slimStateMachine.beginSlimReconfigure
+        // already acquired + released slimStateLock; we re-acquire here
+        // (cheap). The clear runs BEFORE configure publishes a new bundle,
+        // so a concurrent reader sees either the old state (pre-rotation,
+        // token-stale) or empty (post-rotation, new token required).
+        synchronized(slimStateLock) {
+            authoritativeLocal.clear()
+            visibleContent.clear()
+        }
+        return ticket
+    }
 
     /**
      * C-D3 rev-3 round-5 (oracle §1.4): asserts [ticket] still identifies
@@ -771,18 +791,20 @@ class OpenCodeRepository @Inject constructor(
             // ι-P2: rebuild message source to match the new connection mode.
             // 与 sessionSource 同纪律：仅在 completeSlimReconfigure 之后（事务全成功）
             // 才发布新 mode 的 source；throw 时 messageSource 保持先前 live source。
-            // SlimMessageSource 经注入的**纯函数 lambda** 访问共享态——
-            //   • slimSessionUpdatedAt = { sid -> slimStateMachine.getSlimSessionState(sid)?.updatedAt ?: 0L }
-            //     （只读 watermark，不暴露状态机对象给端口实现）
-            //   • bumpBookmark = { sid, items, tok -> bumpSlimBookmarkFromItems(sid, items, tok) }
-            //     （回调 OCR 自身 private 方法，内部 synchronized(slimStateLock)）
+            // §11.1 stage A: SlimMessageSource 经注入的**纯函数 lambda** 访问共享态——
+            //   • slimSessionUpdatedAt = { sid -> slimStateMachine.getSlimSessionState(sid)?.localAppliedUpdatedAt ?: 0L }
+            //     （§11.1 fix-6 P0-5: 只读 LOCAL-applied watermark，绝不 fallback 到
+            //      remoteUpdatedAt；remote 仅由 reducer 推进。anchor 缺失时返回 0L，
+            //      调用方应走 full/cursor drain 而非跳过未应用消息。）
             // → **锁与 bookmark 状态不离开 OCR**（I5 保持）；SlimMessageSource 不持锁 /
             //   不持 slimStateMachine 对象。SlimCommitToken / StaleSlimCommitException
             //   仍嵌套于 OCR（I15 token threading 透传 + freeze 嵌套 FQN 不变）。
+            //   The previously-injected `bumpBookmark` lambda was REMOVED (stage A:
+            //   `/since` is staging-only at every MessageSource surface).
             messageSource = if (slim) SlimMessageSource(
-                apiProvider = { api },
-                slimSessionUpdatedAt = { sid -> slimStateMachine.getSlimSessionState(sid)?.updatedAt ?: 0L },
-                bumpBookmark = { sid, items, tok -> bumpSlimBookmarkFromItems(sid, items, tok) },
+                apiProvider = { token -> token.capturedClientBundle?.restApi ?: api },
+                slimSessionUpdatedAt = { sid -> slimStateMachine.getSlimSessionState(sid)?.localAppliedUpdatedAt ?: 0L },
+                requireSlimTokenCurrent = { token -> slimStateMachine.requireSlimTokenCurrent(token) },
             ) else StandardMessageSource({ api })
             // ι-A (capability read-model): 发布能力 mode 仅在整条 ssl/host/client/readiness
             // 事务全成功后——与 completeSlimReconfigure 的「readiness 仅每步成功后才发布」
@@ -938,6 +960,156 @@ class OpenCodeRepository @Inject constructor(
     )
 
     /**
+     * §11.2 fix-4: per-session authoritative message store, written ONLY by
+     * [InternalSlimAuthoritativeCommitter.commitAuthoritative] inside the host's
+     * [commitIfSlimTokenCurrent] critical section. Guards the same
+     * [slimStateLock] as [slimSseState] so the committer's read-check-write is
+     * atomic w.r.t. rotation. §11.1 fix-9 P0-5: cleared by
+     * [beginSlimReconfigure] so a host switch does not leak the old host's
+     * messages into the new host.
+     *
+     * Stage A: this store is not yet consumed by the UI (Phase B will wire it
+     * as the authoritative source of truth). It is laid down here so the
+     * commit protocol has a real effect on first wiring.
+     *
+     * **DEFERRED (rev-2 P0-2 / §11.1 fix-9 DEFERRED)**: this store and
+     * [visibleContent] are REPOSITORY-LEVEL memo stores — they are NOT the
+     * UI chat slice. The slim commit protocol clears `dirty` after a
+     * successful commit (per §11.2 step 6), but the UI chat slice's
+     * retention is driven by [CachedSessionWindow] + the chat reducer,
+     * NOT by this store. A future phase must wire the committer's
+     * `replaceVisibleAndAuthoritative` to ALSO drive the UI chat slice
+     * (or a bridge) so that a successful commit's dirty clear is
+     * consistent with UI retention. Until then, UI retention failure
+     * (where the user doesn't see the freshly-committed messages but
+     * `dirty=false`) is a known stage-A gap. Tracked as DEFERRED; not a
+     * stage-A blocker (plan §11.2 explicitly limits stage-A committer
+     * scope to in-memory state).
+     */
+    private val authoritativeLocal = mutableMapOf<String, List<MessageWithParts>>()
+
+    /**
+     * §11.2 fix-4: per-session visible-content store. Stage A writes it in
+     * lock-step with [authoritativeLocal] (the committer replaces both via
+     * [SlimAuthoritativeCommitHost.replaceVisibleAndAuthoritative]). Phase B
+     * will diverge them when partial / streaming-friendly updates land.
+     */
+    private val visibleContent = mutableMapOf<String, List<MessageWithParts>>()
+
+    /**
+     * §11.2 fix-4: the [SlimAuthoritativeCommitHost] adapter, backed by this
+     * repository's [slimStateMachine] + [authoritativeLocal] / [visibleContent]
+     * stores. Lazy because [slimSyncEngine] is lazy and the committer is
+     * threaded into the engine's construction.
+     *
+     * # Operation mapping (plan §11.2 fix-4 implementation note)
+     *
+     * | host op                              | implementation                         |
+     * |--------------------------------------|----------------------------------------|
+     * | [SlimAuthoritativeCommitHost.requireToken] | [requireSlimTokenCurrent]        |
+     * | [SlimAuthoritativeCommitHost.captureCurrentState] | [getSlimSessionState]    |
+     * | [SlimAuthoritativeCommitHost.captureCurrentVisibleMessages] | read [authoritativeLocal] / [visibleContent] |
+     * | [SlimAuthoritativeCommitHost.writeDiagnosticCache] | no-op (stage A; non-authoritative) |
+     * | [SlimAuthoritativeCommitHost.commitIfCurrent] | [commitIfSlimTokenCurrent]        |
+     * | [SlimAuthoritativeCommitHost.replaceVisibleAndAuthoritative] | write [authoritativeLocal] + [visibleContent] |
+     * | [SlimAuthoritativeCommitHost.replaceLocalAppliedAndClearDirty] | [SlimSseStateMachine.replaceLocalAppliedAndClearDirtyLocked] |
+     */
+    private val authoritativeCommitHost by lazy {
+        object : SlimAuthoritativeCommitHost {
+            override fun requireToken(token: SlimCommitToken) =
+                requireSlimTokenCurrent(token)
+
+            override fun captureCurrentState(sessionId: String): SlimSessionState? =
+                getSlimSessionState(sessionId)
+
+            override fun captureCurrentVisibleMessages(sessionId: String): List<MessageWithParts> =
+                synchronized(slimStateLock) {
+                    authoritativeLocal[sessionId] ?: visibleContent[sessionId] ?: emptyList()
+                }
+
+            override fun writeDiagnosticCache(sessionId: String, messages: List<MessageWithParts>) {
+                // §11.2 stage A: diagnostic (non-authoritative) cache write is
+                // a no-op. The authoritative store is the in-memory
+                // [authoritativeLocal] / [visibleContent] pair, written inside
+                // the critical section. A future Phase B may persist a
+                // diagnostic snapshot here; until then the method MUST NOT
+                // throw so [InternalSlimAuthoritativeCommitter] treats it as
+                // a successful best-effort write.
+            }
+
+            override fun commitIfCurrent(token: SlimCommitToken, commit: () -> Unit): Boolean =
+                commitIfSlimTokenCurrent(token, commit)
+
+            override fun replaceVisibleAndAuthoritative(
+                sessionId: String,
+                messages: List<MessageWithParts>,
+            ) {
+                // Inside commitIfSlimTokenCurrent's critical section — lock
+                // already held. Defensive copy (the committer also copies, but
+                // a second copy is cheap and pins the stored snapshot).
+                val copy = ArrayList(messages)
+                authoritativeLocal[sessionId] = copy
+                visibleContent[sessionId] = copy
+            }
+
+            override fun replaceLocalAppliedAndClearDirty(
+                sessionId: String,
+                localAppliedUpdatedAt: Long?,
+                localAppliedMessageId: String?,
+                hasConflict: Boolean,
+            ) {
+                // Inside commitIfSlimTokenCurrent's critical section — lock
+                // already held. Delegates to the state machine's locked helper
+                // (reentrant on slimStateLock via Java synchronized reentrancy).
+                slimStateMachine.replaceLocalAppliedAndClearDirtyLocked(
+                    sessionId = sessionId,
+                    localAppliedUpdatedAt = localAppliedUpdatedAt,
+                    localAppliedMessageId = localAppliedMessageId,
+                    hasConflict = hasConflict,
+                )
+            }
+        }
+    }
+
+    /**
+     * §11.2 fix-4: the [InternalSlimAuthoritativeCommitter] instance, backed by
+     * [authoritativeCommitHost]. Lazy + threaded into [slimSyncEngine]'s
+     * construction so cold-start full/cursor drain Success can drive
+     * [commitAuthoritative].
+     */
+    private val authoritativeCommitter by lazy {
+        InternalSlimAuthoritativeCommitter(authoritativeCommitHost)
+    }
+
+    /**
+     * §11.1 fix-6 P0-4: public facade for [SlimAuthoritativeCommitter.commitAuthoritative].
+     * The ONLY path that may advance localApplied* / clear dirty / replace
+     * visible content — atomically inside the committer's token-guarded
+     * critical section. Used by the reconciler's full/cursor drain path.
+     */
+    internal suspend fun commitAuthoritative(
+        candidate: SlimAuthoritativeCandidate,
+    ): SlimAuthoritativeCommitResult =
+        authoritativeCommitter.commitAuthoritative(candidate)
+
+    /**
+     * §11.1 fix-8 P1-6: snapshot the current authoritative message list for
+     * [sid] — the input to [mergeSlimMessageSet] when the reconciler
+     * constructs a fresh [SlimAuthoritativeCandidate]. Backed by the same
+     * [authoritativeLocal] / [visibleContent] store the committer writes
+     * (consistency: the read runs under [slimStateLock] for a consistent
+     * snapshot, mirroring [SlimAuthoritativeCommitHost.captureCurrentVisibleMessages]).
+     *
+     * Returns an empty list when no authoritative view exists yet (cold
+     * path / first reconcile). The list is a defensive copy; the caller
+     * may mutate freely.
+     */
+    internal fun captureAuthoritativeMessages(sid: String): List<MessageWithParts> =
+        synchronized(slimStateLock) {
+            ArrayList(authoritativeLocal[sid] ?: visibleContent[sid] ?: emptyList())
+        }
+
+    /**
      * §P1: slim message-sync engine (extracted from the 6 functions below).
      * See [SlimSyncEngine] for the full contract. Field-init mirrors the
      * [expandBatchEngine] pattern.
@@ -949,6 +1121,11 @@ class OpenCodeRepository @Inject constructor(
      * **slimStateMachine** — injected directly (not lambda) because it is a
      * stable singleton that outlives any host config cycle.
      *
+     * **§11.2 fix-4** — [authoritativeCommitter] is threaded in so the
+     * cold-start full/cursor drain `Success` path can drive
+     * [SlimAuthoritativeCommitter.commitAuthoritative] and lay down the new
+     * authoritative-local / visible-content stores.
+     *
      * **lazy** — because the 2-arg constructor `(TrafficTracker, TrafficLogger)`
      * used by tests (mockk) does NOT run field initializers; lazy defers
      * engine construction until first access, avoding NPE on mocks.
@@ -959,6 +1136,11 @@ class OpenCodeRepository @Inject constructor(
             slimStateMachine = slimStateMachine,
             parseErrorCode = { parseErrorCode(it) },
             retryAfterHeaderToMs = { retryAfterHeaderToMs(it) },
+            authoritativeCommitter = authoritativeCommitter,
+            // §11.1 fix-9 P1-2: feed the drain's merge with the OCR's
+            // authoritative store so the candidate carries the merged
+            // (retained-authoritative + drain-incoming) message set.
+            authoritativeMessagesProvider = { sid -> captureAuthoritativeMessages(sid) },
         )
     }
 
@@ -977,9 +1159,11 @@ class OpenCodeRepository @Inject constructor(
     /**
      * ι-P2: message 域端口—Standard 或 Slim 双实现,由 [configure] 在 client 重建后选束。
      * 默认 [StandardMessageSource]（legacy）与未 configure 行为一致。
-     * [SlimMessageSource] 经注入 lambda 访问共享态（slimSessionUpdatedAt 只读
-     * watermark + bumpBookmark 回调 OCR.bumpSlimBookmarkFromItems）——锁与 bookmark
-     * 状态留 OCR（I5 保持），SlimMessageSource 不持锁 / 不持状态机对象。
+     * §11.1 fix-9 P2 KDoc cleanup: [SlimMessageSource] 经注入 lambda 访问共享态
+     * （slimSessionUpdatedAt 只读 watermark + apiProvider token-bound +
+     * requireSlimTokenCurrent token guard）。**bumpBookmark 回调已移除**（stage A:
+     * `/since` 仅作 staging；watermark 由 [SlimAuthoritativeCommitter] 推进）。
+     * 锁与 bookmark 状态留 OCR（I5 保持），SlimMessageSource 不持锁 / 不持状态机对象。
      *
      * ι-4: @Volatile — 同 [sessionSource]，并发路由位（configure monitor 内写、
      * [getMessagesPaged] 等无锁读），volatile 保证 reader 可见最新选束。
@@ -1430,25 +1614,34 @@ class OpenCodeRepository @Inject constructor(
      * Cursor-paged message fetch (V1 route: cursor carried via the
      * `X-Next-Cursor` response header + the `before` query param).
      *
-     * §slim-reconcile-lane-repo (B2 T3): in slim mode, route to the sidecar's
-     * `/slimapi/messages/{sid}/since/{ts}` anchor-paginated endpoint. The
-     * `since` ts is derived from the local slim SSE bookmark
-     * ([slimSseState.get]·updatedAt, 0L if none — same source as
-     * [coldStartSlimSync] uses for its open-session tail). `limit` / `before`
-     * are forwarded verbatim (slimapi supports the since-ts + before-opaque-
-     * cursor combination per v1 contract §5).
+     * §11.1 fix-10 P0-1: in slim mode, the method now DISTINGUISHES two
+     * UI message-loading paths by the [before] parameter:
      *
-     * The slimapi DTO IS the legacy [MessageWithParts] shape — there is no
-     * separate SlimapiMessage type to map (the sidecar emits skeletons in
-     * the wire format the legacy opencode route already speaks). Bookmark
-     * bumping uses the same `max(time.updated)` rule as
-     * [coldStartSlimSync] / [getSlimapiMessagesSince].
+     *  - **`before == null` (initial / reload / catch-up):** routes through
+     *    the authoritative skeleton cursor drain +
+     *    [SlimAuthoritativeCommitter.commitAuthoritative] using
+     *    [SLIMAPI_LOCAL_HISTORY_BOUND] as the drain item bound (NOT the UI
+     *    [limit]). The drain walks the cursor window to a terminal page
+     *    (`nextCursor == null`) and commits the aggregate atomically. The
+     *    returned `MessagesPage` has `nextCursor = null` (the drain
+     *    exhausted the window — there is no "next page" for load-more
+     *    until the next cold-load). The UI [limit] is IGNORED on this
+     *    path — it is a PRESENTATION page size, not a drain safety bound.
+     *    The drain's own [SLIMAPI_DEFAULT_PAGE_LIMIT] controls the
+     *    per-HTTP page size.
      *
-     * §slim-v1-paging (Task 5 / G5 cursor): the slim since path SURFACES
-     * the `X-Next-Cursor` response header (was: hardcoded `null` under the
-     * earlier single-page decision). Both slim and legacy branches now
-     * read the header identically — the upper layer decides whether to
-     * follow via `?before=<opaque>`.
+     *  - **`before != null` (load-more / history pagination):** routes
+     *    through [getSlimapiMessagesPage] — a SINGLE-PAGE cursor fetch
+     *    that forwards [before] to the HTTP query and surfaces the
+     *    response's `X-Next-Cursor` header as `MessagesPage.nextCursor`.
+     *    NO authoritative commit (load-more is incremental history
+     *    pagination, not a completeness sync). The UI [limit] IS honoured
+     *    as the per-page `limit` query param.
+     *
+     * This split fixes the fix-9 P0-6 regression where ALL slim calls
+     * routed through the drain, breaking load-more (before cursor was
+     * ignored, nextCursor was forced null, UI limit was misused as drain
+     * itemBound producing Partial on the first page of long sessions).
      *
      * legacy (`isSlimMode == false`): byte-for-byte unchanged.
      */
@@ -1457,61 +1650,80 @@ class OpenCodeRepository @Inject constructor(
         limit: Int? = null,
         before: String? = null,
         token: SlimCommitToken = captureSlimCommitToken(),
-    ): Result<MessagesPage> =
-        getMessagesPagedImpl(sessionId, limit, before, token, anchored = true)
+    ): Result<MessagesPage> {
+        if (serverCompatProfile.slimConnection) {
+            // §11.1 fix-10 P0-1: split by `before`.
+            if (before != null) {
+                // Load-more: single-page cursor fetch, preserve before +
+                // nextCursor, no authoritative commit.
+                return getSlimapiMessagesPage(
+                    sessionId = sessionId,
+                    limit = limit,
+                    before = before,
+                    mode = "skeleton",
+                    token = token,
+                )
+            }
+            // Initial / reload / catch-up: full drain + commit.
+            return runSuspendCatching {
+                val items = slimSyncEngine.drainAndCommitAuthoritative(
+                    sessionId = sessionId,
+                    token = token,
+                    // Use the authoritative drain bound, NOT the UI limit.
+                    // The UI limit is a presentation page size; the drain
+                    // safety bound is a completeness-vs-lateness trade-off.
+                    itemBound = SLIMAPI_LOCAL_HISTORY_BOUND,
+                )
+                MessagesPage(items = items, nextCursor = null)
+            }
+        }
+        return getMessagesPagedImpl(sessionId, limit, before, token, anchored = true)
+    }
 
     /**
      * §empty-window-fix: UNANCHORED slim initial-window fetch — same contract
-     * as [getMessagesPaged] but forces `since=0L` in slim mode (ignores the
-     * cached slim SSE watermark). Used ONLY by the VerifyAndHydrate cold-load
-     * path (via `launchLoadMessages(forceInitialWindow = true)` /
-     * `loadMessagesForEffect(forceInitialWindow = true)`) when a resident-but-
-     * EMPTY [cn.vectory.ocdroid.ui.controller.CachedSessionWindow] is treated
-     * as a cache miss.
+     * shape as [getMessagesPaged] but forces a fresh authoritative load.
      *
-     * # Why this exists (root cause of the "session opens to 暂无消息 but send
-     * populates it" bug)
+     * §11.1 fix-10 P0-1: same `before`-based split as [getMessagesPaged]:
+     *  - `before == null` → full drain + commit (cold-load).
+     *  - `before != null` → single-page cursor fetch via
+     *    [getSlimapiMessagesPage] (load-more).
      *
-     * An empty window gets written when
-     * [cn.vectory.ocdroid.ui.controller.SessionSwitcher.captureCurrentSessionWindow]
-     * snapshots an outgoing session that was still loading or already cleared.
-     * Pre-fix, VerifyAndHydrate hydrated that empty window and ran a
-     * `resetLimit=false` refresh → [getMessagesPaged]'s slim branch anchored on
-     * the EXISTING slim watermark + `/since/{ts}`. If that watermark already
-     * covered the server's latest message, the `/since` response was EMPTY, so
-     * the selective merge preserved the empty UI window. Net: server had
-     * messages, UI showed "暂无消息". Sending bypassed this because it triggers
-     * `onRefreshMessages(sessionId, true)` via `loadMessagesWithRetry` + SSE
-     * activity.
+     * The cold-load path uses [SLIMAPI_LOCAL_HISTORY_BOUND] as the drain
+     * item bound (NOT the UI [limit]). The load-more path honours [limit]
+     * as the per-page query param.
      *
-     * Forcing `since=0L` makes the fetch UNANCHORED — it returns the server's
-     * actual initial window regardless of any cached watermark, exactly like a
-     * genuine cache-miss cold load.
-     *
-     * # Shape compatibility
-     *
-     * Returns the SAME [MessagesPage] shape (items + nextCursor) as
-     * [getMessagesPaged] so the caller's selective-merge
-     * (§preserveUnfetched / §Bug3) + cursor-seeding
-     * (`olderMessagesCursor` / `hasMoreMessages`) logic is IDENTICAL to the
-     * `resetLimit=true` path. The `X-Next-Cursor` header seeds the history
-     * cursor so `loadMore` continues to work.
-     *
-     * Legacy non-slim mode (`isSlimMode == false`) has no watermark concept —
-     * the body is byte-for-byte identical to [getMessagesPaged]'s legacy
-     * branch (same [api.getMessages] call, same header read).
-     *
-     * See [getMessagesPaged] for the anchored (watermark-based) counterpart.
-     * `getMessagesPaged`'s default behavior for all other callers is
-     * unchanged.
+     * Legacy non-slim mode: byte-for-byte identical to [getMessagesPaged]'s
+     * legacy branch.
      */
     suspend fun getMessagesPagedUnanchored(
         sessionId: String,
         limit: Int? = null,
         before: String? = null,
         token: SlimCommitToken = captureSlimCommitToken(),
-    ): Result<MessagesPage> =
-        getMessagesPagedImpl(sessionId, limit, before, token, anchored = false)
+    ): Result<MessagesPage> {
+        if (serverCompatProfile.slimConnection) {
+            // §11.1 fix-10 P0-1: same before-based split as getMessagesPaged.
+            if (before != null) {
+                return getSlimapiMessagesPage(
+                    sessionId = sessionId,
+                    limit = limit,
+                    before = before,
+                    mode = "skeleton",
+                    token = token,
+                )
+            }
+            return runSuspendCatching {
+                val items = slimSyncEngine.drainAndCommitAuthoritative(
+                    sessionId = sessionId,
+                    token = token,
+                    itemBound = SLIMAPI_LOCAL_HISTORY_BOUND,
+                )
+                MessagesPage(items = items, nextCursor = null)
+            }
+        }
+        return getMessagesPagedImpl(sessionId, limit, before, token, anchored = false)
+    }
 
     /**
      * Shared implementation for [getMessagesPaged] and
@@ -2264,9 +2476,18 @@ class OpenCodeRepository @Inject constructor(
     /**
      * Cluster A: anchor-paginated message fetch (§5 A2=A). GETs
      * `/slimapi/messages/{sid}/since/{ts}` — server returns skeletons whose
-     * `time.updated >= ts`. After a successful fetch the local bookmark is
-     * bumped to the max `time.updated` observed so subsequent digests only
-     * trigger on strictly newer activity.
+     * `time.updated >= ts`.
+     *
+     * §11.1 fix-10 P1-3 KDoc: this facade is RETAINED for source/test
+     * binary compatibility but is NO LONGER a reliability path. It returns
+     * `Result.failure(SlimSinceStagingOnlyException)` unconditionally and
+     * performs NO bookmark / localApplied / dirty mutation. It NEVER bumps
+     * the bookmark (the prior "after a successful fetch the local bookmark
+     * is bumped" behavior was removed by fix-6 stage-A staging-only).
+     *
+     * New reliability callers MUST use [fetchSinceForStageA] (returning
+     * [SlimSinceStageAOutcome]) for staging, and the full/cursor drain +
+     * authoritative commit path for watermark advancement.
      *
      * Pass [since] = 0L for the cold-start path (no prior bookmark).
      */
@@ -2280,11 +2501,32 @@ class OpenCodeRepository @Inject constructor(
         slimSyncEngine.getSlimapiMessagesSince(sessionId, since, limit, before, token)
 
     /**
+     * §11.1 stage A: the NEW staging `/since` fetch. Delegates to
+     * [SlimSyncEngine.fetchSinceForStageA]. See there for the full exception
+     * classification contract and the [SlimSinceStageAOutcome] variants.
+     *
+     * Stage A treats every `/since` response (including `X-Since-Complete:
+     * true`) as staging-only — the caller MUST NOT advance the watermark /
+     * clear dirty / replace authoritative memory based on the returned
+     * [SlimSinceStageAOutcome]. Authoritative watermark advancement happens
+     * ONLY via the full/cursor drain Success path +
+     * [SlimAuthoritativeCommitter.commitAuthoritative].
+     */
+    internal suspend fun fetchSinceForStageA(
+        sessionId: String,
+        since: Long,
+        limit: Int? = null,
+        before: String? = null,
+        token: SlimCommitToken,
+    ): SlimSinceStageAOutcome =
+        slimSyncEngine.fetchSinceForStageA(sessionId, since, limit, before, token)
+
+    /**
      * §slim-v1-paging (Task 5 / G5 cursor): Cluster A cursor-paginated
      * skeleton fetch (`GET /slimapi/messages/{sid}?limit=…&before=…&mode=…`).
      * Used for the no-bookmark cold-start branch in [coldStartSlimSync]
-     * (which cursor-follows via [drainSlimapiMessagesBounded]) and any
-     * future caller that wants to walk older history without an anchor ts.
+     * (which cursor-follows via [drainSlimapiMessagesBoundedOutcome]) and
+     * any caller that wants to walk older history without an anchor ts.
      *
      * Surfaces BOTH the items AND the `X-Next-Cursor` response header on
      * the returned [MessagesPage] (was: the pre-G5 [getSlimapiMessagesPaged]
@@ -2292,27 +2534,22 @@ class OpenCodeRepository @Inject constructor(
      * cursor was discarded; that method was unused and is replaced here).
      * The legacy non-slim analogue is [getMessagesPaged] (legacy branch).
      *
-     * Bookmark invariant (rev-gpt MINOR #2, Option A): when [bumpBookmark]
-     * is true (default), bumps the local slim SSE watermark to
-     * `max(time.updated)` over the returned items — mirrors
-     * [getSlimapiMessagesSince] / [getMessagesPaged] slim branch so single-
-     * page callers keep the invariant for free. The cursor-following drain
-     * ([drainSlimapiMessagesBounded]) passes `bumpBookmark = false` and
-     * bumps ONCE at termination from the aggregated items — otherwise each
-     * page would bump individually and the "single bump" claim in the
-     * drain's KDoc would be inaccurate (the result is correct either way
-     * because [bumpSlimBookmarkFromItems] is monotonic, but the doc/code
-     * should agree).
+     * §11.1 fix-8 P1-3: the `bumpBookmark` parameter was REMOVED. The
+     * single-page fetch NEVER bumps the slim SSE watermark — completeness
+     * proof belongs to the caller (the bounded drain bumps ONCE at
+     * terminal page via [SlimAuthoritativeCommitter.commitAuthoritative];
+     * a single-page caller has no completeness claim). Watermark advance
+     * is the exclusive job of [SlimAuthoritativeCommitter.commitAuthoritative]
+     * inside its token-guarded critical section.
      */
     suspend fun getSlimapiMessagesPage(
         sessionId: String,
         limit: Int? = null,
         before: String? = null,
         mode: String? = "skeleton",
-        bumpBookmark: Boolean = true,
         token: SlimCommitToken,
     ): Result<MessagesPage> =
-        slimSyncEngine.getSlimapiMessagesPage(sessionId, limit, before, mode, bumpBookmark, token)
+        slimSyncEngine.getSlimapiMessagesPage(sessionId, limit, before, mode, token)
 
     /**
      * Cluster A: single-message full expansion (`/slimapi/messages/{sid}/full/{mid}`).
@@ -2627,7 +2864,7 @@ class OpenCodeRepository @Inject constructor(
      * Blindly trusting `onReconcileSuccess`'s `dirty = false` would clear
      * a real gap → lost-update hazard fixed by this re-evaluation.
      */
-    private fun bumpSlimBookmarkFromItems(
+    internal fun bumpSlimBookmarkFromItems(
         sessionId: String,
         items: List<MessageWithParts>,
         token: SlimCommitToken,
@@ -2795,57 +3032,82 @@ class OpenCodeRepository @Inject constructor(
     ): Boolean = slimStateMachine.markSlimDirty(sessionId, token)
 
     /**
-     * §slim-v1-paging (Task 5 / G5 cursor): cursor-follows the slimapi
-     * `/messages/{sid}?mode=skeleton&limit={pageLimit}` endpoint, aggregating
-     * pages until EITHER the sidecar stops returning `X-Next-Cursor` OR the
-     * aggregated item count reaches [itemBound]. Called by
-     * [coldStartSlimSync]'s no-bookmark branch.
+     * §11.1 fix-12b P1-2: UNCONDITIONALLY set `dirty = true` for [sessionId]
+     * (delegates to [SlimSseStateMachine.forceSlimDirty]). Bypasses the
+     * [SlimSseStateMachine.needsReconcile] gate that [markSlimDirty] honors.
      *
-     * Boundary rules:
+     * Used by the reconciler's cache-retention failure paths in
+     * [cn.vectory.ocdroid.ui.controller.SlimSessionReconciler
+     * .applyCurrentReconcileResult]: when a non-focus Reconciled result's
+     * `WriteSessionWindow` was dropped, filtered to nothing, or arrived
+     * empty, the reconciler must re-ratchet dirty so the next pass retries
+     * the fetch. In the normal steady state (authoritative commit landed,
+     * remote aligned, no conflict, `needsReconcile == false`), the gated
+     * [markSlimDirty] is a SEMANTIC NO-OP — it returns true but `dirty`
+     * stays `false`, leaving the user with no cached window AND no
+     * scheduled retry. This method closes that hole by setting `dirty`
+     * unconditionally (still under the same SlimCommitToken guard).
+     *
+     * Atomic: holds [slimStateLock] for the in-memory derive+write via
+     * [SlimSseStateMachine.withSlimStateCommit]. D3 token validation
+     * includes the captured identity epoch and ClientBundle generation
+     * before this write.
+     */
+    fun forceSlimDirty(
+        sessionId: String,
+        token: SlimCommitToken,
+    ): Boolean = slimStateMachine.forceSlimDirty(sessionId, token)
+
+    /**
+     * §slim-v1-paging (Task 5 / G5 cursor) + §11.5 unified state contract +
+     * §11.1 fix-8 P0-1/P0-2/P1-3: cursor-follows the slimapi
+     * `/messages/{sid}?mode=skeleton&limit={pageLimit}` endpoint, aggregating
+     * pages until EITHER the sidecar stops returning `X-Next-Cursor`
+     * (terminal page → Success) OR a SAFETY limit is hit while the cursor is
+     * still non-null (item-bound / page-count cap → Partial). Called by
+     * [drainAndCommitAuthoritative] (the helper behind the no-bookmark
+     * branch of [coldStartSlimSync] and [getMessagesPagedUnanchored] in
+     * slim mode).
+     *
+     * Boundary rules (final §11.1 fix-8 contract, supersedes the earlier
+     * rev-gpt MINOR #2 / Option A "bump-on-termination" semantics):
+     *
      *  - **message-id dedup**: the sidecar's `X-Next-Cursor` is the OLDEST
      *    id of the current page; the next page is `?before=<that id>` and
      *    MAY include the boundary id again (boundary-inclusive, per §3).
      *    The aggregation dedups by `info.id` (first-seen wins → preserves
      *    newest-first ordering across the overlap).
-     *  - **bound reached mid-page**: if a page would push aggregation past
-     *    [itemBound], the bound-winning prefix of that page is kept and the
-     *    follow STOPS (the next older page is NOT fetched). This means the
-     *    aggregation is at most `itemBound` items (never `itemBound + pageLimit`).
-     *  - **bookmark invariant (rev-gpt MINOR #2, Option A)**: passes
-     *    `bumpBookmark = false` into [getSlimapiMessagesPage] per page so
-     *    the per-page bump is suppressed; bumps the slim SSE watermark to
-     *    `max(time.updated)` over the AGGREGATED items ONCE at termination
-     *    (a single bump — true "single bump", not per-page). A follow
-     *    interrupted by the bound / end-of-cursor / page-count cap still
-     *    updates the watermark for whatever was pulled. Mirrors
-     *    [getSlimapiMessagesSince] / [getMessagesPaged] slim branch.
-     *  - **transport failure mid-walk**: returns whatever was aggregated so
-     *    far (runSuspendCatching at the call site swallows HTTP/transport
-     *    failures → coldStartSlimSync folds the partial result). Bumps the
-     *    bookmark from the aggregate BEFORE returning so the next digest
-     *    re-drives from the NEW watermark (rev-gpt round-2 IMPORTANT: this
-     *    is the 4th termination path — without the bump, Option A's
-     *    suppressed per-page bump would lose the successfully-fetched
-     *    pages' watermark and the next digest would re-fetch already-
-     *    acquired history). Cancellation is NOT swallowed —
-     *    [getSlimapiMessagesPage] uses [runSuspendCatching] and CE
-     *    propagates out of this loop (the bump is skipped on CE; safe
-     *    because the partial aggregate would be re-fetched on retry, and
-     *    the bump is monotonic so no rollback risk either way).
+     *  - **§11.5 page-level terminal check** (NOT per-item): each page is
+     *    aggregated in full, THEN the terminal decision runs against the
+     *    page's `nextCursor`:
+     *    * `nextCursor == null` → terminal page → [SlimDrainOutcome.Success].
+     *      Even if the aggregate happens to hit `itemBound` on this exact
+     *      page, the server signalled end-of-history → Success.
+     *    * `nextCursor != null` AND `aggregated.size >= itemBound` →
+     *      [SlimDrainOutcome.Partial] (cause =
+     *      [SlimDrainBoundExceededException]).
+     *    * `nextCursor != null` AND page-count cap exhausted →
+     *      [SlimDrainOutcome.Partial] (cause =
+     *      [SlimDrainBoundExceededException]).
+     *  - **§11.1 fix-8 P1-3 NO bookmark bump in the drain**:
+     *    [getSlimapiMessagesPage] (the per-page helper) no longer accepts a
+     *    `bumpBookmark` parameter — single-page and per-page fetches NEVER
+     *    bump the slim SSE watermark. The drain likewise NEVER bumps. The
+     *    watermark advances ONLY inside [SlimAuthoritativeCommitter.commitAuthoritative]
+     *    on a [SlimAuthoritativeCommitResult.Committed] result (called by
+     *    [drainAndCommitAuthoritative] on the Success arm).
+     *  - **transport failure mid-walk**: surfaces as
+     *    [SlimDrainOutcome.Partial] (cause = the transport exception). NO
+     *    watermark bump. The next reconcile re-enters the cursor walk from
+     *    the same pre-drain watermark.
+     *  - **§11.5 wall-clock timeout**: the `withTimeout(30_000L)` wrapping
+     *    the walk surfaces as [SlimDrainOutcome.Partial] with a
+     *    [TimeoutCancellationException] cause. NO watermark bump.
      *  - **page-count safety cap**: a misbehaving sidecar that keeps
      *    returning `X-Next-Cursor` with empty pages would otherwise spin
      *    forever. The loop also stops after `ceil(itemBound / pageLimit) + 1`
      *    pages (covers the genuine bound-reaching case in 2 pages for the
      *    default 200/250; +1 slack for the trailing partial).
-     *
-     * **Future cleanup (not in T5 scope):** the four termination paths
-     * (transport-failure, bound-stop, cursor-null, page-count cap) each
-     * repeat the `bumpSlimBookmarkFromItems(sessionId, aggregated)` call.
-     * A `try { ... } finally { bumpSlimBookmarkFromItems(sessionId,
-     * aggregated) }` wrapper would unify them — skipped here because it
-     * would also bump on CE propagation (a behaviour change, however
-     * safe), and the reviewer's constraint pins the three normal
-     * termination points as "stays as-is".
      */
     private suspend fun drainSlimapiMessagesBounded(
         sessionId: String,
@@ -2862,46 +3124,22 @@ class OpenCodeRepository @Inject constructor(
      * [drainSlimapiMessagesBoundedOutcome] in a **STRICT [Result] type** so
      * the coordinator can distinguish:
      *
-     *  - `Result.success(items)` — bounded skeleton cursor drain completed
-     *    cleanly (cursor-null, item-bound, or page-count cap). The local
-     *    watermark was advanced inside the drain via
-     *    [bumpSlimBookmarkFromItems] (which calls `onReconcileSuccess`).
-     *    The coordinator may clear dirty.
-     *  - `Result.failure(SlimCursorPartialException)` — a MID-WALK
-     *    transport/page failure terminated the drain AFTER some items
-     *    were aggregated. The coordinator MUST treat this as failure →
-     *    preserve dirty. The aggregated items ARE useful for cold-start
-     *    (via [drainSlimapiMessagesBounded]); the reconciler does NOT
-     *    consume them (preserves dirty for retry).
+     * §11.1 fix-8 final contract (supersedes "cursor-null, item-bound, or
+     * page-count cap" Success semantics + the earlier round-4
+     * no-bump-on-partial patch):
      *
-     * # T11 round-3 (oracle I2 review fix)
-     *
-     * Pre-round-3 this façade wrapped Partial as Success — violating
-     * oracle's "transport/page failure distinguishable → preserve dirty".
-     * Round-3 makes Partial → Result.failure so the reconciler preserves
-     * dirty on this call.
-     *
-     * # T11 round-4 (durable partial-cursor retry — the no-bump-on-partial)
-     *
-     * Round-3 had a remaining gap: the drain bumped `localApplied*` on
-     * Partial (unconditionally), so the next reconcile's `needsCatchUp`
-     * (which compares probe vs `localApplied*`, NOT dirty) could see
-     * "aligned" if the partial window included the server's latest, then
-     * `markSlimReconcileAligned` cleared dirty and the cursor walk
-     * switched to `/since/{partial-watermark}` → older pages permanently
-     * lost.
-     *
-     * Round-4 fixes that by passing `bumpBookmarkOnPartialFailure = false`
-     * into [drainSlimapiMessagesBoundedOutcome]. Partial now does NOT
-     * advance `localApplied*`; the next reconcile re-enters the cursor
-     * drain from the SAME pre-drain watermark, eventually fetching the
-     * older pages that failed. Dirty stays preserved across retries
-     * until a clean Success.
-     *
-     * The cold-start path ([coldStartSlimSync] via
-     * [drainSlimapiMessagesBounded]) keeps `bumpBookmarkOnPartialFailure
-     * = true` — its "consume partial + record progress" semantics are
-     * unchanged.
+     *  - `Result.success(items)` — bounded skeleton cursor drain reached a
+     *    TERMINAL page (`nextCursor == null`). The local watermark is NOT
+     *    advanced by the drain (P1-3) — the caller MUST drive
+     *    [SlimAuthoritativeCommitter.commitAuthoritative] to advance it
+     *    atomically. An item-bound / page-count cap hit while the cursor
+     *    is STILL non-null is a [SlimDrainOutcome.Partial] (NOT Success)
+     *    per §11.5 — the cap is a SAFETY limit, not a completeness proof.
+     *  - `Result.failure(SlimCursorPartialException)` — mid-walk transport
+     *    / page failure detected (including loop / zero-progress / timeout
+     *    / item-bound / page-bound with non-null cursor). The local
+     *    watermark is NOT advanced (no-bump-on-partial). The next reconcile
+     *    re-enters the cursor walk from the same pre-drain watermark.
      *
      * # Boundary ownership (oracle I2)
      *
@@ -2909,9 +3147,9 @@ class OpenCodeRepository @Inject constructor(
      * ([SLIMAPI_DEFAULT_PAGE_LIMIT]), history bound
      * ([SLIMAPI_LOCAL_HISTORY_BOUND]), `X-Next-Cursor` traversal,
      * message-id dedup, page-count / no-progress safety, CE propagation,
-     * and the ONE final local-watermark update on Success only (via
-     * [bumpSlimBookmarkFromItems] → `onReconcileSuccess` → dirty-cleared
-     * with T11 round-2 re-evaluation).
+     * and NEVER bumps the local watermark (P1-3 — only
+     * [SlimAuthoritativeCommitter.commitAuthoritative] advances it on a
+     * Committed result).
  *
  * # Honest caveat (G-F1)
  *
@@ -2948,6 +3186,56 @@ class OpenCodeRepository @Inject constructor(
      */
     class SlimCursorPartialException(cause: Throwable) :
         java.io.IOException("slim cursor drain terminated mid-walk: ${cause.message}", cause)
+
+    /**
+     * §11.1 fix-8 P0-2: typed exception raised by
+     * [SlimSyncEngine.drainAndCommitAuthoritative] when the authoritative
+     * commit returned a non-Committed result ([SlimAuthoritativeCommitResult.StaleToken] /
+     * [CacheWriteFailed] / [MergeRejected]). Carries the typed commit result
+     * in [commitResult] so callers can branch on the specific failure mode.
+     *
+     * # Caller contract
+     *
+     *  - [SlimSyncEngine.coldStartSlimSync] maps this to `messages = null`
+     *    (keep prior visible content + dirty, no UI success merge).
+     *  - [OpenCodeRepository.getMessagesPagedUnanchored] surfaces it via
+     *    `Result.failure` so the cold-load caller treats it as a transient
+     *    failure (UiEvent.Error is appropriate — the user-visible cold-load
+     *    could not complete).
+     *
+     * The drain's internal `commitBookmarkOrThrow` is NOT called (the drain
+     * P1-3 fix removed all per-page / per-drain bookmark bumps); the
+     * watermark is ONLY advanced inside [commitAuthoritative] on
+     * [SlimAuthoritativeCommitResult.Committed]. A non-Committed result
+     * therefore leaves `localApplied*` / `dirty` / `visibleContent`
+     * unchanged — matching §11.2's failure-branch invariant.
+     */
+    class SlimAuthoritativeCommitFailedException(
+        message: String,
+        val commitResult: SlimAuthoritativeCommitResult,
+    ) : java.io.IOException(message)
+
+    /**
+     * §11.1 fix-8 P1-2: typed exception returned by the slim `/since` facade
+     * ([getMessagesPaged] / [getMessagesPagedUnanchored] in slim anchored /
+     * non-anchored non-drain mode). Stage A treats every `/since` response
+     * as staging-only; the facade surfaces this exception so consumers can
+     * distinguish "conservative staging" (REST reload unavailable, SSE
+     * drives updates) from a real transport failure.
+     *
+     * Consumers (MessageActions / CatchUpActions / RevertCutoffCoordinator)
+     * MUST detect this typed exception and suppress the UiEvent.Error /
+     * Failure surface — the slim REST reload is intentionally unavailable
+     * in stage A; the caller keeps the current UI state.
+     *
+     * §11.1 fix-8 P1-2: declared `open` so the `data.repository`-side
+     * [SlimSinceStagingOnlyException] subclass can inherit (preserving
+     * binary compat for the existing internal type while letting consumers
+     * in `data.repository` and `ui` branches detect the SAME typed
+     * exception via a single `is` check).
+     */
+    open class SlimSinceStagingOnlyException internal constructor(message: String) :
+        java.io.IOException(message)
 
     companion object {
         /**

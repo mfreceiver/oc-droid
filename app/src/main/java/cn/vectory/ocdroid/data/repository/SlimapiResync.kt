@@ -49,6 +49,95 @@ internal fun compareWatermark(tsA: Long?, idA: String?, tsB: Long?, idB: String?
 }
 
 /**
+ * §11.3 (slim message reliability joint plan): compute the tuple-max
+ * `(time.updated, info.id)` over [items], restricted to messages that
+ * carry BOTH a usable `time.updated` (`> 0L`) AND a non-blank `info.id`.
+ *
+ * Returns the winning `(Long, String)` pair, or `null` if no eligible
+ * message exists in [items]. The return type is declared
+ * `Pair<Long?, String?>?` so it is directly assignable to the nullable
+ * [SlimSessionState] watermark fields; in practice, whenever a non-null
+ * Pair is returned BOTH components are non-null (the eligibility filter
+ * guarantees it).
+ *
+ * # Key invariants (must hold for every caller)
+ *
+ *  - **Legal watermark state is only `(null, null)` or
+ *    `(timestamp, messageId)`** — never `(timestamp, null)` nor
+ *    `(null, messageId)`. Advancing localApplied MUST write BOTH fields
+ *    atomically (see [canAdvanceLocalAppliedTuple] + [onReconcileSuccess]).
+ *  - Only messages with `info.time.updated > 0L && info.id.isNotBlank()`
+ *    participate in watermark selection. Other messages may still enter
+ *    merge/staging, but they MUST NOT advance the watermark.
+ *  - When the collection has no eligible message, this returns `null`
+ *    (i.e. "do not advance") — it NEVER returns `(null, id)` or
+ *    `(0L, id)`. `updated <= 0L` is NOT a completeness proof.
+ *  - This helper does NOT add a `msg_` prefix allowlist and does NOT
+ *    assume any message id format — it compares ids purely
+ *    lexicographically (delegating to [compareWatermark] in the callers),
+ *    so it works for opaque / legacy / future id schemes.
+ *  - The tuple is compared in lexicographic order (ts first; equal ts ⇒
+ *    id tie-break), mirroring [compareWatermark]. Among equal-ts items
+ *    the largest id wins (deterministic in id space).
+ *
+ * Pure — no IO, no SlimSseState mutation, no Android dependency.
+ */
+internal fun maxMessageTuple(
+    items: List<MessageWithParts>,
+): Pair<Long?, String?>? {
+    val item = items
+        .asSequence()
+        .filter {
+            (it.info.time?.updated ?: 0L) > 0L &&
+                it.info.id.isNotBlank()
+        }
+        .maxWithOrNull(
+            compareBy<MessageWithParts>(
+                { it.info.time!!.updated!! },
+                { it.info.id },
+            ),
+        )
+        ?: return null
+
+    return item.info.time!!.updated!! to item.info.id
+}
+
+/**
+ * §11.3 (slim message reliability joint plan): predicate — does the
+ * tuple-max of [items] strictly exceed the current localApplied tuple
+ * of [state]?
+ *
+ *  - `true` ⇒ the caller may advance localApplied (both fields together)
+ *    AND may clear `dirty` (the local view has caught up to a strictly
+ *    newer tuple).
+ *  - `false` ⇒ the caller MUST NOT advance localApplied, MUST NOT clear
+ *    `dirty`, and MAY trigger a bounded full/cursor fallback to prove
+ *    completeness. Reasons for `false` include: no eligible message in
+ *    [items] ([maxMessageTuple] returned `null`), same tuple observed
+ *    (idempotent re-fetch), or an older tail returned (stale /
+ *    out-of-order fetch).
+ *
+ * This predicate is the **tuple-safety gate** for localApplied advance.
+ * It exists separately from [onReconcileSuccess] so §11.2's commit
+ * protocol and §11.4's set-merge can both consult it without coupling
+ * to the state-copy machinery. `remote*` is never consulted here —
+ * remote tuple being ahead only signals "needs reconcile", not
+ * "collection is complete".
+ *
+ * Pure — no IO, no SlimSseState mutation, no Android dependency.
+ */
+internal fun canAdvanceLocalAppliedTuple(
+    state: SlimSessionState,
+    items: List<MessageWithParts>,
+): Boolean {
+    val max = maxMessageTuple(items) ?: return false
+    return compareWatermark(
+        max.first, max.second,
+        state.localAppliedUpdatedAt, state.localAppliedMessageId,
+    ) > 0
+}
+
+/**
  * Task 6 (slimapi v1 §G5 — split watermark): pure reconcile primitives
  * for [SlimSessionState]. These are the **local-applied path** of the
  * split watermark model — the counterpart to the digest reducer's remote

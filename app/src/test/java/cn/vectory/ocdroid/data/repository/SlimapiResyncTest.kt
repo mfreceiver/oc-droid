@@ -665,17 +665,19 @@ class SlimapiResyncTest {
     @Test
     fun `T6-C2 dirty survives across non-focus digests then clears on reconcile success`() {
         // Mirrors the focus/non-focus flow pinned by T6-C2 + T6-C3.
+        // §11.1 fix-9 P1-1: use full-tuple digests so remote* advances.
         val state = SlimSseState()
 
         // 1. Focus-session digest arrives → reducer advances remote, sets dirty.
-        reduceSlimDigest(state, SlimSessionDigest(sessionId = "s1", updatedAt = 100L))
+        reduceSlimDigest(state, SlimSessionDigest(sessionId = "s1", updatedAt = 100L, messageId = "m1"))
         val afterDigest = state.get("s1")!!
         assertTrue("dirty set by digest reducer", afterDigest.dirty)
         assertEquals(100L, afterDigest.remoteUpdatedAt)
+        assertEquals("m1", afterDigest.remoteMessageId)
         assertNull(afterDigest.localAppliedUpdatedAt)
 
         // 2. Non-focus digest re-emit (debounce) — dirty stays.
-        reduceSlimDigest(state, SlimSessionDigest(sessionId = "s1", updatedAt = 100L))
+        reduceSlimDigest(state, SlimSessionDigest(sessionId = "s1", updatedAt = 100L, messageId = "m1"))
         assertTrue("dirty survives debounce re-emit", state.get("s1")!!.dirty)
 
         // 3. Reconcile succeeds (REST fetched the message at updatedAt=100).
@@ -695,8 +697,9 @@ class SlimapiResyncTest {
 
     @Test
     fun `T6-C2 dirty stays true when reconcile fails`() {
+        // §11.1 fix-9 P1-1: use full-tuple digest so remote* advances.
         val state = SlimSseState()
-        reduceSlimDigest(state, SlimSessionDigest(sessionId = "s1", updatedAt = 100L))
+        reduceSlimDigest(state, SlimSessionDigest(sessionId = "s1", updatedAt = 100L, messageId = "m1"))
         assertTrue(state.get("s1")!!.dirty)
 
         // Reconcile attempt fails — preserve dirty.
@@ -727,6 +730,223 @@ class SlimapiResyncTest {
         // ts 相等 + null id = 最旧
         assertTrue(compareWatermark(200L, null, 200L, "m1") < 0)
         assertTrue(compareWatermark(200L, "m1", 200L, null) > 0)
+    }
+
+    // ── §11.3: maxMessageTuple / canAdvanceLocalAppliedTuple ─────────────
+
+    @Test
+    fun `§11_3 maxMessageTuple null updated timestamp is not completeness proof`() {
+        // A message whose time.updated is null (or <= 0L) is NOT a
+        // completeness signal — it is excluded from watermark selection.
+        // Here every candidate is ineligible, so maxMessageTuple returns
+        // null even though the collection is non-empty. canAdvance*
+        // therefore returns false (no advance), regardless of the prior
+        // state. This is why `updated <= 0L` is never treated as proof
+        // that the set is complete / caught up.
+        val items = listOf(
+            MessageWithParts(info = Message(id = "m1", role = "assistant")), // no time
+            messageWithParts(id = "m2", updated = 0L),
+        )
+        assertNull(
+            "null / zero updated timestamps are not completeness proof — " +
+                "no eligible item ⇒ maxMessageTuple is null",
+            maxMessageTuple(items),
+        )
+    }
+
+    @Test
+    fun `§11_3 maxMessageTuple same timestamp uses existing message id tie break`() {
+        // When multiple eligible items share the max updatedAt, the
+        // LARGEST id wins (lexicographic tie-break, mirroring
+        // compareWatermark). Both components of the returned pair come
+        // from that same winning item.
+        val items = listOf(
+            messageWithParts(id = "aaa", updated = 200L),
+            messageWithParts(id = "zzz", updated = 200L),
+            messageWithParts(id = "mmm", updated = 200L),
+        )
+        val max = maxMessageTuple(items)
+        assertEquals(200L, max?.first)
+        assertEquals(
+            "same-ts tie-break: largest id (zzz) wins, mirroring compareWatermark",
+            "zzz",
+            max?.second,
+        )
+    }
+
+    @Test
+    fun `§11_3 tuple comparison does not validate or invent message id format`() {
+        // The tuple helpers make NO assumption about id format: no
+        // `msg_` prefix allowlist, no shape validation. Arbitrary opaque
+        // ids (UUIDs, numerics, unicode) compare purely lexicographically
+        // via compareWatermark. This pins that the helpers do not invent
+        // or reject any id scheme.
+        val items = listOf(
+            messageWithParts(id = "b3f0a1c2-uuid-shaped", updated = 100L),
+            messageWithParts(id = "纯文本id", updated = 200L),
+            messageWithParts(id = "0001-numeric", updated = 300L),
+        )
+        val max = maxMessageTuple(items)
+        assertEquals(300L, max?.first)
+        assertEquals("0001-numeric", max?.second)
+
+        // canAdvanceLocalAppliedTuple only consults compareWatermark;
+        // it never inspects id shape.
+        val state = SlimSessionState(
+            sessionId = "s1",
+            localAppliedUpdatedAt = 100L,
+            localAppliedMessageId = "anything-at-all",
+        )
+        assertTrue(
+            "tuple compare is format-agnostic: 300 > 100 ⇒ advance regardless of id shape",
+            canAdvanceLocalAppliedTuple(state, items),
+        )
+    }
+
+    @Test
+    fun `§11_3 maxMessageTuple empty collection returns null`() {
+        assertNull(maxMessageTuple(emptyList()))
+    }
+
+    @Test
+    fun `§11_3 maxMessageTuple all ineligible items returns null`() {
+        // Blank ids and non-positive updated are both excluded.
+        val items = listOf(
+            messageWithParts(id = "", updated = 500L),
+            messageWithParts(id = "   ", updated = 400L),
+            messageWithParts(id = "m1", updated = 0L),
+            messageWithParts(id = "m2", updated = -1L),
+            MessageWithParts(info = Message(id = "m3", role = "assistant")), // no time
+        )
+        assertNull(
+            "no eligible item (blank ids / non-positive updated) ⇒ null, never (null, id)",
+            maxMessageTuple(items),
+        )
+    }
+
+    @Test
+    fun `§11_3 maxMessageTuple blank id coexists with valid lower-ts item anchors to valid max`() {
+        // Among mixed items, only non-blank-id + positive-updated
+        // candidates participate. A blank id @500 is ignored; the valid
+        // tuple-max (m-valid @300) wins.
+        val items = listOf(
+            messageWithParts(id = "", updated = 500L),
+            messageWithParts(id = "m-valid", updated = 300L),
+            messageWithParts(id = "m-older", updated = 200L),
+        )
+        val max = maxMessageTuple(items)
+        assertEquals(300L, max?.first)
+        assertEquals("m-valid", max?.second)
+    }
+
+    @Test
+    fun `§11_3 canAdvanceLocalAppliedTuple initial null-null state advances on any eligible tuple`() {
+        // Fresh state: localApplied is (null, null). Any eligible item
+        // tuple strictly exceeds (null, null) under compareWatermark
+        // (null ts = oldest), so canAdvance* returns true.
+        val state = SlimSessionState(sessionId = "s1")
+        val items = listOf(messageWithParts(id = "m1", updated = 100L))
+        assertTrue(
+            "fresh (null, null) state is advanced by any eligible tuple",
+            canAdvanceLocalAppliedTuple(state, items),
+        )
+    }
+
+    @Test
+    fun `§11_3 canAdvanceLocalAppliedTuple same tuple does not advance`() {
+        // Idempotent: same (ts, id) observed ⇒ compareWatermark == 0 ⇒
+        // not > 0 ⇒ no advance. (Caller must not clear dirty either.)
+        val state = SlimSessionState(
+            sessionId = "s1",
+            localAppliedUpdatedAt = 200L,
+            localAppliedMessageId = "m-same",
+        )
+        val items = listOf(messageWithParts(id = "m-same", updated = 200L))
+        assertFalse(
+            "same tuple is idempotent — no advance",
+            canAdvanceLocalAppliedTuple(state, items),
+        )
+    }
+
+    @Test
+    fun `§11_3 canAdvanceLocalAppliedTuple older tuple does not advance`() {
+        // Older tail (observed ts < prior) ⇒ compareWatermark < 0 ⇒ no
+        // advance. The caller may trigger a bounded full/cursor fallback.
+        val state = SlimSessionState(
+            sessionId = "s1",
+            localAppliedUpdatedAt = 500L,
+            localAppliedMessageId = "m-prior",
+        )
+        val items = listOf(
+            messageWithParts(id = "m1", updated = 100L),
+            messageWithParts(id = "m2", updated = 200L),
+        )
+        assertFalse(
+            "older tail does not advance localApplied",
+            canAdvanceLocalAppliedTuple(state, items),
+        )
+    }
+
+    @Test
+    fun `§11_3 canAdvanceLocalAppliedTuple equal ts larger id advances`() {
+        // T1 inverted tie-break: equal ts + strictly larger id ⇒ advance.
+        val state = SlimSessionState(
+            sessionId = "s1",
+            localAppliedUpdatedAt = 200L,
+            localAppliedMessageId = "m1",
+        )
+        val items = listOf(messageWithParts(id = "m2", updated = 200L))
+        assertTrue(
+            "equal ts + larger id advances under tuple semantics",
+            canAdvanceLocalAppliedTuple(state, items),
+        )
+    }
+
+    @Test
+    fun `§11_3 canAdvanceLocalAppliedTuple equal ts smaller id does not advance`() {
+        // Stale-digest safe harbor: equal ts + strictly smaller id ⇒ no
+        // advance (prevents spurious reconcile loops).
+        val state = SlimSessionState(
+            sessionId = "s1",
+            localAppliedUpdatedAt = 200L,
+            localAppliedMessageId = "m2",
+        )
+        val items = listOf(messageWithParts(id = "m1", updated = 200L))
+        assertFalse(
+            "equal ts + smaller id does not advance (stale-digest safe harbor)",
+            canAdvanceLocalAppliedTuple(state, items),
+        )
+    }
+
+    @Test
+    fun `§11_3 canAdvanceLocalAppliedTuple no eligible item does not advance`() {
+        // No eligible message ⇒ maxMessageTuple returns null ⇒ no
+        // advance, regardless of prior state. The caller must not clear
+        // dirty and may trigger a bounded fallback.
+        val state = SlimSessionState(sessionId = "s1") // (null, null)
+        val items = listOf(
+            messageWithParts(id = "", updated = 500L),
+            messageWithParts(id = "m1", updated = 0L),
+        )
+        assertFalse(
+            "no eligible item ⇒ no advance, even from (null, null) initial state",
+            canAdvanceLocalAppliedTuple(state, items),
+        )
+    }
+
+    @Test
+    fun `§11_3 canAdvanceLocalAppliedTuple strict ts advance with fresh id advances`() {
+        // Strict ts domination: any ids, observed ts > prior ts ⇒ advance.
+        val state = SlimSessionState(
+            sessionId = "s1",
+            localAppliedUpdatedAt = 100L,
+            localAppliedMessageId = "m-old",
+        )
+        val items = listOf(
+            messageWithParts(id = "m-a", updated = 150L),
+            messageWithParts(id = "m-b", updated = 300L),
+        )
+        assertTrue(canAdvanceLocalAppliedTuple(state, items))
     }
 
     // ── helpers ──────────────────────────────────────────────────────────

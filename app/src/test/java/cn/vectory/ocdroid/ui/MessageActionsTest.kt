@@ -812,4 +812,452 @@ class MessageActionsTest {
         )
         assertFalse(slices.chat.value.isLoadingMessages)
     }
+
+    // ── P0-2 freeze: SSE-off / terminal-degraded foreground observability ──────
+    //
+    // §context: "SSE-off" = the debug sse_disabled=true flag (REST-only
+    // degraded mode, ConnectionPhase.SseDisabled) OR a real terminal outage
+    // (ConnectionPhase.Disconnected past the 90s
+    // SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS). "terminal-degraded" = the slim
+    // repository is stuck mid-reconfigure (every GET returns
+    // StaleSlimCommitException because the SSE-driven reconfigure never
+    // settles). The contract: a foreground chat open under these conditions
+    // must NOT silently leave the window blank.
+    //
+    // §evidence — the existing launchLoadMessages logic ALREADY covers this
+    // via four mechanisms (NO new poller / mutation retry needed):
+    //
+    //  ① forceInitialWindow=true (set by performGlobalColdStartRefresh /
+    //     performForceRefresh / VerifyAndHydrate cold-load) routes the slim
+    //     fetch UNANCHORED (getMessagesPagedUnanchored → since=0L), bypassing
+    //     a stale slim watermark. (MessageActions.kt:124-128)
+    //
+    //  ② §stale-retry-fix: a StaleSlimCommitException from the slim GET
+    //     (mid-reconfigure on SSE reconnect / resume / host switch — the
+    //     exact terminal-degraded transition window) is retried up to 2
+    //     times with 500ms delay, covering the typical ~1s reconfigure
+    //     settle. Applies to BOTH forceInitialWindow branches.
+    //     (MessageActions.kt:129-139)
+    //
+    //  ③ §history-load-fix: after retry exhaustion (or a non-stale failure),
+    //     onFailure emits UiEvent.Error(R.string.error_load_messages_failed)
+    //     for the CURRENT session — the user sees a visible error, NOT a
+    //     silent blank. (MessageActions.kt:513-526)
+    //
+    //  ④ CancellationException is NEVER swallowed: runSuspendCatching (R-14)
+    //     in MessageSource re-throws it; launchLoadMessages' outer
+    //     try/catch re-throws it; the finally clears the loading flag.
+    //     (MessageActions.kt:552-554). launchLoadMessages issues ONLY GET
+    //     fetches (getMessagesPaged* + getSessionTodos) — it never touches
+    //     a mutation POST, so "no auto-retry mutation POST" is structural.
+    //
+    // The tests below pin each guarantee so a future refactor cannot regress
+    // the P0-2 freeze contract.
+
+    @Test
+    fun `P0-2 forceInitialWindow=true retries StaleSlimCommitException and recovers foreground messages (SSE-off cold-load)`(): Unit = runTest {
+        // §mechanism ①+②: the SSE-off / reconnect cold-load path
+        // (forceInitialWindow=true) hits a stale commit token twice
+        // (mid-reconfigure), then the third fetch settles and returns the
+        // server's initial window. The retry loop recovers the foreground
+        // instead of failing fast into a blank window.
+        val msgs = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
+        coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returnsMany listOf(
+            Result.failure(OpenCodeRepository.StaleSlimCommitException()),
+            Result.failure(OpenCodeRepository.StaleSlimCommitException()),
+            Result.success(MessagesPage(msgs, nextCursor = null)),
+        )
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "s1",
+            resetLimit = true,
+            forceInitialWindow = true,
+            emit = emit,
+        )
+        // §note: scope (setUp) has its own TestCoroutineScheduler separate from
+        // runTest's; the retry loop's delay(500) suspends on scope's scheduler,
+        // so we must advance SCOPE's scheduler (mirrors the existing
+        // launchLoadMessagesWithRetry delay-based tests).
+        scope.advanceUntilIdle()
+        scope.runCurrent()
+
+        // 3 attempts: initial + 2 retries (the §stale-retry-fix ceiling).
+        coVerify(exactly = 3) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
+        // Foreground window recovered — NOT a silent blank.
+        assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
+        // Retry succeeded → no user-facing error.
+        assertTrue(emitted.filterIsInstance<UiEvent.Error>().isEmpty())
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
+
+    @Test
+    fun `P0-2 forceInitialWindow=true emits UiEvent Error after stale retry exhaustion (terminal-degraded is observable, not silent blank)`(): Unit = runTest {
+        // §mechanism ②+③: terminal-degraded — the reconfigure NEVER settles,
+        // so every slim GET returns StaleSlimCommitException. After 2 retries
+        // (3 total attempts) the load MUST surface a user-visible error
+        // instead of leaving the foreground chat silently blank.
+        coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returns
+            Result.failure(OpenCodeRepository.StaleSlimCommitException())
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "s1",
+            resetLimit = true,
+            forceInitialWindow = true,
+            emit = emit,
+        )
+        // §note: advance SCOPE's scheduler (separate from runTest's) past the
+        // two retry delay(500)s.
+        scope.advanceUntilIdle()
+        scope.runCurrent()
+
+        // 3 attempts then give up (the retry ceiling).
+        coVerify(exactly = 3) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
+        // §the-key-assertion: the failure is OBSERVABLE — UiEvent.Error fires
+        // for the current (foreground) session. The window is empty (no data)
+        // but the user is told why, so it is NOT a silent blank.
+        val err = emitted.filterIsInstance<UiEvent.Error>().single()
+        assertEquals(R.string.error_load_messages_failed, err.resId)
+        assertTrue(slices.chat.value.messages.isEmpty())
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
+
+    @Test
+    fun `P0-2 anchored path (forceInitialWindow=false) also retries StaleSlimCommitException (periodic reload covered)`(): Unit = runTest {
+        // §mechanism ②: the stale-retry guard covers the anchored periodic-
+        // reload path too (not just the cold-load unanchored branch), so a
+        // mid-reconfigure reconnect doesn't silently drop a foreground
+        // refresh either.
+        val msgs = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returnsMany listOf(
+            Result.failure(OpenCodeRepository.StaleSlimCommitException()),
+            Result.success(MessagesPage(msgs, nextCursor = null)),
+        )
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            sessionId = "s1",
+            resetLimit = false,
+            forceInitialWindow = false,
+            emit = emit,
+        )
+        // §note: advance SCOPE's scheduler (separate from runTest's) past the
+        // retry delay(500).
+        scope.advanceUntilIdle()
+        scope.runCurrent()
+
+        // 2 attempts: initial + 1 retry.
+        coVerify(exactly = 2) { repository.getMessagesPaged("s1", any(), any()) }
+        assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
+        assertTrue(emitted.filterIsInstance<UiEvent.Error>().isEmpty())
+    }
+
+    @Test
+    fun `P0-2 non-stale foreground failure emits UiEvent Error immediately (observable, no retry)`(): Unit = runTest {
+        // §mechanism ③: a generic transport failure (HTTP 503 / network) is
+        // NOT a stale token, so the retry loop does NOT engage — but the
+        // failure is STILL observable: UiEvent.Error fires immediately so
+        // the user doesn't stare at a silent blank under SSE-off / degraded
+        // transport.
+        // §11.1 fix-9 P0-7: the SSE-off first-fetch retry (P0-7) is
+        // DISABLED here by passing `isSseLive = { true }` — SSE is "live"
+        // so the P0-7 retry does not fire. The P0-7-specific behavior
+        // (SSE-off → one extra retry) is covered by
+        // `P0-7 SSE-off first-fetch failure retries once via unanchored`.
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+            Result.failure(java.io.IOException("HTTP 503"))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(scope, repository, slices, "s1", emit = emit, isSseLive = { true })
+        advanceUntilIdle()
+
+        // Exactly 1 attempt — non-stale failures don't retry when SSE is live.
+        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        val err = emitted.filterIsInstance<UiEvent.Error>().single()
+        assertEquals(R.string.error_load_messages_failed, err.resId)
+        assertTrue("failure cause surfaced to the user", err.args.any { it.toString().contains("503") })
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
+
+    @Test
+    fun `P0-7 SSE-off first-fetch failure retries once via unanchored REST`() = runTest {
+        // §11.1 fix-9 P0-7 (sse-sync-degradation-remediation.md P0-2):
+        // when SSE transport is NOT live AND the first fetch fails with a
+        // non-stale IOException, launchLoadMessages retries ONCE via the
+        // unanchored path. Mock the first call (getMessagesPaged) to fail
+        // with IOException, then the unanchored retry call to succeed.
+        // Asserts: exactly 1 getMessagesPaged call AND at-least 1
+        // getMessagesPagedUnanchored call (the P0-7 retry).
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+            Result.failure(java.io.IOException("HTTP 503"))
+        coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returns
+            Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(
+            scope, repository, slices, "s1",
+            emit = emit,
+            isSseLive = { false }, // P0-7: SSE-off → retry engages
+        )
+        // §note: scope (setUp) has its own TestCoroutineScheduler separate
+        // from runTest's; the retry loop's delay(500) suspends on scope's
+        // scheduler, so we must advance SCOPE's scheduler (mirrors the
+        // existing launchLoadMessagesWithRetry delay-based tests).
+        scope.advanceUntilIdle()
+        scope.runCurrent()
+
+        // Exactly 1 first-fetch (getMessagesPaged) + at-least 1 P0-7 retry
+        // (getMessagesPagedUnanchored). We use atLeast for both to avoid
+        // mockk's default-arg matcher-recording interaction: each fetch's
+        // default `token = captureSlimCommitToken()` is recorded as a
+        // separate call, so `exactly = 1` on getMessagesPaged would also
+        // pin captureSlimCommitToken to exactly 1 (and we have 2 — one per
+        // fetch). The semantic check (1 first-fetch + retry happened) is
+        // preserved by `atLeast = 1` on each.
+        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
+        // No error — the retry succeeded (empty success is the "no history"
+        // legitimate state).
+        assertTrue(
+            "P0-7: SSE-off retry success suppresses UiEvent.Error (got $emitted)",
+            emitted.filterIsInstance<UiEvent.Error>().isEmpty(),
+        )
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
+
+    @Test
+    fun `P0-7 SSE-off first-fetch failure retries once and surfaces Error when retry also fails`() = runTest {
+        // §11.1 fix-9 P0-7: SSE-off + first-fetch failure + retry also
+        // fails → UiEvent.Error fires (the user is notified that the
+        // foreground load could not complete).
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+            Result.failure(java.io.IOException("HTTP 503"))
+        coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returns
+            Result.failure(java.io.IOException("HTTP 503 retry"))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(
+            scope, repository, slices, "s1",
+            emit = emit,
+            isSseLive = { false }, // P0-7: SSE-off → retry engages
+        )
+        scope.advanceUntilIdle()
+        scope.runCurrent()
+
+        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
+        val err = emitted.filterIsInstance<UiEvent.Error>().single()
+        assertEquals(R.string.error_load_messages_failed, err.resId)
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
+
+    @Test
+    fun `P0-7 SSE-on first-fetch failure does NOT engage P0-7 retry`() = runTest {
+        // §11.1 fix-9 P0-7: when SSE transport IS live, the P0-7 retry
+        // does NOT fire (the SSE digest relay will deliver updates; the
+        // REST retry is unnecessary).
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+            Result.failure(java.io.IOException("HTTP 503"))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(
+            scope, repository, slices, "s1",
+            emit = emit,
+            isSseLive = { true }, // P0-7: SSE-on → no retry
+        )
+        scope.advanceUntilIdle()
+        scope.runCurrent()
+
+        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) }
+        emitted.filterIsInstance<UiEvent.Error>().single()
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
+
+    @Test
+    fun `P1-4 non-IOException does NOT trigger SSE-off retry`() = runTest {
+        // §11.1 fix-10 P1-4 (rev-ogpt 五轮评审): the SSE-off retry condition is
+        // narrowed to IOException ONLY (MessageActions.kt:181 `retryCause is
+        // java.io.IOException`). A programming error (RuntimeException /
+        // ClassCastException / etc.) must NOT engage the retry even when SSE
+        // is off — retrying a crash-inducing call would mask bugs (double the
+        // crash before reporting). The failure surfaces UiEvent.Error
+        // immediately on the first fetch.
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+            Result.failure(RuntimeException("programming error"))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(
+            scope, repository, slices, "s1",
+            emit = emit,
+            isSseLive = { false }, // SSE-off — but retry MUST NOT fire (non-IOException)
+        )
+        scope.advanceUntilIdle()
+        scope.runCurrent()
+
+        // No retry: unanchored NEVER called.
+        coVerify(exactly = 0) { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) }
+        // RuntimeException surfaces as UiEvent.Error immediately (not swallowed,
+        // not retried).
+        val err = emitted.filterIsInstance<UiEvent.Error>().single()
+        assertEquals(R.string.error_load_messages_failed, err.resId)
+        assertTrue(
+            "non-IOException cause surfaced to the user",
+            err.args.any { it.toString().contains("programming error") },
+        )
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
+
+    @Test
+    fun `P1-4 CancellationException in Result failure is re-thrown by retry guard`(): Unit = runTest {
+        // §11.1 fix-10 P1-4 (rev-ogpt 五轮评审): the retry-decision guard
+        // (MessageActions.kt:176-178) checks the failure cause for
+        // CancellationException FIRST and re-throws it, BEFORE evaluating the
+        // IOException retry condition. This is a defensive backstop:
+        // runSuspendCatching (R-14) already re-throws CancellationException so
+        // the repository normally THROWS (not Result.failure) — covered by the
+        // existing P0-2 test below. But if a future code path returns
+        // Result.failure(CE), the guard ensures structured concurrency is
+        // preserved (coroutine cancels cleanly, no retry, no misleading
+        // UiEvent.Error). This test pins that guard.
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+            Result.failure(kotlinx.coroutines.CancellationException("cooperative cancel"))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(
+            scope, repository, slices, "s1",
+            emit = emit,
+            isSseLive = { false }, // SSE-off — but retry MUST NOT fire (cancellation)
+        )
+        scope.advanceUntilIdle()
+        scope.runCurrent()
+
+        // CancellationException re-thrown by the guard → coroutine cancels →
+        // onFailure NEVER reached → NO UiEvent.Error (cancellation is not a
+        // user-facing error).
+        assertTrue(
+            "CancellationException (Result.failure path) must NOT emit UiEvent.Error",
+            emitted.filterIsInstance<UiEvent.Error>().isEmpty(),
+        )
+        // No retry: unanchored NEVER called (cancellation propagated before retry).
+        coVerify(exactly = 0) { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) }
+        // Session-guarded finally still cleared the loading flag on the cancel exit.
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
+
+    @Test
+    fun `P1-4 IOException under SSE-off retries EXACTLY once (initial plus single retry)`() = runTest {
+        // §11.1 fix-10 P1-4 (rev-ogpt 五轮评审): tighten the existing P0-7
+        // tests which use atLeast=1 — a weak assertion that would still pass
+        // if the code regressed to retry 2+ times. This test pins the retry
+        // count to EXACTLY one initial fetch + EXACTLY one retry (no infinite
+        // loop, no double-retry). total fetch calls = 2 (1 getMessagesPaged
+        // initial + 1 getMessagesPagedUnanchored retry).
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+            Result.failure(java.io.IOException("HTTP 503"))
+        coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returns
+            Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(
+            scope, repository, slices, "s1",
+            emit = emit,
+            isSseLive = { false }, // SSE-off → retry engages
+        )
+        scope.advanceUntilIdle()
+        scope.runCurrent()
+
+        // Exactly one initial fetch + exactly one retry (2 total repository
+        // fetch calls). Pins "retry exactly once" — a regression to 2+ retries
+        // (e.g. a loop bug) would fail this assertion.
+        //
+        // §mockk-default-arg: provide ALL 4 matchers (including `token` — the
+        // 4th `any()`) so Kotlin does NOT evaluate the default arg
+        // `token = captureSlimCommitToken()` inside the verify lambda. With only
+        // 3 matchers the default-arg evaluation is recorded as an extra mockk
+        // call, making `exactly = 1` fail (2 captureSlimCommitToken calls —
+        // one per fetch). This is the same root cause the existing P0-7 tests
+        // paper over with `atLeast = 1`; providing 4 matchers is the precise
+        // fix. (Mirrors the P0-7 SSE-on test which already uses 4 matchers for
+        // its `exactly = 0` assertion on getMessagesPagedUnanchored.)
+        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), any(), any()) }
+        coVerify(exactly = 1) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
+        // Retry succeeded → no error surfaced.
+        assertTrue(
+            "P1-4: SSE-off single retry success suppresses UiEvent.Error (got $emitted)",
+            emitted.filterIsInstance<UiEvent.Error>().isEmpty(),
+        )
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
+
+    @Test
+    fun `P0-2 CancellationException from the slim GET propagates (not swallowed into silent Result failure)`(): Unit = runTest {
+        // §mechanism ④: runSuspendCatching (R-14) re-throws CancellationException
+        // so the repository GET propagates it as a throw (NOT Result.failure).
+        // launchLoadMessages' outer try/catch(kotlin.coroutines...CancellationException)
+        // re-throws, so the coroutine cancels cleanly WITHOUT emitting
+        // UiEvent.Error (which would mislead the user on a routine ViewModel
+        // clear). Pins the §history-load-fix round-1 contract.
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } throws
+            kotlinx.coroutines.CancellationException("viewModel cleared")
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(scope, repository, slices, "s1", emit = emit)
+        advanceUntilIdle()
+
+        // CancellationException propagated past the retry loop / onFailure →
+        // NO UiEvent.Error emitted (a swallowed-then-failed path would emit).
+        assertTrue(
+            "CancellationException must NOT reach onFailure (structured concurrency preserved)",
+            emitted.filterIsInstance<UiEvent.Error>().isEmpty(),
+        )
+        // The session-guarded finally still cleared the loading flag on the
+        // cancellation exit (idempotent backstop).
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
+
+    @Test
+    fun `P0-2 launchLoadMessages issues only GET fetches (no mutation POST auto-retry)`(): Unit = runTest {
+        // §mechanism ④ (structural guard): launchLoadMessages performs ONLY
+        // read-side calls — getMessagesPaged* (GET) + getSessionTodos
+        // (progressive enhancement). It has no reference to sendMessage /
+        // any mutation POST, so "don't auto-retry mutation POST" is enforced
+        // structurally. This test pins that surface so a future edit cannot
+        // silently introduce a mutation call here.
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+            Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(scope, repository, slices, "s1", emit = emit)
+        advanceUntilIdle()
+
+        // Only read-side calls observed.
+        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        coVerify(atLeast = 1) { repository.getSessionTodos("s1") }
+        // No mutation POST (sendMessage) was issued — not auto-retried, not
+        // even called once. (mockk relaxed → an unstubbed sendMessage would
+        // return a default Result; coVerify(exactly=0) asserts it never ran.)
+        coVerify(exactly = 0) { repository.sendMessage(any(), any()) }
+    }
 }

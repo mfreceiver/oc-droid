@@ -305,6 +305,12 @@ class SlimSseStateMachine internal constructor(
      * `synchronized(slimStateLock){ if(token.marker !== slimCommitMarker) throw; get }`
      * block 1:1 (marker-only check, single critical section with the read).
      */
+    /**
+     * §11.1 fix-6 P0-5: returns ONLY [SlimSessionState.localAppliedUpdatedAt]
+     * — the `/since/{ts}` anchor. MUST NOT fall back to `remoteUpdatedAt`
+     * (the digest-driven watermark). When localApplied is missing, the
+     * caller MUST fall back to the full/cursor drain, NOT skip messages.
+     */
     fun readBookmarkOrThrowIfStale(
         sid: String,
         token: OpenCodeRepository.SlimCommitToken,
@@ -312,7 +318,7 @@ class SlimSseStateMachine internal constructor(
         if (!isTokenCurrentLocked(token)) {
             throw OpenCodeRepository.StaleSlimCommitException()
         }
-        slimSseState.get(sid)?.updatedAt
+        slimSseState.get(sid)?.localAppliedUpdatedAt
     }
 
     /**
@@ -450,6 +456,52 @@ class SlimSseStateMachine internal constructor(
     }
 
     /**
+     * §11.1 fix-10 P1-1: UNCONDITIONALLY set `dirty = true` for [sessionId],
+     * bypassing the [needsReconcile] gate that [markSlimDirty] uses.
+     *
+     * # rev-ogpt P1-1 / P1-2 (seven rounds → fix-13) — production callers
+     *
+     * Production: called by the cache-retention failure path in
+     * [SlimSessionReconciler] (when the post-REST retention guard rejects
+     * the merged set, the reconciler must force the session dirty
+     * unconditionally so a later reconcile re-fetches — [markSlimDirty]
+     * would no-op here because the post-reconcile watermark is aligned).
+     * The conflict hot path (engine `drainAndCommitAuthoritative` +
+     * reconciler `foldRestFetch` same-tuple-different-parts) NO LONGER
+     * calls this method: the conflict's dirty decision is ATOMIC with the
+     * commit via [replaceLocalAppliedAndClearDirtyLocked]'s `hasConflict`
+     * parameter (carried from [SlimAuthoritativeCandidate.hasConflict], and
+     * from the committer's in-lock per-ID conflict-aware merge — fix-13).
+     * Diagnostic / test paths also retain this method as an unconditional
+     * dirty ratchet.
+     *
+     * The prior post-commit `forceSlimDirty` had two issues on the conflict
+     * hot path that the atomic decision closes:
+     *
+     *  - P1-1 (reconciler conflict path): the prior reconciler code called
+     *    `markDirty` (gated by [needsReconcile]) which was a NO-OP for
+     *    same-tuple conflicts (needsReconcile returns false on an aligned
+     *    watermark).
+     *  - P1-2 (engine conflict path): the prior engine code called
+     *    `forceSlimDirty` here in a SEPARATE critical section after the
+     *    commit, leaving a window where `dirty = false` against a divergent
+     *    authoritative set.
+     *
+     * Returns false (no-op) when the session has no state or token is stale.
+     */
+    fun forceSlimDirty(
+        sessionId: String,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): Boolean = withSlimStateCommit(
+        token = token,
+        onStale = { false },
+    ) {
+        val prev = slimSseState.get(sessionId) ?: return@withSlimStateCommit false
+        slimSseState.put(sessionId, prev.copy(dirty = true))
+        true
+    }
+
+    /**
      * Bumps the slim SSE bookmark for [sessionId] from the max
      * `time.updated` over [items]. Applies [onReconcileSuccess] and then
      * re-evaluates [needsReconcile] for dirty ratchet.
@@ -472,5 +524,123 @@ class SlimSseStateMachine internal constructor(
             else applied
         slimSseState.put(sessionId, next)
         true
+    }
+
+    /**
+     * §11.2 fix-4 host contract ([SlimAuthoritativeCommitHost.replaceLocalAppliedAndClearDirty]):
+     * write [localAppliedUpdatedAt] / [localAppliedMessageId] VERBATIM onto the
+     * [SlimSessionState] for [sessionId] + decide `dirty` ATOMICALLY, inside
+     * the caller's existing [commitIfSlimTokenCurrent] critical section.
+     *
+     * §11.1 fix-8 P1-4 + fix-9 P0-4 + rev-ogpt P1-1 / P1-2 — ATOMIC dirty
+     * decision. The commit decides `dirty` from `hasConflict` AND the
+     * post-write state INSIDE this same critical section that wrote
+     * localApplied*:
+     *  - `hasConflict = true` ⇒ `dirty = true` UNCONDITIONALLY (covers
+     *    BOTH the candidate-merge-flagged same-tuple-different-parts
+     *    divergence AND the in-lock same-tuple content conflict the
+     *    committer detected against a concurrent candidate — rev-ogpt
+     *    P1-1 six rounds).
+     *  - else if `needsReconcile` holds against the post-write state
+     *    (`remote > localApplied` via [compareWatermark], P0-4 TOCTOU)
+     *    ⇒ `dirty = true`.
+     *  - else ⇒ `dirty = false` (normal happy-path clear).
+     *
+     * The prior fix-8 P1-4 implementation cleared `dirty` UNCONDITIONALLY
+     * and relied on the next digest to re-evaluate via [needsReconcile]
+     * (the reducer was the SOLE writer of `dirty=true`). That opened the
+     * P1-1 hole (the reconciler-path `markDirty` was a no-op for same-
+     * tuple conflicts because [needsReconcile] returns false on an
+     * aligned watermark) and the P1-2 atomicity window (the engine-path
+     * `forceSlimDirty` ran in a SEPARATE critical section after the
+     * commit, leaving a window where `dirty=false` against a divergent
+     * authoritative set). Carrying `hasConflict` into THIS critical
+     * section closes both — no separate `forceSlimDirty` / `markDirty`
+     * post-commit is needed on the **conflict hot paths** (engine +
+     * reconciler foldRestFetch). The cache-retention failure production
+     * path in [SlimSessionReconciler] (post-REST retention guard rejects
+     * the merged set, which happens AFTER the commit protocol has
+     * finished and therefore cannot ride its atomic `hasConflict`
+     * decision) still uses [forceSlimDirty] to unconditionally ratchet
+     * `dirty=true`.
+     *
+     * # Why verbatim (not derived)
+     *
+     * The committer trusts the candidate's tuple and writes it verbatim — it
+     * does NOT re-derive from the message list (plan §11.2, test
+     * `successfulCommitUsesCandidateLocalAppliedTupleNotDerivedFromMessages`).
+     * [bumpSlimBookmarkFromItems] DERIVES the tuple from items via
+     * [onReconcileSuccess]; this method writes the PASSED tuple directly.
+     * The two diverge in the empty-items edge case (where derivation keeps the
+     * prior tuple but the candidate may legitimately carry `(null, null)`).
+     *
+     * # NOT token-checked
+     *
+     * The caller (the host's [SlimAuthoritativeCommitHost.commitIfCurrent] block)
+     * already validated the token inside the lock. Reentrant on [slimStateLock]
+     * (Java/Kotlin `synchronized` is reentrant, so the inner `synchronized` in
+     * the read-modify-write is a no-op re-entry).
+     *
+     * MUST NOT touch `remote*` — those are advanced only by the digest reducer
+     * (plan invariant #1).
+     *
+     * # §11.1 fix-9 P0-4 + rev-ogpt P1-1 / P1-2 — atomic dirty decision
+     *
+     * The commit's dirty decision is ATOMIC with the localApplied write.
+     * [hasConflict] is an input to this decision (carried from the merge
+     * via [SlimAuthoritativeCandidate.hasConflict]):
+     *
+     *  - `hasConflict = true` ⇒ `dirty = true` UNCONDITIONALLY. The
+     *    candidate's merge detected a same-tuple-different-parts divergence;
+     *    the watermark is aligned (remote <= localApplied) but the
+     *    authoritative parts are stale. Forcing dirty=true here closes the
+     *    P1-1 hole (the prior reconciler-path `markDirty` was a no-op
+     *    because `needsReconcile` returns false on an aligned watermark)
+     *    AND the P1-2 atomicity window (the prior engine-path
+     *    `forceSlimDirty` ran in a SEPARATE critical section after the
+     *    commit, leaving a window where dirty=false against a divergent
+     *    authoritative set).
+     *  - `hasConflict = false` ⇒ re-evaluate [needsReconcile] against the
+     *    post-write state. If remote is still ahead (strictly greater than
+     *    candidate's tuple via [compareWatermark]), dirty is RE-SET to
+     *    `true` — the session still needs reconcile (P0-4: TOCTOU
+     *    mitigation for a digest arriving mid-drain and advancing remote).
+     *    Otherwise dirty clears to `false` (normal happy path).
+     *
+     * `dirty=true` writers: (a) the committer (this method) — when
+     * `hasConflict=true` (candidate's own merge OR the in-lock per-ID
+     * conflict-aware merge — fix-13), OR when `remote > localApplied`
+     * post-write (P0-4 TOCTOU); (b) the digest reducer via
+     * [needsReconcile]; (c) [forceSlimDirty] (production: cache-retention
+     * failure path in [SlimSessionReconciler]; diagnostic / test). The
+     * commit-time atomic decision is the authoritative bridge between
+     * "drain captured a snapshot at time T" and "remote may have advanced
+     * past T / parts may have diverged by the time the commit lands".
+     */
+    internal fun replaceLocalAppliedAndClearDirtyLocked(
+        sessionId: String,
+        localAppliedUpdatedAt: Long?,
+        localAppliedMessageId: String?,
+        hasConflict: Boolean,
+    ) = synchronized(slimStateLock) {
+        val prev = slimSseState.get(sessionId) ?: SlimSessionState(sessionId)
+        // §11.1 fix-9 P0-4 + rev-ogpt P1-1/P1-2: write candidate tuple,
+        // then decide dirty ATOMICALLY from hasConflict + post-write state.
+        // needsReconcile reads remote* vs localApplied*; if remote >
+        // localApplied, dirty MUST stay true (the server has observed
+        // activity beyond what we just applied). hasConflict=true forces
+        // dirty=true unconditionally (same-tuple-different-parts ⇒ the
+        // watermark is aligned but the authoritative parts are stale).
+        val candidate = prev.copy(
+            localAppliedUpdatedAt = localAppliedUpdatedAt,
+            localAppliedMessageId = localAppliedMessageId,
+            dirty = false,
+        )
+        val next = when {
+            hasConflict -> candidate.copy(dirty = true)
+            needsReconcile(candidate) -> candidate.copy(dirty = true)
+            else -> candidate
+        }
+        slimSseState.put(sessionId, next)
     }
 }

@@ -141,6 +141,9 @@ class ChatViewModel @Inject constructor(
             // not only a legacy bare-chat caller. Capture the active minted
             // token here so its completion updates LoadedContent as well.
             expectedRouteInstance = core.store.slices.routeInstanceFor(sessionId),
+            // §11.1 fix-9 P0-7: SSE liveness predicate — see
+            // [AppCore.loadMessagesForEffect] for rationale.
+            isSseLive = { core.store.slices.sseConnected },
         )
         // §E3 ChatViewModel.loadMessages side-door open (D2 gate r2 S1): re-apply
         // the same open gate used in loadMessagesForEffect. Mid-generation retry /
