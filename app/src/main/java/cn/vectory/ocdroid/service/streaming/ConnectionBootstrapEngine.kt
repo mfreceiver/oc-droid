@@ -9,6 +9,7 @@ import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.util.SettingsManager
+import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -30,6 +31,8 @@ sealed interface ConnectionBootstrapOutcome {
         val hostPort: String,
         val capture: OpenCodeRepository.TofuCaptureResult,
     ) : ConnectionBootstrapOutcome
+
+    data object ReconfigureInProgress : ConnectionBootstrapOutcome
 
     data class Failed(val error: Throwable) : ConnectionBootstrapOutcome
 }
@@ -107,24 +110,47 @@ class ConnectionBootstrapEngine internal constructor(
             return ConnectionBootstrapOutcome.Failed(IllegalStateException("mTLS client certificate unavailable"))
         }
         val expected = identityStore.currentIdentity.value
+        val expectedEpoch = identityStore.currentEpoch()
         val matchingIdentity = expected?.serverGroupFp == key.serverGroupFp &&
             expected.normalizedWorkdir == key.workdir && expected.endpointFp == key.url
-        if (configuredKey != key || !matchingIdentity) {
+        val slimReady = repository.isSlimIncarnationReady()
+        val reconfiguring = repository.isSlimIncarnationReconfiguring()
+        if (reconfiguring) {
+            return ConnectionBootstrapOutcome.ReconfigureInProgress
+        }
+        if (configuredKey != key || !matchingIdentity || repository.isSlimIncarnationFailed()) {
             // R8 slim-mode foundation / Cluster B: 透传 key.slim 到 repository.configure，
             // 后者写入 hostConfig.slim 供 SlimapiVersionInterceptor（注入版本头）+
             // SSEClient（A1，路由到 /slimapi/events）+ health 探针（C3 fix，路由到
             // /slimapi/health）读取。configuredKey != key 的整体相等性判断保证切换
             // slim 状态（legacy↔slim）必然触发重 configure（hostConfig.slim 是路由
             // 开关，遗漏会让 SSE/REST/health 走错端点）。
-            repository.configure(
-                key.url,
-                key.username,
-                key.password,
-                hostPort = hostPortFromUrl(key.url),
-                clientCert = clientCert,
-                slim = key.slim,
-            )
-            configuredKey = key
+            try {
+                repository.configure(
+                    key.url,
+                    key.username,
+                    key.password,
+                    hostPort = hostPortFromUrl(key.url),
+                    clientCert = clientCert,
+                    slim = key.slim,
+                )
+            } catch (_: OpenCodeRepository.SlimReconfigureInProgressException) {
+                return ConnectionBootstrapOutcome.ReconfigureInProgress
+            }
+            // Configure may suspend and another profile can become current.
+            // Publish only when both the incarnation and resolver still agree.
+            val currentKey = configResolver.resolve()
+            val stillMatches = currentKey == key && repository.isSlimIncarnationReady()
+            if (stillMatches) configuredKey = key else return ConnectionBootstrapOutcome.ReconfigureInProgress
+        } else {
+            DebugLog.d("Bootstrap", "skipping configure: matching key/identity; slimReady=$slimReady")
+        }
+        // The skip decision is only a snapshot. Do not activate a tunnel for
+        // an incarnation that became stale while the decision was in flight.
+        if (configResolver.resolve() != key || !repository.isSlimIncarnationReady() ||
+            identityStore.currentEpoch() != expectedEpoch
+        ) {
+            return ConnectionBootstrapOutcome.ReconfigureInProgress
         }
         if (key.tunnelPasswordId != null && tunnelActivatedKey != key) {
             val password = key.tunnelPassword
@@ -135,19 +161,33 @@ class ConnectionBootstrapEngine internal constructor(
                 hostPort = hostPortFromUrl(key.url),
             ).getOrElse { return ConnectionBootstrapOutcome.Failed(it) }
             tunnelActivatedKey = key
+            if (configResolver.resolve() != key || !repository.isSlimIncarnationReady() ||
+                identityStore.currentEpoch() != expectedEpoch
+            ) {
+                return ConnectionBootstrapOutcome.ReconfigureInProgress
+            }
         }
 
         while (true) {
             val healthResult = repository.checkHealth()
             val health = healthResult.getOrNull()
             if (health != null && health.healthy) {
+                val finalKey = configResolver.resolve()
+                val finalIdentity = identityStore.currentIdentity.value
+                if (finalKey != key || !repository.isSlimIncarnationReady() ||
+                    identityStore.currentEpoch() != expectedEpoch ||
+                    (finalIdentity != null && (finalIdentity.serverGroupFp != key.serverGroupFp ||
+                        finalIdentity.normalizedWorkdir != key.workdir || finalIdentity.endpointFp != key.url))
+                ) {
+                    return ConnectionBootstrapOutcome.ReconfigureInProgress
+                }
                 serverCompatProfile.update(health.version)
-                val current = identityStore.currentIdentity.value
-                val identity = if (current != null &&
-                    current.serverGroupFp == key.serverGroupFp &&
-                    current.normalizedWorkdir == key.workdir &&
-                    current.endpointFp == key.url
-                ) current else identityStore.bind(key.serverGroupFp, key.workdir, key.url)
+                val identity = identityStore.bindIfCurrent(
+                    key.serverGroupFp,
+                    key.workdir,
+                    key.url,
+                    expectedEpoch,
+                ) ?: return ConnectionBootstrapOutcome.ReconfigureInProgress
                 bootstrapCoordinator.clearPendingTofu()
                 return ConnectionBootstrapOutcome.Success(identity, health)
             }

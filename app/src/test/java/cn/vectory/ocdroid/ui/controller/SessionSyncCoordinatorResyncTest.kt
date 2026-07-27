@@ -1955,13 +1955,13 @@ class SessionSyncCoordinatorResyncTest {
                     // C-D3 rev-3: beginSlimReconfigure is the production first
                     // step (before HostStatePurged / configure). Old token
                     // becomes stale without waiting for configure().
-                    realRepo.beginSlimReconfigure()
+                    val ticket = realRepo.beginSlimReconfigure()
                     assertFalse(
                         "token must be stale after beginSlimReconfigure()",
                         realRepo.isSlimCommitTokenCurrent(token),
                     )
                     // Optional network rewire after purge window.
-                    realRepo.configure(baseUrl = baseUrl, slim = true)
+                    realRepo.configure(baseUrl = baseUrl, slim = true, reconfigureTicket = ticket)
                 }
                 // REAL gate (referential) — returns false because marker rotated.
                 realRepo.commitIfSlimTokenCurrent(token, block)

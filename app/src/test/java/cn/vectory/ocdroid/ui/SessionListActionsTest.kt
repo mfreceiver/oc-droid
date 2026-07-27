@@ -1788,8 +1788,8 @@ class SessionListActionsTest {
                 started.path!!.startsWith("/slimapi/permissions"))
 
             // C-D3 rev-3: beginSlimReconfigure before configure (purge window).
-            realRepo.beginSlimReconfigure()
-            realRepo.configure(baseUrl = baseUrl, slim = true)
+            val ticket = realRepo.beginSlimReconfigure()
+            realRepo.configure(baseUrl = baseUrl, slim = true, reconfigureTicket = ticket)
 
             kotlinx.coroutines.delay(800)
             collector.cancel()

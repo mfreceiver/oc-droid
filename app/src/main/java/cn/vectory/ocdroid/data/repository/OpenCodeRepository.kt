@@ -380,6 +380,9 @@ class OpenCodeRepository @Inject constructor(
     class SupersededSlimReconfigureException internal constructor() :
         java.io.IOException("superseded slim reconfigure transaction")
 
+    class SlimReconfigureInProgressException internal constructor() :
+        java.io.IOException("slim reconfigure already in progress")
+
     /**
      * Rotated under [slimStateLock] by [beginSlimReconfigure] (and at the
      * start of [configure] as defense-in-depth). Same critical section
@@ -688,6 +691,24 @@ class OpenCodeRepository @Inject constructor(
     fun completeSlimReconfigure(ticket: SlimReconfigureTicket): Unit =
         slimStateMachine.completeSlimReconfigure(ticket)
 
+    /** Read-only view of whether the current slim incarnation is usable. */
+    fun isSlimIncarnationReady(): Boolean = slimStateMachine.isReady()
+
+    fun isSlimIncarnationFailed(): Boolean = slimStateMachine.isFailed()
+
+    fun isSlimIncarnationReconfiguring(): Boolean = slimStateMachine.isActiveReconfiguring()
+
+    /** Same-host local wipe; transport/client bundle remains untouched. */
+    fun resetSlimForLocalWipe() {
+        slimStateMachine.resetSlimForLocalWipe()
+        synchronized(slimStateLock) {
+            authoritativeLocal.clear()
+            visibleContent.clear()
+        }
+    }
+
+    /** Clears local slim authoritative stores as one same-host reset operation. */
+
     /**
      * §slim-reconcile-lane-repo (B2 T1): the live host's slim-mode flag.
      * True when the current [HostConfig] points at an oc-slimapi sidecar
@@ -799,6 +820,7 @@ class OpenCodeRepository @Inject constructor(
                 client.dispatcher.cancelAll()
                 client.connectionPool.evictAll()
             }
+            DebugLog.e("SlimReadiness", "configure failed; readiness remains false", error)
             throw error
         }
     }
@@ -927,7 +949,11 @@ class OpenCodeRepository @Inject constructor(
         // settings / HostConfig mutation) or begin one right here (direct /
         // bootstrap path — defense-in-depth so configure itself never opens a
         // "host already changed, old token still current" window).
-        val ticket = reconfigureTicket ?: beginSlimReconfigure()
+        val ticket = reconfigureTicket ?: when (val claim = slimStateMachine.claimDirectConfigure()) {
+            is SlimSseStateMachine.DirectConfigureClaim.Owned -> claim.ticket
+            SlimSseStateMachine.DirectConfigureClaim.InProgress ->
+                throw SlimReconfigureInProgressException()
+        }
         // Reject a ticket that was superseded between begin and configure
         // (or presented twice). NEVER re-arm a new transaction here — caller
         // propagates the failure.
@@ -959,12 +985,6 @@ class OpenCodeRepository @Inject constructor(
                 clientCert = clientCert,
                 updateClientCert = true,
             )
-            // C-D3 rev-3 readiness bit: only after every ssl/host/client step
-            // succeeds do new tokens become valid. On throw, readiness stays
-            // false (fail-forward) — no token can commit until a later
-            // successful configure re-arms it. Ticket-ownership guarantees we
-            // activate THIS transaction's incarnation, not a superseding one.
-            completeSlimReconfigure(ticket)
             // ι-P1: rebuild session source to match the new connection mode.
             // 放在 completeSlimReconfigure 之后（与 ι-A setSlimConnection 同纪律：
             // 仅在整条事务全成功后才发布新 mode 的 source；throw 时 sessionSource
@@ -1003,7 +1023,11 @@ class OpenCodeRepository @Inject constructor(
             // 确立（= networkGraph.hostConfig.slim），不能从 serverCompatProfile 现有字段推导（legacy 模式
             // 下 slimapi* 全 null；slim 模式首次 health 成功前 slimapi* 也全 null）。
             serverCompatProfile.setSlimConnection(slim)
+            // Readiness is published only after every source and capability
+            // publication above has succeeded.
+            completeSlimReconfigure(ticket)
         } catch (error: Throwable) {
+            slimStateMachine.markSlimReconfigureFailed(ticket)
             // Deliberately do NOT complete: old host cannot be reinstated
             // safely after partial ssl/HostConfig/client mutation. A superseded
             // ticket (SupersededSlimReconfigureException from

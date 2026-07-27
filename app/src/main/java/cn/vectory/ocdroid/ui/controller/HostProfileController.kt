@@ -5,6 +5,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SlimLocalResetCoordinator
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
@@ -92,6 +93,7 @@ class HostProfileController(
     internal val identityStore: ConnectionIdentityStore? = null,
     private val reconfigureBarrier: cn.vectory.ocdroid.service.ConnectionReconfigureBarrier? = null,
     private val effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver? = null,
+    private val slimLocalResetCoordinator: SlimLocalResetCoordinator? = null,
 ) {
     // ── §P9 ProfileMutationEngine (extracted) ──────────────────────────────
 
@@ -824,6 +826,7 @@ class HostProfileController(
         if (reconfigureBarrier != null) {
             scope.launch {
                 reconfigureBarrier.reconfigure {
+                    resetSlimForLocalWipe()
                     resetLocalStateCore()
                 }
                 effects.emitEffect(ControllerEffect.ColdStartReconnect)
@@ -841,12 +844,12 @@ class HostProfileController(
         // (step 4) AFTER clearAllLocalData / trafficTracker.reset /
         // ClearSessionWindowCache — the helper emits CancelSse immediately,
         // which would break the test @1088 ordering
-        // `clearCacheIdx < cancelSseIdx < coldStartIdx`. It also never calls
-        // configure() (the ticket is a dummy) and emits ColdStartReconnect
-        // (not ForceReconnect). Keep byte-identical.
+        // `clearCacheIdx < cancelSseIdx < coldStartIdx`. It does not call
+        // configure() directly; the slim ticket is completed after the local
+        // purge, and ColdStartReconnect performs the network bootstrap.
         identityStore?.beginReconfigure()
-        // C-D3 rev-3: slim marker before local purge / slice reset.
-        repository.beginSlimReconfigure()
+        // C-D3 rev-3 same-host reset: rotate marker before local purge / slice reset.
+        repository.resetSlimForLocalWipe()
         // remove-message-persistence Task 5: the cacheRepository.clearAll() +
         // appContext.deleteDatabase(...) that used to wipe the SQLite cache DB
         // here were removed together with the persistence layer. The in-memory
@@ -887,7 +890,7 @@ class HostProfileController(
         slices.mutateComposer { ComposerState() }
         slices.mutateFile { FileState() }
         slices.mutateSettings { SettingsState() }
-        // 8. Reconnect to the (preserved) current host profile and re-fetch.
+        // 8. Reconnect only after the same-host reset has rotated its marker.
         effects.tryEmitEffect(ControllerEffect.ColdStartReconnect)
     }
 
@@ -910,6 +913,11 @@ class HostProfileController(
         slices.mutateComposer { ComposerState() }
         slices.mutateFile { FileState() }
         slices.mutateSettings { SettingsState() }
+    }
+
+    private suspend fun resetSlimForLocalWipe() {
+        slimLocalResetCoordinator?.resetSlimForLocalWipe()
+            ?: repository.resetSlimForLocalWipe()
     }
 
     private companion object {

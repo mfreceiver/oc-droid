@@ -1,5 +1,7 @@
 package cn.vectory.ocdroid.data.repository
 
+import cn.vectory.ocdroid.util.DebugLog
+
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
 import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
@@ -23,6 +25,10 @@ class SlimSseStateMachine internal constructor(
     private val identityCaptureProvider: (() -> ConnectionIdentityStore.Capture)? = null,
     private val clientBundleProvider: (() -> ClientBundle?)? = null,
 ) {
+    sealed interface DirectConfigureClaim {
+        data class Owned(val ticket: OpenCodeRepository.SlimReconfigureTicket) : DirectConfigureClaim
+        data object InProgress : DirectConfigureClaim
+    }
     // ── Fields ───────────────────────────────────────────────────────────────────
     /**
      * Per-session bookmark accumulator for [session.digest] frames + the
@@ -47,14 +53,14 @@ class SlimSseStateMachine internal constructor(
     private var slimCommitMarker: Any = Any()
 
     /**
-     * C-D3 rev-3 readiness bit: false while a reconfigure transaction is
+     * C-D3 rev-3 incarnation state: false while a reconfigure transaction is
      * in flight (between [beginSlimReconfigure] and a successful [configure]
      * completion). Tokens captured while false carry [SlimCommitToken.issuedReady]
      * = false permanently, closing the mid-transaction capture window where a
      * marker-only check would accept a token captured during host mutation.
      */
     // GuardedBy("slimStateLock") — documentary.
-    private var slimIncarnationReady: Boolean = true
+    private var slimIncarnationState: SlimIncarnationState = SlimIncarnationState.Ready
 
     // ── Public state API (forwarders from OpenCodeRepository) ───────────────
 
@@ -69,7 +75,7 @@ class SlimSseStateMachine internal constructor(
             val capturedEpoch = identityCapture?.epoch ?: epochProvider?.invoke()
             val token = OpenCodeRepository.SlimCommitToken(
                 marker = slimCommitMarker,
-                issuedReady = slimIncarnationReady,
+                issuedReady = slimIncarnationState is SlimIncarnationState.Ready,
                 capturedConnectionIdentity = identityCapture?.identity,
                 capturedIdentityEpoch = capturedEpoch,
                 capturedClientBundleGeneration = capturedBundle?.generation,
@@ -99,7 +105,7 @@ class SlimSseStateMachine internal constructor(
      */
     private fun isTokenCurrentLocked(token: OpenCodeRepository.SlimCommitToken): Boolean =
         token.issuedReady &&
-            slimIncarnationReady &&
+            slimIncarnationState is SlimIncarnationState.Ready &&
             token.marker === slimCommitMarker &&
             isTokenEpochCurrent(token) &&
             isConnectionIdentityCurrent(token) &&
@@ -163,13 +169,31 @@ class SlimSseStateMachine internal constructor(
      */
     fun beginSlimReconfigure(): OpenCodeRepository.SlimReconfigureTicket =
         synchronized(slimStateLock) {
+            DebugLog.d("SlimReadiness", "begin reconfigure; stack=${Throwable().stackTraceToString()}")
             val marker = Any()
+            val ticket = OpenCodeRepository.SlimReconfigureTicket(marker)
             slimCommitMarker = marker
-            slimIncarnationReady = false
+            slimIncarnationState = SlimIncarnationState.begin(
+                slimIncarnationState,
+                ticket,
+            )
             slimSseState.clear()
             tokenEpochs.clear()
-            OpenCodeRepository.SlimReconfigureTicket(marker)
+            ticket
         }
+
+    /** Atomically claims a direct configure without ever borrowing an owner. */
+    fun claimDirectConfigure(): DirectConfigureClaim = synchronized(slimStateLock) {
+        if (slimIncarnationState is SlimIncarnationState.Reconfiguring) {
+            return@synchronized DirectConfigureClaim.InProgress
+        }
+        val ticket = OpenCodeRepository.SlimReconfigureTicket(Any())
+        slimCommitMarker = ticket.marker
+        slimIncarnationState = SlimIncarnationState.begin(slimIncarnationState, ticket)
+        slimSseState.clear()
+        tokenEpochs.clear()
+        DirectConfigureClaim.Owned(ticket)
+    }
 
     /**
      * Checks that [token] was captured under the current slim epoch (i.e. no
@@ -223,7 +247,9 @@ class SlimSseStateMachine internal constructor(
             // The "already completed" branch is a programming error (calling
             // configure twice with the same ticket) — keep it as ISE so it
             // surfaces loudly in dev.
-            check(!slimIncarnationReady) {
+            val state = slimIncarnationState
+            check(state is SlimIncarnationState.Reconfiguring &&
+                state.ownerTicket.marker === ticket.marker) {
                 "Slim reconfigure transaction already completed"
             }
         }
@@ -244,7 +270,58 @@ class SlimSseStateMachine internal constructor(
             if (ticket.marker !== slimCommitMarker) {
                 throw OpenCodeRepository.SupersededSlimReconfigureException()
             }
-            slimIncarnationReady = true
+            slimIncarnationState = try {
+                SlimIncarnationState.complete(slimIncarnationState, ticket)
+            } catch (_: IllegalArgumentException) {
+                throw OpenCodeRepository.SupersededSlimReconfigureException()
+            }
+            DebugLog.d("SlimReadiness", "complete reconfigure; readiness=true")
+        }
+    }
+
+    /** True when the current slim incarnation has completed configuration. */
+    fun isReady(): Boolean = synchronized(slimStateLock) {
+        slimIncarnationState is SlimIncarnationState.Ready
+    }
+
+    fun isFailed(): Boolean = synchronized(slimStateLock) {
+        slimIncarnationState is SlimIncarnationState.Failed
+    }
+
+    fun isActiveReconfiguring(): Boolean = synchronized(slimStateLock) {
+        slimIncarnationState is SlimIncarnationState.Reconfiguring
+    }
+
+    /** Marks only this ticket's failed transaction; never changes a winner. */
+    fun markSlimReconfigureFailed(ticket: OpenCodeRepository.SlimReconfigureTicket) {
+        synchronized(slimStateLock) {
+            slimIncarnationState = SlimIncarnationState.markFailed(slimIncarnationState, ticket)
+        }
+    }
+
+    /** Same-host reset: rotate and clear local slim state while staying Ready. */
+    fun resetSlimForLocalWipe() {
+        synchronized(slimStateLock) {
+            // A host-switch owner always wins. The local wipe may clear local
+            // data, but it must not rotate or complete that owner's ticket.
+            if (slimIncarnationState !is SlimIncarnationState.Reconfiguring) {
+                val marker = Any()
+                val ticket = OpenCodeRepository.SlimReconfigureTicket(marker)
+                slimCommitMarker = marker
+                slimIncarnationState = SlimIncarnationState.beginLocalWipe(
+                    slimIncarnationState,
+                    ticket,
+                )
+                slimSseState.clear()
+                tokenEpochs.clear()
+                slimIncarnationState = SlimIncarnationState.completeLocalWipe(
+                    slimIncarnationState,
+                    ticket,
+                )
+                return
+            }
+            slimSseState.clear()
+            tokenEpochs.clear()
         }
     }
 

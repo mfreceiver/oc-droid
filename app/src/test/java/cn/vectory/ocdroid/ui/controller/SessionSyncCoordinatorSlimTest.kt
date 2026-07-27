@@ -906,8 +906,8 @@ class SessionSyncCoordinatorSlimTest {
             // C-D3 rev-3: production order is beginSlimReconfigure BEFORE
             // HostStatePurged / configure. Rotate marker first so the purge
             // window already rejects old commitIf.
-            realRepo.beginSlimReconfigure()
-            realRepo.configure(baseUrl = baseUrl, slim = true)
+            val ticket = realRepo.beginSlimReconfigure()
+            realRepo.configure(baseUrl = baseUrl, slim = true, reconfigureTicket = ticket)
 
             // Wait for the delayed response + stale gate to finish.
             kotlinx.coroutines.delay(800)

@@ -1136,6 +1136,25 @@ class HostProfileControllerTest {
     }
 
     @Test
+    fun `resetLocalDataAndResync uses the same-host slim reset primitive`() {
+
+        controller.resetLocalDataAndResync()
+
+        verify(exactly = 1) { repository.resetSlimForLocalWipe() }
+    }
+
+    @Test
+    fun `non-barrier reset leaves slim incarnation Ready`() {
+        var ready = false
+        every { repository.isSlimIncarnationReady() } answers { ready }
+        every { repository.resetSlimForLocalWipe() } answers { ready = true }
+
+        controller.resetLocalDataAndResync()
+
+        assertTrue("same-host non-barrier reset must re-arm readiness", ready)
+    }
+
+    @Test
     fun `resetLocalDataAndResync wipes persisted local data and fires the full reset callback chain in order`() {
         controller.resetLocalDataAndResync()
         // remove-message-persistence Task 5: the async cache-wipe launch
@@ -1206,6 +1225,45 @@ class HostProfileControllerTest {
         runPending()
 
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ColdStartReconnect>().size)
+    }
+
+    @Test
+    fun `barrier reset leaves slim incarnation Ready`() {
+        var ready = false
+        val identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
+        identityStore.bind("g-A", "/wd", "http://a:4096")
+        val ticket = OpenCodeRepository.SlimReconfigureTicket(Any())
+        every { repository.beginSlimReconfigure() } returns ticket
+        every { repository.isSlimIncarnationReady() } answers { ready }
+        every { repository.resetSlimForLocalWipe() } answers { ready = true }
+        val barrier = cn.vectory.ocdroid.service.ConnectionReconfigureBarrier(
+            identityStore,
+            repository,
+            object : cn.vectory.ocdroid.service.ReconfigureTeardown {
+                override suspend fun teardownAndAwait(reason: cn.vectory.ocdroid.service.TeardownReason) = Unit
+            },
+            effects,
+        )
+        val barrierController = HostProfileController(
+            scope = scope,
+            slices = slices,
+            hostProfileStore = store,
+            repository = repository,
+            settingsManager = settingsManager,
+            trafficTracker = trafficTracker,
+            effects = effects,
+            currentServerGroupFp = { "test-fp" },
+            identityStore = identityStore,
+            reconfigureBarrier = barrier,
+        )
+
+        barrierController.resetLocalDataAndResync()
+        runPending()
+
+        // The controller's barrier reset uses the same local-wipe primitive;
+        // the seam models that primitive's postcondition explicitly.
+        verify(exactly = 1) { repository.resetSlimForLocalWipe() }
+        assertTrue("same-host barrier reset must re-arm readiness", ready)
     }
 
     @Test

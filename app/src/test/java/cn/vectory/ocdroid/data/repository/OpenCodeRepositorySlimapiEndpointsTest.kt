@@ -4013,7 +4013,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         val tokenA = repository.captureSlimCommitToken()
         assertTrue(repository.isSlimCommitTokenCurrent(tokenA))
 
-        repository.beginSlimReconfigure()
+        val ticket = repository.beginSlimReconfigure()
 
         assertFalse(
             "tokenA must be stale immediately after beginSlimReconfigure",
@@ -4028,6 +4028,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         repository.configure(
             baseUrl = server.url("/").toString().trimEnd('/'),
             slim = true,
+            reconfigureTicket = ticket,
         )
         assertFalse(
             "tokenA stays stale after configure (fail-forward, no rollback)",
@@ -4070,11 +4071,12 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         // Transaction order: marker rotate FIRST (as HostProfileController
         // does before HostStatePurged), then configure rewires host + retires
         // the old client (which cancels the in-flight HTTP call).
-        repository.beginSlimReconfigure()
+        val ticket = repository.beginSlimReconfigure()
         assertFalse(repository.isSlimCommitTokenCurrent(tokenA))
         repository.configure(
             baseUrl = server.url("/").toString().trimEnd('/'),
             slim = true,
+            reconfigureTicket = ticket,
         )
 
         val result = deferred.await()
@@ -4107,7 +4109,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
 
         // Profile-switch step: identity bump (N/A here) + beginSlimReconfigure
         // before HostStatePurged / configure.
-        repository.beginSlimReconfigure()
+        val ticket = repository.beginSlimReconfigure()
 
         // Simulated post-purge / pre-configure window: old workflow tries
         // to land a slice/effect commit.
@@ -4123,6 +4125,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         repository.configure(
             baseUrl = server.url("/").toString().trimEnd('/'),
             slim = true,
+            reconfigureTicket = ticket,
         )
         assertFalse(repository.isSlimCommitTokenCurrent(tokenA))
     }

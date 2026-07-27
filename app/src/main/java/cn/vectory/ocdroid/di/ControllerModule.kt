@@ -193,6 +193,7 @@ object ControllerModule {
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
         reconfigureBarrier: cn.vectory.ocdroid.service.ConnectionReconfigureBarrier,
         effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver,
+        slimLocalResetCoordinator: cn.vectory.ocdroid.data.repository.SlimLocalResetCoordinator,
     ): HostProfileController = HostProfileController(
         scope = appScope,
         slices = store.slices,
@@ -205,6 +206,7 @@ object ControllerModule {
         identityStore = identityStore,
         reconfigureBarrier = reconfigureBarrier,
         effectiveConnectionConfigResolver = effectiveConnectionConfigResolver,
+        slimLocalResetCoordinator = slimLocalResetCoordinator,
     )
 
     @Provides
