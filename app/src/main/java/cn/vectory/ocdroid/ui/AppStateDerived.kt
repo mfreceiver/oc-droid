@@ -8,6 +8,7 @@ import cn.vectory.ocdroid.data.model.ProvidersResponse
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.data.repository.isThinPlaceholder
 
 /**
  * §R-17 M5: context-usage summary for the most recent assistant message, shown
@@ -355,6 +356,15 @@ fun isStaleQuestionPart(part: Part, pending: List<QuestionRequest>): Boolean {
         val tool = q.tool ?: return@none false
         tool.messageId == partMessageId && tool.callId == partCallId
     }
+}
+
+fun isStaleRunningPart(
+    part: Part,
+    pending: List<QuestionRequest>,
+    sessionStatus: SessionStatus?,
+): Boolean {
+    if (part.isThinPlaceholder()) return sessionStatus?.isIdle == true
+    return isStaleQuestionPart(part, pending)
 }
 
 private fun logContextUsageUnavailable(reason: String): ContextUsage? {

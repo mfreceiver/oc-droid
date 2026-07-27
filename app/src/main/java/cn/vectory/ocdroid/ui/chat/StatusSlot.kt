@@ -80,6 +80,7 @@ import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
+import cn.vectory.ocdroid.ui.theme.Dimens
 
 /**
  * The binding priority of the status slot. The slot renders the surface
@@ -209,6 +210,9 @@ internal sealed class StatusSlotContent {
     data class Question(val question: QuestionRequest) : StatusSlotContent()
     data class Permission(val permission: PermissionRequest) : StatusSlotContent()
 }
+
+internal fun statusSlotPlacement(contentHeightPx: Int, gapPx: Int = Dimens.spacing2.value.toInt()): Pair<Int, Int> =
+    contentHeightPx to gapPx
 
 /**
  * §1C: the single status slot. The only thing it does is pick the
@@ -360,14 +364,11 @@ internal fun BoxScope.StatusSlot(
         contentKey = { it::class },
         modifier = modifier
             .align(Alignment.TopCenter)
-            // §thinking-bubble-gap (2026-07-26): offset the status capsule
-            // downward by half its OWN height so it breathes below the
-            // TopAppBar instead of touching it. The custom layout measures
-            // the content once, then places it at y = height/2 — single pass,
-            // no chicken-and-egg (onSizeChanged would flash on first frame).
+            // Fixed top gap keeps the status slot stable as question content
+            // grows; the card's own scroll area handles long content.
             .layout { measurable, constraints ->
                 val placeable = measurable.measure(constraints)
-                val gap = placeable.height / 2
+                val (_, gap) = statusSlotPlacement(placeable.height, with(density) { Dimens.spacing2.roundToPx() })
                 layout(placeable.width, placeable.height + gap) {
                     placeable.placeRelative(0, gap)
                 }

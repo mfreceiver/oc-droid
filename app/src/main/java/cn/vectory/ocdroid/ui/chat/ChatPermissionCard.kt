@@ -25,6 +25,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -33,11 +36,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
-import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.PermissionResponse
+import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
+import cn.vectory.ocdroid.ui.theme.Dimens
 
 /**
  * §1C-FIX-⑧: the metadata fields surfaced per scheme E.4. The
@@ -82,37 +85,43 @@ internal fun ChatPermissionCard(
     onRespond: (PermissionResponse) -> Unit,
 ) {
     Surface(
-        modifier = Modifier.fillMaxWidth().padding(16.dp),
+        modifier = Modifier.fillMaxWidth().heightIn(max = Dimens.statusCardMaxHeight).padding(Dimens.spacing4),
         shape = MaterialTheme.shapes.extraLarge,
         color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp
+        tonalElevation = Dimens.hairline
     ) {
         Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
             Box(
                 modifier = Modifier
-                    .width(3.dp)
+                    .width(Dimens.hairline)
                     .fillMaxHeight()
                     .background(MaterialTheme.colorScheme.primary)
             )
-            Column(modifier = Modifier.padding(16.dp)) {
+            Column(modifier = Modifier.fillMaxWidth().padding(Dimens.spacing4)) {
                 Text(
                     text = stringResource(R.string.permission_card_title),
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
-                Spacer(modifier = Modifier.size(8.dp))
+                Spacer(modifier = Modifier.size(Dimens.spacing2))
                 Text(
                     text = permission.permission
                         ?: stringResource(R.string.permission_card_unknown_permission),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Spacer(modifier = Modifier.size(Dimens.spacing2))
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                ) {
                 // §1C-FIX-⑧: scheme E.4 metadata block. Each line is
                 // conditionally rendered when its field is non-null;
                 // a card with no metadata fields at all (e.g. cold-
                 // start, no host / session / tool) still shows the
                 // title + permission name + buttons.
-                Spacer(modifier = Modifier.size(8.dp))
+                Spacer(modifier = Modifier.size(Dimens.spacing2))
                 metadata.hostName?.let { host ->
                     Text(
                         text = stringResource(R.string.permission_card_metadata_host, host),
@@ -145,7 +154,7 @@ internal fun ChatPermissionCard(
                 // be a file path or a command — both benefit from
                 // monospace alignment).
                 metadata.target?.let { target ->
-                    Spacer(modifier = Modifier.size(4.dp))
+                    Spacer(modifier = Modifier.size(Dimens.spacing1))
                     SelectionContainer {
                         Text(
                             text = stringResource(R.string.permission_card_metadata_target, target),
@@ -155,7 +164,8 @@ internal fun ChatPermissionCard(
                         )
                     }
                 }
-                Spacer(modifier = Modifier.size(16.dp))
+                }
+                Spacer(modifier = Modifier.size(Dimens.spacing2))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = { onRespond(PermissionResponse.REJECT) }) {
                         Text(
@@ -163,14 +173,14 @@ internal fun ChatPermissionCard(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(Dimens.spacing2))
                     TextButton(onClick = { onRespond(PermissionResponse.ONCE) }) {
                         Text(
                             text = stringResource(R.string.permission_allow_once),
                             color = MaterialTheme.colorScheme.primary,
                         )
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(Dimens.spacing2))
                     TextButton(onClick = { onRespond(PermissionResponse.ALWAYS) }) {
                         Text(
                             text = stringResource(R.string.permission_always_allow),

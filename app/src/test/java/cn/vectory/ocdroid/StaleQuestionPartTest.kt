@@ -4,6 +4,8 @@ import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.PartState
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.ui.isStaleQuestionPart
+import cn.vectory.ocdroid.ui.isStaleRunningPart
+import cn.vectory.ocdroid.data.model.SessionStatus
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -146,5 +148,22 @@ class StaleQuestionPartTest {
             qRef(id = "q-3", messageId = "msg-3", callId = "call-3")
         )
         assertFalse(isStaleQuestionPart(p, pending))
+    }
+
+    @Test
+    fun `thin placeholder is stale after session becomes idle`() {
+        val p = Part(
+            id = "thin_placeholder_msg-1",
+            messageId = "msg-1",
+            type = "text",
+            text = "[内容已折叠，点开查看]",
+        )
+        assertTrue(isStaleRunningPart(p, pending = emptyList(), sessionStatus = SessionStatus("idle")))
+    }
+
+    @Test
+    fun `thin placeholder stays live while session is busy`() {
+        val p = Part(id = "thin_placeholder_msg-1", type = "text")
+        assertFalse(isStaleRunningPart(p, pending = emptyList(), sessionStatus = SessionStatus("busy")))
     }
 }

@@ -58,7 +58,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
@@ -441,6 +443,53 @@ fun ChatScaffold(
     val curCutoff = chromeSessionId?.let(chat.revertCutoffs::get)
     val curRevertMessageId = if (curSession != null) curSession.revert?.messageId else curCutoff?.messageId
     val curSessionStatus = currentSessionStatus(sessionList.sessionStatuses, chromeSessionId)
+    // ── §P0 rev-3: unified reconcile state machine ───────────────────────
+    // SSE question resolution can be missed while this process is paused. A
+    // session activation (first entry or switch) and each genuine foreground
+    // return perform one authoritative reconcile; the loader's race-safe merge
+    // preserves live question.asked arrivals.
+    //
+    // The previous approach (rev-2) had a behaviour regression: it deferred
+    // the actual reconcile decision to LifecycleEventEffect(ON_RESUME), but a
+    // foreground session switch (App already RESUMED, user switches A→B) does
+    // NOT produce a new ON_RESUME — so the reconcile was postponed until the
+    // next lifecycle pause→resume. This weakened the P0-B window-closure goal.
+    //
+    // Rev-3 fix: [onSessionChange] returns `(shouldReconcile, nextState)`
+    // directly, and LaunchedEffect calls reconcilePendingQuestions() itself
+    // when the return signals `true`. ON_RESUME handles genuine pause→resume
+    // independently. Initial `wasPaused = false` prevents the catch-up
+    // ON_RESUME (on first composition) from double-firing when LaunchedEffect
+    // already reconciled the session.
+    var reconcileState by remember { mutableStateOf(ReconcileTriggerState()) }
+
+    // Session switch or first composition: reconcile directly if this is a
+    // new session (different from last reconciled). Does NOT wait for ON_RESUME.
+    LaunchedEffect(chromeSessionId) {
+        if (chromeSessionId != null) {
+            val (shouldReconcile, nextState) = reconcileState.onSessionChange(chromeSessionId)
+            reconcileState = nextState
+            if (shouldReconcile) {
+                chatVM.reconcilePendingQuestions()
+            }
+        }
+    }
+
+    // Genuine background → mark pause for the next ON_RESUME.
+    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) {
+        reconcileState = reconcileState.onPause()
+    }
+
+    // Foreground return: only reconcile for genuine pause→resume.
+    // First-composition catch-up is race-free because LaunchedEffect already
+    // handled it (wasPaused starts as false, so the catch-up is a no-op).
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        val (shouldReconcile, nextState) = reconcileState.onResume(chromeSessionId)
+        reconcileState = nextState
+        if (shouldReconcile && chromeSessionId != null) {
+            chatVM.reconcilePendingQuestions()
+        }
+    }
     val computedContextUsage = computeContextUsage(renderedMessages, settings.providers)
     // §L5a: cache `cachedContextUsage` behind a State handle so the
     // rememberChatTopBarState lambda can read `.value` on it (snapshot-tracking
@@ -1208,3 +1257,72 @@ fun ChatScaffold(
 // triggered via the ContextUsageDialog's own "Compress context" button, NOT
 // a standalone overflow item. Archive was dropped (the destructive
 // affordance moves to the Sessions screen long-press).
+
+// ── §P0 rev-3: Reconcile trigger state machine ───────────────────────────
+
+/**
+ * Deterministic state machine that decides whether [ChatScaffold] should call
+ * [cn.vectory.ocdroid.ui.ChatViewModel.reconcilePendingQuestions].
+ *
+ * Two independent trigger paths:
+ *   1. **Session change** ([onSessionChange]): called from
+ *      [androidx.compose.runtime.LaunchedEffect] when [chromeSessionId]
+ *      changes. Returns `(shouldReconcile, nextState)` directly so the caller
+ *      can invoke [cn.vectory.ocdroid.ui.ChatViewModel.reconcilePendingQuestions]
+ *      immediately — does NOT wait for the next ON_RESUME. Reconciles iff the
+ *      new session ID differs from [lastReconciledSessionId].
+ *   2. **Genuine pause→resume** ([onPause] / [onResume]): called from
+ *      [androidx.lifecycle.compose.LifecycleEventEffect]. [onResume]
+ *      reconciles iff [wasPaused] is `true` (set by a prior [onPause]).
+ *
+ * `wasPaused` starts as `false` so the first-composition catch-up ON_RESUME
+ * (lifecycle observer emit) is a no-op when [onSessionChange] already handled
+ * the first composition.
+ *
+ * @see QuestionReconcileTriggerTest for the full coverage matrix.
+ */
+internal data class ReconcileTriggerState(
+    /** Session ID that was last reconciled by [onSessionChange]. `null` = never. */
+    val lastReconciledSessionId: String? = null,
+    /**
+     * `true` when a genuine [Lifecycle.Event.ON_PAUSE] has occurred since the
+     * last [onResume]. Initialised `false` so the first ON_RESUME catch-up
+     * does NOT double-reconcile when [onSessionChange] already handled it.
+     */
+    val wasPaused: Boolean = false,
+) {
+    /** Call when [Lifecycle.Event.ON_PAUSE] fires. */
+    fun onPause(): ReconcileTriggerState = copy(wasPaused = true)
+
+    /**
+     * Call when [chromeSessionId] changes or the composable first enters
+     * composition.
+     *
+     * @return `(shouldReconcile, nextState)` — `shouldReconcile` is `true`
+     *         iff [newSessionId] differs from [lastReconciledSessionId].
+     *         [wasPaused] is preserved (pause→resume is handled independently
+     *         by [onResume]).
+     */
+    fun onSessionChange(newSessionId: String): Pair<Boolean, ReconcileTriggerState> {
+        val shouldReconcile = lastReconciledSessionId != newSessionId
+        return shouldReconcile to ReconcileTriggerState(
+            lastReconciledSessionId = newSessionId,
+            wasPaused = this.wasPaused,
+        )
+    }
+
+    /**
+     * Call when [Lifecycle.Event.ON_RESUME] fires.
+     *
+     * @return `(shouldReconcile, nextState)` — `shouldReconcile` is `true`
+     *         iff [wasPaused] is `true` (a genuine ON_PAUSE preceded this
+     *         resume). The next state has `wasPaused = false`.
+     *         [lastReconciledSessionId] is preserved — session changes are
+     *         managed by [onSessionChange].
+     */
+    fun onResume(currentSessionId: String?): Pair<Boolean, ReconcileTriggerState> {
+        if (currentSessionId == null) return false to this
+        val shouldReconcile = wasPaused
+        return shouldReconcile to copy(wasPaused = false)
+    }
+}

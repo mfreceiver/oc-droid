@@ -12,6 +12,45 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
+internal data class QuestionDirectoryFetch(
+    val directory: String,
+    val result: Result<List<QuestionRequest>>,
+)
+
+internal fun reconcileLegacyPendingQuestions(
+    startIds: Set<String>,
+    current: List<QuestionRequest>,
+    fetches: List<QuestionDirectoryFetch>,
+    sessionIdToDirectory: Map<String, String> = emptyMap(),
+): List<QuestionRequest> {
+    val successfulDirectories = fetches.filter { it.result.isSuccess }.mapTo(mutableSetOf()) { it.directory }
+    val allQueriedDirectories = fetches.mapTo(mutableSetOf()) { it.directory }
+    val fetched = buildList {
+        fetches.forEach { fetch ->
+            fetch.result.getOrNull()?.forEach(::add)
+        }
+    }.distinctBy { it.id }
+    val fetchedIds = fetched.mapTo(mutableSetOf()) { it.id }
+    val locallyArrivedOrUnavailable = current.filter { question ->
+        question.id !in fetchedIds && (
+            question.id !in startIds || when (question.directory) {
+                null -> {
+                    // Attempt precise ownership via sessionId→directory mapping.
+                    val resolvedDir = sessionIdToDirectory[question.sessionId]
+                    when {
+                        resolvedDir == null -> true        // can't determine — keep conservatively
+                        resolvedDir in successfulDirectories -> false   // belongs to a successful dir → clean
+                        resolvedDir in allQueriedDirectories -> true    // belongs to a queried-but-failed dir → keep
+                        else -> true                        // belongs to an unqueried dir → keep (conservative)
+                    }
+                }
+                else -> question.directory !in successfulDirectories
+            }
+        )
+    }
+    return (fetched + locallyArrivedOrUnavailable).distinctBy { it.id }
+}
+
 // ==========================================================================
 // P5 extraction: `SlimQuestionLoader`. Owns the legacy all-workdir fan-out
 // + the slim single-shot question aggregation. Pure move from SSC — NO
@@ -180,11 +219,14 @@ internal class SlimQuestionLoader(
      * Legacy `startIds` capture + slim token capture happen HERE (inside
      * the launched coroutine), preserving the original timing invariants.
      */
-    internal suspend fun execute(command: SlimQuestionLoadCommand) {
+    internal suspend fun execute(
+        command: SlimQuestionLoadCommand,
+        isCurrent: () -> Boolean = { true },
+    ) {
         when (command) {
             SlimQuestionLoadCommand.None -> Unit
-            is SlimQuestionLoadCommand.LoadLegacy -> executeLegacy(command.repository, command.workdirs)
-            is SlimQuestionLoadCommand.LoadSlim -> executeSlim(command.repository)
+            is SlimQuestionLoadCommand.LoadLegacy -> executeLegacy(command.repository, command.workdirs, isCurrent)
+            is SlimQuestionLoadCommand.LoadSlim -> executeSlim(command.repository, isCurrent)
         }
     }
 
@@ -201,6 +243,7 @@ internal class SlimQuestionLoader(
     private suspend fun executeLegacy(
         repository: SlimQuestionRepositoryPort,
         workdirs: List<String>,
+        isCurrent: () -> Boolean,
     ) {
         // §badge-stale-fix: fan out to EVERY known workdir in parallel, then
         // reconcile AUTHORITATIVELY (server is source of truth). Unlike the
@@ -222,18 +265,18 @@ internal class SlimQuestionLoader(
         val fetched = coroutineScope {
             workdirs.map { dir ->
                 async {
-                    repository.getPendingQuestions(dir)
+                    val result = repository.getPendingQuestions(dir)
                         .onSuccess { questions ->
                             DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs dir=$dir count=${questions.size}")
                         }
                         .onFailure { error ->
                             DebugLog.w(tag, "fan-out getPendingQuestions failed for $dir: ${error.message}")
                         }
-                        .getOrDefault(emptyList())
+                    QuestionDirectoryFetch(dir, result)
                 }
             }.awaitAll()
         }
-        val fetchedIds = mutableSetOf<String>()
+        if (!isCurrent()) return
         // §task5-ghost (final-review fix 2): snapshot the three-source
         // sessions map BEFORE the merge so the filter can identify
         // archived-session questions. A question whose session is marked
@@ -247,12 +290,14 @@ internal class SlimQuestionLoader(
             slSnap.directorySessions,
             slSnap.childSessions,
         )
-        val authoritative = buildList {
-            fetched.flatten().forEach { if (fetchedIds.add(it.id)) add(it) }
-            slSnap.pendingQuestions.forEach { q ->
-                if (q.id !in fetchedIds && q.id !in startIds) add(q)
-            }
-        }.let { filterArchivedSessionQuestions(it, sessionsById) }
+        // Build sessionId→directory map for precise null-directory attribution.
+        val sessionIdToDirectory = sessionsById.mapValues { (_, s) -> s.directory }
+        val authoritative = reconcileLegacyPendingQuestions(
+            startIds = startIds,
+            current = slSnap.pendingQuestions,
+            fetches = fetched,
+            sessionIdToDirectory = sessionIdToDirectory,
+        ).let { filterArchivedSessionQuestions(it, sessionsById) }
         store.mutateSessionList { it.copy(pendingQuestions = authoritative) }
         DebugLog.d("Question", "loadPendingQuestionsAllWorkdirs authoritative reconcile total=${authoritative.size} (had ${startIds.size} before)")
     }
@@ -269,7 +314,7 @@ internal class SlimQuestionLoader(
      * commit inside a single `commitIfSlimTokenCurrent` block. A stale
      * result is a clean no-op (no slice mutation, no UiEvent).
      */
-    private suspend fun executeSlim(repository: SlimQuestionRepositoryPort) {
+    private suspend fun executeSlim(repository: SlimQuestionRepositoryPort, isCurrent: () -> Boolean) {
         // Standalone workflow entry: ONE capture before first suspend.
         val token = repository.captureCommitToken()
 
@@ -295,7 +340,7 @@ internal class SlimQuestionLoader(
         }
 
         // Fast rejection after suspension but before building work.
-        if (!repository.isCommitTokenCurrent(token)) return
+        if (!repository.isCommitTokenCurrent(token) || !isCurrent()) return
 
         // C-D3 v2 §2.2: ALL slice + effect commits land inside ONE
         // commitIfSlimTokenCurrent atomic gate so a host rotation

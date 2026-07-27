@@ -248,10 +248,21 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                 .fillMaxSize()
                 .padding(innerPadding)
                 .consumeWindowInsets(innerPadding)
-                // §home-hub T7-C1: bottom bar removed; finish IME handling
-                // with a plain imePadding on the content (the composer inside
-                // ChatScaffold already imePads its input row; this top-level
-                // padding is the safety net for any other IME-consuming surface).
+                // §IME-OWNER (sole): AppShell's NavHost is the UNIQUE IME padding
+                // owner in the tree. Composer has been deliberately stripped of
+                // its own .imePadding() to prevent double displacement (rev-2
+                // finding). The NavHost sits above every route (Chat, Sessions,
+                // Files, Git, Settings), so ALL content is uniformly shrunk by
+                // the IME height — the composer (at the bottom of ChatScaffold's
+                // Column) sits flush against the IME top, and the message area
+                // (weight(1f) above the composer) resizes correctly. DO NOT add
+                // another .imePadding() or .consumWindowInsets(ime) below this
+                // level without explicit rev-2 sign-off: any child imePadding
+                // re-creates the two-owner ambiguity that was intentionally
+                // collapsed here. Non-Chat routes whose text fields live in
+                // AppFormDialog / AlertDialog (Tier-C) get IME from the dialog
+                // host, NOT from this padding; this top-level safety net handles
+                // any remaining non-dialog input surface uniformly.
                 .imePadding(),
         ) {
             composable(NavRoute.Chat.route) {

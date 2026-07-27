@@ -458,6 +458,10 @@ class ChatViewModel @Inject constructor(
         })
     }
 
+    fun reconcilePendingQuestions() {
+        core.effectBus.tryEmitEffect(ControllerEffect.LoadPendingQuestions)
+    }
+
     fun togglePartExpand(key: String, currentValue: Boolean) {
         core.composerController.togglePartExpand(key, currentValue)
     }

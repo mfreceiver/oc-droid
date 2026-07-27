@@ -57,6 +57,8 @@ object Dimens {
     // ── 组件尺寸 ───────────────────────────────────────────────────────
     /** Material 推荐的最小可点击目标尺寸（无障碍标准；底栏 item 等需保证）。 */
     val touchTargetMin: Dp = 48.dp
+    /** Bounded overlay height so long status content leaves actions visible. */
+    val statusCardMaxHeight: Dp = 360.dp
 
     // ── 图标尺寸阶梯（M3 对齐；UI 代码一律走这些 token，禁散落字面量）─────
     // 14 / 18 / 24 / 28 / 32 五档。历史散落的 16→iconSm(18)、20→iconSm(18)、

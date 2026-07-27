@@ -30,6 +30,7 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -1567,12 +1568,17 @@ class SessionSyncCoordinatorTest {
         scope.testScheduler.advanceUntilIdle()
 
         val ids = slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
-        // Authoritative reconcile: server result wins; the locally-held ghost
-        // (present at fan-out start, absent from every server response) is dropped.
+        // Authoritative reconcile: server result wins for questions whose directory
+        // is known. The locally-held ghost with null directory + unresolvable sessionId
+        // is CONSERVATIVELY KEPT (cannot determine which directory it belongs to →
+        // fail closed). See reconcileLegacyPendingQuestions directory==null resolution.
         assertTrue("qa from /proj-a", "qa" in ids)
         assertTrue("qb from /proj-b", "qb" in ids)
         assertTrue("qc from /current", "qc" in ids)
-        assertFalse("existing-not-on-server dropped (ghost no longer reported by server)", "existing-not-on-server" in ids)
+        assertTrue(
+            "existing-not-on-server (directory=null, sessionId=s0 not in any known session) " +
+                "is CONSERVATIVELY KEPT because its directory cannot be resolved",
+            "existing-not-on-server" in ids)
         // §issue-1 Fix B: exact workdir SET = directorySessions.keys + currentWorkdir
         // + recent_workdirs (per-fp). Each queried exactly once (distinct). The
         // recent workdirs contribute no questions here (else-branch → empty) but
@@ -1625,6 +1631,117 @@ class SessionSyncCoordinatorTest {
         // Failure path doesn't wipe the slice — pendingQuestions stays empty
         // (its initial state) rather than being mutated by the failed fetch.
         assertTrue(slices.sessionList.value.pendingQuestions.isEmpty())
+    }
+
+    @Test
+    fun `concurrent stale reconcile via generation gate does not resurrect resolved question`() {
+        // Real end-to-end concurrent out-of-order regression test (P0 rev-3).
+        // Pins the MID-FLIGHT invariant: the stale response (deferred1) must
+        // NOT write q1 back BEFORE the trailing response (deferred2) arrives
+        // and cleans up. A final-only assertion would pass even if the
+        // generation gate were removed (old write + trailing clear = empty).
+        //
+        // Two-deferred protocol:
+        //  1. Pre-seed pending q1 for session s1 on /proj-a.
+        //  2. 1st reconcile hangs on deferred1.
+        //  3. 2nd and 3rd reconciles queued (single-flight pending flag).
+        //  4. q1 removed from slice (server-side resolution).
+        //  5. Release deferred1 (stale response with q1).
+        //     → Generation gate (1 != 3) must prevent write-back.
+        //  6. ★ MID-FLIGHT ASSERTION: pendingQuestions STILL empty.
+        //     → If generation gate deleted, q1 written here → assertion FAILS.
+        //  7. Release deferred2 (trailing authoritative empty).
+        //  8. Final assertions: empty + maxConcurrentCalls == 1.
+        //
+        // Mental regression test: if someone deletes
+        // `generation == questionReconcileGeneration` (line 1542 of
+        // SessionSyncCoordinator.kt), step 6's mid-flight assertion catches
+        // it because the stale response writes q1 back BEFORE the trailing
+        // response arrives.
+        seed {
+            it.copy(
+                directorySessions = mapOf(
+                    "/proj-a" to listOf(Session(id = "s1", directory = "/proj-a"))
+                ),
+                pendingQuestions = listOf(
+                    QuestionRequest(id = "q1", sessionId = "s1", directory = null, questions = emptyList())
+                )
+            )
+        }
+        every { settingsManager.currentWorkdir } returns "/proj-a"
+        every { settingsManager.getRecentWorkdirs("test-fp") } returns emptyList()
+
+        // Two deferreds: deferred1 = stale response, deferred2 = trailing empty.
+        val deferred1 = CompletableDeferred<Result<List<QuestionRequest>>>()
+        val deferred2 = CompletableDeferred<Result<List<QuestionRequest>>>()
+        // Concurrent-call tracking: maxConcurrentCalls captures the peak
+        // number of in-flight getPendingQuestions calls simultaneously.
+        var concurrentCalls = 0
+        var maxConcurrentCalls = 0
+        var callCount = 0
+        val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        coEvery { repository.getPendingQuestions(any()) } coAnswers {
+            concurrentCalls++
+            maxConcurrentCalls = maxOf(maxConcurrentCalls, concurrentCalls)
+            callCount++
+            val result = when (callCount) {
+                1 -> deferred1.await()  // stale response: hangs until explicitly released
+                2 -> deferred2.await()  // trailing response: hangs until explicitly released
+                else -> Result.success(emptyList())
+            }
+            concurrentCalls--
+            result
+        }
+
+        // Step 2: 1st reconcile — hangs on deferred1 inside async.
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+
+        // Step 3: 2nd and 3rd reconciles while first is still hanging.
+        // generation bumps to 2, then 3. Both queued via the single-flight
+        // mechanism (questionReconcilePending flag), NOT executed in parallel.
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+
+        // Step 4: Simulate server-side resolution — another client answered q1.
+        slices.mutateSessionList { it.copy(pendingQuestions = emptyList()) }
+
+        // Step 5: Release the stale (1st) response — still contains q1.
+        // The generation gate (generation=1 != questionReconcileGeneration=3)
+        // should prevent write-back. After this, the trailing is launched and
+        // immediately suspended on deferred2 (UnconfinedTestDispatcher runs it
+        // synchronously until the first suspension point).
+        deferred1.complete(
+            Result.success(
+                listOf(
+                    QuestionRequest(id = "q1", sessionId = "s1", directory = null, questions = emptyList())
+                )
+            )
+        )
+
+        // ── Step 6: CRITICAL MID-FLIGHT ASSERTION ─────────────────────────
+        // The stale response arrived and was processed (generation gate
+        // evaluated). The trailing reconcile is launched but has NOT completed
+        // (suspended on deferred2). If the generation gate were absent, q1
+        // would have been written back here. This assertion catches that.
+        assertTrue(
+            "★★★ MID-FLIGHT: stale response must NOT resurrect q1 — " +
+                "if this fails, the generation gate was bypassed or removed",
+            slices.sessionList.value.pendingQuestions.isEmpty()
+        )
+
+        // Step 7: Release trailing response (authoritative empty).
+        deferred2.complete(Result.success(emptyList()))
+        scope.testScheduler.advanceUntilIdle()
+
+        // Step 8: Final assertions.
+        assertTrue(
+            "final pendingQuestions must be empty after trailing reconcile",
+            slices.sessionList.value.pendingQuestions.isEmpty()
+        )
+        assertEquals(
+            "maxConcurrentCalls must be 1 — single-flight prevents parallel execution",
+            1, maxConcurrentCalls
+        )
     }
 
     // ── §task5-ghost (final-review fix 2): archived-session question guard ──

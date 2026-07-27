@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
+import cn.vectory.ocdroid.data.repository.isThinPlaceholder
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.isThinPlaceholder
 import cn.vectory.ocdroid.ui.theme.CardWidthScope
@@ -286,6 +287,7 @@ internal fun MessageRow(
                     partExpandState = (part.messageId ?: message.id)
                         .let { PartKey(it, part.id) }
                         .let { partExpandStates[it] } ?: PartExpandState.Idle,
+                    staleRunning = part.id in staleQuestionPartKeys,
                 )
                 i += 1
             }
@@ -657,6 +659,16 @@ internal fun FoldMessageDecoration(
 }
 
 @Composable
+private fun InterruptedPart(modifier: Modifier) {
+    Text(
+        text = stringResource(R.string.chat_question_stale),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.outline,
+        modifier = modifier.padding(vertical = 4.dp),
+    )
+}
+
+@Composable
 internal fun PartView(
     part: Part,
     isUser: Boolean,
@@ -676,6 +688,7 @@ internal fun PartView(
     // 该 part 的展开状态；默认 Idle。仅用于 thin_placeholder 占位条的门控
     // （仅 Idle 时渲染加载条；Loading/Failed 等交给下方 OmittedContentCard）。
     partExpandState: PartExpandState = PartExpandState.Idle,
+    staleRunning: Boolean = false,
 ) {
     val expandKey = "${messageId}|${part.id}"
     when {
@@ -689,7 +702,9 @@ internal fun PartView(
                 // 时不渲染（下方 OmittedContentCard 会显示 spinner / 错误重试 / 隐藏），
                 // 避免双 spinner 和「加载中」掩盖失败状态。绝不能回退渲染 part.text
                 // 的死板占位文案。
-                if (partExpandState is PartExpandState.Idle) {
+                if (staleRunning) {
+                    InterruptedPart(modifier = modifier)
+                } else if (partExpandState is PartExpandState.Idle) {
                     DebugCardIdentity(name = "ThinPlaceholderLoadingBar", source = "PartView:656", part = part) {
                         ThinPlaceholderLoadingBar(modifier = modifier)
                     }

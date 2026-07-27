@@ -25,7 +25,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -181,8 +180,16 @@ fun Composer(
     var showStopConfirm by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
+    // §IME-OWNER (sole): NO .imePadding() here — AppShell's NavHost is the
+    // unique IME padding owner (see AppShell.kt §IME-OWNER). Adding padding
+    // here would re-create the two-owner ambiguity that rev-2 flagged. The
+    // composer sits at the bottom of ChatScaffold's Column; the NavHost's
+    // imePadding shrinks the entire route content uniformly, placing the
+    // composer flush against the IME top. If you add an overlay / drawer /
+    // consumeWindowInsets below NavHost level, route IME through the NavHost
+    // — do NOT add another imePadding here.
     Surface(
-        modifier = Modifier.fillMaxWidth().imePadding(),
+        modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         shape = RectangleShape,
         shadowElevation = 2.dp,

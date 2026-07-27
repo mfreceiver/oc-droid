@@ -64,7 +64,7 @@ import cn.vectory.ocdroid.ui.ScrollBehavior
 import cn.vectory.ocdroid.ui.currentSessionStatus
 import cn.vectory.ocdroid.ui.filterBeforeRevert
 import cn.vectory.ocdroid.ui.injectMetadataMarkers
-import cn.vectory.ocdroid.ui.isStaleQuestionPart
+import cn.vectory.ocdroid.ui.isStaleRunningPart
 import cn.vectory.ocdroid.ui.theme.AppTextStyles
 import cn.vectory.ocdroid.ui.theme.CardWidthScope
 import cn.vectory.ocdroid.util.FLICKER_TAG
@@ -288,9 +288,9 @@ internal fun ChatMessageList(
     // Recomputed only when the message window or the pending-questions list
     // changes. Pure derivation: reads partsByMessage + sessionListState.
     val pendingQuestions = sessionListState.pendingQuestions
-    val staleQuestionPartKeys: Set<String> = remember(partsByMessage, pendingQuestions) {
+    val staleQuestionPartKeys: Set<String> = remember(partsByMessage, pendingQuestions, currentSessionStatus) {
         partsByMessage.values.flatten().mapNotNullTo(HashSet()) { part ->
-            if (isStaleQuestionPart(part, pendingQuestions)) part.id else null
+            if (isStaleRunningPart(part, pendingQuestions, currentSessionStatus)) part.id else null
         }
     }
 

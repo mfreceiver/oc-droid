@@ -326,6 +326,13 @@ class SessionSyncCoordinator(
      */
     private val reconcileStripes: Array<Mutex> = Array(STRIPES) { Mutex() }
 
+    // Question refreshes can be requested by both composition and lifecycle
+    // edges. Keep one worker and replay only the latest request after it ends.
+    private var questionReconcileRunning = false
+    private var questionReconcilePending = false
+    private var questionReconcileGeneration = 0L
+    private var latestQuestionRepository: OpenCodeRepository? = null
+
     private fun stripeForImpl(sid: String): Mutex {
         // floorMod keeps the result non-negative for negative hashCode().
         val idx = ((sid.hashCode() % STRIPES) + STRIPES) % STRIPES
@@ -1504,25 +1511,54 @@ class SessionSyncCoordinator(
      * (callers fan out via [ControllerEffect]s); AppCore (out of this wave's
      * write scope) will need a one-line wiring update to call this method.
      *
-     * Merge semantics: byGet wins, pre-existing fills gaps (mirrors
-     * `launchLoadPendingQuestions` so the per-workdir fan-out composes without
-     * dropping prior SSE-delivered questions).
+     * Merge semantics: successful directory responses are authoritative (server
+     * is source of truth — questions absent from server response are dropped),
+     * failed directories conservatively retain locally-held questions for that
+     * directory, race-window arrivals (SSE `question.asked` during the fan-out)
+     * are preserved, and the generation gate ensures stale (superseded) responses
+     * from a prior reconcile round are not committed.
      *
      * §scope-note: AppCore needs to call this from its catch-up / switch paths
      * to wire production. The method is exercised directly by
      * [SessionSyncCoordinatorTest].
      */
     fun loadPendingQuestionsAllWorkdirs(repository: OpenCodeRepository) {
-        // P5 §2.1: thin F5 façade. The loader's synchronous `planLoad`
-        // decides mode (slim vs legacy) + computes workdirs + early-returns
-        // for empty set. SSC owns the `scope.launch` and calls `execute`.
+        latestQuestionRepository = repository
+        questionReconcileGeneration += 1L
+        if (questionReconcileRunning) {
+            questionReconcilePending = true
+            return
+        }
+        questionReconcileRunning = true
+        launchLatestQuestionReconcile(repository, questionReconcileGeneration)
+    }
+
+    private fun launchLatestQuestionReconcile(repository: OpenCodeRepository, generation: Long) {
         val command = slimQuestionLoader.planLoad(OpenCodeSlimQuestionRepositoryPort(repository))
-        when (command) {
-            SlimQuestionLoadCommand.None -> Unit
-            is SlimQuestionLoadCommand.LoadLegacy,
-            is SlimQuestionLoadCommand.LoadSlim -> {
-                scope.launch { slimQuestionLoader.execute(command) }
+        if (command is SlimQuestionLoadCommand.None) {
+            finishQuestionReconcile()
+            return
+        }
+        scope.launch {
+            try {
+                slimQuestionLoader.execute(command) {
+                    generation == questionReconcileGeneration
+                }
+            } finally {
+                finishQuestionReconcile()
             }
+        }
+    }
+
+    private fun finishQuestionReconcile() {
+        if (questionReconcilePending) {
+            questionReconcilePending = false
+            launchLatestQuestionReconcile(
+                repository = latestQuestionRepository ?: return,
+                generation = questionReconcileGeneration,
+            )
+        } else {
+            questionReconcileRunning = false
         }
     }
 
