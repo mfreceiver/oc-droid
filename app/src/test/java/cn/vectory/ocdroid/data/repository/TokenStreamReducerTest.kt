@@ -4,6 +4,7 @@ import cn.vectory.ocdroid.data.model.ResyncReason
 import cn.vectory.ocdroid.data.model.TokenStreamFrame
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -559,5 +560,138 @@ class TokenStreamReducerTest {
         val (s2, e2) = TokenStreamReducer.reduce(base, TokenStreamFrame.ServerHeartbeat)
         assertEquals(base, s2)
         assertTrue(e2.isEmpty())
+    }
+
+    // ── §Stage-B M5: removal frames clear the reducer + emit ClearPartState ──
+
+    @Test
+    fun `MessagePartRemoved drops the part and emits ClearPartState (M5 fix)`() {
+        // Pre-M5 this branch was a no-op — the reducer kept the part and
+        // emitted no effect, leaving the streaming overlay intact so a
+        // late straggler frame could resurrect ghost text. After the fix
+        // the part is dropped from the reducer map AND a ClearPartState
+        // effect is emitted so the coordinator tears down the chat-slice
+        // overlay (streamOwned / streamingPartTexts / coalesce buffers).
+        val state = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            snapshot(partId = "p1", sessionId = "s1", messageId = "m1", text = "live"),
+        ).first
+        val (next, effects) = TokenStreamReducer.reduce(
+            state,
+            TokenStreamFrame.MessagePartRemoved(
+                sessionId = "s1",
+                messageId = "m1",
+                partId = "p1",
+                messageEventSeq = 7L,
+            ),
+        )
+        assertNull("reducer part dropped", next.parts["p1"])
+        val clear = effects.filterIsInstance<TokenStreamCoordinatorEffect.ClearPartState>().single()
+        assertEquals(setOf("p1"), clear.partIds)
+    }
+
+    @Test
+    fun `MessagePartRemoved for an unknown part emits ClearPartState (severe #3 fix)`() {
+        // §rev-ogpt severe #3: a removal for a part the reducer does NOT own
+        // (UI-owned overlay — e.g. a reasoning part whose streaming text lives
+        // in ChatState.streamingPartTexts without a reducer TokenPartAcc, or a
+        // DONE part pruned from the reducer's working map while the chat slice
+        // retained it) MUST still emit ClearPartState(frame.partId). Pre-fix
+        // this was a no-op — the UI overlay survived the removal event and a
+        // subsequent /full(authoritative=false) merge kept the ghost via
+        // preservedLocal (the part was still STREAMING-owned in streamOwned).
+        val state = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            snapshot(partId = "p1", sessionId = "s1", messageId = "m1", text = "live"),
+        ).first
+        val (next, effects) = TokenStreamReducer.reduce(
+            state,
+            TokenStreamFrame.MessagePartRemoved(
+                sessionId = "s1",
+                messageId = "m1",
+                partId = "p-not-owned",
+                messageEventSeq = 7L,
+            ),
+        )
+        // Reducer state unchanged (it never owned p-not-owned)...
+        assertEquals("state unchanged for unknown part", state, next)
+        // ...but a ClearPartState effect IS emitted so the coordinator can
+        // tear down the UI-side overlay via ClearTokenStreamState.
+        val clear = effects.filterIsInstance<TokenStreamCoordinatorEffect.ClearPartState>().single()
+        assertEquals("effect carries the wire frame's partId", setOf("p-not-owned"), clear.partIds)
+    }
+
+    @Test
+    fun `MessagePartRemoved with mismatched session or message is a no-op`() {
+        // Defensive: a partId collision across sessions/messages (theoretically
+        // impossible on the wire but cheap to guard) must not let a removal
+        // in one context clear another context's overlay.
+        val state = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            snapshot(partId = "p1", sessionId = "s1", messageId = "m1", text = "live"),
+        ).first
+        val (nextSid, effectsSid) = TokenStreamReducer.reduce(
+            state,
+            TokenStreamFrame.MessagePartRemoved(
+                sessionId = "s-OTHER",
+                messageId = "m1",
+                partId = "p1",
+                messageEventSeq = 7L,
+            ),
+        )
+        assertEquals("session mismatch no-op", state, nextSid)
+        assertTrue("session mismatch no effect", effectsSid.isEmpty())
+
+        val (nextMid, effectsMid) = TokenStreamReducer.reduce(
+            state,
+            TokenStreamFrame.MessagePartRemoved(
+                sessionId = "s1",
+                messageId = "m-OTHER",
+                partId = "p1",
+                messageEventSeq = 7L,
+            ),
+        )
+        assertEquals("message mismatch no-op", state, nextMid)
+        assertTrue("message mismatch no effect", effectsMid.isEmpty())
+    }
+
+    @Test
+    fun `MessageRemoved drops ALL reducer-owned parts for the message and emits ClearPartState (M5 fix)`() {
+        // Seed TWO parts for m1 (both STREAMING) plus one part for m2 to
+        // prove the eviction is scoped by messageId. Pre-M5 this branch
+        // was a no-op; after the fix ALL of m1's parts are dropped from
+        // the reducer map AND a single ClearPartState effect carries the
+        // union of those part IDs.
+        val seed = TokenStreamReducerState(
+            parts = mapOf(
+                "p1" to TokenPartAcc("s1", "m1", "p1", "live-1", TokenPartStreamState.STREAMING),
+                "p2" to TokenPartAcc("s1", "m1", "p2", "live-2", TokenPartStreamState.STREAMING),
+                "p3" to TokenPartAcc("s1", "m2", "p3", "live-3", TokenPartStreamState.STREAMING),
+            ),
+        )
+        val (next, effects) = TokenStreamReducer.reduce(
+            seed,
+            TokenStreamFrame.MessageRemoved(sessionId = "s1", messageId = "m1"),
+        )
+        assertNull("p1 dropped", next.parts["p1"])
+        assertNull("p2 dropped", next.parts["p2"])
+        assertNotNull("p3 (different message) preserved", next.parts["p3"])
+        val clear = effects.filterIsInstance<TokenStreamCoordinatorEffect.ClearPartState>().single()
+        assertEquals(setOf("p1", "p2"), clear.partIds)
+    }
+
+    @Test
+    fun `MessageRemoved for a message the reducer has no parts for is a no-op`() {
+        val seed = TokenStreamReducerState(
+            parts = mapOf(
+                "p1" to TokenPartAcc("s1", "m1", "p1", "live", TokenPartStreamState.STREAMING),
+            ),
+        )
+        val (next, effects) = TokenStreamReducer.reduce(
+            seed,
+            TokenStreamFrame.MessageRemoved(sessionId = "s1", messageId = "m-EMPTY"),
+        )
+        assertEquals("state unchanged", seed, next)
+        assertTrue("no effect", effects.isEmpty())
     }
 }

@@ -14,6 +14,8 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
 import cn.vectory.ocdroid.data.model.SlimapiQuestionEntry
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SlimAuthoritativeCommitResult
+import cn.vectory.ocdroid.data.repository.SlimDrainOutcome
 import cn.vectory.ocdroid.data.repository.SlimSinceStageAOutcome
 import cn.vectory.ocdroid.data.repository.ProbeResult
 import cn.vectory.ocdroid.data.repository.SlimColdStartSnapshot
@@ -74,6 +76,14 @@ class SessionSyncCoordinatorSlimTest {
         transportComplete = true,
     )
 
+    /**
+     * §阶段B P0-4 test helper: wrap items as a drain Success outcome (the
+     * production `/since` path uses drainSlimSinceBounded).
+     */
+    private fun drainSuccess(
+        items: List<cn.vectory.ocdroid.data.model.MessageWithParts>,
+    ): SlimDrainOutcome = SlimDrainOutcome.Success(items)
+
     @get:org.junit.Rule
     val mainDispatcherRule = MainDispatcherRule(UnconfinedTestDispatcher())
 
@@ -114,6 +124,13 @@ class SessionSyncCoordinatorSlimTest {
         every { repository.markSlimSessionDeleted(any(), any()) } returns true
         every { repository.markSlimDirty(any(), any()) } returns true
         every { repository.invalidateSlimLocalApplied(any(), any()) } returns true
+
+        // §阶段B P0-4 (rev-ogpt MAJOR #1): production `/since` path uses
+        // drainSlimSinceBounded → foldSinceDrainFetch → commitAuthoritative.
+        // Stub the commit to return Committed so the full flow can complete.
+        coEvery { repository.commitAuthoritative(any()) } returns
+            SlimAuthoritativeCommitResult.Committed
+        every { repository.captureAuthoritativeMessages(any()) } returns emptyList()
     }
 
     @After
@@ -179,13 +196,16 @@ class SessionSyncCoordinatorSlimTest {
             messageID = "m1",
             updatedAt = 1000L,
         )
-        coEvery { repository.fetchSinceForStageA("sess-1", 0L, any(), any(), any()) } returns stagedSince(
-            listOf(
-                MessageWithParts(
-                    info = Message(id = "m1", role = "assistant", sessionId = "sess-1"),
-                    parts = listOf(Part(id = "p1", messageId = "m1", sessionId = "sess-1", type = "text", text = "hi")),
-                ),
-            ),
+        // §阶段B P0-4 (rev-ogpt MAJOR #1): production `/since` path is the
+        // multi-page drain (NOT fetchSinceForStageA). Mock the drain to return
+        // Success(items) so foldSinceDrainFetch drives commitAuthoritative →
+        // Reconciled → items merge into chat.
+        val m1 = MessageWithParts(
+            info = Message(id = "m1", role = "assistant", sessionId = "sess-1"),
+            parts = listOf(Part(id = "p1", messageId = "m1", sessionId = "sess-1", type = "text", text = "hi")),
+        )
+        coEvery { repository.drainSlimSinceBounded("sess-1", 0L, any()) } returns drainSuccess(
+            listOf(m1),
         )
 
         val c = coordinator()
@@ -193,15 +213,16 @@ class SessionSyncCoordinatorSlimTest {
         scope.testScheduler.advanceUntilIdle()
 
         verify { repository.applySlimDigest(match { it.sessionId == "sess-1" && it.updatedAt == 1000L }, any()) }
-        coVerify(exactly = 1) { repository.fetchSinceForStageA("sess-1", 0L, any(), any(), any()) }
-        // §11.1 fix-6 P0-1: `/since` path is staging-only → Staged maps to
-        // RefreshRow (no items). Messages do NOT appear in the chat from the
-        // `/since` path; only a complete full/cursor candidate committed via
-        // commitAuthoritative may merge items.
-        assertTrue(
-            "/since staging-only → no items in chat (got ${slices.chat.value.messages.map { it.id }})",
-            slices.chat.value.messages.none { it.id == "m1" },
+        // §阶段B P0-4: production `/since` path uses drainSlimSinceBounded.
+        coVerify(exactly = 1) { repository.drainSlimSinceBounded("sess-1", 0L, any()) }
+        // P0-4 drain Success → foldSinceDrainFetch → commitAuthoritative →
+        // Reconciled → items merge into chat (unlike the staging-only path).
+        assertEquals(
+            "P0-4 drain Success items appear in chat",
+            listOf("m1"),
+            slices.chat.value.messages.map { it.id },
         )
+        assertEquals("hi", slices.chat.value.partsByMessage["m1"]?.firstOrNull()?.text)
         assertEquals("busy", slices.sessionList.value.sessionStatuses["sess-1"]?.type)
     }
 
@@ -1317,25 +1338,26 @@ class SessionSyncCoordinatorSlimTest {
             messageID = "m1",
             updatedAt = 1000L,
         )
-        coEvery { repository.fetchSinceForStageA("sess-1", 0L, any(), any(), any()) } returns stagedSince(
-            listOf(
-                MessageWithParts(
-                    info = Message(id = "m1", role = "assistant", sessionId = "sess-1"),
-                    parts = listOf(Part(id = "p1", messageId = "m1", sessionId = "sess-1", type = "text", text = "hi")),
-                ),
-            ),
+        // §阶段B P0-4: production `/since` path uses drainSlimSinceBounded.
+        val m1 = MessageWithParts(
+            info = Message(id = "m1", role = "assistant", sessionId = "sess-1"),
+            parts = listOf(Part(id = "p1", messageId = "m1", sessionId = "sess-1", type = "text", text = "hi")),
+        )
+        coEvery { repository.drainSlimSinceBounded("sess-1", 0L, any()) } returns drainSuccess(
+            listOf(m1),
         )
 
         val c = coordinator()
         c.handleEvent(digestEvent("sess-1", status = "busy", updatedAt = 1000L, messageId = "m1"))
         scope.testScheduler.advanceUntilIdle()
 
-        // §11.1 fix-6 P0-1: `/since` path is staging-only → Staged maps to
-        // RefreshRow (no items). Messages do NOT appear in the chat from the
-        // `/since` path.
-        assertTrue(
-            "/since staging-only → no items in chat (got ${slices.chat.value.messages.map { it.id }})",
-            slices.chat.value.messages.none { it.id == "m1" },
+        // §阶段B P0-4: drain Success → commitAuthoritative → Reconciled →
+        // items merge into chat (unlike the staging-only path). But the
+        // expandedParts fold map MUST stay untouched.
+        assertEquals(
+            "P0-4 drain Success items appear in chat",
+            listOf("m1"),
+            slices.chat.value.messages.map { it.id },
         )
         assertEquals(
             "slim digest→reconcile MUST NOT write the legacy expandedParts fold map",

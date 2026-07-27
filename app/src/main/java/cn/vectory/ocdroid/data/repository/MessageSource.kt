@@ -25,6 +25,21 @@ import kotlin.coroutines.cancellation.CancellationException
  * bumps the bookmark either (stage A: `/since` is staging-only at every
  * surface). Anchored slim callers SHOULD migrate to [getMessagesPagedStageA].
  *
+ * # §阶段B C1 (frozen protocol) — terminal-success split
+ *
+ *  - `/messages` (no-anchor cursor window, [MessagesPage]): terminal signal
+ *    = `nextCursor == null`. `X-Since-Complete` is FORBIDDEN on this
+ *    endpoint. The drain ([SlimSyncEngine.drainSlimapiMessagesBoundedOutcome])
+ *    does NOT consult that header.
+ *  - `/since/{ts}` (anchored incremental window, [SlimSincePage]):
+ *    terminal Success = `nextCursor == null && X-Since-Complete == true`.
+ *    The header is REQUIRED — missing / unparseable → protocol failure
+ *    ([SlimSinceProtocolException]). The typed drain is
+ *    [SlimSyncEngine.drainSlimSinceBoundedOutcome] (page primitive:
+ *    [SlimSyncEngine.getSlimSincePage]); the Stage-A single-page staging
+ *    surface here is separate (diagnostics-only, retains a nullable
+ *    [SlimSinceStageAOutcome.Staged.completeHeader] for inspection).
+ *
  * # anchored 语义
  *
  * slim 实现里 `anchored = true` 读缓存 watermark

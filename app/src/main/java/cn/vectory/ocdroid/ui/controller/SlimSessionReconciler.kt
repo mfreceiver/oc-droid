@@ -11,6 +11,7 @@ import cn.vectory.ocdroid.data.repository.ProbeResult
 import cn.vectory.ocdroid.data.repository.SlimAuthoritativeCandidate
 import cn.vectory.ocdroid.data.repository.SlimAuthoritativeCommitResult
 import cn.vectory.ocdroid.data.repository.SlimAuthoritativeCommitter
+import cn.vectory.ocdroid.data.repository.SlimDrainOutcome
 import cn.vectory.ocdroid.data.repository.SlimSessionState
 import cn.vectory.ocdroid.data.repository.SlimSinceStageAOutcome
 import cn.vectory.ocdroid.data.repository.maxMessageTuple
@@ -218,12 +219,46 @@ internal interface SlimReconcileRepositoryPort {
      * response is staging-only at every surface — the reconciler MUST NOT
      * advance the watermark / clear dirty / replace authoritative memory on
      * any [SlimSinceStageAOutcome] variant.
+     *
+     * §阶段B P0-4 (rev-ogpt MAJOR #1): this port is NO LONGER called from
+     * the production `/since` reconcile path — [drainSlimSinceBounded]
+     * (multi-page drain + P0-4 state machine) replaced it. Retained on the
+     * interface for the Stage-A unit tests ([SlimSyncEngineStageATest] /
+     * [OpenCodeRepositorySlimapiEndpointsTest]) which exercise the
+     * single-page staging contract directly.
      */
     suspend fun fetchSinceStageA(
         sid: String,
         since: Long,
         token: OpenCodeRepository.SlimCommitToken,
     ): SlimSinceStageAOutcome
+
+    /**
+     * §阶段B P0-4 (rev-ogpt MAJOR #1): the AUTHORITATIVE anchored `/since`
+     * drain. Replaces [fetchSinceStageA] as the production `/since` path
+     * — multi-page drain with the P0-4 state machine (Success requires
+     * `nextCursor == null && X-Since-Complete == true`; truncation retries
+     * from the original anchor; Degraded on loop / zero-progress).
+     *
+     * Returns [SlimDrainOutcome] (Success / Partial / Degraded) directly so
+     * the reconciler can fold each variant:
+     *  - [SlimDrainOutcome.Success] → incremental merge + commit
+     *    authoritative (the ONLY arm that may advance the watermark / clear
+     *    dirty / replace visible content).
+     *  - [SlimDrainOutcome.Partial] / [SlimDrainOutcome.Degraded] →
+     *    preserve dirty, NO watermark advance (mirror the cold cursor
+     *    drain's no-bump-on-partial contract).
+     *
+     * [OpenCodeRepository.StaleSlimCommitException] is THROWN by the drain
+     * (NOT wrapped in a Partial); the reconciler catches it at the call
+     * site and maps to Stale.
+     */
+    suspend fun drainSlimSinceBounded(
+        sid: String,
+        anchor: Long,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): SlimDrainOutcome
+
     suspend fun fetchInitialWindow(
         sid: String,
         token: OpenCodeRepository.SlimCommitToken,
@@ -354,6 +389,14 @@ internal class OpenCodeSlimReconcileRepositoryPort(
         token: OpenCodeRepository.SlimCommitToken,
     ): SlimSinceStageAOutcome =
         delegate.fetchSinceForStageA(sessionId = sid, since = since, token = token)
+
+    // §阶段B P0-4 (rev-ogpt MAJOR #1): production `/since` drain façade.
+    override suspend fun drainSlimSinceBounded(
+        sid: String,
+        anchor: Long,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): SlimDrainOutcome =
+        delegate.drainSlimSinceBounded(sessionId = sid, anchor = anchor, token = token)
 
     override suspend fun fetchInitialWindow(
         sid: String,
@@ -1042,24 +1085,28 @@ internal class SlimSessionReconciler(
         }
 
         // Watermark-branched fetch (oracle I2):
-        //   - localAppliedUpdatedAt != null → /since/{ts} (stage A staging-only)
-        //   - localAppliedUpdatedAt == null → bounded cursor drain façade
-        //     (the ONLY authoritative watermark-advancement path)
+        //   - localAppliedUpdatedAt != null → anchored `/since` drain
+        //     (§阶段B P0-4 state machine: multi-page Success requires
+        //     `nextCursor == null && X-Since-Complete == true`; truncation
+        //     retries; Degraded on loop / zero-progress).
+        //   - localAppliedUpdatedAt == null → bounded NO-ANCHOR cursor
+        //     drain façade (cold path).
         return if (state.localAppliedUpdatedAt != null) {
-            // §11.1 stage A: anchored `/since` is staging-only. The reconciler
-            // MUST NOT advance the watermark / clear dirty / replace
-            // authoritative memory on any [SlimSinceStageAOutcome] variant.
-            // StaleSlimCommitException (thrown by fetchSinceStageA on stale
-            // incarnation) is caught here and mapped to Stale (mirrors the
+            // §阶段B P0-4 (rev-ogpt MAJOR #1): production `/since` path is
+            // the multi-page drain façade (NOT the staging-only Stage-A
+            // single-page fetch). The drain's P0-4 state machine decides
+            // Success vs Partial vs Degraded. StaleSlimCommitException is
+            // thrown by the drain on stale incarnation (NOT wrapped in a
+            // Partial); caught here and mapped to Stale (mirrors the
             // probeLatest TOCTOU catch above).
-            val since = state.localAppliedUpdatedAt!!
+            val anchor = state.localAppliedUpdatedAt!!
             val outcome = try {
-                repo.fetchSinceStageA(sid, since, token)
+                repo.drainSlimSinceBounded(sid, anchor, token)
             } catch (e: OpenCodeRepository.StaleSlimCommitException) {
-                DebugLog.d("Sync", "reconcileSessionLocked sid=$sid stage-A fetch stale — incarnation rotated (TOCTOU)")
+                DebugLog.d("Sync", "reconcileSessionLocked sid=$sid /since drain stale — incarnation rotated (TOCTOU)")
                 return SlimReconcileOutcome(SlimReconcileResult.Stale(sid))
             }
-            val folded = foldStageAFetch(sid, mode, outcome, token)
+            val folded = foldSinceDrainFetch(sid, mode, outcome, token)
             SlimReconcileOutcome(folded)
         } else {
             // Cold path: no local watermark yet. Use the bounded cursor
@@ -1091,6 +1138,12 @@ internal class SlimSessionReconciler(
      *    (keep dirty; no items; no watermark advance).
      *  - [SlimSinceStageAOutcome.Failed] → [SlimReconcileResult.Failure] (mark
      *    failure preserves dirty) unless the token went stale (Stale).
+     *
+     * **§阶段B P0-4 (rev-ogpt MAJOR #1): DEAD CODE in production.** The
+     * production `/since` path now uses [foldSinceDrainFetch] (multi-page
+     * drain + P0-4 state machine). This fold is retained only for the
+     * Stage-A port's binary-compat surface ([fetchSinceStageA] is still on
+     * the interface for the unit tests of the single-page staging contract).
      */
     private suspend fun foldStageAFetch(
         sid: String,
@@ -1136,6 +1189,170 @@ internal class SlimSessionReconciler(
                         DebugLog.w(
                             tag,
                             "reconcileSession sid=$sid mode=$mode stage-A /since failed: ${outcome.cause.message}",
+                        )
+                        SlimReconcileResult.Failure(sid)
+                    }
+                }
+            }
+        }
+    }
+
+    // ── §阶段B P0-4: foldSinceDrainFetch (anchored /since drain path) ──────
+
+    /**
+     * §阶段B P0-4 (rev-ogpt MAJOR #1): fold the anchored `/since` drain
+     * [SlimDrainOutcome] into a [SlimReconcileResult]. This is the
+     * PRODUCTION `/since` path — the multi-page drain with the P0-4 state
+     * machine (Success requires `nextCursor == null &&
+     * X-Since-Complete == true`; truncation retries; Degraded on loop /
+     * zero-progress).
+     *
+     *  - [SlimDrainOutcome.Success] → construct a [SlimAuthoritativeCandidate]
+     *    from the merged items and drive [commitAuthoritative]. This is the
+     *    ONLY arm that may advance the watermark / clear dirty / replace
+     *    visible content. Only a [SlimAuthoritativeCommitResult.Committed]
+     *    result permits [SlimReconcileResult.Reconciled] (items for UI merge).
+     *
+     *    # Incremental merge contract (frozen protocol)
+     *
+     *    The drained items are merged onto the current authoritative set
+     *    via [mergeSlimMessageSetWithConflict]`(..., complete = true)`. The
+     *    `/since` anchored scan is best-effort INCREMENTAL — a message
+     *    present in authoritative but absent from the drained set is NOT a
+     *    deletion (frozen: "missing message ≠ deleted"). The `complete =
+     *    true` arm already implements this exact contract (per the §11.4
+     *    "missing message is not interpreted as deletion" test): union
+     *    merge with newer-wins-per-id, missing-from-incoming RETAINED, and
+     *    same-tuple-different-parts kept authoritative + hasConflict flag
+     *    set. The hasConflict flag threads into the commit's atomic dirty
+     *    decision so a same-tuple parts divergence forces a retry.
+     *
+     *    (NB: `complete = false` in [mergeSlimMessageSetWithConflict] is a
+     *    documented no-op that drops incoming — it does NOT implement the
+     *    incremental union contract that the `/since` drain requires, so we
+     *    use `complete = true` which has the correct union + missing-retained
+     *    semantics.)
+     *
+     *  - [SlimDrainOutcome.Partial] → mid-walk HTTP / transport / timeout /
+     *    protocol failure (truncation Partials are retried inside the drain
+     *    and only surface as Degraded after the retry budget is exhausted).
+     *    [SlimDrainOutcome.items] is staging/diagnostics only and is
+     *    DROPPED. preserve dirty, NO watermark advance. Mirror the cold
+     *    cursor drain's no-bump-on-partial: stale token → Stale; otherwise
+     *    markFailure → Failure.
+     *
+     *  - [SlimDrainOutcome.Degraded] → loop / zero-progress / truncation-
+     *    retries-exhausted. Same contract as Partial: preserve dirty, NO
+     *    watermark advance.
+     *
+     * C-D3 v2 §1.9: Stale ≠ Failure. A stale token result must NOT call
+     * markFailure (that pollutes error state for the new incarnation).
+     *
+     * CE discipline: a non-timeout [CancellationException] carried as a
+     * Partial/Degraded cause is re-thrown (structured cancellation). Only
+     * [TimeoutCancellationException] (the 30 s wall-clock bound) maps to
+     * Failure.
+     */
+    private suspend fun foldSinceDrainFetch(
+        sid: String,
+        mode: SlimReconcileMode,
+        outcome: SlimDrainOutcome,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): SlimReconcileResult {
+        val repo = repository ?: return SlimReconcileResult.NoRepository(sid)
+        return when (outcome) {
+            is SlimDrainOutcome.Success -> {
+                if (!repo.isCommitTokenCurrent(token)) return SlimReconcileResult.Stale(sid)
+                // §阶段B P0-4 incremental merge: drained items merged onto
+                // the existing authoritative set. Missing-from-incoming ids
+                // MUST be RETAINED (frozen protocol: "missing message ≠
+                // deleted"). mergeSlimMessageSetWithConflict(complete = true)
+                // implements this exact contract — see the §11.4 "no
+                // tombstone" test. The hasConflict flag is threaded into
+                // the commit's atomic dirty decision.
+                val authoritative = repo.captureAuthoritativeMessages(sid)
+                val mergeResult = mergeSlimMessageSetWithConflict(
+                    authoritative = authoritative,
+                    incoming = outcome.items,
+                    complete = true,
+                )
+                val merged = mergeResult.messages
+                val (ts, id) = maxMessageTuple(merged)
+                    ?.let { it.first to it.second } ?: (null to null)
+                val candidate = SlimAuthoritativeCandidate(
+                    sessionId = sid,
+                    token = token,
+                    messages = merged,
+                    localAppliedUpdatedAt = ts,
+                    localAppliedMessageId = id,
+                    hasConflict = mergeResult.hasConflict,
+                )
+                when (val commitResult = repo.commitAuthoritative(candidate)) {
+                    is SlimAuthoritativeCommitResult.Committed ->
+                        SlimReconcileResult.Reconciled(sid, merged)
+                    is SlimAuthoritativeCommitResult.StaleToken ->
+                        SlimReconcileResult.Stale(sid)
+                    is SlimAuthoritativeCommitResult.CacheWriteFailed -> {
+                        DebugLog.w(
+                            tag,
+                            "reconcileSession sid=$sid mode=$mode /since drain commit CacheWriteFailed: " +
+                                "${commitResult.cause.message}",
+                        )
+                        SlimReconcileResult.Failure(sid)
+                    }
+                    is SlimAuthoritativeCommitResult.MergeRejected -> {
+                        DebugLog.w(
+                            tag,
+                            "reconcileSession sid=$sid mode=$mode /since drain commit MergeRejected: " +
+                                "${commitResult.reason}",
+                        )
+                        SlimReconcileResult.Failure(sid)
+                    }
+                }
+            }
+
+            is SlimDrainOutcome.Partial -> {
+                // CE propagation: a non-timeout CE mid-walk must escape
+                // (structured cancellation), NOT be collapsed to Failure.
+                if (outcome.cause is kotlinx.coroutines.CancellationException &&
+                    outcome.cause !is kotlinx.coroutines.TimeoutCancellationException
+                ) {
+                    throw outcome.cause
+                }
+                if (!repo.isCommitTokenCurrent(token)) {
+                    SlimReconcileResult.Stale(sid)
+                } else {
+                    val marked = repo.markFailure(sid, token)
+                    if (!marked) {
+                        SlimReconcileResult.Stale(sid)
+                    } else {
+                        DebugLog.w(
+                            tag,
+                            "reconcileSession sid=$sid mode=$mode /since drain Partial: ${outcome.cause.message}",
+                        )
+                        SlimReconcileResult.Failure(sid)
+                    }
+                }
+            }
+
+            is SlimDrainOutcome.Degraded -> {
+                // Same contract as Partial: preserve dirty, NO watermark
+                // advance. CE propagation first (same as Partial).
+                if (outcome.cause is kotlinx.coroutines.CancellationException &&
+                    outcome.cause !is kotlinx.coroutines.TimeoutCancellationException
+                ) {
+                    throw outcome.cause
+                }
+                if (!repo.isCommitTokenCurrent(token)) {
+                    SlimReconcileResult.Stale(sid)
+                } else {
+                    val marked = repo.markFailure(sid, token)
+                    if (!marked) {
+                        SlimReconcileResult.Stale(sid)
+                    } else {
+                        DebugLog.w(
+                            tag,
+                            "reconcileSession sid=$sid mode=$mode /since drain Degraded: ${outcome.cause.message}",
                         )
                         SlimReconcileResult.Failure(sid)
                     }

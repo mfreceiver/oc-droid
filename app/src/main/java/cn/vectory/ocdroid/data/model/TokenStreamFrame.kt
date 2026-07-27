@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.longOrNull
 
 /**
  * §Stage-C §3.2 — wire model for the oc-slimapi per-session token stream
@@ -24,6 +25,8 @@ import kotlinx.serialization.json.booleanOrNull
  *  - `server.heartbeat`    → [ServerHeartbeat] (empty/comment frame)
  *  - `message.part.snapshot` → [PartSnapshot]
  *  - `message.part.delta`  → [PartDelta]
+ *  - `message.part.removed` → [MessagePartRemoved] (B-P0-3)
+ *  - `message.removed`     → [MessageRemoved] (B-P0-3)
  *  - `resync`              → [Resync]
  *
  * The wire JSON keys use camelCase with capital suffixes (`sessionID` /
@@ -68,6 +71,23 @@ sealed interface TokenStreamFrame {
         val text: String?,
         val done: Boolean,
         val truncated: Boolean,
+        /**
+         * B-P0-3: per-part event revision carried on the token frame.
+         * Optional (null when absent — older sidecar or status-only
+         * snapshot). Used by [MessageWatermarkState.applyPartRevision]
+         * ONLY for 250ms-debounce-window dedup against a re-delivered
+         * snapshot/delta for the same partID; it is NOT a change-
+         * detection key (change detection rides the digest's
+         * [SlimSessionDigest.contentRevisions] / messageEventSeq).
+         *
+         * Monotonic per-part; the sidecar bumps it on every
+         * `message.part.updated` (initial snapshot included) and on
+         * `message.part.removed`. A token frame whose `partEventRevision`
+         * equals the previously-applied value for the same
+         * `(messageID, partID)` is a re-delivery and the consumer MAY
+         * drop it.
+         */
+        val partEventRevision: Long? = null,
     ) : TokenStreamFrame
 
     /** Incremental token append for a part currently in STREAMING state. */
@@ -76,6 +96,42 @@ sealed interface TokenStreamFrame {
         val messageId: String,
         val partId: String,
         val text: String,
+        /**
+         * B-P0-3: per-part event revision — see [PartSnapshot.partEventRevision].
+         * Same dedup-only contract; null when the sidecar omits it.
+         */
+        val partEventRevision: Long? = null,
+    ) : TokenStreamFrame
+
+    /**
+     * B-P0-3 (R1+R2 recovery strategy): a single part was removed from
+     * the message upstream. The sidecar MUST carry the post-increment
+     * `messageEventSeq` (the per-message event counter after the
+     * removal bumps it) so the client can:
+     *  - advance [MessageWatermark.messageEventSeq] monotonically;
+     *  - flag `needsFullRecheck=true` (B-P0-1 will consume the flag,
+     *    100ms-debounced, to drive a per-message `/full`).
+     *
+     * [partId] is the removed part; partIDs are NOT reused upstream, so
+     * removing + re-adding produces a fresh partID.
+     */
+    data class MessagePartRemoved(
+        val sessionId: String,
+        val messageId: String,
+        val partId: String,
+        val messageEventSeq: Long,
+    ) : TokenStreamFrame
+
+    /**
+     * B-P0-3: the whole message was removed upstream. The client MUST
+     * NOT trigger a `/full` for this — there is nothing to fetch. The
+     * watermark entry is removed; the UI layer's session-list eviction
+     * is driven separately (B-P0-1's wiring responsibility, mirroring
+     * `session.digest` deleted / `resync` session_deleted handling).
+     */
+    data class MessageRemoved(
+        val sessionId: String,
+        val messageId: String,
     ) : TokenStreamFrame
 
     /**
@@ -93,6 +149,8 @@ sealed interface TokenStreamFrame {
         internal const val EVENT_SERVER_HEARTBEAT = "server.heartbeat"
         internal const val EVENT_PART_SNAPSHOT = "message.part.snapshot"
         internal const val EVENT_PART_DELTA = "message.part.delta"
+        internal const val EVENT_PART_REMOVED = "message.part.removed"
+        internal const val EVENT_MESSAGE_REMOVED = "message.removed"
         internal const val EVENT_RESYNC = "resync"
 
         // Mirrors SSEClient.companion Json so both transports tolerate the same
@@ -147,6 +205,7 @@ sealed interface TokenStreamFrame {
                         text = root.str("text"),
                         done = root.boolOrFalse("done"),
                         truncated = root.boolOrFalse("truncated"),
+                        partEventRevision = root.longOrNull("partEventRevision"),
                     )
                 }
 
@@ -155,7 +214,38 @@ sealed interface TokenStreamFrame {
                     val mid = root.str("messageID") ?: return null
                     val pid = root.str("partID") ?: return null
                     val text = root.str("text") ?: return null
-                    PartDelta(sid, mid, pid, text)
+                    PartDelta(
+                        sessionId = sid,
+                        messageId = mid,
+                        partId = pid,
+                        text = text,
+                        partEventRevision = root.longOrNull("partEventRevision"),
+                    )
+                }
+
+                EVENT_PART_REMOVED -> {
+                    // partID + messageEventSeq are both required on a
+                    // message.part.removed frame (bilateral wire contract,
+                    // B-P0-3 §removal handling). sessionID + messageID are
+                    // also required (the sidecar identifies the scope).
+                    val sid = root.str("sessionID") ?: return null
+                    val mid = root.str("messageID") ?: return null
+                    val pid = root.str("partID") ?: return null
+                    val seq = root.longOrNull("messageEventSeq") ?: return null
+                    MessagePartRemoved(
+                        sessionId = sid,
+                        messageId = mid,
+                        partId = pid,
+                        messageEventSeq = seq,
+                    )
+                }
+
+                EVENT_MESSAGE_REMOVED -> {
+                    // message.removed carries only the scope ids; no seq
+                    // (no /full is triggered, so no seq to compare).
+                    val sid = root.str("sessionID") ?: return null
+                    val mid = root.str("messageID") ?: return null
+                    MessageRemoved(sessionId = sid, messageId = mid)
                 }
 
                 EVENT_RESYNC -> {
@@ -194,6 +284,23 @@ sealed interface TokenStreamFrame {
         /** Reads a boolean field; absent / non-boolean / null → false. */
         private fun JsonObject.boolOrFalse(key: String): Boolean =
             (this[key] as? JsonPrimitive)?.takeIf { it !== JsonNull }?.booleanOrNull ?: false
+
+        /**
+         * B-P0-3: reads a Long field. Returns null when:
+         *  - the key is absent;
+         *  - the value is JSON `null`;
+         *  - the value is a non-numeric primitive (string / bool).
+         *
+         * Used for the optional `partEventRevision` (snapshot/delta) and
+         * the required `messageEventSeq` (message.part.removed). The
+         * caller decides whether null is acceptable (optional vs
+         * required).
+         */
+        private fun JsonObject.longOrNull(key: String): Long? {
+            val el = this[key] ?: return null
+            if (el === JsonNull) return null
+            return (el as? JsonPrimitive)?.longOrNull
+        }
     }
 }
 

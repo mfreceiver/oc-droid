@@ -10,6 +10,8 @@ import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SlimAuthoritativeCommitResult
+import cn.vectory.ocdroid.data.repository.SlimDrainOutcome
 import cn.vectory.ocdroid.data.repository.SlimSinceStageAOutcome
 import cn.vectory.ocdroid.data.repository.ProbeResult
 import cn.vectory.ocdroid.data.repository.SlimColdStartSnapshot
@@ -83,6 +85,24 @@ import java.util.concurrent.atomic.AtomicInteger
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionSyncCoordinatorResyncTest {
 
+    /**
+     * §阶段B P0-4 (rev-ogpt MAJOR #1) test helper: wrap items as a drain
+     * Success outcome (the production `/since` path uses drainSlimSinceBounded,
+     * NOT fetchSinceForStageA).
+     */
+    private fun drainSuccess(
+        items: List<cn.vectory.ocdroid.data.model.MessageWithParts>,
+    ): SlimDrainOutcome = SlimDrainOutcome.Success(items)
+
+    /**
+     * §阶段B P0-4 test helper: wrap a cause as a drain Partial (mid-walk
+     * transport / timeout failure — preserve dirty, no watermark advance).
+     */
+    private fun drainPartial(
+        cause: Throwable,
+        items: List<cn.vectory.ocdroid.data.model.MessageWithParts> = emptyList(),
+    ): SlimDrainOutcome = SlimDrainOutcome.Partial(items, cause)
+
     /** §11.1 stage A test helper: wrap items as a Staged outcome. */
     private fun stagedSince(
         items: List<cn.vectory.ocdroid.data.model.MessageWithParts>,
@@ -152,6 +172,15 @@ class SessionSyncCoordinatorResyncTest {
             repository.getSlimapiMessagesSince(any(), any(), any(), any(), any())
         } returns Result.success(emptyList())
         coEvery { repository.fetchSlimInitialWindowBounded(any(), any()) } returns Result.success(emptyList())
+        // §阶段B P0-4 (rev-ogpt MAJOR #1): production `/since` path now uses
+        // the multi-page drain façade (NOT fetchSinceForStageA). Default the
+        // drain to an empty Success + commit to Committed so individual tests
+        // override only when they care about a specific outcome.
+        coEvery { repository.drainSlimSinceBounded(any(), any(), any()) } returns
+            SlimDrainOutcome.Success(emptyList())
+        coEvery { repository.commitAuthoritative(any()) } returns
+            SlimAuthoritativeCommitResult.Committed
+        every { repository.captureAuthoritativeMessages(any()) } returns emptyList()
         every { repository.getSlimSessionState(any()) } returns null
         every { repository.snapshotSlimSseState() } returns emptyMap()
     }
@@ -231,7 +260,7 @@ class SessionSyncCoordinatorResyncTest {
             messageID = "m-remote",
             updatedAt = 1000L,
         )
-        coEvery { repository.fetchSinceForStageA("sess-1", 500L, any(), any(), any()) } returns stagedSince(
+        coEvery { repository.drainSlimSinceBounded("sess-1", 500L, any()) } returns drainSuccess(
             listOf(msg("m-remote", 1000L)),
         )
 
@@ -240,14 +269,14 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.probeLatestSlim("sess-1") }
-        coVerify(exactly = 1) { repository.fetchSinceForStageA("sess-1", 500L, any(), any(), any()) }
-        // §11.1 fix-6 P0-1: `/since` path is staging-only → Staged maps to
-        // RefreshRow (no items). Messages do NOT appear in the chat from the
-        // `/since` path; only a complete full/cursor candidate committed via
-        // commitAuthoritative may merge items.
+        coVerify(exactly = 1) { repository.drainSlimSinceBounded("sess-1", 500L, any()) }
+        // §阶段B P0-4 (rev-ogpt MAJOR #1): `/since` path is now the multi-page
+        // drain — Success drives commitAuthoritative → Reconciled (items for
+        // UI merge). The drained message DOES appear in the chat (current
+        // session = sess-1, focus gate passes).
         assertTrue(
-            "/since staging-only → no items in chat (got ${slices.chat.value.messages.map { it.id }})",
-            slices.chat.value.messages.none { it.id == "m-remote" },
+            "/since drain Success → items in chat (got ${slices.chat.value.messages.map { it.id }})",
+            slices.chat.value.messages.any { it.id == "m-remote" },
         )
     }
 
@@ -267,7 +296,7 @@ class SessionSyncCoordinatorResyncTest {
             messageID = "m-new",
             updatedAt = 200L,
         )
-        coEvery { repository.fetchSinceForStageA("sess-1", 50L, any(), any(), any()) } returns stagedSince(
+        coEvery { repository.drainSlimSinceBounded("sess-1", 50L, any()) } returns drainSuccess(
             listOf(msg("m-new", 200L)),
         )
 
@@ -276,7 +305,7 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.probeLatestSlim("sess-1") }
-        coVerify(exactly = 1) { repository.fetchSinceForStageA("sess-1", 50L, any(), any(), any()) }
+        coVerify(exactly = 1) { repository.drainSlimSinceBounded("sess-1", 50L, any()) }
     }
 
     @Test
@@ -295,7 +324,7 @@ class SessionSyncCoordinatorResyncTest {
             messageID = "m-server-current",
             updatedAt = 100L,
         )
-        coEvery { repository.fetchSinceForStageA("sess-1", 100L, any(), any(), any()) } returns stagedSince(
+        coEvery { repository.drainSlimSinceBounded("sess-1", 100L, any()) } returns drainSuccess(
             listOf(msg("m-server-current", 100L)),
         )
 
@@ -304,7 +333,7 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.probeLatestSlim("sess-1") }
-        coVerify(exactly = 1) { repository.fetchSinceForStageA("sess-1", 100L, any(), any(), any()) }
+        coVerify(exactly = 1) { repository.drainSlimSinceBounded("sess-1", 100L, any()) }
     }
 
     // ── T11-C1d: I2 cursor drain (no localAppliedUpdatedAt) ─────────────────
@@ -337,7 +366,7 @@ class SessionSyncCoordinatorResyncTest {
 
         // Cursor drain façade used (NOT getSlimapiMessagesSince).
         coVerify(exactly = 1) { repository.fetchSlimInitialWindowBounded("sess-1", any()) }
-        coVerify(exactly = 0) { repository.fetchSinceForStageA(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.drainSlimSinceBounded(any(), any(), any()) }
     }
 
     // ── T11-C2: focus REST success / failure ────────────────────────────────
@@ -358,7 +387,7 @@ class SessionSyncCoordinatorResyncTest {
             messageID = "m-remote",
             updatedAt = 1000L,
         )
-        coEvery { repository.fetchSinceForStageA("sess-1", 500L, any(), any(), any()) } returns stagedSince(
+        coEvery { repository.drainSlimSinceBounded("sess-1", 500L, any()) } returns drainSuccess(
             listOf(msg("m-remote", 1000L)),
         )
 
@@ -367,7 +396,7 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.markSlimReconcileFailure("sess-1", any()) }
-        coVerify(exactly = 1) { repository.fetchSinceForStageA("sess-1", 500L, any(), any(), any()) }
+        coVerify(exactly = 1) { repository.drainSlimSinceBounded("sess-1", 500L, any()) }
     }
 
     @Test
@@ -386,8 +415,8 @@ class SessionSyncCoordinatorResyncTest {
             messageID = "m-remote",
             updatedAt = 1000L,
         )
-        coEvery { repository.fetchSinceForStageA("sess-1", 500L, any(), any(), any()) } returns
-            SlimSinceStageAOutcome.Failed(java.io.IOException("transport"))
+        coEvery { repository.drainSlimSinceBounded("sess-1", 500L, any()) } returns
+            drainPartial(java.io.IOException("transport"))
 
         val c = coordinator()
         c.handleEvent(digestEvent("sess-1", updatedAt = 1000L, messageId = "m-remote"))
@@ -422,7 +451,7 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
 
         // BACKGROUND: never fetches.
-        coVerify(exactly = 0) { repository.fetchSinceForStageA(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.drainSlimSinceBounded(any(), any(), any()) }
         coVerify(exactly = 0) { repository.fetchSlimInitialWindowBounded(any(), any()) }
         // BACKGROUND: never clears dirty (no aligned, no clearLocal).
         coVerify(exactly = 0) { repository.markSlimReconcileAligned("sess-1", any()) }
@@ -454,7 +483,7 @@ class SessionSyncCoordinatorResyncTest {
 
         // BACKGROUND aligned → NO markSlimReconcileAligned.
         coVerify(exactly = 0) { repository.markSlimReconcileAligned("sess-1", any()) }
-        coVerify(exactly = 0) { repository.fetchSinceForStageA(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.drainSlimSinceBounded(any(), any(), any()) }
     }
 
     @Test
@@ -523,7 +552,7 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.markSlimSessionDeleted("sess-1", any()) }
-        coVerify(exactly = 0) { repository.fetchSinceForStageA(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.drainSlimSinceBounded(any(), any(), any()) }
     }
 
     @Test
@@ -544,7 +573,7 @@ class SessionSyncCoordinatorResyncTest {
 
         coVerify(exactly = 1) { repository.markSlimReconcileFailure("sess-1", any()) }
         coVerify(exactly = 0) { repository.markSlimSessionDeleted("sess-1", any()) }
-        coVerify(exactly = 0) { repository.fetchSinceForStageA(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.drainSlimSinceBounded(any(), any(), any()) }
     }
 
     @Test
@@ -878,7 +907,7 @@ class SessionSyncCoordinatorResyncTest {
             messageID = "m1",
             updatedAt = 200L,
         )
-        coEvery { repository.fetchSinceForStageA("session-a", 100L, any(), any(), any()) } returns stagedSince(
+        coEvery { repository.drainSlimSinceBounded("session-a", 100L, any()) } returns drainSuccess(
             listOf(msg("m1", 200L, sid = "session-a")),
         )
         slices.mutateChat { it.copy(currentSessionId = "session-a") }
@@ -912,10 +941,10 @@ class SessionSyncCoordinatorResyncTest {
         testScheduler.advanceUntilIdle()
         collector.cancel()
 
-        // §11.1 fix-6 P0-1: `/since` path is staging-only → RefreshRow (NOT Reconciled).
+        // §阶段B P0-4: production `/since` drain succeeded → Reconciled (NOT RefreshRow).
         assertTrue(
-            "T2: /since staging-only → RefreshRow returned (got ${result.await()})",
-            result.await() is SessionSyncCoordinator.ReconcileResult.RefreshRow,
+            "T2: /since P0-4 drain → Reconciled returned (got ${result.await()})",
+            result.await() is SessionSyncCoordinator.ReconcileResult.Reconciled,
         )
         // Focus rotation preserved.
         assertEquals("session-b", slices.chat.value.currentSessionId)
@@ -926,11 +955,10 @@ class SessionSyncCoordinatorResyncTest {
             "chat-merge skipped (inner focus gate); m1 must NOT be in chat",
             slices.chat.value.messages.none { it.id == "m1" },
         )
-        // §11.1 fix-6 P0-1: `/since` path is staging-only → no items → no
-        // WriteSessionWindow emission. Verify no retention effect fired.
+        // §阶段B P0-4: items present + non-current → WriteSessionWindow fires.
         assertTrue(
-            "no WriteSessionWindow for staging-only /since path: $collectedEffects",
-            collectedEffects.none {
+            "WriteSessionWindow emitted for non-current /since drain: $collectedEffects",
+            collectedEffects.any {
                 it is ControllerEffect.WriteSessionWindow && it.sessionId == "session-a"
             },
         )
@@ -962,7 +990,7 @@ class SessionSyncCoordinatorResyncTest {
             messageID = "m1",
             updatedAt = 200L,
         )
-        coEvery { repository.fetchSinceForStageA("session-a", 100L, any(), any(), any()) } returns stagedSince(
+        coEvery { repository.drainSlimSinceBounded("session-a", 100L, any()) } returns drainSuccess(
             listOf(msg("m1", 200L, sid = "session-a")),
         )
         coEvery { repository.coldStartSlimSync(any(), any(), any()) } coAnswers {
@@ -994,10 +1022,10 @@ class SessionSyncCoordinatorResyncTest {
         testScheduler.advanceUntilIdle()
         collector.cancel()
 
-        // §11.1 fix-6 P0-1: `/since` path is staging-only → RefreshRow (NOT Reconciled).
+        // §阶段B P0-4: production `/since` drain succeeded → Reconciled (NOT RefreshRow).
         assertTrue(
-            "T2: outcome for session-a is RefreshRow (got ${outcomes["session-a"]})",
-            outcomes["session-a"] is SessionSyncCoordinator.ReconcileResult.RefreshRow,
+            "T2: outcome for session-a is Reconciled (got ${outcomes["session-a"]})",
+            outcomes["session-a"] is SessionSyncCoordinator.ReconcileResult.Reconciled,
         )
         // Focus rotation preserved.
         assertEquals("session-b", slices.chat.value.currentSessionId)
@@ -1007,10 +1035,10 @@ class SessionSyncCoordinatorResyncTest {
             "chat-merge skipped; m1 must NOT be in chat",
             slices.chat.value.messages.none { it.id == "m1" },
         )
-        // §11.1 fix-6 P0-1: no retention effect for staging-only /since path.
+        // §阶段B P0-4: items present + non-current → WriteSessionWindow fires.
         assertTrue(
-            "no WriteSessionWindow for staging-only /since path: $collectedEffects",
-            collectedEffects.none {
+            "WriteSessionWindow emitted for non-current /since drain: $collectedEffects",
+            collectedEffects.any {
                 it is ControllerEffect.WriteSessionWindow && it.sessionId == "session-a"
             },
         )
@@ -1037,7 +1065,7 @@ class SessionSyncCoordinatorResyncTest {
             enterCount.decrementAndGet()
             ProbeResult(ok = true, messageID = "m", updatedAt = 100L)
         }
-        coEvery { repository.fetchSinceForStageA("sess-1", any(), any(), any(), any()) } returns stagedSince(emptyList())
+        coEvery { repository.drainSlimSinceBounded("sess-1", any(), any()) } returns drainSuccess(emptyList())
 
         val c = coordinator()
         val job1 = scope.launch { c.reconcileSessionExposed("sess-1", SessionSyncCoordinator.ReconcileMode.DIGEST_FOCUS) }
@@ -1266,7 +1294,7 @@ class SessionSyncCoordinatorResyncTest {
         coEvery { repository.probeLatestSlim("sid-nonfocus") } returns ProbeResult(
             ok = true, messageID = "m-remote", updatedAt = 1000L,
         )
-        coEvery { repository.fetchSinceForStageA("sid-nonfocus", 500L, any(), any(), any()) } returns stagedSince(
+        coEvery { repository.drainSlimSinceBounded("sid-nonfocus", 500L, any()) } returns drainSuccess(
             listOf(msg("m-remote", 1000L, sid = "sid-nonfocus")),
         )
 
@@ -1281,7 +1309,7 @@ class SessionSyncCoordinatorResyncTest {
         // Note: effects.tryEmitEffect uses a SharedFlow; collect it if needed.
         // For unit-test scope: verify the reconcile returned Reconciled
         // (which triggers the cache write branch inside applyReconcileResult).
-        coVerify(atLeast = 1) { repository.fetchSinceForStageA("sid-nonfocus", 500L, any(), any(), any()) }
+        coVerify(atLeast = 1) { repository.drainSlimSinceBounded("sid-nonfocus", 500L, any()) }
     }
 
     /**
@@ -1319,7 +1347,7 @@ class SessionSyncCoordinatorResyncTest {
         coEvery { repository.probeLatestSlim("session-a") } returns ProbeResult(
             ok = true, messageID = "m1", updatedAt = 200L,
         )
-        coEvery { repository.fetchSinceForStageA("session-a", 100L, any(), any(), any()) } returns stagedSince(
+        coEvery { repository.drainSlimSinceBounded("session-a", 100L, any()) } returns drainSuccess(
             listOf(msg("m1", 200L, sid = "session-a")),
         )
         every { repository.commitIfSlimTokenCurrent(any(), any()) } answers {
@@ -1340,21 +1368,21 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
         collector.cancel()
 
-        // §11.1 fix-6 P0-1: `/since` path is staging-only → RefreshRow (NOT Reconciled).
+        // §阶段B P0-4: production `/since` drain succeeded → Reconciled (NOT RefreshRow).
         assertTrue(
-            "T3a: /since staging-only → RefreshRow returned (got $result)",
-            result is SessionSyncCoordinator.ReconcileResult.RefreshRow,
+            "T3a: /since P0-4 drain → Reconciled returned (got $result)",
+            result is SessionSyncCoordinator.ReconcileResult.Reconciled,
         )
-        // §11.1 fix-6 P0-1: no retention effect for staging-only /since path.
+        // §阶段B P0-4: items present + non-current → WriteSessionWindow fires.
         assertTrue(
-            "T3a: no WriteSessionWindow for staging-only /since path: $collectedEffects",
-            collectedEffects.none {
+            "T3a: WriteSessionWindow emitted for non-current /since drain: $collectedEffects",
+            collectedEffects.any {
                 it is ControllerEffect.WriteSessionWindow && it.sessionId == "session-a"
             },
         )
-        // Items present + retention succeeded → markSlimDirty NOT re-invoked
+        // Items present + retention succeeded → forceDirty NOT re-invoked
         // (dirty clear from the fetch stays authoritative; no retry loop).
-        coVerify(exactly = 0) { repository.markSlimDirty("session-a", any()) }
+        coVerify(exactly = 0) { repository.forceSlimDirty("session-a", any()) }
         // rev-grok rule #3: chat-merge skipped (live session-b != result.sid
         // session-a); m1 must NOT be in the chat slice.
         assertTrue(
@@ -1374,7 +1402,7 @@ class SessionSyncCoordinatorResyncTest {
         scope.testScheduler.advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.probeLatestSlim(any()) }
-        coVerify(exactly = 0) { repository.fetchSinceForStageA(any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.drainSlimSinceBounded(any(), any(), any()) }
         coVerify(exactly = 0) { repository.fetchSlimInitialWindowBounded(any(), any()) }
     }
 
@@ -1572,7 +1600,7 @@ class SessionSyncCoordinatorResyncTest {
             ok = true, messageID = "m1", updatedAt = 100L,
         )
         // fetchSinceForStageA returns Staged with empty items.
-        coEvery { repository.fetchSinceForStageA("sid-empty", 50L, any(), any(), any()) } returns stagedSince(emptyList())
+        coEvery { repository.drainSlimSinceBounded("sid-empty", 50L, any()) } returns drainSuccess(emptyList())
 
         c.performResyncCatchUp(setOf("sid-empty"))
         scope.testScheduler.advanceUntilIdle()
@@ -1670,7 +1698,7 @@ class SessionSyncCoordinatorResyncTest {
             probeEntered.decrementAndGet()
             ProbeResult(ok = true, messageID = "m1", updatedAt = 100L)
         }
-        coEvery { repository.fetchSinceForStageA("sess-x", any(), any(), any(), any()) } returns stagedSince(emptyList())
+        coEvery { repository.drainSlimSinceBounded("sess-x", any(), any()) } returns drainSuccess(emptyList())
 
         val c = coordinator()
         // Fire TWO digests for the same sid concurrently.
@@ -2204,14 +2232,14 @@ class SessionSyncCoordinatorResyncTest {
         )
         // Match the EXACT token so a recapture (different instance) misses.
         coEvery {
-            repository.fetchSinceForStageA("s1", 100L, any(), any(), token)
-        } returns stagedSince(emptyList())
+            repository.drainSlimSinceBounded("s1", 100L, token)
+        } returns drainSuccess(emptyList())
 
         coordinator().reconcileSession("s1", SessionSyncCoordinator.ReconcileMode.RESYNC)
 
         verify(exactly = 1) { repository.captureSlimCommitToken() }
         coVerify(exactly = 1) {
-            repository.fetchSinceForStageA("s1", 100L, any(), any(), token)
+            repository.drainSlimSinceBounded("s1", 100L, token)
         }
         verify(atLeast = 1) { repository.commitIfSlimTokenCurrent(token, any()) }
     }
@@ -2264,8 +2292,8 @@ class SessionSyncCoordinatorResyncTest {
             updatedAt = 1_000L,
         )
         coEvery {
-            repository.fetchSinceForStageA("sess-1", 500L, any(), any(), token)
-        } returns stagedSince(emptyList())
+            repository.drainSlimSinceBounded("sess-1", 500L, token)
+        } returns drainSuccess(emptyList())
 
         val c = coordinator()
         c.handleEvent(digestEvent(sessionId = "sess-1", updatedAt = 1_000L, messageId = "m1"))
@@ -2277,7 +2305,7 @@ class SessionSyncCoordinatorResyncTest {
         verify(atLeast = 1) { repository.applySlimDigest(any(), token) }
         // The SAME token reaches the /since fetch.
         coVerify(exactly = 1) {
-            repository.fetchSinceForStageA("sess-1", 500L, any(), any(), token)
+            repository.drainSlimSinceBounded("sess-1", 500L, token)
         }
         // The SAME token reaches the final UI commit gate (the banner commit
         // in reconcileDigest + the applyReconcileResult commit).

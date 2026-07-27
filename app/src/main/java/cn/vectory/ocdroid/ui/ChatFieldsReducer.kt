@@ -304,3 +304,108 @@ internal fun reduceExpandedPartsContentCommitted(state: StoreState, action: AppA
     ),
     ).withRouteContentSynced(action.expectedRouteInstance, action.expectedSessionId)
 }
+
+// ── B-P0-2: evict a single message confirmed deleted by R2 /full reconcile ─
+
+@Suppress("DEPRECATION")
+internal fun reduceMessageRemovedFromFull(state: StoreState, action: AppAction.MessageRemovedFromFull): StoreState {
+    // B-P0-2 (MAJOR 4): evict the message from messages + partsByMessage by
+    // messageId. The per-message watermark was already removed by
+    // SlimSseStateMachine.applyMessageRemoved under the slim commit token
+    // guard. sessionId is informational — eviction is by messageId.
+    //
+    // §Stage-B C5 (CRITICAL) — M5 cleanup backport: the legacy call site
+    // (ControllerModule.onMessageGone) is migrated to [MessageRemovedConfirmed]
+    // by a parallel lane; until then this reducer retains source compat
+    // AND applies the same overlay cleanup the new reducer does, so the
+    // legacy dispatch path cannot leave ghost text from the removed
+    // message's parts. The new route-token / bundle-stamp guard is NOT
+    // retrofitted here (the legacy action carries neither field); the
+    // freeze-protocol guard lives in [reduceMessageRemovedConfirmed].
+    val msgId = action.messageId
+    val partIds = state.chat.partsByMessage[msgId].orEmpty().map { it.id }.toSet()
+    return state.copy(
+        chat = state.chat.evictMessageAndPartOverlay(msgId, partIds),
+    )
+}
+
+/**
+ * §Stage-B C5 (CRITICAL): `/full` 200 Reconciled single-message merge —
+ * non-authoritative (preserves STREAMING token-stream-owned parts).
+ *
+ * The reducer threads [AppAction.SlimFullMessageReconciled.expectedRouteInstance]
+ * + [AppAction.SlimFullMessageReconciled.bundleStamp] (captured at the
+ * request trigger) into the §7.2 freshness CAS + bundle CAS so a stale
+ * dispatch whose route has advanced (or whose bundle has rotated) is
+ * dropped. The flat + [LoadedContent] projections are updated in the
+ * same reducer pass via [withRouteContentSynced].
+ */
+internal fun reduceSlimFullMessageReconciled(
+    state: StoreState,
+    action: AppAction.SlimFullMessageReconciled,
+): StoreState {
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
+    return state.copy(
+        chat = state.chat.mergeSlimMessages(
+            items = listOf(action.message),
+            authoritative = false,
+        ),
+    ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+}
+
+/**
+ * §Stage-B C5 (CRITICAL): source-agnostic removal confirmation (R2 `/full`
+ * HTTP 404 OR token stream `message.removed`).
+ *
+ * Freeze protocol: an async removal MUST NOT write route-owned transcript
+ * state when there is no active route. A dispatch with
+ * `expectedRouteInstance == 0L` is therefore a no-op for the chat
+ * transcript (the watermark/repository cleanup lives outside this
+ * reducer — it does not need a chat-route token). The non-zero path
+ * CAS-rejects stale incarnations and then evicts the message from BOTH
+ * the flat projection AND [LoadedContent] (the dual-projection invariant)
+ * while clearing every streaming-overlay entry owned by the message's
+ * parts so a late straggler frame cannot resurrect ghost text.
+ */
+internal fun reduceMessageRemovedConfirmed(
+    state: StoreState,
+    action: AppAction.MessageRemovedConfirmed,
+): StoreState {
+    // Freeze protocol §C5: no active route → no transcript write.
+    if (action.expectedRouteInstance == 0L) return state
+    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
+    val msgId = action.messageId
+    // Collect the message's part IDs from BOTH projections — the flat map
+    // is the legacy authority, but LoadedContent may carry an equivalent
+    // view that contributed the same part IDs. Either source's ids must
+    // be cleared from the streaming overlay.
+    val flatPartIds = state.chat.partsByMessage[msgId].orEmpty().map { it.id }
+    val loadedPartIds = state.chat.content?.partsByMessage?.get(msgId).orEmpty().map { it.id }
+    val partIds = (flatPartIds + loadedPartIds).toSet()
+    return state.copy(
+        chat = state.chat.evictMessageAndPartOverlay(msgId, partIds),
+    ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+}
+
+/**
+ * Shared pure helper: evict message [msgId] from `messages` +
+ * `partsByMessage` AND clear every streaming-overlay entry owned by
+ * [partIds] (streamOwned / streamingPartTexts / deltaBuffer /
+ * fullTextBuffer / pendingFlushPartIds / matching streamingReasoningPart).
+ * Used by both [reduceMessageRemovedFromFull] (legacy) and
+ * [reduceMessageRemovedConfirmed] (route-aware) so the overlay-cleanup
+ * contract is identical across the two dispatch shapes. Pure.
+ */
+private fun ChatState.evictMessageAndPartOverlay(
+    msgId: String,
+    partIds: Set<String>,
+): ChatState = copy(
+    messages = messages.filterNot { it.id == msgId },
+    partsByMessage = partsByMessage - msgId,
+    streamOwned = if (partIds.isEmpty()) streamOwned else streamOwned.filterKeys { it !in partIds },
+    streamingPartTexts = if (partIds.isEmpty()) streamingPartTexts else streamingPartTexts.filterKeys { it !in partIds },
+    deltaBuffer = if (partIds.isEmpty()) deltaBuffer else deltaBuffer.filterKeys { it !in partIds },
+    fullTextBuffer = if (partIds.isEmpty()) fullTextBuffer else fullTextBuffer.filterKeys { it !in partIds },
+    pendingFlushPartIds = if (partIds.isEmpty()) pendingFlushPartIds else pendingFlushPartIds - partIds,
+    streamingReasoningPart = streamingReasoningPart?.takeUnless { it.id in partIds },
+)

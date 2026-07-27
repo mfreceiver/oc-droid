@@ -192,4 +192,29 @@ data class SlimSessionDigest(
      */
     @Serializable(with = LastErrorFieldSerializer::class)
     val lastError: LastErrorField = LastErrorField.Omitted,
+    /**
+     * B-P0-3 (R1+R2 recovery strategy): per-message event-seq snapshot the
+     * sidecar carries on a digest. Maps `messageID` → `messageEventSeq`
+     * (the per-message monotonic event counter; 0 = uninitialised).
+     *
+     * Absent (null) on digests that carry no part-event information
+     * (status-only / archived / deleted digests). The reducer folds each
+     * present entry into the per-session [MessageWatermark] map via
+     * [cn.vectory.ocdroid.data.repository.MessageWatermarkState.applyDigestRevision]:
+     *  - incoming seq > local seq ⇒ advance + flag `needsFullRecheck=true`
+     *    (B-P0-1 will consume the flag to drive a `/full` for that message).
+     *  - incoming seq == 0 ⇒ the sidecar just restarted and lost its seq
+     *    state; do NOT trust the value, flag `needsFullRecheck=true` (R1
+     *    rebuild).
+     *  - incoming seq <= local seq ⇒ no-op (stale debounce re-emit).
+     *
+     * Wire name: `contentRevisions` (plural — the map field name on the
+     * digest). The per-message value is the same `messageEventSeq` Long
+     * that token frames carry as `partEventRevision` (per-part) and that
+     * the `/full` response advertises via the `X-Message-Event-Seq`
+     * header. The map shape (vs a single scalar) lets one digest advance
+     * the watermark of several messages at once (e.g. after the sidecar
+     * finishes a batch of part-event replays on reconnect).
+     */
+    val contentRevisions: Map<String, Long>? = null,
 )

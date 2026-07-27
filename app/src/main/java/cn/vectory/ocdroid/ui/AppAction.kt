@@ -466,6 +466,95 @@ sealed interface AppAction {
         val sessionId: String,
     ) : AppAction
 
+    /**
+     * B-P0-2 (MAJOR 4): a single message was deleted upstream and the
+     * R2 /full reconcile confirmed it via HTTP 404 (OR the token stream
+     * delivered a `message.removed` frame). The reducer evicts the
+     * message from `messages` + `partsByMessage`; the per-message
+     * watermark entry was already removed by
+     * [cn.vectory.ocdroid.data.repository.SlimSseStateMachine.applyMessageRemoved]
+     * under the slim commit token guard (B-P0-2's [SlimFullReconciler.onMessageGone]
+     * wiring drives BOTH the watermark removal AND this dispatch).
+     *
+     * The [cn.vectory.ocdroid.data.repository.maxMessageTuple] cache is
+     * NOT a separate structure — it is derived on demand from
+     * `messages` (the merger scans the list). Evicting the message
+     * here drops its tuple automatically on the next derivation.
+     *
+     * `sessionId` is informational (the eviction is by `messageId`);
+     * it is retained for diagnostic logging + future per-session
+     * accounting.
+     *
+     * §Stage-B C5 (CRITICAL): superseded by [MessageRemovedConfirmed],
+     * which carries the §7.2 route token + bundle stamp required for the
+     * freeze protocol (route-owned transcript + LoadedContent dual
+     * projection MUST be guarded by route token + bundle stamp; an
+     * async `/full` 404 / token `message.removed` MUST NOT mutate
+     * transcript state when there is no active route). The legacy call
+     * site (ControllerModule.onMessageGone) is migrated by a parallel
+     * lane; the reducer here retains source compatibility and ALSO
+     * clears the streaming overlay (matches the new contract).
+     */
+    @Deprecated(
+        "Use MessageRemovedConfirmed (carries route token + bundle stamp per the freeze protocol).",
+        replaceWith = ReplaceWith(
+            "MessageRemovedConfirmed(sessionId, messageId, expectedRouteInstance = 0L, bundleStamp = bundleStamp)",
+        ),
+    )
+    data class MessageRemovedFromFull(
+        val sessionId: String,
+        val messageId: String,
+    ) : AppAction
+
+    /**
+     * §Stage-B C5 (CRITICAL): `/full` 200 Reconciled merge for a SINGLE
+     * message — non-authoritative (token-stream-owned STREAMING parts
+     * are preserved; the server skeleton text="" is dropped). The
+     * reducer applies [ChatState.mergeSlimMessages] with
+     * `authoritative=false` over a singleton list AND keeps the flat +
+     * [LoadedContent] projections consistent in the same reducer pass
+     * (the freeze protocol: every transcript mutation runs in one
+     * committed aggregate state).
+     *
+     * [expectedRouteInstance] + [bundleStamp] are captured at the
+     * request trigger and threaded UNCHANGED across the entire fetch —
+     * the reducer CAS-rejects any dispatch whose token / bundle stamp
+     * no longer matches the live incarnation.
+     */
+    data class SlimFullMessageReconciled(
+        val sessionId: String,
+        val message: MessageWithParts,
+        val expectedRouteInstance: Long,
+        val bundleStamp: BundleStamp,
+    ) : AppAction
+
+    /**
+     * §Stage-B C5 (CRITICAL): source-agnostic removal confirmation —
+     * either an R2 `/full` HTTP 404 for [messageId] OR a token stream
+     * `message.removed` frame. The reducer evicts the message from
+     * `messages` + `partsByMessage` AND clears ALL streaming-overlay
+     * state owned by that message's parts (streamOwned /
+     * streamingPartTexts / deltaBuffer / fullTextBuffer /
+     * pendingFlushPartIds / streamingReasoningPart) so a late straggler
+     * frame cannot resurrect ghost text. The eviction runs in ONE
+     * committed aggregate state across BOTH the flat projection AND
+     * [LoadedContent] (the freeze protocol's dual-projection invariant).
+     *
+     * [expectedRouteInstance] + [bundleStamp] are captured at the
+     * trigger and threaded UNCHANGED. A dispatch with
+     * `expectedRouteInstance == 0L` (no active route) is REJECTED —
+     * per the freeze protocol, async `/full` 404 / token removal MUST
+     * NOT write route-owned transcript state when there is no active
+     * route (only watermark/repository state may be cleaned, and that
+     * cleanup lives outside this reducer).
+     */
+    data class MessageRemovedConfirmed(
+        val sessionId: String,
+        val messageId: String,
+        val expectedRouteInstance: Long,
+        val bundleStamp: BundleStamp,
+    ) : AppAction
+
     // ── T1b residual: bypass write sites on §2.3 target fields ─────────────
 
     /**
@@ -763,6 +852,9 @@ internal fun reduce(
     is AppAction.SessionSelected -> reduceSessionSelected(state, action)
     is AppAction.SlimChatContentCleared -> reduceSlimChatContentCleared(state, action)
     is AppAction.SlimChatContentClearedForRoute -> reduceSlimChatContentClearedForRoute(state, action)
+    is AppAction.MessageRemovedFromFull -> reduceMessageRemovedFromFull(state, action)
+    is AppAction.SlimFullMessageReconciled -> reduceSlimFullMessageReconciled(state, action)
+    is AppAction.MessageRemovedConfirmed -> reduceMessageRemovedConfirmed(state, action)
     is AppAction.ChatCleared -> reduceChatCleared(state, action)
     is AppAction.LastAssistantErrorAttached -> reduceLastAssistantErrorAttached(state, action)
     is AppAction.CatchUpMessagesMerged -> reduceCatchUpMessagesMerged(state, action)
@@ -791,6 +883,8 @@ private fun AppAction.acceptsBundle(state: StoreState): Boolean {
         is AppAction.TokenStreamPartUpdated -> bundleStamp
         is AppAction.PartFullTextReceived -> bundleStamp
         is AppAction.PartDeltaReceived -> bundleStamp
+        is AppAction.SlimFullMessageReconciled -> bundleStamp
+        is AppAction.MessageRemovedConfirmed -> bundleStamp
         else -> return true
     } ?: return false
     return state.liveBundleGeneration == expected.generation &&

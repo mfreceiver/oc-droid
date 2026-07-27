@@ -149,7 +149,14 @@ internal fun ChatState.applyMessageUpdated(updated: Message): Pair<ChatState, Bo
 /**
  * T1b pure extract of the pre-T1b [SessionSyncCoordinator.mergeSlimMessagesIntoChat]
  * private loop (patch-if-found + insert-if-absent for messages; parts map
- * overwritten per fetched id when parts non-empty). Empty-id items are skipped.
+ * overwritten per fetched id). Empty-id items are skipped.
+ *
+ * §rev-ogpt severe #2: an item whose `parts` is EMPTY is now treated as an
+ * AUTHORITATIVE replacement — `partsByMessage[updated.id]` is set to the
+ * (possibly-preserved-local) merged value, which collapses to `[]` once the
+ * matching `message.part.removed` ClearPartState effect has cleared
+ * `streamOwned` for the part. Pre-fix this was a no-op and the stale Part
+ * survived in the map, reprojected into LoadedContent as ghost content.
  *
  * §Stage-B §3.4 (splice/merge + single-owner contract):
  *  - [authoritative]=false (default / skeleton): for each fetched part `f`,
@@ -200,32 +207,68 @@ internal fun ChatState.mergeSlimMessages(
         } else {
             absent.add(updated)
         }
-        if (item.parts.isNotEmpty()) {
-            val local = partsByMessage[updated.id] ?: emptyList()
-            val fetchedIds = item.parts.map { it.id }.toSet()
-            // §Stage-B: substitute local part only when !authoritative AND the
-            // fetched part is currently token-stream-owned (STREAMING) — keep
-            // the streamed text, drop the server skeleton (text="").
-            val merged = item.parts.map { f ->
-                if (!authoritative && newOwned[f.id] == StreamOwnedState.STREAMING) {
-                    local.firstOrNull { it.id == f.id } ?: f
-                } else {
-                    f
-                }
+        // §rev-ogpt severe #2: an item with `parts = []` is an AUTHORITATIVE
+        // replacement — the message had parts, all have been deleted upstream
+        // (e.g. via `message.part.removed` deleting the last part → a
+        // subsequent `/full` returns `parts=[]`). Pre-fix this whole block
+        // was guarded by `if (item.parts.isNotEmpty())`, so empty parts was
+        // a no-op: partsByMessage[updated.id] retained the stale Part entries
+        // and withRouteContentSynced projected them into LoadedContent →
+        // ghost content with the wrong (or orphaned) text. Now the merge
+        // ALWAYS writes partsByMessage[updated.id]; when parts is empty the
+        // merged + preservedLocal computation yields the correct replacement
+        // (empty when streamOwned is clear, the still-streaming locals
+        // otherwise — matching the §Stage-B skeleton contract).
+        val local = partsByMessage[updated.id] ?: emptyList()
+        val fetchedIds = item.parts.map { it.id }.toSet()
+        // §Stage-B: substitute local part only when !authoritative AND the
+        // fetched part is currently token-stream-owned (STREAMING) — keep
+        // the streamed text, drop the server skeleton (text="").
+        val merged = item.parts.map { f ->
+            if (!authoritative && newOwned[f.id] == StreamOwnedState.STREAMING) {
+                local.firstOrNull { it.id == f.id } ?: f
+            } else {
+                f
             }
-            // §opus MF-A: preservedLocal keeps locally-owned parts that are
-            // NOT in the fetched set (an in-flight token-stream part the
-            // server snapshot hasn't caught up to). When streamOwned is empty
-            // this is always empty → byte-for-byte legacy parity.
-            val preservedLocal = local.filter { lp ->
+        }
+        // §opus MF-A: preservedLocal keeps locally-owned parts that are
+        // NOT in the fetched set (an in-flight token-stream part the
+        // server snapshot hasn't caught up to). When streamOwned is empty
+        // this is always empty → byte-for-byte legacy parity.
+        //
+        // §Stage-B M5: preservedLocal is ONLY allowed when
+        // !authoritative — an authoritative merge (resync / watchdog /
+        // forced) treats the fetched items as the final view, so a part
+        // absent from the fetch is genuinely gone upstream and MUST NOT
+        // be preserved (otherwise the locally-owned STREAMING overlay
+        // would survive an authoritative replace and keep rendering
+        // ghost text the server has dropped).
+        //
+        // §rev-ogpt severe #3: when the part was removed upstream, the
+        // token-stream reducer's ClearPartState effect has already torn
+        // down streamOwned[partId] by the time this merge runs (the
+        // effect is processed synchronously inside dispatchEpochFrame
+        // while the debounced /full fetch lands ~100ms later). The
+        // preservedLocal filter (`newOwned[lp.id] == STREAMING`) therefore
+        // naturally drops the removed part — no special-case needed here.
+        val preservedLocal = if (authoritative) {
+            emptyList()
+        } else {
+            local.filter { lp ->
                 lp.id !in fetchedIds && newOwned[lp.id] == StreamOwnedState.STREAMING
             }
-            partsByMessage = partsByMessage + (updated.id to (merged + preservedLocal))
-            // §Stage-B: on authoritative, collect fetched ids that were owned
-            // so their ownership state can be cleared after the loop.
-            if (authoritative) {
-                cleared += fetchedIds.filter { it in newOwned }
-            }
+        }
+        partsByMessage = partsByMessage + (updated.id to (merged + preservedLocal))
+        // §Stage-B: on authoritative, clear ownership for every local part
+        // of this message that was stream-owned (not just fetched ids).
+        // §rev-ogpt severe #2 (Fix-B): when the authoritative view carries
+        // parts=[] (all parts deleted upstream), fetchedIds is empty and
+        // the old code collected nothing — streamOwned survived for stale
+        // parts whose owning ClearPartState event had already fired. Now we
+        // collect every local part id that is still owned so the final
+        // newOwned/newSpt correctly strips all stale ownership.
+        if (authoritative) {
+            cleared += local.map { it.id }.filter { it in newOwned }
         }
     }
     if (cleared.isNotEmpty()) {

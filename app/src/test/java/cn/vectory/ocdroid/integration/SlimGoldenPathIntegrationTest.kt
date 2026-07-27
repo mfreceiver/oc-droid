@@ -314,7 +314,11 @@ class SlimGoldenPathIntegrationTest {
             server.enqueue(jsonResponse(json.encodeToString(listOf(skeleton))))
             // (b) Cursor drain page 1 — limit=200, same skeleton, NO
             //     X-Next-Cursor header (sidecar signals end-of-history).
-            server.enqueue(jsonResponse(json.encodeToString(listOf(skeleton))))
+            //     §阶段B C1 fix: `/messages` terminal = nextCursor==null
+            //     (no X-Since-Complete on this endpoint).
+            server.enqueue(
+                jsonResponse(json.encodeToString(listOf(skeleton))),
+            )
 
             // 3) Start SSE collection on the coordinator scope. Each parsed
             //    SSEEvent is dispatched synchronously via handleEvent; the
@@ -674,9 +678,14 @@ class SlimGoldenPathIntegrationTest {
             )
             val itemBody = json.encodeToString(listOf(item))
 
-            // Probe (limit=1) + since-fetch page (returns the new skeleton).
+            // Probe (limit=1) + drain page (returns the new skeleton).
+            // §阶段B C1 fix: `/messages` terminal = nextCursor==null
+            // (localAppliedUpdatedAt is null → cursor drain path, NOT
+            // /since — and `/messages` forbids X-Since-Complete).
             server.enqueue(jsonResponse(itemBody))
-            server.enqueue(jsonResponse(itemBody))
+            server.enqueue(
+                jsonResponse(itemBody),
+            )
 
             // Spy the repo to rotate focus at the commit gate (between the
             // fetch returning + bookmark bumped and the chat-merge step).

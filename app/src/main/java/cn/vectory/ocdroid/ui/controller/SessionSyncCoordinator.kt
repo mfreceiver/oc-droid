@@ -18,6 +18,7 @@ import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ProbeResult
 import cn.vectory.ocdroid.data.repository.SlimColdStartSnapshot
+import cn.vectory.ocdroid.data.repository.SlimFullReconciler
 import cn.vectory.ocdroid.data.repository.SlimSessionState
 import cn.vectory.ocdroid.data.repository.catchUpSet
 import cn.vectory.ocdroid.data.repository.needsCatchUp
@@ -206,6 +207,33 @@ class SessionSyncCoordinator(
     override val repository: OpenCodeRepository? = null,
     /** Worker lane for network/reconcile computation. UI commits switch to Main. */
     internal val reconcileDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    /**
+     * C2 CRITICAL (digest → R1 + reconnect R1 trigger chain): the R1
+     * bounded `/full` reconcile coordinator. Injected by Lane I
+     * (ControllerModule.provideSlimFullReconciler); nullable so legacy /
+     * test constructions that don't exercise the C2 trigger chain keep
+     * working byte-identically (a null reconciler makes
+     * [requestDigestFullSweep] / [reconcileFullAfterTransportReset]
+     * no-ops).
+     *
+     * # No callback / no SSC reference
+     *
+     * The reconciler holds NO CoroutineScope, NO SSC reference. The two
+     * entry points used here ([SlimFullReconciler.reconcileActiveSession]
+     * for digest debounce + [SlimFullReconciler.reconcileReconnect] for
+     * server.connected) are suspend; SSC launches them on [scope].
+     *
+     * # Token + route threading (freeze protocol)
+     *
+     * Both trigger paths capture the route instance + slim token at the
+     * TRIGGER and thread them UNCHANGED across the entire fetch (no
+     * recapture, no dynamic read). The reconciler's per-message worker
+     * re-validates `isTokenCurrent` after every network suspension + every
+     * backoff sleep (M6); the dispatched [AppAction.SlimFullMessageReconciled]
+     * carries the captured [SlimFullReconciler.FullReconcileContext] so the
+     * reducer's route + bundle CAS can reject stale dispatches.
+     */
+    internal val slimFullReconciler: SlimFullReconciler? = null,
 ) : SseDispatchHost, StripeLock, SlimEffectsPort {
     /** Tag for [reportNonFatalIssue]; mirrors the original MainViewModel TAG. */
     private val tag: String = "SessionSyncCoordinator"
@@ -237,6 +265,26 @@ class SessionSyncCoordinator(
      * or use @Synchronized.
      */
     private val flushJobs = mutableMapOf<String, Job>()
+
+    /**
+     * C2 CRITICAL (digest → R1 active sweep): per-session debounce Job
+     * references for [requestDigestFullSweep]. Mirrors [flushJobs]'s
+     * pattern: a Job is neither serializable nor a value type, so it
+     * stays on the coordinator (bound to [scope]) rather than in a slice.
+     *
+     * # Thread confinement
+     *
+     * Main-thread confined — all access runs on appScope
+     * (Dispatchers.Main.immediate). Same discipline as [flushJobs].
+     *
+     * # Lifecycle
+     *
+     * The leading-edge digest cancels any in-flight pending sweep and
+     * schedules a fresh one (trailing-edge debounce). The Job self-removes
+     * on completion (post-delay). A scope cancel (e.g. host reconfigure)
+     * propagates cancellation to every pending sweep cleanly.
+     */
+    private val digestFullSweepJobs = mutableMapOf<String, Job>()
 
     /**
      * Task 11 round-2 (oracle I5 — fixed striped locks): a fixed array of
@@ -1174,7 +1222,231 @@ class SessionSyncCoordinator(
                     val attempt = slimSessionReconciler.reconcileDigest(decision.request)
                     executeSlimReconcileCommand(attempt.outcome.command)
                     slimSessionReconciler.applyReconcileResult(attempt)
+                    // C2 CRITICAL (digest contentRevisions → R1 active sweep):
+                    // only DIGEST_FOCUS triggers the /full sweep immediately —
+                    // the user is viewing this session, so any watermark
+                    // needsFullRecheck flag set by the digest's reducer apply
+                    // (contentRevisions / message.part.removed) MUST be consumed
+                    // by a bounded reconcileActiveSession batch.
+                    //
+                    // BACKGROUND digests deliberately SKIP the sweep (the user
+                    // is NOT viewing this session — a background /full storm
+                    // would burn quota on stale tabs). The flag stays set +
+                    // is consumed by the next focus sweep (user switches to
+                    // that session) or the next reconnect R1 batch
+                    // ([reconcileFullAfterTransportReset]).
+                    //
+                    // Token + route threading: the request's captured token +
+                    // route instance are passed through UNCHANGED (no
+                    // recapture) — see [requestDigestFullSweep].
+                    if (decision.request.mode == SlimReconcileMode.DIGEST_FOCUS) {
+                        requestDigestFullSweep(
+                            sessionId = decision.request.sid,
+                            token = decision.request.token,
+                            expectedRouteInstance = decision.request.routeInstance,
+                        )
+                    }
                 }
+            }
+        }
+    }
+
+    // ── C2 CRITICAL (digest → R1 active sweep + reconnect R1) ──────────────
+
+    /**
+     * C2 CRITICAL (digest contentRevisions → R1 active sweep): schedules a
+     * per-session [DIGEST_FULL_SWEEP_DEBOUNCE_MS] debounce that aggregates
+     * rapid digest frames into a SINGLE
+     * [SlimFullReconciler.reconcileActiveSession] call. The captured entry
+     * token + route instance from the digest request are threaded UNCHANGED
+     * (no recapture — the digest's [SlimDigestReconcileRequest.token] /
+     * [.routeInstance] are the request-scoped guards).
+     *
+     * # Debounce
+     *
+     * Multiple contentRevisions-bearing digests for the same session inside
+     * the debounce window coalesce into ONE R1 batch (the trailing digest
+     * wins; the prior pending job is cancelled). This bounds the /full
+     * fetch rate when the sidecar bursts several revisions in quick
+     * succession. Mirrors [scheduleDeltaFlushImpl]'s trailing-coalesce
+     * pattern.
+     *
+     * # Token / route invariants (freeze protocol)
+     *
+     *  - [token] is the digest's entry token — captured BEFORE the first
+     *    suspend point in [SlimSessionReconciler.prepareSessionDigest].
+     *    Re-capturing here would break the "single entry token, no
+     *    recapture" invariant (C-D3 v2 §1.8).
+     *  - [expectedRouteInstance] is the route instance captured at digest
+     *    prep time. The reducer's route CAS-check rejects any dispatch
+     *    whose route has advanced under the user's tab switch.
+     *
+     * # Background-digest invariant
+     *
+     * Only [SlimReconcileMode.DIGEST_FOCUS] digests trigger this sweep
+     * (the caller guards). BACKGROUND digests leave the watermark's
+     * `needsFullRecheck` flag in place; it is picked up by the next focus
+     * sweep or the next [reconcileFullAfterTransportReset] reconnect
+     * batch. This avoids a background /full storm on sessions the user is
+     * not viewing.
+     *
+     * # bundleStamp capture
+     *
+     * The bundle stamp is captured at SWEEP time (NOT at digest-arrival
+     * time) because the debounce delay straddles a potential bundle
+     * rotation window. Capturing it after the delay ensures the dispatched
+     * [AppAction.SlimFullMessageReconciled] carries the CURRENT bundle
+     * identity, which is what the reducer's bundle CAS validates.
+     *
+     * # No reconciler / no repository
+     *
+     * No-op when [slimFullReconciler] or [repository] is null (legacy /
+     * test constructions). The reconcileActiveSession call is wrapped in
+     * a CE-propagating try/catch so a transient failure logs and the flag
+     * stays set for the next sweep (matches SlimFullReconciler's own
+     * "stay flagged on failure" semantics).
+     */
+    internal fun requestDigestFullSweep(
+        sessionId: String,
+        token: OpenCodeRepository.SlimCommitToken,
+        expectedRouteInstance: Long,
+    ) {
+        val reconciler = slimFullReconciler ?: return
+        // Per-sid trailing debounce: cancel any in-flight pending sweep and
+        // schedule a fresh one. The leading-edge digest's token + route
+        // instance REPLACE the prior pending sweep's (the trailing digest
+        // is the most-recent view).
+        digestFullSweepJobs[sessionId]?.cancel()
+        digestFullSweepJobs[sessionId] = scope.launch {
+            delay(DIGEST_FULL_SWEEP_DEBOUNCE_MS)
+            digestFullSweepJobs.remove(sessionId)
+            // bundleStamp captured AT SWEEP time (post-delay) so a bundle
+            // rotation during the debounce window is reflected.
+            val bundle = repository?.currentClientBundle()
+            val bundleStamp = if (bundle != null) {
+                BundleStamp(bundle.generation, bundle.endpointFp)
+            } else {
+                BundleStamp(0L, "")
+            }
+            val context = SlimFullReconciler.FullReconcileContext(
+                expectedRouteInstance = expectedRouteInstance,
+                bundleStamp = bundleStamp,
+            )
+            try {
+                val outcome = reconciler.reconcileActiveSession(
+                    sessionId = sessionId,
+                    token = token,
+                    context = context,
+                )
+                if (outcome is SlimFullReconciler.BatchOutcome.Stale) {
+                    DebugLog.i(
+                        tag,
+                        "digest full sweep sid=$sessionId stale token — flag preserved for next sweep",
+                    )
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                DebugLog.w(tag, "digest full sweep sid=$sessionId failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * C2 CRITICAL (server.connected / resync → reconnect R1): the SINGLE
+     * wiring point for reconnecting `/full` reconciliation after a transport
+     * reset. Called by [SessionStreamingService.onResync] BEFORE
+     * [performSlimResync] so the watermark reset + per-message R2 fan-out
+     * (Lane R's [SlimFullReconciler.reconcileReconnect]) land ahead of the
+     * Stage-A metadata + /since reconcile.
+     *
+     * # Single wiring point (anti-double-reset)
+     *
+     * This is the ONLY server.connected-path call site. Do NOT add a
+     * parallel call from ServiceSseConnectionOwner's first-frame handler
+     * or from [handleEvent]'s server.connected branch — a second
+     * [SlimFullReconciler.reconcileReconnect] would run
+     * [OpenCodeRepository.clearWatermarksForReconnect] a second time (the
+     * second call returns emptyMap, but the per-message work fan-out would
+     * race the first).
+     *
+     * # Token + context capture
+     *
+     *  - ONE token is captured here (the reconnect is a single workflow).
+     *    A token rotation mid-batch aborts ([BatchOutcome.Stale]).
+     *  - [isStillCurrent] is the onResync transport-current gate; the
+     *    token-current guard runs alongside it so a host reconfigure that
+     *    rotated the incarnation between capture and verify aborts cleanly.
+     *  - The current route instance is captured from the open chat tab (if
+     *    any) so the reducer CAS-accepts transcript dispatches for the
+     *    session the user is viewing; 0L when no chat tab is open (the
+     *    watermark advances, transcript dispatch skipped — the reducer
+     *    would reject a route=0 write anyway).
+     *
+     * # Fire-and-forget
+     *
+     * This method is non-suspending. The reconcile body launches on
+     * [scope] so [SessionStreamingService.onResync] proceeds to
+     * [performSlimResync] without waiting — the two reconciles run
+     * concurrently on different lanes (reconnect R1 = per-message /full;
+     * performSlimResync = Stage-A metadata + /since).
+     *
+     * # No reconciler / no repository
+     *
+     * No-op when [slimFullReconciler] or [repository] is null (legacy /
+     * test constructions).
+     */
+    internal fun reconcileFullAfterTransportReset(
+        isStillCurrent: () -> Boolean,
+    ) {
+        val reconciler = slimFullReconciler ?: return
+        val repo = repository ?: return
+        scope.launch {
+            // Gate 1: transport currency (onResync's view of the same
+            // transport generation). A false here means a newer transport
+            // superseded this resync trigger — abort cleanly.
+            if (!isStillCurrent()) return@launch
+            // ONE token captured at workflow entry (the reconnect is a
+            // single workflow — no per-message recapture).
+            val token = repo.captureSlimCommitToken()
+            // Gate 2: token currency — incarnation not rotated between the
+            // transport gate above and the token capture.
+            if (!repo.isSlimCommitTokenCurrent(token)) return@launch
+            // Capture the current route instance (0L when no chat tab open)
+            // + the live bundle stamp → FullReconcileContext. Threading
+            // these UNCHANGED across the entire fetch is what enables the
+            // reducer's route + bundle CAS to reject stale dispatches.
+            val currentSid = slices.chat.value.currentSessionId
+            val routeInstance = currentSid?.let { slices.routeInstanceFor(it) } ?: 0L
+            val bundle = repo.currentClientBundle()
+            val bundleStamp = if (bundle != null) {
+                BundleStamp(bundle.generation, bundle.endpointFp)
+            } else {
+                BundleStamp(0L, "")
+            }
+            val context = SlimFullReconciler.FullReconcileContext(
+                expectedRouteInstance = routeInstance,
+                bundleStamp = bundleStamp,
+            )
+            try {
+                // reconcileReconnect internally calls
+                // clearWatermarksForReconnect(token) — token-guarded,
+                // TOCTOU-safe (Lane R rev-b-fix M3). Per-message work
+                // fans out under DEFAULT_RECONNECT_CONCURRENCY (=8).
+                val outcome = reconciler.reconcileReconnect(
+                    context = context,
+                    token = token,
+                )
+                if (outcome is SlimFullReconciler.BatchOutcome.Stale) {
+                    DebugLog.i(
+                        tag,
+                        "reconnect full sweep stale token — flags preserved for next sweep",
+                    )
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                DebugLog.w(tag, "reconnect full sweep failed: ${e.message}")
             }
         }
     }
@@ -2004,6 +2276,17 @@ class SessionSyncCoordinator(
          * of one per token.
          */
         private const val DELTA_COALESCE_MS = 100L
+
+        /**
+         * C2 CRITICAL: per-session debounce window for the digest → R1
+         * active sweep ([requestDigestFullSweep]). Multiple
+         * contentRevisions-bearing digests for the same session within
+         * this window coalesce into ONE [SlimFullReconciler.reconcileActiveSession]
+         * call. Frozen at 100ms (matches DELTA_COALESCE_MS — the
+         * sidecar's burst cadence is the same order of magnitude as the
+         * token-stream delta cadence).
+         */
+        internal const val DIGEST_FULL_SWEEP_DEBOUNCE_MS = 100L
 
         /**
          * T11 round-2 (oracle I5): stripe count for [reconcileStripes].

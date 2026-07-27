@@ -248,6 +248,348 @@ class SlimSseStateMachine internal constructor(
         }
     }
 
+    /**
+     * B-P0-3: applies a `message.part.removed` token event to the
+     * per-session watermark map. Advances the message's `messageEventSeq`
+     * (monotonic; stale re-delivery is a no-op), drops the removed
+     * partID from `partRevisions`, and flags `needsFullRecheck = true`
+     * so B-P0-1's 100ms-debounced `/full` driver picks it up.
+     *
+     * Token-checked: a stale incarnation is a no-op (returns null).
+     *
+     * @return the post-update [MessageWatermark], or null if the token
+     *   was stale OR the incoming seq was `<=` the prior local seq
+     *   (stale re-delivery — no-op).
+     */
+    fun applyMessagePartRemoved(
+        sessionId: String,
+        messageId: String,
+        partId: String,
+        messageEventSeq: Long,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): MessageWatermark? = withSlimStateCommit(
+        token = token,
+        onStale = { null },
+    ) {
+        slimSseState.watermarksFor(sessionId)
+            .applyPartRemoved(messageId, partId, messageEventSeq)
+    }
+
+    /**
+     * B-P0-3: applies a `message.removed` token event to the per-session
+     * watermark map. Removes the entry entirely (no `/full` is triggered
+     * — there's nothing to fetch). The UI-layer session-list eviction
+     * is B-P0-1's wiring concern.
+     *
+     * Token-checked: a stale incarnation is a no-op (returns null).
+     *
+     * @return the removed [MessageWatermark] (or null if none existed /
+     *   token stale), so the caller can branch on "we were tracking
+     *   this message".
+     */
+    fun applyMessageRemoved(
+        sessionId: String,
+        messageId: String,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): MessageWatermark? = withSlimStateCommit(
+        token = token,
+        onStale = { null },
+    ) {
+        slimSseState.watermarksFor(sessionId).removeMessage(messageId)
+    }
+
+    /**
+     * B-P0-3: applies a per-part `partEventRevision` from a token
+     * snapshot / delta frame, for 250ms-debounce-window dedup. Returns
+     * `true` iff the revision differs from the previously-applied one
+     * (a fresh event); `false` signals a re-delivery the caller SHOULD
+     * drop.
+     *
+     * Token-checked: a stale incarnation returns `true` (fail-open —
+     * without applying dedup we cannot drop, so the caller falls back
+     * to accept). The watermark state isn't mutated on the stale path.
+     */
+    fun applyTokenPartRevision(
+        sessionId: String,
+        messageId: String,
+        partId: String,
+        partEventRevision: Long?,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): Boolean = withSlimStateCommit(
+        token = token,
+        onStale = { true },
+    ) {
+        slimSseState.watermarksFor(sessionId)
+            .applyPartRevision(messageId, partId, partEventRevision)
+    }
+
+    /**
+     * B-P0-3: snapshot of one session's per-message watermarks. Used
+     * by B-P0-1's wiring layer to scan for `needsFullRecheck = true`
+     * entries (the `/full` work queue).
+     *
+     * Acquires [slimStateLock] for a consistent read (no concurrent
+     * mutator land grab between the snapshot and the caller's
+     * branching).
+     */
+    fun snapshotSessionWatermarks(sessionId: String): Map<String, MessageWatermark> =
+        synchronized(slimStateLock) {
+            slimSseState.watermarksFor(sessionId).all()
+        }
+
+    /**
+     * B-P0-3: server.connected / resync reset. Clears seq state for
+     * EVERY session's watermark map, preserves messageIDs, flags every
+     * message `needsFullRecheck = true`. The sidecar's seq counter
+     * resets to 0 on restart; the prior client-side values are
+     * untrustworthy. B-P0-1's R1 reconcile path consumes the returned
+     * per-session messageID sets as its work queue.
+     *
+     * NOT token-checked — this is a system-level reset that MUST apply
+     * regardless of in-flight tokens (a reconnect invalidates every
+     * outstanding operation). Acquires [slimStateLock] so the reset is
+     * atomic w.r.t. any concurrent digest / token-frame mutation.
+     *
+     * NOTE: distinct from [beginSlimReconfigure] — that's a HOST SWITCH
+     * (total wipe via [SlimSseState.clear]); this is a SAME-HOST
+     * reconnect (preserve messageIDs for R1).
+     *
+     * # rev-b-fix M3 — legacy bridge
+     *
+     * This no-arg overload is the LEGACY path retained until Lane R
+     * migrates [SlimFullReconciler]'s `clearWatermarksForReconnect`
+     * port signature to take a token. The TOCTOU in the reconciler
+     * (`isTokenCurrent(token)` check, then this no-arg reset, with no
+     * atomic guard between them) is FIXED only after the migration —
+     * the canonical path is the new [clearWatermarksForReconnect]`(
+     * token)` overload, which performs the reset INSIDE the
+     * `withSlimStateCommit` token guard.
+     */
+    fun clearWatermarksForReconnect(): Map<String, Set<String>> =
+        synchronized(slimStateLock) {
+            slimSseState.clearAndMarkAllWatermarksForReconnect()
+        }
+
+    /**
+     * rev-b-fix M3 (token-guarded reconnect reset): the canonical
+     * path. Acquires [slimStateLock] AND validates [token] inside the
+     * SAME critical section that runs the reset, closing the
+     * TOCTOU window the legacy no-arg overload leaves open.
+     *
+     * Returns `emptyMap()` on a stale token (the caller MUST treat as
+     * stale and short-circuit — no work was done, the watermark maps
+     * are untouched). Otherwise returns the per-session work set
+     * (Map<sessionId, Set<messageId>>) — the entries that were flagged
+     * for R1.
+     *
+     * # Atomicity
+     *
+     * The token check + reset are inside one `synchronized(
+     * slimStateLock)` block (via [withSlimStateCommit]). A token that
+     * was current at capture but went stale (host reconfigure) before
+     * this call enters the critical section is rejected at the guard;
+     * a token that's current at entry stays current for the duration
+     * of the reset (no concurrent rotation can interleave —
+     * [beginSlimReconfigure] also acquires [slimStateLock] to rotate
+     * the marker, so it serialises against this reset).
+     */
+    fun clearWatermarksForReconnect(
+        token: OpenCodeRepository.SlimCommitToken,
+    ): Map<String, Set<String>> = withSlimStateCommit(
+        token = token,
+        onStale = { emptyMap() },
+    ) {
+        slimSseState.clearAndMarkAllWatermarksForReconnect()
+    }
+
+    /**
+     * B-P0-1: clears the per-message `needsFullRecheck` sticky flag for
+     * `(sessionId, messageId)` after a successful `/full` reconcile
+     * (HTTP 200 with body OR HTTP 304 Not Modified — both signal the
+     * client's view of the message is authoritative). Token-checked:
+     * a stale incarnation is a no-op (returns false), so a /full result
+     * that returns after a host switch cannot mutate the new incarnation's
+     * freshly-flagged watermark map.
+     *
+     * Delegates to [MessageWatermarkState.clearFullRecheckFlag] under
+     * [slimStateLock]; the data-layer method is the SOLE writer that
+     * clears the flag (B-P0-3 frozen clause).
+     *
+     * @return `true` iff the flag was actually cleared; `false` on
+     *   stale token OR a no-op (absent entry OR flag already clear).
+     */
+    fun clearFullRecheckFlag(
+        sessionId: String,
+        messageId: String,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): Boolean = withSlimStateCommit(
+        token = token,
+        onStale = { false },
+    ) {
+        slimSseState.watermarksFor(sessionId).clearFullRecheckFlag(messageId)
+    }
+
+    // ── rev-b-fix: atomic /full commit ports (Lane R/O2 contract) ───────────
+
+    /**
+     * rev-b-fix §3 — atomic commit of a `/full` 200 OK response.
+     *
+     * The ENTIRE commit runs inside the slim state machine's token
+     * guard (one critical section): validate token → validate seq →
+     * invoke [commitUi] → (iff accepted) advance watermark + clear
+     * flag. The UI commit (which merges the 200 body into the chat
+     * slice /w eagerly-rendered content) is run inside the SAME lock
+     * so a concurrent token rotation, digest, or token-frame cannot
+     * observe an intermediate state where the UI lambda has run but
+     * the watermark hasn't moved (or vice versa).
+     *
+     * # Rules (frozen, all inside the token guard)
+     *
+     *  - token stale → `false` (host switch / reconfigure happened
+     *    between request and commit). The watermark map is untouched.
+     *    [commitUi] is NOT invoked.
+     *  - `responseSeq <= 0` → `false` (protocol failure — the sidecar
+     *    MUST advertise `X-Message-Event-Seq` as strictly-positive on
+     *    a 200; `0` is the uninitialised/untrustworthy sentinel).
+     *    The watermark map is untouched. [commitUi] is NOT invoked.
+     *  - `responseSeq < currentSeq` → `false` (stale response — a
+     *    newer seq was already observed via SSE while this /full was
+     *    in flight; the 200 body is for an older state). The
+     *    watermark map is untouched; the flag is NOT cleared (the
+     *    newer seq will drive a fresh reconcile). [commitUi] is NOT
+     *    invoked.
+     *  - otherwise → run [commitUi]. The flag clear + seq advance
+     *    now DEPEND on [commitUi]'s verdict:
+     *    - `commitUi() == true` (reducer accepted the dispatch —
+     *      route/bundle CAS passed, content merged into transcript)
+     *      → `messageEventSeq = responseSeq`, `needsFullRecheck =
+     *      false`, return `true`.
+     *    - `commitUi() == false` (reducer rejected — route/bundle
+     *      expired, OR route=0 with no active route) → return
+     *      `false` WITHOUT mutating the watermark. The flag is
+     *      PRESERVED; the seq is NOT advanced. The next digest
+     *      sweep (or route reactivation after a route=0 skip)
+     *      re-enters with the same seq and retries.
+     *
+     * The [requestSeq] parameter (the seq observed when the caller
+     * issued the /full) is part of the contract for symmetry with
+     * [commitFull304] and for caller-side observability, but the
+     * 200 commit rule only inspects [responseSeq] vs. the CURRENT seq
+     * (the 200 body is authoritative; the responseSeq overwrites
+     * whatever the client held).
+     *
+     * # [commitUi] contract
+     *
+     * Returns `true` iff the dispatch was accepted — i.e. the
+     * reducer's route + bundle CAS passed and the message body was
+     * merged into the chat transcript. Returns `false` iff the
+     * dispatch was rejected (route/bundle stale, OR the caller
+     * short-circuited with route=0 because no active route owns the
+     * transcript).
+     *
+     * MUST be a short, in-memory mutation — no network, no suspension,
+     * no blocking I/O. It is invoked under [slimStateLock]; long-running
+     * work would block every other slim state operation. The typical
+     * body is `slice.mergeAuthoritative(message)` or a dispatch of an
+     * AppAction that the reducer applies synchronously.
+     *
+     * # rev-ogpt #2 — why the flag clear now depends on [commitUi]
+     *
+     * Previously, [commitUi] returned `Unit` and the flag was cleared
+     * BEFORE the dispatch ran. If the reducer's route/bundle CAS
+     * rejected the dispatch, the watermark was already marked done
+     * and the message was silently dropped (no retry). The Boolean
+     * return makes the CAS verdict observable so this method can
+     * preserve the flag on rejection. route=0 (no active route) is
+     * the canonical rejection: the reducer would skip the transcript
+     * write anyway, so the caller's [commitUi] lambda returns `false`
+     * WITHOUT dispatching — preserving the flag for the next sweep
+     * once a route is activated.
+     *
+     * @return `true` iff the commit landed (token current + valid
+     *   responseSeq + seq not regressed + [commitUi] accepted);
+     *   `false` otherwise. The caller (Lane R/O2 — SlimFullReconciler
+     *   / SlimSyncEngine) MUST short-circuit on `false` and treat the
+     *   message as still needing reconcile.
+     */
+    fun commitFull200(
+        sessionId: String,
+        messageId: String,
+        @Suppress("UNUSED_PARAMETER") requestSeq: Long,
+        responseSeq: Long,
+        token: OpenCodeRepository.SlimCommitToken,
+        commitUi: () -> Boolean,
+    ): Boolean = withSlimStateCommit(
+        token = token,
+        onStale = { false },
+    ) {
+        val wms = slimSseState.watermarksFor(sessionId)
+        // Step 1: read-only seq validation (fail-fast on protocol
+        // failure / stale responseSeq). Does NOT mutate the map;
+        // mutation only runs after the UI commit accepts.
+        if (!wms.canCommitFull200Seq(messageId, responseSeq)) {
+            return@withSlimStateCommit false
+        }
+        // Step 2: run the UI commit. Its verdict decides whether the
+        // watermark moves. The lambda runs under slimStateLock so the
+        // reducer's CAS sees a state consistent with our seq check.
+        val accepted = commitUi()
+        if (!accepted) {
+            // UI rejected (route/bundle CAS fail OR route=0 no active
+            // route). Preserve flag + do NOT advance seq. Return false
+            // so the reconciler reports Skipped (not Failure) and the
+            // next digest sweep / route reactivation retries.
+            return@withSlimStateCommit false
+        }
+        // Step 3: UI accepted — advance seq + clear flag atomically.
+        // canCommitFull200Seq pre-validated responseSeq; commitFull200Seq
+        // re-validates (defensively) and mutates.
+        wms.commitFull200Seq(messageId, responseSeq)
+        true
+    }
+
+    /**
+     * rev-b-fix §4 — conditional commit of a `/full` 304 Not Modified.
+     *
+     * Clears the per-message `needsFullRecheck` flag IFF (a) the
+     * token is current AND (b) the message's current `messageEventSeq`
+     * EXACTLY matches [requestSeq] (the seq the caller observed at
+     * request time). Both checks run inside one [slimStateLock]
+     * critical section (via [withSlimStateCommit]).
+     *
+     * # Why exact-equality on [requestSeq]
+     *
+     * A 304 means "your fingerprint is authoritative". The fingerprint
+     * included `known.messageEventSeq = requestSeq`, so the sidecar
+     * confirmed that seq AT REQUEST TIME. If the local seq has since
+     * ADVANCED (a `message.part.*` SSE event arrived between request
+     * and 304), the client has new information the 304 didn't account
+     * for — clearing the flag would discard a real recovery signal.
+     * Keep the flag; the next sweep re-fetches against the new seq.
+     *
+     * # Returns
+     *
+     *  - `true` iff the flag was cleared (token current + seq matched
+     *    + flag was set). The caller treats the message as
+     *    authoritative (no further work this sweep).
+     *  - `false` otherwise. On the `seq advanced` branch the flag is
+     *    INTENTIONALLY preserved (the caller MUST NOT treat the
+     *    message as reconciled — the new seq will drive a fresh
+     *    /full next sweep).
+     */
+    fun commitFull304(
+        sessionId: String,
+        messageId: String,
+        requestSeq: Long,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): Boolean = withSlimStateCommit(
+        token = token,
+        onStale = { false },
+    ) {
+        slimSseState.watermarksFor(sessionId)
+            .clearFlagIfSeqMatches(messageId, requestSeq)
+    }
+
     // ── Slim digest / reconcile state mutations ────────────────────────────────
 
     /**

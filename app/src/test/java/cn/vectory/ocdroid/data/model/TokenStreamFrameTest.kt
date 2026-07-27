@@ -111,6 +111,175 @@ class TokenStreamFrameTest {
         assertEquals(" world", frame.text)
     }
 
+    // ── B-P0-3: partEventRevision on snapshot / delta (optional, dedup) ────
+
+    @Test
+    fun `part_snapshot parses partEventRevision when present`() {
+        val frame = TokenStreamFrame.parse(
+            "message.part.snapshot",
+            """{"sessionID":"s1","messageID":"m1","partID":"p1","text":"x","partEventRevision":42}""",
+        ) as TokenStreamFrame.PartSnapshot
+        assertEquals(42L, frame.partEventRevision)
+    }
+
+    @Test
+    fun `part_snapshot partEventRevision defaults to null when absent`() {
+        val frame = TokenStreamFrame.parse(
+            "message.part.snapshot",
+            """{"sessionID":"s1","messageID":"m1","partID":"p1","text":"x"}""",
+        ) as TokenStreamFrame.PartSnapshot
+        assertNull(frame.partEventRevision)
+    }
+
+    @Test
+    fun `part_snapshot partEventRevision null JSON yields null`() {
+        val frame = TokenStreamFrame.parse(
+            "message.part.snapshot",
+            """{"sessionID":"s1","messageID":"m1","partID":"p1","text":"x","partEventRevision":null}""",
+        ) as TokenStreamFrame.PartSnapshot
+        assertNull(frame.partEventRevision)
+    }
+
+    @Test
+    fun `part_snapshot partEventRevision non-numeric yields null`() {
+        // A string where a Long is expected — the parser coerces to null
+        // (mirrors the JsonElement-access helper convention: never throw).
+        val frame = TokenStreamFrame.parse(
+            "message.part.snapshot",
+            """{"sessionID":"s1","messageID":"m1","partID":"p1","text":"x","partEventRevision":"not-a-number"}""",
+        ) as TokenStreamFrame.PartSnapshot
+        assertNull(frame.partEventRevision)
+    }
+
+    @Test
+    fun `part_delta parses partEventRevision when present`() {
+        val frame = TokenStreamFrame.parse(
+            "message.part.delta",
+            """{"sessionID":"s1","messageID":"m1","partID":"p1","text":" world","partEventRevision":7}""",
+        ) as TokenStreamFrame.PartDelta
+        assertEquals(7L, frame.partEventRevision)
+    }
+
+    @Test
+    fun `part_delta partEventRevision defaults to null when absent`() {
+        val frame = TokenStreamFrame.parse(
+            "message.part.delta",
+            """{"sessionID":"s1","messageID":"m1","partID":"p1","text":" world"}""",
+        ) as TokenStreamFrame.PartDelta
+        assertNull(frame.partEventRevision)
+    }
+
+    @Test
+    fun `part_snapshot partEventRevision zero is preserved`() {
+        // 0 is a legal value (different from null = absent). The dedup
+        // logic treats 0 == prior-0 as a duplicate; the parser MUST
+        // surface the distinction between "absent" (null) and "present
+        // zero" (0L).
+        val frame = TokenStreamFrame.parse(
+            "message.part.snapshot",
+            """{"sessionID":"s1","messageID":"m1","partID":"p1","text":"x","partEventRevision":0}""",
+        ) as TokenStreamFrame.PartSnapshot
+        assertEquals(0L, frame.partEventRevision)
+    }
+
+    // ── B-P0-3: removal events ────────────────────────────────────────────
+
+    @Test
+    fun `message_part_removed maps all required fields`() {
+        val frame = TokenStreamFrame.parse(
+            "message.part.removed",
+            """{"sessionID":"s1","messageID":"m1","partID":"p2","messageEventSeq":42}""",
+        ) as TokenStreamFrame.MessagePartRemoved
+        assertEquals("s1", frame.sessionId)
+        assertEquals("m1", frame.messageId)
+        assertEquals("p2", frame.partId)
+        assertEquals(42L, frame.messageEventSeq)
+    }
+
+    @Test
+    fun `message_part_removed missing messageEventSeq yields null`() {
+        // messageEventSeq is REQUIRED on a message.part.removed frame
+        // (the bilateral wire contract). A frame missing it is
+        // malformed → drop.
+        assertNull(
+            TokenStreamFrame.parse(
+                "message.part.removed",
+                """{"sessionID":"s1","messageID":"m1","partID":"p2"}""",
+            )
+        )
+    }
+
+    @Test
+    fun `message_part_removed missing partID yields null`() {
+        assertNull(
+            TokenStreamFrame.parse(
+                "message.part.removed",
+                """{"sessionID":"s1","messageID":"m1","messageEventSeq":1}""",
+            )
+        )
+    }
+
+    @Test
+    fun `message_part_removed missing sessionID yields null`() {
+        assertNull(
+            TokenStreamFrame.parse(
+                "message.part.removed",
+                """{"messageID":"m1","partID":"p2","messageEventSeq":1}""",
+            )
+        )
+    }
+
+    @Test
+    fun `message_part_removed messageEventSeq null JSON yields null`() {
+        assertNull(
+            TokenStreamFrame.parse(
+                "message.part.removed",
+                """{"sessionID":"s1","messageID":"m1","partID":"p2","messageEventSeq":null}""",
+            )
+        )
+    }
+
+    @Test
+    fun `message_removed maps sessionID and messageID`() {
+        val frame = TokenStreamFrame.parse(
+            "message.removed",
+            """{"sessionID":"s1","messageID":"m1"}""",
+        ) as TokenStreamFrame.MessageRemoved
+        assertEquals("s1", frame.sessionId)
+        assertEquals("m1", frame.messageId)
+    }
+
+    @Test
+    fun `message_removed missing sessionID yields null`() {
+        assertNull(
+            TokenStreamFrame.parse(
+                "message.removed",
+                """{"messageID":"m1"}""",
+            )
+        )
+    }
+
+    @Test
+    fun `message_removed missing messageID yields null`() {
+        assertNull(
+            TokenStreamFrame.parse(
+                "message.removed",
+                """{"sessionID":"s1"}""",
+            )
+        )
+    }
+
+    @Test
+    fun `message_removed tolerates extra fields`() {
+        // Forward-compat: a future sidecar may add fields; the parser
+        // must not drop the frame for that.
+        val frame = TokenStreamFrame.parse(
+            "message.removed",
+            """{"sessionID":"s1","messageID":"m1","futureField":99}""",
+        )
+        assertTrue(frame is TokenStreamFrame.MessageRemoved)
+    }
+
     @Test
     fun `resync maps reason and optional sessionID`() {
         val withSid = TokenStreamFrame.parse(

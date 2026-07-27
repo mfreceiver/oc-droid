@@ -141,6 +141,35 @@ class SlimSyncEngine internal constructor(
 
     internal companion object {
         internal const val SLIM_COLDSTART_SESSION_LIMIT = 500
+
+        /**
+         * §阶段B C1 / P0-4 (frozen protocol): max consecutive truncation
+         * Partials the **anchored `/since` drain**
+         * ([drainSlimSinceBoundedOutcome]) will retry (by re-walking from
+         * the original anchor + `before = null`) before degrading to
+         * [SlimDrainOutcome.Degraded]. Truncation = `/since` terminal
+         * page reached (`nextCursor == null`) but `X-Since-Complete`
+         * parsed as `false` (sidecar signalled it did NOT return the
+         * complete anchored scan).
+         *
+         * §阶段B C1 fix: this constant NO LONGER applies to the
+         * `/messages` drain ([drainSlimapiMessagesBoundedOutcome]) —
+         * `/messages` has no `X-Since-Complete` truncation signal. Its
+         * terminal Success is `nextCursor == null` and there is no
+         * re-walk. The previous application of this budget to `/messages`
+         * was the C1 bug (it broke the cold-start path because real
+         * `/messages` responses do not carry `X-Since-Complete`).
+         *
+         * Transport / null-body / protocol-failure Partials do NOT count
+         * toward this limit (they surface immediately).
+         *
+         * After this many consecutive truncation Partials, the `/since`
+         * drain returns [SlimDrainOutcome.Degraded] (cause =
+         * `SlimDrainBoundExceededException("max partial retries exceeded
+         * (since truncation)")`) to prevent infinite re-walks on a
+         * persistently-truncating sidecar.
+         */
+        internal const val MAX_PARTIAL_RETRIES = 3
     }
 
     // ── Public API: anchored /since fetch ──────────────────────────────────────
@@ -299,7 +328,88 @@ class SlimSyncEngine internal constructor(
         // via commitAuthoritative; an item-bound mid-walk page must NOT
         // advance localApplied*.
         val nextCursor = response.headers()["X-Next-Cursor"]
+        // §阶段B C1 (frozen protocol): `/messages` is the NO-ANCHOR cursor
+        // window. Its terminal signal is `nextCursor == null` — full stop.
+        // X-Since-Complete is FORBIDDEN on this endpoint (it is only
+        // meaningful on the anchored /since endpoint, where the sidecar
+        // can make a "scan-complete relative to anchor" claim). The
+        // previous read of X-Since-Complete here was the C1 bug. The
+        // /since page helper ([getSlimSincePage]) is the ONLY place that
+        // surfaces that header (as [SlimSincePage.sinceComplete]).
         MessagesPage(items = items, nextCursor = nextCursor)
+    }
+
+    /**
+     * §阶段B C1 / P0-4 (frozen protocol): single-page fetch of the
+     * ANCHORED `/since` endpoint
+     * (`GET /slimapi/messages/{sid}/since/{ts}?limit=…&before=…`).
+     *
+     * Returns [SlimSincePage] carrying [SlimSincePage.sinceComplete]
+     * (parsed from the `X-Since-Complete` response header). The header
+     * is REQUIRED by the frozen /since contract — a missing or
+     * unparseable value is a protocol failure (throws
+     * [SlimSinceProtocolException], surfaced as [SlimDrainOutcome.Partial]
+     * by the drain). There is NO nullable "defensive" fallback: the
+     * previous nullable encoding hid sidecar contract violations behind
+     * a silent `false`, which compounded the C1 bug.
+     *
+     * This is the page-level primitive consumed by
+     * [drainSlimSinceBoundedOutcome] (P0-4 drain). It is distinct from
+     * [fetchSinceForStageA] (which is the Stage-A single-page STAGING
+     * surface — returns [SlimSinceStageAOutcome] with a nullable
+     * [SlimSinceStageAOutcome.Staged.completeHeader] for diagnostics and
+     * performs NO drain, NO commit). The Stage-A staging path stays as
+     * it is; this method is the page-fetch primitive for the typed
+     * drain that follows the frozen protocol's terminal-success rule:
+     * `nextCursor == null && X-Since-Complete == true`.
+     *
+     * # Exception classification (mirrors [getSlimapiMessagesPage])
+     *  - transport / IO / non-2xx → wrapped as `Result.failure` (drain
+     *    classifies as [SlimDrainOutcome.Partial]).
+     *  - 2xx null body → [SlimPageIncompleteException] (Partial).
+     *  - 2xx missing/unparseable `X-Since-Complete` →
+     *    [SlimSinceProtocolException] (Partial; protocol failure).
+     *  - [CancellationException] / [OpenCodeRepository.StaleSlimCommitException]
+     *    propagate verbatim (via [runSlimStaleAwareCatching]).
+     */
+    internal suspend fun getSlimSincePage(
+        sessionId: String,
+        since: Long,
+        limit: Int?,
+        before: String?,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): Result<SlimSincePage> = runSlimStaleAwareCatching(token) {
+        val response = apiProvider(token).getSlimapiMessagesSince(
+            sessionId = sessionId,
+            sinceTimestamp = since,
+            limit = limit,
+            before = before,
+        )
+
+        slimStateMachine.requireSlimTokenCurrent(token)
+
+        if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
+        val items = response.body() ?: throw SlimPageIncompleteException("null_body")
+        val nextCursor = response.headers()["X-Next-Cursor"]
+        // §阶段B C1 (frozen protocol): /since header is REQUIRED. Missing /
+        // unparseable → protocol failure (no nullable fallback). The drain
+        // surfaces this as Partial.
+        val rawComplete = response.headers()["X-Since-Complete"]
+            ?: throw SlimSinceProtocolException(
+                "X-Since-Complete header missing on /since response (sid=$sessionId, since=$since)",
+            )
+        val sinceComplete = when (rawComplete.trim().lowercase()) {
+            "true" -> true
+            "false" -> false
+            else -> throw SlimSinceProtocolException(
+                "X-Since-Complete header unparseable on /since response: raw=$rawComplete (sid=$sessionId)",
+            )
+        }
+        SlimSincePage(
+            items = items,
+            nextCursor = nextCursor,
+            sinceComplete = sinceComplete,
+        )
     }
 
     // ── Cold-start + bounded drain ──────────────────────────────────────────────
@@ -679,17 +789,24 @@ class SlimSyncEngine internal constructor(
     }
 
     /**
-     * Bounded skeleton-cursor drain (G5 cursor follow).
+     * Bounded skeleton-cursor drain (G5 cursor follow) over the NO-ANCHOR
+     * `/messages` endpoint.
      *
      * Walks the skeleton-only message window for [sessionId] via cursor-
      * paginated `GET /slimapi/messages/{sid}?limit=…&before=…&mode=skeleton`
      * up to [itemBound] items OR page-count cap (wall-clock 30 s timeout),
      * whichever hits first.
      *
+     * §阶段B C1 (frozen protocol): `/messages` is the NO-ANCHOR cursor
+     * window. Its terminal signal is **`nextCursor == null`** — full stop.
+     * `X-Since-Complete` is FORBIDDEN on this endpoint (C1 bug). The
+     * anchored `/since` drain ([drainSlimSinceBoundedOutcome]) is the
+     * ONLY drain that consults `X-Since-Complete`.
+     *
      * Returns ONE OF:
      *  - [SlimDrainOutcome.Success] — all pages succeeded and the final
-     *    page had `nextCursor == null`. The local watermark is NOT advanced
-     *    by the drain — the caller MUST construct a
+     *    page had `nextCursor == null`. The local watermark is NOT
+     *    advanced by the drain — the caller MUST construct a
      *    [SlimAuthoritativeCandidate] and drive
      *    [SlimAuthoritativeCommitter.commitAuthoritative] to advance the
      *    watermark / clear dirty / replace visible content atomically.
@@ -707,8 +824,7 @@ class SlimSyncEngine internal constructor(
      * while the server's `X-Next-Cursor` is non-null, the result MUST be
      * [SlimDrainOutcome.Partial] (cause =
      * [SlimDrainBoundExceededException]); the walk may NOT return Success
-     * and may NOT bump the bookmark. Only an explicit terminal page
-     * (`nextCursor == null`) is Success.
+     * and may NOT bump the bookmark.
      *
      * Implementation shape (page-level check, NOT per-item):
      *   1. fetch + aggregate the FULL page (dedup by message id)
@@ -720,7 +836,8 @@ class SlimSyncEngine internal constructor(
      *      a non-null cursor still pending → Partial
      *      (SlimDrainBoundExceededException, NO bump)
      * The per-item loop MUST NOT return Success based on `aggregated.size`
-     * alone — the page's `nextCursor` is the only completeness signal.
+     * alone — the page's `nextCursor == null` is the only completeness
+     * signal on this endpoint.
      *
      * BOOKMARK INVARIANT (fix-6 P0-3): The drain NEVER bumps the bookmark.
      * Only [SlimAuthoritativeCommitter.commitAuthoritative] advances
@@ -741,17 +858,19 @@ class SlimSyncEngine internal constructor(
         itemBound: Int,
         token: OpenCodeRepository.SlimCommitToken,
     ): SlimDrainOutcome {
-        val aggregated = mutableListOf<MessageWithParts>()
-        val seen = HashSet<String>()
-        var before: String? = null
         // +1 slack page for the trailing partial; ceil via Int math.
         val maxPages = (itemBound + pageLimit - 1) / pageLimit + 1
+        val aggregated = mutableListOf<MessageWithParts>()
 
-        // G-F1: wall-clock bound for the entire cursor walk (30s). On timeout
-        // surface as Partial (preserve dirty, retain aggregated items).
+        // G-F1: wall-clock bound for the entire cursor walk (30s). On
+        // timeout surface as Partial (preserve dirty, retain aggregated
+        // items for diagnostics).
         return try {
             withTimeout(30_000L) {
-                repeat(maxPages) {
+                val seen = HashSet<String>()
+                var before: String? = null
+
+                for (pageIndex in 0 until maxPages) {
                     // C-D3 v2 §1.4: SAME entry token on every page. No recapture.
                     val page = getSlimapiMessagesPage(
                         sessionId = sessionId,
@@ -812,35 +931,30 @@ class SlimSyncEngine internal constructor(
                         }
                     }
 
-                    // ── §11.5 page-level terminal check (nextCursor FIRST) ──────────
-                    // nextCursor is the ONLY completeness signal. itemBound / page
-                    // cap are SAFETY limits, NOT proof.
-                    when {
-                        page.nextCursor == null -> {
-                            // Explicit terminal page → Success. Even if the
-                            // aggregate happens to hit itemBound on this exact
-                            // page, the server signalled end-of-history → success.
-                            // §11.1 fix-6 P0-3: do NOT bump bookmark here — the
-                            // watermark advance happens atomically inside
-                            // commitAuthoritative (via replaceLocalAppliedAndClearDirty).
-                            // Bumping here would split the "classify → commit"
-                            // atomicity: a CacheWriteFailed/StaleToken/MergeRejected
-                            // after the bump would leave localApplied advanced but
-                            // visibleContent/authoritativeLocal/dirty unchanged.
-                            return@withTimeout SlimDrainOutcome.Success(aggregated.toList())
-                        }
+                    // ── §阶段B C1 (frozen protocol): terminal check ──────────────────
+                    // `/messages` is the NO-ANCHOR cursor window. Its terminal
+                    // signal is `nextCursor == null` — period. X-Since-Complete
+                    // is FORBIDDEN on this endpoint (C1 bug). The anchored
+                    // `/since` drain ([drainSlimSinceBoundedOutcome]) is the
+                    // ONLY drain that consults X-Since-Complete.
+                    if (page.nextCursor == null) {
+                        // §11.1 fix-6 P0-3: do NOT bump bookmark here —
+                        // the watermark advance happens atomically inside
+                        // commitAuthoritative. Bumping here would split
+                        // the "classify → commit" atomicity.
+                        return@withTimeout SlimDrainOutcome.Success(aggregated.toList())
+                    }
 
-                        aggregated.size >= itemBound -> {
-                            // Item safety bound hit while cursor is STILL non-null
-                            // → Partial. The bound is not completeness proof; the
-                            // walk has NOT exhausted history. NO bookmark bump.
-                            return@withTimeout SlimDrainOutcome.Partial(
-                                items = aggregated.toList(),
-                                cause = SlimDrainBoundExceededException(
-                                    "item bound reached before cursor exhaustion",
-                                ),
-                            )
-                        }
+                    if (aggregated.size >= itemBound) {
+                        // Item safety bound hit while cursor is STILL non-null
+                        // → Partial. The bound is not completeness proof; the
+                        // walk has NOT exhausted history. NO bookmark bump.
+                        return@withTimeout SlimDrainOutcome.Partial(
+                            items = aggregated.toList(),
+                            cause = SlimDrainBoundExceededException(
+                                "item bound reached before cursor exhaustion",
+                            ),
+                        )
                     }
 
                     before = page.nextCursor
@@ -856,6 +970,213 @@ class SlimSyncEngine internal constructor(
             }
         } catch (e: TimeoutCancellationException) {
             // §11.5: wall-clock timeout → Partial, NO bookmark bump.
+            SlimDrainOutcome.Partial(aggregated.toList(), e)
+        }
+    }
+
+    /**
+     * §阶段B C1 / P0-4 (frozen protocol): bounded ANCHORED `/since` cursor
+     * drain — the typed incremental-sync drain that complements the
+     * no-anchor `/messages` drain ([drainSlimapiMessagesBoundedOutcome]).
+     *
+     * Walks the anchored incremental window
+     * `GET /slimapi/messages/{sid}/since/{anchor}?limit=…&before=…`
+     * up to [itemBound] items OR page-count cap (wall-clock 30 s timeout),
+     * whichever hits first. The [anchor] is captured ONCE at entry and
+     * reused for every page (cursor-follow uses `?before=` only; the
+     * anchor `?since=` is constant within one walk).
+     *
+     * # Frozen protocol state machine
+     *
+     * ```
+     * originalAnchor = anchor
+     * before = null
+     * fetch /since page (via [getSlimSincePage] → [SlimSincePage])
+     * ├─ HTTP / transport / null body / invalid header → Partial
+     * ├─ nextCursor != null
+     * │    ├─ bound / loop → Partial / Degraded
+     * │    └─ before = nextCursor，继续
+     * └─ nextCursor == null
+     *      ├─ X-Since-Complete == true  → Success
+     *      └─ X-Since-Complete == false → truncation retry：从
+     *          originalAnchor + before=null 重走，[MAX_PARTIAL_RETRIES]
+     *          次后 Degraded
+     * ```
+     *
+     * # Terminal Success condition (frozen)
+     *
+     * `nextCursor == null && X-Since-Complete == true`. This is the
+     * endpoint-specific Success rule for `/since` (anchored incremental
+     * scan); the `/messages` drain's terminal rule is just
+     * `nextCursor == null`.
+     *
+     * # Truncation retry budget
+     *
+     * `nextCursor == null && X-Since-Complete == false` (sidecar signalled
+     * it did NOT return the full anchored scan) → re-walk from
+     * `originalAnchor` + `before = null`. After [MAX_PARTIAL_RETRIES]
+     * consecutive truncations → Degraded (cause =
+     * `SlimDrainBoundExceededException("max partial retries exceeded")`).
+     * Transport-failure Partials (HTTP error / timeout / socket drop /
+     * protocol failure from a missing/unparseable X-Since-Complete
+     * header) do NOT count toward the truncation retry budget — they
+     * surface immediately as Partial.
+     *
+     * # Incremental merge contract (caller responsibility)
+     *
+     * On [SlimDrainOutcome.Success], the caller MUST merge the drained
+     * items onto the existing authoritative set via [mergeSlimMessageSet]
+     * with `complete = false` (incremental, NOT a full snapshot). Missing-
+     * from-incoming ids MUST be RETAINED — the `/since` anchored scan is
+     * best-effort incremental; a missing existing message is NOT a
+     * deletion (frozen protocol: "missing message ≠ deleted"). The drain
+     * itself performs NO merge and NO commit (BOOKMARK INVARIANT below).
+     *
+     * BOOKMARK INVARIANT (mirrors [drainSlimapiMessagesBoundedOutcome]):
+     * the drain NEVER bumps the bookmark. Only
+     * [SlimAuthoritativeCommitter.commitAuthoritative] advances
+     * `localApplied*` / clears `dirty` / replaces `visibleContent` — all
+     * inside one token-guarded critical section.
+     *
+     * CE discipline: [CancellationException] (non-timeout) propagates out
+     * of [getSlimSincePage] via [runSlimStaleAwareCatching] and is NOT
+     * caught here — it surfaces to the caller as a thrown CE (not as a
+     * Partial). Only [TimeoutCancellationException] (the 30 s wall-clock
+     * bound) is caught and mapped to Partial.
+     */
+    internal suspend fun drainSlimSinceBoundedOutcome(
+        sessionId: String,
+        anchor: Long,
+        pageLimit: Int,
+        itemBound: Int,
+        token: OpenCodeRepository.SlimCommitToken,
+    ): SlimDrainOutcome {
+        // +1 slack page for the trailing partial; ceil via Int math.
+        val maxPages = (itemBound + pageLimit - 1) / pageLimit + 1
+        val aggregated = mutableListOf<MessageWithParts>()
+
+        return try {
+            withTimeout(30_000L) {
+                // §阶段B P0-4: outer truncation-retry loop. On a truncation
+                // Partial (terminal page but X-Since-Complete == false),
+                // re-walk from the original anchor + before=null. After
+                // MAX_PARTIAL_RETRIES consecutive truncations → Degraded.
+                var truncationRetries = 0
+                walk@ while (true) {
+                    // Reset per-walk state (truncation retry = fresh walk).
+                    aggregated.clear()
+                    val seen = HashSet<String>()
+                    var before: String? = null
+
+                    for (pageIndex in 0 until maxPages) {
+                        val page = getSlimSincePage(
+                            sessionId = sessionId,
+                            since = anchor,
+                            limit = pageLimit,
+                            before = before,
+                            token = token,
+                        ).getOrElse { error ->
+                            // Stale incarnation is NOT an ordinary partial
+                            // transport result; it invalidates the entire
+                            // aggregate.
+                            if (error is OpenCodeRepository.StaleSlimCommitException) {
+                                throw error
+                            }
+                            // HTTP / transport / null body / protocol failure
+                            // (missing/unparseable X-Since-Complete) → Partial.
+                            // Does NOT count toward the truncation budget.
+                            return@withTimeout SlimDrainOutcome.Partial(
+                                items = aggregated.toList(),
+                                cause = error,
+                            )
+                        }
+
+                        slimStateMachine.requireSlimTokenCurrent(token)
+
+                        // ── G-F1 loop detection (mirrors /messages drain) ───────────
+                        val loopDetected =
+                            (before != null && page.nextCursor == before) ||
+                                (page.nextCursor != null && page.items.all { it.info.id in seen })
+                        if (loopDetected) {
+                            return@withTimeout if (aggregated.isEmpty()) {
+                                SlimDrainOutcome.Partial(
+                                    items = emptyList(),
+                                    cause = SlimDrainLoopException(
+                                        "loop detected on first page: cursor=$before",
+                                    ),
+                                )
+                            } else {
+                                SlimDrainOutcome.Degraded(
+                                    items = aggregated.toList(),
+                                    cause = SlimDrainLoopException(
+                                        "loop detected after page: cursor=$before",
+                                    ),
+                                )
+                            }
+                        }
+
+                        // ── page-level aggregate (dedup by id) ─────────────────────
+                        for (item in page.items) {
+                            if (seen.add(item.info.id)) {
+                                aggregated += item
+                            }
+                        }
+
+                        // ── terminal check (frozen /since protocol) ────────────────
+                        if (page.nextCursor == null) {
+                            if (page.sinceComplete) {
+                                // Success: cursor window exhausted AND sidecar
+                                // signalled the anchored scan was complete.
+                                return@withTimeout SlimDrainOutcome.Success(aggregated.toList())
+                            }
+                            // Truncation: terminal page but sinceComplete=false.
+                            // Re-walk from the original anchor + before=null.
+                            truncationRetries++
+                            if (truncationRetries >= MAX_PARTIAL_RETRIES) {
+                                return@withTimeout SlimDrainOutcome.Degraded(
+                                    items = aggregated.toList(),
+                                    cause = SlimDrainBoundExceededException(
+                                        "max partial retries exceeded (since truncation)",
+                                    ),
+                                )
+                            }
+                            DebugLog.w(
+                                "SlimapiResync",
+                                "drain /since truncation retry sid=$sessionId " +
+                                    "attempt=$truncationRetries/$MAX_PARTIAL_RETRIES",
+                            )
+                            continue@walk
+                        }
+
+                        if (aggregated.size >= itemBound) {
+                            // Item safety bound hit while cursor is STILL
+                            // non-null → Partial. The bound is not a
+                            // completeness proof; the anchored scan has NOT
+                            // been completed.
+                            return@withTimeout SlimDrainOutcome.Partial(
+                                items = aggregated.toList(),
+                                cause = SlimDrainBoundExceededException(
+                                    "item bound reached before cursor exhaustion",
+                                ),
+                            )
+                        }
+
+                        before = page.nextCursor
+                    }
+                    // Page-count safety cap exhausted with a non-null cursor
+                    // still pending → Partial.
+                    return@withTimeout SlimDrainOutcome.Partial(
+                        items = aggregated.toList(),
+                        cause = SlimDrainBoundExceededException(
+                            "page bound reached before cursor exhaustion",
+                        ),
+                    )
+                }
+                @Suppress("UNREACHABLE_CODE")
+                error("unreachable: walk@ while(true) returns via return@withTimeout")
+            }
+        } catch (e: TimeoutCancellationException) {
+            // wall-clock timeout → Partial, NO bookmark bump.
             SlimDrainOutcome.Partial(aggregated.toList(), e)
         }
     }

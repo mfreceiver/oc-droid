@@ -136,6 +136,158 @@ class SlimMessagesMergeTokenStreamContractTest {
         assertEquals(seed.partsByMessage, resultTrue.partsByMessage)
     }
 
+    // ── §rev-ogpt severe #2: empty parts is authoritative replacement ──────
+
+    @Test
+    fun `severe-2 - empty parts clears partsByMessage when streamOwned is empty (authoritative=false)`() {
+        // Pre-fix: an item with parts=[] was a no-op for partsByMessage, so
+        // a removed-last-part message left its stale Part entries in the map
+        // (ghost content). Post-fix: parts=[] clears partsByMessage[msgId].
+        val seed = ChatState(
+            messages = listOf(msg("m1", 1000L)),
+            partsByMessage = mapOf("m1" to listOf(part("p1", "m1", "stale-text"))),
+            streamOwned = emptyMap(),
+        )
+        val items = listOf(
+            MessageWithParts(info = msg("m1", 1000L), parts = emptyList()),
+        )
+        val result = seed.mergeSlimMessages(items, authoritative = false)
+        assertTrue(
+            "partsByMessage[m1] MUST be empty when fetched parts is empty and streamOwned is clear",
+            result.partsByMessage["m1"]?.isEmpty() == true,
+        )
+    }
+
+    @Test
+    fun `severe-2 - empty parts clears partsByMessage when streamOwned is empty (authoritative=true)`() {
+        val seed = ChatState(
+            messages = listOf(msg("m1", 1000L)),
+            partsByMessage = mapOf("m1" to listOf(part("p1", "m1", "stale-text"))),
+            streamOwned = emptyMap(),
+        )
+        val items = listOf(
+            MessageWithParts(info = msg("m1", 1000L), parts = emptyList()),
+        )
+        val result = seed.mergeSlimMessages(items, authoritative = true)
+        assertTrue(
+            "partsByMessage[m1] MUST be empty on authoritative empty-parts merge",
+            result.partsByMessage["m1"]?.isEmpty() == true,
+        )
+        assertTrue(result.streamOwned.isEmpty())
+        assertTrue(result.streamingPartTexts.isEmpty())
+    }
+
+    @Test
+    fun `severe-2 - empty parts preserves STREAMING-owned local when overlay still active (authoritative=false)`() {
+        // The reverse of the above: when the token-stream overlay for p1 is
+        // STILL active (no ClearPartState has fired yet — the server hasn't
+        // sent message.part.removed, /full just hasn't caught up), the
+        // §Stage-B skeleton contract keeps the live streamed text. This is
+        // the same preservedLocal semantics as a skeleton merge — the empty
+        // parts list just means "nothing fetched", not "delete the active
+        // stream". Once the removal event fires and ClearPartState clears
+        // streamOwned, a subsequent empty-parts merge will collapse to []
+        // (covered by the test above).
+        val seed = ChatState(
+            messages = listOf(msg("m1", 1000L)),
+            partsByMessage = mapOf("m1" to listOf(part("p1", "m1", "streamed-live-text"))),
+            streamOwned = mapOf("p1" to StreamOwnedState.STREAMING),
+            streamingPartTexts = mapOf("p1" to "streamed-live-text"),
+        )
+        val items = listOf(
+            MessageWithParts(info = msg("m1", 1000L), parts = emptyList()),
+        )
+        val result = seed.mergeSlimMessages(items, authoritative = false)
+        assertEquals(
+            "STREAMING-owned part preserved through empty-parts skeleton merge",
+            listOf(part("p1", "m1", "streamed-live-text")),
+            result.partsByMessage["m1"],
+        )
+        // Ownership + overlay untouched.
+        assertEquals(seed.streamOwned, result.streamOwned)
+        assertEquals(seed.streamingPartTexts, result.streamingPartTexts)
+    }
+
+    @Test
+    fun `severe-2 - empty parts collapses to empty when streamOwned was cleared post-removal (authoritative=false)`() {
+        // End-to-end severe #2 + #3 contract: a part removed upstream fires
+        // ClearPartState → the coordinator's ClearTokenStreamState clears
+        // streamOwned[p1] → the subsequent /full arrives with parts=[] →
+        // preservedLocal now sees newOwned[p1] == null (not STREAMING) and
+        // drops the local → partsByMessage[m1] collapses to [].
+        val seed = ChatState(
+            messages = listOf(msg("m1", 1000L)),
+            partsByMessage = mapOf("m1" to listOf(part("p1", "m1", "stale-text"))),
+            // Simulate the post-ClearPartState state: p1 is in partsByMessage
+            // (the stale placeholder) but streamOwned has been torn down.
+            streamOwned = emptyMap(),
+            streamingPartTexts = emptyMap(),
+        )
+        val items = listOf(
+            MessageWithParts(info = msg("m1", 1000L), parts = emptyList()),
+        )
+        val result = seed.mergeSlimMessages(items, authoritative = false)
+        assertTrue(
+            "stale placeholder cleared after streamOwned torn down + empty /full",
+            result.partsByMessage["m1"]?.isEmpty() == true,
+        )
+    }
+
+    @Test
+    fun `severe-2 - empty parts on authoritative merge clears STREAMING-owned overlay for stale locals`() {
+        // Authoritative empty-parts merge (resync / watchdog): even if p1 is
+        // STREAMING-owned locally, an authoritative view with parts=[] means
+        // the server has dropped the part upstream — ownership MUST be cleared
+        // and partsByMessage collapsed. This is the §Stage-B M5 contract:
+        // authoritative treats the fetched items as the final view.
+        val seed = ChatState(
+            messages = listOf(msg("m1", 1000L)),
+            partsByMessage = mapOf("m1" to listOf(part("p1", "m1", "streamed-live-text"))),
+            streamOwned = mapOf("p1" to StreamOwnedState.STREAMING),
+            streamingPartTexts = mapOf("p1" to "streamed-live-text"),
+        )
+        val items = listOf(
+            MessageWithParts(info = msg("m1", 1000L), parts = emptyList()),
+        )
+        val result = seed.mergeSlimMessages(items, authoritative = true)
+        assertTrue(
+            "partsByMessage[m1] empty on authoritative empty-parts merge",
+            result.partsByMessage["m1"]?.isEmpty() == true,
+        )
+        assertTrue("streamOwned cleared", result.streamOwned.isEmpty())
+        assertTrue("streamingPartTexts cleared", result.streamingPartTexts.isEmpty())
+    }
+
+    @Test
+    fun `severe-2 - mixed batch with one empty-parts item only clears that message's parts`() {
+        // Two messages: m1 has parts, m2 has parts. The fetched items carry
+        // an empty parts list for m1 (removed) and a normal parts list for
+        // m2. Only m1's partsByMessage entry should collapse; m2's should be
+        // replaced by the fetched parts (normal merge).
+        val seed = ChatState(
+            messages = listOf(msg("m1", 1000L), msg("m2", 2000L)),
+            partsByMessage = mapOf(
+                "m1" to listOf(part("p1", "m1", "stale")),
+                "m2" to listOf(part("p2", "m2", "old")),
+            ),
+            streamOwned = emptyMap(),
+        )
+        val items = listOf(
+            MessageWithParts(info = msg("m1", 1000L), parts = emptyList()),
+            MessageWithParts(
+                info = msg("m2", 2000L),
+                parts = listOf(part("p2", "m2", "refreshed")),
+            ),
+        )
+        val result = seed.mergeSlimMessages(items, authoritative = false)
+        assertTrue("m1 parts cleared", result.partsByMessage["m1"]?.isEmpty() == true)
+        assertEquals(
+            "m2 parts replaced (normal merge)",
+            listOf(part("p2", "m2", "refreshed")),
+            result.partsByMessage["m2"],
+        )
+    }
+
     // ── Splice semantics when streamOwned IS populated ─────────────────────
 
     @Test

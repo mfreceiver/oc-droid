@@ -52,7 +52,14 @@ import javax.inject.Singleton
  */
 @Singleton
 class SharedStateStore @Inject constructor() {
-    private val state: MutableStateFlow<StoreState> = MutableStateFlow(StoreState.initial())
+    internal var state: MutableStateFlow<StoreState> = MutableStateFlow(StoreState.initial())
+        private set
+
+    /** Test-only: inject a custom [MutableStateFlow] for deterministic CAS control
+     *  (e.g., to simulate CAS failure / retry sequences). */
+    internal constructor(testState: MutableStateFlow<StoreState>) : this() {
+        state = testState
+    }
 
     /**
      * §A5-3 Phase B2: read-only aggregate [StateFlow] over the single
@@ -227,6 +234,48 @@ class SharedStateStore @Inject constructor() {
      */
     internal fun dispatch(action: AppAction) {
         state.update { reduce(it, action) }
+    }
+
+    /**
+     * §rev-2 TOCTOU fix: dispatch an [AppAction] inside the CAS retry loop
+     * and return whether the reducer accepted (i.e., actually modified state).
+     *
+     * The reducer returns the SAME [StoreState] reference when it rejects
+     * (due to stale bundle / route / session), and a NEW reference from
+     * `copy(...)` when it accepts. By comparing references inside the CAS
+     * loop's LAST invocation (the one that actually commits), the verdict
+     * reflects the truly committed state — closing the TOCTOU window between
+     * a pre-check read and the dispatch write.
+     *
+     * # CAS retry semantics
+     *
+     * [MutableStateFlow.update] calls the reducer function with the latest
+     * current state in a compare-and-swap loop until the CAS succeeds. If
+     * a concurrent writer mutates the state between the reducer call and the
+     * CAS, the loop retries with the new state. The `accepted` flag is set
+     * on EVERY call where the reducer produces a new reference; the LAST
+     * call's verdict (the one that actually committed) is what gets returned.
+     *
+     * # Callers
+     *
+     * Used by [ControllerModule]'s `dispatchSlimFullReconciled` and
+     * `dispatchMessageRemoved` production hooks (and any future dispatch
+     * site that needs to gate side-effects on the reducer's verdict).
+     * Does NOT change the 170+ existing [dispatch] call sites (which
+     * fire-and-forget and do not need the return value).
+     */
+    internal fun dispatchAndVerify(action: AppAction): Boolean {
+        // CAS loop: run reduce inside the retry, and only the LAST iteration's
+        // verdict (the one that actually committed) is returned. This closes the
+        // TOCTOU window AND the sticky-variable bug (the old `accepted` flag
+        // persisted across CAS retries).
+        while (true) {
+            val current = state.value
+            val next = reduce(current, action)
+            if (state.compareAndSet(current, next)) {
+                return next !== current
+            }
+        }
     }
 
     /** §history-load-fix: per-session message-list mutation lock shared by the

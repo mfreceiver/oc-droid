@@ -196,6 +196,19 @@ data class SlimSessionState(
 class SlimSseState {
     private val sessions = mutableMapOf<String, SlimSessionState>()
 
+    /**
+     * B-P0-3: per-session [MessageWatermarkState] accumulators.
+     * Populated lazily via [watermarksFor] (the first digest / token
+     * event for a sessionID seeds its map). The LRU cap (500 messages
+     * per session) is enforced inside [MessageWatermarkState].
+     *
+     * Cleared by [clear] (host switch via `beginSlimReconfigure`) AND
+     * selectively reset by [clearAndMarkAllWatermarksForReconnect]
+     * (server.connected / resync — messageIDs preserved, flagged
+     * `needsFullRecheck`).
+     */
+    private val sessionWatermarks = mutableMapOf<String, MessageWatermarkState>()
+
     @Synchronized
     fun get(sessionId: String): SlimSessionState? = sessions[sessionId]
 
@@ -207,8 +220,45 @@ class SlimSseState {
     @Synchronized
     fun all(): Map<String, SlimSessionState> = sessions.toMap()
 
+    /**
+     * B-P0-3: returns the per-session [MessageWatermarkState],
+     * seeding it lazily on first access. The returned reference is
+     * the live mutable accumulator (NOT a snapshot); callers mutate
+     * it via its own `@Synchronized` methods. Holding the
+     * [SlimSseState] monitor around the get-or-put keeps the seed
+     * race-free; subsequent mutations ride the inner lock.
+     */
     @Synchronized
-    fun clear() = sessions.clear()
+    fun watermarksFor(sessionId: String): MessageWatermarkState =
+        sessionWatermarks.getOrPut(sessionId) { MessageWatermarkState() }
+
+    /**
+     * B-P0-3: snapshot of every session's watermark map. Used by
+     * B-P0-1's wiring layer to scan for `needsFullRecheck=true`
+     * entries across all sessions.
+     */
+    @Synchronized
+    fun snapshotAllWatermarks(): Map<String, Map<String, MessageWatermark>> =
+        sessionWatermarks.mapValues { it.value.all() }
+
+    /**
+     * B-P0-3: server.connected / resync reset for ALL sessions. Clears
+     * each session's seq state, preserves messageIDs, flags every
+     * message `needsFullRecheck=true` so B-P0-1 can drive R1
+     * (REST `/since`) for each.
+     *
+     * Returns the per-session set of messageIDs that were flagged
+     * (B-P0-1's R1 work set).
+     */
+    @Synchronized
+    fun clearAndMarkAllWatermarksForReconnect(): Map<String, Set<String>> =
+        sessionWatermarks.mapValues { it.value.clearAndMarkAllForReconnect() }
+
+    @Synchronized
+    fun clear() {
+        sessions.clear()
+        sessionWatermarks.clear()
+    }
 
     /**
      * Advances the **remote** watermark ([SlimSessionState.remoteUpdatedAt])
@@ -434,6 +484,17 @@ fun reduceSlimDigest(
     // failures.
     val merged = if (needsReconcile(candidate)) candidate.copy(dirty = true) else candidate
     state.put(sessionId, merged)
+
+    // B-P0-3: fold the digest's per-message `contentRevisions` map
+    // into the per-session [MessageWatermarkState]. Each entry drives
+    // the loss / untrustworthy detection (seq > local ⇒ needsFullRecheck;
+    // seq == 0 ⇒ needsFullRecheck). The token part.updated path
+    // (per-part dedup) is wired separately — see
+    // [MessageWatermarkState.applyPartRevision] + SlimSseStateMachine.
+    // The 100ms debounce + actual `/full` call live in B-P0-1.
+    digest.contentRevisions?.forEach { (messageId, seq) ->
+        state.watermarksFor(sessionId).applyDigestRevision(messageId, seq)
+    }
 
     // Fetch decision — TRIGGER vs ANCHOR split (rev-gpt Critical fix,
     // restated for the T1 tuple regime):

@@ -107,6 +107,30 @@ data class TokenStreamConnection(
     val bundle: ClientBundle,
 )
 
+/**
+ * §Stage-B C3 (CRITICAL): the route + bundle context captured at the moment
+ * a token frame's commit hook fires. The hooks ([TokenStreamCoordinator.dedupPartRevision],
+ * [TokenStreamCoordinator.onMessagePartRemoved], [TokenStreamCoordinator.onMessageRemoved])
+ * MUST receive the context that was live at the frame's dispatch entry — NOT
+ * a fresh "latest route token" read at callback time. Threading the captured
+ * pair verbatim preserves the epoch+bundle critical-section invariant: a
+ * bundle rotation between the epoch check and the hook is impossible, and a
+ * late straggler frame cannot adopt a newer route incarnation.
+ *
+ * - [expectedRouteInstance]: the [SliceFlows.routeInstanceFor] snapshot
+ *   captured at THIS lifecycle's open()/runStream() entry (the same value
+ *   threaded as `capturedRouteInstance` through [TokenStreamCoordinator.dispatchEpochFrame]).
+ * - [bundleStamp]: the [BundleStamp] derived from the bound [ClientBundle]
+ *   (generation + endpointFp) at dispatch time. Production wiring (Lane I)
+ *   forwards these verbatim into [AppAction.SlimFullMessageReconciled] /
+ *   [AppAction.MessageRemovedConfirmed] so the §7.2 route + bundle CAS in the
+ *   reducer stays the single source of truth for transcript mutations.
+ */
+data class TokenFrameCommitContext(
+    val expectedRouteInstance: Long,
+    val bundleStamp: BundleStamp,
+)
+
 class TokenStreamCoordinator(
     private val scope: CoroutineScope,
     private val slices: SliceFlows,
@@ -164,14 +188,99 @@ class TokenStreamCoordinator(
      * coordinator ENTRY (before debounce/job/state mutation) so no stream
      * lifecycle is ever created while the flag is on.
      */
-    private val sseDisabled: () -> Boolean = { false },
-     /** Resolve-time stream connection, including its immutable bundle. */
-     private val streamConnectionProvider: ((String, String?) -> TokenStreamConnection)? = null,
-     /** Shared with [OpenCodeRepository.configure]'s @Synchronized monitor. */
-     private val bundleCommitLock: Any = Any(),
-     /** Published bundle identity used by all lifecycle/result guards. */
-     private val currentBundleProvider: () -> ClientBundle? = { null },
-) {
+     private val sseDisabled: () -> Boolean = { false },
+      /** Resolve-time stream connection, including its immutable bundle. */
+      private val streamConnectionProvider: ((String, String?) -> TokenStreamConnection)? = null,
+      /** Shared with [OpenCodeRepository.configure]'s @Synchronized monitor. */
+      private val bundleCommitLock: Any = Any(),
+      /** Published bundle identity used by all lifecycle/result guards. */
+      private val currentBundleProvider: () -> ClientBundle? = { null },
+      /**
+      * B-P0-1 (R1+R2 dedup wiring): per-part revision dedup hook. Called
+      * BEFORE the streaming reducer for EVERY `message.part.snapshot` /
+      * `message.part.delta` frame. Returns `true` iff the frame is FRESH
+      * (the revision differs from the previously-applied one — the
+      * caller proceeds with [TokenStreamReducer.reduce]); `false`
+      * signals a re-delivery within the 250ms debounce window, and the
+      * caller DROPS the frame (returns from [dispatchEpochFrame]
+      * without bridging / state mutation).
+      *
+      * Default `{ _, _, _, _, _ -> true }` (accept all) preserves the
+      * pre-B-P0-1 behavior — no dedup is performed when the hook is
+      * unset. Production wiring (B-P0-1) injects
+      * [cn.vectory.ocdroid.data.repository.SlimSseStateMachine.applyTokenPartRevision]
+      * captured against the lifecycle's slim commit token; the
+      * coordinator stays free of the data/repository layer dependency.
+      *
+      * `partEventRevision == null` (older sidecar / status-only frame)
+      * MUST be accepted (`true`) — without a revision counter the
+      * dedup-layer cannot operate, and the caller falls back to its
+      * pre-B-P0-1 behavior.
+      *
+      * §Stage-B C3: the [context] carries the route + bundle snapshot
+      * captured at THIS frame's dispatch entry; production wiring MAY
+      * forward it verbatim into downstream route-guarded actions.
+      */
+     private val dedupPartRevision: (
+         sessionId: String, messageId: String, partId: String, partEventRevision: Long?,
+         context: TokenFrameCommitContext,
+     ) -> Boolean = { _, _, _, _, _ -> true },
+     /**
+      * B-P0-2 (MAJOR 4 + replacement edge): hook invoked when a
+      * `message.part.removed` token frame clears the epoch + bundle
+      * guards. The callback is responsible for:
+      *
+      *  1. Applying the part-removal to the per-message watermark map
+      *     (advances `messageEventSeq` monotonically, drops the
+      *     removed partID, flags `needsFullRecheck = true`) via
+      *     [cn.vectory.ocdroid.data.repository.SlimSseStateMachine.applyMessagePartRemoved]
+      *     captured against the lifecycle's slim commit token.
+      *  2. Scheduling a 100ms-debounced R2 /full reconcile for the
+      *     message so the chat slice's part cache reflects the
+      *     upstream removal.
+      *
+      * Default `{ _, _, _, _, _ -> }` (no-op) preserves the pre-B-P0-2
+      * behaviour — the frame is still consumed by the reducer (which
+      * returns no effects for it) but no watermark mutation / R2
+      * reconcile is scheduled.
+      *
+      * The hook is called AFTER the dedup check, INSIDE
+      * [dispatchEpochFrame]'s `bundleCommitLock` critical section, so
+      * a bundle rotation between the epoch check and the hook is
+      * impossible. §Stage-B C3: the [context] carries the route +
+      * bundle snapshot captured at THIS frame's dispatch entry;
+      * production wiring forwards it verbatim into the R2 reconcile's
+      * route-guarded dispatch.
+      */
+     private val onMessagePartRemoved: (
+         sessionId: String, messageId: String, partId: String, messageEventSeq: Long,
+         context: TokenFrameCommitContext,
+     ) -> Unit = { _, _, _, _, _ -> },
+     /**
+      * B-P0-2 (MAJOR 4): hook invoked when a `message.removed` token
+      * frame clears the epoch + bundle guards. The callback is
+      * responsible for:
+      *
+      *  1. Removing the per-message watermark entry via
+      *     [cn.vectory.ocdroid.data.repository.SlimSseStateMachine.applyMessageRemoved]
+      *     (token-guarded).
+      *  2. Evicting the message from the chat slice (`messages` list
+      *     + `partsByMessage` map) and dropping its tuple from any
+      *     `maxMessageTuple` cache (MAJOR 4 cleanup).
+      *
+      * Default `{ _, _, _ -> }` (no-op) preserves the pre-B-P0-2
+      * behaviour. Production wiring (B-P0-2) injects the cleanup
+      * path; tests override to verify the hook fires.
+      *
+      * §Stage-B C3: the [context] carries the route + bundle snapshot
+      * captured at THIS frame's dispatch entry; production wiring
+      * forwards it verbatim into [AppAction.MessageRemovedConfirmed].
+      */
+     private val onMessageRemoved: (
+         sessionId: String, messageId: String,
+         context: TokenFrameCommitContext,
+     ) -> Unit = { _, _, _ -> },
+ ) {
     // ── State ───────────────────────────────────────────────────────────────
     //
     // All shared mutable state uses concurrent + atomic primitives. The
@@ -712,6 +821,23 @@ class TokenStreamCoordinator(
         // admission gate let us in), so the streak is broken.
         consecutive503BySid[sid]?.set(0)
 
+        // §Stage-B C3 (CRITICAL): capture the route + bundle context ONCE
+        // inside the epoch+bundle critical section (after both guards have
+        // passed) and thread it VERBATIM through every hook call below. The
+        // hooks MUST receive the context that was live at THIS frame's
+        // dispatch entry — NOT a fresh read at callback time (a bundle
+        // rotation or route advance between the guards and the hook is
+        // impossible inside the synchronized block, and threading the
+        // captured pair prevents a late straggler frame from adopting a
+        // newer route incarnation). Lane I forwards these unchanged into
+        // [AppAction.SlimFullMessageReconciled] / [AppAction.MessageRemovedConfirmed]
+        // so the §7.2 route + bundle CAS in the reducer is the single source
+        // of truth for transcript mutations.
+        val commitContext = TokenFrameCommitContext(
+            expectedRouteInstance = capturedRouteInstance,
+            bundleStamp = BundleStamp(boundBundle.generation, boundBundle.endpointFp),
+        )
+
         val priorState = reducerStateBySid[sid] ?: TokenStreamReducerState()
         // S2 (Stage-C should-fix): a resync frame may arrive with
         // sessionId == null (backpressure overflow omits it per the sidecar's
@@ -733,9 +859,99 @@ class TokenStreamCoordinator(
         // concept via ChatState.streamOwned; D1 keeps its own working set so
         // the engine stays decoupled from the UI slice in unit tests).
         val ownedBySession: Map<String, Set<String>> = mapOf(sid to ownedPartsForSid(sid))
+        // B-P0-1 (R1+R2 dedup wiring): apply the per-part revision
+        // dedup BEFORE the streaming reducer. A `false` return means
+        // the frame is a re-delivery within the 250ms debounce window
+        // — drop it (no reducer state mutation, no bridge, no effects).
+        // The hook is the injected [dedupPartRevision] callback, which
+        // production wires to SlimSseStateMachine.applyTokenPartRevision;
+        // it is null-safe (a null partEventRevision always returns true
+        // — accept every frame, matching the pre-B-P0-1 behavior).
+        //
+        // Per the B-P0-3 frozen contract: the dedup MUST run BEFORE
+        // TokenStreamReducer.reduce to prevent the streaming-overlay
+        // from being polluted by a re-delivered snapshot/delta.
+        when (effectiveFrame) {
+            is TokenStreamFrame.PartSnapshot -> {
+                val fresh = dedupPartRevision(
+                    effectiveFrame.sessionId,
+                    effectiveFrame.messageId,
+                    effectiveFrame.partId,
+                    effectiveFrame.partEventRevision,
+                    commitContext,
+                )
+                if (!fresh) {
+                    DebugLog.d(
+                        TAG,
+                        "drop dup part-snapshot sid=${effectiveFrame.sessionId} " +
+                            "mid=${effectiveFrame.messageId} pid=${effectiveFrame.partId} " +
+                            "rev=${effectiveFrame.partEventRevision}",
+                    )
+                    return
+                }
+            }
+            is TokenStreamFrame.PartDelta -> {
+                val fresh = dedupPartRevision(
+                    effectiveFrame.sessionId,
+                    effectiveFrame.messageId,
+                    effectiveFrame.partId,
+                    effectiveFrame.partEventRevision,
+                    commitContext,
+                )
+                if (!fresh) {
+                    DebugLog.d(
+                        TAG,
+                        "drop dup part-delta sid=${effectiveFrame.sessionId} " +
+                            "mid=${effectiveFrame.messageId} pid=${effectiveFrame.partId} " +
+                            "rev=${effectiveFrame.partEventRevision}",
+                    )
+                    return
+                }
+            }
+            else -> { /* no dedup for non-part frames */ }
+        }
         val (newState, effects) = TokenStreamReducer.reduce(priorState, effectiveFrame, ownedBySession)
         if (!isBundleCurrentForCommit(boundBundle)) return
         reducerStateBySid[sid] = newState
+
+        // B-P0-2 (MAJOR 4 + replacement edge): fire the message.part.removed
+        // / message.removed hooks AFTER the reducer has cleared its in-memory
+        // overlay (the [TokenStreamReducer.reduce] call above already removed
+        // the part(s) from [reducerStateBySid]). The hooks run INSIDE the
+        // bundleCommitLock critical section (no bundle rotation between epoch
+        // check and hook), carrying the [commitContext] captured at this
+        // frame's dispatch entry. The ClearPartState effect (chat-slice
+        // streamOwned/streamingPartTexts clear) is processed AFTER the hooks
+        // via [handleEffect] below — the §Stage-B C3 frozen contract is:
+        // reducer-overlay clear (synchronous, in-memory) → hook (watermark +
+        // R2 debounce schedule) → chat-slice overlay clear (effect dispatch).
+        // The hook implementations are no-ops by default; B-P0-2's DI wiring
+        // (Lane I, ControllerModule) injects the production callbacks
+        // (applyMessagePartRemoved / applyMessageRemoved + debounced
+        // SlimFullReconciler.reconcileActiveSession / MessageRemovedConfirmed
+        // dispatch).
+        when (effectiveFrame) {
+            is TokenStreamFrame.MessagePartRemoved -> {
+                val msgSeq = effectiveFrame.messageEventSeq
+                if (!isBundleCurrentForCommit(boundBundle)) return
+                onMessagePartRemoved(
+                    effectiveFrame.sessionId,
+                    effectiveFrame.messageId,
+                    effectiveFrame.partId,
+                    msgSeq,
+                    commitContext,
+                )
+            }
+            is TokenStreamFrame.MessageRemoved -> {
+                if (!isBundleCurrentForCommit(boundBundle)) return
+                onMessageRemoved(
+                    effectiveFrame.sessionId,
+                    effectiveFrame.messageId,
+                    commitContext,
+                )
+            }
+            else -> { /* no hook for other frame types */ }
+        }
 
         // Bridge reducer state → ChatState for any frame that touches a part
         // (snapshot / delta). ServerConnected / Heartbeat / Resync carry no

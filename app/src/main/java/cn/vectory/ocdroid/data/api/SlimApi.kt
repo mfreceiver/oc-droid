@@ -93,6 +93,54 @@ interface SlimApi {
     ): MessageWithParts
 
     /**
+     * B-P0-1 (R2 /full fingerprint): single-message full expansion with
+     * a `known.*` fingerprint query so the sidecar can short-circuit a
+     * 304 Not Modified when the client's view is already authoritative.
+     *
+     * `GET /slimapi/messages/{sid}/full/{mid}?known.maxPartId=…&known.partCount=…&known.messageEventSeq=…`
+     *
+     * # Wire contract (R2, frozen B-P0-1)
+     *
+     *  - All three `known.*` params are OPTIONAL. Omitting any one of
+     *    them forces a 200 (the sidecar cannot match a partial
+     *    fingerprint). The caller SHOULD supply all three when it has
+     *    a watermark for the message; omit them on a cold /full.
+     *  - 200 OK → body is the full [MessageWithParts]; the response
+     *    advertises its `messageEventSeq` via the `X-Message-Event-Seq`
+     *    response header (MUST be present on 200 — the caller advances
+     *    the per-message watermark from it). Body shape is identical to
+     *    [getSlimapiMessageFull].
+     *  - 304 Not Modified → empty body; the client's fingerprint matched
+     *    the sidecar's current state. The caller clears the
+     *    `needsFullRecheck` flag WITHOUT touching `messageEventSeq`
+     *    (the watermark is already authoritative).
+     *  - 429 (sidecar fetch-storm guard) → the response carries a
+     *    `Retry-After` header (seconds); the caller backs off.
+     *
+     * Retrofit returns the raw [Response] so the caller can branch on
+     * `code() == 304` (Retrofit's body converter would otherwise
+     * deserialise an empty body into an EOFException) and read the
+     * `X-Message-Event-Seq` / `Retry-After` headers verbatim.
+     *
+     * # Distinct from [getSlimapiMessageFull]
+     *
+     * The legacy method (no `known.*` params, returns [MessageWithParts]
+     * directly) stays for the UI's expand path ([expandMessagesFullBatch]
+     * foldRestFetch fallback). This R2 variant is the B-P0-1 reconcile
+     * path EXCLUSIVELY — the existing UI expand path does NOT carry a
+     * fingerprint (it has no per-message watermark to compare against).
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/messages/{sid}/full/{mid}")
+    suspend fun getSlimapiMessageFullWithFingerprint(
+        @Path("sid") sessionId: String,
+        @Path("mid") messageId: String,
+        @Query("known.maxPartId") knownMaxPartId: String? = null,
+        @Query("known.partCount") knownPartCount: Int? = null,
+        @Query("known.messageEventSeq") knownMessageEventSeq: Long? = null,
+    ): retrofit2.Response<MessageWithParts>
+
+    /**
      * Cluster A (slimapi v1 §5 G6): batched message-full expansion. Loads
      * multiple messages by id in one round-trip
      * (`GET /slimapi/messages/{sid}/full?ids=m1,m2,…&mode=full`) — the

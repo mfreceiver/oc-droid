@@ -960,4 +960,724 @@ class SlimSseReducerTest {
         assertEquals(fresh, mergeLastError(prior, LastErrorField.Set(fresh)))
         assertEquals(fresh, mergeLastError(null, LastErrorField.Set(fresh)))
     }
+
+    // ── B-P0-3: digest contentRevisions → MessageWatermark integration ─────
+
+    @Test
+    fun `digest with contentRevisions advances watermark and flags needsFullRecheck`() {
+        // Cold path: no prior watermark. Incoming seq=5 (strictly > 0
+        // prior) → seed + flag.
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = mapOf("m1" to 5L),
+            ),
+        )
+        val w = state.watermarksFor("s1").get("m1")
+        assertNotNull("watermark seeded for m1", w)
+        assertEquals(5L, w!!.messageEventSeq)
+        assertTrue("seq > prior(0) ⇒ needsFullRecheck", w.needsFullRecheck)
+    }
+
+    @Test
+    fun `digest contentRevisions seq == 0 seeds flagged placeholder for R1 pickup`() {
+        // rev-b-fix M2: Untrustworthy 0 (sidecar restart). No prior
+        // entry → MUST seed a flagged placeholder so B-P0-1's R1 sweep
+        // (which scans `needsFullRecheck = true`) discovers the message
+        // and drives a /full. The previous behaviour returned null,
+        // dropping the recovery signal entirely (the message was
+        // invisible to the R1 sweep until a later non-zero digest
+        // arrived, which could be never if the sidecar stayed quiescent
+        // after the restart).
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = mapOf("m1" to 0L),
+            ),
+        )
+        val w = state.watermarksFor("s1").get("m1")
+        assertNotNull("flagged placeholder MUST be seeded on untrustworthy 0", w)
+        assertEquals(0L, w!!.messageEventSeq)
+        assertTrue("flag set so R1 sweep picks up the message", w.needsFullRecheck)
+    }
+
+    @Test
+    fun `digest contentRevisions seq == 0 on existing entry preserves seq and sets flag`() {
+        // Seed a real entry first via a non-zero seq.
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = mapOf("m1" to 5L),
+            ),
+        )
+        // Clear the flag manually (simulating B-P0-1's successful /full).
+        state.watermarksFor("s1").apply {
+            // Reapply a strict-equal seq to clear via reducer path is
+            // not possible (the reducer never clears the flag); instead,
+            // mutate the entry directly via watermarksFor put-equivalent.
+        }
+        // Sidecar restart sends seq=0: preserve prior seq=5, set flag.
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = mapOf("m1" to 0L),
+            ),
+        )
+        val w = state.watermarksFor("s1").get("m1")!!
+        assertEquals(5L, w.messageEventSeq)
+        assertTrue("seq=0 ⇒ needsFullRecheck forced", w.needsFullRecheck)
+    }
+
+    @Test
+    fun `digest contentRevisions stale seq is no-op`() {
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = mapOf("m1" to 10L),
+            ),
+        )
+        // Stale re-emit (seq=3 < prior 10). Monotonic: no-op.
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = mapOf("m1" to 3L),
+            ),
+        )
+        val w = state.watermarksFor("s1").get("m1")!!
+        assertEquals(10L, w.messageEventSeq)
+        assertTrue("flag preserved from first observation", w.needsFullRecheck)
+    }
+
+    @Test
+    fun `digest contentRevisions equal seq is no-op`() {
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = mapOf("m1" to 7L),
+            ),
+        )
+        // Equal seq: no-op (preserves flag from first observation).
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = mapOf("m1" to 7L),
+            ),
+        )
+        val w = state.watermarksFor("s1").get("m1")!!
+        assertEquals(7L, w.messageEventSeq)
+        assertTrue("flag preserved", w.needsFullRecheck)
+    }
+
+    @Test
+    fun `digest contentRevisions advances multiple messages in one frame`() {
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = mapOf("m1" to 1L, "m2" to 2L, "m3" to 3L),
+            ),
+        )
+        val all = state.watermarksFor("s1").all()
+        assertEquals(3, all.size)
+        assertEquals(1L, all["m1"]!!.messageEventSeq)
+        assertEquals(2L, all["m2"]!!.messageEventSeq)
+        assertEquals(3L, all["m3"]!!.messageEventSeq)
+        assertTrue(all["m1"]!!.needsFullRecheck)
+        assertTrue(all["m2"]!!.needsFullRecheck)
+        assertTrue(all["m3"]!!.needsFullRecheck)
+    }
+
+    @Test
+    fun `digest without contentRevisions leaves watermarks untouched`() {
+        // Seed.
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = mapOf("m1" to 5L),
+            ),
+        )
+        // A status-only digest (no contentRevisions) MUST NOT touch the
+        // watermark map.
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(sessionId = "s1", status = "busy"),
+        )
+        val w = state.watermarksFor("s1").get("m1")!!
+        assertEquals(5L, w.messageEventSeq)
+    }
+
+    @Test
+    fun `digest contentRevisions empty map leaves watermarks untouched`() {
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = mapOf("m1" to 5L),
+            ),
+        )
+        // Explicit empty map ≠ absent. Either way: no entries to fold →
+        // no-op.
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = emptyMap(),
+            ),
+        )
+        assertEquals(5L, state.watermarksFor("s1").get("m1")!!.messageEventSeq)
+    }
+
+    @Test
+    fun `watermarksFor is lazily seeded per session and isolated`() {
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = mapOf("m1" to 1L),
+            ),
+        )
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s2",
+                contentRevisions = mapOf("m1" to 99L),
+            ),
+        )
+        // Same messageID m1 in different sessions → independent watermarks.
+        assertEquals(1L, state.watermarksFor("s1").get("m1")!!.messageEventSeq)
+        assertEquals(99L, state.watermarksFor("s2").get("m1")!!.messageEventSeq)
+    }
+
+    // ── B-P0-3: SlimSseState clear + reconnect semantics ─────────────────
+
+    @Test
+    fun `SlimSseState clear wipes session watermarks on host switch`() {
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = mapOf("m1" to 1L),
+            ),
+        )
+        state.clear()
+        // After clear, the lazy map is empty; a fresh watermarksFor call
+        // returns an empty state. (The prior MessageWatermarkState
+        // instance is gone — getOrPut seeds a fresh one.)
+        assertEquals(0, state.watermarksFor("s1").size())
+    }
+
+    @Test
+    fun `clearAndMarkAllWatermarksForReconnect preserves messageIDs and flags them`() {
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s1",
+                contentRevisions = mapOf("m1" to 10L, "m2" to 20L),
+            ),
+        )
+        reduceSlimDigest(
+            state,
+            SlimSessionDigest(
+                sessionId = "s2",
+                contentRevisions = mapOf("mX" to 30L),
+            ),
+        )
+        val flagged = state.clearAndMarkAllWatermarksForReconnect()
+        assertEquals(setOf("m1", "m2"), flagged["s1"])
+        assertEquals(setOf("mX"), flagged["s2"])
+        // All preserved entries: seq=0 (untrustworthy), flag=true.
+        val w1 = state.watermarksFor("s1").get("m1")!!
+        assertEquals(0L, w1.messageEventSeq)
+        assertTrue(w1.needsFullRecheck)
+        assertEquals(emptyMap<String, Long>(), w1.partRevisions)
+        val wX = state.watermarksFor("s2").get("mX")!!
+        assertEquals(0L, wX.messageEventSeq)
+        assertTrue(wX.needsFullRecheck)
+    }
+
+    @Test
+    fun `clearAndMarkAllForReconnect on empty state returns empty map`() {
+        val flagged = state.clearAndMarkAllWatermarksForReconnect()
+        assertTrue(flagged.isEmpty())
+    }
+
+    // ── B-P0-1: clearFullRecheckFlag ─────────────────────────────────────
+
+    @Test
+    fun `clearFullRecheckFlag on flagged entry clears and preserves seq`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 5L)
+        // Pre-condition: flagged.
+        assertTrue(wms.get("m1")!!.needsFullRecheck)
+        val cleared = wms.clearFullRecheckFlag("m1")
+        assertTrue("flag was cleared", cleared)
+        val w = wms.get("m1")!!
+        assertFalse("flag now false", w.needsFullRecheck)
+        assertEquals("seq preserved", 5L, w.messageEventSeq)
+    }
+
+    @Test
+    fun `clearFullRecheckFlag on absent entry returns false`() {
+        val wms = MessageWatermarkState()
+        assertFalse(wms.clearFullRecheckFlag("ghost"))
+    }
+
+    @Test
+    fun `clearFullRecheckFlag on already-clear flag returns false`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 5L)
+        assertTrue(wms.clearFullRecheckFlag("m1"))
+        // Second call: already clear → no-op.
+        assertFalse(wms.clearFullRecheckFlag("m1"))
+        // State unchanged.
+        assertEquals(5L, wms.get("m1")!!.messageEventSeq)
+        assertFalse(wms.get("m1")!!.needsFullRecheck)
+    }
+
+    @Test
+    fun `clearFullRecheckFlag preserves partRevisions`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 5L)
+        wms.applyPartRevision("m1", "p1", 10L)
+        wms.applyPartRevision("m1", "p2", 20L)
+        assertTrue(wms.clearFullRecheckFlag("m1"))
+        val w = wms.get("m1")!!
+        assertEquals(10L, w.partRevisions["p1"])
+        assertEquals(20L, w.partRevisions["p2"])
+    }
+
+    @Test
+    fun `clearFullRecheckFlag promotes entry to MRU`() {
+        val wms = MessageWatermarkState(cap = 3)
+        // Seed m1, m2, m3 — m1 is LRU.
+        wms.applyDigestRevision("m1", 1L)
+        wms.applyDigestRevision("m2", 2L)
+        wms.applyDigestRevision("m3", 3L)
+        // Clear m1's flag → promotes m1 to MRU; m2 is now LRU.
+        assertTrue(wms.clearFullRecheckFlag("m1"))
+        wms.applyDigestRevision("m4", 4L)
+        assertNull("m2 evicted (m1 promotion)", wms.get("m2"))
+        assertNotNull("m1 survived (promoted)", wms.get("m1"))
+    }
+}
+
+/**
+ * B-P0-3: pure unit tests for the [MessageWatermarkState] accumulator,
+ * independent of the digest reducer. Covers the LRU cap, the per-part
+ * dedup, the removal paths, and the reconnect clear.
+ *
+ * Lives in the same file (matching the `*SlimSseReducerTest*` filter)
+ * so the `--tests '*SlimSseReducerTest*'` invocation picks it up.
+ */
+class MessageWatermarkStateTest {
+
+    @Test
+    fun `applyDigestRevision strictly greater advances seq and flags`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 5L)
+        wms.applyDigestRevision("m1", 10L)
+        val w = wms.get("m1")!!
+        assertEquals(10L, w.messageEventSeq)
+        assertTrue(w.needsFullRecheck)
+    }
+
+    @Test
+    fun `applyDigestRevision zero on absent entry seeds flagged placeholder`() {
+        // rev-b-fix M2: incomingSeq == 0 on an absent entry MUST seed a
+        // flagged placeholder so B-P0-1's R1 sweep (which scans
+        // `needsFullRecheck = true`) discovers the message and drives
+        // a /full. The previous behaviour returned null, dropping the
+        // recovery signal entirely.
+        val wms = MessageWatermarkState()
+        val result = wms.applyDigestRevision("m1", 0L)
+        assertNotNull("must seed an entry, not return null", result)
+        val w = wms.get("m1")!!
+        assertEquals(0L, w.messageEventSeq)
+        assertTrue("must flag needsFullRecheck for R1 pickup", w.needsFullRecheck)
+        assertTrue("partRevisions empty on the seeded placeholder", w.partRevisions.isEmpty())
+    }
+
+    @Test
+    fun `applyDigestRevision zero on existing entry preserves seq and sets flag`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 5L)
+        wms.applyDigestRevision("m1", 0L)
+        val w = wms.get("m1")!!
+        assertEquals(5L, w.messageEventSeq)
+        assertTrue(w.needsFullRecheck)
+    }
+
+    @Test
+    fun `applyDigestRevision equal is no-op`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 5L)
+        // Capture flag state.
+        val flagAfterFirst = wms.get("m1")!!.needsFullRecheck
+        wms.applyDigestRevision("m1", 5L)
+        val w = wms.get("m1")!!
+        assertEquals(5L, w.messageEventSeq)
+        assertEquals(flagAfterFirst, w.needsFullRecheck)
+    }
+
+    @Test
+    fun `applyDigestRevision older is no-op and does not regress`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 10L)
+        wms.applyDigestRevision("m1", 3L)
+        val w = wms.get("m1")!!
+        assertEquals(10L, w.messageEventSeq)
+    }
+
+    @Test
+    fun `applyPartRevision first event returns true and stores`() {
+        val wms = MessageWatermarkState()
+        val fresh = wms.applyPartRevision("m1", "p1", 1L)
+        assertTrue(fresh)
+        assertEquals(1L, wms.get("m1")!!.partRevisions["p1"])
+    }
+
+    @Test
+    fun `applyPartRevision duplicate returns false`() {
+        val wms = MessageWatermarkState()
+        wms.applyPartRevision("m1", "p1", 5L)
+        val dup = wms.applyPartRevision("m1", "p1", 5L)
+        assertFalse(dup)
+        // Stored value unchanged.
+        assertEquals(5L, wms.get("m1")!!.partRevisions["p1"])
+    }
+
+    @Test
+    fun `applyPartRevision newer revision returns true and updates`() {
+        val wms = MessageWatermarkState()
+        wms.applyPartRevision("m1", "p1", 5L)
+        val fresh = wms.applyPartRevision("m1", "p1", 6L)
+        assertTrue(fresh)
+        assertEquals(6L, wms.get("m1")!!.partRevisions["p1"])
+    }
+
+    @Test
+    fun `applyPartRevision lower revision is rejected`() {
+        // rev-b-fix M1: strict `>` — a LOWER revision is a stale
+        // snapshot replay (the sidecar's monotonic counter does NOT
+        // regress). The previous implementation only rejected equality,
+        // accepting 6 → 5 and silently regressing the dedup cursor —
+        // which then accepted a subsequent 6 as "fresh", re-firing
+        // the debounce for content the UI had already merged.
+        val wms = MessageWatermarkState()
+        wms.applyPartRevision("m1", "p1", 6L)
+        val stale = wms.applyPartRevision("m1", "p1", 5L)
+        assertFalse("lower revision MUST be rejected (strict >)", stale)
+        // Stored value unchanged — no regression.
+        assertEquals(6L, wms.get("m1")!!.partRevisions["p1"])
+    }
+
+    @Test
+    fun `applyPartRevision first revision zero is accepted`() {
+        // rev-b-fix M1: prior absent + revision >= 0 → accept. The
+        // first frame for a partID is always fresh even at revision 0
+        // (per-part counters may legitimately start at 0; only the
+        // per-message messageEventSeq treats 0 as a sentinel).
+        val wms = MessageWatermarkState()
+        val fresh = wms.applyPartRevision("m1", "p1", 0L)
+        assertTrue("first revision (0) is fresh", fresh)
+        assertEquals(0L, wms.get("m1")!!.partRevisions["p1"])
+    }
+
+    @Test
+    fun `applyPartRevision null always accepts`() {
+        // Older sidecar without partEventRevision — accept every frame
+        // (cannot dedup without a counter).
+        val wms = MessageWatermarkState()
+        assertTrue(wms.applyPartRevision("m1", "p1", null))
+        assertTrue(wms.applyPartRevision("m1", "p1", null))
+        // No partRevisions entry stored (null wasn't a counter).
+        assertNull(wms.get("m1")?.partRevisions?.get("p1"))
+    }
+
+    @Test
+    fun `applyPartRevision distinct partIDs are independent`() {
+        val wms = MessageWatermarkState()
+        wms.applyPartRevision("m1", "p1", 1L)
+        wms.applyPartRevision("m1", "p2", 1L)
+        // Both fresh (different partIDs); both stored.
+        assertEquals(1L, wms.get("m1")!!.partRevisions["p1"])
+        assertEquals(1L, wms.get("m1")!!.partRevisions["p2"])
+    }
+
+    @Test
+    fun `applyPartRemoved advances seq drops partID and flags`() {
+        val wms = MessageWatermarkState()
+        // Seed via digest: seq=5, parts p1+p2.
+        wms.applyDigestRevision("m1", 5L)
+        wms.applyPartRevision("m1", "p1", 1L)
+        wms.applyPartRevision("m1", "p2", 2L)
+        // part.removed for p1 at post-increment seq=6.
+        val w = wms.applyPartRemoved("m1", "p1", 6L)!!
+        assertEquals(6L, w.messageEventSeq)
+        assertTrue(w.needsFullRecheck)
+        assertFalse("p1 dropped from partRevisions", "p1" in w.partRevisions)
+        assertTrue("p2 preserved", "p2" in w.partRevisions)
+    }
+
+    @Test
+    fun `applyPartRemoved stale seq is no-op`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 10L)
+        // Removal claims seq=5 < prior 10: stale re-delivery.
+        val result = wms.applyPartRemoved("m1", "p1", 5L)
+        // Returns prior entry (no-op); seq NOT regressed.
+        assertEquals(10L, result!!.messageEventSeq)
+        assertEquals(10L, wms.get("m1")!!.messageEventSeq)
+    }
+
+    @Test
+    fun `applyPartRemoved on absent entry seeds with sidecar seq`() {
+        val wms = MessageWatermarkState()
+        val w = wms.applyPartRemoved("m1", "p1", 1L)!!
+        assertEquals(1L, w.messageEventSeq)
+        assertTrue(w.needsFullRecheck)
+        assertTrue("p1 not in partRevisions (wasn't there to drop)", w.partRevisions.isEmpty())
+    }
+
+    @Test
+    fun `removeMessage drops the entry and does not flag`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 5L)
+        val removed = wms.removeMessage("m1")
+        assertNotNull(removed)
+        assertNull(wms.get("m1"))
+    }
+
+    @Test
+    fun `removeMessage absent returns null`() {
+        val wms = MessageWatermarkState()
+        assertNull(wms.removeMessage("nope"))
+    }
+
+    @Test
+    fun `clearAndMarkAllForReconnect preserves messageIDs resets seq and flags`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 10L)
+        wms.applyDigestRevision("m2", 20L)
+        wms.applyPartRevision("m1", "p1", 99L)
+        val known = wms.clearAndMarkAllForReconnect()
+        assertEquals(setOf("m1", "m2"), known)
+        val w1 = wms.get("m1")!!
+        assertEquals(0L, w1.messageEventSeq)
+        assertTrue(w1.needsFullRecheck)
+        assertTrue("partRevisions cleared on reconnect", w1.partRevisions.isEmpty())
+        val w2 = wms.get("m2")!!
+        assertEquals(0L, w2.messageEventSeq)
+        assertTrue(w2.needsFullRecheck)
+    }
+
+    @Test
+    fun `clearAndMarkAllForReconnect on empty returns empty set`() {
+        val wms = MessageWatermarkState()
+        assertTrue(wms.clearAndMarkAllForReconnect().isEmpty())
+    }
+
+    // ── LRU cap 500 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `LRU cap 500 evicts eldest on insertion`() {
+        val wms = MessageWatermarkState(cap = 3)
+        wms.applyDigestRevision("m1", 1L)
+        wms.applyDigestRevision("m2", 2L)
+        wms.applyDigestRevision("m3", 3L)
+        assertEquals(3, wms.size())
+        // Inserting m4 evicts the LRU entry.
+        wms.applyDigestRevision("m4", 4L)
+        assertEquals(3, wms.size())
+        // m1 was the LRU (no accesses since insertion); it's gone.
+        assertNull("m1 evicted as LRU", wms.get("m1"))
+        assertNotNull(wms.get("m2"))
+        assertNotNull(wms.get("m3"))
+        assertNotNull(wms.get("m4"))
+    }
+
+    @Test
+    fun `LRU access via get promotes the entry to MRU`() {
+        val wms = MessageWatermarkState(cap = 3)
+        wms.applyDigestRevision("m1", 1L)
+        wms.applyDigestRevision("m2", 2L)
+        wms.applyDigestRevision("m3", 3L)
+        // Touch m1 → promotes to MRU; m2 is now the LRU.
+        wms.get("m1")
+        wms.applyDigestRevision("m4", 4L)
+        assertNull("m2 evicted (was LRU after m1 promotion)", wms.get("m2"))
+        assertNotNull("m1 survived (was promoted)", wms.get("m1"))
+    }
+
+    @Test
+    fun `LRU access via update promotes the entry to MRU`() {
+        val wms = MessageWatermarkState(cap = 3)
+        wms.applyDigestRevision("m1", 1L)
+        wms.applyDigestRevision("m2", 2L)
+        wms.applyDigestRevision("m3", 3L)
+        // Update m1 (a no-op equal-seq still promotes via put).
+        wms.applyDigestRevision("m1", 1L)
+        wms.applyDigestRevision("m4", 4L)
+        assertNull("m2 evicted (m1 update promoted m1)", wms.get("m2"))
+        assertNotNull(wms.get("m1"))
+    }
+
+    @Test
+    fun `LRU default cap is 500`() {
+        // Spec: cap 500 messages. Drives the constant.
+        assertEquals(500, MessageWatermarkState.DEFAULT_CAP)
+        val wms = MessageWatermarkState()
+        // Fill 500 + 1, expect size to stay 500.
+        for (i in 1..501) {
+            wms.applyDigestRevision("m$i", i.toLong())
+        }
+        assertEquals(500, wms.size())
+        // The very first message (m1) was the LRU and got evicted.
+        assertNull(wms.get("m1"))
+        assertNotNull(wms.get("m501"))
+    }
+
+    // ── rev-b-fix §3: commitFull200Seq (data-layer half of commit port) ──
+
+    @Test
+    fun `commitFull200Seq rejects responseSeq zero as protocol failure`() {
+        // Frozen protocol: 0 is the uninitialised/untrustworthy sentinel
+        // and MUST NOT be accepted as a real watermark value.
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 5L)
+        val committed = wms.commitFull200Seq("m1", responseSeq = 0L)
+        assertFalse("responseSeq=0 is a protocol failure", committed)
+        // State untouched: seq preserved, flag preserved.
+        val w = wms.get("m1")!!
+        assertEquals(5L, w.messageEventSeq)
+        assertTrue(w.needsFullRecheck)
+    }
+
+    @Test
+    fun `commitFull200Seq rejects negative responseSeq`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 5L)
+        val committed = wms.commitFull200Seq("m1", responseSeq = -1L)
+        assertFalse("negative responseSeq rejected", committed)
+        assertEquals(5L, wms.get("m1")!!.messageEventSeq)
+    }
+
+    @Test
+    fun `commitFull200Seq rejects responseSeq older than current`() {
+        // rev-b-fix §3 frozen rule: responseSeq < currentSeq → false.
+        // A stale /full response that lag behind the watermark; do NOT
+        // merge, do NOT clear the flag (the newer seq will drive a
+        // fresh reconcile).
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 10L)
+        val committed = wms.commitFull200Seq("m1", responseSeq = 7L)
+        assertFalse("stale responseSeq < current MUST be rejected", committed)
+        val w = wms.get("m1")!!
+        assertEquals(10L, w.messageEventSeq)
+        assertTrue("flag MUST stay set when stale response rejected", w.needsFullRecheck)
+    }
+
+    @Test
+    fun `commitFull200Seq advances seq clears flag and preserves partRevisions`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 5L)
+        wms.applyPartRevision("m1", "p1", 1L)
+        wms.applyPartRevision("m1", "p2", 2L)
+        val committed = wms.commitFull200Seq("m1", responseSeq = 10L)
+        assertTrue("happy-path commit MUST succeed", committed)
+        val w = wms.get("m1")!!
+        assertEquals(10L, w.messageEventSeq)
+        assertFalse("flag cleared on commit", w.needsFullRecheck)
+        assertEquals(1L, w.partRevisions["p1"])
+        assertEquals(2L, w.partRevisions["p2"])
+    }
+
+    @Test
+    fun `commitFull200Seq seeds fresh entry when none existed`() {
+        // A 200 may reconcile a message the digest path hadn't seen yet.
+        val wms = MessageWatermarkState()
+        val committed = wms.commitFull200Seq("m1", responseSeq = 7L)
+        assertTrue(committed)
+        val w = wms.get("m1")!!
+        assertEquals(7L, w.messageEventSeq)
+        assertFalse(w.needsFullRecheck)
+    }
+
+    @Test
+    fun `commitFull200Seq accepts equal responseSeq and clears flag`() {
+        // Equal is the 304-style happy path (the /full confirmed the
+        // exact seq we held) — accept, clear flag, seq stays the same.
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 5L)
+        val committed = wms.commitFull200Seq("m1", responseSeq = 5L)
+        assertTrue(committed)
+        val w = wms.get("m1")!!
+        assertEquals(5L, w.messageEventSeq)
+        assertFalse(w.needsFullRecheck)
+    }
+
+    // ── rev-b-fix §4: clearFlagIfSeqMatches (data-layer half of commit port) ──
+
+    @Test
+    fun `clearFlagIfSeqMatches clears flag when seq matches exactly`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 5L)
+        val cleared = wms.clearFlagIfSeqMatches("m1", requestSeq = 5L)
+        assertTrue("flag cleared on exact seq match", cleared)
+        val w = wms.get("m1")!!
+        assertFalse(w.needsFullRecheck)
+        assertEquals(5L, w.messageEventSeq)
+    }
+
+    @Test
+    fun `clearFlagIfSeqMatches does NOT clear when seq advanced`() {
+        // rev-b-fix §4 frozen rule: a `message.part.*` SSE event that
+        // advanced the seq during the network window means the 304's
+        // "your view is authoritative" assertion no longer holds —
+        // keep the flag so the next sweep re-fetches.
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 5L)
+        // Simulate the SSE event arriving mid-flight: seq advances to 7.
+        wms.applyDigestRevision("m1", 7L)
+        val cleared = wms.clearFlagIfSeqMatches("m1", requestSeq = 5L)
+        assertFalse("seq mismatch MUST NOT clear the flag", cleared)
+        assertTrue(
+            "flag preserved so next sweep re-fetches against new seq",
+            wms.get("m1")!!.needsFullRecheck,
+        )
+        // Seq not regressed.
+        assertEquals(7L, wms.get("m1")!!.messageEventSeq)
+    }
+
+    @Test
+    fun `clearFlagIfSeqMatches returns false on absent entry`() {
+        val wms = MessageWatermarkState()
+        assertFalse(wms.clearFlagIfSeqMatches("ghost", requestSeq = 5L))
+    }
+
+    @Test
+    fun `clearFlagIfSeqMatches returns false when flag already clear`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 5L)
+        assertTrue(wms.clearFlagIfSeqMatches("m1", 5L))
+        // Second call: flag already clear → no-op.
+        assertFalse(wms.clearFlagIfSeqMatches("m1", 5L))
+    }
+
+    @Test
+    fun `clearFlagIfSeqMatches does not regress seq`() {
+        val wms = MessageWatermarkState()
+        wms.applyDigestRevision("m1", 10L)
+        wms.clearFlagIfSeqMatches("m1", requestSeq = 5L) // mismatch → no-op
+        assertEquals(10L, wms.get("m1")!!.messageEventSeq)
+    }
 }

@@ -137,6 +137,19 @@ object TokenStreamReducer {
         is TokenStreamFrame.PartSnapshot -> reduceSnapshot(state, frame)
         is TokenStreamFrame.PartDelta -> reduceDelta(state, frame)
         is TokenStreamFrame.Resync -> reduceResync(state, frame, ownedBySession)
+        // B-P0-3 §Stage-B M5: removal events carry no streaming-text
+        // mutation of their own (the per-message watermark is updated via
+        // a SEPARATE path — [MessageWatermarkState], owned by
+        // [SlimSseStateMachine]). But the reducer OWNS the streaming-text
+        // overlay, so a removal MUST (a) drop the removed part(s) from
+        // the reducer's working map so a late straggler frame cannot
+        // re-establish them, AND (b) emit [ClearPartState] so the
+        // coordinator translates it into [cn.vectory.ocdroid.ui.AppAction.ClearTokenStreamState]
+        // and the chat slice's streamOwned / streamingPartTexts /
+        // coalesce buffers are torn down — preventing a late frame from
+        // resurrecting ghost text for a removed part / message.
+        is TokenStreamFrame.MessagePartRemoved -> reduceMessagePartRemoved(state, frame)
+        is TokenStreamFrame.MessageRemoved -> reduceMessageRemoved(state, frame)
     }
 
     private fun reduceSnapshot(
@@ -288,5 +301,110 @@ object TokenStreamReducer {
             }
         }
         return state.copy(parts = clearedParts) to effects
+    }
+
+    /**
+     * §Stage-B M5: `message.part.removed` — drop the single reducer-owned
+     * part (no straggler frame can resurrect it after the watermark has
+     * advanced) and emit [TokenStreamCoordinatorEffect.ClearPartState] so
+     * the coordinator translates it into a chat-slice overlay clear
+     * (streamOwned / streamingPartTexts / coalesce buffers).
+     *
+     * §rev-ogpt severe #3: the ClearPartState effect is now emitted for
+     * EVERY `message.part.removed` frame, including parts the reducer does
+     * NOT own (UI-owned overlay). Pre-fix the unowned branch was a no-op,
+     * so the UI-side overlay survived the removal event; a subsequent
+     * `/full` (`authoritative=false`) then preserved the part via
+     * `preservedLocal` (SseChatReducers.kt — it was still STREAMING-owned
+     * in `streamOwned`), keeping ghost text alive despite the explicit
+     * upstream deletion. The partId carried on the wire frame is sufficient
+     * signal — it does not depend on whether the reducer happens to own a
+     * [TokenPartAcc] for it (the UI slice can own a part through paths the
+     * reducer never sees, e.g. `applyPartCreatedPlaceholder` for a reasoning
+     * part, or a DONE part pruned from the working map while the chat slice
+     * retained it).
+     */
+    private fun reduceMessagePartRemoved(
+        state: TokenStreamReducerState,
+        frame: TokenStreamFrame.MessagePartRemoved,
+    ): Pair<TokenStreamReducerState, List<TokenStreamCoordinatorEffect>> {
+        val existing = state.parts[frame.partId]
+        // Reducer-owned path: drop the part from the working map. The
+        // defensive session/message guard below protects against a
+        // theoretically-impossible partId collision across contexts
+        // (cheap to guard; if it ever fires the frame is treated as buggy
+        // and no ClearPartState is emitted either — see the mismatch
+        // branch).
+        if (existing != null) {
+            // Defensive: only clear for the matching session/message — a
+            // partId collision across sessions (theoretically impossible
+            // given the wire's per-session scope, but cheap to guard) would
+            // otherwise let a removal in session A clear session B's overlay.
+            if (existing.sessionId != frame.sessionId ||
+                existing.messageId != frame.messageId
+            ) return state to emptyList()
+            val cleared = state.copy(parts = state.parts - frame.partId)
+            val effects = listOf(
+                TokenStreamCoordinatorEffect.ClearPartState(setOf(frame.partId)),
+            )
+            return cleared to effects
+        }
+        // §rev-ogpt severe #3: reducer does NOT own this part. Pre-fix this
+        // was a no-op; now emit ClearPartState(frame.partId) unconditionally
+        // so the coordinator translates it into ClearTokenStreamState and
+        // the chat-slice overlay (streamOwned / streamingPartTexts /
+        // coalesce buffers) is torn down. Without this, the only signal the
+        // UI layer gets about the removal is the debounced /full fetch —
+        // but the /full authoritative=false merge keeps STREAMING-owned
+        // locals via preservedLocal, so the ghost survives. The partId
+        // comes from the wire frame itself (independent of reducer
+        // ownership); the generation guard in
+        // [TokenStreamCoordinator.filterClearByGeneration] still drops the
+        // clear if a NEWER generation now owns the partId.
+        val effects = listOf(
+            TokenStreamCoordinatorEffect.ClearPartState(setOf(frame.partId)),
+        )
+        return state to effects
+    }
+
+    /**
+     * §Stage-B M5: `message.removed` — drop EVERY reducer-owned part
+     * attributed to the message and emit [TokenStreamCoordinatorEffect.ClearPartState]
+     * with the union of those part IDs (the coordinator translates it
+     * into the chat-slice overlay clear).
+     *
+     * §rev-ogpt severe #3 analog: unlike [reduceMessagePartRemoved], the
+     * `message.removed` wire frame carries NO partId — only session/message
+     * scope ids. The reducer therefore cannot enumerate UI-owned parts
+     * attributed to the removed message (its only external ownership view,
+     * `ownedBySession`, is keyed by sessionId and over-clearing would wipe
+     * unrelated messages' active streams in the same session). The
+     * reducer-owned partIds emitted here cover the common case; the UI-side
+     * cleanup for any UI-owned part that lives in `partsByMessage[msgId]`
+     * is driven SEPARATELY by the production `onMessageRemoved` hook,
+     * which dispatches [cn.vectory.ocdroid.ui.AppAction.MessageRemovedConfirmed]
+     * (Lane U) → [cn.vectory.ocdroid.ui.evictMessageAndPartOverlay] — that
+     * reducer collects partIds from BOTH the flat projection AND
+     * LoadedContent and clears streamOwned / streamingPartTexts /
+     * deltaBuffer / fullTextBuffer / pendingFlushPartIds /
+     * streamingReasoningPart for them. The two paths together (immediate
+     * reducer-owned clear + UI-side eviction) cover the whole-message
+     * removal contract.
+     */
+    private fun reduceMessageRemoved(
+        state: TokenStreamReducerState,
+        frame: TokenStreamFrame.MessageRemoved,
+    ): Pair<TokenStreamReducerState, List<TokenStreamCoordinatorEffect>> {
+        val ownedPartIds = state.parts.values
+            .asSequence()
+            .filter { it.messageId == frame.messageId && it.sessionId == frame.sessionId }
+            .map { it.partId }
+            .toSet()
+        if (ownedPartIds.isEmpty()) return state to emptyList()
+        val cleared = state.copy(parts = state.parts.filterKeys { it !in ownedPartIds })
+        val effects = listOf(
+            TokenStreamCoordinatorEffect.ClearPartState(ownedPartIds),
+        )
+        return cleared to effects
     }
 }

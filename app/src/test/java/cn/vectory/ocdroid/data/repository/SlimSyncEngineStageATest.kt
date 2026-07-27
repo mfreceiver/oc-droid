@@ -14,6 +14,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -380,6 +381,9 @@ class SlimSyncEngineStageATest {
                 .setResponseCode(200)
                 .setBody(json.encodeToString(listOf(skeleton)))
                 .setHeader("Content-Type", "application/json"),
+            // §阶段B C1 fix: `/messages` terminal = nextCursor==null (no
+            // X-Since-Complete on this endpoint). The drain reaches the
+            // commit phase on `nextCursor == null` alone.
         )
 
         val failingCommitter = object : SlimAuthoritativeCommitter {
@@ -430,6 +434,362 @@ class SlimSyncEngineStageATest {
             "P0-2: localApplied* unchanged on commit failure",
             stateBefore?.localAppliedUpdatedAt,
             stateAfter?.localAppliedUpdatedAt,
+        )
+    }
+
+    // ── §阶段B C1 / P0-4: anchored `/since` drain (drainSlimSinceBoundedOutcome) ──
+
+    /**
+     * Helper: enqueue a 200 page of the ANCHORED `/since` window. The
+     * `X-Since-Complete` header is REQUIRED on `/since` (frozen protocol)
+     * — this helper always sets it. Mirror of the production-side helper
+     * in [OpenCodeRepositorySlimapiEndpointsTest.enqueueSincePage]; kept
+     * here too because this test class constructs [SlimSyncEngine]
+     * directly via reflection (it does NOT go through the OCR's public
+     * surface).
+     */
+    private fun enqueueSincePage(
+        items: List<MessageWithParts>,
+        nextCursor: String? = null,
+        sinceComplete: Boolean,
+    ) {
+        val resp = MockResponse().setResponseCode(200)
+            .setBody(json.encodeToString(items))
+            .setHeader("Content-Type", "application/json")
+            .setHeader("X-Since-Complete", sinceComplete.toString())
+        if (nextCursor != null) resp.setHeader("X-Next-Cursor", nextCursor)
+        server.enqueue(resp)
+    }
+
+    private fun skeleton(id: String, updated: Long): MessageWithParts =
+        MessageWithParts(
+            info = Message(
+                id = id,
+                role = "assistant",
+                sessionId = "sess-1",
+                time = Message.TimeInfo(updated = updated),
+            ),
+        )
+
+    /**
+     * §阶段B C1 / P0-4 (frozen protocol): the `/since` drain's terminal
+     * Success condition is `nextCursor == null && X-Since-Complete == true`.
+     * Pin the positive path: a single anchored page with no cursor AND
+     * `X-Since-Complete: true` → [SlimDrainOutcome.Success].
+     */
+    @Test
+    fun `C1 since drain - terminal page with sinceComplete true is Success`() = runBlocking {
+        enqueueSincePage(listOf(skeleton("m1", 100L)), nextCursor = null, sinceComplete = true)
+
+        val engine = newEngineWithRepositoryState()
+        val token = repository.captureSlimCommitToken()
+        val outcome = engine.drainSlimSinceBoundedOutcome(
+            sessionId = "sess-1",
+            anchor = 0L,
+            pageLimit = 200,
+            itemBound = 250,
+            token = token,
+        )
+
+        assertTrue(
+            "since drain: terminal + sinceComplete=true → Success (got $outcome)",
+            outcome is SlimDrainOutcome.Success,
+        )
+        assertEquals(
+            listOf("m1"),
+            (outcome as SlimDrainOutcome.Success).items.map { it.info.id },
+        )
+        // Exactly 1 /since request dispatched.
+        val req = server.takeRequest(2, TimeUnit.SECONDS)!!
+        assertTrue(
+            "request MUST hit /since/{ts}: ${req.path}",
+            req.path!!.contains("/since/"),
+        )
+    }
+
+    /**
+     * §阶段B C1 / P0-4: multi-page `/since` drain follows the cursor
+     * window; the anchor is constant, only `?before=` changes. Terminal
+     * Success when `nextCursor == null && X-Since-Complete == true`.
+     */
+    @Test
+    fun `C1 since drain - multi-page cursor follow reaches Success`() = runBlocking {
+        // Page 1: 2 items + cursor → follow.
+        enqueueSincePage(
+            listOf(skeleton("m1", 100L), skeleton("m2", 200L)),
+            nextCursor = "c2",
+            sinceComplete = false, // non-terminal page; value ignored by drain
+        )
+        // Page 2: 1 item, no cursor, sinceComplete=true → Success.
+        enqueueSincePage(
+            listOf(skeleton("m3", 300L)),
+            nextCursor = null,
+            sinceComplete = true,
+        )
+
+        val engine = newEngineWithRepositoryState()
+        val token = repository.captureSlimCommitToken()
+        val outcome = engine.drainSlimSinceBoundedOutcome(
+            sessionId = "sess-1",
+            anchor = 0L,
+            pageLimit = 200,
+            itemBound = 250,
+            token = token,
+        )
+
+        assertTrue(
+            "since drain: multi-page → Success (got $outcome)",
+            outcome is SlimDrainOutcome.Success,
+        )
+        val items = (outcome as SlimDrainOutcome.Success).items
+        assertEquals(listOf("m1", "m2", "m3"), items.map { it.info.id })
+
+        // Both requests must hit /since and carry the SAME anchor (anchor
+        // is constant within a walk; only `before` changes).
+        val req1 = server.takeRequest(2, TimeUnit.SECONDS)!!
+        val req2 = server.takeRequest(2, TimeUnit.SECONDS)!!
+        assertTrue("page 1 hits /since: ${req1.path}", req1.path!!.contains("/since/0"))
+        assertTrue("page 2 hits /since: ${req2.path}", req2.path!!.contains("/since/0"))
+        assertFalse("page 1 has no before: ${req1.path}", req1.path!!.contains("before="))
+        assertTrue("page 2 carries before=c2: ${req2.path}", req2.path!!.contains("before=c2"))
+    }
+
+    /**
+     * §阶段B C1 / P0-4: `/since` header MISSING on a 2xx response →
+     * protocol failure ([SlimSinceProtocolException]) → drain classifies
+     * as [SlimDrainOutcome.Partial]. There is NO nullable "defensive
+     * false" fallback — the previous nullable encoding hid sidecar
+     * contract violations.
+     */
+    @Test
+    fun `C1 since drain - missing X-Since-Complete header is protocol failure Partial`() = runBlocking {
+        // /since 200 response with NO X-Since-Complete header.
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody(json.encodeToString(listOf(skeleton("m1", 100L))))
+                .setHeader("Content-Type", "application/json"),
+        )
+
+        val engine = newEngineWithRepositoryState()
+        val token = repository.captureSlimCommitToken()
+        val outcome = engine.drainSlimSinceBoundedOutcome(
+            sessionId = "sess-1",
+            anchor = 0L,
+            pageLimit = 200,
+            itemBound = 250,
+            token = token,
+        )
+
+        assertTrue(
+            "since drain: missing X-Since-Complete → Partial (got $outcome)",
+            outcome is SlimDrainOutcome.Partial,
+        )
+        val cause = (outcome as SlimDrainOutcome.Partial).cause
+        assertTrue(
+            "cause must be SlimSinceProtocolException (got ${cause.javaClass.name})",
+            cause is SlimSinceProtocolException,
+        )
+    }
+
+    /**
+     * §阶段B C1 / P0-4: `/since` header UNPARSEABLE (e.g. "maybe") →
+     * protocol failure ([SlimSinceProtocolException]) → Partial. Same
+     * contract as missing-header.
+     */
+    @Test
+    fun `C1 since drain - unparseable X-Since-Complete header is protocol failure Partial`() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody(json.encodeToString(listOf(skeleton("m1", 100L))))
+                .setHeader("Content-Type", "application/json")
+                .setHeader("X-Since-Complete", "maybe"),
+        )
+
+        val engine = newEngineWithRepositoryState()
+        val token = repository.captureSlimCommitToken()
+        val outcome = engine.drainSlimSinceBoundedOutcome(
+            sessionId = "sess-1",
+            anchor = 0L,
+            pageLimit = 200,
+            itemBound = 250,
+            token = token,
+        )
+
+        assertTrue(
+            "since drain: unparseable X-Since-Complete → Partial (got $outcome)",
+            outcome is SlimDrainOutcome.Partial,
+        )
+        val cause = (outcome as SlimDrainOutcome.Partial).cause
+        assertTrue(
+            "cause must be SlimSinceProtocolException (got ${cause.javaClass.name})",
+            cause is SlimSinceProtocolException,
+        )
+    }
+
+    /**
+     * §阶段B C1 / P0-4: terminal page (`nextCursor == null`) with
+     * `X-Since-Complete: false` (truncation). After
+     * [SlimSyncEngine.MAX_PARTIAL_RETRIES] (=3) consecutive truncations
+     * → [SlimDrainOutcome.Degraded] (cause =
+     * `SlimDrainBoundExceededException("max partial retries exceeded
+     * (since truncation)")`).
+     *
+     * Each truncation response is a single-page terminal walk. The drain
+     * re-walks from `before=null` on each retry. Exactly 3 /since requests
+     * are dispatched (one per walk).
+     */
+    @Test
+    fun `C1 since drain - maxPartialRetries consecutive truncation degrades`() = runBlocking {
+        // 3 consecutive truncation responses (MAX_PARTIAL_RETRIES=3).
+        repeat(SlimSyncEngine.MAX_PARTIAL_RETRIES) {
+            enqueueSincePage(
+                listOf(skeleton("m1", 100L)),
+                nextCursor = null,
+                sinceComplete = false,
+            )
+        }
+
+        val engine = newEngineWithRepositoryState()
+        val token = repository.captureSlimCommitToken()
+        val outcome = engine.drainSlimSinceBoundedOutcome(
+            sessionId = "sess-1",
+            anchor = 0L,
+            pageLimit = 200,
+            itemBound = 250,
+            token = token,
+        )
+
+        assertTrue(
+            "since drain: 3 consecutive truncations → Degraded (got $outcome)",
+            outcome is SlimDrainOutcome.Degraded,
+        )
+        val cause = (outcome as SlimDrainOutcome.Degraded).cause
+        assertTrue(
+            "cause must be SlimDrainBoundExceededException (got ${cause.javaClass.name})",
+            cause is SlimDrainBoundExceededException,
+        )
+        // Exactly MAX_PARTIAL_RETRIES /since requests (one per truncation walk).
+        val sinceReqs = (1..SlimSyncEngine.MAX_PARTIAL_RETRIES).mapNotNull {
+            server.takeRequest(2, TimeUnit.SECONDS)
+        }.filter { it.path!!.contains("/since/") }
+        assertEquals(
+            "exactly ${SlimSyncEngine.MAX_PARTIAL_RETRIES} truncation walk requests",
+            SlimSyncEngine.MAX_PARTIAL_RETRIES,
+            sinceReqs.size,
+        )
+    }
+
+    /**
+     * §阶段B C1 / P0-4: a SINGLE truncation followed by a clean Success
+     * on the retry — confirms the drain recovers when the sidecar stops
+     * truncating (re-walks from originalAnchor + before=null).
+     */
+    @Test
+    fun `C1 since drain - single truncation then clean retry succeeds`() = runBlocking {
+        // Walk 1: single terminal page, truncated.
+        enqueueSincePage(
+            listOf(skeleton("m1", 100L)),
+            nextCursor = null,
+            sinceComplete = false,
+        )
+        // Walk 2 (retry): single terminal page, clean Success.
+        enqueueSincePage(
+            listOf(skeleton("m1", 100L)),
+            nextCursor = null,
+            sinceComplete = true,
+        )
+
+        val engine = newEngineWithRepositoryState()
+        val token = repository.captureSlimCommitToken()
+        val outcome = engine.drainSlimSinceBoundedOutcome(
+            sessionId = "sess-1",
+            anchor = 0L,
+            pageLimit = 200,
+            itemBound = 250,
+            token = token,
+        )
+
+        assertTrue(
+            "since drain: truncation + clean retry → Success (got $outcome)",
+            outcome is SlimDrainOutcome.Success,
+        )
+        // Both walks reuse the SAME anchor (originalAnchor is captured once).
+        val req1 = server.takeRequest(2, TimeUnit.SECONDS)!!
+        val req2 = server.takeRequest(2, TimeUnit.SECONDS)!!
+        assertTrue("walk 1 /since: ${req1.path}", req1.path!!.contains("/since/0"))
+        assertTrue(
+            "walk 2 reuses originalAnchor (same /since/0): ${req2.path}",
+            req2.path!!.contains("/since/0"),
+        )
+        assertFalse(
+            "walk 2 starts fresh (no before): ${req2.path}",
+            req2.path!!.contains("before="),
+        )
+    }
+
+    /**
+     * §阶段B C1 / P0-4: a transport-failure Partial (HTTP 500 mid-walk)
+     * does NOT count toward the truncation retry budget. The drain
+     * surfaces the transport Partial IMMEDIATELY (no re-walk).
+     */
+    @Test
+    fun `C1 since drain - transport failure mid-walk is immediate Partial`() = runBlocking {
+        // Page 1: non-terminal (cursor set, drain continues).
+        enqueueSincePage(
+            listOf(skeleton("m1", 100L)),
+            nextCursor = "c2",
+            sinceComplete = false,
+        )
+        // Page 2: HTTP 500 → transport Partial (surfaces immediately).
+        server.enqueue(MockResponse().setResponseCode(500))
+
+        val engine = newEngineWithRepositoryState()
+        val token = repository.captureSlimCommitToken()
+        val outcome = engine.drainSlimSinceBoundedOutcome(
+            sessionId = "sess-1",
+            anchor = 0L,
+            pageLimit = 200,
+            itemBound = 250,
+            token = token,
+        )
+
+        assertTrue(
+            "since drain: transport failure → Partial (got $outcome)",
+            outcome is SlimDrainOutcome.Partial,
+        )
+        // Exactly 2 /since requests: page 1 (success) + page 2 (500). No re-walk.
+        val sinceReqs = (1..2).mapNotNull {
+            server.takeRequest(2, TimeUnit.SECONDS)
+        }.filter { it.path!!.contains("/since/") }
+        assertEquals(
+            "transport failure surfaces after exactly 2 pages (NO re-walk)",
+            2,
+            sinceReqs.size,
+        )
+    }
+
+    /**
+     * Helper: construct a [SlimSyncEngine] wired to the test [repository]'s
+     * real [SlimSseStateMachine] + token-captured REST bundle. Mirrors
+     * the construction pattern in
+     * `§11_2 fix-8 P0-2 drainAndCommitAuthoritative throws on non-Committed`
+     * above (reflective reach into the OCR's private state machine).
+     */
+    private fun newEngineWithRepositoryState(): SlimSyncEngine {
+        val stateMachineField = OpenCodeRepository::class.java
+            .getDeclaredField("slimStateMachine")
+            .apply { isAccessible = true }
+        val stateMachine = stateMachineField.get(repository) as SlimSseStateMachine
+        val apiProvider: (OpenCodeRepository.SlimCommitToken) -> OpenCodeApi =
+            { token -> token.capturedClientBundle!!.restApi }
+        return SlimSyncEngine(
+            apiProvider = apiProvider,
+            slimStateMachine = stateMachine,
+            parseErrorCode = { _ -> null },
+            retryAfterHeaderToMs = { _ -> 0L },
+            // No authoritativeCommitter: drainSlimSinceBoundedOutcome does
+            // NOT commit (BOOKMARK INVARIANT). The drain returns items +
+            // outcome; the caller owns the incremental merge + commit.
         )
     }
 }
