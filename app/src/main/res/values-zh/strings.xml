@@ -567,4 +567,8 @@
     <!-- I-2 v2 §3.7: slim 聚合全量失败 toast；Partial 仅 signal，不 toast。 -->
     <string name="error_slim_questions_fetch_failed">待处理问题刷新失败，已保留之前的状态。</string>
     <string name="error_slim_permissions_fetch_failed">待处理权限刷新失败，已保留之前的状态。</string>
+
+    <!-- D-barrier: 连接参数变更（host 切换等）需重启生效——全屏横幅提示。 -->
+    <string name="connection_restart_required">连接参数已更改，请重启应用以生效</string>
+    <string name="connection_restart_required_title">需要重启</string>
 </resources>
