@@ -560,7 +560,7 @@ class OpenCodeRepositoryWrapperTest {
     }
 
     @Test
-    fun `connectSSE forwards directory as header and query param`() = runBlocking {
+    fun `connectSSE forwards directory as header only`() = runBlocking {
         val payload = """{"payload":{"type":"server.connected"}}"""
         server.enqueue(sseResponse(dataFrame(payload)))
 

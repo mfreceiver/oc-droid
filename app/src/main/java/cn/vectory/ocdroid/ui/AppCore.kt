@@ -800,6 +800,14 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.RestartRequired -> {
+            // §persistent-restart-required: dual notification —
+            //  1) UiEvent.Error snackbar: immediate feedback on ANY screen
+            //     (host-profile select/edit/delete fires from Settings, not
+            //     Chat, so the snackbar ensures the user sees the prompt even
+            //     before navigating to Chat).
+            //  2) restartRequired flag → persistent StatusBanner in ChatScaffold
+            //     (tied to the flag, NOT auto-dismiss) — stays visible until
+            //     the app is restarted so the user cannot forget.
             store.slices.mutateConnection { it.copy(restartRequired = true) }
             effectBus.tryEmitUiEvent(UiEvent.Error(R.string.connection_restart_required))
             true

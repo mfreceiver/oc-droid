@@ -242,9 +242,9 @@ class OrchestratorViewModel @Inject constructor(
         sessionId: String,
         permissionId: String,
         response: PermissionResponse,
-        // §Phase3b slim-branch: when the permission arrived via slim SSE /
-        // /slimapi/permissions the sidecar re-injects the directory from
-        // this HMAC token; legacy respondPermission relies on a global
+        // §Phase3b slim-branch: when the permission arrived via a slim SSE
+        // event the sidecar re-injects the directory from this HMAC token;
+        // legacy respondPermission relies on a global
         // currentDirectory header which has no correct value on the slim
         // cross-directory aggregation surface. Null = legacy single-dir path.
         routeToken: String? = null,

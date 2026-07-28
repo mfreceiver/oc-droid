@@ -37,7 +37,10 @@ data class SlimapiQuestionEntry(
 )
 
 /**
- * Cluster A: entry returned by `GET /slimapi/permissions`. Same pattern as
+ * Cluster A: legacy slimapi permission entry shape (the V1 `GET /slimapi/permissions`
+ * endpoint was removed in V2; the standard API `GET /permission` returns bare
+ * [PermissionRequest] arrays). Kept for SSE/digest deserialization compatibility.
+ * Same pattern as
  * [SlimapiQuestionEntry] — legacy [PermissionRequest] shape plus [directory]
  * + [routeToken] for the sidecar's cross-directory routing.
  */

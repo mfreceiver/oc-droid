@@ -673,7 +673,7 @@ internal fun launchLoadMoreMessages(
     // swallowed the click). Self-reentry (rapid double-click / fast scroll)
     // still coalesces on this own flag.
     if (slices.chat.value.isLoadingMoreMessages) return
-    // §on-demand: cursor-based history paging. Fetch one older page via the V1
+    // §on-demand: cursor-based history paging. Fetch one older page via the
     // `before` cursor and PREPEND it — no longer re-downloading the latest
     // window with an ever-growing limit (the old O(n²) anti-pattern that caused
     // both cellular blowup and OOM). Stops when there's no next cursor.

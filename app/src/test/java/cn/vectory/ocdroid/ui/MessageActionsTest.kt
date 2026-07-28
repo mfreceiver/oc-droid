@@ -966,8 +966,12 @@ class MessageActionsTest {
         scope.advanceUntilIdle()
         scope.runCurrent()
 
-        // 1 anchored fetch + 1 unanchored retry. Use atLeast to avoid mockk's
-        // default-arg matcher-recording interaction (mirrors the P0-7 pattern).
+        // 1 anchored fetch + 1 unanchored retry. atLeast=1 is intentional:
+        // exactly=1 was attempted (rev-gpt MINOR #6) but mockk's default-arg
+        // matcher-recording interaction with suspend functions that have
+        // default parameters prevents exact-count verification via partial
+        // matchers. The 4-param matcher test at :1181 independently pins
+        // these exact counts (exactly=1 anchored + exactly=1 unanchored).
         coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any()) }
         coVerify(atLeast = 1) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
         assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })

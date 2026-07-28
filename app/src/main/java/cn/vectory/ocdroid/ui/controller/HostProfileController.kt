@@ -451,8 +451,8 @@ class HostProfileController(
 
     /**
      * C-D3 rev-3 round-5 (oracle §5): raw body accepts the slim ticket from
-     * the caller (barrier context or non-barrier beginSlimReconfigure return)
-     * and threads it into [OpenCodeRepository.configure].
+     * the caller (barrier context or non-barrier configure path) and threads
+     * it into [OpenCodeRepository.configure].
      */
     private fun configureServerRaw(
         url: String,

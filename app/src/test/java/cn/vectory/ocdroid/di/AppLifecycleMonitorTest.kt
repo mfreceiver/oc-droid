@@ -749,7 +749,7 @@ class AppLifecycleMonitorTest {
      *    poll launch
      *  - MockWebServer.enqueue(MockResponse().setBodyDelay(400ms))
      *  - server.takeRequest(5s) to confirm the request started under A
-     *  - mid-flight: identityStore.beginReconfigure + repository.beginSlimReconfigure
+     *  - mid-flight: identityStore.beginReconfigure + repository.configure
      *    + repository.configure(hostB) — production reconfigure order
      *  - wait for the poll to drain the delayed response + run the fence
      *  - assert dedup key is still claimable (no notify happened)
@@ -831,7 +831,6 @@ class AppLifecycleMonitorTest {
                     // Mid-flight host switch (production reconfigure order):
                     // identity + slim marker rotate BEFORE configure rewires.
                     identityStore.beginReconfigure()
-                    // lite-v2: beginSlimReconfigure removed
                     realRepo.configure(
                         baseUrl = baseUrlA,
                         slim = true,
@@ -841,6 +840,23 @@ class AppLifecycleMonitorTest {
                     // the fence check. The join is real-time (the MockWebServer
                     // bodyDelay is real, not virtual) — but 400ms is fast.
                     pollJob.join()
+
+                    // Oracle strengthening (rev-gpt MINOR #7): prove the
+                    // poll job ran to completion and at least one request
+                    // reached the server. This narrows — but does not fully
+                    // close — the vacuous-pass gap: the production path uses
+                    // getOrDefault(emptyList()), so a deserialization failure
+                    // would still yield an empty list and let lateClaim pass.
+                    // Fully closing that gap would require spying on the
+                    // handler/notifier, which is out of scope for this MINOR.
+                    assertTrue(
+                        "at least one permissions request must have hit the server",
+                        server.requestCount >= 1,
+                    )
+                    assertTrue(
+                        "poll job must have completed normally",
+                        pollJob.isCompleted && !pollJob.isCancelled,
+                    )
 
                     // The fence at onSuccess must have rejected the entry-time
                     // slimToken + identity → silent drop. handler was never

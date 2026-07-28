@@ -1787,8 +1787,7 @@ class SessionListActionsTest {
                 "path must be standard permission endpoint: ${started!!.path}",
                 started.path!!.startsWith("/permission"))
 
-            // C-D3 rev-3: beginSlimReconfigure before configure (purge window).
-            // lite-v2: beginSlimReconfigure removed
+            // C-D3 rev-3: configure rotates the slim marker (purge window).
             realRepo.configure(baseUrl = baseUrl, slim = true)
 
             kotlinx.coroutines.delay(800)

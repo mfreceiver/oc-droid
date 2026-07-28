@@ -1195,7 +1195,7 @@ class OpenCodeRepository @Inject constructor(
         }
 
     /**
-     * Cursor-paged message fetch (V1 route: cursor carried via the
+     * Cursor-paged message fetch (V1 cursor-paging protocol: cursor carried via the
      * `X-Next-Cursor` response header + the `before` query param).
      *
      * §11.1 fix-10 P0-1: in slim mode, the method now DISTINGUISHES two
@@ -1599,22 +1599,11 @@ class OpenCodeRepository @Inject constructor(
     }
 
     /**
-     * §slim-reconcile-lane-repo (B2 T4) / §rev-grok fix1: in slim mode, route
-     * to the sidecar's `/slimapi/permissions` cross-directory aggregate
-     * (single call replaces the legacy per-directory `/permission` poll). The
-     * sidecar returns its `{items, errors}` envelope; this method flattens
-     * `.items` and maps each [SlimapiPermissionEntry] to a legacy
-     * [PermissionRequest] via [toPermissionRequest], **preserving
-     * [SlimapiPermissionEntry.routeToken]** (Phase 3b — the slim respond
-     * path needs the sidecar HMAC; `directory` is still dropped, the sidecar
-     * re-injects it from the token).
-     *
-     * `directories = null` lets the sidecar decide scope (matches
-     * [coldStartSlimSync]'s default — the upper layer that knows the user's
-     * session set can pass a list explicitly via [getSlimapiPermissions]).
-     *
-     * Per-directory `errors` are logged at WARN (same envelope-degradation
-     * policy as the other slimapi aggregate readers).
+     * §slim-reconcile-lane-repo (B2 T4) / §rev-grok fix1: fetch pending
+     * permissions from the standard `/permission` endpoint (slim or legacy).
+     * V2 removed the `/slimapi/permissions` sidecar aggregate — always uses
+     * the standard API, which returns bare [PermissionRequest] without the
+     * V1 `{items, errors}` envelope.
      *
      * legacy (`isSlimMode == false`): byte-for-byte unchanged.
      */

@@ -5,7 +5,7 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
 /**
  * One page of the cursor-paginated `/messages` window
  * (`GET /slimapi/messages/{sid}?before=…&mode=skeleton`). [nextCursor] is
- * the opaque V1 cursor (`X-Next-Cursor` response header) to pass as
+ * the opaque cursor (`X-Next-Cursor` response header) to pass as
  * `before` for the next older page; **null means no more history** and is
  * the sole terminal signal for the drain.
  *
@@ -19,9 +19,9 @@ data class MessagesPage(
 )
 
 /**
- * §slim-v1-paging (Task 5 / G5 cursor): the `/messages` endpoint accepts
+ * §slim-paging (Task 5 / G5 cursor): the `/messages` endpoint accepts
  * a server-side `?limit`. V2 removed the `/since` endpoint (spec §2:59).
- * Each fetch returns ONE bounded page; v1 now surfaces the sidecar's
+ * Each fetch returns ONE bounded page; the endpoint surfaces the sidecar's
  * `X-Next-Cursor` response header so the caller can decide whether to
  * follow via the `?before=<opaque>` query (T5 flipped the earlier
  * "single-page; no cursor follow" decision — see [getMessagesPaged] slim

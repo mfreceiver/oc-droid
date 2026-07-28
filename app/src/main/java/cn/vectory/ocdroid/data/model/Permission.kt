@@ -15,9 +15,10 @@ data class PermissionRequest(
     val directory: String? = null,
     /**
      * Slimapi HMAC the sidecar validates on the permission response POST
-     * (~1h TTL). Present only when the permission arrived via slim SSE /
-     * `/slimapi/permissions`; legacy paths leave this null. Phase 3 respond
-     * path returns it on the slim write endpoints.
+     * (~1h TTL). Present only when the permission arrived via slim SSE;
+     * legacy/standard paths leave this null. The slim respond path
+     * ([OpenCodeRepository.respondSlimapiPermission]) threads it back on
+     * the write endpoint.
      */
     @SerialName("routeToken") val routeToken: String? = null,
 ) {
