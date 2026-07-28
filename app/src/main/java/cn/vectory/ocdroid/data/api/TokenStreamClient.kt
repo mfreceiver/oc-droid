@@ -37,7 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * The session path is concatenated under `/slimapi/sessions/{sid}/stream`;
  * when [directory] is non-null it is added as a properly percent-encoded
  * `?directory=` query (the sidecar reads the query before any header). The
- * `X-Slimapi-Version: 1` header is auto-injected by
+ * `X-Slimapi-Version: 2` header is auto-injected by
  * [cn.vectory.ocdroid.data.repository.http.SlimapiVersionInterceptor] on the
  * OkHttp chain (the client built by
  * [cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory.tokenStreamClient]

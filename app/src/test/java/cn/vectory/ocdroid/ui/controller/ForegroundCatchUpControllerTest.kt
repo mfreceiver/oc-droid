@@ -409,26 +409,6 @@ class ForegroundCatchUpControllerTest {
         assertTrue(collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>().isEmpty())
     }
 
-    // ── onHostReconfigured ─────────────────────────────────────────────────
-
-    @Test
-    fun `onHostReconfigured resets so next connect is treated as cold start`() = withCollectedEffects { controllerScope, collected ->
-        val controller = makeController(controllerScope)
-        store.mutateChat { it.copy(currentSessionId = "session-Z") }
-        controller.onServerConnected() // first → sseHasConnectedOnce=true
-        controller.onServerConnected() // reconnect → would catch up
-        assertEquals(1, collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>().size)
-
-        controller.onHostReconfigured() // host switch → reset
-        controller.onServerConnected() // next connect treated as cold start
-        assertEquals(
-            "after host reconfigure the next connect skips catch-up",
-            1,
-            collected.filterIsInstance<ControllerEffect.CatchUpAfterDisconnect>().size
-        )
-    }
-
-    // ── suppress flag carry-over (glm-1 🟠-1) ──────────────────────────────
 
     @Test
     fun `residual suppress flag is cleared at start of next foreground cycle`() = withCollectedEffects { controllerScope, collected ->

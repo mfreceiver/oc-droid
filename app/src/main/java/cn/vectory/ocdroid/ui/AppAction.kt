@@ -472,9 +472,8 @@ sealed interface AppAction {
      * delivered a `message.removed` frame). The reducer evicts the
      * message from `messages` + `partsByMessage`; the per-message
      * watermark entry was already removed by
-     * [cn.vectory.ocdroid.data.repository.SlimSseStateMachine.applyMessageRemoved]
-     * under the slim commit token guard (B-P0-2's [SlimFullReconciler.onMessageGone]
-     * wiring drives BOTH the watermark removal AND this dispatch).
+     * the in-memory slim state under the slim commit token guard (the
+     * onMessageGone wiring drives BOTH the watermark removal AND this dispatch).
      *
      * The [cn.vectory.ocdroid.data.repository.maxMessageTuple] cache is
      * NOT a separate structure — it is derived on demand from

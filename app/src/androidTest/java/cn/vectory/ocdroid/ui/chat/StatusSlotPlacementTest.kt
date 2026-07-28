@@ -102,8 +102,7 @@ class StatusSlotPlacementTest {
         //    The container is the root Surface (400dp tall). The StatusSlot
         //    is Modifier.align(TopCenter), so its top edge should be at ~0
         //    PLUS the gap offset applied by the layout modifier (= 8dp).
-        val density = composeRule.density
-        val expectedGapPx = with(density) { expectedGap.toPx() }
+        //    getUnclippedBoundsInRoot() returns BoundsInRoot with Dp fields.
         val containerBounds = composeRule.onNodeWithTag("slotContainer")
             .getUnclippedBoundsInRoot()
         val activityTextBounds = composeRule.onNodeWithText("Running test activity")
@@ -111,22 +110,24 @@ class StatusSlotPlacementTest {
 
         // The text node is a child of the AnimatedContent → the gap offset
         // propagates from the outer layout modifier. The text's top should be
-        // at least expectedGapPx from the container's top.
+        // at least expectedGap from the container's top. Work in Dp: Dp - Dp = Dp,
+        // Dp * 0.8f = Dp, Dp >= Dp compiles.
         val textTopFromContainer = activityTextBounds.top - containerBounds.top
         assertTrue(
-            "Text top should be >= gap ($expectedGapPx px), " +
+            "Text top should be >= gap ($expectedGap), " +
                 "was $textTopFromContainer",
-            textTopFromContainer >= expectedGapPx * 0.8f, // allow small rounding
+            textTopFromContainer >= expectedGap * 0.8f, // allow small rounding
         )
 
         // 3. The content should be horizontally centered in the container.
         //    The AnimatedContent has Modifier.align(Alignment.TopCenter), so
         //    the child's center X should be near the container's center X.
-        val containerCenterX = containerBounds.centerX
-        val textCenterX = activityTextBounds.centerX
+        //    Convert Dp to Float via .value for division and abs.
+        val containerCenterX = (containerBounds.left + containerBounds.right).value / 2f
+        val textCenterX = (activityTextBounds.left + activityTextBounds.right).value / 2f
         val centerDelta = kotlin.math.abs(textCenterX - containerCenterX)
         // Allow 10% of the container width for padding/content-inset tolerance.
-        val maxCenterDelta = containerBounds.width * 0.10f
+        val maxCenterDelta = (containerBounds.right - containerBounds.left).value * 0.10f
         assertTrue(
             "Text should be roughly centered horizontally; delta=$centerDelta " +
                 "max=$maxCenterDelta",
@@ -188,8 +189,6 @@ class StatusSlotPlacementTest {
         composeRule.onNodeWithText("Compacting…")
             .assertExists("Compacting text should be rendered")
 
-        val density = composeRule.density
-        val expectedGapPx = with(density) { expectedGap.toPx() }
         val containerBounds = composeRule.onNodeWithTag("slotContainer2")
             .getUnclippedBoundsInRoot()
         val compactTextBounds = composeRule.onNodeWithText("Compacting…")
@@ -197,16 +196,16 @@ class StatusSlotPlacementTest {
 
         val textTopFromContainer = compactTextBounds.top - containerBounds.top
         assertTrue(
-            "Compacting text top should be >= gap ($expectedGapPx px), " +
+            "Compacting text top should be >= gap ($expectedGap), " +
                 "was $textTopFromContainer",
-            textTopFromContainer >= expectedGapPx * 0.8f,
+            textTopFromContainer >= expectedGap * 0.8f,
         )
 
         // Verify horizontal centering.
-        val containerCenterX = containerBounds.centerX
-        val textCenterX = compactTextBounds.centerX
+        val containerCenterX = (containerBounds.left + containerBounds.right).value / 2f
+        val textCenterX = (compactTextBounds.left + compactTextBounds.right).value / 2f
         val centerDelta = kotlin.math.abs(textCenterX - containerCenterX)
-        val maxCenterDelta = containerBounds.width * 0.10f
+        val maxCenterDelta = (containerBounds.right - containerBounds.left).value * 0.10f
         assertTrue(
             "Compacting text should be roughly centered; delta=$centerDelta " +
                 "max=$maxCenterDelta",

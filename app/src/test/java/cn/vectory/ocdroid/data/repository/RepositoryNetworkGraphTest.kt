@@ -6,7 +6,6 @@ import cn.vectory.ocdroid.data.repository.http.CachePathSanitizer
 import cn.vectory.ocdroid.data.repository.http.DirectoryHeaderInterceptor
 import cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory
 import cn.vectory.ocdroid.data.repository.http.ResponseSizeGuardInterceptor
-import cn.vectory.ocdroid.data.repository.http.SlimapiCapabilitiesInterceptor
 import cn.vectory.ocdroid.data.repository.http.SlimapiDebugInterceptor
 import cn.vectory.ocdroid.data.repository.http.SlimapiVersionInterceptor
 import cn.vectory.ocdroid.data.repository.http.SslConfigFactory
@@ -47,7 +46,6 @@ class RepositoryNetworkGraphTest {
         DirectoryHeaderInterceptor::class.java,
         SlimapiVersionInterceptor::class.java,
         SlimapiDebugInterceptor::class.java,
-        SlimapiCapabilitiesInterceptor::class.java,
         AuthInterceptor::class.java,
         CacheControlInterceptor::class.java,
         CachePathSanitizer::class.java,

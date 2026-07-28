@@ -45,6 +45,5 @@ data class SlimColdStartSnapshot(
     val messages: List<MessageWithParts>?,
     /** rev-F: three-header discovery meta absent on pre-rev-F sidecars. */
     val complete: Boolean? = null,
-    val discoveryDirectories: Int? = null,
-    val discoveryReady: Boolean? = null,
+
 )

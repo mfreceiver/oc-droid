@@ -12,13 +12,27 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.controller.CachedSessionWindow
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
+import cn.vectory.ocdroid.data.repository.MessagesPage
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.ui.StreamOwnedState
+import cn.vectory.ocdroid.ui.chat.PartExpandState
+import cn.vectory.ocdroid.ui.chat.PartKey
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 
 internal fun launchLoadMessages(
     scope: CoroutineScope,
@@ -89,8 +103,7 @@ internal fun launchLoadMessages(
      * Defaults to `{ true }` (treat SSE as live — no retry, preserves
      * legacy behavior for tests/legacy callers). When the predicate reports
      * SSE-off (`isSseLive() == false`) AND the failure is an IOException
-     * (NOT CancellationException / StaleSlimCommitException /
-     * SlimSinceStagingOnlyException) AND `resetLimit == true` (cold-load),
+     * (NOT CancellationException) AND `resetLimit == true` (cold-load),
      * the retry loop fires ONE extra `getMessagesPagedUnanchored` call after
      * a short delay. CancellationException propagates verbatim through the
      * delay (handled by the outer try/catch). Production callers
@@ -129,29 +142,10 @@ internal fun launchLoadMessages(
         // watermark that would return an empty /since response and preserve an
         // empty UI window. Both methods return the same MessagesPage shape, so
         // the merge / cursor-seeding logic below is shared verbatim.
-        // §stale-retry-fix (2026-07-26): when the repository is mid-reconfigure
-        // (common on SSE reconnect / app resume / host switch), getMessagesPaged
-        // returns Result.failure(StaleSlimCommitException). Without retry, the
-        // REST GET fails → no LoadedContent created → new session shows nothing.
-        // The user's "new conversation first message doesn't render" bug was
-        // caused by this: the log showed loadMessages failing 3× with stale token
-        // during the SSE reconnect catch-up window. Retry up to 2 times with
-        // 500ms delay — the reconfigure typically completes within 1s.
         var pageResult = if (forceInitialWindow) {
             repository.getMessagesPagedUnanchored(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
         } else {
             repository.getMessagesPaged(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
-        }
-        var staleAttempts = 0
-        while (pageResult.exceptionOrNull() is OpenCodeRepository.StaleSlimCommitException && staleAttempts < 2) {
-            staleAttempts++
-            DebugLog.d("Sync", "loadMessages stale token (attempt $staleAttempts/2), retrying in 500ms")
-            kotlinx.coroutines.delay(500)
-            pageResult = if (forceInitialWindow) {
-                repository.getMessagesPagedUnanchored(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
-            } else {
-                repository.getMessagesPaged(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
-            }
         }
         // §11.1 fix-9 P0-7 (sse-sync-degradation-remediation.md P0-2):
         // SSE-off first-fetch retry. When the SSE transport is NOT live
@@ -179,8 +173,6 @@ internal fun launchLoadMessages(
         if (pageResult.isFailure &&
             resetLimit &&
             retryCause is java.io.IOException &&
-            retryCause !is OpenCodeRepository.StaleSlimCommitException &&
-            retryCause !is OpenCodeRepository.SlimSinceStagingOnlyException &&
             !isSseLive()
         ) {
             DebugLog.d("Sync", "loadMessages SSE-off first-fetch failure (cause=${pageResult.exceptionOrNull()?.let { it::class.simpleName }}), retrying once via unanchored in 500ms")
@@ -572,16 +564,9 @@ internal fun launchLoadMessages(
                 // session the user already left).
                 // §chat-list-detail §7.2 B0.5-rework: ALSO check the route token —
                 // a stale A→B→A failure must NOT emit an error for the newer load.
-                // §11.1 fix-8 P1-2: the slim anchored `/since` path now returns
-                // SlimSinceStagingOnlyException (conservative staging). This is
-                // NOT a real transport failure — REST reload is intentionally
-                // unavailable in slim stage-A (SSE drives updates). Suppress the
-                // UiEvent.Error surface for this typed exception; treat it as
-                // "REST reload skipped, keep current UI state".
                 val tokenValid = expectedRouteInstance == 0L ||
                     expectedRouteInstance == slices.store.stateFlow.value.chatRouteInstance
-                val isStagingOnly = error is OpenCodeRepository.SlimSinceStagingOnlyException
-                if (sessionId == slices.chat.value.currentSessionId && tokenValid && !isStagingOnly) {
+                if (sessionId == slices.chat.value.currentSessionId && tokenValid) {
                     emit.emit(UiEvent.Error(R.string.error_load_messages_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
             }
@@ -898,3 +883,480 @@ internal fun launchLoadMoreMessages(
     onCacheWindow = onCacheWindow,
     expectedRouteInstance = 0L,
 )
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §4.3 reloadSkeletonPage — lite-v2-dev 核心同步路径
+//
+// 新的 skeleton reload 协调器：digest / done / resync / idle 等触发点 →
+// 拉 sidecar skeleton 单页（无 token / 无 watermark / 无 reconfigure 协议）→
+// 权威窗口 merge 进 chat slice。替代旧的 sync engine / full reconciler
+// + cold-start snapshot 系统（见 plan §4.1 整文件退役清单）。
+//
+// 实现严格照抄 plan §4.3.6 完整伪代码（v2.7-final），适配到 MessageActions.kt
+// 顶层函数语境：状态 + 行为收敛进 SkeletonReloadCoordinator 类，构造期注入
+// scope / repository / slices / currentServerGroupFp。锁序、原子提交事务、
+// 身份校验、历史守卫、空页早退、补集分区、deadMsgIds 黑名单、watchdog 退避
+// 等细节全部保留——见伪代码注释（被原样保留以便后续 review 比对）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * §4.3.1 per-session reload 状态。所有字段在 [SkeletonReloadCoordinator.stateMutex]
+ * 下 check-and-set。`failed` / `retryAttempt` 跨 watchdog arm 持久化（v2.7 修正
+ * v2.6 用局部变量导致退避永远停在 15s 的缺陷）。
+ */
+private data class ReloadState(
+    var desiredEpoch: Long = 0L,       // 每次触发递增（Layer 1，非提交门）
+    var inFlight: Boolean = false,
+    var pendingLimit: Int = 0,         // 排队的 reload limit
+    var failed: Boolean = false,       // 失败标记（Layer A）
+    var retryAttempt: Int = 0,         // v2.7：退避计数，跨 armWatchdog 持久化
+)
+
+/**
+ * §4.3.2 Layer 2 fence：launch 时一次性捕获的身份三元组。dispatch 原样携带
+ * 捕获值，不重新读取，防 A₁→B→A₂ 的 token laundering。
+ */
+private data class ReloadIdentity(
+    val serverGroupFp: String,
+    val sessionId: String,
+    val routeInstance: Long,
+)
+
+/**
+ * §4.3 reloadSkeletonPage 协调器。一个实例对应一个长生命周期 host/session
+ * 域（典型持有方：AppCore / OrchestratorViewModel）。所有共享簿记（reloadStates /
+ * reloadJobs / locallyInjected / watchdogJobs）都在 [stateMutex] 下 check-and-set。
+ *
+ * # 锁序契约（v2.7，MANDATORY）
+ *
+ * `sessionLock → stateMutex`，单向无环。禁止在 launchNextReload / merge 里把
+ * stateMutex 反向套在 sessionLock 外——会与本路径成环死锁。
+ *
+ * # 调用入口
+ *
+ *  - [requestReload]：fire-and-forget，digest / done / resync / idle 触发
+ *  - [onDigestChange]：digest 专用入口（含失败重置 + watchdog disarm）
+ *  - [onSessionClosed]：session 关闭清理（cancelAndJoin 在途 job）
+ *  - [markLocallyInjected]：同步标记本地注入消息（消除 SSE shell 注入与打标的时序窗口）
+ */
+class SkeletonReloadCoordinator(
+    private val scope: CoroutineScope,
+    private val repository: OpenCodeRepository,
+    private val slices: SliceFlows,
+    private val currentServerGroupFp: () -> String,
+) {
+    // 所有共享簿记在一把 Mutex 下（check-and-set 必须在锁内）
+    // 锁序契约（v2.7）：sessionLock → stateMutex，单向，无环。
+    //   禁止在 launchNextReload / merge 里把 stateMutex 反向套在 sessionLock 外。
+    private val stateMutex = Mutex()
+
+    // ── per-session 状态（key = sessionId）──
+    //
+    // desiredEpoch：每次触发都递增（不只是 launch 时）。
+    //   v2.7：epoch 不再作为"提交门"（会饥饿），只决定"要不要再拉一轮"。
+    private val reloadStates = mutableMapOf<String, ReloadState>()
+
+    // 本地注入消息 id（小闭集）。
+    //   只有两个写入点：launchSendMessage 乐观消息 + SseChatReducers assistant shell。
+    //   被服务器确认后（出现在 fetched 中）立即移除。
+    //   用于区分"本地注入"（保留）和"服务器删除"（移除）。
+    //   v2.7：ConcurrentHashMap —— markLocallyInjected 必须同步生效（见 §4.3.6），
+    //         否则 SSE assistant shell 注入与打标之间有时序窗口，
+    //         窗口内到达的 reload 会把尚未打标的 shell 判成"服务器删除"。
+    private val locallyInjected = ConcurrentHashMap<String, MutableSet<String>>()
+
+    // 15s watchdog（仅失败时 arm，成功时 disarm）
+    private val watchdogJobs = mutableMapOf<String, Job>()
+
+    // 在途 reload job（session close 时 cancelAndJoin，防止 detached state 回写）
+    private val reloadJobs = mutableMapOf<String, Job>()
+
+    // ── init: session 切换观察（onSessionClosed 接线，🔴-6）──
+    init {
+        scope.launch {
+            var previousSessionId: String? = null
+            slices.chat
+                .map { it.currentSessionId }
+                .distinctUntilChanged()
+                .collect { current ->
+                    val closed = previousSessionId
+                    previousSessionId = current
+                    if (closed != null && closed != current) {
+                        onSessionClosed(closed)
+                    }
+                }
+        }
+    }
+
+    // ── ReloadIdentity：launch 时一次性捕获 ──
+    // v2.7: routeInstanceFor 的接收者是 slices（不是 store snapshot）
+    private fun captureIdentity(sessionId: String): ReloadIdentity? {
+        if (slices.chat.value.currentSessionId != sessionId) return null
+        val routeInstance = slices.routeInstanceFor(sessionId)
+        if (routeInstance == 0L) return null
+        return ReloadIdentity(
+            serverGroupFp = currentServerGroupFp(),
+            sessionId = sessionId,
+            routeInstance = routeInstance,
+        )
+    }
+
+    // ── 入口：requestReload（fire-and-forget）──
+    fun requestReload(sessionId: String, limit: Int = 50) {
+        // 后台 session gate：fetch 前检查，避免无效请求
+        if (sessionId != slices.chat.value.currentSessionId) return
+
+        scope.launch {
+            stateMutex.withLock {
+                val state = reloadStates.getOrPut(sessionId) { ReloadState() }
+                // 每次触发都递增 desiredEpoch（Layer 1）
+                state.desiredEpoch += 1
+                state.pendingLimit = maxOf(state.pendingLimit, limit)
+                if (!state.inFlight) {
+                    launchNextReload(sessionId)
+                }
+            }
+        }
+    }
+
+    // 必须在 stateMutex 内调用
+    private fun launchNextReload(sessionId: String) {
+        val ownerState = reloadStates[sessionId] ?: return
+        if (ownerState.inFlight || ownerState.pendingLimit == 0) return
+
+        val identity = captureIdentity(sessionId) ?: run {
+            ownerState.pendingLimit = 0
+            return
+        }
+
+        val requestEpoch = ownerState.desiredEpoch
+        val limit = ownerState.pendingLimit
+        ownerState.pendingLimit = 0
+        ownerState.inFlight = true
+
+        // v2.7-final: lazy start —— 先登记 job 再启动，避免极快完成时 map 写入顺序反转
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                val page = repository.getSlimapiMessagesSkeleton(
+                    sessionId, limit = limit, before = null
+                )
+                // 锁序：sessionLock → stateMutex（单向，无环）。
+                // 禁止反向（把 stateMutex 套在 sessionLock 外）—— 会与本路径成环死锁。
+                slices.messageLoadCoordinator.withSessionLock(sessionId) {
+                    // v2.7-final: 原子提交事务 —— epoch + 身份 + merge + dispatch + 簿记在同一 stateMutex 内
+                    stateMutex.withLock {
+                        val current = reloadStates[sessionId]
+                        if (current !== ownerState) return@withLock
+                        if (ownerState.desiredEpoch != requestEpoch) {
+                            ownerState.pendingLimit = maxOf(ownerState.pendingLimit, limit)
+                        }
+                        val chat = slices.chat.value
+                        if (chat.currentSessionId != identity.sessionId) return@withLock
+                        if (currentServerGroupFp() != identity.serverGroupFp) return@withLock
+                        if (page.items.isEmpty()) {
+                            // 空页不清 transcript（mergeSkeletonIntoChatSlice 内部 isEmpty 早退），
+                            // 但成功 HTTP 必须复位失败标记 + 退避计数 + disarm watchdog，
+                            // 否则 watchdog 继续以指数退避空转。
+                            ownerState.failed = false
+                            ownerState.retryAttempt = 0
+                            watchdogJobs.remove(sessionId)?.cancel()
+                            return@withLock
+                        }
+                        mergeSkeletonIntoChatSlice(chat, sessionId, page, identity)
+                        ownerState.failed = false
+                        ownerState.retryAttempt = 0
+                        watchdogJobs.remove(sessionId)?.cancel()
+                    }
+                }
+            } catch (ce: CancellationException) {
+                throw ce  // R-14: CE 必须原样传播
+            } catch (e: Exception) {
+                // Layer A: 失败标记 + arm watchdog（不动 pendingLimit）
+                stateMutex.withLock {
+                    val current = reloadStates[sessionId]
+                    if (current === ownerState) {
+                        ownerState.failed = true
+                        armWatchdog(sessionId, ownerState)
+                    }
+                }
+            } finally {
+                withContext(NonCancellable) {
+                    stateMutex.withLock {
+                        val current = reloadStates[sessionId]
+                        val self = coroutineContext[Job]
+                        if (current === ownerState) {
+                            ownerState.inFlight = false
+                            if (!ownerState.failed && ownerState.pendingLimit > 0) {
+                                launchNextReload(sessionId)
+                            }
+                        }
+                        if (reloadJobs[sessionId] === self) reloadJobs.remove(sessionId)
+                    }
+                }
+            }
+        }
+        reloadJobs[sessionId] = job
+        job.start()
+    }
+
+    // ── 权威窗口 merge ──
+    // 调用方已持 sessionLock + stateMutex（见 launchNextReload）
+    @Suppress("UNUSED_PARAMETER")
+    private fun mergeSkeletonIntoChatSlice(
+        chat: ChatState,
+        sessionId: String,
+        page: MessagesPage,
+        identity: ReloadIdentity,
+    ) {
+        // ── v2.7 P0: 空页零权威 —— 入口早退，不 merge 不 dispatch ──
+        // （launchNextReload 已做 isEmpty 早退；这里防御性 double-check，遵守
+        //   「空页承载零权威信息」契约——任何"部分应用"都会退化成清空 transcript。）
+        if (page.items.isEmpty()) return
+
+        // ── v2.7: 一次性快照，全函数只读 chat（避免中途 slice 变更导致自相矛盾）──
+        // 调用方传入 launchNextReload 捕获的 chat 快照；下面所有 src* 都从这一份读。
+        val srcMessages = chat.messages
+        val srcParts = chat.partsByMessage
+        val srcStreamingTexts = chat.streamingPartTexts
+        val srcStreamingReasoning = chat.streamingReasoningPart
+        val srcStreamOwned = chat.streamOwned
+        val srcCursor = chat.olderMessagesCursor
+        val srcHasMore = chat.hasMoreMessages
+
+        // 防御性排序（N ≤ 200，成本可忽略）—— 拼接顺序依赖升序，见 §4.3.7 契约
+        val fetched = page.items.map { it.info }
+            .sortedWith(compareBy({ it.time?.created ?: Long.MAX_VALUE }, { it.id }))
+        val fetchedParts = page.items.associate { it.info.id to it.parts }
+        val fetchedIds = fetched.mapTo(HashSet()) { it.id }
+
+        // 更新 locallyInjected：被服务器确认的 id 移除
+        locallyInjected[sessionId]?.removeAll(fetchedIds)
+
+        val fetchedCreated = fetched.mapNotNull { it.time?.created }
+        val oldestFetched = fetchedCreated.minOrNull()
+        val newestFetched = fetchedCreated.maxOrNull()
+        val injected: Set<String> = locallyInjected[sessionId] ?: emptySet()
+
+        // ── 删除检测（包含法）──
+        fun isServerDeleted(m: Message): Boolean {
+            if (m.id in fetchedIds) return false             // 在 fetched 中
+            if (m.id in injected) return false               // 本地注入
+            val created = m.time?.created ?: return false    // 无时间戳 → 永不删
+            val oldest = oldestFetched ?: return false       // 无法定位窗口 → 永不删
+            // 比窗口最新还新 → 永不删（他端新消息 / 同毫秒 tie）：
+            //   这是"提交稍旧窗口"安全的前提，见 §4.3.2 Layer 1
+            if (newestFetched != null && created >= newestFetched) return false
+            return created > oldest                           // 严格在窗口内缺席 → 删除
+        }
+
+        // ── 补集分区 merge（v2.7：survivors 非删即留，绝不丢人）──
+        val survivors = srcMessages.filterNot(::isServerDeleted)
+        val notFetched = survivors.filter { it.id !in fetchedIds }
+        val olderKept = notFetched.filter { m ->
+            val c = m.time?.created
+            c != null && oldestFetched != null && c <= oldestFetched   // tie 归历史
+        }
+        val olderKeptIds = olderKept.mapTo(HashSet()) { it.id }
+        // newerKept = notFetched − olderKept：兜住 null-created + injected + 一切剩余
+        val newerKept = notFetched.filter { it.id !in olderKeptIds }
+        val keptIds = HashSet(olderKeptIds).apply { addAll(newerKept.map { it.id }) }
+
+        val mergedMessages = (olderKept + fetched + newerKept).distinctBy { it.id }
+
+        // ── Parts merge：按位置就地替换，保护展开内容 ──
+        // v2.7: HashMap 就地写入（v2.6 在循环里 `mergedParts + (…)` = 每轮全量复制，O(n²)）
+        val expandedKeys = chat.partExpandStates
+            .filterValues { it is PartExpandState.Loaded }.keys
+
+        val mergedPartsMut = HashMap<String, List<Part>>(srcParts.filterKeys { it in keptIds })
+        for ((msgId, fetchedPartList) in fetchedParts) {
+            val localById = srcParts[msgId]?.associateBy { it.id }
+            mergedPartsMut[msgId] = if (localById == null) fetchedPartList else fetchedPartList.map { fp ->
+                val lp = localById[fp.id]          // v2.7: 显式 null 检查（v2.6 `lp.isTruncatedMarker()` 编译不过）
+                if (lp != null && PartKey(msgId, fp.id) in expandedKeys &&
+                    fp.isTruncatedMarker() && !lp.isTruncatedMarker()
+                ) lp else fp
+            }
+        }
+
+        // ── 孤儿键清理：删除后 mergedParts 不残留已删消息的 parts ──
+        val liveIds = mergedMessages.mapTo(HashSet()) { it.id }
+        mergedPartsMut.keys.retainAll(liveIds)
+        var mergedParts: Map<String, List<Part>> = mergedPartsMut
+
+        // ── Historical Guard 1: §flicker-fix (placeholder survival) ──
+        val srcSessionStatuses = slices.sessionList.value.sessionStatuses
+        val streamingFinalized = srcSessionStatuses[sessionId]
+            ?.let { st -> !st.isBusy && !st.isRetry } ?: true
+        val streamingPartIds = srcStreamingTexts.keys
+        if (!streamingFinalized && streamingPartIds.isNotEmpty()) {
+            val withPlaceholders = mergedParts.toMutableMap()
+            for ((oldMsgId, oldParts) in srcParts) {
+                if (oldMsgId !in liveIds) continue  // 跳过已删消息
+                for (p in oldParts) {
+                    if (p.id in streamingPartIds && (p.isText || p.isReasoning)) {
+                        val merged = withPlaceholders[oldMsgId]
+                        if (merged == null || merged.none { it.id == p.id }) {
+                            withPlaceholders[oldMsgId] = (merged ?: emptyList()) + p
+                        }
+                    }
+                }
+            }
+            mergedParts = withPlaceholders
+        }
+
+        // ── Historical Guard 2: §append-safe + §Q10 overlay guard ──
+        // Part owner 索引（避免 O(n²) 全表扫描）
+        val partOwnerIndex = srcParts.entries
+            .flatMap { (mid, ps) -> ps.map { it.id to mid } }.toMap()
+
+        val overlayOwnerMsgIds = srcStreamingTexts.keys.mapNotNull { pid ->
+            partOwnerIndex[pid]
+        }.toSet()
+        val overlayFinalized = overlayOwnerMsgIds.isEmpty() ||
+            overlayOwnerMsgIds.all { it in fetchedIds }
+
+        val reasoningOwnerMsgId = srcStreamingReasoning?.let { r -> partOwnerIndex[r.id] }
+        val reasoningFinalized = reasoningOwnerMsgId == null || reasoningOwnerMsgId in fetchedIds
+
+        val ownedStreamingKeys = srcStreamOwned
+            .filterValues { it == StreamOwnedState.STREAMING }.keys
+        val legacyWouldClear = streamingFinalized && overlayFinalized
+        val authoritative = legacyWouldClear && ownedStreamingKeys.isEmpty()
+        val newStreamingTexts = when {
+            authoritative -> emptyMap()
+            legacyWouldClear -> srcStreamingTexts.filterKeys { it in ownedStreamingKeys }
+            else -> srcStreamingTexts
+        }
+        val newStreamingReasoning =
+            if (streamingFinalized && reasoningFinalized && ownedStreamingKeys.isEmpty()) null
+            else srcStreamingReasoning
+
+        // 孤儿 overlay 清理（v2.7：deadMsgIds 黑名单，不用 livePartIds 白名单）
+        //   白名单会误杀 streamOwned == STREAMING 且尚未持久化的 part
+        //   （还没进 mergedParts → 不在 livePartIds → 正在流的文本被剪掉）。
+        val srcIds = srcMessages.mapTo(HashSet()) { it.id }
+        val deadMsgIds = srcIds - liveIds
+        val deadPartIds = deadMsgIds.flatMapTo(HashSet()) { mid ->
+            srcParts[mid].orEmpty().map { it.id }
+        }
+        val prunedStreamingTexts = newStreamingTexts.filterKeys { it !in deadPartIds }
+        val prunedReasoning = newStreamingReasoning?.takeUnless { r ->
+            partOwnerIndex[r.id]?.let { it in deadMsgIds } == true
+        }
+
+        // ── Cursor/hasMore ──
+        val cursorUnseeded = srcCursor == null
+        val historyAlreadyPaged = !cursorUnseeded && olderKept.isNotEmpty()
+        val newCursor = if (cursorUnseeded && !historyAlreadyPaged) page.nextCursor else srcCursor
+        val newHasMore = if (cursorUnseeded && !historyAlreadyPaged) (page.nextCursor != null) else srcHasMore
+
+        // ── Dispatch（补齐全部字段）──
+        slices.store.dispatch(
+            AppAction.ChatContentLoaded(
+                sessionId = identity.sessionId,
+                expectedRouteInstance = identity.routeInstance,  // 捕获值，不重读
+                messages = mergedMessages,
+                partsByMessage = mergedParts,
+                streamingPartTexts = prunedStreamingTexts,
+                streamingReasoningPart = prunedReasoning,          // ← v2.5 漏；v2.7 补黑名单剪枝
+                olderMessagesCursor = newCursor,
+                hasMoreMessages = newHasMore,
+                currentModel = inferCurrentModel(mergedMessages), // ← v2.5 漏
+                authoritative = authoritative,                    // ← v2.5 漏
+            )
+        )
+    }
+
+    // ── Part 截断标记判定（与 ExpandedPartsReconcile.kt:65-67 同判据）──
+    private fun Part.isTruncatedMarker(): Boolean = hasFull == true && omitted != null
+
+    // ── digest 触发入口 ──
+    fun onDigestChange(sessionId: String) {
+        // 后台 session：不拉 skeleton（status 投影由 SlimSseHandler digest 消费处理）
+        if (sessionId != slices.chat.value.currentSessionId) return
+        scope.launch {
+            stateMutex.withLock {
+                val state = reloadStates.getOrPut(sessionId) { ReloadState() }
+                // Layer B: 如果上次失败，清除失败状态 + 重置退避
+                if (state.failed) {
+                    state.failed = false
+                    state.retryAttempt = 0
+                    watchdogJobs.remove(sessionId)?.cancel()
+                }
+                state.desiredEpoch += 1
+                state.pendingLimit = maxOf(state.pendingLimit, 50)
+                if (!state.inFlight) launchNextReload(sessionId)
+            }
+        }
+    }
+
+    // ── Watchdog（仅失败时 arm，指数退避，retryAttempt 持久化在 ReloadState）──
+    //   必须在 stateMutex 内调用
+    //   ownerState: 首次失败所属的 session 生命周期实例
+    private fun armWatchdog(sessionId: String, ownerState: ReloadState) {
+        if (watchdogJobs[sessionId]?.isActive == true) return  // 已 armed，不重置退避
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                while (true) {
+                    val delayMs = stateMutex.withLock {
+                        val current = reloadStates[sessionId]
+                        if (current !== ownerState || !ownerState.failed) 0L  // 已恢复或已重开
+                        else when (ownerState.retryAttempt) {
+                            0 -> 15_000L; 1 -> 30_000L; 2 -> 60_000L; else -> 300_000L
+                        }
+                    }
+                    if (delayMs == 0L) break
+                    delay(delayMs)
+                    val retryScheduled = stateMutex.withLock {
+                        val current = reloadStates[sessionId]
+                        if (current !== ownerState || !ownerState.failed) false  // 已恢复或已重开
+                        else {
+                            ownerState.retryAttempt++
+                            ownerState.desiredEpoch += 1
+                            ownerState.pendingLimit = maxOf(ownerState.pendingLimit, 50)
+                            if (!ownerState.inFlight) launchNextReload(sessionId)
+                            true
+                        }
+                    }
+                    if (!retryScheduled) break
+                }
+            } finally {
+                withContext(NonCancellable) {
+                    stateMutex.withLock {
+                        val self = coroutineContext[Job]
+                        if (watchdogJobs[sessionId] === self) watchdogJobs.remove(sessionId)
+                    }
+                }
+            }
+        }
+        watchdogJobs[sessionId] = job
+        job.start()
+    }
+
+    // ── Session 关闭清理（取消在途 job，防止 detached state 回写）──
+    //   调用点：(1) session 删除 reducer（CloseDetail / DetailMissing）；
+    //          (2) host 切换（C2 = 重启，状态自然清空）；
+    //          (3) ViewModel.onCleared()。
+    suspend fun onSessionClosed(sessionId: String) {
+        val jobsToCancel = stateMutex.withLock {
+            val rj = reloadJobs.remove(sessionId)
+            val wj = watchdogJobs.remove(sessionId)
+            reloadStates.remove(sessionId)
+            locallyInjected.remove(sessionId)
+            listOfNotNull(rj, wj)
+        }
+        jobsToCancel.forEach { it.cancelAndJoin() }
+    }
+
+    // ── 本地注入标记（同步，无 launch —— 消除注册时序窗口）──
+    // 顺序契约（MANDATORY）：调用点必须「先 markLocallyInjected，后发布 slice 更新」，
+    //   即 dispatch(reducer 写入 shell) 之前完成打标。
+    //   依据：StateFlow 发布建立 happens-before —— merge 若在快照中看见 shell，
+    //   则必已看见 CHM 中的标记；反之（先发布后打标）窗口仍在，shell 会被误判删除。
+    //   两个写入点（launchSendMessage 乐观消息 / SseChatReducers assistant shell）
+    //   实现时逐一核对此顺序。
+    fun markLocallyInjected(sessionId: String, messageId: String) {
+        locallyInjected.computeIfAbsent(sessionId) { ConcurrentHashMap.newKeySet() }.add(messageId)
+    }
+}

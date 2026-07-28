@@ -44,17 +44,11 @@ class ConnectionBootstrapEngineTest {
     private fun fixture(hasActivity: Boolean, withTunnel: Boolean = true, slim: Boolean = false): Fixture {
         val settings = mockk<SettingsManager>(relaxed = true)
         val repository = mockk<OpenCodeRepository>(relaxed = true)
-        every { repository.isSlimIncarnationReady() } returns true
-        every { repository.isSlimIncarnationFailed() } returns false
-        every { repository.isSlimIncarnationReconfiguring() } returns false
         val selected = if (withTunnel) profile else profile.copy(tunnelPasswordId = null)
         every { settings.currentWorkdir } returns "/work"
         every { settings.getTunnelPassword("tunnel") } returns "secret"
         every { repository.pinnedSpkiFor(any()) } returns null
         every { repository.isMutualTlsActive() } returns false
-        every { repository.isSlimIncarnationReady() } returns true
-        every { repository.isSlimIncarnationFailed() } returns false
-        every { repository.isSlimIncarnationReconfiguring() } returns false
         val store = ConnectionIdentityStore()
         val coordinator = ConnectionBootstrapCoordinator()
         val resolver = mockk<EffectiveConnectionConfigResolver>()
@@ -126,9 +120,6 @@ class ConnectionBootstrapEngineTest {
         )
         val settings = mockk<SettingsManager>(relaxed = true)
         val repository = mockk<OpenCodeRepository>(relaxed = true)
-        every { repository.isSlimIncarnationReady() } returns true
-        every { repository.isSlimIncarnationFailed() } returns false
-        every { repository.isSlimIncarnationReconfiguring() } returns false
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(true, "1.0"))
         val store = ConnectionIdentityStore()
         val engine = ConnectionBootstrapEngine(
@@ -255,7 +246,6 @@ class ConnectionBootstrapEngineTest {
     fun `matching host with unready slim incarnation reconfigures and restores readiness`() = runTest {
         val f = fixture(hasActivity = false, withTunnel = false, slim = true)
         var ready = false
-        every { f.repository.isSlimIncarnationReady() } answers { ready }
         every { f.repository.configure(any(), any(), any(), any(), any(), any()) } answers {
             ready = true
         }
@@ -267,53 +257,14 @@ class ConnectionBootstrapEngineTest {
         verify(exactly = 1) {
             f.repository.configure("https://server:443", null, null, "server:443", null, true)
         }
-        assertTrue(f.repository.isSlimIncarnationReady())
-    }
+            }
 
-    @Test
-    fun `matching host in Failed incarnation reconfigures again and recovers`() = runTest {
-        val f = fixture(hasActivity = false, withTunnel = false, slim = true)
-        var incarnation = "ready"
-        every { f.repository.isSlimIncarnationReady() } answers { incarnation == "ready" }
-        every { f.repository.isSlimIncarnationFailed() } answers { incarnation == "failed" }
-        every { f.repository.isSlimIncarnationReconfiguring() } answers { incarnation == "reconfiguring" }
-        every { f.repository.configure(any(), any(), any(), any(), any(), any()) } answers {
-            incarnation = "ready"
-        }
-        coEvery { f.repository.checkHealth() } returns Result.success(HealthResponse(true, "1.0"))
 
-        f.engine.bootstrap()
-        incarnation = "failed" // Simulate a bricked slim incarnation.
-        val result = f.engine.bootstrap()
-
-        assertTrue(result is ConnectionBootstrapOutcome.Success)
-        assertEquals("ready", incarnation)
-        verify(exactly = 2) {
-            f.repository.configure("https://server:443", null, null, "server:443", null, true)
-        }
-    }
-
-    @Test
-    fun `active Reconfiguring incarnation is not superseded by bootstrap`() = runTest {
-        val f = fixture(hasActivity = false, withTunnel = false, slim = true)
-        every { f.repository.isSlimIncarnationReady() } returns false
-        every { f.repository.isSlimIncarnationFailed() } returns false
-        every { f.repository.isSlimIncarnationReconfiguring() } returns true
-        coEvery { f.repository.checkHealth() } returns Result.success(HealthResponse(true, "1.0"))
-
-        val result = f.engine.bootstrap()
-
-        assertEquals(ConnectionBootstrapOutcome.ReconfigureInProgress, result)
-        verify(exactly = 0) { f.repository.configure(any(), any(), any(), any(), any(), any()) }
-    }
 
     @Test
     fun `configure failure remains Failed and never reports Connected`() = runTest {
         val f = fixture(hasActivity = false, withTunnel = false, slim = true)
         var failed = true
-        every { f.repository.isSlimIncarnationReady() } returns false
-        every { f.repository.isSlimIncarnationFailed() } answers { failed }
-        every { f.repository.isSlimIncarnationReconfiguring() } returns false
         val failure = IllegalStateException("configure failed")
         every { f.repository.configure(any(), any(), any(), any(), any(), any()) } answers {
             failed = true

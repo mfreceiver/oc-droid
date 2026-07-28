@@ -32,7 +32,7 @@ sealed interface ConnectionBootstrapOutcome {
         val capture: OpenCodeRepository.TofuCaptureResult,
     ) : ConnectionBootstrapOutcome
 
-    data object ReconfigureInProgress : ConnectionBootstrapOutcome
+
 
     data class Failed(val error: Throwable) : ConnectionBootstrapOutcome
 }
@@ -113,44 +113,26 @@ class ConnectionBootstrapEngine internal constructor(
         val expectedEpoch = identityStore.currentEpoch()
         val matchingIdentity = expected?.serverGroupFp == key.serverGroupFp &&
             expected.normalizedWorkdir == key.workdir && expected.endpointFp == key.url
-        val slimReady = repository.isSlimIncarnationReady()
-        val reconfiguring = repository.isSlimIncarnationReconfiguring()
-        if (reconfiguring) {
-            return ConnectionBootstrapOutcome.ReconfigureInProgress
-        }
-        if (configuredKey != key || !matchingIdentity || repository.isSlimIncarnationFailed()) {
-            // R8 slim-mode foundation / Cluster B: 透传 key.slim 到 repository.configure，
-            // 后者写入 hostConfig.slim 供 SlimapiVersionInterceptor（注入版本头）+
-            // SSEClient（A1，路由到 /slimapi/events）+ health 探针（C3 fix，路由到
-            // /slimapi/health）读取。configuredKey != key 的整体相等性判断保证切换
-            // slim 状态（legacy↔slim）必然触发重 configure（hostConfig.slim 是路由
-            // 开关，遗漏会让 SSE/REST/health 走错端点）。
-            try {
-                repository.configure(
-                    key.url,
-                    key.username,
-                    key.password,
-                    hostPort = hostPortFromUrl(key.url),
-                    clientCert = clientCert,
-                    slim = key.slim,
-                )
-            } catch (_: OpenCodeRepository.SlimReconfigureInProgressException) {
-                return ConnectionBootstrapOutcome.ReconfigureInProgress
-            }
-            // Configure may suspend and another profile can become current.
-            // Publish only when both the incarnation and resolver still agree.
+        if (configuredKey != key || !matchingIdentity) {
+            repository.configure(
+                key.url,
+                key.username,
+                key.password,
+                hostPort = hostPortFromUrl(key.url),
+                clientCert = clientCert,
+                slim = key.slim,
+            )
             val currentKey = configResolver.resolve()
-            val stillMatches = currentKey == key && repository.isSlimIncarnationReady()
-            if (stillMatches) configuredKey = key else return ConnectionBootstrapOutcome.ReconfigureInProgress
+            if (currentKey == key) configuredKey = key else return ConnectionBootstrapOutcome.Failed(
+                IllegalStateException("Config changed during bootstrap")
+            )
         } else {
-            DebugLog.d("Bootstrap", "skipping configure: matching key/identity; slimReady=$slimReady")
+            DebugLog.d("Bootstrap", "skipping configure: matching key/identity")
         }
-        // The skip decision is only a snapshot. Do not activate a tunnel for
-        // an incarnation that became stale while the decision was in flight.
-        if (configResolver.resolve() != key || !repository.isSlimIncarnationReady() ||
+        if (configResolver.resolve() != key ||
             identityStore.currentEpoch() != expectedEpoch
         ) {
-            return ConnectionBootstrapOutcome.ReconfigureInProgress
+            return ConnectionBootstrapOutcome.Failed(IllegalStateException("Config or epoch changed"))
         }
         if (key.tunnelPasswordId != null && tunnelActivatedKey != key) {
             val password = key.tunnelPassword
@@ -161,10 +143,10 @@ class ConnectionBootstrapEngine internal constructor(
                 hostPort = hostPortFromUrl(key.url),
             ).getOrElse { return ConnectionBootstrapOutcome.Failed(it) }
             tunnelActivatedKey = key
-            if (configResolver.resolve() != key || !repository.isSlimIncarnationReady() ||
+            if (configResolver.resolve() != key ||
                 identityStore.currentEpoch() != expectedEpoch
             ) {
-                return ConnectionBootstrapOutcome.ReconfigureInProgress
+                return ConnectionBootstrapOutcome.Failed(IllegalStateException("Config or epoch changed after tunnel"))
             }
         }
 
@@ -174,12 +156,12 @@ class ConnectionBootstrapEngine internal constructor(
             if (health != null && health.healthy) {
                 val finalKey = configResolver.resolve()
                 val finalIdentity = identityStore.currentIdentity.value
-                if (finalKey != key || !repository.isSlimIncarnationReady() ||
+                if (finalKey != key ||
                     identityStore.currentEpoch() != expectedEpoch ||
                     (finalIdentity != null && (finalIdentity.serverGroupFp != key.serverGroupFp ||
                         finalIdentity.normalizedWorkdir != key.workdir || finalIdentity.endpointFp != key.url))
                 ) {
-                    return ConnectionBootstrapOutcome.ReconfigureInProgress
+                    return ConnectionBootstrapOutcome.Failed(IllegalStateException("Config or identity changed"))
                 }
                 serverCompatProfile.update(health.version)
                 val identity = identityStore.bindIfCurrent(
@@ -187,7 +169,7 @@ class ConnectionBootstrapEngine internal constructor(
                     key.workdir,
                     key.url,
                     expectedEpoch,
-                ) ?: return ConnectionBootstrapOutcome.ReconfigureInProgress
+                ) ?: return ConnectionBootstrapOutcome.Failed(IllegalStateException("Identity bind failed"))
                 bootstrapCoordinator.clearPendingTofu()
                 return ConnectionBootstrapOutcome.Success(identity, health)
             }
@@ -225,8 +207,6 @@ class ConnectionBootstrapEngine internal constructor(
             }
             repository.applyTofuDecision(hostPort, selected)
             bootstrapCoordinator.clearPendingTofu()
-            // Retry this same attempt immediately: TOFU does not consume a
-            // network-retry slot or apply a retry delay.
         }
     }
 }

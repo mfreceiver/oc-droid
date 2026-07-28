@@ -3,23 +3,15 @@ package cn.vectory.ocdroid.data.repository
 import cn.vectory.ocdroid.data.model.MessageWithParts
 
 /**
- * One page of the NO-ANCHOR cursor-paginated `/messages` window
+ * One page of the cursor-paginated `/messages` window
  * (`GET /slimapi/messages/{sid}?before=…&mode=skeleton`). [nextCursor] is
  * the opaque V1 cursor (`X-Next-Cursor` response header) to pass as
  * `before` for the next older page; **null means no more history** and is
- * the SOLE terminal signal for the `/messages` drain.
+ * the sole terminal signal for the drain.
  *
- * §阶段B C1 (frozen protocol): `X-Since-Complete` is FORBIDDEN on this
- * endpoint — the `/messages` window is unanchored, so the sidecar cannot
- * make a "scan-complete relative to anchor" claim. The `/messages` drain
- * ([SlimSyncEngine.drainSlimapiMessagesBoundedOutcome]) treats
- * `nextCursor == null` as Success unconditionally. Any previous reading
- * of `X-Since-Complete` on this endpoint was the C1 bug — the field has
- * been REMOVED from this data class.
- *
- * See [SlimSincePage] for the anchored `/since` page that DOES carry the
- * `X-Since-Complete` completeness signal (header REQUIRED — missing /
- * unparseable → protocol failure).
+ * V2 removed the `/since` endpoint (spec §2:59, §5:189) — there is no
+ * anchored scan, no `X-Since-Complete` header. `nextCursor == null` is
+ * the only terminal signal.
  */
 data class MessagesPage(
     val items: List<MessageWithParts>,
@@ -27,41 +19,8 @@ data class MessagesPage(
 )
 
 /**
- * One page of the ANCHORED incremental `/since` window
- * (`GET /slimapi/messages/{sid}/since/{ts}?before=…`). [nextCursor] is
- * the opaque V1 cursor (`X-Next-Cursor`) for the next older page within
- * the same anchored scan; null means the sidecar has finished walking
- * `[ts, now]`.
- *
- * §阶段B C1 / P0-4 (frozen protocol): [sinceComplete] carries the parsed
- * `X-Since-Complete` response header. Unlike the legacy nullable form,
- * this is a **non-null Boolean** — the `/since` endpoint contract REQUIRES
- * the sidecar to send the header on every 2xx response. A missing or
- * unparseable header is a protocol failure (surfaced as
- * [SlimSinceProtocolException] from the page-fetch helper), NOT a silent
- * "defensive false" fallback.
- *
- * Drain Success on the `/since` endpoint requires BOTH:
- *   - `nextCursor == null` (cursor window exhausted), AND
- *   - `sinceComplete == true` (sidecar signalled the scan was complete).
- *
- * `nextCursor == null && sinceComplete == false` → truncation: the
- * `/since` drain re-walks from the original anchor + `before = null`,
- * up to [SlimSyncEngine.MAX_PARTIAL_RETRIES] times before degrading.
- *
- * Missing messages in a successful `/since` response are NOT deletions
- * (the sidecar's anchored scan is best-effort incremental; an existing
- * message absent from the response MUST be retained on incremental merge).
- */
-data class SlimSincePage(
-    val items: List<MessageWithParts>,
-    val nextCursor: String?,
-    val sinceComplete: Boolean,
-)
-
-/**
- * §slim-v1-paging (Task 5 / G5 cursor): the slimapi `/messages` and
- * `/messages/{sid}/since/{ts}` endpoints accept a server-side `?limit`.
+ * §slim-v1-paging (Task 5 / G5 cursor): the `/messages` endpoint accepts
+ * a server-side `?limit`. V2 removed the `/since` endpoint (spec §2:59).
  * Each fetch returns ONE bounded page; v1 now surfaces the sidecar's
  * `X-Next-Cursor` response header so the caller can decide whether to
  * follow via the `?before=<opaque>` query (T5 flipped the earlier
@@ -111,34 +70,28 @@ internal const val SLIMAPI_DEFAULT_PAGE_LIMIT = 200
 internal const val SLIMAPI_LOCAL_HISTORY_BOUND = 250
 
 /**
- * Outcome of a bounded cursor-walk drain. Used by BOTH drains:
- *  - the NO-ANCHOR `/messages` drain
- *    ([SlimSyncEngine.drainSlimapiMessagesBoundedOutcome]) — Success =
- *    `nextCursor == null` (terminal signal, no X-Since-Complete involved).
- *  - the ANCHORED `/since` drain
- *    ([SlimSyncEngine.drainSlimSinceBoundedOutcome]) — Success =
- *    `nextCursor == null && X-Since-Complete == true` (frozen protocol,
- *    §阶段B P0-4).
+ * Outcome of a bounded cursor-walk drain. Used by the `/messages` drain
+ * (drainSlimapiMessagesBoundedOutcome). V2 removed the `/since` endpoint
+ * (spec §2:59) — there is only one drain.
  *
- *  - [Success]: the drain reached the endpoint-specific terminal Success
- *    condition. The local watermark is NOT advanced by either drain —
- *    the caller MUST construct a [SlimAuthoritativeCandidate] and drive
+ * Success = `nextCursor == null` (terminal signal, no X-Since-Complete
+ * involved — V2 removed that header).
+ *
+ *  - [Success]: the drain reached the terminal condition (`nextCursor ==
+ *    null`). The local watermark is NOT advanced by the drain — the
+ *    caller MUST construct a [SlimAuthoritativeCandidate] and drive
  *    [SlimAuthoritativeCommitter.commitAuthoritative] to advance the
  *    watermark atomically with the visible-content replacement.
  *  - [Partial]: HTTP/transport/page failure, wall-clock timeout, item
- *    cap reached before cursor exhaustion, page-count cap reached before
- *    cursor exhaustion, OR (`/since` only) terminal-page truncation
- *    (`nextCursor == null` but `X-Since-Complete != true`). [items] is
- *    a partial aggregate (staging/diagnostics only — it MUST NOT be fed
- *    into cold-start/reconciler/visible-content merge via the List
- *    facades); caller MUST keep dirty / retry. The local watermark is
- *    NOT advanced.
+ *    cap reached before cursor exhaustion, or page-count cap reached
+ *    before cursor exhaustion. [items] is a partial aggregate (staging/
+ *    diagnostics only — it MUST NOT be fed into cold-start/reconciler/
+ *    visible-content merge via the List facades); caller MUST keep dirty
+ *    / retry. The local watermark is NOT advanced.
  *  - [Degraded]: loop detected (same cursor returned OR zero-new-items
- *    page), OR ([SlimSyncEngine.MAX_PARTIAL_RETRIES] — `/since` only)
- *    consecutive truncation Partials exhausted — the server is
- *    misbehaving; [items] is staging/diagnostics only. Caller MUST keep
- *    dirty / retry, same contract as [Partial]. The local watermark is
- *    NOT advanced.
+ *    page) — the server is misbehaving; [items] is staging/diagnostics
+ *    only. Caller MUST keep dirty / retry, same contract as [Partial].
+ *    The local watermark is NOT advanced.
  */
 sealed interface SlimDrainOutcome {
     val items: List<MessageWithParts>
@@ -164,11 +117,7 @@ class SlimDrainLoopException(message: String) : java.io.IOException(message)
 /**
  * §11.5: the drain hit [SLIMAPI_LOCAL_HISTORY_BOUND] (item cap) or the
  * page-count cap while the server still returned a non-null
- * `X-Next-Cursor`. §阶段B P0-4 (`/since` drain only): also used for
- * terminal-page truncation (`nextCursor == null` but
- * `X-Since-Complete != true` → "since scan truncated") and for
- * [SlimSyncEngine.MAX_PARTIAL_RETRIES] exhaustion ("max partial retries
- * exceeded"). Bounds are SAFETY limits, NOT completeness proof — the
+ * `X-Next-Cursor`. Bounds are SAFETY limits, NOT completeness proof — the
  * caller MUST treat this as [SlimDrainOutcome.Partial] (preserve dirty,
  * NO bookmark advance, retry from the same pre-drain watermark). Carried
  * as the [cause] inside [SlimDrainOutcome.Partial] / [SlimDrainOutcome.Degraded].
@@ -176,25 +125,12 @@ class SlimDrainLoopException(message: String) : java.io.IOException(message)
 internal class SlimDrainBoundExceededException(message: String) : java.io.IOException(message)
 
 /**
- * §11.5: the slimapi `/messages` (or `/since`) page returned a 2xx with
- * a null body. Thrown by the page-fetch helpers; the drain classifies it
- * as [SlimDrainOutcome.Partial] (NO bookmark advance). Distinct from a
+ * §11.5: the slimapi `/messages` page returned a 2xx with a null body.
+ * Thrown by the page-fetch helpers; the drain classifies it as
+ * [SlimDrainOutcome.Partial] (NO bookmark advance). Distinct from a
  * transport failure so diagnostics can tell "server replied but the body
  * was empty" from "transport dropped".
  */
 internal class SlimPageIncompleteException(message: String) : java.io.IOException(message)
 
-/**
- * §阶段B C1 (frozen protocol): the `/since` endpoint contract REQUIRES
- * the sidecar to send `X-Since-Complete: true|false` on every 2xx
- * response. A missing or unparseable header is a PROTOCOL FAILURE — the
- * page-fetch helper ([SlimSyncEngine.getSlimSincePage]) throws this so
- * the drain classifies it as [SlimDrainOutcome.Partial] (NO nullable
- * "defensive false" fallback). Distinct from [SlimPageIncompleteException]
- * (empty body) and a transport failure so diagnostics can tell "sidecar
- * broke the /since header contract" from ordinary transport errors.
- *
- * This type is INTERNAL: it is a classified cause inside a drain
- * outcome, never surfaced to UI / production callers directly.
- */
-internal class SlimSinceProtocolException(message: String) : java.io.IOException(message)
+// V2: SlimSinceProtocolException removed (spec §2:59 — `/since` endpoint deleted).

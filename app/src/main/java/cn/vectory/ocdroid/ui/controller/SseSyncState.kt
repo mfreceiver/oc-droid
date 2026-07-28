@@ -50,7 +50,8 @@ package cn.vectory.ocdroid.ui.controller
  *   if a dirty session is NOT the current session at reconnect, its list-
  *   level state may be stale (badge / last-activity) and a
  *   [SseSyncDecision.RefreshSessions] is emitted. Populated only by the
- *   Disconnected trigger; cleared in full by [HostReconfigured].
+ *   Disconnected trigger; lite-v2: HostReconfigured trigger removed (process
+ *   restart clears all in-memory state).
  *
  *   §R-19 fix Blocker 2 v2 (gpter round-2): the PRIOR role of sessionsDirty
  *   as a one-shot idle-dedup set is REMOVED. The lifecycle of "added on
@@ -61,21 +62,15 @@ package cn.vectory.ocdroid.ui.controller
  *   `isLoadingMessages` coalescing + the 400ms `loadMessagesWithRetry`
  *   debounce (same path that absorbs ForegroundCatchUpController's
  *   overlapping catch-up effects), NOT on overlay-level dedup.
- * @param hostGeneration Monotonic counter bumped on every host reconfigure
- *   ([ControllerEffect.HostReconfigured]). Triggers carry the generation they
- *   were issued under; mismatched generations are no-ops — this is the guard
- *   against a late SSE frame from the PREVIOUS host (its collection job was
- *   cancelled by `cancelSseForReconfigure` but a buffered frame still lands)
- *   erroneously triggering a reload of the NEW host's session.
+ * @param hostGeneration Monotonic counter for generation-gating stale SSE
+ *   frames (lite-v2: host switch = restart, so generation is per-run).
  * @param sessionsEverColdSnapshotted R-20 Phase 2 (G6): sessions for which a
  *   catch-up cold snapshot has established the SSE-coverage baseline. A session
  *   is SSE-covered (no probe needed) iff the live SSE feed is attached to its
  *   workdir AND it appears in this set (the inlined `shouldProbeCatchUp`
  *   helper in CatchUpActions.kt is the negation). Populated by [cn.vectory.ocdroid.ui.launchCatchUp]'s
- *   onColdSnapshot callback (fired on every successful catch-up); reset to
- *   empty by [SseReconnectTrigger.HostReconfigured] so a host switch cannot
- *   carry a stale baseline across to an unrelated server (avoiding a false
- *   "covered" verdict that would skip a needed probe).
+ *   onColdSnapshot callback (fired on every successful catch-up); lite-v2:
+ *   HostReconfigured trigger removed (host switch = restart clears in-memory).
  */
 data class SseSyncState(
     val connectedOnce: Boolean = false,
@@ -87,6 +82,8 @@ data class SseSyncState(
 
 /**
  * §R-19 Sprint 1 Lane A (P1-10): the events the SSE gap reconciler reacts to.
+ * lite-v2: [HostReconfigured] variant removed (host switch = restart;
+ * the reconciler never observes a host-reconfigure while the process is alive).
  *
  * Sealed so the compiler forces [reconcileGap]'s `when` to be exhaustive when
  * a new trigger is added. Each trigger carries the [hostGeneration] it was
@@ -116,17 +113,6 @@ sealed class SseReconnectTrigger {
     data class Disconnected(
         val atMs: Long,
         val dirtySessionIds: Set<String>,
-        override val hostGeneration: Long
-    ) : SseReconnectTrigger()
-
-    /**
-     * Host / profile switch — the server identity changed. Resets all per-host
-     * state and bumps the generation so any in-flight [ServerConnected] /
-     * [Disconnected] trigger carrying the OLD generation becomes a no-op
-     * (scenario 4: late SSE frame from the previous host). [hostGeneration]
-     * IS the new generation (the bump is the hostGeneration value itself).
-     */
-    data class HostReconfigured(
         override val hostGeneration: Long
     ) : SseReconnectTrigger()
 
@@ -174,12 +160,6 @@ sealed class SseSyncDecision {
  * unit-testable invariant surface for the 4 P1-10 scenarios.
  *
  * **Decision logic by trigger**:
- *
- * - [SseReconnectTrigger.HostReconfigured]:
- *   Reset to a fresh cold-start state under the new generation. No decisions
- *   (the reconfigure path runs its own loadSessions / coldStartReconnect).
- *   This is the generation-bump that makes any later stale-generation trigger
- *   a no-op (scenario 4).
  *
  * - [SseReconnectTrigger.Disconnected]:
  *   Generation guard: stale → no-op. Cold-start skip: never-connected hosts
@@ -237,15 +217,6 @@ fun reconcileGap(
     trigger: SseReconnectTrigger
 ): Pair<SseSyncState, List<SseSyncDecision>> {
     return when (trigger) {
-        is SseReconnectTrigger.HostReconfigured -> {
-            // Fresh cold-start under the new generation. All per-host state resets.
-            SseSyncState(
-                connectedOnce = false,
-                lastDisconnectAt = null,
-                sessionsDirty = emptySet(),
-                hostGeneration = trigger.hostGeneration
-            ) to emptyList()
-        }
         is SseReconnectTrigger.Disconnected -> {
             // Generation guard: stale trigger (host reconfigured since this
             // disconnect was observed) → no-op.

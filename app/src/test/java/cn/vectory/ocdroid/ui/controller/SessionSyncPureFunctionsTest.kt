@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui.controller
 import cn.vectory.ocdroid.data.model.FileDiff
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
+import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.QuestionInfo
 import cn.vectory.ocdroid.data.model.QuestionOption
 import cn.vectory.ocdroid.data.model.QuestionRequest
@@ -2143,6 +2144,53 @@ class SessionSyncPureFunctionsTest {
         val (next, _) = state.applyQuestionResolved("q1")
 
         assertEquals(listOf("q2"), next.pendingQuestions.map { it.id })
+    }
+
+    // === applyPermissionResolved: boundary ================================
+
+    @Test
+    fun `applyPermissionResolved on an empty pending list is a no-op`() {
+        val state = SessionListState()
+
+        val (next, _) = state.applyPermissionResolved("anything")
+
+        assertTrue(next.pendingPermissions.isEmpty())
+    }
+
+    @Test
+    fun `applyPermissionResolved resolving the only pending permission yields empty list`() {
+        val state = SessionListState(pendingPermissions = listOf(
+            PermissionRequest(id = "p1", sessionId = "s1")
+        ))
+
+        val (next, _) = state.applyPermissionResolved("p1")
+
+        assertTrue(next.pendingPermissions.isEmpty())
+    }
+
+    @Test
+    fun `applyPermissionResolved removes only the matching permission by id`() {
+        val state = SessionListState(pendingPermissions = listOf(
+            PermissionRequest(id = "p1", sessionId = "s1"),
+            PermissionRequest(id = "p2", sessionId = "s2"),
+        ))
+
+        val (next, _) = state.applyPermissionResolved("p1")
+
+        assertEquals(listOf("p2"), next.pendingPermissions.map { it.id })
+    }
+
+    @Test
+    fun `applyPermissionResolved filter removes every entry sharing the id`() {
+        val state = SessionListState(pendingPermissions = listOf(
+            PermissionRequest(id = "p1", sessionId = "s1"),
+            PermissionRequest(id = "p1", sessionId = "s2"),
+            PermissionRequest(id = "p2", sessionId = "s1"),
+        ))
+
+        val (next, _) = state.applyPermissionResolved("p1")
+
+        assertEquals(listOf("p2"), next.pendingPermissions.map { it.id })
     }
 
     // === applyTodoUpdated: boundary ======================================

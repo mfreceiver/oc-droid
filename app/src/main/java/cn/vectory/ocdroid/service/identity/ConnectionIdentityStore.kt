@@ -179,6 +179,30 @@ class ConnectionIdentityStore @Inject constructor() {
     }
 
     /**
+     * §atomic-commit-gate: runs [commit] ONLY IF the identity store is still
+     * at ([identity], [epoch]). The epoch/identity check AND the [commit]
+     * invocation run under a SINGLE [synchronized]([lock]) critical section
+     * that is mutually exclusive with [beginReconfigure], so a host
+     * reconfigure can NEVER slip between the staleness check and the commit
+     * (TOCTOU window closed).
+     *
+     * Returns true if [commit] ran (the captured epoch/identity were still
+     * current); false otherwise (the caller's snapshot is stale and the
+     * commit MUST be skipped — its in-flight result would overwrite a newer
+     * connection's data).
+     */
+    fun commitIfCurrent(
+        identity: ConnectionIdentity?,
+        epoch: Long,
+        commit: () -> Unit,
+    ): Boolean = synchronized(lock) {
+        if (currentEpochAtomic.get() != epoch) return false
+        if (currentIdentityAtomic.get() != identity) return false
+        commit()
+        true
+    }
+
+    /**
      * Shared write helper (callers MUST already hold [lock]): builds the
      * [ConnectionIdentity] at [epoch], publishes it to both the atomic reference
      * (lock-free readers) and the [StateFlow] (Compose/collector observers), and

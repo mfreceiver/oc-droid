@@ -174,14 +174,8 @@ internal fun launchCatchUp(
                 }
             }
             .onFailure {
-                // §11.1 fix-8 P1-2: SlimSinceStagingOnlyException is
-                // "conservative staging" — REST catch-up reload is
-                // intentionally unavailable in slim stage-A (SSE drives
-                // updates). Suppress the Failure surface for this typed
-                // exception; treat it as "REST catch-up skipped".
-                val isStagingOnly = it is OpenCodeRepository.SlimSinceStagingOnlyException
-                DebugLog.w("Sync", "catch-up probe-page failed (stagingOnly=$isStagingOnly): ${it.message}")
-                if (sessionId == slices.chat.value.currentSessionId && !isStagingOnly) {
+                DebugLog.w("Sync", "catch-up probe-page failed: ${it.message}")
+                if (sessionId == slices.chat.value.currentSessionId) {
                     reportNonFatalIssue("MainViewModel", "Catch-up tail reload failed")
                 }
                 // §history-load-fix round-2 (gpter 🟠): flag clear deferred to

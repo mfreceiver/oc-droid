@@ -128,7 +128,7 @@ class SlimLiveSidecarIntegrationTest {
             )
         }
         println("[SlimLiveSidecar] sessions count=${sessions.size}")
-        println("[SlimLiveSidecar] complete=${page.complete} discoveryDirectories=${page.discoveryDirectories} discoveryReady=${page.discoveryReady}")
+        println("[SlimLiveSidecar] complete=${page.complete} discovery fields removed (lite-v2)")
         sessions.take(3).forEach { s ->
             println("[SlimLiveSidecar]   id=${s.id} dir=${s.directory} title=${s.title ?: "-"}")
         }

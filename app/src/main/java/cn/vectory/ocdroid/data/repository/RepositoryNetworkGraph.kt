@@ -99,10 +99,9 @@ internal class RepositoryNetworkGraph(
     val sslConfigFactory: SslConfigFactory = SslConfigFactory(tofuStore)
 
     /**
-     * OkHttp client factory — composes [sslConfigFactory] + the eight
+     * OkHttp client factory — composes [sslConfigFactory] + the
      * interceptors into rest / sse / command / mutation / health / tunnel /
-     * token-stream clients. The [SlimapiCapabilitiesInterceptor] is added
-     * internally by [OkHttpClientFactory] (it shares the version snapshot).
+     * token-stream clients.
      */
     val clientFactory: OkHttpClientFactory = OkHttpClientFactory(
         sslConfigFactory,

@@ -856,14 +856,15 @@ class MessageActionsTest {
 
     @Test
     fun `P0-2 forceInitialWindow=true retries StaleSlimCommitException and recovers foreground messages (SSE-off cold-load)`(): Unit = runTest {
-        // §mechanism ①+②: the SSE-off / reconnect cold-load path
-        // (forceInitialWindow=true) hits a stale commit token twice
-        // (mid-reconfigure), then the third fetch settles and returns the
-        // server's initial window. The retry loop recovers the foreground
-        // instead of failing fast into a blank window.
+        // §11.1 fix-9 P0-7 (sse-sync-degradation-remediation.md P0-2): the
+        // SSE-off cold-load path (forceInitialWindow=true + resetLimit=true)
+        // retries ONCE (not 2×) via getMessagesPagedUnanchored when the first
+        // fetch fails with a StaleSlimCommitException (a java.io.IOException
+        // subclass). The stale-retry-fix (unconditional 2-retry) was removed
+        // in V2 — the only retry is the P0-7 SSE-off first-fetch retry.
+        // Mock: first attempt fails stale → retry succeeds.
         val msgs = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
         coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returnsMany listOf(
-            Result.failure(OpenCodeRepository.StaleSlimCommitException()),
             Result.failure(OpenCodeRepository.StaleSlimCommitException()),
             Result.success(MessagesPage(msgs, nextCursor = null)),
         )
@@ -878,6 +879,7 @@ class MessageActionsTest {
             resetLimit = true,
             forceInitialWindow = true,
             emit = emit,
+            isSseLive = { false }, // SSE-off → retry engages
         )
         // §note: scope (setUp) has its own TestCoroutineScheduler separate from
         // runTest's; the retry loop's delay(500) suspends on scope's scheduler,
@@ -886,8 +888,8 @@ class MessageActionsTest {
         scope.advanceUntilIdle()
         scope.runCurrent()
 
-        // 3 attempts: initial + 2 retries (the §stale-retry-fix ceiling).
-        coVerify(exactly = 3) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
+        // 2 attempts: initial + 1 retry (the P0-7 SSE-off single-retry).
+        coVerify(exactly = 2) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
         // Foreground window recovered — NOT a silent blank.
         assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
         // Retry succeeded → no user-facing error.
@@ -897,10 +899,10 @@ class MessageActionsTest {
 
     @Test
     fun `P0-2 forceInitialWindow=true emits UiEvent Error after stale retry exhaustion (terminal-degraded is observable, not silent blank)`(): Unit = runTest {
-        // §mechanism ②+③: terminal-degraded — the reconfigure NEVER settles,
-        // so every slim GET returns StaleSlimCommitException. After 2 retries
-        // (3 total attempts) the load MUST surface a user-visible error
-        // instead of leaving the foreground chat silently blank.
+        // §11.1 fix-9 P0-7: V2 retries only ONCE under SSE-off (not 2×).
+        // Terminal-degraded: every slim GET returns StaleSlimCommitException.
+        // After 1 initial + 1 retry (2 attempts total) the load MUST surface
+        // a user-visible error instead of leaving the foreground chat blank.
         coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returns
             Result.failure(OpenCodeRepository.StaleSlimCommitException())
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
@@ -914,14 +916,15 @@ class MessageActionsTest {
             resetLimit = true,
             forceInitialWindow = true,
             emit = emit,
+            isSseLive = { false }, // SSE-off → retry engages
         )
         // §note: advance SCOPE's scheduler (separate from runTest's) past the
-        // two retry delay(500)s.
+        // single retry delay(500).
         scope.advanceUntilIdle()
         scope.runCurrent()
 
-        // 3 attempts then give up (the retry ceiling).
-        coVerify(exactly = 3) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
+        // 2 attempts then give up (P0-7 single-retry ceiling).
+        coVerify(exactly = 2) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
         // §the-key-assertion: the failure is OBSERVABLE — UiEvent.Error fires
         // for the current (foreground) session. The window is empty (no data)
         // but the user is told why, so it is NOT a silent blank.
@@ -932,16 +935,19 @@ class MessageActionsTest {
     }
 
     @Test
-    fun `P0-2 anchored path (forceInitialWindow=false) also retries StaleSlimCommitException (periodic reload covered)`(): Unit = runTest {
-        // §mechanism ②: the stale-retry guard covers the anchored periodic-
-        // reload path too (not just the cold-load unanchored branch), so a
-        // mid-reconfigure reconnect doesn't silently drop a foreground
-        // refresh either.
+    fun `P0-2 anchored cold-load (forceInitialWindow=false) retries StaleSlimCommitException once via unanchored`(): Unit = runTest {
+        // §11.1 fix-9 P0-7: V2 retries only on resetLimit=true + SSE-off,
+        // and always via getMessagesPagedUnanchored (not getMessagesPaged).
+        // The old "periodic reload (resetLimit=false) also retries stale"
+        // behavior was removed. This test covers the anchored cold-load path
+        // (forceInitialWindow=false, resetLimit=true): the initial anchored
+        // fetch (getMessagesPaged) fails stale → P0-7 retries once via
+        // getMessagesPagedUnanchored and recovers.
         val msgs = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returnsMany listOf(
-            Result.failure(OpenCodeRepository.StaleSlimCommitException()),
-            Result.success(MessagesPage(msgs, nextCursor = null)),
-        )
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+            Result.failure(OpenCodeRepository.StaleSlimCommitException())
+        coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returns
+            Result.success(MessagesPage(msgs, nextCursor = null))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
 
@@ -950,17 +956,20 @@ class MessageActionsTest {
             repository = repository,
             slices = slices,
             sessionId = "s1",
-            resetLimit = false,
-            forceInitialWindow = false,
+            resetLimit = true,       // retry requires resetLimit=true in V2
+            forceInitialWindow = false, // anchored: uses getMessagesPaged
             emit = emit,
+            isSseLive = { false },   // SSE-off → retry engages
         )
         // §note: advance SCOPE's scheduler (separate from runTest's) past the
         // retry delay(500).
         scope.advanceUntilIdle()
         scope.runCurrent()
 
-        // 2 attempts: initial + 1 retry.
-        coVerify(exactly = 2) { repository.getMessagesPaged("s1", any(), any()) }
+        // 1 anchored fetch + 1 unanchored retry. Use atLeast to avoid mockk's
+        // default-arg matcher-recording interaction (mirrors the P0-7 pattern).
+        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
         assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
         assertTrue(emitted.filterIsInstance<UiEvent.Error>().isEmpty())
     }

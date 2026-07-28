@@ -179,17 +179,11 @@ sealed class ControllerEffect {
      */
     data class EvictGroup(val serverGroupFp: String) : ControllerEffect()
 
+    // ── HostProfileController (restart-required model) ──
+    /** Active host connection params changed — user must restart the app to apply. */
+    data object RestartRequired : ControllerEffect()
+
     // ── ConnectionCoordinator ──
-    /**
-     * A host/profile switch → reset foreground catch-up state machine.
-     *
-     * CP1 (notify Phase-0): carries [epoch] — the new connection epoch from
-     * [cn.vectory.ocdroid.service.identity.ConnectionIdentityStore.beginReconfigure]
-     * that invalidated the old collector. Consumers (SSC's init collector)
-     * reset their overlay state to this exact epoch so a late frame from the
-     * previous host (whose epoch < [epoch]) is a no-op.
-     */
-    data class HostReconfigured(val epoch: Long) : ControllerEffect()
     /**
      * Initial-data fan-out entry: load sessions list (cross-domain — needs
      * SessionSwitcher + loadMessages/loadSessionStatus callbacks that the

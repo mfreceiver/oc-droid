@@ -16,6 +16,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import cn.vectory.ocdroid.data.repository.http.SlimapiContract
 import cn.vectory.ocdroid.util.TrafficLogger
 import cn.vectory.ocdroid.util.TrafficTracker
 import java.io.IOException
@@ -303,7 +304,10 @@ class OpenCodeRepositoryClientBundleTest {
             Request.Builder().url("$slimBase/slimapi/events").build(),
         ).execute().use { response -> assertEquals(200, response.code) }
         val slimSseRequest = server.takeRequest()
-        assertEquals("1", slimSseRequest.getHeader("X-Slimapi-Version"))
+        assertEquals(
+            SlimapiContract.SLIMAPI_CLIENT_VERSION.toString(),
+            slimSseRequest.getHeader(SlimapiContract.X_SLIMAPI_VERSION),
+        )
 
         val legacyBase = server.url("/").toString().trimEnd('/')
         repository.configure(baseUrl = legacyBase, slim = false)

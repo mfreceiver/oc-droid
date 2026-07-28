@@ -5,7 +5,6 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.data.repository.SlimLocalResetCoordinator
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
@@ -91,27 +90,19 @@ class HostProfileController(
      * guarantee this ordering — that was the bug being fixed (FGS spec §2).
      */
     internal val identityStore: ConnectionIdentityStore? = null,
-    private val reconfigureBarrier: cn.vectory.ocdroid.service.ConnectionReconfigureBarrier? = null,
     private val effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver? = null,
-    private val slimLocalResetCoordinator: SlimLocalResetCoordinator? = null,
 ) {
     // ── §P9 ProfileMutationEngine (extracted) ──────────────────────────────
 
     /**
      * §P9: profile save/delete + clientCert mutation engine (extracted from
      * the 5 CRUD methods below). See [ProfileMutationEngine] for the full
-     * contract. Field-init mirrors the [SlimSyncEngine] pattern (provider-
-     * lambda injection, `by lazy`).
+     * contract. Field-init uses provider-lambda injection, `by lazy`.
      *
-     * The injected lambdas capture `this` so they re-read live controller
-     * state on every call — [withHostReconfiguration] / [beginReconfigureBoundary]
-     * / [configureRepositoryForProfileRaw] / [configureRepositoryForProfile] /
-     * [refreshHostProfileState] / [purgePerHostState] /
-     * [deleteHostProfileWithBarrier] all stay in the controller (barrier
-     * folding + reconfigure boundary = extractor-independent per §5.4 #3).
-     *
-     * **11-arg constructor (F6) unchanged** — zero new params; the engine is
-     * a private field.
+     * lite-v2: reconfigureBarrier / beginReconfigureBoundary / deleteHostProfileWithBarrier
+     * removed — no runtime hot-reconfigure. withHostReconfiguration signature
+     * changed (no slim ticket). configureRepositoryForProfileRaw no longer
+     * takes a ticket param.
      */
     private val profileMutationEngine by lazy {
         ProfileMutationEngine(
@@ -120,16 +111,11 @@ class HostProfileController(
             hostProfileStore = hostProfileStore,
             settingsManager = settingsManager,
             effects = effects,
-            reconfigureBarrier = reconfigureBarrier,
             withHostReconfiguration = { needs, body -> withHostReconfiguration(needs, body) },
-            beginReconfigureBoundary = { beginReconfigureBoundary() },
-            configureRepositoryForProfileRaw = { profile, ticket ->
-                configureRepositoryForProfileRaw(profile, ticket)
-            },
+            configureRepositoryForProfileRaw = { profile -> configureRepositoryForProfileRaw(profile) },
             configureRepositoryForProfile = { configureRepositoryForProfile(it) },
             refreshHostProfileState = { refreshHostProfileState() },
             purgePerHostState = { purgePerHostState(it) },
-            deleteHostProfileWithBarrier = { deleteHostProfileWithBarrier(it) },
         )
     }
 
@@ -176,32 +162,28 @@ class HostProfileController(
 
     // ── Reconfigure boundary helpers (cluster 6 barrier folding) ───────────
 
-    /** Single source of truth for the non-barrier reconfigure boundary
-     *  preamble. Order is load-bearing: identity epoch bump → slim incarnation
-     *  rotation → CancelSse. NOT used by [resetLocalDataAndResync] (its
-     *  CancelSse is deliberately deferred until after the local wipe — see
-     *  test @1088). */
-    private fun beginReconfigureBoundary(): OpenCodeRepository.SlimReconfigureTicket {
-        identityStore?.beginReconfigure()
-        val ticket = repository.beginSlimReconfigure()
-        effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
-        return ticket
-    }
-
-    /** CD3 3-branch reconfigure fold. Cold (`needsReconfigure=false`):
-     *  `body(null)`, no CancelSse, no configure. Barrier-active:
-     *  `ctx.slimTicket` + barrier-internal teardown. Non-barrier-active:
-     *  [beginReconfigureBoundary] ticket. */
-    internal suspend fun <T> withHostReconfiguration(
+    /**
+     * C-8 reconfigure boundary: when [needsReconfigure] is true (active-host
+     * connection-param edit OR profile select), runs [body] then EMITS
+     * [ControllerEffect.RestartRequired] (suspend = SUSPEND-on-full, cannot
+     * lose). Non-active changes run body with no restart signal.
+     *
+     * C-8 full matrix:
+     *  - active profile edit connection params → persist + RestartRequired ✓
+     *  - select another active profile → persist + RestartRequired ✓
+     *  - delete active profile → persist + RestartRequired ✓
+     *  - resetLocalDataAndResync → same-host teardown (no restart) ✓
+     *  - non-active CRUD → persist only (no restart)
+     */
+    internal suspend fun withHostReconfiguration(
         needsReconfigure: Boolean,
-        body: suspend (ticket: OpenCodeRepository.SlimReconfigureTicket?) -> T,
-    ): T {
-        if (!needsReconfigure) return body(null)
-        val barrier = reconfigureBarrier
-        return if (barrier != null) {
-            barrier.reconfigure { ctx -> body(ctx.slimTicket) }
-        } else {
-            body(beginReconfigureBoundary())
+        body: suspend () -> Unit,
+    ): Unit {
+        body()
+        if (needsReconfigure) {
+            // FIX-7: suspend emitEffect = SUSPEND-on-full, cannot lose.
+            // tryEmitEffect was the old non-suspend variant that could drop on full bus.
+            effects.emitEffect(ControllerEffect.RestartRequired)
         }
     }
 
@@ -283,51 +265,6 @@ class HostProfileController(
     fun deleteHostProfile(profileId: String) =
         profileMutationEngine.deleteHostProfile(profileId)
 
-    private suspend fun deleteHostProfileWithBarrier(profileId: String) {
-        var wasCurrent = false
-        var deletedFp: String? = null
-        var remainingInGroup: List<HostProfile> = emptyList()
-        // Cluster 6 full fold. NOTE: the barrier body configures
-        // UNCONDITIONALLY with the boundary ticket even when !wasCurrent
-        // (matches old ~L519-522) — do NOT import the non-barrier
-        // wasCurrent-conditional ticket logic here; the captured out-vars
-        // stay outer and post-barrier effects stay at the call site below.
-        withHostReconfiguration(needsReconfigure = true) { ticket ->
-            // C-D3 rev-3 round-5: barrier already invalidated identity + slim
-            // incarnation before teardown. delete + configure run inside the
-            // boundary; thread the boundary ticket into raw configure so the
-            // SAME transaction invalidates + activates (ticket-ownership).
-            wasCurrent = profileId == slices.host.value.currentHostProfileId
-            val deletedProfile = hostProfileStore.profiles().firstOrNull { it.id == profileId }
-            deletedFp = deletedProfile?.serverGroupFp
-            remainingInGroup = deletedFp?.let { fp ->
-                hostProfileStore.profilesInGroup(fp).filter { it.id != profileId }
-            }.orEmpty()
-            hostProfileStore.delete(profileId)
-            deletedProfile?.clientCertId?.let { settingsManager.clearClientCert(it) }
-            configureRepositoryForProfileRaw(
-                profile = hostProfileStore.currentProfile(),
-                ticket = ticket,
-            )
-            refreshHostProfileState()
-            if (wasCurrent) {
-                if (remainingInGroup.isEmpty()) {
-                    deletedFp?.let { settingsManager.clearModelDataForGroup(it) }
-                }
-                purgePerHostState(preserveServerGroupData = false)
-            }
-        }
-        if (wasCurrent) {
-            if (remainingInGroup.isEmpty()) {
-                deletedFp?.let { effects.emitEffect(ControllerEffect.EvictGroup(it)) }
-            }
-            effects.emitEffect(ControllerEffect.ForceReconnect)
-            effects.emitEffect(ControllerEffect.HostProfileSwitched)
-        } else if (remainingInGroup.isEmpty()) {
-            deletedFp?.let { effects.emitEffect(ControllerEffect.EvictGroup(it)) }
-        }
-    }
-
     fun importHostProfile(payload: String): Result<HostProfile> =
         profileMutationEngine.importHostProfile(payload)
 
@@ -338,29 +275,33 @@ class HostProfileController(
 
     /**
      * Switches to the host profile [profileId], fully resetting all per-host
-     * state (sessions/messages/unread/draft/cache/commands) and reconnecting
-     * to the new host.
+     * state (sessions/messages/unread/draft/cache/commands).
      *
-     * The purge + reconfigure + testConnection sequence is the same as
-     * deleteHostProfile(wasCurrent) — extracted into [purgePerHostState].
+     * **C-8 (lite-v2): active profile select → persist + RestartRequired.**
+     * The app must restart to apply the new host; no runtime reconfigure /
+     * ForceReconnect / HostProfileSwitched (restart supersedes them).
      *
-     * **R-20 Phase 1 (plan §3 v4 momo N-B1 select 4-step):**
+     * The purge + select sequence (no runtime reconfigure):
      *  1. Snapshot `previousFp = hostProfileStore.currentProfile().serverGroupFp`
      *     BEFORE [HostProfileStore.select] (select has a side effect — it
      *     bumps lastUsedAt + sets currentHostProfileId, so reading
      *     currentProfile() AFTER would return the new profile's fp).
-     *  2. `select(profileId)` — mutates the store.
-     *  3. Read `targetFp = returned profile.serverGroupFp`.
-     *  4. Compare: same group → no cache eviction (just memory view switch);
-     *     different group → emit [ControllerEffect.EvictGroup] for previousFp
-     *     (group-scoped memory + persistent cache clear). The new group's
-     *     cache stays intact (it may have been populated by an earlier session
-     *     on a sibling profile in the same group).
+     *  2. Inside the `withHostReconfiguration(needsReconfigure = true)` body:
+     *     a. `activateProfile(profileId)` / `select(profileId)` — mutates the store.
+     *     b. `purgePerHostState` — clears per-profile UX state; preserves
+     *        per-server data iff same group.
+     *     c. Emit `EvictGroup(previousFp)` if cross-group.
+     *     d. `refreshHostProfileState()`.
+     *     e. **NO** `configureRepositoryForProfileRaw` — restart handles it.
+     *  3. After the block, `RestartRequired` is emitted by `withHostReconfiguration`.
+     *     No `ForceReconnect`/`HostProfileSwitched`.
      *
-     * `purgePerHostState` still runs — but with the group-isolated field
-     * classification (see [purgePerHostState] doc): per-profile UX state
-     * (draft / currentWorkdir) is wiped, but per-server-data
-     * (sessions / unread / recentWorkdirs) is preserved iff same group.
+     * **C-8 full matrix (frozen):**
+     *  - active profile edit connection params → persist + RestartRequired ✓
+     *  - select another active profile → persist + RestartRequired ✓ (THIS)
+     *  - delete active profile → persist + RestartRequired ✓
+     *  - resetLocalDataAndResync → same-host teardown (no restart) ✓
+     *  - non-active CRUD → persist only (no restart)
      */
     fun selectHostProfile(profileId: String) {
         scope.launch {
@@ -374,19 +315,11 @@ class HostProfileController(
             val targetBeforeMutation =
                 hostProfileStore.profiles().firstOrNull { it.id == profileId } ?: return@launch
             val sameGroup = previousFp == targetBeforeMutation.serverGroupFp
-            // Cluster 6 full fold. selectHostProfile ALWAYS reconfigures (it is
-            // a host switch) → needsReconfigure = true → ticket is always
-            // non-null (barrier ctx.slimTicket OR beginReconfigureBoundary()).
-            //
-            // EvictGroup split-placement is INTENTIONAL — the body can't tell
-            // barrier from non-barrier via the ticket, so it gates on the
-            // field: non-barrier fires EvictGroup INSIDE the body (between
-            // purge and configure, matches old ~L621) so the test @817
-            // ordering `cancelIdx < evictIdx < reconnectIdx` holds; barrier
-            // fires EvictGroup AFTER the helper returns (matches old ~L625-
-            // 633) so the barrier's atomic teardown is not interleaved with
-            // effect emission. Do NOT move EvictGroup wholesale.
-            withHostReconfiguration(needsReconfigure = true) { ticket ->
+            // C-8: host switch = restart. withHostReconfiguration(needsReconfigure=true)
+            // persists selection + purges per-host state + emits RestartRequired.
+            // No runtime reconfigure (configureRepositoryForProfileRaw removed),
+            // no ForceReconnect/HostProfileSwitched (restart supersedes them).
+            withHostReconfiguration(needsReconfigure = true) {
                 effectiveConnectionConfigResolver?.activateProfile(profileId)
                 val selected = if (effectiveConnectionConfigResolver != null) {
                     hostProfileStore.currentProfile()
@@ -394,32 +327,13 @@ class HostProfileController(
                     hostProfileStore.select(profileId)
                 }
                 purgePerHostState(preserveServerGroupData = sameGroup)
-                // Non-barrier EvictGroup placement (matches old ~L621):
-                // between purge and configure.
-                if (reconfigureBarrier == null && !sameGroup) {
+                if (!sameGroup) {
                     effects.emitEffect(ControllerEffect.EvictGroup(previousFp))
                 }
-                configureRepositoryForProfileRaw(profile = selected, ticket = ticket)
                 refreshHostProfileState()
             }
-            if (reconfigureBarrier != null && !sameGroup) {
-                // Group-scoped eviction: clears memory LRU + persistent cache
-                // for previousFp only; the new group (targetFp, now current)
-                // keeps its cache. Routed through the effect bus so AppCore's
-                // dispatchHostEffect handler runs both halves atomically-ish
-                // (memory sync, persistent async). Barrier placement (matches
-                // old ~L625-633): AFTER the helper returns.
-                // §R18 Phase 3 Wave 1 (P1-3 A 类): scope.launch suspend context → suspend emitEffect.
-                effects.emitEffect(ControllerEffect.EvictGroup(previousFp))
-            }
-            // §R18 Phase 3 Wave 1 (P1-3 A 类): scope.launch suspend 上下文 → 用 suspend emitEffect
-            // 可靠+FIFO，不会丢。
-            effects.emitEffect(ControllerEffect.ForceReconnect)
-            // §host-switch-order: only AFTER select + reconnect have settled do
-            // we hand control back for host-scoped post-processing. Doing this
-            // synchronously in the caller raced the launch above and read the
-            // PREVIOUS host's baseUrl.
-            effects.emitEffect(ControllerEffect.HostProfileSwitched)
+            // RestartRequired is emitted by withHostReconfiguration inside the block.
+            // No ForceReconnect / HostProfileSwitched — restart supersedes them.
         }
     }
 
@@ -527,19 +441,11 @@ class HostProfileController(
      * trusted endpoints — replaces the legacy `allowInsecureConnections` flag.
      */
     fun configureServer(url: String, username: String? = null, password: String? = null): Job? {
-        if (reconfigureBarrier != null) {
-            return scope.launch {
-                // C-D3 rev-3 round-5: barrier creates the slim ticket before
-                // teardown; thread it through the raw configure (ticket-ownership).
-                reconfigureBarrier.reconfigure { ctx ->
-                    configureServerRaw(url, username, password, ticket = ctx.slimTicket)
-                }
-            }
-        }
-        // Cluster 6 partial fold: non-barrier path stays SYNCHRONOUS (tests
-        // rely on it). Preamble delegated to [beginReconfigureBoundary]; the
-        // returned ticket threads into configure (ticket-ownership).
-        configureServerRaw(url, username, password, ticket = beginReconfigureBoundary())
+        // lite-v2: manual URL entry from the login form does runtime configure
+        // (the user expects immediate connection). The restart-required model
+        // applies only to saved-profile edits (saveHostProfile), not to the
+        // initial manual connection attempt.
+        configureServerRaw(url, username, password)
         return null
     }
 
@@ -552,7 +458,6 @@ class HostProfileController(
         url: String,
         username: String?,
         password: String?,
-        ticket: OpenCodeRepository.SlimReconfigureTicket? = null,
     ) {
         val oldUrl = settingsManager.serverUrl
         val urlChanging = oldUrl != url
@@ -591,7 +496,9 @@ class HostProfileController(
             // left a slim-profile host routed as legacy after a manual URL
             // change. See OpenCodeRepository.configure slim param.
             slim = profile.slim,
-            reconfigureTicket = ticket,
+            // lite-v2-dev: reconfigureTicket 形参已从 configure() 移除（incarnation
+            // 协议退役，见 OpenCodeRepository.configure）。ticket 仍在 barrier 层流转
+            // 但不再传入 configure。
         )
         // #12 / §2.5(b): mirror the host's TLS trust policy (incl. mTLS) into
         // the markdown image client (same as configureRepositoryForProfile).
@@ -620,40 +527,11 @@ class HostProfileController(
      * host switch by the caller (see resetLocalDataAndResync).
      */
     internal fun configureRepositoryForProfile(profile: HostProfile) {
-        if (reconfigureBarrier != null) {
-            scope.launch { configureRepositoryForProfileAwait(profile) }
-            return
-        }
-        // Cluster 6 partial fold: sync entry stays synchronous. Preamble
-        // delegated to [beginReconfigureBoundary]; the returned ticket threads
-        // into configure so this same transaction activates the not-ready
-        // incarnation (ticket-ownership).
-        configureRepositoryForProfileRaw(profile, ticket = beginReconfigureBoundary())
+        configureRepositoryForProfileRaw(profile)
     }
 
-    private suspend fun configureRepositoryForProfileAwait(profile: HostProfile) {
-        // Cluster 6 full fold: the prior else-branch (barrier == null) called
-        // back into the sync [configureRepositoryForProfile] entry, which is
-        // semantically identical to the helper's non-barrier branch
-        // (beginReconfigureBoundary → raw). In practice this Await path is
-        // only reached with a barrier (the sync entry dispatches it), but the
-        // fold preserves both branches.
-        withHostReconfiguration(needsReconfigure = true) { ticket ->
-            configureRepositoryForProfileRaw(profile, ticket = ticket)
-        }
-    }
-
-    /**
-     * C-D3 rev-3 round-5 (oracle §6.1): raw configure accepts the slim
-     * reconfigure ticket from the caller (barrier context or non-barrier
-     * [beginSlimReconfigure] return) and threads it into
-     * [OpenCodeRepository.configure]. This guarantees the not-ready
-     * incarnation invalidated at the boundary is the one activated on
-     * success — closing the T1/T2 completion race.
-     */
     private fun configureRepositoryForProfileRaw(
         profile: HostProfile,
-        ticket: OpenCodeRepository.SlimReconfigureTicket? = null,
     ) {
         val password = profile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
         // §2.5(a): 注入 mTLS 客户端证书材料（profile.mtlsEnabled 时从 ESP 载入）。
@@ -686,7 +564,7 @@ class HostProfileController(
             // legacy opencode). Was defaulting to false, leaving slim profiles
             // mis-routed on selectHostProfile / deleteHostProfile / testConnection.
             slim = profile.slim,
-            reconfigureTicket = ticket,
+            // lite-v2-dev: reconfigureTicket 形参已从 configure() 移除（见上）。
         )
         // #12 / §2.5(a): keep the markdown image HTTP client's TLS trust policy
         // in sync with the active host (now incl. mTLS) so self-signed HTTPS
@@ -823,32 +701,14 @@ class HostProfileController(
      * loadInitialData on a healthy connection.
      */
     fun resetLocalDataAndResync() {
-        if (reconfigureBarrier != null) {
-            scope.launch {
-                reconfigureBarrier.reconfigure {
-                    resetSlimForLocalWipe()
-                    resetLocalStateCore()
-                }
-                effects.emitEffect(ControllerEffect.ColdStartReconnect)
-            }
-            return
-        }
         // CP1 (notify Phase-0) §2 step 1: SYNCHRONOUSLY bump the epoch AND
         // invalidate the old identity BEFORE any reset/reconnect runs. The
-        // full-data reset is a reconfigure (the SSE collector + all in-memory
-        // caches are torn down); the epoch bump ensures any in-flight
-        // collector / directory fetch from the pre-reset state is dropped.
-        //
-        // Cluster 6: intentionally does NOT use [beginReconfigureBoundary] /
-        // [withHostReconfiguration]. Its CancelSseForReconfigure fires BELOW
-        // (step 4) AFTER clearAllLocalData / trafficTracker.reset /
-        // ClearSessionWindowCache — the helper emits CancelSse immediately,
-        // which would break the test @1088 ordering
-        // `clearCacheIdx < cancelSseIdx < coldStartIdx`. It does not call
-        // configure() directly; the slim ticket is completed after the local
-        // purge, and ColdStartReconnect performs the network bootstrap.
+        // full-data reset tears down SSE + all in-memory caches; the epoch
+        // bump ensures any in-flight collector / fetch from the pre-reset
+        // state is dropped.
         identityStore?.beginReconfigure()
-        // C-D3 rev-3 same-host reset: rotate marker before local purge / slice reset.
+        // C-D3 rev-3 same-host reset: rotate the slim-local marker before the
+        // local purge / slice reset (no-op compat shim — see OpenCodeRepository).
         repository.resetSlimForLocalWipe()
         // remove-message-persistence Task 5: the cacheRepository.clearAll() +
         // appContext.deleteDatabase(...) that used to wipe the SQLite cache DB
@@ -859,26 +719,17 @@ class HostProfileController(
         settingsManager.clearAllLocalData()
         // 2. Zero the in-memory traffic tracker (direct — same domain).
         trafficTracker.reset()
-        // 3. Drop the per-session message-window cache (sibling controller).
-        // §R18 Phase 3 Wave 1 (P1-3 C 类): resetLocalDataAndResync 多发顺序敏感 (Clear → Cancel → ColdStart) → 保持同步 tryEmitEffect。
-        effects.tryEmitEffect(ControllerEffect.ClearSessionWindowCache)
-        // 4. Tear down SSE + reset catch-up flags.
-        effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
-        // 5. T1b residual: chat + sessionList + unread via HostStatePurged
-        //    (superset of the prior mutateChat field set + epoch bump —
-        //    deliberate §fix-leak-window / ABA improvement). Connection /
-        //    traffic / composer / file / settings still need the full
-        //    reconnect defaults (isConnecting / Reconnecting / input wipe)
-        //    which HostStatePurged does not cover — those stay as explicit
-        //    slice resets below (effects stay at the call site).
+        // 3-8. Lane A: three critical effects (ClearSessionWindowCache →
+        // CancelSseForReconfigure → ColdStartReconnect) use suspend emitEffect
+        // (not tryEmitEffect) so none are silently dropped. FIFO is preserved
+        // by emitting sequentially in a single scope.launch. Slice resets
+        // (HostStatePurged, mutateXxx) are synchronous BEFORE the launch so
+        // collectors see the clean state before effects are dispatched.
         slices.store.dispatch(
             cn.vectory.ocdroid.ui.AppAction.HostStatePurged(
                 preserveServerGroupData = false,
             )
         )
-        // 6. Reset the connection + traffic slices to "reconnecting / zeroed".
-        //    Defaults already cover tunnelActivationState=Idle; we override
-        //    isConnecting + connectionPhase to signal the in-flight reconnect.
         slices.mutateConnection {
             ConnectionState(
                 isConnecting = true,
@@ -886,38 +737,14 @@ class HostProfileController(
             )
         }
         slices.mutateTraffic { TrafficState(resetAt = trafficTracker.resetAt) }
-        // 7. Reset the composer/file/settings slices to defaults.
         slices.mutateComposer { ComposerState() }
         slices.mutateFile { FileState() }
         slices.mutateSettings { SettingsState() }
-        // 8. Reconnect only after the same-host reset has rotated its marker.
-        effects.tryEmitEffect(ControllerEffect.ColdStartReconnect)
-    }
-
-    private fun resetLocalStateCore() {
-        settingsManager.clearAllLocalData()
-        trafficTracker.reset()
-        effects.tryEmitEffect(ControllerEffect.ClearSessionWindowCache)
-        // T1b residual: same HostStatePurged path as resetLocalDataAndResync.
-        // HostStatePurged bumps completenessEpoch (fixes the prior ABA bug
-        // where this branch reset epoch to 0 via SessionListState()).
-        slices.store.dispatch(
-            cn.vectory.ocdroid.ui.AppAction.HostStatePurged(
-                preserveServerGroupData = false,
-            )
-        )
-        slices.mutateConnection {
-            ConnectionState(isConnecting = true, connectionPhase = ConnectionPhase.Reconnecting)
+        scope.launch {
+            effects.emitEffect(ControllerEffect.ClearSessionWindowCache)
+            effects.emitEffect(ControllerEffect.CancelSseForReconfigure)
+            effects.emitEffect(ControllerEffect.ColdStartReconnect)
         }
-        slices.mutateTraffic { TrafficState(resetAt = trafficTracker.resetAt) }
-        slices.mutateComposer { ComposerState() }
-        slices.mutateFile { FileState() }
-        slices.mutateSettings { SettingsState() }
-    }
-
-    private suspend fun resetSlimForLocalWipe() {
-        slimLocalResetCoordinator?.resetSlimForLocalWipe()
-            ?: repository.resetSlimForLocalWipe()
     }
 
     private companion object {

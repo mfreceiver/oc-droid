@@ -126,30 +126,14 @@ class SessionSwitcher(
      * access here is on the main dispatcher. `accessOrder = true` makes both
      * `get` and `put` promote the entry to MRU (LRU semantics).
      *
-     * T11 round-3 (oracle D1 part b): the LRU-eviction override calls back
-     * into [repository.invalidateSlimLocalApplied] for the evicted sid so
-     * the per-session slim SSE local-applied watermark is cleared — a
-     * later switchTo that re-opens the evicted session re-enters the
-     * bounded cursor drain façade ([fetchSlimInitialWindowBounded])
-     * instead of fetching an empty /since tail anchored on the (now-stale)
-     * watermark. Same callback as the explicit [EvictSession] effect path
-     * in AppCore; both reach [invalidateSlimLocalApplied].
+     * lite-v2: slim SSE local-applied watermark invalidation removed
+     * (slim incarnation protocol retired). LRU eviction just drops the
+     * cache entry.
      */
     private val sessionWindowCache: MutableMap<CacheWindowKey, CachedSessionWindow> =
         object : LinkedHashMap<CacheWindowKey, CachedSessionWindow>(16, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<CacheWindowKey, CachedSessionWindow>?): Boolean {
-                val shouldEvict = size > SESSION_WINDOW_CACHE_CAPACITY
-                if (shouldEvict && eldest != null) {
-                    // T11 round-3 (oracle D1 part b): invalidate the
-                    // local-applied watermark for the evicted sid. The
-                    // repository is on the SAME main dispatcher
-                    // (Dispatchers.Main.immediate) — the
-                    // [invalidateSlimLocalApplied] call acquires the
-                    // repo's [slimStateLock] for the atomic derive+write.
-                    // Noop when the session has no slim SSE state.
-                    repository.invalidateSlimLocalApplied(eldest.key.sessionId, repository.captureSlimCommitToken())
-                }
-                return shouldEvict
+                return size > SESSION_WINDOW_CACHE_CAPACITY
             }
         }
 

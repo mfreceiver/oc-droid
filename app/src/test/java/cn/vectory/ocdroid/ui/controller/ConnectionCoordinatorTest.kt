@@ -1,6 +1,8 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
+import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
+import cn.vectory.ocdroid.service.status.StatusAggregator
 
 import android.util.Log
 import cn.vectory.ocdroid.R
@@ -743,14 +745,94 @@ class ConnectionCoordinatorTest {
         coordinator.cancelSseForReconfigure()
         runPending()
         assertEquals(epochBefore, identityStore.currentEpoch())
-        assertTrue(collectedEffects.none { it is ControllerEffect.HostReconfigured })
+        // lite-v2: HostReconfigured removed
+        assertTrue(collectedEffects.isEmpty())
     }
 
     @Test
     fun `cancelSseForReconfigure is neutral with no active feed`() {
         coordinator.cancelSseForReconfigure()
         runPending()
-        assertTrue(collectedEffects.none { it is ControllerEffect.HostReconfigured })
+        // lite-v2: HostReconfigured removed
+        assertTrue(collectedEffects.isEmpty())
+    }
+
+    // ── §pendingReconfigureTeardown ABA / teardown→bootstrap serialization ──
+
+    @Test
+    fun `coldStartReconnect awaits pending teardown before probing`() {
+        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val teardownBarrier = CompletableDeferred<Unit>()
+        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+            teardownBarrier.await()
+        }
+        val cc = ConnectionCoordinator(
+            scope, slices, repository, settingsManager, effects,
+            cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            identityStore = identityStore,
+            streamingLifecycleCoordinator = lifecycleCoordinator,
+        )
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = false, version = "1.0"))
+
+        cc.cancelSseForReconfigure()
+        cc.coldStartReconnect()
+        runPending()
+
+        coVerify(exactly = 0) { repository.checkHealth() }
+
+        teardownBarrier.complete(Unit)
+        runPending()
+
+        // coldStartReconnect → testConnection(force=true, retries=3) → 4 attempts
+        coVerify(exactly = 4) { repository.checkHealth() }
+    }
+
+    @Test
+    fun `coldStartReconnect waits for latest teardown when duplicate cancelSseForReconfigure fires during join`() {
+        val barrier1 = CompletableDeferred<Unit>()
+        val barrier2 = CompletableDeferred<Unit>()
+        var callCount = 0
+        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+            when (++callCount) {
+                1 -> barrier1.await()
+                2 -> barrier2.await()
+                else -> Unit
+            }
+        }
+        val cc = ConnectionCoordinator(
+            scope, slices, repository, settingsManager, effects,
+            cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            identityStore = identityStore,
+            streamingLifecycleCoordinator = lifecycleCoordinator,
+        )
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = false, version = "1.0"))
+
+        cc.cancelSseForReconfigure()
+        cc.coldStartReconnect()
+        cc.cancelSseForReconfigure()
+        runPending()
+
+        coVerify(exactly = 0) { repository.checkHealth() }
+
+        barrier1.complete(Unit)
+        runPending()
+        coVerify(exactly = 0) { repository.checkHealth() }
+
+        barrier2.complete(Unit)
+        runPending()
+        // coldStartReconnect → testConnection(force=true, retries=3) → 4 attempts
+        coVerify(exactly = 4) { repository.checkHealth() }
+    }
+
+    @Test
+    fun `coldStartReconnect with no pending teardown probes immediately`() {
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = false, version = "1.0"))
+
+        coordinator.coldStartReconnect()
+        runPending()
+
+        coVerify(exactly = 4) { repository.checkHealth() }
     }
 
     // ── loadInitialData (§best-effort: directory onFailure is non-fatal) ───

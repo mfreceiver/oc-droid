@@ -249,7 +249,7 @@ class AutoExpandOmittedPartsTest {
         val fullItems = expectedWindow.map { id ->
             MessageWithParts(msg(id), listOf(fullPart("p_$id", id)))
         }
-        val capturedIds = mutableListOf<Collection<String>>()
+        val capturedIds = mutableListOf<Set<String>>()
         coEvery {
             repo.expandMessagesFullBatch(eq("s1"), capture(capturedIds))
         } returns ExpandOutcome.Ok(items = fullItems, failures = emptyList(), usedBatch = true)
@@ -259,7 +259,7 @@ class AutoExpandOmittedPartsTest {
 
         // Exactly ONE batch invocation (single-flight per load).
         assertEquals("repo invoked once", 1, capturedIds.size)
-        val requested = capturedIds.single().toSet()
+        val requested = capturedIds.single()
         // Bounded to the recent window, not the full 25.
         assertEquals("only recent-$budget ids requested", budget, requested.size)
         // Newest end of the window is present.
@@ -394,7 +394,7 @@ class AutoExpandOmittedPartsTest {
             )
         }
 
-        val capturedIds = mutableListOf<Collection<String>>()
+        val capturedIds = mutableListOf<Set<String>>()
         coEvery {
             repo.expandMessagesFullBatch(eq("s1"), capture(capturedIds))
         } returns ExpandOutcome.Ok(
@@ -408,7 +408,7 @@ class AutoExpandOmittedPartsTest {
 
         // Only the Idle owner's id was requested — the Loaded owner was filtered out.
         assertEquals(1, capturedIds.size)
-        assertEquals(setOf("m_idle"), capturedIds.single().toSet())
+        assertEquals(setOf("m_idle"), capturedIds.single())
 
         val states = store.chatFlow.value.partExpandStates
         // Idle key resolved to Loaded by the reconcile.

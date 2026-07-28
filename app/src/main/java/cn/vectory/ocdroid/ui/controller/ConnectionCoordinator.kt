@@ -26,7 +26,11 @@ import cn.vectory.ocdroid.ui.launchLoadProviders
 import cn.vectory.ocdroid.ui.reportNonFatalIssue
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -217,6 +221,72 @@ class ConnectionCoordinator(
      * (deferred — never runs during CC construction), preserving the
      * pre-extraction wiring timing verbatim.
      */
+    /**
+     * lite-v2 D-barrier-fixup + lane A ABA fix: stores the no-source teardown
+     * Job from cancelSseForReconfigure so coldStartReconnect can await it before
+     * probing.
+     *
+     * **Job chaining (thread-safe)**: each new `cancelSseForReconfigure` joins
+     * the previous job first (`prev?.join()`) — serializes teardowns transitively.
+     * The read-modify-write of this field is protected by [reconfigureLock]
+     * (`synchronized`) so concurrent callers from multiple threads cannot both
+     * read `null` and launch parallel teardowns (the @Volatile-only race).
+     *
+     * **Identity-guarded loop join**: `coldStartReconnect` enters a while loop
+     * that repeatedly reads this field under [reconfigureLock], joins the job,
+     * then loops to check for new jobs that were registered during the join.
+     * The atomic read-and-clear inside the lock eliminates the TOCTOU between
+     * the identity check and the field nullification that a concurrent
+     * `cancelSseForReconfigure` could otherwise exploit.
+     *
+     * Locking note: both [cancelSseForReconfigure] and [coldStartReconnect] use
+     * the same [reconfigureLock]. [synchronized] is safe here because the
+     * critical sections are brief (field read/write + `scope.async` which is
+     * non-blocking and returns immediately). On `Dispatchers.Main.immediate`
+     * (production dispatcher) the coroutine body from `scope.async` is
+     * scheduled on the main queue — it does NOT run inside the lock.
+     *
+     * **Result-aware barrier (rev-gpt R2 fix):** [pendingReconfigureTeardown] is
+     * typed as [Deferred]&lt;[Result]&lt;[Unit]&gt;&gt; so the caller can distinguish
+     * successful teardown from exceptional teardown. Each body step (token-stream
+     * close / lifecycle teardown) catches non-[CancellationException] errors
+     * independently — a close failure NEVER skips the lifecycle teardown. The
+     * deferred completes with [Result.success] iff both steps succeed.
+     * [coldStartReconnect] joins the tail: on success it clears the field and
+     * probes; on failure it clears the field, logs a diagnostic, and does NOT
+     * probe (no bootstrap on a corrupted teardown). A newer successful full
+     * teardown (chained via prev?.await()) recovers the barrier.
+     */
+    private val reconfigureLock = Any()
+    @Volatile
+    private var pendingReconfigureTeardown: Deferred<Result<Unit>>? = null
+
+    /**
+     * @VisibleForTesting: seam fired inside [reconfigureLock] just before
+     * the handoff-probe invocation. Tests use this to deterministically
+     * trigger a REAL second thread to call [cancelSseForReconfigure] while
+     * the lock is held — proving the concurrent call is blocked until the
+     * probe completes and the lock is released. This is the ONLY way to
+     * reproduce the lock-contention window without fragile sleeps or
+     * private-field reflection.
+     *
+     * Unlike the previous [onBeforeHandoffRecheck] callback, this seam does
+     * NOT itself call [cancelSseForReconfigure] (that would be reentrant
+     * synchronized and would NOT test real thread competition).
+     */
+    internal var onHandoffProbeAboutToRun: (() -> Unit)? = null
+
+    /**
+     * @VisibleForTesting: fired at the probe coroutine's FIRST instruction
+     * (after [scope.launch] enqueues it), BEFORE the clear→probe recheck. This
+     * is AFTER coldStartReconnect has released [reconfigureLock] — exactly the
+     * window the old inside-lock handoff seam ([onHandoffProbeAboutToRun])
+     * could not capture. Tests park the probe here to deterministically
+     * register a teardown via [cancelSseForReconfigure] and prove the recheck
+     * joins it. Forwarded to the probe via its constructor hook.
+     */
+    internal var onProbeCoroutineStarted: (() -> Unit)? = null
+
     private val healthProbe = ConnectionHealthProbe(
         scope = scope,
         slices = slices,
@@ -236,6 +306,8 @@ class ConnectionCoordinator(
         loadInitialData = ::loadInitialData,
         startSSE = ::startSSE,
         effectiveConnectionConfigResolver = effectiveConnectionConfigResolver,
+        awaitPendingReconfigureTeardown = ::awaitPendingReconfigureTeardown,
+        onProbeCoroutineStartedHook = { onProbeCoroutineStarted?.invoke() },
     )
 
     /**
@@ -284,6 +356,11 @@ class ConnectionCoordinator(
     /**
      * Cold-start entry point: force a connection check with up to 3 retries.
      *
+     * lite-v2 D-barrier-fixup: if a no-source teardown (from
+     * [cancelSseForReconfigure]) is pending, awaits it before probing
+     * (serializes teardown→bootstrap, equivalent to the old barrier).
+     * Otherwise directly delegates to [healthProbe].
+     *
      * L4c: thin delegate to [ConnectionHealthProbe.coldStartReconnect]. The
      * TOFU-frozen guard + `testConnection(force=true, retries=3)` semantics
      * are preserved verbatim. Callers (MainActivity cold-start LaunchedEffect,
@@ -291,7 +368,121 @@ class ConnectionCoordinator(
      * `ConnectionViewModel.coldStartReconnect()`) see no change.
      */
     fun coldStartReconnect() {
-        healthProbe.coldStartReconnect()
+        scope.launch {
+            // Result-aware barrier loop: joins the pending teardown [Deferred]
+            // and checks its [Result]:
+            //
+            //   - **null** (no pending teardown): break to handoff re-check.
+            //   - **Result.success**: identity-guarded clear, break to handoff
+            //     re-check (or loop back if new teardown arrived during window).
+            //   - **Result.failure**: identity-guarded clear, log diagnostic,
+            //     return WITHOUT probing (no bootstrap on a corrupted teardown).
+            //     A subsequent cancelSseForReconfigure → coldStart cycle (or an
+            //     external reconnect trigger) recovers.
+            //   - **identity mismatch** (concurrent cancelSseForReconfigure
+            //     fired during await): loop back to read and await the new
+            //     deferred.
+            //
+            // Non-[CancellationException] is never thrown from await() because
+            // every teardown body wraps its steps in try-catch and completes
+            // the deferred with [Result]. [CancellationException] propagates.
+            //
+            // ## Atomic handoff (Item ① fix)
+            //
+            // The handoff (final pending==null check + probe invocation) is
+            // performed INSIDE [reconfigureLock]. A concurrent
+            // [cancelSseForReconfigure] that arrives:
+            //   (a) before the check → caught by the != null branch → loops back.
+            //   (b) during the probe → blocked by [synchronized] until the
+            //       probe returns (probe is non-suspend and short). No race
+            //       window exists.
+            outer@ while (true) {
+                var shouldProbe = true
+                inner@ while (true) {
+                    val d: Deferred<Result<Unit>>?
+                    synchronized(reconfigureLock) {
+                        d = pendingReconfigureTeardown
+                    }
+                    if (d == null) break@inner
+                    val result = d.await()
+                    synchronized(reconfigureLock) {
+                        if (pendingReconfigureTeardown === d) {
+                            result
+                                .onSuccess { pendingReconfigureTeardown = null }
+                                .onFailure { e ->
+                                    pendingReconfigureTeardown = null
+                                    DebugLog.w(
+                                        TAG,
+                                        "coldStartReconnect: teardown failed (${e.message}), skipping probe",
+                                    )
+                                    shouldProbe = false
+                                }
+                            break@inner
+                        }
+                        // identity mismatch → loop back to @inner
+                    }
+                }
+
+                if (!shouldProbe) return@launch
+
+                // Atomic handoff: re-check AND probe under reconfigureLock.
+                synchronized(reconfigureLock) {
+                    if (pendingReconfigureTeardown != null) {
+                        // A concurrent cancel registered during the join
+                        // window — loop back to join it.
+                        continue@outer
+                    }
+                    // @VisibleForTesting: test seam fires inside the lock,
+                    // just before the probe. A concurrent thread calling
+                    // cancelSseForReconfigure is blocked by this very
+                    // synchronized block — cannot register until the probe
+                    // returns and the lock is released.
+                    onHandoffProbeAboutToRun?.invoke()
+                    healthProbe.coldStartReconnect()
+                    return@launch
+                }
+            }
+        }
+    }
+
+    /**
+     * lite-v2 D-fixup-r4 (Item ① close): re-check + join any teardown
+     * registered in the clear→probe window. Called by the probe coroutine
+     * ([ConnectionHealthProbe.testConnection]) at its FIRST instruction,
+     * BEFORE checkHealth/SSE start.
+     *
+     * **Why this exists**: [coldStartReconnect] performs the handoff inside
+     * [reconfigureLock], but `healthProbe.coldStartReconnect()` →
+     * `testConnection()` → `scope.launch{}` returns ASYNCHRONOUSLY — the lock
+     * is released before the probe coroutine runs. A concurrent
+     * [cancelSseForReconfigure] arriving in that window registers a teardown
+     * the probe would otherwise bypass (clear→probe race). This method closes
+     * that window: the probe coroutine, once dispatched, re-acquires the lock,
+     * re-checks [pendingReconfigureTeardown], and joins any teardown that
+     * appeared.
+     *
+     * Mirrors [coldStartReconnect]'s identity-guarded join loop. Returns true
+     * if the probe may proceed (no pending teardown, or it succeeded); false
+     * if a pending teardown FAILED — the probe should abort, mirroring
+     * coldStart's "skip probe on corrupted teardown". The field is consumed
+     * (nulled) in both cases so a subsequent coldStart sees a clean slate.
+     */
+    private suspend fun awaitPendingReconfigureTeardown(): Boolean {
+        while (true) {
+            val d: Deferred<Result<Unit>>?
+            synchronized(reconfigureLock) { d = pendingReconfigureTeardown }
+            if (d == null) return true
+            val result = d.await()
+            synchronized(reconfigureLock) {
+                if (pendingReconfigureTeardown === d) {
+                    pendingReconfigureTeardown = null
+                    return result.isSuccess.also { ok ->
+                        if (!ok) DebugLog.w(TAG, "probe-entry recheck: pending teardown failed, aborting probe")
+                    }
+                }
+            }
+            // identity mismatch → a newer teardown arrived during await; loop
+        }
     }
 
     /**
@@ -321,7 +512,7 @@ class ConnectionCoordinator(
         // settling slimapiTokenStreamEnabled. If the feature is on, clear any
         // stale degrade state for the current session so the token stream can
         // be opened (a transient cap-8 admission state may have cleared).
-        if (serverCompatProfile.slimapiTokenStreamEnabled) {
+        if (serverCompatProfile.tokenStreamEnabled) {
             tokenStreamCoordinator?.let { tsc ->
                 slices.chat.value.currentSessionId?.let { sid -> tsc.resetDegraded(sid) }
             }
@@ -651,8 +842,11 @@ class ConnectionCoordinator(
 
     /**
      * CP9 §B11: cancels the in-flight SSE feed (foreground ON_STOP /
-     * ViewModel onCleared / process teardown). No longer touches a job —
-     * routes through [StreamingLifecycleCoordinator.onDisconnect] which the
+     * ViewModel onCleared / process teardown). Uses generic Disconnect path
+     * (replacement poller + markGap=true) — NOT the no-source teardown used
+     * by [cancelSseForReconfigure].
+     *
+     * Routes through [StreamingLifecycleCoordinator.onDisconnect] which the
      * Service observes (the coordinator emits StopSse →
      * [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner].disconnect).
      * Does NOT reset the catch-up state machine — the foreground return path
@@ -667,32 +861,81 @@ class ConnectionCoordinator(
     }
 
     /**
-     * §Stage D (gpter 阻塞 #1) + CP9 §B12: tear down any in-flight SSE feed
-     * BEFORE the repository is reconfigured for a host / profile switch.
-     * CP9: routes through [StreamingLifecycleCoordinator.onDisconnect] (the
-     * §4.1 disconnect entry → L3 teardown); the Service observes the
-     * teardown commands and disconnects its owner. Without this, the SSE job
-     * bound to the PREVIOUS host keeps delivering events into AppState while
-     * the new host's health probe is still in flight — those stale events
-     * would pollute the freshly-cleared state for the new profile.
+     * lite-v2 D-barrier-fixup: no-source teardown (no replacement poller,
+     * markGap=false). Stores the pending teardown Job so [coldStartReconnect]
+     * can await it before probing (serializes teardown→bootstrap, equivalent to
+     * the old [ConnectionReconfigureBarrier] serialization).
      *
-     * D3 keeps this as a legacy effect adapter only. It deliberately does not
-     * bump epoch or publish HostReconfigured: ConnectionReconfigureBarrier is
-     * the sole transaction/epoch owner and performs the repository rebuild
-     * only after this lifecycle teardown has joined.
+     * [cancelSse] (generic Disconnect path) is UNCHANGED — it still uses
+     * the generic teardown with replacement poller + markGap=true.
      */
     fun cancelSseForReconfigure() {
-        DebugLog.i("SSE", "cancelSse (reconfigure)")
-        cancelSseInternal(TeardownReason.Reconfigure)
+        DebugLog.i("SSE", "cancelSse (reconfigure, no-source)")
+        // Capture sid before the lock; close will run inside the chained
+        // Deferred body so there is no window between side effect start and
+        // registration — coldStartReconnect always sees a non-null pending
+        // teardown and joins it before probing.
+        val currentSid = slices.chat.value.currentSessionId
+        // Atomic create-and-register: the LAZY Deferred body
+        // (prev?.await() → token close → lifecycle teardown → Result<Unit>)
+        // does NOT start until [deferred.start()] is called outside the lock,
+        // so the assignment is visible before any teardown side effect begins.
+        //
+        // Result-aware barrier: each step (close / lifecycle) independently
+        // catches non-[CancellationException] exceptions — a close failure
+        // NEVER skips the lifecycle teardown. The deferred completes with
+        // [Result.success] iff both steps succeed.
+        val deferred = synchronized(reconfigureLock) {
+            val prev = pendingReconfigureTeardown
+            val newDef = scope.async(start = CoroutineStart.LAZY) {
+                // Serialization only: await the previous teardown (if any)
+                // before starting this one. The prev's result does NOT gate
+                // this node's execution — every node always runs its full
+                // close + lifecycle.
+                prev?.await()
+                var allOk = true
+
+                // Step 1: token-stream close — errors are captured, lifecycle
+                // continues regardless. CancellationException propagates.
+                try {
+                    tokenStreamCoordinator?.let { tsc ->
+                        currentSid?.let { sid -> tsc.close(sid) }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    DebugLog.e(TAG, "cancelSseForReconfigure: close failed", e)
+                    allOk = false
+                }
+
+                // Step 2: lifecycle teardown — errors are captured.
+                // CancellationException propagates.
+                try {
+                    streamingLifecycleCoordinator?.teardownNoSourceAndAwait()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    DebugLog.e(TAG, "cancelSseForReconfigure: teardown failed", e)
+                    allOk = false
+                }
+
+                if (allOk) Result.success(Unit) else Result.failure(TeardownException("one or more steps failed"))
+            }
+            pendingReconfigureTeardown = newDef
+            newDef
+        }
+        // Start outside the lock — the field is already set so concurrent
+        // coldStartReconnect / cancelSseForReconfigure see the Deferred
+        // immediately.
+        deferred.start()
     }
 
     /**
-     * Cluster 11 (duplication backlog): the shared body of [cancelSse] /
-     * [cancelSseForReconfigure]. Closes the token stream for the current
-     * session, then tears down the streaming lifecycle with [reason]. The
-     * `DebugLog` in [cancelSseForReconfigure] stays at its call site (BEFORE
-     * this helper) so the pre-dedup log timing is preserved verbatim;
-     * [cancelSse] logs nothing (as before).
+     * Generic teardown shared body used by [cancelSse] only (lags the old name
+     * — [cancelSseForReconfigure] now inlines its own no-source path instead
+     * of routing through this helper). Closes the token stream for the current
+     * session, then tears down the streaming lifecycle with [reason] via the
+     * generic Disconnect path (replacement poller + markGap=true).
      *
      * L4c placement decision: this helper STAYS on the coordinator (it is
      * general teardown, NOT probe-owned — the probe never calls
@@ -711,6 +954,8 @@ class ConnectionCoordinator(
             streamingLifecycleCoordinator?.teardownAndAwait(reason)
         }
     }
+
+    internal class TeardownException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
     companion object {
         private const val TAG = "ConnectionCoordinator"

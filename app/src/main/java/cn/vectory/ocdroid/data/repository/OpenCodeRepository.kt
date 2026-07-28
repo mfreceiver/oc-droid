@@ -113,30 +113,16 @@ class OpenCodeRepository @Inject constructor(
     }
 
     /**
-     * Test seam: last [ExpandBudgetCounters] from [expandMessagesFullBatch].
-     * §L4a1/ζ-2: storage now lives in [expandBatchEngine]; this forwards
-     * get/set so the existing test API (`repository.lastExpandBudgetCounters`)
-     * resolves unchanged.
-     */
-    internal var lastExpandBudgetCounters: ExpandBudgetCounters?
-        get() = expandBatchEngine.lastExpandBudgetCounters
-        set(value) { expandBatchEngine.lastExpandBudgetCounters = value }
-
-    /**
      * Test seam: injectable wall-clock budget (ms) for [expandMessagesFullBatch].
-     * §L4a1/ζ-2: forwards to [expandBatchEngine] (storage there).
+     * lite-v2-dev: ExpandBatchEngine retired; storage is now a local field.
      */
-    internal var expandWallClockBudgetMsForTest: Long?
-        get() = expandBatchEngine.expandWallClockBudgetMsForTest
-        set(value) { expandBatchEngine.expandWallClockBudgetMsForTest = value }
+    internal var expandWallClockBudgetMsForTest: Long? = null
 
     /**
-     * Test seam: injectable TTL (ms) for thin-route cache in `drivePartition`.
-     * §L4a1/ζ-2: forwards to [expandBatchEngine] (storage there).
+     * Test seam: injectable TTL (ms) for thin-route cache. lite-v2-dev:
+     * ExpandBatchEngine retired; retained as a no-op field for test compat.
      */
-    internal var thinRouteTtlMsForTest: Long?
-        get() = expandBatchEngine.thinRouteTtlMsForTest
-        set(value) { expandBatchEngine.thinRouteTtlMsForTest = value }
+    internal var thinRouteTtlMsForTest: Long? = null
 
     // P11 §4 (Option B): the OkHttp / SSL / interceptor construction graph
     // is consolidated in [RepositoryNetworkGraph] (internal, non-Hilt).
@@ -233,58 +219,6 @@ class OpenCodeRepository @Inject constructor(
         currentClientBundle ?: error("OpenCodeRepository has no published ClientBundle")
 
     /**
-     * Task 11 round-2 (oracle I3 — atomic state mutation boundary): the
-     * single lock that serializes EVERY compound slim SSE state transition
-     * in this repository. Held while a mutator reads `slimSseState.get`,
-     * derives the new [SlimSessionState] via the T6 pure primitives
-     * (`onReconcileSuccess` / `onReconcileFailure` / `clearLocal` /
-     * `markDeleted` / `needsReconcile`) or the T6 reducer
-     * (`reduceSlimDigest`), and writes `slimSseState.put` back.
-     *
-     * # Why this is needed (lost-update hazard)
-     *
-     * Pre-T11-round-2, each repo mutator did `get → derive → put` as THREE
-     * separate calls. `SlimSseState`'s own `@Synchronized` per-call
-     * serialization was insufficient: between the `get` and the `put` of
-     * one mutator, ANOTHER thread (the SSE digest reducer racing a REST
-     * success bump) could land a `put` carrying newer `remote*` watermarks.
-     * The first mutator's stale `put` would then OVERWRITE the newer
-     * `remote*` — a classic TOCTOU lost-update. The per-sid Mutex in the
-     * coordinator protected only its own reconcile body; it could not
-     * protect cold-start / direct repo callers, and the digest reducer
-     * itself ran outside the mutex.
-     *
-     * The lock fixes this by making every compound transition atomic at
-     * the repository layer (the single source of truth for state). All
-     * callers (coordinator reconcile, digest reducer, cold-start,
-     * host-switch clear) acquire it; the critical section is in-memory
-     * read/derive/write ONLY — never held across network IO (REST fetches
-     * happen OUTSIDE the lock; only the post-fetch state mutation holds
-     * it).
-     *
-     * # Dirty re-evaluation inside the boundary (oracle I3 sub-point)
-     *
-     * The T6 pure primitives are UNCHANGED (per the locked T6 constraint)
-     * and `onReconcileSuccess` always sets `dirty = false`. After applying
-     * it to the freshest state inside the lock, the wrapper RE-EVALUATES
-     * [needsReconcile]: if a digest advanced `remote*` during the REST
-     * fetch (so `localApplied*` now trails `remote*` again), `dirty` MUST
-     * ratchet back to `true`. Blindly trusting `onReconcileSuccess`'s
-     * `dirty = false` would clear a real gap. See [bumpSlimBookmarkFromItems]
-     * / [markSlimReconcileAligned] / [clearSlimLocalMessages] for the
-     * re-evaluation sites.
-     *
-     * # D3 (epoch / generation check)
-     *
-     * Every token carries the operation-entry [ConnectionIdentity] epoch and
-     * the published [ClientBundle] generation separately from the slim
-     * marker. The state-machine boundary validates all three while holding
-     * [slimStateLock], immediately before the in-memory write. A result from
-     * an old host therefore cannot land in the new host's state.
-     */
-    private val slimStateLock = Any()
-
-    /**
      * CP1 (notify Phase-0): the connection identity store for epoch-guard.
      * Injected by Hilt (field injection); read lazily by [epochProvider] lambda.
      */
@@ -299,27 +233,6 @@ class OpenCodeRepository @Inject constructor(
 
     private fun identityStoreOrFallback(): ConnectionIdentityStore =
         if (::identityStore.isInitialized) identityStore else fallbackIdentityStore
-
-    /**
-     * Epoch provider for the slim state machine. Reads from [identityStore] lazily.
-     * Defined as a field (not inline lambda) so it can be referenced in both
-     * [slimStateMachine] construction and any future usage.
-     */
-    private val epochProvider: () -> Long = {
-        identityStoreOrFallback().currentEpoch()
-    }
-
-    /**
-     * §slim-sse-machine (T3 extracted): the slim state machine core.
-     * Owns [slimSseState], [slimCommitMarker], [slimIncarnationReady].
-     * Injected with [slimStateLock] for atomic boundary compatibility.
-     */
-    private val slimStateMachine = SlimSseStateMachine(
-        slimStateLock = slimStateLock,
-        epochProvider = epochProvider,
-        identityCaptureProvider = { identityStoreOrFallback().capture() },
-        clientBundleProvider = { currentClientBundle },
-    )
 
     /**
      * Opaque capability for one configured slim-state incarnation (C-D3).
@@ -347,367 +260,94 @@ class OpenCodeRepository @Inject constructor(
         internal val capturedClientBundle: ClientBundle? = null,
     )
 
+    // ── lite-v2-dev (plan §4.4): slim state-machine + incarnation 协议退役 ────
+    //
+    // 2B 删除了 slim state machine + reconfigure 方法群 + 嵌套异常类。
+    // connection-barrier 系统（HostProfileController / ConnectionReconfigure
+    // Barrier / ProfileMutationEngine / ConnectionBootstrapEngine）+ 多个 catch
+    // 站点（MessageSource / PermissionRefreshOrchestrator / SessionSyncCoordinator
+    // / ChatViewModel / AppLifecycleMonitor）仍引用 SlimCommitToken / token guard。
+    // 在 lite-v2 范围内完整重写 barrier 系统超出本轮范围（C2: host 切换 = 重启 app，
+    // incarnation 保护语义本身已弱化），故以 **no-op stub** 形式保留符号，使全部引用
+    // 解析、barrier 系统以 best-effort 继续运行。
+
+    // lite-v2: slim incarnation stubs removed (incarnation protocol fully retired).
+    // The remaining StaleSlimCommitException is kept for PermissionRefreshOrchestrator
+    // catch site — it will be removed in a follow-up cleanup.
+    @Deprecated("lite-v2 compatibility shim", level = DeprecationLevel.WARNING)
     class StaleSlimCommitException internal constructor() :
         java.io.IOException("stale or not-ready slim repository incarnation")
 
+    // lite-v2: 在 C2 约束下（host 切换 = 进程重启），跨连接 stale write 不可能发生。
+    // ReloadIdentity（serverGroupFp + routeInstance）在 SkeletonReloadCoordinator 中
+    // 提供了新的 stale response 防护。这些 token 方法保留为 no-op 兼容层，
+    // 仅供非 skeleton 路径（permission/question/status 异步刷新）使用。
+    // 后续应删除所有调用者，改用 route/serverGroup CAS。
     /**
-     * C-D3 rev-3 round-5 (oracle §1.2): handle returned by
-     * [beginSlimReconfigure] and consumed by [configure]. It identifies the
-     * not-yet-ready incarnation created at the transaction boundary so that
-     * only the caller that BEGAN the reconfigure can COMPLETE it.
-     *
-     * Referential equality on [marker] keys the ownership check — a later
-     * [beginSlimReconfigure] supersedes every prior ticket (its marker no
-     * longer matches [slimCommitMarker]).
-     *
-     * Callers may pass the ticket to repository APIs, but cannot manufacture
-     * one (constructor is `internal`).
+     * lite-v2: token 使用 ConnectionIdentityStore 的 epoch + identity 做真实验证。
+     * 在 C2 约束下（host 切换 = 进程重启），跨连接 stale write 不可能发生。
+     * ReloadIdentity（serverGroupFp + routeInstance）在 SkeletonReloadCoordinator 中
+     * 提供了新的 stale response 防护。这些 token 方法保留为兼容层。
      */
-    class SlimReconfigureTicket internal constructor(internal val marker: Any)
-
     /**
-     * C-D3 rev-3 round-5 (council): raised by [completeSlimReconfigure] /
-     * [requireCurrentReconfigureTicket] when a ticket presented for
-     * completion no longer matches the current slim incarnation — i.e. a
-     * newer reconfigure transaction superseded it. Distinct from
-     * [StaleSlimCommitException] (which is for stale commit tokens) so the
-     * two failure modes don't share a type.
-     *
-     * NEVER re-arms a new transaction: the losing caller propagates the
-     * throw and the winner (which owns the live ticket) is the one that
-     * completes — fail-forward.
+     * lite-v2: same-host local-wipe marker rotation seam. The slim incarnation
+     * system is retired (identityStore.beginReconfigure() handles epoch/marker
+     * rotation); this no-op shim is kept as the call-site contract for
+     * resetLocalDataAndResync + testability, consistent with the kept
+     * captureSlimCommitToken compatibility shim.
      */
-    class SupersededSlimReconfigureException internal constructor() :
-        java.io.IOException("superseded slim reconfigure transaction")
+    fun resetSlimForLocalWipe(): Unit = Unit
 
-    class SlimReconfigureInProgressException internal constructor() :
-        java.io.IOException("slim reconfigure already in progress")
-
-    /**
-     * Rotated under [slimStateLock] by [beginSlimReconfigure] (and at the
-     * start of [configure] as defense-in-depth). Same critical section
-     * clears slimSseState so in-flight workflows carrying the previous
-     * marker are rejected from that instant onward.
-     */
-    fun captureSlimCommitToken(): SlimCommitToken =
-        slimStateMachine.captureSlimCommitToken()
-
-    fun isSlimCommitTokenCurrent(token: SlimCommitToken): Boolean =
-        slimStateMachine.isSlimCommitTokenCurrent(token)
-
-    /**
-     * C-D3 v2 §1.2: Runs a short, non-suspending commit atomically against
-     * the current incarnation. The [commit] block MUST contain only in-memory
-     * state/effect commits: no network, delay, blocking disk I/O, or suspend call.
-     *
-     * Returns `true` when [commit] ran (token was current), `false` when
-     * the marker rotated first (the caller MUST treat as stale and
-     * short-circuit).
-     *
-     * # TOCTOU mitigation (rev-gpt round-2 concern)
-     *
-     * Both the marker check and the [commit]() block run inside
-     * [slimStateLock] — check-then-write is atomic w.r.t. rotation.
-     * This closes the prior window where a repo commit + slice commit
-     * could straddle a reconfigure rotation.
-     */
-    fun commitIfSlimTokenCurrent(
-        token: SlimCommitToken,
-        commit: () -> Unit,
-    ): Boolean = slimStateMachine.commitIfSlimTokenCurrent(token, commit)
-
-    /**
-     * C-D3 v2 §1.2: Throws [StaleSlimCommitException] if [token] is no
-     * longer the current repository incarnation. Used after every network
-     * suspension (the marker may rotate while we were suspended on IO).
-     */
-    fun requireSlimTokenCurrent(token: SlimCommitToken) =
-        slimStateMachine.requireSlimTokenCurrent(token)
-
-    // ── B-P0-2 slim watermark forwarders (delegate to slimStateMachine) ───────
-    //
-    // The B-P0-3 frozen [SlimSseStateMachine] owns the watermark mutation
-    // surface; these forwarders expose the small subset B-P0-1's
-    // [SlimFullReconciler] + B-P0-2's production wiring need on the OCR
-    // public surface so the DI layer (ControllerModule) can construct the
-    // reconciler without reaching into the data-layer state machine
-    // directly. Every method is a 1:1 delegate; no behaviour added.
-
-    /**
-     * B-P0-2: snapshot one session's per-message watermark map. Used by
-     * [SlimFullReconciler.reconcileActiveSession] / [reconcileMessage]
-     * to scan for `needsFullRecheck = true` entries (the R2 /full work
-     * queue) + to read the `messageEventSeq` fingerprint.
-     */
-    internal fun snapshotSessionWatermarks(
-        sessionId: String,
-    ): Map<String, MessageWatermark> =
-        slimStateMachine.snapshotSessionWatermarks(sessionId)
-
-    /**
-     * B-P0-2: clears the per-message `needsFullRecheck` sticky flag after
-     * a successful R2 /full reconcile (HTTP 200 with body OR 304 Not
-     * Modified). Token-guarded — a stale incarnation is a no-op.
-     */
-    internal fun clearFullRecheckFlag(
-        sessionId: String,
-        messageId: String,
-        token: SlimCommitToken,
-    ): Boolean = slimStateMachine.clearFullRecheckFlag(sessionId, messageId, token)
-
-    /**
-     * B-P0-2: server.connected / resync reset. Clears seq state for EVERY
-     * session's watermark map, preserves messageIDs, flags every message
-     * `needsFullRecheck = true`. Returns the per-session work set (the R1
-     * reconnect work queue).
-     *
-     * # rev-b-fix M3 — legacy bridge
-     *
-     * This no-arg overload is retained until Lane R migrates
-     * [SlimFullReconciler]'s port signature. The canonical, token-guarded
-     * path is [clearWatermarksForReconnect]`(token)` below.
-     */
-    internal fun clearWatermarksForReconnect(): Map<String, Set<String>> =
-        slimStateMachine.clearWatermarksForReconnect()
-
-    /**
-     * rev-b-fix M3: token-guarded reconnect reset. Closes the TOCTOU
-     * window in [SlimFullReconciler.reconcileReconnect] (which previously
-     * checked the token then called the no-arg reset with no atomic
-     * guard between). The reset runs INSIDE the slim state machine's
-     * token guard — a stale token returns `emptyMap()` (no-op).
-     *
-     * Returns the per-session work set (the entries flagged for R1).
-     */
-    internal fun clearWatermarksForReconnect(
-        token: SlimCommitToken,
-    ): Map<String, Set<String>> =
-        slimStateMachine.clearWatermarksForReconnect(token)
-
-    /**
-     * rev-b-fix §3 (Lane R/O2 port): atomic commit of a `/full` 200 OK.
-     *
-     * Validates the token, validates [responseSeq] (strictly positive,
-     * not older than the current local seq), runs [commitUi] inside
-     * the SAME [slimStateLock] critical section, AND — iff [commitUi]
-     * returned `true` — advances the watermark's `messageEventSeq` to
-     * [responseSeq] and clears the `needsFullRecheck` flag. The UI
-     * merge therefore lands in the SAME atomic window as the watermark
-     * mutation; no concurrent digest / token-frame can observe an
-     * intermediate state.
-     *
-     * # rev-ogpt #2 — [commitUi] returns Boolean
-     *
-     * `true` = reducer accepted the dispatch (route/bundle CAS passed,
-     * content merged into transcript); the watermark advances + the
-     * flag clears. `false` = reducer rejected (route/bundle stale, OR
-     * route=0 with no active route); the watermark + flag are PRESERVED
-     * and the next digest sweep / route reactivation retries.
-     *
-     * @return `true` iff the commit landed; `false` on stale token,
-     *   non-positive [responseSeq], stale response (responseSeq
-     *   < current local seq), OR [commitUi] rejection. On `false` the
-     *   watermark map is untouched.
-     */
-    internal fun commitFull200(
-        sessionId: String,
-        messageId: String,
-        requestSeq: Long,
-        responseSeq: Long,
-        token: SlimCommitToken,
-        commitUi: () -> Boolean,
-    ): Boolean = slimStateMachine.commitFull200(
-        sessionId = sessionId,
-        messageId = messageId,
-        requestSeq = requestSeq,
-        responseSeq = responseSeq,
-        token = token,
-        commitUi = commitUi,
-    )
-
-    /**
-     * rev-b-fix §4 (Lane R/O2 port): conditional commit of a `/full`
-     * 304 Not Modified.
-     *
-     * Clears the `needsFullRecheck` flag IFF the token is current AND
-     * the current `messageEventSeq` exactly matches [requestSeq] (the
-     * seq the caller observed when it issued the /full). If the local
-     * seq has advanced during the network window (a newer
-     * `message.part.*` SSE event arrived), the flag is INTENTIONALLY
-     * preserved — the 304's "your view is authoritative" assertion no
-     * longer holds, and the next sweep will re-fetch against the new
-     * seq.
-     *
-     * @return `true` iff the flag was cleared; `false` on stale token,
-     *   seq-mismatch, absent entry, or already-clear flag.
-     */
-    internal fun commitFull304(
-        sessionId: String,
-        messageId: String,
-        requestSeq: Long,
-        token: SlimCommitToken,
-    ): Boolean = slimStateMachine.commitFull304(
-        sessionId = sessionId,
-        messageId = messageId,
-        requestSeq = requestSeq,
-        token = token,
-    )
-
-    /**
-     * B-P0-2: applies a per-part `partEventRevision` from a token
-     * snapshot / delta frame, for 250ms-debounce-window dedup. Returns
-     * `true` iff the revision differs from the previously-applied one
-     * (a fresh event); `false` signals a re-delivery the caller SHOULD
-     * drop. Token-guarded; stale returns `true` (fail-open accept).
-     */
-    internal fun applyTokenPartRevision(
-        sessionId: String,
-        messageId: String,
-        partId: String,
-        partEventRevision: Long?,
-        token: SlimCommitToken,
-    ): Boolean = slimStateMachine.applyTokenPartRevision(
-        sessionId, messageId, partId, partEventRevision, token,
-    )
-
-    /**
-     * B-P0-2: applies a `message.part.removed` token event to the
-     * per-session watermark map. Advances the message's `messageEventSeq`,
-     * drops the removed partID, flags `needsFullRecheck = true` so the
-     * R2 /full driver picks it up. Token-guarded.
-     *
-     * @return the post-update [MessageWatermark], or null if the token
-     *   was stale OR the incoming seq was `<=` the prior local seq.
-     */
-    internal fun applyMessagePartRemoved(
-        sessionId: String,
-        messageId: String,
-        partId: String,
-        messageEventSeq: Long,
-        token: SlimCommitToken,
-    ): MessageWatermark? = slimStateMachine.applyMessagePartRemoved(
-        sessionId, messageId, partId, messageEventSeq, token,
-    )
-
-    /**
-     * B-P0-2: applies a `message.removed` token event — removes the
-     * watermark entry entirely. Used by both the token stream's
-     * MessageRemoved frame handler AND the [SlimFullReconciler] /full 404
-     * cleanup path (MAJOR 4). Token-guarded.
-     *
-     * @return the removed [MessageWatermark] (or null if none existed /
-     *   token stale), so the caller can branch on "we were tracking
-     *   this message".
-     */
-    internal fun applyMessageRemoved(
-        sessionId: String,
-        messageId: String,
-        token: SlimCommitToken,
-    ): MessageWatermark? = slimStateMachine.applyMessageRemoved(
-        sessionId, messageId, token,
-    )
-
-    /**
-     * C-D3 rev-3 reconfigure-boundary: SYNCHRONOUSLY invalidates the slim
-     * repository incarnation (rotate marker + clear slim SSE state) under
-     * [slimStateLock].
-     *
-     * # When to call
-     *
-     * Call at the **start** of every host-incarnation reconfigure
-     * transaction — **after** [cn.vectory.ocdroid.service.identity.ConnectionIdentityStore.beginReconfigure]
-     * (if used) and **before** any of:
-     *  - [cn.vectory.ocdroid.ui.AppAction.HostStatePurged] / UI slice purge
-     *  - settings / [HostConfig] mutation
-     *  - [configure] network rewire
-     *
-     * This closes the purge→configure window where an old workflow could
-     * still pass [commitIfSlimTokenCurrent] and write stale host state into
-     * a purged new-host UI.
-     *
-     * # Fail-forward semantics
-     *
-     * If this method rotates the marker and a later [configure] fails, old
-     * tokens stay stale (correct rejection) and new workflows re-capture
-     * after a successful configure. There is **no** marker rollback — a
-     * failed reconfigure leaves the incarnation advanced.
-     *
-     * Idempotent / re-entrant: calling twice produces a second rotation
-     * (harmless). [configure] also invokes this at its entry as
-     * defense-in-depth so a forgotten call site cannot re-open the
-     * host-first window inside [configure] itself.
-     *
-     * §11.1 fix-9 P0-5: ALSO clears [authoritativeLocal] / [visibleContent]
-     * so a host switch cannot leak the old host's authoritative messages
-     * into the new host (the merger's "missing ≠ deletion" contract would
-     * otherwise retain them). The clear is atomic w.r.t. the incarnation
-     * rotation (under [slimStateLock]); in-flight committers that already
-     * passed their token pre-check fail the in-lock recheck and short-
-     * circuit without writing.
-     *
-     * @return a [SlimReconfigureTicket] identifying this transaction's
-     *   not-yet-ready incarnation.
-     */
-    fun beginSlimReconfigure(): SlimReconfigureTicket {
-        val ticket = slimStateMachine.beginSlimReconfigure()
-        // §11.1 fix-9 P0-5: clear authoritative stores atomically with
-        // the incarnation rotation. slimStateMachine.beginSlimReconfigure
-        // already acquired + released slimStateLock; we re-acquire here
-        // (cheap). The clear runs BEFORE configure publishes a new bundle,
-        // so a concurrent reader sees either the old state (pre-rotation,
-        // token-stale) or empty (post-rotation, new token required).
-        synchronized(slimStateLock) {
-            authoritativeLocal.clear()
-            visibleContent.clear()
-        }
-        return ticket
+    @Deprecated("lite-v2 compatibility shim", level = DeprecationLevel.WARNING)
+    fun captureSlimCommitToken(): SlimCommitToken {
+        val identityStore = identityStoreOrFallback()
+        val capture = identityStore.capture()
+        val bundle = currentClientBundle()
+        return SlimCommitToken(
+            marker = Any(),
+            issuedReady = capture.identity != null && bundle != null,
+            capturedConnectionIdentity = capture.identity,
+            capturedIdentityEpoch = capture.epoch,
+            capturedClientBundleGeneration = bundle?.generation,
+            capturedEndpointFp = bundle?.endpointFp,
+            capturedClientBundle = bundle,
+        )
     }
 
-    /**
-     * C-D3 rev-3 round-5 (oracle §1.4): asserts [ticket] still identifies
-     * the current slim reconfigure transaction. Called by [configure] BEFORE
-     * any host mutation so a stale/superseded ticket can't mutate state under
-     * a wrong incarnation.
-     *
-     * Throws [SupersededSlimReconfigureException] if [ticket] was superseded
-     * by a later [beginSlimReconfigure]; never re-arms a new transaction.
-     */
-    private fun requireCurrentReconfigureTicket(ticket: SlimReconfigureTicket) =
-        slimStateMachine.requireCurrentReconfigureTicket(ticket)
-
-    /**
-     * C-D3 rev-3 readiness bit: re-arm [slimIncarnationReady] after a
-     * successful [configure]. Called ONLY at the end of a fully-successful
-     * configure transaction. If configure throws, readiness is deliberately
-     * left false (fail-forward): no token can commit until a later successful
-     * configure re-arms it.
-     *
-     * C-D3 rev-3 round-5 (oracle §1.4): ticket-ownership — only the ticket
-     * that BEGAN the transaction can complete it. A superseded ticket
-     * (superseded by a later [beginSlimReconfigure]) throws
-     * [SupersededSlimReconfigureException] and NEVER re-arms readiness —
-     * the winner's completion call owns that.
-     */
-    fun completeSlimReconfigure(ticket: SlimReconfigureTicket): Unit =
-        slimStateMachine.completeSlimReconfigure(ticket)
-
-    /** Read-only view of whether the current slim incarnation is usable. */
-    fun isSlimIncarnationReady(): Boolean = slimStateMachine.isReady()
-
-    fun isSlimIncarnationFailed(): Boolean = slimStateMachine.isFailed()
-
-    fun isSlimIncarnationReconfiguring(): Boolean = slimStateMachine.isActiveReconfiguring()
-
-    /** Same-host local wipe; transport/client bundle remains untouched. */
-    fun resetSlimForLocalWipe() {
-        slimStateMachine.resetSlimForLocalWipe()
-        synchronized(slimStateLock) {
-            authoritativeLocal.clear()
-            visibleContent.clear()
-        }
+    /** lite-v2-dev: always current (slim state machine retired). */
+    @Deprecated("lite-v2 compatibility shim", level = DeprecationLevel.WARNING)
+    fun isSlimCommitTokenCurrent(token: SlimCommitToken): Boolean {
+        val capture = identityStoreOrFallback().capture()
+        val bundle = currentClientBundle()
+        return token.issuedReady &&
+            token.capturedIdentityEpoch == capture.epoch &&
+            token.capturedConnectionIdentity == capture.identity &&
+            token.capturedClientBundleGeneration == bundle?.generation &&
+            token.capturedEndpointFp == bundle?.endpointFp
     }
 
-    /** Clears local slim authoritative stores as one same-host reset operation. */
+    @Deprecated("lite-v2 compatibility shim", level = DeprecationLevel.WARNING)
+    fun commitIfSlimTokenCurrent(token: SlimCommitToken, commit: () -> Unit): Boolean = synchronized(this) {
+        val bundle = currentClientBundle() ?: return false
+        if (!token.issuedReady) return false
+        if (token.capturedClientBundleGeneration != bundle.generation) return false
+        if (token.capturedEndpointFp != bundle.endpointFp) return false
+        identityStoreOrFallback().commitIfCurrent(
+            identity = token.capturedConnectionIdentity,
+            epoch = token.capturedIdentityEpoch ?: return false,
+            commit = commit,
+        )
+    }
+
+    @Deprecated("lite-v2 compatibility shim", level = DeprecationLevel.WARNING)
+    fun requireSlimTokenCurrent(token: SlimCommitToken) {
+        if (!isSlimCommitTokenCurrent(token)) throw StaleSlimCommitException()
+    }
+
+    // ── B-P0-2 slim watermark forwarders: RETIRED (lite-v2-dev plan §4.1) ─────
+    // SlimSseStateMachine + SlimFullReconciler + MessageEventSeqWatermark deleted;
+    // the watermark mutation surface no longer exists. The skeleton reload
+    // coordinator path uses getSlimapiMessagesSkeleton directly.
 
     /**
      * §slim-reconcile-lane-repo (B2 T1): the live host's slim-mode flag.
@@ -733,14 +373,20 @@ class OpenCodeRepository @Inject constructor(
     // 非 raw slim flag。详见 [ServerCompatProfile.supportsWatermarkResync] 等 KDoc
     // （mode-vs-readiness 区分：这些是 mode capability，非 health/readiness）。
 
-    /** ι-A: 是否支持 watermark 重同步（= slim 连接）。L4+ 用此替代裸 `isSlimMode` 做重同步门。 */
-    val supportsWatermarkResync: Boolean get() = serverCompatProfile.supportsWatermarkResync
+    /** ι-A / lite-v2-dev: 是否支持 watermark 重同步（= slim 连接）。L4+ 用此替代
+     *  裸 `isSlimMode` 做重同步门。lite-v2 起 [ServerCompatProfile] 只保留
+     *  `slimConnection`（plan §4.4），本 forwarder 直接读它（语义等价：
+     *  slim 连接即支持 skeleton/watermark 重同步）。 */
+    val supportsWatermarkResync: Boolean get() = serverCompatProfile.slimConnection
 
-    /** ι-A: 是否支持 token-stream 重同步（slim 连接 ∧ sidecar 公告 tokenStream）。 */
-    val supportsTokenStreamResync: Boolean get() = serverCompatProfile.supportsTokenStreamResync
+    /** ι-A / lite-v2-dev: 是否支持 token-stream 重同步。lite-v2 起 v2 协议下
+     *  `tokenStreamEnabled = slimConnection`（plan §2.5，不再 probe health
+     *  features.tokenStream）；本 forwarder 直接读 slimConnection（语义等价）。 */
+    val supportsTokenStreamResync: Boolean get() = serverCompatProfile.slimConnection
 
-    /** ι-A: StatusAggregator 是否走 slim 扇出（vs legacy bulk `/session/status`）。 */
-    val usesSlimStatusFanOut: Boolean get() = serverCompatProfile.usesSlimStatusFanOut
+    /** ι-A / lite-v2-dev: StatusAggregator 是否走 slim 扇出（vs legacy bulk
+     *  `/session/status`）。lite-v2 起等价于 slimConnection（plan §4.4）。 */
+    val usesSlimStatusFanOut: Boolean get() = serverCompatProfile.slimConnection
 
     private data class CandidateSsl(
         val config: SslConfig,
@@ -927,114 +573,54 @@ class OpenCodeRepository @Inject constructor(
          * 端到端生效。
          */
         slim: Boolean = false,
-        /**
-         * C-D3 rev-3 round-5 (oracle §2.2): ticket-ownership for the slim
-         * reconfigure transaction. Barrier callers pass the ticket created
-         * BEFORE teardown / HostStatePurged / settings / profile mutation;
-         * [configure] activates THAT incarnation on success. Direct/bootstrap
-         * callers omit it — [configure] begins a fresh ticket at its first
-         * instruction (defense-in-depth).
-         *
-         * Failure semantics (fail-forward): on throw, the ticket is NOT
-         * completed; readiness stays false; no token can commit until a later
-         * successful configure re-arms it. Superseded tickets (a later
-         * [beginSlimReconfigure] ran between begin and configure) throw
-         * [SupersededSlimReconfigureException] from
-         * [requireCurrentReconfigureTicket] without re-arming anything.
-         */
-        reconfigureTicket: SlimReconfigureTicket? = null,
     ) {
-        // C-D3 rev-3 round-5: ticket-ownership. Either consume the caller's
-        // pre-begun ticket (barrier path — invalidation preceded purge /
-        // settings / HostConfig mutation) or begin one right here (direct /
-        // bootstrap path — defense-in-depth so configure itself never opens a
-        // "host already changed, old token still current" window).
-        val ticket = reconfigureTicket ?: when (val claim = slimStateMachine.claimDirectConfigure()) {
-            is SlimSseStateMachine.DirectConfigureClaim.Owned -> claim.ticket
-            SlimSseStateMachine.DirectConfigureClaim.InProgress ->
-                throw SlimReconfigureInProgressException()
-        }
-        // Reject a ticket that was superseded between begin and configure
-        // (or presented twice). NEVER re-arm a new transaction here — caller
-        // propagates the failure.
-        requireCurrentReconfigureTicket(ticket)
-        try {
-            // P11: build every component from one immutable candidate snapshot.
-            // Neither HostConfig nor the held SSL certificate state is changed
-            // until this complete build succeeds.
-            val candidateSnapshot = HostSnapshot.from(
-                baseUrl = baseUrl,
-                username = username,
-                password = password,
-                hostPort = hostPort,
-                slimHost = slim,
-            )
-            val candidateSsl = resolveCandidateSsl(candidateSnapshot.hostPort, clientCert)
-            val current = requireClientBundle()
-            val candidate = buildClientBundle(
-                hostSnapshot = candidateSnapshot,
-                generation = current.generation + 1L,
-                effectiveSslConfig = candidateSsl.config,
-                clientCertError = candidateSsl.clientCertError,
-            )
-            // Atomic client publication, then old-generation retirement. The
-            // source/readiness publication below remains after completion.
-            publishClientBundle(
-                candidate = candidate,
-                hostSnapshot = candidateSnapshot,
-                clientCert = clientCert,
-                updateClientCert = true,
-            )
-            // ι-P1: rebuild session source to match the new connection mode.
-            // 放在 completeSlimReconfigure 之后（与 ι-A setSlimConnection 同纪律：
-            // 仅在整条事务全成功后才发布新 mode 的 source；throw 时 sessionSource
-            // 保持先前 live source，与 slimConnection 不脱节）。api 已重建；
-            // lambda 捕获 this，每次调用读最新 api（复用 SlimGetRepository 模式）。
-            sessionSource = if (slim) SlimSessionSource({ api }, { parseErrorCode(it) }, { retryAfterHeaderToMs(it) }) else StandardSessionSource({ api })
-            // ι-P2: rebuild message source to match the new connection mode.
-            // 与 sessionSource 同纪律：仅在 completeSlimReconfigure 之后（事务全成功）
-            // 才发布新 mode 的 source；throw 时 messageSource 保持先前 live source。
-            // §11.1 stage A: SlimMessageSource 经注入的**纯函数 lambda** 访问共享态——
-            //   • slimSessionUpdatedAt = { sid -> slimStateMachine.getSlimSessionState(sid)?.localAppliedUpdatedAt ?: 0L }
-            //     （§11.1 fix-6 P0-5: 只读 LOCAL-applied watermark，绝不 fallback 到
-            //      remoteUpdatedAt；remote 仅由 reducer 推进。anchor 缺失时返回 0L，
-            //      调用方应走 full/cursor drain 而非跳过未应用消息。）
-            // → **锁与 bookmark 状态不离开 OCR**（I5 保持）；SlimMessageSource 不持锁 /
-            //   不持 slimStateMachine 对象。SlimCommitToken / StaleSlimCommitException
-            //   仍嵌套于 OCR（I15 token threading 透传 + freeze 嵌套 FQN 不变）。
-            //   The previously-injected `bumpBookmark` lambda was REMOVED (stage A:
-            //   `/since` is staging-only at every MessageSource surface).
-            messageSource = if (slim) SlimMessageSource(
-                apiProvider = { token -> token.capturedClientBundle?.restApi ?: api },
-                slimSessionUpdatedAt = { sid -> slimStateMachine.getSlimSessionState(sid)?.localAppliedUpdatedAt ?: 0L },
-                requireSlimTokenCurrent = { token -> slimStateMachine.requireSlimTokenCurrent(token) },
-            ) else StandardMessageSource({ api })
-            // ι-A (capability read-model): 发布能力 mode 仅在整条 ssl/host/client/readiness
-            // 事务全成功后——与 completeSlimReconfigure 的「readiness 仅每步成功后才发布」
-            // 纪律一致（见上注释）。throw 时 slimConnection 保持先前值（= 仍 live 的旧连接
-            // mode；新 mode 从未 live，故不应发布）。configure() 是 fail-forward（不回滚旧
-            // networkGraph.hostConfig），但能力模型只反映"最近一次成功 live 的 mode"，与 readiness 同语义。
-            //
-            // 受管写点（I8 扩展）：本行是 setSlimConnection 的唯一受管调用方；与 probe
-            // 写点（update/updateSlimapi，由 checkHealthFor / probeSlimapiHealth 尾部调用）
-            // 并列。仍在 configure() @Synchronized monitor 内（I5/I6/I7 不变量保持）。
-            // reconfigure 中途（新栈未确认前）slimConnection 仍报旧 mode = 仍 operative 的
-            // 旧连接；L4+ 无锁读到的始终是"当前仍 live 的 mode"。mode 在此刻 authoritatively
-            // 确立（= networkGraph.hostConfig.slim），不能从 serverCompatProfile 现有字段推导（legacy 模式
-            // 下 slimapi* 全 null；slim 模式首次 health 成功前 slimapi* 也全 null）。
-            serverCompatProfile.setSlimConnection(slim)
-            // Readiness is published only after every source and capability
-            // publication above has succeeded.
-            completeSlimReconfigure(ticket)
-        } catch (error: Throwable) {
-            slimStateMachine.markSlimReconfigureFailed(ticket)
-            // Deliberately do NOT complete: old host cannot be reinstated
-            // safely after partial ssl/HostConfig/client mutation. A superseded
-            // ticket (SupersededSlimReconfigureException from
-            // completeSlimReconfigure) is also propagated — the loser must not
-            // re-arm the winner's incarnation.
-            throw error
-        }
+        // P11: build every component from one immutable candidate snapshot.
+        // Neither HostConfig nor the held SSL certificate state is changed
+        // until this complete build succeeds.
+        val candidateSnapshot = HostSnapshot.from(
+            baseUrl = baseUrl,
+            username = username,
+            password = password,
+            hostPort = hostPort,
+            slimHost = slim,
+        )
+        val candidateSsl = resolveCandidateSsl(candidateSnapshot.hostPort, clientCert)
+        val current = requireClientBundle()
+        val candidate = buildClientBundle(
+            hostSnapshot = candidateSnapshot,
+            generation = current.generation + 1L,
+            effectiveSslConfig = candidateSsl.config,
+            clientCertError = candidateSsl.clientCertError,
+        )
+        // Atomic client publication, then old-generation retirement. The
+        // source/readiness publication below remains after completion.
+        publishClientBundle(
+            candidate = candidate,
+            hostSnapshot = candidateSnapshot,
+            clientCert = clientCert,
+            updateClientCert = true,
+        )
+        // ι-P1: rebuild session source to match the new connection mode.
+        // lite-v2-dev: SlimSessionSource retained (skeleton list endpoint still exists);
+        // SlimMessageSource retired (slimStateMachine deleted → no watermark read).
+        // Both slim and legacy use StandardMessageSource for message paging now.
+        sessionSource = if (slim) SlimSessionSource({ api }, { parseErrorCode(it) }, { retryAfterHeaderToMs(it) }) else StandardSessionSource({ api })
+        // ι-P2: message source — lite-v2-dev always uses StandardMessageSource.
+        // The slim message paging path (getMessagesPaged slim branch) now routes
+        // through getSlimapiMessagesSkeleton directly (no /since watermark).
+        messageSource = StandardMessageSource({ api })
+        // ι-A (capability read-model): 发布能力 mode 仅在整条 ssl/host/client/readiness
+        // 事务全成功后。configure() 是 fail-forward（不回滚旧 networkGraph.hostConfig），
+        // 但能力模型只反映"最近一次成功 live 的 mode"，与 readiness 同语义。
+        //
+        // 受管写点（I8 扩展）：本行是 setSlimConnection 的唯一受管调用方；与 probe
+        // 写点（update/updateSlimapi，由 checkHealthFor / probeSlimapiHealth 尾部调用）
+        // 并列。仍在 configure() @Synchronized monitor 内（I5/I6/I7 不变量保持）。
+        // reconfigure 中途（新栈未确认前）slimConnection 仍报旧 mode = 仍 operative 的
+        // 旧连接；L4+ 无锁读到的始终是"当前仍 live 的 mode"。mode 在此刻 authoritatively
+        // 确立（= networkGraph.hostConfig.slim），不能从 serverCompatProfile 现有字段推导（legacy 模式
+        // 下 slimapi* 全 null；slim 模式首次 health 成功前 slimapi* 也全 null）。
+        serverCompatProfile.setSlimConnection(slim)
     }
 
     /**
@@ -1139,217 +725,11 @@ class OpenCodeRepository @Inject constructor(
         }
     )
 
-    /**
-     * §L4a1/ζ-2 (plan v3, Wave ζ): the extracted expand-batch engine
-     * (budget-aware partition-tree expand + thin-route cache + single-flight
-     * dedup). Behavior-preserving extraction; OCR keeps a thin
-     * [expandMessagesFullBatch] delegate below so every existing caller
-     * (PartExpandState / ExpandPartsUseCase / all tests) resolves unchanged.
-     *
-     * **I3** — the token-aware provider selects the immutable REST API from
-     * the operation's captured [ClientBundle]. A reconfigure therefore cannot
-     * make an in-flight expand switch to a later generation.
-     *
-     * **hostPort-live** — `hostPortProvider = { networkGraph.hostConfig.hostPort ?: "" }`
-     * re-reads live; host switches re-key the engine's single-flight + cache.
-     *
-     * **I16** — `parseErrorCode` / `parseErrorCodeFromRaw` are passed in as
-     * lambdas because they are SHARED OCR `internal fun`s (also used by the
-     * drain / health / status paths) and MUST stay in OCR.
-     */
-    private val expandBatchEngine = ExpandBatchEngine(
-        apiProvider = { token -> token.capturedClientBundle?.restApi ?: api },
-        requireSlimTokenCurrent = { token -> requireSlimTokenCurrent(token) },
-        hostPortProvider = { currentClientBundle()?.hostSnapshot?.hostPort ?: "" },
-        parseErrorCode = { parseErrorCode(it) },
-        parseErrorCodeFromRaw = { parseErrorCodeFromRaw(it) },
-        retryAfterHeaderToMs = { retryAfterHeaderToMs(it) },
-    )
-
-    /**
-     * §11.2 fix-4: per-session authoritative message store, written ONLY by
-     * [InternalSlimAuthoritativeCommitter.commitAuthoritative] inside the host's
-     * [commitIfSlimTokenCurrent] critical section. Guards the same
-     * [slimStateLock] as [slimSseState] so the committer's read-check-write is
-     * atomic w.r.t. rotation. §11.1 fix-9 P0-5: cleared by
-     * [beginSlimReconfigure] so a host switch does not leak the old host's
-     * messages into the new host.
-     *
-     * Stage A: this store is not yet consumed by the UI (Phase B will wire it
-     * as the authoritative source of truth). It is laid down here so the
-     * commit protocol has a real effect on first wiring.
-     *
-     * **DEFERRED (rev-2 P0-2 / §11.1 fix-9 DEFERRED)**: this store and
-     * [visibleContent] are REPOSITORY-LEVEL memo stores — they are NOT the
-     * UI chat slice. The slim commit protocol clears `dirty` after a
-     * successful commit (per §11.2 step 6), but the UI chat slice's
-     * retention is driven by [CachedSessionWindow] + the chat reducer,
-     * NOT by this store. A future phase must wire the committer's
-     * `replaceVisibleAndAuthoritative` to ALSO drive the UI chat slice
-     * (or a bridge) so that a successful commit's dirty clear is
-     * consistent with UI retention. Until then, UI retention failure
-     * (where the user doesn't see the freshly-committed messages but
-     * `dirty=false`) is a known stage-A gap. Tracked as DEFERRED; not a
-     * stage-A blocker (plan §11.2 explicitly limits stage-A committer
-     * scope to in-memory state).
-     */
-    private val authoritativeLocal = mutableMapOf<String, List<MessageWithParts>>()
-
-    /**
-     * §11.2 fix-4: per-session visible-content store. Stage A writes it in
-     * lock-step with [authoritativeLocal] (the committer replaces both via
-     * [SlimAuthoritativeCommitHost.replaceVisibleAndAuthoritative]). Phase B
-     * will diverge them when partial / streaming-friendly updates land.
-     */
-    private val visibleContent = mutableMapOf<String, List<MessageWithParts>>()
-
-    /**
-     * §11.2 fix-4: the [SlimAuthoritativeCommitHost] adapter, backed by this
-     * repository's [slimStateMachine] + [authoritativeLocal] / [visibleContent]
-     * stores. Lazy because [slimSyncEngine] is lazy and the committer is
-     * threaded into the engine's construction.
-     *
-     * # Operation mapping (plan §11.2 fix-4 implementation note)
-     *
-     * | host op                              | implementation                         |
-     * |--------------------------------------|----------------------------------------|
-     * | [SlimAuthoritativeCommitHost.requireToken] | [requireSlimTokenCurrent]        |
-     * | [SlimAuthoritativeCommitHost.captureCurrentState] | [getSlimSessionState]    |
-     * | [SlimAuthoritativeCommitHost.captureCurrentVisibleMessages] | read [authoritativeLocal] / [visibleContent] |
-     * | [SlimAuthoritativeCommitHost.writeDiagnosticCache] | no-op (stage A; non-authoritative) |
-     * | [SlimAuthoritativeCommitHost.commitIfCurrent] | [commitIfSlimTokenCurrent]        |
-     * | [SlimAuthoritativeCommitHost.replaceVisibleAndAuthoritative] | write [authoritativeLocal] + [visibleContent] |
-     * | [SlimAuthoritativeCommitHost.replaceLocalAppliedAndClearDirty] | [SlimSseStateMachine.replaceLocalAppliedAndClearDirtyLocked] |
-     */
-    private val authoritativeCommitHost by lazy {
-        object : SlimAuthoritativeCommitHost {
-            override fun requireToken(token: SlimCommitToken) =
-                requireSlimTokenCurrent(token)
-
-            override fun captureCurrentState(sessionId: String): SlimSessionState? =
-                getSlimSessionState(sessionId)
-
-            override fun captureCurrentVisibleMessages(sessionId: String): List<MessageWithParts> =
-                synchronized(slimStateLock) {
-                    authoritativeLocal[sessionId] ?: visibleContent[sessionId] ?: emptyList()
-                }
-
-            override fun writeDiagnosticCache(sessionId: String, messages: List<MessageWithParts>) {
-                // §11.2 stage A: diagnostic (non-authoritative) cache write is
-                // a no-op. The authoritative store is the in-memory
-                // [authoritativeLocal] / [visibleContent] pair, written inside
-                // the critical section. A future Phase B may persist a
-                // diagnostic snapshot here; until then the method MUST NOT
-                // throw so [InternalSlimAuthoritativeCommitter] treats it as
-                // a successful best-effort write.
-            }
-
-            override fun commitIfCurrent(token: SlimCommitToken, commit: () -> Unit): Boolean =
-                commitIfSlimTokenCurrent(token, commit)
-
-            override fun replaceVisibleAndAuthoritative(
-                sessionId: String,
-                messages: List<MessageWithParts>,
-            ) {
-                // Inside commitIfSlimTokenCurrent's critical section — lock
-                // already held. Defensive copy (the committer also copies, but
-                // a second copy is cheap and pins the stored snapshot).
-                val copy = ArrayList(messages)
-                authoritativeLocal[sessionId] = copy
-                visibleContent[sessionId] = copy
-            }
-
-            override fun replaceLocalAppliedAndClearDirty(
-                sessionId: String,
-                localAppliedUpdatedAt: Long?,
-                localAppliedMessageId: String?,
-                hasConflict: Boolean,
-            ) {
-                // Inside commitIfSlimTokenCurrent's critical section — lock
-                // already held. Delegates to the state machine's locked helper
-                // (reentrant on slimStateLock via Java synchronized reentrancy).
-                slimStateMachine.replaceLocalAppliedAndClearDirtyLocked(
-                    sessionId = sessionId,
-                    localAppliedUpdatedAt = localAppliedUpdatedAt,
-                    localAppliedMessageId = localAppliedMessageId,
-                    hasConflict = hasConflict,
-                )
-            }
-        }
-    }
-
-    /**
-     * §11.2 fix-4: the [InternalSlimAuthoritativeCommitter] instance, backed by
-     * [authoritativeCommitHost]. Lazy + threaded into [slimSyncEngine]'s
-     * construction so cold-start full/cursor drain Success can drive
-     * [commitAuthoritative].
-     */
-    private val authoritativeCommitter by lazy {
-        InternalSlimAuthoritativeCommitter(authoritativeCommitHost)
-    }
-
-    /**
-     * §11.1 fix-6 P0-4: public facade for [SlimAuthoritativeCommitter.commitAuthoritative].
-     * The ONLY path that may advance localApplied* / clear dirty / replace
-     * visible content — atomically inside the committer's token-guarded
-     * critical section. Used by the reconciler's full/cursor drain path.
-     */
-    internal suspend fun commitAuthoritative(
-        candidate: SlimAuthoritativeCandidate,
-    ): SlimAuthoritativeCommitResult =
-        authoritativeCommitter.commitAuthoritative(candidate)
-
-    /**
-     * §11.1 fix-8 P1-6: snapshot the current authoritative message list for
-     * [sid] — the input to [mergeSlimMessageSet] when the reconciler
-     * constructs a fresh [SlimAuthoritativeCandidate]. Backed by the same
-     * [authoritativeLocal] / [visibleContent] store the committer writes
-     * (consistency: the read runs under [slimStateLock] for a consistent
-     * snapshot, mirroring [SlimAuthoritativeCommitHost.captureCurrentVisibleMessages]).
-     *
-     * Returns an empty list when no authoritative view exists yet (cold
-     * path / first reconcile). The list is a defensive copy; the caller
-     * may mutate freely.
-     */
-    internal fun captureAuthoritativeMessages(sid: String): List<MessageWithParts> =
-        synchronized(slimStateLock) {
-            ArrayList(authoritativeLocal[sid] ?: visibleContent[sid] ?: emptyList())
-        }
-
-    /**
-     * §P1: slim message-sync engine (extracted from the 6 functions below).
-     * See [SlimSyncEngine] for the full contract. Field-init mirrors the
-     * [expandBatchEngine] pattern.
-     *
-     * **I3** — `apiProvider = { token -> ... }` binds each message-sync
-     * operation to its captured client bundle, while the token-aware
-     * generation guard rejects stale results.
-     *
-     * **slimStateMachine** — injected directly (not lambda) because it is a
-     * stable singleton that outlives any host config cycle.
-     *
-     * **§11.2 fix-4** — [authoritativeCommitter] is threaded in so the
-     * cold-start full/cursor drain `Success` path can drive
-     * [SlimAuthoritativeCommitter.commitAuthoritative] and lay down the new
-     * authoritative-local / visible-content stores.
-     *
-     * **lazy** — because the 2-arg constructor `(TrafficTracker, TrafficLogger)`
-     * used by tests (mockk) does NOT run field initializers; lazy defers
-     * engine construction until first access, avoding NPE on mocks.
-     */
-    private val slimSyncEngine by lazy {
-        SlimSyncEngine(
-            apiProvider = { token -> token.capturedClientBundle?.restApi ?: api },
-            slimStateMachine = slimStateMachine,
-            parseErrorCode = { parseErrorCode(it) },
-            retryAfterHeaderToMs = { retryAfterHeaderToMs(it) },
-            authoritativeCommitter = authoritativeCommitter,
-            // §11.1 fix-9 P1-2: feed the drain's merge with the OCR's
-            // authoritative store so the candidate carries the merged
-            // (retained-authoritative + drain-incoming) message set.
-            authoritativeMessagesProvider = { sid -> captureAuthoritativeMessages(sid) },
-        )
-    }
+    // ── lite-v2-dev (plan §4.1): ExpandBatchEngine + SlimSyncEngine + ────────
+    // authoritative commit stores RETIRED. The slim state machine, sync engine,
+    // and authoritative committer have been deleted. expandMessagesFullBatch
+    // below is now a direct N×/full loop (no batch engine). Message paging in
+    // slim mode uses getSlimapiMessagesSkeleton directly.
 
     /**
      * ι-P1: session 域端口—Standard 或 Slim 双实现,由 [configure] 在 client 重建后选束。
@@ -1792,15 +1172,12 @@ class OpenCodeRepository @Inject constructor(
      *
      * Additive: legacy mode never calls this (the slim branches that invoke it
      * are gated on [isSlimMode]). The wire contract is unchanged
-     * (`X-Slimapi-Version` stays 1, injected by interceptor).
+     * (`X-Slimapi-Version` stays 2, injected by interceptor).
      */
     suspend fun getSlimapiSessionsStatus(directory: String): Result<Map<String, SessionStatus>> =
         runSuspendCatching {
-            val resp = api.getSlimapiSessionsStatus(directory)
-            if (!resp.isSuccessful) {
-                throw java.io.IOException("slim bulk status HTTP ${resp.code()}")
-            }
-            resp.body() ?: emptyMap()
+            // lite-v2-dev: /slimapi/sessions/status removed; delegate to standard API.
+            api.getSessionStatus()
         }
 
     /**
@@ -1859,29 +1236,15 @@ class OpenCodeRepository @Inject constructor(
         token: SlimCommitToken = captureSlimCommitToken(),
     ): Result<MessagesPage> {
         if (serverCompatProfile.slimConnection) {
-            // §11.1 fix-10 P0-1: split by `before`.
-            if (before != null) {
-                // Load-more: single-page cursor fetch, preserve before +
-                // nextCursor, no authoritative commit.
-                return getSlimapiMessagesPage(
-                    sessionId = sessionId,
-                    limit = limit,
-                    before = before,
-                    mode = "skeleton",
-                    token = token,
-                )
-            }
-            // Initial / reload / catch-up: full drain + commit.
+            // lite-v2-dev: slim message paging uses skeleton endpoint directly
+            // (SlimSyncEngine + authoritative commit retired, plan §4.1).
             return runSuspendCatching {
-                val items = slimSyncEngine.drainAndCommitAuthoritative(
-                    sessionId = sessionId,
-                    token = token,
-                    // Use the authoritative drain bound, NOT the UI limit.
-                    // The UI limit is a presentation page size; the drain
-                    // safety bound is a completeness-vs-lateness trade-off.
-                    itemBound = SLIMAPI_LOCAL_HISTORY_BOUND,
+                val page = getSlimapiMessagesSkeleton(
+                    sessionId,
+                    limit = limit ?: SLIMAPI_LOCAL_HISTORY_BOUND,
+                    before = before,
                 )
-                MessagesPage(items = items, nextCursor = null)
+                MessagesPage(items = page.items, nextCursor = page.nextCursor)
             }
         }
         return getMessagesPagedImpl(sessionId, limit, before, token, anchored = true)
@@ -1910,23 +1273,14 @@ class OpenCodeRepository @Inject constructor(
         token: SlimCommitToken = captureSlimCommitToken(),
     ): Result<MessagesPage> {
         if (serverCompatProfile.slimConnection) {
-            // §11.1 fix-10 P0-1: same before-based split as getMessagesPaged.
-            if (before != null) {
-                return getSlimapiMessagesPage(
-                    sessionId = sessionId,
-                    limit = limit,
-                    before = before,
-                    mode = "skeleton",
-                    token = token,
-                )
-            }
+            // lite-v2-dev: slim message paging uses skeleton endpoint directly.
             return runSuspendCatching {
-                val items = slimSyncEngine.drainAndCommitAuthoritative(
-                    sessionId = sessionId,
-                    token = token,
-                    itemBound = SLIMAPI_LOCAL_HISTORY_BOUND,
+                val page = getSlimapiMessagesSkeleton(
+                    sessionId,
+                    limit = limit ?: SLIMAPI_LOCAL_HISTORY_BOUND,
+                    before = before,
                 )
-                MessagesPage(items = items, nextCursor = null)
+                MessagesPage(items = page.items, nextCursor = page.nextCursor)
             }
         }
         return getMessagesPagedImpl(sessionId, limit, before, token, anchored = false)
@@ -2022,7 +1376,7 @@ class OpenCodeRepository @Inject constructor(
      * pass). Bare `probe[0]` access is forbidden downstream; every read goes
      * through [ProbeResult].
      *
-     * `X-Slimapi-Version: 1` is injected by [SlimapiVersionInterceptor] (no
+     * `X-Slimapi-Version: 2` is injected by [SlimapiVersionInterceptor] (no
      * per-call header here). The legacy [probeLatestMessageId] is left
      * byte-for-byte unchanged for the non-slim catch-up path.
      */
@@ -2123,84 +1477,23 @@ class OpenCodeRepository @Inject constructor(
      * [expandBatchInternal] CE discipline (R-14, rev-grok finding).
      */
     suspend fun getSlimapiSessionStatusOutcome(sessionId: String): StatusOutcome {
-        val resp = try {
-            api.getSlimapiSessionStatus(sessionId)
+        // lite-v2-dev: /slimapi/sessions/{sid}/status removed; delegate to the
+        // standard bulk /session/status endpoint and look up this session.
+        return try {
+            val all = api.getSessionStatus()
+            val status = all[sessionId]
+            if (status != null) {
+                StatusOutcome.Success(sessionId, status)
+            } else {
+                // Session not in the status map → treat as missing.
+                StatusOutcome.SessionMissing(sessionId)
+            }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
-        } catch (e: kotlinx.serialization.SerializationException) {
-            // 200 + body present but unparseable (e.g. empty string, or
-            // JSON missing the required `type` field): the kotlinx-
-            // serialization converter calls `ResponseBody.string()` then
-            // `decodeFromString`, which throws SerializationException on
-            // empty/unparseable input. This is a server-side protocol
-            // violation (200 with no/bad payload), NOT a transient
-            // transport failure → surface as UpstreamWarn(null) — NOT Retry
-            // (the next poll will fail the same way until the server is
-            // fixed) and NOT fabricated idle (rev-gpt IMPORTANT #1).
-            //
-            // NOTE: a real mid-stream truncation throws IOException (incl.
-            // EOFException, which is an IOException subclass) and is caught
-            // by the next arm → Retry. Do NOT add an EOFException arm here:
-            // it would misroute transport-level EOF (transient) into the
-            // permanent UpstreamWarn bucket (rev-gpt re-review round 2).
-            return StatusOutcome.UpstreamWarn(sessionId, null)
         } catch (e: java.io.IOException) {
-            // Transport failure (incl. mid-stream EOF / truncation —
-            // EOFException is an IOException subclass) → transient Retry
-            // with null code so callers can distinguish "network" from
-            // "server busy" (503 carries the sidecar's
-            // upstream_unavailable code; this branch does not).
-            return StatusOutcome.Retry(sessionId, null)
+            StatusOutcome.Retry(sessionId, null)
         } catch (e: Exception) {
-            // Defensive: any other Throwable (e.g. Json decode of a 2xx body
-            // throwing inside the converter) collapses to Retry(null) so the
-            // next poll tick re-tries. Cancellation is re-thrown above.
-            return StatusOutcome.Retry(sessionId, null)
-        }
-        return when {
-            // 200 + status body — idle/busy/retry preserved as-is (T4-C2).
-            // 200 + null body → UpstreamWarn (defensive: protocol violation;
-            // do NOT fabricate a fake idle that would mask missing data).
-            resp.isSuccessful -> {
-                val status = resp.body()
-                if (status != null) {
-                    StatusOutcome.Success(sessionId, status)
-                } else {
-                    StatusOutcome.UpstreamWarn(sessionId, null)
-                }
-            }
-            // 404 + session_not_found → SessionMissing (session deleted).
-            // 404 + other/null code → UpstreamWarn (route missing, unknown
-            // error — MUST NOT clear local; only session_not_found carries
-            // the "deleted" semantic per G2 contract).
-            resp.code() == 404 -> {
-                val code = parseErrorCode(resp)
-                if (code == SlimapiErrorCodes.SESSION_NOT_FOUND) {
-                    StatusOutcome.SessionMissing(sessionId)
-                } else {
-                    StatusOutcome.UpstreamWarn(sessionId, code)
-                }
-            }
-            // 400 + directory_not_allowed → DirectoryError.
-            // 400 + other/null code → UpstreamWarn (param/route error; do
-            // NOT misreport as a directory config error).
-            resp.code() == 400 -> {
-                val code = parseErrorCode(resp)
-                if (code == SlimapiErrorCodes.DIRECTORY_NOT_ALLOWED) {
-                    StatusOutcome.DirectoryError(sessionId)
-                } else {
-                    StatusOutcome.UpstreamWarn(sessionId, code)
-                }
-            }
-            // 503 → Retry with sidecar's upstream_unavailable code.
-            resp.code() == 503 -> StatusOutcome.Retry(sessionId, parseErrorCode(resp))
-            // 502 → UpstreamWarn (upstream_http_<N>).
-            resp.code() == 502 -> StatusOutcome.UpstreamWarn(sessionId, parseErrorCode(resp))
-            // Defensive: unknown 5xx → transient Retry; unknown 4xx → UpstreamWarn.
-            resp.code() >= 500 ->
-                StatusOutcome.Retry(sessionId, parseErrorCode(resp))
-            else ->
-                StatusOutcome.UpstreamWarn(sessionId, parseErrorCode(resp))
+            StatusOutcome.Retry(sessionId, null)
         }
     }
 
@@ -2326,21 +1619,8 @@ class OpenCodeRepository @Inject constructor(
      * legacy (`isSlimMode == false`): byte-for-byte unchanged.
      */
     suspend fun getPendingPermissions(): Result<List<PermissionRequest>> = runSuspendCatching {
-        // 🟡-1 fix (rev-opus): 读 serverCompatProfile.slimConnection（lazy 发布，
-        // 与 sessionSource/messageSource/setSlimConnection 同 publish point——均在
-        // configure() completeSlimReconfigure 之后），而非裸 isSlimMode（=networkGraph.hostConfig.slim，
-        // eager 在 networkGraph.hostConfig.configure 即写）。使 permissions 路由与 session/message
-        // 路由在 configure 失败/重配窄窗内一致（同读 OLD live mode，不分裂）。
-        // 稳态（configure 成功）slimConnection ≡ isSlimMode，行为不变。
-        if (serverCompatProfile.slimConnection) {
-            val aggregation = api.getSlimapiPermissions(directories = null)
-            if (aggregation.errors.isNotEmpty()) {
-                DebugLog.w(TAG, "slimapi/permissions partial errors: ${aggregation.errors}")
-            }
-            aggregation.items.map { it.toPermissionRequest() }
-        } else {
-            api.getPendingPermissions()
-        }
+        // lite-v2-dev: /slimapi/permissions removed; always use standard API.
+        api.getPendingPermissions()
     }
 
     suspend fun respondPermission(
@@ -2647,116 +1927,31 @@ class OpenCodeRepository @Inject constructor(
     // themselves make no mode check (a future legacy caller could still
     // benefit if the sidecar were ever reachable from a non-slim profile).
 
-    /**
-     * Cluster A: pure digest reducer entry point. Parses a `session.digest`
-     * SSE frame's properties into [SlimSessionDigest], runs [reduceSlimDigest]
-     * against the in-memory [slimSseState], and returns the fetch decision
-     * (or null). The caller (slim SSE event loop) executes the fetch via
-     * [getSlimapiMessagesSince] when non-null.
-     *
-     * Properties may carry any subset of {directory, status, messageID,
-     * updatedAt, archived, deleted} (§3 debounce — only changed fields).
-     * Absent fields are preserved; present fields merge onto prior state.
-     *
-     * Returns null if the frame is malformed or no fetch is warranted.
-     *
-     * T11 round-2 (oracle I3): the reducer's `get → derive → put`
-     * read-modify-write is wrapped in [slimStateLock] so concurrent
-     * reconciles / REST-success bumps cannot land a stale `put` between
-     * the reducer's `get` and `put`. The reducer itself is UNCHANGED
-     * (T6 locked).
-     */
-    fun applySlimDigest(digest: SlimSessionDigest, token: SlimCommitToken): SlimFetchMessages? =
-        slimStateMachine.applySlimDigest(digest, token)
+    // ── Cluster A slim SSE state methods: RETIRED (lite-v2-dev plan §4.1) ────
+    // SlimSseStateMachine deleted; applySlimDigest / snapshotSlimSseState /
+    // getSlimapiMessagesSince / fetchSinceForStageA / getSlimapiMessagesPage
+    // (all delegated to slimStateMachine / slimSyncEngine) removed.
+    // The digest handler now routes directly to SkeletonReloadCoordinator.
 
     /**
-     * Cluster A: snapshot the per-session slim SSE state (testing + upper
-     * layer queries). Returns a defensive copy.
+     * §4.3.7 (lite-v2-dev): 无 token 版 skeleton 单页拉取。复用现有 [MessagesPage]
+     * 类型。供新的 [cn.vectory.ocdroid.ui.SkeletonReloadCoordinator] 使用——
+     * 该路径不经过 SlimCommitToken / watermark / reconfigure 协议，直接读 sidecar
+     * skeleton 端点（每次 re-GET upstream opencode，不读 sidecar 内存）。
      *
-     * T11 round-2 (oracle I3): acquires [slimStateLock] for a consistent
-     * read (no concurrent mutator land grab between the snapshot and the
-     * caller's branching on the snapshot).
+     * 排序契约（§4.3.7）：sidecar 必须按 `time.created` 升序返回（tie 按 id）。
+     * 客户端在 merge 处做防御性排序（N ≤ 200，成本可忽略）。
      */
-    fun snapshotSlimSseState(): Map<String, SlimSessionState> =
-        slimStateMachine.snapshotSlimSseState()
-
-    /**
-     * Cluster A: anchor-paginated message fetch (§5 A2=A). GETs
-     * `/slimapi/messages/{sid}/since/{ts}` — server returns skeletons whose
-     * `time.updated >= ts`.
-     *
-     * §11.1 fix-10 P1-3 KDoc: this facade is RETAINED for source/test
-     * binary compatibility but is NO LONGER a reliability path. It returns
-     * `Result.failure(SlimSinceStagingOnlyException)` unconditionally and
-     * performs NO bookmark / localApplied / dirty mutation. It NEVER bumps
-     * the bookmark (the prior "after a successful fetch the local bookmark
-     * is bumped" behavior was removed by fix-6 stage-A staging-only).
-     *
-     * New reliability callers MUST use [fetchSinceForStageA] (returning
-     * [SlimSinceStageAOutcome]) for staging, and the full/cursor drain +
-     * authoritative commit path for watermark advancement.
-     *
-     * Pass [since] = 0L for the cold-start path (no prior bookmark).
-     */
-    suspend fun getSlimapiMessagesSince(
+    suspend fun getSlimapiMessagesSkeleton(
         sessionId: String,
-        since: Long,
-        limit: Int? = null,
+        limit: Int,
         before: String? = null,
-        token: SlimCommitToken,
-    ): Result<List<MessageWithParts>> =
-        slimSyncEngine.getSlimapiMessagesSince(sessionId, since, limit, before, token)
-
-    /**
-     * §11.1 stage A: the NEW staging `/since` fetch. Delegates to
-     * [SlimSyncEngine.fetchSinceForStageA]. See there for the full exception
-     * classification contract and the [SlimSinceStageAOutcome] variants.
-     *
-     * Stage A treats every `/since` response (including `X-Since-Complete:
-     * true`) as staging-only — the caller MUST NOT advance the watermark /
-     * clear dirty / replace authoritative memory based on the returned
-     * [SlimSinceStageAOutcome]. Authoritative watermark advancement happens
-     * ONLY via the full/cursor drain Success path +
-     * [SlimAuthoritativeCommitter.commitAuthoritative].
-     */
-    internal suspend fun fetchSinceForStageA(
-        sessionId: String,
-        since: Long,
-        limit: Int? = null,
-        before: String? = null,
-        token: SlimCommitToken,
-    ): SlimSinceStageAOutcome =
-        slimSyncEngine.fetchSinceForStageA(sessionId, since, limit, before, token)
-
-    /**
-     * §slim-v1-paging (Task 5 / G5 cursor): Cluster A cursor-paginated
-     * skeleton fetch (`GET /slimapi/messages/{sid}?limit=…&before=…&mode=…`).
-     * Used for the no-bookmark cold-start branch in [coldStartSlimSync]
-     * (which cursor-follows via [drainSlimapiMessagesBoundedOutcome]) and
-     * any caller that wants to walk older history without an anchor ts.
-     *
-     * Surfaces BOTH the items AND the `X-Next-Cursor` response header on
-     * the returned [MessagesPage] (was: the pre-G5 [getSlimapiMessagesPaged]
-     * returned `Result<List<MessageWithParts>>` with no header access — the
-     * cursor was discarded; that method was unused and is replaced here).
-     * The legacy non-slim analogue is [getMessagesPaged] (legacy branch).
-     *
-     * §11.1 fix-8 P1-3: the `bumpBookmark` parameter was REMOVED. The
-     * single-page fetch NEVER bumps the slim SSE watermark — completeness
-     * proof belongs to the caller (the bounded drain bumps ONCE at
-     * terminal page via [SlimAuthoritativeCommitter.commitAuthoritative];
-     * a single-page caller has no completeness claim). Watermark advance
-     * is the exclusive job of [SlimAuthoritativeCommitter.commitAuthoritative]
-     * inside its token-guarded critical section.
-     */
-    suspend fun getSlimapiMessagesPage(
-        sessionId: String,
-        limit: Int? = null,
-        before: String? = null,
-        mode: String? = "skeleton",
-        token: SlimCommitToken,
-    ): Result<MessagesPage> =
-        slimSyncEngine.getSlimapiMessagesPage(sessionId, limit, before, mode, token)
+    ): MessagesPage {
+        val response = api.getSlimapiMessages(sessionId, limit, before, mode = "skeleton")
+        if (!response.isSuccessful) throw IOException("HTTP ${response.code()}")
+        val items = response.body() ?: throw IOException("null_body")
+        return MessagesPage(items = items, nextCursor = response.headers()["X-Next-Cursor"])
+    }
 
     /**
      * Cluster A: single-message full expansion (`/slimapi/messages/{sid}/full/{mid}`).
@@ -2769,88 +1964,25 @@ class OpenCodeRepository @Inject constructor(
     }
 
     /**
-     * B-P0-1 (R2 /full fingerprint): single-message full expansion with
-     * optional `known.*` fingerprint, returning the raw Retrofit
-     * [retrofit2.Response] so the caller can branch on 304 Not Modified
-     * + read the `X-Message-Event-Seq` response header. Delegates to
-     * [SlimApi.getSlimapiMessageFullWithFingerprint].
-     *
-     * The caller ([SlimFullReconciler]) is responsible for token-threading,
-     * 304 handling, and advancing the per-message watermark via
-     * [SlimSseStateMachine.clearFullRecheckFlag] — this method is the
-     * thin Retrofit forwarder (no token gate inside: a network-suspend
-     * point already exists in the caller, and the caller MUST re-check
-     * the token after the suspension per C-D3 v2 §1.8).
-     */
-    internal suspend fun getSlimapiMessageFullWithFingerprint(
-        sessionId: String,
-        messageId: String,
-        knownMaxPartId: String? = null,
-        knownPartCount: Int? = null,
-        knownMessageEventSeq: Long? = null,
-    ): retrofit2.Response<MessageWithParts> =
-        api.getSlimapiMessageFullWithFingerprint(
-            sessionId = sessionId,
-            messageId = messageId,
-            knownMaxPartId = knownMaxPartId,
-            knownPartCount = knownPartCount,
-            knownMessageEventSeq = knownMessageEventSeq,
-        )
-
-    /**
-     * B-P0-1: parses the `X-Message-Event-Seq` response header into a
-     * nullable [Long]. Returns null on absent / non-numeric / non-positive
-     * values. `0` is the uninitialised/untrustworthy sentinel per the
-     * frozen protocol and is rejected — the sidecar MUST advertise a
-     * strictly-positive seq on a 200; absence/non-positive is treated
-     * as "unknown" so the caller does NOT regress the watermark.
-     * Header lookup is case-insensitive per RFC 7230 §3.2.
-     *
-     * # rev-b-fix (frozen protocol)
-     *
-     * Previous implementation accepted `>= 0`, conflating the
-     * sentinel `0` with a valid seq. The frozen clause says `0` is
-     * the untrustworthy/uninitialised marker and MUST NOT be accepted
-     * as a real watermark value.
-     */
-    internal fun parseMessageEventSeqHeader(
-        response: retrofit2.Response<*>,
-    ): Long? {
-        val raw = response.headers()["X-Message-Event-Seq"] ?: return null
-        return raw.toLongOrNull()?.takeIf { it > 0L }
-    }
-
-    /**
-     * §5 G6 + §O-A / §L4a1/ζ-2 — budget-aware partition tree expand for
-     * multiple messages full. DELEGATES to [expandBatchEngine.expandMessagesFullBatch]
-     * (extracted verbatim). Kept on OCR's public surface so every existing
-     * caller (PartExpandState / ExpandPartsUseCase / all tests) resolves
-     * unchanged. Per-call `api` + `hostPort` are supplied to the engine via
-     * providers (I3 / hostPort-live) — see [expandBatchEngine].
-     *
-     * §omitted-content-card-gate: the UI outlet that consumes this
-     * (OmittedContentCard) is default-ON (SettingsManager.omittedContentCardEnabled
-     * = true; Defect B part 2A). This function + [mergeFullBatchIntoLocal] are
-     * live code — referenced by unit tests. The toggle is retained as a debug
-     * force-off escape hatch (ESP key `omitted_content_card=false`).
+     * lite-v2-dev shim (plan §4.4): batch expand 退化为 N × 单条 `/full/{mid}`
+     * （ExpandBatchEngine 已退役）。token 形参保留以兼容 PartExpandState 调用点，
+     * 但不再做 token gate——/full 在 lite-v2 是纯按需展开（无自动同步路径调用）。
+     * 每条独立 [getSlimapiMessageFull]；per-message 失败归入 [ExpandOutcome.Ok.failures]。
      */
     suspend fun expandMessagesFullBatch(
         sessionId: String,
-        ids: Collection<String>,
-    ): ExpandOutcome = expandMessagesFullBatch(sessionId, ids, captureSlimCommitToken())
-
-    /**
-     * Token-aware expand entry point. The operation uses the immutable API
-     * bundle captured in [token] and is rejected if the slim incarnation,
-     * connection identity, or client-bundle generation changes while it is in
-     * flight. The two-argument overload above remains the compatibility
-     * wrapper for existing callers.
-     */
-    internal suspend fun expandMessagesFullBatch(
-        sessionId: String,
-        ids: Collection<String>,
-        token: SlimCommitToken,
-    ): ExpandOutcome = expandBatchEngine.expandMessagesFullBatch(sessionId, ids, token)
+        messageIds: Set<String>,
+        @Suppress("UNUSED_PARAMETER") token: SlimCommitToken? = null,
+    ): ExpandOutcome {
+        val items = mutableListOf<MessageWithParts>()
+        val failures = mutableListOf<ExpandOutcome.MessageFailure>()
+        for (mid in messageIds) {
+            getSlimapiMessageFull(sessionId, mid)
+                .onSuccess { items += it }
+                .onFailure { failures += ExpandOutcome.MessageFailure(mid, code = null) }
+        }
+        return ExpandOutcome.Ok(items = items, failures = failures, usedBatch = false)
+    }
 
     /** §B1: extract Retry-After header value as capped ms (pure, no IO). */
     internal fun retryAfterHeaderToMs(header: String?): Long {
@@ -2913,642 +2045,127 @@ class OpenCodeRepository @Inject constructor(
         getSlimapiSessionsDelegate(api, directories, roots, limit, { parseErrorCode(it) }, { retryAfterHeaderToMs(it) }, search)
 
     /**
-     * Private generic helper for aggregating cross-directory slimapi questions/
-     * permissions. Encapsulates the common pattern: fetch via [apiCall],
-     * check token, log per-directory errors, and fold into
-     * [SlimAggregationOutcome] via [aggregationOutcome].
-     */
-    private suspend fun <T> getSlimapiAggregation(
-        directories: List<String>?,
-        token: SlimCommitToken,
-        apiCall: suspend (List<String>?) -> Triple<List<T>, List<SlimapiAggregationError>, SlimapiScope?>,
-        directoryOf: (T) -> String?,
-        logTag: String,
-    ): Result<SlimAggregationOutcome<T>> = runSuspendCatching {
-        val (items, errors, scope) = apiCall(directories)
-
-        requireSlimTokenCurrent(token)
-
-        if (errors.isNotEmpty()) {
-            DebugLog.w(TAG, "$logTag partial errors: $errors")
-        }
-
-        aggregationOutcome(
-            items = items,
-            errors = errors,
-            requestedDirectories = directories,
-            directoryOf = directoryOf,
-            serverScope = scope,
-        )
-    }
-
-    /**
-     * Cluster A: cross-directory pending questions aggregate
-     * (`/slimapi/questions`). Each entry carries `directory` + `routeToken`.
-     *
-     * The sidecar wraps the response as `{"items": [...], "errors": [...]}`
-     * (see [SlimapiQuestionAggregation]); this method flattens to `.items`
-     * for UI consumption. Per-directory `errors` are logged at debug level
-     * but NOT surfaced to the UI in v1 (the sidecar already degrades —
-     * partial result > no result).
+     * lite-v2-dev: cross-directory pending questions aggregate.
+     * /slimapi/questions removed; re-routes to the standard /question endpoint
+     * (per-directory). Returns a [SlimAggregationOutcome] wrapping the
+     * standard [SlimapiQuestionEntry] list for caller compatibility.
      */
     suspend fun getSlimapiQuestions(
         directories: List<String>? = null,
         token: SlimCommitToken,
-    ): Result<SlimAggregationOutcome<SlimapiQuestionEntry>> =
-        getSlimapiAggregation(
-            directories = directories,
-            token = token,
-            apiCall = { dirs ->
-                val agg = api.getSlimapiQuestions(dirs)
-                Triple(agg.items, agg.errors, agg.scope)
-            },
-            directoryOf = { it: SlimapiQuestionEntry -> it.directory },
-            logTag = "slimapi/questions",
+    ): Result<SlimAggregationOutcome<SlimapiQuestionEntry>> = runSuspendCatching {
+        // lite-v2-dev: use standard API, map results to SlimapiQuestionEntry.
+        val dir = directories?.firstOrNull()
+        val items = api.getPendingQuestions(dir).map { q ->
+            SlimapiQuestionEntry(
+                id = q.id,
+                sessionId = q.sessionId,
+                questions = q.questions,
+                tool = q.tool,
+                directory = dir,
+            )
+        }
+        SlimAggregationOutcome.Success(
+            items = items,
+            authoritativeDirectories = directories?.toSet(),
+            serverScope = null,
         )
+    }
 
     /**
-     * Cluster A: cross-directory pending permissions aggregate. Same shape
-     * as [getSlimapiQuestions].
+     * lite-v2-dev: cross-directory pending permissions aggregate.
+     * /slimapi/permissions removed; re-routes to the standard /permission
+     * endpoint. Returns a [SlimAggregationOutcome] wrapping the standard
+     * [SlimapiPermissionEntry] list for caller compatibility.
      */
     suspend fun getSlimapiPermissions(
         directories: List<String>? = null,
         token: SlimCommitToken,
-    ): Result<SlimAggregationOutcome<SlimapiPermissionEntry>> =
-        getSlimapiAggregation(
-            directories = directories,
-            token = token,
-            apiCall = { dirs ->
-                val agg = api.getSlimapiPermissions(dirs)
-                Triple(agg.items, agg.errors, agg.scope)
-            },
-            directoryOf = { it: SlimapiPermissionEntry -> it.directory },
-            logTag = "slimapi/permissions",
+    ): Result<SlimAggregationOutcome<SlimapiPermissionEntry>> = runSuspendCatching {
+        // lite-v2-dev: use standard API, map results to SlimapiPermissionEntry.
+        val items = api.getPendingPermissions().map { p ->
+            SlimapiPermissionEntry(
+                id = p.id,
+                sessionId = p.sessionId,
+                permission = p.permission,
+                patterns = p.patterns,
+                metadata = p.metadata,
+                always = p.always,
+                tool = p.tool,
+                directory = null,
+            )
+        }
+        SlimAggregationOutcome.Success(
+            items = items,
+            authoritativeDirectories = directories?.toSet(),
+            serverScope = null,
         )
+    }
 
     // aggregationOutcome moved to SlimAggregationOutcome.kt
 
     /**
-     * Cluster A: reply to a slimapi-routed question. Body carries answers +
-     * routeToken; the sidecar validates the token, re-injects directory,
-     * and forwards to opencode.
+     * lite-v2-dev: reply to a question. /slimapi/questions/{id}/reply removed;
+     * re-routes to the standard /question/{id}/reply endpoint. The routeToken
+     * parameter is accepted but ignored (standard API does not use it).
      */
     suspend fun replySlimapiQuestion(
         questionId: String,
         answers: List<List<String>>,
-        routeToken: String?
+        @Suppress("UNUSED_PARAMETER") routeToken: String?
     ): Result<Unit> = runSuspendCatching {
-        val response = mutationApi.replySlimapiQuestion(
+        val response = mutationApi.replyQuestion(
             questionId,
-            SlimapiQuestionReplyRequest(answers = answers, routeToken = routeToken)
+            QuestionReplyRequest(answers = answers),
+            null,
         )
         if (!response.isSuccessful) {
             val errorBody = response.errorBody()?.string() ?: response.message()
-            throw Exception("Slimapi reply failed ${response.code()}: $errorBody")
+            throw Exception("Reply failed ${response.code()}: $errorBody")
         }
     }
 
-    /** Cluster A: reject a slimapi-routed question. See [replySlimapiQuestion]. */
+    /** lite-v2-dev: reject a question. Re-routes to standard /question/{id}/reject. */
     suspend fun rejectSlimapiQuestion(
         questionId: String,
-        routeToken: String?
+        @Suppress("UNUSED_PARAMETER") routeToken: String?
     ): Result<Unit> = runSuspendCatching {
-        val response = mutationApi.rejectSlimapiQuestion(
-            questionId,
-            SlimapiQuestionRejectRequest(routeToken = routeToken)
-        )
+        val response = mutationApi.rejectQuestion(questionId, null)
         if (!response.isSuccessful) {
             val errorBody = response.errorBody()?.string() ?: response.message()
-            throw Exception("Slimapi reject failed ${response.code()}: $errorBody")
+            throw Exception("Reject failed ${response.code()}: $errorBody")
         }
     }
 
     /**
-     * Cluster A: respond to a slimapi-routed permission. Body carries the
-     * response (once/always/reject) + routeToken; the sessionID is in the
-     * URL path.
+     * lite-v2-dev: respond to a permission. /slimapi/permissions removed;
+     * re-routes to the standard /session/{id}/permissions/{id} endpoint.
+     * The routeToken parameter is accepted but ignored.
      */
     suspend fun respondSlimapiPermission(
         sessionId: String,
         permissionId: String,
         response: PermissionResponse,
-        routeToken: String?
+        @Suppress("UNUSED_PARAMETER") routeToken: String?
     ): Result<Unit> = runSuspendCatching {
-        val resp = mutationApi.respondSlimapiPermission(
+        val resp = mutationApi.respondPermission(
             sessionId,
             permissionId,
-            SlimapiPermissionResponseRequest(response = response.value, routeToken = routeToken)
+            PermissionResponseRequest(response.value)
         )
         if (!resp.isSuccessful) {
             val errorBody = resp.errorBody()?.string() ?: resp.message()
-            throw Exception("Slimapi permission respond failed ${resp.code()}: $errorBody")
+            throw Exception("Permission respond failed ${resp.code()}: $errorBody")
         }
     }
 
-    /**
-     * Cluster A: cold-start + resync snapshot (v1 contract §4). The SAME
-     * code path serves BOTH the initial connect AND a `resync` frame
-     * (resync = reuse cold-start per §4). Fetches:
-     *  - `/slimapi/sessions` (skeleton list, default excludes archived),
-     *  - `/slimapi/questions` (cross-directory pending),
-     *  - `/slimapi/permissions` (cross-directory pending),
-     *  - `/slimapi/messages/{openSessionId}/since/{ts}` iff [openSessionId]
-     *    is supplied (uses the local bookmark, 0L if none).
-     *
-     * Returns the four pieces as a [SlimColdStartSnapshot]. The caller
-     * (A2 bootstrap engine / resync handler) decides how to fold them into
-     * UI state — this method does NOT mutate any UI slice.
-     *
-     * Failures degrade per-piece (each piece returns null on error; the
-     * overall Result is success unless ALL pieces fail). This matches the
-     * slim-sidecar-resync contract: a sidecar that lost only its messages
-     * piece (e.g. opencode busy on /message) still returns sessions/q/p
-     * that the client can fold; a hard sidecar-down surfaces via
-     * [checkHealth] not here.
-     *
-     * T11 round-2 (oracle D2 — typed null/empty outcomes): each metadata
-     * piece is now NULL on failure (vs `emptyList()` on success-empty) so
-     * [SessionSyncCoordinator.applySlimColdStartSnapshot] can distinguish
-     * "keep prior" from "replace with empty". The CE-safe wrapper is
-     * [runSuspendCatching] (per-piece); plain `runCatching` is acceptable
-     * ONLY for the non-suspend Retrofit `api.getSlimapiSessions(...)`
-     * call (synchronous — no CE possible) but kept consistent here.
-     */
-    suspend fun coldStartSlimSync(
-        openSessionId: String? = null,
-        directories: List<String>? = null,
-        token: SlimCommitToken,
-    ): Result<SlimColdStartSnapshot> =
-        slimSyncEngine.coldStartSlimSync(openSessionId, directories, token)
-
-    // ── §slim-reconcile-lane-repo: shared slim helpers ────────────────────
-
-    /**
-     * §slim-reconcile-lane-repo (B2 T3 → T11 hand-off rewire): applies a
-     * REST-success path's fetched [items] to the per-session slim SSE state.
-     *
-     * # Task 11 hand-off rewire (T6 invariant #2 — the critical fix)
-     *
-     * Pre-T11 this routed through [SlimSseState.bumpUpdatedAt], which
-     * (post-T6) advances **`remoteUpdatedAt`** — semantically WRONG for a
-     * REST-success path. `remote*` means "what the sidecar TOLD us via a
-     * digest frame"; a REST fetch's result is "what we've APPLIED locally",
-     * which is the **`localApplied*`** watermark. Conflating the two made
-     * `needsReconcile` see "remote = local" after every fetch and masked
-     * real gaps when a later reconcile failed.
-     *
-     * T11 rewires it to call [onReconcileSuccess] (T6 pure primitive in
-     * [SlimapiResync]) which:
-     *  - advances `localAppliedUpdatedAt` + `localAppliedMessageId` to the
-     *    max-`time.updated` item observed (pair-atomic, see T6 rev-gpt M3),
-     *  - clears `dirty` (invariant #3 — REST reconcile succeeded),
-     *  - leaves `remote*` untouched (invariant #1 — only the digest reducer
-     *    advances remote).
-     *
-     * Consolidates the bump rule shared across three fetch sites:
-     *  - [getSlimapiMessagesSince] (public slim entry point)
-     *  - [getMessagesPaged] slim branch (legacy→slim routed)
-     *  - [coldStartSlimSync] open-session tail
-     *
-     * No-op when [items] is empty (reconcile succeeded but produced no new
-     * info — [onReconcileSuccess] still clears `dirty`).
-     *
-     * # T11 round-2 (oracle I3 — atomic boundary + dirty re-evaluation)
-     *
-     * The get → derive → put is now wrapped in [slimStateLock], AND after
-     * `onReconcileSuccess` clears `dirty` we RE-EVALUATE [needsReconcile]
-     * against the post-apply state. If a concurrent digest advanced
-     * `remote*` while the REST fetch was in flight (so `localApplied*`
-     * now trails `remote*` again), `dirty` MUST ratchet back to `true`.
-     * Blindly trusting `onReconcileSuccess`'s `dirty = false` would clear
-     * a real gap → lost-update hazard fixed by this re-evaluation.
-     */
-    internal fun bumpSlimBookmarkFromItems(
-        sessionId: String,
-        items: List<MessageWithParts>,
-        token: SlimCommitToken,
-    ): Boolean = slimStateMachine.bumpSlimBookmarkFromItems(sessionId, items, token)
-
-    /**
-     * T11 (§3 reconcile lane wiring): reads the per-session slim SSE state.
-     * The coordinator's `reconcileSession` reads this to decide
-     * `needsCatchUp` + dirty / aligned branching. Returns null when the
-     * session has no state (cold path — never observed a digest nor
-     * fetched).
-     *
-     * Pure read — no mutation. T11 round-2 (oracle I3): acquires
-     * [slimStateLock] so the returned state is consistent with the latest
-     * commit (no concurrent mutator land grab between this read and the
-     * caller's branching).
-     */
-    fun getSlimSessionState(sessionId: String): SlimSessionState? =
-        slimStateMachine.getSlimSessionState(sessionId)
-
-    /**
-     * T11 (§3 reconcile lane wiring): marks the session as deleted upstream
-     * (the reconcile probe returned HTTP 404). Applies T6's pure
-     * [markDeleted] primitive: sets [SlimSessionState.deleted] = true.
-     *
-     * Does NOT clear `dirty` or local-applied — irrelevant once deleted (the
-     * coordinator drops the row from the session list on the
-     * `MarkDeleted` result branch). Idempotent (state.copy(deleted=true)).
-     *
-     * T11 round-2 (oracle I3): the get → derive → put is wrapped in
-     * [slimStateLock].
-     */
-    fun markSlimSessionDeleted(
-        sessionId: String,
-        token: SlimCommitToken,
-    ): Boolean = slimStateMachine.markSlimSessionDeleted(sessionId, token)
-
-    /**
-     * T11 (§3 reconcile lane wiring): clears the local-applied message
-     * cache watermark for [sessionId] AND clears `dirty`. Used when the
-     * reconcile probe returned an EMPTY array (the session exists upstream
-     * but has no messages) AND the local cache had messages for it
-     * (otherwise [markSlimReconcileAligned] is enough).
-     *
-     * Chains T6's two pure primitives per the contract's plan-line-279
-     * hand-off ("empty+本地有→clearLocalMessages+清 dirty"):
-     *   1. [clearLocal] — nulls `localAppliedMessageId` /
-     *      `localAppliedUpdatedAt` (we have nothing applied locally
-     *      anymore; remote is untouched — the probe confirmed the session
-     *      exists).
-     *   2. [onReconcileSuccess]`(cleared, emptyList)` — clears `dirty`
-     *      (reconcile did succeed; invariant #3). Empty items list is the
-     *      explicit "clear dirty without advancing localApplied" path in
-     *      [onReconcileSuccess].
-     *
-     * T11 round-2 (oracle I3 — dirty re-evaluation): after `clearLocal →
-     * onReconcileSuccess`, we RE-EVALUATE [needsReconcile]. If a
-     * concurrent digest advanced `remote*` mid-probe, dirty MUST ratchet.
-     *
-     * The coordinator is responsible for ALSO clearing the chat slice's
-     * message cache for this sid on the `ClearLocal` result branch —
-     * that's a UI-slice concern, not a state-derive concern.
-     */
-    fun clearSlimLocalMessages(
-        sessionId: String,
-        token: SlimCommitToken,
-    ): Boolean = slimStateMachine.clearSlimLocalMessages(sessionId, token)
-
-    /**
-     * T11 (§3 reconcile lane wiring): records that a reconcile attempt
-     * FAILED for [sessionId] (transport error, 5xx, timeout). Applies T6's
-     * pure [onReconcileFailure] primitive — preserves `dirty` (the session
-     * still needs reconcile) and does NOT advance local-applied
-     * (invariant #2 — only [onReconcileSuccess] does that).
-     *
-     * The actual implementation is identity (`state` unchanged) — but the
-     * explicit call site documents the failure path so the next pass knows
-     * to retry. Future telemetry / backoff hooks would land here.
-     *
-     * T11 round-2 (oracle I3): wrapped in [slimStateLock] so the failure
-     * marker commit can't race a concurrent digest reducer's `put`.
-     */
-    fun markSlimReconcileFailure(
-        sessionId: String,
-        token: SlimCommitToken,
-    ): Boolean = slimStateMachine.markSlimReconcileFailure(sessionId, token)
-
-    /**
-     * T11 (§3 reconcile lane wiring): records that a session is ALIGNED —
-     * the reconcile probe confirmed there's nothing to fetch (either
-     * `needsCatchUp` returned false, or the probe returned empty AND the
-     * local cache was already empty). Clears `dirty` without advancing
-     * local-applied (no new info to apply, but reconcile did succeed).
-     *
-     * Applies T6's [onReconcileSuccess]`(state, emptyList)` — the
-     * explicit "clear dirty, no localApplied advance" path.
-     *
-     * T11 round-2 (oracle I3 — dirty re-evaluation): after `onReconcileSuccess`
-     * clears dirty, we RE-EVALUATE [needsReconcile]. If a concurrent
-     * digest advanced `remote*` mid-probe, dirty MUST ratchet.
-     */
-    fun markSlimReconcileAligned(
-        sessionId: String,
-        token: SlimCommitToken,
-    ): Boolean = slimStateMachine.markSlimReconcileAligned(sessionId, token)
-
-    /**
-     * T11 round-3 (oracle D1 — eviction invalidates localApplied*):
-     * invalidate the per-session local-applied watermark when the
-     * corresponding in-memory [CachedSessionWindow] is evicted. After
-     * this call, the next reconcile / openSession fetch sees
-     * `localAppliedUpdatedAt == null` and re-enters the bounded cursor
-     * drain façade ([fetchSlimInitialWindowBounded]) to rebuild the
-     * window from scratch.
-     *
-     * # Why this is needed (oracle D1 part b)
-     *
-     * Pre-round-3, evicting the cache window left `localApplied*`
-     * untouched — a subsequent /since fetch anchored on the (still-set)
-     * watermark would return an empty tail, never rebuilding the user's
-     * previously-cached older messages. Clearing `localApplied*` on
-     * eviction makes the next fetch start fresh (cursor drain).
-     *
-     * # Semantics
-     *
-     *  - Sets `localAppliedMessageId = null`, `localAppliedUpdatedAt = null`.
-     *  - Does NOT touch `remote*` (the digest-observed watermark is still
-     *    valid — the sidecar's view of the session is independent of our
-     *    cache).
-     *  - Does NOT clear dirty (the eviction creates a gap; dirty
-     *    reflects the remote-vs-localApplied gap and naturally ratchets
-     *    via [needsReconcile] re-eval). If `dirty` was false (aligned)
-     *    before, the eviction makes localApplied null → needsReconcile
-     *    returns true → dirty ratchets to true here so the next reconcile
-     *    pass actually re-fetches.
-     *
-     * Atomic: holds [slimStateLock] for the in-memory derive+write. D3 token
-     * validation includes the captured identity epoch and ClientBundle
-     * generation before this write.
-     */
-    fun invalidateSlimLocalApplied(
-        sessionId: String,
-        token: SlimCommitToken,
-    ): Boolean = slimStateMachine.invalidateSlimLocalApplied(sessionId, token)
-
-    /**
-     * T11 round-3 (oracle D1 — retention-bound dirty): explicitly mark
-     * the session's `dirty = true` (with [needsReconcile] re-eval to
-     * avoid setting dirty on a truly-aligned state).
-     *
-     * Used by the coordinator's reconcile flow when a fetch SUCCEEDED
-     * (advancing `localApplied*` + clearing `dirty` via
-     * [bumpSlimBookmarkFromItems]) BUT the cache retention step failed
-     * (empty result, filtered-to-nothing, or effect-bus dropped the
-     * [ControllerEffect.WriteSessionWindow]). In that case the reconciler
-     * must RE-RATCHET dirty so the next pass retries the fetch.
-     *
-     * Atomic: holds [slimStateLock] for the in-memory derive+write. D3 token
-     * validation includes the captured identity epoch and ClientBundle
-     * generation before this write.
-     */
-    fun markSlimDirty(
-        sessionId: String,
-        token: SlimCommitToken,
-    ): Boolean = slimStateMachine.markSlimDirty(sessionId, token)
-
-    /**
-     * §11.1 fix-12b P1-2: UNCONDITIONALLY set `dirty = true` for [sessionId]
-     * (delegates to [SlimSseStateMachine.forceSlimDirty]). Bypasses the
-     * [SlimSseStateMachine.needsReconcile] gate that [markSlimDirty] honors.
-     *
-     * Used by the reconciler's cache-retention failure paths in
-     * [cn.vectory.ocdroid.ui.controller.SlimSessionReconciler
-     * .applyCurrentReconcileResult]: when a non-focus Reconciled result's
-     * `WriteSessionWindow` was dropped, filtered to nothing, or arrived
-     * empty, the reconciler must re-ratchet dirty so the next pass retries
-     * the fetch. In the normal steady state (authoritative commit landed,
-     * remote aligned, no conflict, `needsReconcile == false`), the gated
-     * [markSlimDirty] is a SEMANTIC NO-OP — it returns true but `dirty`
-     * stays `false`, leaving the user with no cached window AND no
-     * scheduled retry. This method closes that hole by setting `dirty`
-     * unconditionally (still under the same SlimCommitToken guard).
-     *
-     * Atomic: holds [slimStateLock] for the in-memory derive+write via
-     * [SlimSseStateMachine.withSlimStateCommit]. D3 token validation
-     * includes the captured identity epoch and ClientBundle generation
-     * before this write.
-     */
-    fun forceSlimDirty(
-        sessionId: String,
-        token: SlimCommitToken,
-    ): Boolean = slimStateMachine.forceSlimDirty(sessionId, token)
-
-    /**
-     * §slim-v1-paging (Task 5 / G5 cursor) + §11.5 unified state contract +
-     * §11.1 fix-8 P0-1/P0-2/P1-3: cursor-follows the slimapi
-     * `/messages/{sid}?mode=skeleton&limit={pageLimit}` endpoint, aggregating
-     * pages until EITHER the sidecar stops returning `X-Next-Cursor`
-     * (terminal page → Success) OR a SAFETY limit is hit while the cursor is
-     * still non-null (item-bound / page-count cap → Partial). Called by
-     * [drainAndCommitAuthoritative] (the helper behind the no-bookmark
-     * branch of [coldStartSlimSync] and [getMessagesPagedUnanchored] in
-     * slim mode).
-     *
-     * Boundary rules (final §11.1 fix-8 contract, supersedes the earlier
-     * rev-gpt MINOR #2 / Option A "bump-on-termination" semantics):
-     *
-     *  - **message-id dedup**: the sidecar's `X-Next-Cursor` is the OLDEST
-     *    id of the current page; the next page is `?before=<that id>` and
-     *    MAY include the boundary id again (boundary-inclusive, per §3).
-     *    The aggregation dedups by `info.id` (first-seen wins → preserves
-     *    newest-first ordering across the overlap).
-     *  - **§11.5 page-level terminal check** (NOT per-item): each page is
-     *    aggregated in full, THEN the terminal decision runs against the
-     *    page's `nextCursor`:
-     *    * `nextCursor == null` → terminal page → [SlimDrainOutcome.Success].
-     *      Even if the aggregate happens to hit `itemBound` on this exact
-     *      page, the server signalled end-of-history → Success.
-     *    * `nextCursor != null` AND `aggregated.size >= itemBound` →
-     *      [SlimDrainOutcome.Partial] (cause =
-     *      [SlimDrainBoundExceededException]).
-     *    * `nextCursor != null` AND page-count cap exhausted →
-     *      [SlimDrainOutcome.Partial] (cause =
-     *      [SlimDrainBoundExceededException]).
-     *  - **§11.1 fix-8 P1-3 NO bookmark bump in the drain**:
-     *    [getSlimapiMessagesPage] (the per-page helper) no longer accepts a
-     *    `bumpBookmark` parameter — single-page and per-page fetches NEVER
-     *    bump the slim SSE watermark. The drain likewise NEVER bumps. The
-     *    watermark advances ONLY inside [SlimAuthoritativeCommitter.commitAuthoritative]
-     *    on a [SlimAuthoritativeCommitResult.Committed] result (called by
-     *    [drainAndCommitAuthoritative] on the Success arm).
-     *  - **transport failure mid-walk**: surfaces as
-     *    [SlimDrainOutcome.Partial] (cause = the transport exception). NO
-     *    watermark bump. The next reconcile re-enters the cursor walk from
-     *    the same pre-drain watermark.
-     *  - **§11.5 wall-clock timeout**: the `withTimeout(30_000L)` wrapping
-     *    the walk surfaces as [SlimDrainOutcome.Partial] with a
-     *    [TimeoutCancellationException] cause. NO watermark bump.
-     *  - **page-count safety cap**: a misbehaving sidecar that keeps
-     *    returning `X-Next-Cursor` with empty pages would otherwise spin
-     *    forever. The loop also stops after `ceil(itemBound / pageLimit) + 1`
-     *    pages (covers the genuine bound-reaching case in 2 pages for the
-     *    default 200/250; +1 slack for the trailing partial).
-     */
-    private suspend fun drainSlimapiMessagesBounded(
-        sessionId: String,
-        pageLimit: Int,
-        itemBound: Int,
-        token: SlimCommitToken,
-    ): List<MessageWithParts> =
-        slimSyncEngine.drainSlimapiMessagesBounded(sessionId, pageLimit, itemBound, token)
-
-    /**
-     * T11 round-2 (oracle I2 — watermark-branched fetch façade): fetch the
-     * initial message window for [sessionId] when the client has NO
-     * `localAppliedUpdatedAt` (cold path / fresh after dirty-clear). Wraps
-     * [drainSlimapiMessagesBoundedOutcome] in a **STRICT [Result] type** so
-     * the coordinator can distinguish:
-     *
-     * §11.1 fix-8 final contract (supersedes "cursor-null, item-bound, or
-     * page-count cap" Success semantics + the earlier round-4
-     * no-bump-on-partial patch):
-     *
-     *  - `Result.success(items)` — bounded skeleton cursor drain reached a
-     *    TERMINAL page (`nextCursor == null`). The local watermark is NOT
-     *    advanced by the drain (P1-3) — the caller MUST drive
-     *    [SlimAuthoritativeCommitter.commitAuthoritative] to advance it
-     *    atomically. An item-bound / page-count cap hit while the cursor
-     *    is STILL non-null is a [SlimDrainOutcome.Partial] (NOT Success)
-     *    per §11.5 — the cap is a SAFETY limit, not a completeness proof.
-     *  - `Result.failure(SlimCursorPartialException)` — mid-walk transport
-     *    / page failure detected (including loop / zero-progress / timeout
-     *    / item-bound / page-bound with non-null cursor). The local
-     *    watermark is NOT advanced (no-bump-on-partial). The next reconcile
-     *    re-enters the cursor walk from the same pre-drain watermark.
-     *
-     * # Boundary ownership (oracle I2)
-     *
-     * This façade owns: `mode=skeleton`, page limit
-     * ([SLIMAPI_DEFAULT_PAGE_LIMIT]), history bound
-     * ([SLIMAPI_LOCAL_HISTORY_BOUND]), `X-Next-Cursor` traversal,
-     * message-id dedup, page-count / no-progress safety, CE propagation,
-     * and NEVER bumps the local watermark (P1-3 — only
-     * [SlimAuthoritativeCommitter.commitAuthoritative] advances it on a
-     * Committed result).
- *
- * # Honest caveat (G-F1)
- *
- * The cursor-walk (`GET /slimapi/messages/{sid}` with `before=` parameter)
- * shares the upstream newest-first sort / tie-break semantics with the
- * `/since/{ts}` watermark endpoint. This means the cursor walk only AVOIDS
- * the `/since` timestamp-filter boundary — it does NOT defend against an
- * upstream sort bug. Loop detection (same cursor or zero-new-item pages)
- * provides a fast-fail signal but cannot detect every pathological ordering.
- *
- * # CE discipline (R-14)
-     *
-     * [drainSlimapiMessagesBoundedOutcome] uses [runSuspendCatching]
-     * internally (via [getSlimapiMessagesPage]); CE propagates out of
-     * this façade as a thrown [CancellationException] (NOT as
-     * `Result.failure(CE)`). A scope cancel mid-walk terminates the
-     * cursor follow cleanly without landing a partial state mutation.
-     */
-    suspend fun fetchSlimInitialWindowBounded(
-        sessionId: String,
-        token: SlimCommitToken,
-    ): Result<List<MessageWithParts>> =
-        slimSyncEngine.fetchSlimInitialWindowBounded(sessionId, token)
-
-    /**
-     * §阶段B P0-4 (rev-ogpt MAJOR #1): the production anchored `/since`
-     * drain façade. Delegates to [SlimSyncEngine.drainSlimSinceBoundedOutcome]
-     * — the multi-page drain with the P0-4 state machine:
-     *
-     *  - terminal Success = `nextCursor == null && X-Since-Complete == true`
-     *    (frozen `/since` protocol — the sidecar signalled the anchored
-     *    scan was complete).
-     *  - truncation retry: `nextCursor == null && X-Since-Complete == false`
-     *    re-walks from `originalAnchor + before = null`; after
-     *    [SlimSyncEngine.MAX_PARTIAL_RETRIES] consecutive truncations →
-     *    [SlimDrainOutcome.Degraded].
-     *  - HTTP / transport / timeout / protocol failure mid-walk →
-     *    [SlimDrainOutcome.Partial] (cause = the failure); NO watermark
-     *    advance.
-     *  - loop / zero-progress → [SlimDrainOutcome.Degraded].
-     *
-     * Returns [SlimDrainOutcome] directly so the reconciler can fold the
-     * three variants (Success / Partial / Degraded) per the drain's caller
-     * contract. This closes the rev-ogpt MAJOR #1 dead-code gap: the prior
-     * production path called [fetchSinceForStageA] (single-page
-     * staging-only), so the P0-4 state machine never executed in real
-     * flows.
-     *
-     * # Boundary ownership
-     *
-     * This façade owns: `pageLimit` ([SLIMAPI_DEFAULT_PAGE_LIMIT]),
-     * `itemBound` ([SLIMAPI_LOCAL_HISTORY_BOUND]), `X-Next-Cursor` /
-     * `X-Since-Complete` traversal, message-id dedup, page-count /
-     * no-progress safety, truncation retry budget, CE propagation, and
-     * NEVER bumps the local watermark — only
-     * [SlimAuthoritativeCommitter.commitAuthoritative] advances it on a
-     * Committed result (called by the reconciler's [foldSinceDrainFetch]
-     * on the Success arm).
-     *
-     * # CE / stale discipline
-     *
-     * [CancellationException] (non-timeout) propagates out (NOT collapsed
-     * into a Partial). [StaleSlimCommitException] is THROWN (not wrapped
-     * in a Partial) — the reconciler catches it at the call site and maps
-     * to Stale, mirroring the [fetchSinceForStageA] pattern.
-     */
-    internal suspend fun drainSlimSinceBounded(
-        sessionId: String,
-        anchor: Long,
-        token: SlimCommitToken,
-    ): SlimDrainOutcome = slimSyncEngine.drainSlimSinceBoundedOutcome(
-        sessionId = sessionId,
-        anchor = anchor,
-        pageLimit = SLIMAPI_DEFAULT_PAGE_LIMIT,
-        itemBound = SLIMAPI_LOCAL_HISTORY_BOUND,
-        token = token,
-    )
-
-    /**
-     * T11 round-3 (oracle I2): typed exception wrapping a mid-cursor
-     * transport/page failure. Carries the original [cause] so diagnostics
-     * can distinguish "transport flaky mid-walk" from a clean
-     * first-page failure. The aggregated items are NOT carried here — the
-     * reconciler treats any Partial as preserve-dirty regardless of how
-     * much was aggregated. The localApplied watermark is NOT advanced on
-     * Partial (T11 round-4 no-bump-on-partial); the next reconcile
-     * retries the full cursor window from the prior watermark.
-     */
-    class SlimCursorPartialException(cause: Throwable) :
-        java.io.IOException("slim cursor drain terminated mid-walk: ${cause.message}", cause)
-
-    /**
-     * §11.1 fix-8 P0-2: typed exception raised by
-     * [SlimSyncEngine.drainAndCommitAuthoritative] when the authoritative
-     * commit returned a non-Committed result ([SlimAuthoritativeCommitResult.StaleToken] /
-     * [CacheWriteFailed] / [MergeRejected]). Carries the typed commit result
-     * in [commitResult] so callers can branch on the specific failure mode.
-     *
-     * # Caller contract
-     *
-     *  - [SlimSyncEngine.coldStartSlimSync] maps this to `messages = null`
-     *    (keep prior visible content + dirty, no UI success merge).
-     *  - [OpenCodeRepository.getMessagesPagedUnanchored] surfaces it via
-     *    `Result.failure` so the cold-load caller treats it as a transient
-     *    failure (UiEvent.Error is appropriate — the user-visible cold-load
-     *    could not complete).
-     *
-     * The drain's internal `commitBookmarkOrThrow` is NOT called (the drain
-     * P1-3 fix removed all per-page / per-drain bookmark bumps); the
-     * watermark is ONLY advanced inside [commitAuthoritative] on
-     * [SlimAuthoritativeCommitResult.Committed]. A non-Committed result
-     * therefore leaves `localApplied*` / `dirty` / `visibleContent`
-     * unchanged — matching §11.2's failure-branch invariant.
-     */
-    class SlimAuthoritativeCommitFailedException(
-        message: String,
-        val commitResult: SlimAuthoritativeCommitResult,
-    ) : java.io.IOException(message)
-
-    /**
-     * §11.1 fix-8 P1-2: typed exception returned by the slim `/since` facade
-     * ([getMessagesPaged] / [getMessagesPagedUnanchored] in slim anchored /
-     * non-anchored non-drain mode). Stage A treats every `/since` response
-     * as staging-only; the facade surfaces this exception so consumers can
-     * distinguish "conservative staging" (REST reload unavailable, SSE
-     * drives updates) from a real transport failure.
-     *
-     * Consumers (MessageActions / CatchUpActions / RevertCutoffCoordinator)
-     * MUST detect this typed exception and suppress the UiEvent.Error /
-     * Failure surface — the slim REST reload is intentionally unavailable
-     * in stage A; the caller keeps the current UI state.
-     *
-     * §11.1 fix-8 P1-2: declared `open` so the `data.repository`-side
-     * [SlimSinceStagingOnlyException] subclass can inherit (preserving
-     * binary compat for the existing internal type while letting consumers
-     * in `data.repository` and `ui` branches detect the SAME typed
-     * exception via a single `is` check).
-     */
-    open class SlimSinceStagingOnlyException internal constructor(message: String) :
-        java.io.IOException(message)
+    // ── Cluster A slim state / drain methods: RETIRED (lite-v2-dev plan §4.1) ─
+    // coldStartSlimSync + bumpSlimBookmarkFromItems + getSlimSessionState +
+    // markSlimSessionDeleted + clearSlimLocalMessages + markSlimReconcileFailure
+    // + markSlimReconcileAligned + invalidateSlimLocalApplied + markSlimDirty
+    // + forceSlimDirty + drainSlimapiMessagesBounded + fetchSlimInitialWindowBounded
+    // + drainSlimSinceBounded — ALL delegated to SlimSseStateMachine / SlimSyncEngine
+    // (both deleted). The slim digest path now routes to SkeletonReloadCoordinator.
 
     companion object {
         /**
@@ -3580,13 +2197,19 @@ class OpenCodeRepository @Inject constructor(
     }
 
     /**
-     * §L4a1/ζ-2: invalidate the thin-route cache for the current host
-     * (e.g. on server reconnect). DELEGATES to [expandBatchEngine.invalidateThinRouteCache]
-     * (the cache map + this logic moved to the engine). Kept on OCR's public
-     * surface — callers (coordinator) and the reflection freeze test resolve
-     * unchanged.
+     * lite-v2-dev: was the slim cursor-endpoint paged fetch. The slim
+     * staging/since machinery (SlimSinceStagingOnlyException etc.) is retired;
+     * this stub now delegates to [getMessagesPaged] so the slim/legacy branch
+     * in RevertCutoffCoordinator resolves. The `mode` / `token` params are
+     * ignored (kept for source-compat with the existing call site).
      */
-    fun invalidateThinRouteCache() = expandBatchEngine.invalidateThinRouteCache()
+    suspend fun getSlimapiMessagesPage(
+        sessionId: String,
+        limit: Int,
+        before: String?,
+        @Suppress("UNUSED_PARAMETER") mode: String = "skeleton",
+        @Suppress("UNUSED_PARAMETER") token: SlimCommitToken = captureSlimCommitToken(),
+    ): Result<MessagesPage> = getMessagesPaged(sessionId, limit, before)
 }
 
 // SlimAggregationOutcome, SlimColdStartSnapshot moved to their own files

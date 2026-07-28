@@ -4,7 +4,6 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import retrofit2.http.GET
-import retrofit2.http.Headers
 
 /**
  * §model-selection / §v2-catalog (P2 2B): minimal v2 Retrofit surface on a
@@ -46,11 +45,9 @@ interface OpenCodeApiV2 {
     // is wrapped in runCatching so a wrong-type entry is SKIPPED + counted
     // instead of nuking the entire catalog. The DTOs below are retained for
     // that per-entry decode.
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("model")
     suspend fun getModels(): V2Response<List<JsonElement>>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("provider")
     suspend fun getProviders(): V2Response<List<JsonElement>>
 }

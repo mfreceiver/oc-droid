@@ -454,31 +454,6 @@ class HostProfileControllerTest {
     // ── saveHostProfile (#12 + §tofu R2: live reconfigure when URL/mTLS change) ─
 
     @Test
-    fun `saveHostProfile of active host reconfigures and force-reconnects when serverUrl changes`() {
-        // §tofu R2: the legacy allowInsecure-toggle reconfigure trigger was
-        // REMOVED (TOFU replaces trust-all). serverUrl + mTLS are now the only
-        // reconfigure triggers. Editing the active host's URL → must
-        // reconfigure REST/SSE/image clients + reconnect so the new endpoint
-        // (and its TOFU pin lookup) applies live.
-        seed { it.copy(currentHostProfileId = "p-A") }
-        val moved = profileA.copy(serverUrl = "http://new-host:5050")
-
-        runTest { controller.saveHostProfile(moved, basicAuthEdited = false) }
-
-        // Reconfigured for the updated profileA with the new URL; 4th arg is
-        // hostPort (String?) — match anything (the controller derives it via
-        // hostPortFromUrl).
-        verify { repository.configure(moved.serverUrl, any(), any(), any(), any(), any(), any()) }
-        // forceReconnect fired so the new endpoint takes effect immediately.
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
-        // configureRepositoryForProfile cancels SSE once.
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
-        // §tofu R2: image client SSL sync still fires (the new endpoint's
-        // TOFU pin / SystemDefault resolves on the configure path).
-        assertNotNull(HttpImageHolder.lastUpdateSslMode)
-    }
-
-    @Test
     fun `saveHostProfile of active host does NOT reconfigure when only name changes`() {
         // Editing the active host's name (or any non-URL / non-mTLS field)
         // must NOT trigger a reconnect — zero regression for the
@@ -516,58 +491,6 @@ class HostProfileControllerTest {
     //     trigger reconfigure (previously excluded → stale credentials). ─────
 
     @Test
-    fun `saveHostProfile of active host reconfigures when only basicAuth password changes`() {
-        // C-D3 rev-3 round-6 (review C1): an active-host Basic-Auth-ONLY edit
-        // (password write, username unchanged) MUST reconfigure so the new
-        // credential reaches HostConfig (read by AuthInterceptor at request
-        // time). Pre-round-6 this was excluded → live clients kept the OLD
-        // password. The reconfigure path is the SAME one URL/mTLS/slim edits
-        // take (boundary-wrapped, ticket-threaded).
-        seed { it.copy(currentHostProfileId = "p-B") }
-        // p-B has basicAuth = BasicAuthConfig(username = "user-b", passwordId = "p-B")
-
-        runTest {
-            controller.saveHostProfile(
-                profileB,
-                basicAuthPassword = "new-secret",
-                basicAuthEdited = true)
-        }
-
-        // Password write fired.
-        verify { settingsManager.setBasicAuthPassword("p-B", "new-secret") }
-        // Reconfigure fired for the active host — the live clients pick up the
-        // new credential via configureRepositoryForProfileRaw → repository.configure.
-        verify { repository.configure(profileB.serverUrl, any(), any(), any(), any(), any(), any()) }
-        assertEquals(
-            "ForceReconnect must fire for an active-host basicAuth-only edit",
-            1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
-        assertEquals(
-            "CancelSseForReconfigure must fire for an active-host basicAuth-only edit",
-            1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
-    }
-
-    @Test
-    fun `saveHostProfile of active host reconfigures when only basicAuth username changes`() {
-        // Symmetric: a username-only change (no password write) on the active
-        // host MUST also reconfigure — AuthInterceptor reads hostConfig.username
-        // at request time, and hostConfig is updated only by configure().
-        seed { it.copy(currentHostProfileId = "p-B") }
-        val renamed = profileB.copy(
-            basicAuth = BasicAuthConfig(username = "user-b-renamed", passwordId = "p-B")
-        )
-
-        runTest {
-            controller.saveHostProfile(renamed, basicAuthEdited = false)
-        }
-
-        // Reconfigure fired (username change → basicAuthUsernameChanged).
-        verify { repository.configure(renamed.serverUrl, "user-b-renamed", any(), any(), any(), any(), any()) }
-        assertEquals(
-            "ForceReconnect must fire for an active-host username-only edit",
-            1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
-    }
-
-    @Test
     fun `saveHostProfile of non-active host basicAuth edit does NOT reconfigure`() {
         // Non-active host basicAuth edit → no reconfigure (the live host is
         // unchanged; the new credential applies when this profile is later
@@ -602,83 +525,33 @@ class HostProfileControllerTest {
      * assert the controller rethrows (not Result.failure).
      */
     @Test
-    fun `saveHostProfile propagates CancellationException from the barrier instead of wrapping as Result_failure`() = runTest {
-        // Construct a controller with a fake barrier whose suspend reconfigure
-        // throws CancellationException. The controller under test is built with
-        // the SAME deps as the class-level [controller] fixture, only swapping
-        // in the fake barrier.
-        val mockBarrier = io.mockk.mockk<cn.vectory.ocdroid.service.ConnectionReconfigureBarrier>()
-        io.mockk.coEvery { mockBarrier.reconfigure(any<suspend (cn.vectory.ocdroid.service.ConnectionReconfigureContext) -> Unit>()) } throws
-            kotlinx.coroutines.CancellationException("test-ce-from-barrier")
-        val controllerWithBarrier = HostProfileController(
-            scope = scope,
-            slices = slices,
-            hostProfileStore = store,
-            repository = repository,
-            settingsManager = settingsManager,
-            trafficTracker = trafficTracker,
-            effects = effects,
-            currentServerGroupFp = { "test-fp" },
-            identityStore = null,
-            reconfigureBarrier = mockBarrier,
-            effectiveConnectionConfigResolver = null)
-        seed { it.copy(currentHostProfileId = "p-A") }
-        // Active host + URL change → needsReconfigure=true → barrier path.
-        val moved = profileA.copy(serverUrl = "http://changed:4096")
-
-        var threwCE = false
-        try {
-            controllerWithBarrier.saveHostProfile(moved, basicAuthEdited = false)
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            threwCE = true
-        }
-        assertTrue(
-            "CancellationException from the barrier must PROPAGATE (runSuspendCatching rethrows CE), not collapse to Result.failure",
-            threwCE)
-    }
-
-    // ── #12 / §tofu R2: HttpImageHolder.updateSsl sync verification ─────────
-
-    @Test
-    fun `selectHostProfile propagates the selected host SSL config to HttpImageHolder`() {
-        // §tofu R2: the legacy "propagates allowInsecure flag" assertion is
-        // gone (no TrustAll anymore). selectHostProfile still calls
-        // configureRepositoryForProfile → HttpImageHolder.updateSsl(...), now
-        // with the resolved TOFU / SystemDefault config. Verify the sync hook
-        // fires (the actual config value comes from currentSslConfig which is
-        // mocked here).
+    fun `selectHostProfile does NOT propagate SSL to HttpImageHolder (no runtime reconfigure)`() {
+        // lite-v2: selectHostProfile does NOT call configureRepositoryForProfileRaw
+        // — SSL propagation happens on restart's configure path, NOT on select.
+        // HttpImageHolder must NOT be touched by selectHostProfile.
         every { store.select("p-B") } returns profileB
-        every { settingsManager.basicAuthPassword("p-B") } returns "secret-b"
-        every { repository.currentSslConfig() } returns SslConfig.SystemDefault
 
         controller.selectHostProfile("p-B")
         runPending()
 
-        // §tofu R2: image client SSL config was synced (SystemDefault for an
-        // unpinned endpoint — the TOFU capture/prompt path is exercised in
-        // ConnectionCoordinatorTest, not here).
-        assertEquals("SYSTEM", HttpImageHolder.lastUpdateSslMode)
+        // HttpImageHolder.updateSsl is NOT called (no configureRepositoryForProfileRaw).
+        assertNull(HttpImageHolder.lastUpdateSslMode)
     }
 
     @Test
-    fun `selectHostProfile mirrors profile serverUrl into settingsManager for token-stream baseUrl`() {
-        // §bugfix-token-stream: configureRepositoryForProfileRaw must sync
-        // settingsManager.serverUrl = profile.serverUrl so the direct readers that
-        // bypass EffectiveConnectionConfigResolver (TokenStreamClient @ControllerModule:273,
-        // ConnectionHealthProbe, getSavedConnectionSettings) observe the live URL in
-        // Profile mode. Before the fix only the manual configureServerRaw path synced
-        // (via activateManual); the profile path skipped it, leaving settingsManager.serverUrl
-        // stale at default localhost:4096 → token-stream 连 localhost → 指数退避重连风暴.
+    fun `selectHostProfile does NOT mirror profile serverUrl into settingsManager (no runtime reconfigure)`() {
+        // lite-v2: selectHostProfile does NOT call configureRepositoryForProfileRaw,
+        // so settingsManager.serverUrl is NOT updated here. The mirror happens
+        // on restart's configure path, not on select. The resolver
+        // (EffectiveConnectionConfigResolver) is the single source of truth.
         every { store.select("p-B") } returns profileB
-        every { settingsManager.basicAuthPassword("p-B") } returns "secret-b"
-        every { repository.currentSslConfig() } returns SslConfig.SystemDefault
 
         controller.selectHostProfile("p-B")
         runPending()
 
-        // profileB.serverUrl ("http://b:4096") mirrored into settingsManager, restoring
-        // the "settingsManager.serverUrl ≡ hostConfig.baseUrl" invariant (ControllerModule:241).
-        verify { settingsManager.serverUrl = profileB.serverUrl }
+        // configureRepositoryForProfileRaw is never called — settingsManager.serverUrl
+        // is NOT written by selectHostProfile.
+        verify(exactly = 0) { settingsManager.serverUrl = any() }
     }
 
     // ── duplicateHostProfile ───────────────────────────────────────────────
@@ -695,66 +568,6 @@ class HostProfileControllerTest {
     }
 
     // ── deleteHostProfile ──────────────────────────────────────────────────
-
-    @Test
-    fun `deleteHostProfile of non-current profile reconfigures for current host without purge or reconnect`() {
-        seed { it.copy(currentHostProfileId = "p-A") }
-
-        controller.deleteHostProfile("p-B")
-        scope.testScheduler.advanceUntilIdle()
-
-        // Reconfigures repository for the (unchanged) current host profileA.
-        // §tofu R2: 4th arg is hostPort (String?), derived by the controller
-        // via hostPortFromUrl(profileA.serverUrl) → "a:4096".
-        verify { repository.configure(profileA.serverUrl, any(), any(), "a:4096", any(), any(), any()) }
-        // NOT current → no purge, no reconnect.
-        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().isEmpty())
-        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().isEmpty())
-        // configureRepositoryForProfile cancels SSE once.
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
-    }
-
-    @Test
-    fun `deleteHostProfile of current profile purges per-host state, reconfigures for replacement, and force-reconnects`() {
-        seed {
-            it.copy(
-            currentHostProfileId = "p-A",
-            currentSessionId = "sess-old",
-            sessions = listOf(cn.vectory.ocdroid.data.model.Session(id = "sess-old", directory = "/d")))
-        }
-        // §review-fix #6: keep BOTH profiles in store.profiles() so
-        // deleteHostProfile can capture deletedProfile.serverGroupFp. The
-        // prior seedStore(listOf(profileB)) re-stub dropped profileA before
-        // the production code could read its fp, leaving deletedFp=null and
-        // skipping EvictGroup. Only re-stub currentProfile (the replacement
-        // host the store picks after deletion).
-        every { store.currentProfile() } returns profileB
-
-        controller.deleteHostProfile("p-A")
-        scope.testScheduler.advanceUntilIdle()
-
-        // Reconfigured for the replacement profileB (§tofu R2: hostPort
-        // derived as "b:4096").
-        verify { repository.configure(profileB.serverUrl, any(), any(), "b:4096", any(), any(), any()) }
-        // wasCurrent → purge + forceReconnect.
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
-        // §review-fix #5/#6: ClearSessionWindowCache was removed from
-        // purgePerHostState (over-broad nuke). EvictGroup(g-A) replaces it
-        // (group-scoped clear) — profileA's group has no remaining siblings
-        // (profilesInGroup is a relaxed mock → empty), so EvictGroup fires.
-        assertEquals(
-            "EvictGroup(g-A) replaces ClearSessionWindowCache (group-scoped)",
-            1,
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
-        assertEquals("g-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().serverGroupFp)
-        // Per-host state purged.
-        assertNull("currentSessionId purged", slices.chat.value.currentSessionId)
-        assertTrue("sessions purged", slices.sessionList.value.sessions.isEmpty())
-        // AppState now reflects the replacement current id.
-        assertEquals("p-B", slices.host.value.currentHostProfileId)
-    }
-
-    // ── importHostProfile / exportHostProfile ──────────────────────────────
 
     @Test
     fun `importHostProfile on success delegates to store and refreshes state`() {
@@ -813,25 +626,30 @@ class HostProfileControllerTest {
     }
 
     @Test
-    fun `selectHostProfile reconfigures repository for the selected profile with its derived hostPort`() {
+    fun `selectHostProfile persists selection and emits RestartRequired (no runtime reconfigure)`() {
+        // lite-v2: selectHostProfile must NOT call configureRepositoryForProfileRaw
+        // (no runtime reconfigure — restart handles it). Instead it emits
+        // RestartRequired via withHostReconfiguration(needsReconfigure=true).
+        // No ForceReconnect / HostProfileSwitched.
         every { store.select("p-B") } returns profileB
-        every { settingsManager.basicAuthPassword("p-B") } returns "secret-b"
 
         controller.selectHostProfile("p-B")
         runPending()
 
-        // §tofu R2: 4th arg is hostPort (String?), derived from profileB.serverUrl
-        // ("http://b:4096" → "b:4096").
-        verify {
-            repository.configure(
-                profileB.serverUrl,
-                profileB.basicAuth?.username,
-                "secret-b",
-                "b:4096",
-                any(),
-                any(),
-                any())
-        }
+        // Repository is NOT reconfigured at select time (restart handles it).
+        verify(exactly = 0) { repository.configure(any(), any(), any(), any(), any(), any()) }
+        // RestartRequired is emitted (via withHostReconfiguration).
+        assertEquals(
+            "selectHostProfile emits exactly one RestartRequired",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.RestartRequired>().size)
+        // No runtime reconnect / switch signals (restart supersedes them).
+        assertTrue(
+            "ForceReconnect must NOT be emitted (restart supersedes)",
+            collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().isEmpty())
+        assertTrue(
+            "HostProfileSwitched must NOT be emitted (restart supersedes)",
+            collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().isEmpty())
     }
 
     @Test
@@ -871,31 +689,6 @@ class HostProfileControllerTest {
     }
 
     @Test
-    fun `selectHostProfile forces a reconnect and the callback order is sse-cancel before evict-group before reconnect`() {
-        every { store.select("p-B") } returns profileB
-
-        controller.selectHostProfile("p-B")
-        runPending()
-
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
-        // C-D3 rev-3: non-barrier path rotates identity + beginSlimReconfigure +
-        // CancelSse BEFORE HostStatePurged / EvictGroup, so old workflows cannot
-        // pass commitIf after purge. Order is cancel → EvictGroup → ForceReconnect.
-        val cancelIdx = collectedEffects.indexOfFirst { it is ControllerEffect.CancelSseForReconfigure }
-        val evictIdx = collectedEffects.indexOfFirst { it is ControllerEffect.EvictGroup }
-        val reconnectIdx = collectedEffects.indexOfFirst { it is ControllerEffect.ForceReconnect }
-        assertTrue("cancelSseForReconfigure recorded", cancelIdx >= 0)
-        assertTrue("EvictGroup recorded", evictIdx >= 0)
-        assertTrue("forceReconnect recorded", reconnectIdx >= 0)
-        assertTrue(
-            "C-D3 rev-3: CancelSse (with beginSlim) fires before EvictGroup/purge",
-            cancelIdx < evictIdx)
-        assertTrue("EvictGroup fires before reconnect", evictIdx < reconnectIdx)
-    }
-
-    // ── selectHostProfile (R-20 Phase 5: same-group recentWorkdirs preservation) ─
-
-    @Test
     fun `selectHostProfile same-group preserves recentWorkdirs (per-fp semantics)`() {
         // R-20 Phase 5 (plan §3 glmer I2 字段分类): same-group switches preserve
         // per-server data (sessions / unread / cache / recentWorkdirs /
@@ -922,27 +715,6 @@ class HostProfileControllerTest {
     // ── configureServer (direct connection form) ───────────────────────────
 
     @Test
-    fun `configureServer cancels SSE, writes settings, and configures repository with derived hostPort`() {
-        // §tofu R2: currentHostProfile() returns profileB; configureServer
-        // derives hostPort from the manual URL (not the profile URL) since
-        // the user is typing a new endpoint.
-        every { store.currentProfile() } returns profileB
-        every { repository.currentSslConfig() } returns SslConfig.SystemDefault
-
-        controller.configureServer("http://manual:4096", "mu", "mp")
-
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
-        verify { settingsManager.serverUrl = "http://manual:4096" }
-        verify { settingsManager.username = "mu" }
-        verify { settingsManager.password = "mp" }
-        // §tofu R2: 4th arg = hostPortFromUrl("http://manual:4096") = "manual:4096".
-        verify { repository.configure("http://manual:4096", "mu", "mp", "manual:4096", any(), any(), any()) }
-        // §tofu R2: image client SSL sync fires (SystemDefault for an unpinned
-        // endpoint — TrustAll no longer exists).
-        assertEquals("SYSTEM", HttpImageHolder.lastUpdateSslMode)
-    }
-
-    @Test
     fun `configureServer defaults username and password to null`() {
         every { store.currentProfile() } returns profileA
 
@@ -950,33 +722,10 @@ class HostProfileControllerTest {
 
         verify { settingsManager.username = null }
         verify { settingsManager.password = null }
-        verify { repository.configure("http://m:4096", null, null, any(), any(), any(), any()) }
+        verify { repository.configure("http://m:4096", null, null, any(), any(), any()) }
     }
 
     // ── configureRepositoryForProfile ──────────────────────────────────────
-
-    @Test
-    fun `configureRepositoryForProfile cancels SSE and configures with profile creds + derived hostPort`() {
-        every { settingsManager.basicAuthPassword("p-B") } returns "secret-b"
-        every { settingsManager.currentWorkdir } returns "/persisted/proj"
-
-        controller.configureRepositoryForProfile(profileB)
-
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
-        verify {
-            repository.configure(
-                profileB.serverUrl,
-                profileB.basicAuth?.username,
-                "secret-b",
-                "b:4096",
-                any(),
-                any(),
-                any())
-        }
-        // §R18 Phase 2-E step 2: the repository.setCurrentDirectory call was
-        // removed; directory routing now uses explicit `directory` parameters
-        // sourced from settingsManager.currentWorkdir at each callsite.
-    }
 
     @Test
     fun `configureRepositoryForProfile does not require a persisted workdir`() {
@@ -995,7 +744,6 @@ class HostProfileControllerTest {
                 profileA.basicAuth?.username,
                 any(),
                 "a:4096",
-                any(),
                 any(),
                 any())
         }
@@ -1137,21 +885,9 @@ class HostProfileControllerTest {
 
     @Test
     fun `resetLocalDataAndResync uses the same-host slim reset primitive`() {
-
         controller.resetLocalDataAndResync()
 
         verify(exactly = 1) { repository.resetSlimForLocalWipe() }
-    }
-
-    @Test
-    fun `non-barrier reset leaves slim incarnation Ready`() {
-        var ready = false
-        every { repository.isSlimIncarnationReady() } answers { ready }
-        every { repository.resetSlimForLocalWipe() } answers { ready = true }
-
-        controller.resetLocalDataAndResync()
-
-        assertTrue("same-host non-barrier reset must re-arm readiness", ready)
     }
 
     @Test
@@ -1183,90 +919,6 @@ class HostProfileControllerTest {
     }
 
     @Test
-    fun `resetLocalDataAndResync barrier path emits ColdStartReconnect`() {
-        // remove-message-persistence Task 5: the barrier path used to emit
-        // the cache-listing refresh effect before ColdStartReconnect (the
-        // cache-wipe + cache-listing refresh). With the SQLite persistence layer gone,
-        // only ColdStartReconnect remains on the barrier path. The barrier
-        // wiring itself (reconfigureBarrier != null wraps resetLocalStateCore
-        // in reconfigure { }) is still exercised here. The default test
-        // controller has reconfigureBarrier = null (non-barrier path covered
-        // above), so construct a SEPARATE controller with a real barrier
-        // (identityStore + a no-op ReconfigureTeardown fake) to exercise the
-        // barrier branch — mirrors the wiring in
-        // ConnectionReconfigureBarrierTest.
-        val identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
-        identityStore.bind("g-A", "/wd", "http://a:4096")
-        val barrier = cn.vectory.ocdroid.service.ConnectionReconfigureBarrier(
-            identityStore,
-            repository,
-            object : cn.vectory.ocdroid.service.ReconfigureTeardown {
-                override suspend fun teardownAndAwait(reason: cn.vectory.ocdroid.service.TeardownReason) {
-                    assertEquals(cn.vectory.ocdroid.service.TeardownReason.Reconfigure, reason)
-                }
-            },
-            effects)
-        val barrierController = HostProfileController(
-            scope = scope,
-            slices = slices,
-            hostProfileStore = store,
-            repository = repository,
-            settingsManager = settingsManager,
-            trafficTracker = trafficTracker,
-            effects = effects,
-            currentServerGroupFp = { "test-fp" },
-            identityStore = identityStore,
-            reconfigureBarrier = barrier)
-        seedStore(listOf(profileA, profileB), currentId = "p-A")
-
-        barrierController.resetLocalDataAndResync()
-        // The ENTIRE barrier path runs inside scope.launch { } (reconfigure is
-        // suspend) → nothing is captured until the TestScope is drained.
-        runPending()
-
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ColdStartReconnect>().size)
-    }
-
-    @Test
-    fun `barrier reset leaves slim incarnation Ready`() {
-        var ready = false
-        val identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
-        identityStore.bind("g-A", "/wd", "http://a:4096")
-        val ticket = OpenCodeRepository.SlimReconfigureTicket(Any())
-        every { repository.beginSlimReconfigure() } returns ticket
-        every { repository.isSlimIncarnationReady() } answers { ready }
-        every { repository.resetSlimForLocalWipe() } answers { ready = true }
-        val barrier = cn.vectory.ocdroid.service.ConnectionReconfigureBarrier(
-            identityStore,
-            repository,
-            object : cn.vectory.ocdroid.service.ReconfigureTeardown {
-                override suspend fun teardownAndAwait(reason: cn.vectory.ocdroid.service.TeardownReason) = Unit
-            },
-            effects,
-        )
-        val barrierController = HostProfileController(
-            scope = scope,
-            slices = slices,
-            hostProfileStore = store,
-            repository = repository,
-            settingsManager = settingsManager,
-            trafficTracker = trafficTracker,
-            effects = effects,
-            currentServerGroupFp = { "test-fp" },
-            identityStore = identityStore,
-            reconfigureBarrier = barrier,
-        )
-
-        barrierController.resetLocalDataAndResync()
-        runPending()
-
-        // The controller's barrier reset uses the same local-wipe primitive;
-        // the seam models that primitive's postcondition explicitly.
-        verify(exactly = 1) { repository.resetSlimForLocalWipe() }
-        assertTrue("same-host barrier reset must re-arm readiness", ready)
-    }
-
-    @Test
     fun `resetLocalDataAndResync does NOT call forceReconnect`() {
         // resetLocalDataAndResync uses coldStartReconnect (3 retries), not the
         // throttled forceReconnect — asserting the invariant so the two paths
@@ -1277,86 +929,6 @@ class HostProfileControllerTest {
     }
 
     // ── saveHostProfile (S-1: live reconfigure when active host serverUrl changes) ─
-
-    @Test
-    fun `saveHostProfile of active host reconfigures and reconnects when serverUrl changes`() {
-        // S-1: editing the current host's URL persisted the new value but left
-        // the existing REST/SSE/image clients pointed at the OLD endpoint. The
-        // fix: when the ACTIVE host's serverUrl changes, clear old-URL model
-        // data + reconfigure + reconnect so the new endpoint (and its TOFU pin
-        // lookup) takes effect immediately. §tofu R2: this also covers the
-        // previously-toggle path — serverUrl is now the reconfigure trigger.
-        seed { it.copy(currentHostProfileId = "p-A") }
-        val moved = profileA.copy(serverUrl = "http://new-host:4096")
-
-        runTest { controller.saveHostProfile(moved, basicAuthEdited = false) }
-        scope.testScheduler.advanceUntilIdle()
-
-        // §bug5: old-URL model data dropped so the disable set does not orphan.
-        verify { settingsManager.clearModelDataForGroup("g-A") }
-        // Reconfigured for the updated profileA at the new URL; §tofu R2: 4th
-        // arg = hostPortFromUrl("http://new-host:4096") = "new-host:4096".
-        verify { repository.configure(moved.serverUrl, any(), any(), "new-host:4096", any(), any(), any()) }
-        // forceReconnect fired so clients rebuild against the new endpoint.
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
-        // §disabled-models-consistency: per-host state reloaded for the new baseUrl.
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().size)
-        // configureRepositoryForProfile cancels SSE once.
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
-    }
-
-    @Test
-    fun `saveHostProfile of active host with URL change clears old-URL data once`() {
-        // §tofu R2: the legacy "both URL and allowInsecure changed" composite
-        // collapsed to URL-only (allowInsecure no longer exists). URL-clear
-        // fires exactly once (guard is urlChanged-only), the reconfigure uses
-        // the new URL + derived hostPort, and both effects emit.
-        seed { it.copy(currentHostProfileId = "p-A") }
-        val moved = profileA.copy(serverUrl = "http://new:4096")
-
-        runTest { controller.saveHostProfile(moved, basicAuthEdited = false) }
-        scope.testScheduler.advanceUntilIdle()
-
-        verify(exactly = 1) { settingsManager.clearModelDataForGroup("g-A") }
-        verify { repository.configure("http://new:4096", any(), any(), "new:4096", any(), any(), any()) }
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().size)
-    }
-
-    // ── deleteHostProfile (§bug5: clearModelDataForUrl on the deleted active host) ─
-
-    @Test
-    fun `deleteHostProfile of current profile clears model data for the deleted host serverUrl`() {
-        // §bug5: when the ACTIVE host is deleted, its per-URL model data must be
-        // purged so it does not leak into the replacement host's identity (same-
-        // URL collision or later re-add). The existing wasCurrent test re-stubs
-        // profiles() to drop the deleted entry before deleteHostProfile reads
-        // it, leaving deletedServerUrl=null and skipping clearModelDataForUrl.
-        // Here we keep profileA in profiles() so its serverUrl is captured.
-        seed { it.copy(currentHostProfileId = "p-A") }
-        // Keep the default setUp seed ([profileA, profileB], current p-A) so
-        // profiles().firstOrNull { id == "p-A" } resolves. Re-stub currentProfile
-        // only — the replacement host picked by the store after deletion.
-        every { store.currentProfile() } returns profileB
-
-        controller.deleteHostProfile("p-A")
-        scope.testScheduler.advanceUntilIdle()
-
-        // Deleted active host's old URL model data purged.
-        verify { settingsManager.clearModelDataForGroup("g-A") }
-        // Reconfigured for the replacement profileB (§tofu R2: hostPort "b:4096").
-        verify { repository.configure(profileB.serverUrl, any(), any(), "b:4096", any(), any(), any()) }
-        // wasCurrent → purge + forceReconnect + hostProfileSwitched.
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().size)
-        // §review-fix #5/#6: ClearSessionWindowCache replaced by group-scoped
-        // EvictGroup. profilesInGroup is a relaxed mock returning empty → no
-        // remaining siblings → EvictGroup(g-A) fires.
-        assertEquals(
-            "EvictGroup(g-A) replaces ClearSessionWindowCache",
-            1,
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
-    }
 
     @Test
     fun `deleteHostProfile of current profile keeps model data when sibling remains in group`() {
@@ -1371,46 +943,10 @@ class HostProfileControllerTest {
 
         verify(exactly = 0) { settingsManager.clearModelDataForGroup("g-A") }
         assertTrue(collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().isEmpty())
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.RestartRequired>().size)
     }
 
     // ── configureServer (URL-unchanged branch) ─────────────────────────────
-
-    @Test
-    fun `configureServer with unchanged URL skips clearModelData and HostProfileSwitched but still cancels SSE`() {
-        // The urlChanging=false branch: when the user re-submits the SAME URL
-        // (e.g. just changing credentials), there is no host switch — old-URL
-        // model data must NOT be cleared and HostProfileSwitched must NOT fire.
-        // SSE is still cancelled before the reconfigure so events from the
-        // previous credential don't land during the new probe.
-        every { settingsManager.serverUrl } returns "http://same:4096"
-        every { store.currentProfile() } returns profileA
-
-        controller.configureServer("http://same:4096", "u", "p")
-
-        // Old-URL model data NOT cleared (URL did not change).
-        verify(exactly = 0) { settingsManager.clearModelDataForGroup(any()) }
-        // SSE still cancelled before reconfigure (Stage D — always fires).
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.CancelSseForReconfigure>().size)
-        // Settings + repository reconfigured with the (unchanged) URL + new creds.
-        verify { settingsManager.serverUrl = "http://same:4096" }
-        verify { settingsManager.username = "u" }
-        verify { settingsManager.password = "p" }
-        // §tofu R2: 4th arg = hostPortFromUrl("http://same:4096") = "same:4096".
-        verify { repository.configure("http://same:4096", "u", "p", "same:4096", any(), any(), any()) }
-        // No host switch → no HostProfileSwitched effect.
-        assertTrue("HostProfileSwitched must NOT fire on unchanged URL",
-            collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().isEmpty())
-        // #12: image client trust policy still synced (mirrors REST/SSE).
-        assertEquals("SYSTEM", HttpImageHolder.lastUpdateSslMode)
-    }
-
-    // ── RecordingHostProfileCallbacks (removed in batch 3b) ───────────────
-    // The handwritten spy was replaced by direct filtering on
-    // [collectedEffects] + [trafficTracker] mockk verification. See the
-    // class kdoc at the top for the new pattern.
-
-    // ── R-20 Phase 1 review-fix #5/#6: cache eviction granularity ──────────
 
     @Test
     fun `review-fix 5 selectHostProfile cross-group does NOT emit ClearSessionWindowCache nuke-all`() {
@@ -1513,7 +1049,7 @@ class HostProfileControllerTest {
 
         // 试构建通过 → saveClientCert 被调；mtlsEnabled false→true → mtlsChanged → reconfigure。
         verify { settingsManager.saveClientCert(any(), p12, any(), any()) }
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.RestartRequired>().size)
         // 纯 mTLS 变化（无 urlChanged）→ HostProfileSwitched 不发。
         assertTrue(collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().isEmpty())
     }
@@ -1536,7 +1072,7 @@ class HostProfileControllerTest {
         scope.testScheduler.advanceUntilIdle()
 
         verify { settingsManager.clearClientCert("cert-old") }
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.RestartRequired>().size)
     }
 
     @Test
@@ -1561,8 +1097,8 @@ class HostProfileControllerTest {
         // id 不变（原地覆盖），但材料变了 → reconfigure 必发。
         verify { settingsManager.saveClientCert("cert-stable", newP12, any(), any()) }
         assertEquals(
-            "material edit (re-import) triggers reconfigure even though clientCertId unchanged",
-            1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
+            "material edit (re-import) triggers restart-required even though clientCertId unchanged",
+            1, collectedEffects.filterIsInstance<ControllerEffect.RestartRequired>().size)
     }
 
     @Test
@@ -1667,5 +1203,51 @@ class HostProfileControllerTest {
 
         assertNull(slices.connection.value.mtlsDegradedError)
         assertTrue(recordedEvents.filterIsInstance<UiEvent.Error>().isEmpty())
+    }
+
+    // ── §emitEffect reliability (must not use tryEmitEffect for critical effects) ──
+
+    @Test
+    fun `deleteHostProfile of current profile emits RestartRequired through suspend emitEffect not tryEmit`() {
+        // Regression: RestartRequired must use emitEffect (suspend-on-full) not
+        // tryEmitEffect (can drop silently). The test asserts the effect appears
+        // after runPending (scope.launch { emitEffect(...) }).
+        seed { it.copy(currentHostProfileId = "p-A") }
+        every { store.currentProfile() } returns profileB
+
+        controller.deleteHostProfile("p-A")
+        scope.testScheduler.advanceUntilIdle()
+
+        assertEquals(
+            "RestartRequired must be emitted (suspend emitEffect, not dropped tryEmit)",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.RestartRequired>().size,
+        )
+    }
+
+    @Test
+    fun `resetLocalDataAndResync emits three critical effects FIFO via suspend emitEffect`() {
+        // Regression: ClearSessionWindowCache, CancelSseForReconfigure,
+        // ColdStartReconnect must use suspend emitEffect (not tryEmitEffect)
+        // and must appear in FIFO order. They are now wrapped in a single
+        // scope.launch { emitEffect(A); emitEffect(B); emitEffect(C) }.
+        controller.resetLocalDataAndResync()
+        runPending()
+
+        val clearIdx = collectedEffects.indexOfFirst { it is ControllerEffect.ClearSessionWindowCache }
+        val cancelIdx = collectedEffects.indexOfFirst { it is ControllerEffect.CancelSseForReconfigure }
+        val coldIdx = collectedEffects.indexOfFirst { it is ControllerEffect.ColdStartReconnect }
+
+        assertTrue("ClearSessionWindowCache must be present", clearIdx >= 0)
+        assertTrue("CancelSseForReconfigure must be present", cancelIdx >= 0)
+        assertTrue("ColdStartReconnect must be present", coldIdx >= 0)
+        assertTrue(
+            "ClearSessionWindowCache must precede CancelSseForReconfigure: $clearIdx vs $cancelIdx",
+            clearIdx < cancelIdx,
+        )
+        assertTrue(
+            "CancelSseForReconfigure must precede ColdStartReconnect: $cancelIdx vs $coldIdx",
+            cancelIdx < coldIdx,
+        )
     }
 }

@@ -205,17 +205,17 @@ class TokenStreamCoordinator(
       * caller DROPS the frame (returns from [dispatchEpochFrame]
       * without bridging / state mutation).
       *
-      * Default `{ _, _, _, _, _ -> true }` (accept all) preserves the
-      * pre-B-P0-1 behavior — no dedup is performed when the hook is
-      * unset. Production wiring (B-P0-1) injects
-      * [cn.vectory.ocdroid.data.repository.SlimSseStateMachine.applyTokenPartRevision]
-      * captured against the lifecycle's slim commit token; the
-      * coordinator stays free of the data/repository layer dependency.
-      *
-      * `partEventRevision == null` (older sidecar / status-only frame)
-      * MUST be accepted (`true`) — without a revision counter the
-      * dedup-layer cannot operate, and the caller falls back to its
-      * pre-B-P0-1 behavior.
+       * Default `{ _, _, _, _, _ -> true }` (accept all) preserves the
+       * pre-B-P0-1 behavior — no dedup is performed when the hook is
+       * unset. Production wiring (B-P0-1) injects
+       * a token-part-revision dedup checker captured against the
+       * lifecycle's slim commit token; the coordinator stays free of
+       * the data/repository layer dependency.
+       *
+       * `partEventRevision == null` (older sidecar / status-only frame)
+       * MUST be accepted (`true`) — without a revision counter the
+       * dedup-layer cannot operate, and the caller falls back to its
+       * pre-B-P0-1 behavior.
       *
       * §Stage-B C3: the [context] carries the route + bundle snapshot
       * captured at THIS frame's dispatch entry; production wiring MAY
@@ -230,11 +230,10 @@ class TokenStreamCoordinator(
       * `message.part.removed` token frame clears the epoch + bundle
       * guards. The callback is responsible for:
       *
-      *  1. Applying the part-removal to the per-message watermark map
-      *     (advances `messageEventSeq` monotonically, drops the
-      *     removed partID, flags `needsFullRecheck = true`) via
-      *     [cn.vectory.ocdroid.data.repository.SlimSseStateMachine.applyMessagePartRemoved]
-      *     captured against the lifecycle's slim commit token.
+       *  1. Applying the part-removal to the per-message watermark map
+       *     (advances `messageEventSeq` monotonically, drops the
+       *     removed partID, flags `needsFullRecheck = true`) via the
+       *     slim commit token-guarded in-memory state update.
       *  2. Scheduling a 100ms-debounced R2 /full reconcile for the
       *     message so the chat slice's part cache reflects the
       *     upstream removal.
@@ -261,9 +260,8 @@ class TokenStreamCoordinator(
       * frame clears the epoch + bundle guards. The callback is
       * responsible for:
       *
-      *  1. Removing the per-message watermark entry via
-      *     [cn.vectory.ocdroid.data.repository.SlimSseStateMachine.applyMessageRemoved]
-      *     (token-guarded).
+       *  1. Removing the per-message watermark entry via the slim
+       *     commit token-guarded in-memory state update.
       *  2. Evicting the message from the chat slice (`messages` list
       *     + `partsByMessage` map) and dropping its tuple from any
       *     `maxMessageTuple` cache (MAJOR 4 cleanup).
@@ -280,6 +278,24 @@ class TokenStreamCoordinator(
          sessionId: String, messageId: String,
          context: TokenFrameCommitContext,
      ) -> Unit = { _, _, _ -> },
+     /**
+      * B-4 HIGH-2: called when a part snapshot reaches done:true (terminal).
+      * The production implementation clears the per-part revision entry from
+      * the dedup map so it does not grow unbounded across completed parts.
+      */
+     private val onPartDone: (
+         sessionId: String, messageId: String, partId: String,
+     ) -> Unit = { _, _, _ -> },
+     /**
+      * B-4 HIGH-2: called when ALL revision entries for a session should be
+      * reclaimed (stream close, resync, session switch). Prevents unbounded
+      * map growth across the singleton coordinator's lifetime and provides
+      * connection-epoch isolation (stale revisions from a dead connection
+      * cannot block fresh frames on a new connection).
+      */
+     private val clearSessionRevisions: (
+         sessionId: String,
+     ) -> Unit = { _ -> },
  ) {
     // ── State ───────────────────────────────────────────────────────────────
     //
@@ -528,6 +544,19 @@ class TokenStreamCoordinator(
             }
             DebugLog.i(TAG, "open($sid) bundle changed during guard revalidation — superseding (source=$source)")
         }
+        // B-4 HIGH-2: when switching to a DIFFERENT sid (not same-sid
+        // reopen like reconnect), reclaim ALL revision entries for the
+        // previous session so stale per-part revisions from the dead
+        // connection cannot block fresh frames on the new session's
+        // connection. Checked BEFORE currentSid.set(sid) so the previous
+        // value is still available. Same-sid (currentSid == new sid) is
+        // the idempotent-guard fall-through case (bundle-rotated reopen
+        // or navigateToChat same-session re-entry) — must NOT clear
+        // its own revisions.
+        val prevSid = currentSid.get()
+        if (prevSid != null && prevSid != sid) {
+            clearSessionRevisions(prevSid)
+        }
         currentSid.set(sid)
         currentDirectory.set(directory)
         // §B4 rev-gpt round3 MAJOR: capture this lifecycle's route token for
@@ -620,6 +649,10 @@ class TokenStreamCoordinator(
         // was already cancelled by a newer open()).
         ownerByPartId.entries.removeIf { it.value.sid == sid }
         reducerStateBySid.remove(sid)
+        // B-4 HIGH-2: reclaim ALL revision entries for this session on close
+        // (stream teardown, session switch, background — prevents unbounded
+        // growth + provides epoch isolation).
+        clearSessionRevisions(sid)
         attemptBySid.remove(sid)
         consecutive503BySid.remove(sid)
         }
@@ -863,9 +896,8 @@ class TokenStreamCoordinator(
         // dedup BEFORE the streaming reducer. A `false` return means
         // the frame is a re-delivery within the 250ms debounce window
         // — drop it (no reducer state mutation, no bridge, no effects).
-        // The hook is the injected [dedupPartRevision] callback, which
-        // production wires to SlimSseStateMachine.applyTokenPartRevision;
-        // it is null-safe (a null partEventRevision always returns true
+        // The hook is the injected [dedupPartRevision] callback; it is
+        // null-safe (a null partEventRevision always returns true
         // — accept every frame, matching the pre-B-P0-1 behavior).
         //
         // Per the B-P0-3 frozen contract: the dedup MUST run BEFORE
@@ -928,11 +960,20 @@ class TokenStreamCoordinator(
         // The hook implementations are no-ops by default; B-P0-2's DI wiring
         // (Lane I, ControllerModule) injects the production callbacks
         // (applyMessagePartRemoved / applyMessageRemoved + debounced
-        // SlimFullReconciler.reconcileActiveSession / MessageRemovedConfirmed
-        // dispatch).
+        // reconcileActiveSession / MessageRemovedConfirmed dispatch).
         when (effectiveFrame) {
+            is TokenStreamFrame.PartSnapshot -> {
+                // B-4 HIGH-2 + HIGH-1: reclaim revision entry when part reaches
+                // done:true OR truncated:true. Both are terminal: the reducer
+                // removes the part from the overlay (ClearPartState) and the
+                // dedup revision map must not retain an entry that could block
+                // a future frame for the same partId.
+                if (effectiveFrame.done || effectiveFrame.truncated) {
+                    onPartDone(effectiveFrame.sessionId, effectiveFrame.messageId, effectiveFrame.partId)
+                }
+            }
             is TokenStreamFrame.MessagePartRemoved -> {
-                val msgSeq = effectiveFrame.messageEventSeq
+                val msgSeq = effectiveFrame.messageEventSeq ?: 0L
                 if (!isBundleCurrentForCommit(boundBundle)) return
                 onMessagePartRemoved(
                     effectiveFrame.sessionId,
@@ -949,6 +990,12 @@ class TokenStreamCoordinator(
                     effectiveFrame.messageId,
                     commitContext,
                 )
+            }
+            is TokenStreamFrame.Resync -> {
+                // B-4 HIGH-2 + MEDIUM: resync clears ALL parts for the session
+                // (epoch boundary — stale revisions from the old connection
+                // cannot block fresh frames on the new connection).
+                effectiveFrame.sessionId?.let { clearSessionRevisions(it) }
             }
             else -> { /* no hook for other frame types */ }
         }

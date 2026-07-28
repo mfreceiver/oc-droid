@@ -191,6 +191,8 @@ data class ConnectionState(
      * 但仍保持语义一致。默认 `false` 不破坏既有收集者。
      */
     val isSlimActive: Boolean = false,
+    /** Active host connection params changed since boot — user must restart. */
+    val restartRequired: Boolean = false,
     /**
      * §sse-rest-fallback (TODO 3): wall-clock ms of the transition INTO
      * [ConnectionPhase.Disconnected], or null when connected / never stamped.

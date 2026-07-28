@@ -392,35 +392,15 @@ class SessionStreamingService : Service() {
                     .ifEmpty { null }
                 DebugLog.i(
                     "SessionStreamingService",
-                    "slim performSlimResync directories=$directories",
+                    "slim onResync directories=$directories",
                 )
-                // C2 CRITICAL (reconnect R1): clearWatermarksForReconnect +
-                // per-message /full fan-out. Wired HERE (the SINGLE onResync
-                // entry) so we do NOT double-reset from the
-                // ServiceSseConnectionOwner first-frame path or from
-                // SessionSyncCoordinator.handleEvent's server.connected
-                // branch. Fire-and-forget — runs concurrently with the
-                // performSlimResync metadata + /since reconcile below
-                // (different lanes, no field overlap: /full advances the
-                // per-message needsFullRecheck flag; /since advances
-                // localApplied* / remoteUpdatedAt).
-                //
-                // Ordering rationale: reconnect R1 lands BEFORE
-                // performSlimResync so the watermark reset is visible to
-                // the subsequent Stage-A /since reconcile's catch-up
-                // decision (a /full-recovered message no longer appears
-                // "behind" the watermark the /since path compares against).
+                // lite-v2-dev: performSlimResync retired (plan §4.1/§4.7).
+                // The onResync path now ONLY triggers skeleton reload via
+                // reconcileFullAfterTransportReset (which routes to
+                // SkeletonReloadCoordinator.requestReload). The slim resync
+                // cadence / metadata refresh / catch-up sweep have been retired.
                 sessionSyncCoordinator.reconcileFullAfterTransportReset(
                     isStillCurrent = isStillCurrent,
-                )
-                val outcomes = sessionSyncCoordinator.performSlimResync(
-                    directories = directories,
-                    sessionsDirty = emptySet(),
-                    isStillCurrent = isStillCurrent,
-                )
-                DebugLog.i(
-                    "SessionStreamingService",
-                    "slim performSlimResync complete outcomes=${outcomes.size}",
                 )
             },
         )

@@ -526,7 +526,7 @@ class NotifySwitchoverGateIntegrationTest {
         assertEquals("connectSse was called (paused)", 1, shell.connectSseCalls)
 
         // BEFORE the SSE ack arrives, a reconfigure supersedes the handoff.
-        coordinator.teardownAndAwait(TeardownReason.Reconfigure)
+        coordinator.teardownAndAwait(TeardownReason.Disconnect)
         runCurrent()
 
         // Now resume the paused SSE activation with Ready — the late ack

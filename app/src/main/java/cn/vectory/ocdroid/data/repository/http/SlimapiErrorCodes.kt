@@ -1,21 +1,21 @@
 package cn.vectory.ocdroid.data.repository.http
 
 /**
- * Task 1 (slimapi v1 client L0): machine-readable error code constants
- * emitted by the oc-slimapi sidecar's thin-route error envelope
- * (`{"code": "…"}`). Sources:
+ * V2: machine-readable error code constants emitted by the oc-slimapi
+ * sidecar's thin-route error envelope (`{"code": "…"}`). Sources:
  *
  *  - **§0 / §6 G2** `GET /slimapi/sessions/{sid}/status` —
  *    [SESSION_NOT_FOUND] (404 → clear local), [DIRECTORY_NOT_ALLOWED]
- *    (400 → user prompt), [UPSTREAM_HTTP_PREFIX] + [UPSTREAM_TIMEOUT]
- *    (502 → alert, keep local), [UPSTREAM_UNAVAILABLE] (503 → backoff).
- *  - **§5 G6** `GET /slimapi/messages/{sid}/full` — [INVALID_IDS] (400),
- *    [RESPONSE_TOO_LARGE] (413), [TRANSFORM_BUSY] / [UPSTREAM_UNAVAILABLE]
- *    (503), [SESSION_NOT_FOUND] (404, same handling as G2), and the
- *    per-message [MESSAGE_NOT_FOUND] carried inside `errors[]` of the
- *    G6 envelope.
+ *    (400 → user prompt), [UPSTREAM_HTTP_PREFIX] (502 → alert, keep
+ *    local), [UPSTREAM_UNAVAILABLE] (503 → backoff).
  *  - **§0 thin-route envelope** — [THIN_ROUTE_NOT_FOUND] for unmapped
  *    paths the sidecar refuses to forward.
+ *
+ * V1 removed codes (no triggering endpoint exists in V2):
+ *  - [UPSTREAM_TIMEOUT]: q/p mutation 504 deleted (spec §7:243).
+ *  - [INVALID_IDS]: G6 batch endpoint deleted (spec §7:231).
+ *  - [INVALID_ROUTE_TOKEN]: routeToken deleted (spec §7:231).
+ *  - [MESSAGE_NOT_FOUND]: G6 envelope mid-level code (spec §7:234).
  *
  * Centralised here (rather than inlined at each catch-site) so that the
  * HTTP-status routing logic in later tasks (L2 reducer / L3
@@ -49,8 +49,7 @@ object SlimapiErrorCodes {
      */
     const val UPSTREAM_HTTP_PREFIX = "upstream_http_"
 
-    /** §0 / §6 G2 — upstream call exceeded its deadline → alert, keep local. */
-    const val UPSTREAM_TIMEOUT = "upstream_timeout"
+    // V2: UPSTREAM_TIMEOUT removed (spec §7:243 — q/p mutation 504 deleted).
 
     /**
      * §0 thin-route envelope — the sidecar has no mapping for the
@@ -58,10 +57,7 @@ object SlimapiErrorCodes {
      */
     const val THIN_ROUTE_NOT_FOUND = "thin_route_not_found"
 
-    /**
-     * §5 G6 — `ids` query param empty / >20 / unparseable → fix and retry.
-     */
-    const val INVALID_IDS = "invalid_ids"
+    // V2: INVALID_IDS removed (spec §7:231 — G6 batch endpoint deleted).
 
     /**
      * §5 G6 — cumulative full-body size exceeded the cap → reduce `ids`
@@ -102,15 +98,7 @@ object SlimapiErrorCodes {
      */
     const val INVALID_DIRECTORY_COUNT = "invalid_directory_count"
 
-    /**
-     * 🆕 B1 §2 #7 / contract §7 — `routeToken` HMAC verification failed
-     * (400). The sidecar HMAC-signs `kind+requestID+sessionID+directory`
-     * with ~1h TTL; reply/reject/permission-respond mutations check it
-     * on receipt. Failure means the token is malformed, stale, or for a
-     * different scope — re-fetch the aggregation (`/slimapi/questions`
-     * or `/slimapi/permissions`) to obtain a fresh token.
-     */
-    const val INVALID_ROUTE_TOKEN = "invalid_route_token"
+    // V2: INVALID_ROUTE_TOKEN removed (spec §7:231 — routeToken deleted).
 
     /**
      * §5 G6 — sidecar's response-transform worker pool saturated →
@@ -118,12 +106,7 @@ object SlimapiErrorCodes {
      */
     const val TRANSFORM_BUSY = "transform_busy"
 
-    /**
-     * §5 G6 — a single `id` inside the batch could not be resolved;
-     * surfaces inside the G6 envelope's `errors[]` array (HTTP stays
-     * 200). The client marks just that message's expand as failed.
-     */
-    const val MESSAGE_NOT_FOUND = "message_not_found"
+    // V2: MESSAGE_NOT_FOUND removed (spec §7:234 — G6 envelope code).
 
     /**
      * 🆕 B1 §2 S2 / contract §7 — catch-all path normalization rejected

@@ -52,18 +52,30 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
         val isCurrent = sessionId != null && sessionId == host.slices.chat.value.currentSessionId
         DebugLog.i("Sync", "message.created: ${if (isCurrent) "reload current" else "no-op (unread is lifecycle-driven)"}")
 
-        // §recent-sort-by-message: forward-compat parity
-        if (sessionId != null) {
-            val createdInfo = event.payload.getJsonObject("info")?.let {
+        val createdInfo = sessionId?.let {
+            event.payload.getJsonObject("info")?.let { info ->
                 runCatching {
-                    lenientJson.decodeFromJsonElement<Message>(it)
+                    lenientJson.decodeFromJsonElement<Message>(info)
                 }.getOrNull()
             }
+        }
+
+        // §recent-sort-by-message: forward-compat parity
+        if (sessionId != null) {
             val msgCreated = createdInfo?.time?.created ?: 0L
             if (msgCreated > 0L) {
                 host.slices.mutateSessionList { s ->
                     s.applyMessageTimestampBump(sessionId, msgCreated).first
                 }
+            }
+        }
+
+        // lite-v2-dev (🔴-5 注入点 2)：用户发送后服务器确认 message.created →
+        // 在触发 reload 前标记该消息为本地注入，消除 skeleton 打标时序窗口。
+        if (sessionId != null && createdInfo != null && createdInfo.id.isNotEmpty()) {
+            val found = host.slices.chat.value.messages.any { it.id == createdInfo.id }
+            if (!found) {
+                host.markLocallyInjected(sessionId, createdInfo.id)
             }
         }
 
@@ -97,13 +109,19 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
         // Defensive session guard: only touch the current session's chat view.
         if (eventSessionId != null && eventSessionId != host.slices.chat.value.currentSessionId) return
         if (updated != null && updated.id.isNotEmpty()) {
-            val routeInstance = eventSessionId?.let(host.slices::routeInstanceFor) ?: 0L
+            val sessionId = eventSessionId ?: return
+            val routeInstance = sessionId.let(host.slices::routeInstanceFor)
             val found = host.slices.chat.value.messages.any { it.id == updated.id }
+            if (!found) {
+                // 只对新消息打标：已在本地列表中的消息不再视为「本地注入」，
+                // 避免 skeleton 在 reload 时误判为服务器删除。
+                host.markLocallyInjected(sessionId, updated.id)
+            }
             host.slices.store.dispatch(
                 AppAction.MessageUpdatedApplied(
                     message = updated,
                     expectedRouteInstance = routeInstance,
-                    sessionId = eventSessionId,
+                    sessionId = sessionId,
                 )
             )
             if (found) {
@@ -113,7 +131,7 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
                 host.effects.tryEmitEffect(
                     ControllerEffect.AppendMessageToCache(
                         serverGroupFp = host.serverGroupFp(),
-                        sessionId = eventSessionId!!,
+                        sessionId = sessionId,
                         message = updated,
                         parts = emptyList(),
                     )

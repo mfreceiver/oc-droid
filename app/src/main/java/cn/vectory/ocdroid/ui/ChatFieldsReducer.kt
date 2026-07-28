@@ -311,8 +311,8 @@ internal fun reduceExpandedPartsContentCommitted(state: StoreState, action: AppA
 internal fun reduceMessageRemovedFromFull(state: StoreState, action: AppAction.MessageRemovedFromFull): StoreState {
     // B-P0-2 (MAJOR 4): evict the message from messages + partsByMessage by
     // messageId. The per-message watermark was already removed by
-    // SlimSseStateMachine.applyMessageRemoved under the slim commit token
-    // guard. sessionId is informational — eviction is by messageId.
+    // the in-memory slim state under the slim commit token guard.
+    // sessionId is informational — eviction is by messageId.
     //
     // §Stage-B C5 (CRITICAL) — M5 cleanup backport: the legacy call site
     // (ControllerModule.onMessageGone) is migrated to [MessageRemovedConfirmed]

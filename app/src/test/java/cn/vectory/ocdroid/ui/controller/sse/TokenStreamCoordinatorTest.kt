@@ -846,15 +846,16 @@ class TokenStreamCoordinatorTest {
     }
 
     @Test
-    fun `done snapshot transitions to DONE and replaces final text`() {
+    fun `done snapshot transitions to DONE and preserves accumulated buffer`() {
         coordinator.open("s1")
         runPending()
         val epoch = coordinator.epochOf("s1")
         val gen = coordinator.genOf("s1")
         coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", text = "partial"), 0L, bundleRepository.currentClientBundle()!!)
         coordinator.dispatchEpochFrame("s1", epoch, gen, delta(partId = "p1", text = "+"), 0L, bundleRepository.currentClientBundle()!!)
-        coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", text = "FINAL", done = true), 0L, bundleRepository.currentClientBundle()!!)
-        assertEquals("FINAL", stateStore.chatFlow.value.streamingPartTexts["p1"])
+        // V2 §3.x.2 杠杆1: done marker carries no text — accumulated buffer is preserved.
+        coordinator.dispatchEpochFrame("s1", epoch, gen, snapshot(partId = "p1", text = "FINAL_IGNORED", done = true), 0L, bundleRepository.currentClientBundle()!!)
+        assertEquals("partial+", stateStore.chatFlow.value.streamingPartTexts["p1"])
         assertEquals(StreamOwnedState.DONE, stateStore.chatFlow.value.streamOwned["p1"])
     }
 

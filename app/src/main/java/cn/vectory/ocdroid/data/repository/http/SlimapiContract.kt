@@ -9,8 +9,8 @@ package cn.vectory.ocdroid.data.repository.http
  * X_SLIMAPI_VERSION / SLIMAPI_PATH_PREFIX，避免散落字面量漂移（与 HttpHeaders
  * 同模式）。
  *
- * **版本来源**：客户端硬编码 1，与 oc-slimapi 当前 SERVER_API_VERSION=1 +
- * ACCEPTED_CLIENT_VERSIONS=(1,1) 对齐（见 docs/specs/slim-mode-api-routing.md §3）。
+ * **版本来源**：客户端硬编码 2，与 oc-slimapi 当前 SERVER_API_VERSION=1 +
+ * ACCEPTED_CLIENT_VERSIONS=(1,2) 对齐（见 docs/specs/slim-mode-api-routing.md §3）。
  * 未来 slimapi bump major 时同步本常量；旧客户端打新 sidecar 会触发
  * 400 version_incompatible，由 M2 自检的版本区间检查预先标记。
  *
@@ -32,7 +32,7 @@ object SlimapiContract {
      * X_SLIMAPI_VERSION 头；同时用于 M2 自检——本值必须落在 sidecar 返回的
      * accepted_client_versions 闭区间内，否则标记为不兼容。
      */
-    const val SLIMAPI_CLIENT_VERSION: Int = 1
+    const val SLIMAPI_CLIENT_VERSION: Int = 2
 
     /**
      * slimapi 路由前缀。版本头拦截器用 startsWith 匹配——所有以此前缀开头的
@@ -55,17 +55,8 @@ object SlimapiContract {
      */
     const val LEGACY_HEALTH_PATH = "/global/health"
 
-    /**
-     * HTTP 头名称：客户端 capability 选入头。服务器端根据此头决定是否启用
-     * B2 Opt-A partial-envelope 行为。仅 slimapi 请求携带（门闩同 M1 版本头）。
-     */
-    const val X_SLIMAPI_CAPABILITIES = "X-Slimapi-Capabilities"
-
-    /**
-     * 当前客户端声明的唯一 capability：`mid-partial-envelope=1`（opt-in）。
-     * 值遵循逗号分隔的 `name=value` 语法（I-R4-CAP-GRAMMAR），目前仅此一项。
-     * 服务器端解析时 name 大小写不敏感、忽略前后空白。
-     */
-    const val MID_PARTIAL_ENVELOPE_CAPABILITY = "mid-partial-envelope=1"
+    // V1 Opt-A capability constants X_SLIMAPI_CAPABILITIES and
+    // MID_PARTIAL_ENVELOPE_CAPABILITY were removed in V2 (spec §1:34).
+    // V2 ignores the capabilities header entirely.
 }
 

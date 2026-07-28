@@ -530,8 +530,8 @@ class OpenCodeRepositoryWrapperTest {
     //      chain + the SSEClient JSON decoder all wire up correctly through
     //      the repository).
     //   2. A non-null `directory` argument is forwarded as the
-    //      X-Opencode-Directory header AND mirrored into `?directory` by the
-    //      interceptor (proxy-safe routing per §R18 Phase 2-E step 1).
+    //      X-Opencode-Directory header (proxy-safe routing per §R18 Phase 2-E
+    //      step 1). Query-param mirroring was removed in slimapi V2.
     //   3. A null `directory` produces no header.
 
     private fun sseResponse(vararg frames: String): MockResponse = MockResponse()
@@ -571,16 +571,11 @@ class OpenCodeRepositoryWrapperTest {
 
         val request = server.takeRequest()
         // §R18 Phase 2-E step 1: directory is set on the SSE request as a
-        // header AND mirrored into the query by DirectoryHeaderInterceptor.
+        // header. Query-param mirroring was removed in slimapi V2.
         assertEquals(
             "directory MUST be transmitted via header",
             "/workdir/project",
             request.getHeader("X-Opencode-Directory")
-        )
-        assertEquals(
-            "directory MUST be mirrored into ?directory for proxy-safe routing",
-            "/workdir/project",
-            request.requestUrl?.queryParameter("directory")
         )
     }
 

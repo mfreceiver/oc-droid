@@ -167,9 +167,7 @@ class OkHttpClientFactory private constructor(
             // auth 之前——版本头是路由门闩，逻辑上先于 auth/cache-control；同时
             // directory interceptor 不会触碰 /slimapi/ 路径，无顺序耦合。
             .addInterceptor(slimapiVersionInterceptor)
-            // I-R5-CAP-DUPLICATES: slimapi capability 选入头（B2 Opt-A），紧接版本头
-            // 之后，同样位于 auth 之前。门闩同版本头：仅 slim=true + /slimapi/ 路径。
-            .addInterceptor(SlimapiCapabilitiesInterceptor(slimapiVersionInterceptor.hostSnapshot))
+            // V2 removed Opt-A capability header — no capability interceptor.
             // POST-RELEASE instrumentation (slimapi-client-v1): dedicated
             // slimapi DEBUG interceptor — logs method/encodedPath/version
             // header/directory query/round-trip ms + best-effort error code
@@ -383,7 +381,7 @@ class OkHttpClientFactory private constructor(
      * What it DOES carry (all from the shared base chain's component set):
      *  - SSL via the single [applySsl] / [sslConfigFactory.sslConfigFor] entry
      *    point (TOFU pin / mTLS resolution identical to every other client).
-     *  - [slimapiVersionInterceptor] → injects `X-Slimapi-Version: 1` (the
+     *  - [slimapiVersionInterceptor] → injects `X-Slimapi-Version: 2` (the
      *    path is under `/slimapi/`, so the version gate applies — without it
      *    the sidecar returns 400 version_required).
      *  - [authInterceptor] → Basic Auth when the host profile carries creds.

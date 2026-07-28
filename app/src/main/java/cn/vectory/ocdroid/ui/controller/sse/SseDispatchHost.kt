@@ -106,4 +106,13 @@ interface SseDispatchHost {
 
     /** Dispatches a bundle-bound action with its stamp captured under the lock. */
     fun dispatchBundleBound(actionFactory: (BundleStamp) -> AppAction): Boolean
+
+    /**
+     * lite-v2-dev: marks a message as locally injected (eliminates timing window
+     * between SSE shell injection and skeleton reload marking). The coordinator
+     * forwards to [SkeletonReloadCoordinator.markLocallyInjected].
+     * Order contract: MUST be called BEFORE dispatching the corresponding slice
+     * update.
+     */
+    fun markLocallyInjected(sessionId: String, messageId: String)
 }

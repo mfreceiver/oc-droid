@@ -231,16 +231,6 @@ class ForegroundCatchUpController(
     }
 
     /**
-     * §Phase1E: a host/profile switch is a fresh server — treat the next
-     * connect as a cold start (skip catch-up; the reconfigure path loads
-     * sessions/messages itself). Called from the host-switch / reset paths.
-     */
-    fun onHostReconfigured() {
-        sseHasConnectedOnce = false
-        suppressNextConnectCatchUp = false
-    }
-
-    /**
      * Inline (rule A) — writes the staleNotice banner directly to [chatFlow].
      * Was a [ForegroundCatchUpCallbacks] method; eliminated in batch 3b.
      */

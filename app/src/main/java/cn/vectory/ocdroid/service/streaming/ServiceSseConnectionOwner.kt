@@ -689,18 +689,9 @@ class ServiceSseConnectionOwner(
         val type = event.payload.type
         val isFirstFrameOfGen = !readiness.isCompleted
         val isResync = type == "resync"
-        val isServerReconfigured = type == "server.reconfigured"
-        // T10 (slimapi v1 §3 resync reason): when the frame IS a resync,
-        // parse the server-provided `reason` sub-field from the payload for
-        // OBSERVABILITY. The frame's `properties.reason` is a JsonPrimitive;
-        // we extract it via [SSEPayload.getString], which reads `.content`
-        // (NOT `as? String` — JsonPrimitive is not a String and that cast
-        // would always miss). Tolerates missing/null/unknown wire values →
-        // null via [SlimapiResyncReason.fromRaw]. The catch-up action is
-        // IDENTICAL regardless of reason — reason is pure telemetry and MUST
-        // NOT branch or gate control flow (no `when` on the enum; just log).
+        // lite-v2: server.reconfigured handler removed (no runtime reconfigure).
         val serverReasonRaw: String? =
-            if (isResync || isServerReconfigured) event.payload.getString("reason") else null
+            if (isResync) event.payload.getString("reason") else null
         val serverReasonTyped: SlimapiResyncReason? =
             if (isResync) SlimapiResyncReason.fromRaw(serverReasonRaw) else null
         if (isResync) {
@@ -709,22 +700,7 @@ class ServiceSseConnectionOwner(
                 "slim resync reason: raw=$serverReasonRaw typed=$serverReasonTyped gen=$generation",
             )
         }
-        // rev-F 🔴1: `server.reconfigured` frame always triggers a
-        // cold-start / resync, like a mid-stream `resync`.
-        if (isServerReconfigured) {
-            // Parse `reason` and `at` from payload for logging only (do NOT
-            // branch control flow on reason — rev-F spec: discovery_changed is
-            // the signal; any reason value is informational).
-            val atRaw: Long? = event.payload.getString("at")?.toLongOrNull()
-            DebugLog.i(
-                TAG,
-                "slim server.reconfigured reason=$serverReasonRaw at=$atRaw gen=$generation",
-            )
-            scheduleResync(
-                "server.reconfigured reason=$serverReasonRaw at=$atRaw",
-                generation,
-            )
-        } else if (isFirstFrameOfGen && resyncHandledForGen != generation) {
+        if (isFirstFrameOfGen && resyncHandledForGen != generation) {
             resyncHandledForGen = generation
             // First-frame cold-start. If this first frame IS itself a
             // resync, include the parsed server reason in the label (T10).

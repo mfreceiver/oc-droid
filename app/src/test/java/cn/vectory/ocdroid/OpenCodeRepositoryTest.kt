@@ -906,22 +906,17 @@ class OpenCodeRepositoryTest {
     fun `explicit directory header is injected on scoped requests`() = runBlocking {
         server.enqueue(jsonResponse("[]"))
 
-        // §R18 Phase 2-E step 2: /question now takes an explicit `directory`
-        // parameter (passed as @Header). The interceptor preserves it AND
-        // mirrors it into ?directory for proxy-safe routing.
+        // lite-v2-dev: /question takes an explicit `directory` parameter.
+        // The interceptor preserves the header but no longer mirrors it into
+        // ?directory (mirror logic removed in lite-v2-dev R1B).
         repository.getPendingQuestions("/workdir/project")
 
         val request = server.takeRequest()
         assertTrue(
-            "path must target /question (② now appends a directory query)",
+            "path must target /question",
             request.path?.startsWith("/question") == true
         )
         assertEquals("/workdir/project", request.getHeader("X-Opencode-Directory"))
-        assertEquals(
-            "② directory is mirrored into the query for proxy-safe routing",
-            "/workdir/project",
-            request.requestUrl?.queryParameter("directory")
-        )
     }
 
     @Test
@@ -952,9 +947,9 @@ class OpenCodeRepositoryTest {
     // contract pinned here stays GREEN after the fix.
 
     @Test
-    fun `B1 getPendingQuestions sends X-Opencode-Directory header and mirrors directory to query`() = runBlocking {
-        // GET /question: the DirectoryHeaderInterceptor preserves the caller
-        // header AND mirrors it into ?directory (proxy-safe double-insurance).
+    fun `B1 getPendingQuestions sends X-Opencode-Directory header without query mirror`() = runBlocking {
+        // lite-v2-dev: DirectoryHeaderInterceptor preserves the caller header
+        // but no longer mirrors it into ?directory (mirror logic removed).
         server.enqueue(jsonResponse("[]"))
 
         repository.getPendingQuestions("/workdir-X")
@@ -965,11 +960,6 @@ class OpenCodeRepositoryTest {
             "directory MUST be transmitted via header",
             "/workdir-X",
             request.getHeader("X-Opencode-Directory"),
-        )
-        assertEquals(
-            "GET mirrors the directory header into ?directory (DirectoryHeaderInterceptor)",
-            "/workdir-X",
-            request.requestUrl?.queryParameter("directory"),
         )
     }
 

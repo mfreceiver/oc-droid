@@ -44,6 +44,12 @@ class SlimSseHandler(private val host: SseDispatchHost) : SseEventHandler {
         // name: top-level first, fall back to nested error.name.
         val name = (props?.get("name") as? kotlinx.serialization.json.JsonPrimitive)?.content
             ?: (errObj?.get("name") as? kotlinx.serialization.json.JsonPrimitive)?.content
+        // V2 §3:95: abort (MessageAbortedError) is silently discarded by the
+        // sidecar. Defensive client-side guard: if it leaks through, do NOT
+        // produce an error surface (no SessionError effect, no
+        // LastAssistantError, no durable banner).
+        if (name == "MessageAbortedError") return
+
         // data: nested-only
         val data = errObj?.get("data") as? JsonObject
         // message: top-level first, then nested, then fallback

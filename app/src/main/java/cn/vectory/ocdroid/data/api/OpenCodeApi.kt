@@ -1,7 +1,6 @@
 package cn.vectory.ocdroid.data.api
 
 import cn.vectory.ocdroid.data.model.*
-import cn.vectory.ocdroid.data.repository.http.HttpHeaders
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonElement
 import retrofit2.Response
@@ -168,30 +167,4 @@ data class CommandRequest(
     val agent: String? = null
 )
 
-// ── Cluster A: oc-slimapi request bodies (v1 contract §2) ────────────────
-//
-// Slimapi-side reply/response bodies. Each carries the legacy fields PLUS
-// a `routeToken` so the sidecar can validate the request and re-inject the
-// originating directory before forwarding to opencode.
-//
-// **Contract assumption**: routeToken is sent in the BODY (not as a header).
-// The v1 contract specifies the sidecar validates the token but does not
-// pin its wire location; this client chose body transport to co-locate with
-// the answer payload. Flagged as a contract question in the task output.
 
-@kotlinx.serialization.Serializable
-data class SlimapiQuestionReplyRequest(
-    val answers: List<List<String>>,
-    @kotlinx.serialization.SerialName("routeToken") val routeToken: String? = null,
-)
-
-@kotlinx.serialization.Serializable
-data class SlimapiQuestionRejectRequest(
-    @kotlinx.serialization.SerialName("routeToken") val routeToken: String? = null,
-)
-
-@kotlinx.serialization.Serializable
-data class SlimapiPermissionResponseRequest(
-    val response: String,
-    @kotlinx.serialization.SerialName("routeToken") val routeToken: String? = null,
-)
