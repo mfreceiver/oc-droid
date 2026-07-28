@@ -331,6 +331,32 @@ class StreamingLifecycleCoordinator @Inject constructor(
     }
 
     /**
+     * lite-v2 D-barrier-fixup: the no-source awaitable teardown for same-host
+     * reset (resetLocalDataAndResync). The old identity is invalid post
+     * `beginReconfigure()`, so NO replacement StartPoller is emitted and
+     * ownership is released with markGap=false (NOT the generic Disconnect
+     * path, which starts a replacement poller + markGap=true and races the
+     * new bootstrap). Sequence mirrors the retired teardownForReconfigure:
+     * cancelDebounce → cancelPendingHandoff → StopPoller (pollerRuntime=
+     * Stopped) → StopSse → StopForeground → StopSelf → L3 → await L3 →
+     * disconnectAndRelease(markGap=false).
+     */
+    suspend fun teardownNoSourceAndAwait() {
+        mutex.withLock {
+            cancelDebounce()
+            cancelPendingHandoff()
+            emit(StopPoller)
+            pollerRuntime = PollerRuntime.Stopped
+            emit(StopSse)
+            emit(StopForeground)
+            emit(StopSelf)
+            _layer.value = Layer.L3
+        }
+        layer.first { it == Layer.L3 }
+        ownershipGate?.disconnectAndRelease(markGap = false)
+    }
+
+    /**
      * D4-B — the CANONICAL awaitable teardown path. Every teardown entry
      * (onDisconnect / onTimeout / requestUserClose / terminal SSE callback /
      * bootstrap failure) routes through here.

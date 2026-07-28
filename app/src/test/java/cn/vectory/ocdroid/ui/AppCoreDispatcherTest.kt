@@ -481,6 +481,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             ControllerEffect.ColdStartReconnect,
             ControllerEffect.ResetLocalDataAndResync,
             ControllerEffect.ClearSessionWindowCache,
+            ControllerEffect.RestartRequired,
             // Connection
             // lite-v2: HostReconfigured removed
             ControllerEffect.LoadSessions,

@@ -27,6 +27,7 @@ import cn.vectory.ocdroid.ui.reportNonFatalIssue
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -217,6 +218,15 @@ class ConnectionCoordinator(
      * (deferred — never runs during CC construction), preserving the
      * pre-extraction wiring timing verbatim.
      */
+    /**
+     * lite-v2 D-barrier-fixup: stores the no-source teardown Job from
+     * cancelSseForReconfigure so coldStartReconnect can await it before
+     * probing. Volatile for safe cross-coroutine read without synchronisation
+     * (single-assignment: written once per teardown, cleared once on join).
+     */
+    @Volatile
+    private var pendingReconfigureTeardown: Job? = null
+
     private val healthProbe = ConnectionHealthProbe(
         scope = scope,
         slices = slices,
@@ -284,6 +294,11 @@ class ConnectionCoordinator(
     /**
      * Cold-start entry point: force a connection check with up to 3 retries.
      *
+     * lite-v2 D-barrier-fixup: if a no-source teardown (from
+     * [cancelSseForReconfigure]) is pending, awaits it before probing
+     * (serializes teardown→bootstrap, equivalent to the old barrier).
+     * Otherwise directly delegates to [healthProbe].
+     *
      * L4c: thin delegate to [ConnectionHealthProbe.coldStartReconnect]. The
      * TOFU-frozen guard + `testConnection(force=true, retries=3)` semantics
      * are preserved verbatim. Callers (MainActivity cold-start LaunchedEffect,
@@ -291,7 +306,16 @@ class ConnectionCoordinator(
      * `ConnectionViewModel.coldStartReconnect()`) see no change.
      */
     fun coldStartReconnect() {
-        healthProbe.coldStartReconnect()
+        val pending = pendingReconfigureTeardown
+        if (pending != null) {
+            scope.launch {
+                pending.join()
+                pendingReconfigureTeardown = null
+                healthProbe.coldStartReconnect()
+            }
+        } else {
+            healthProbe.coldStartReconnect()
+        }
     }
 
     /**
@@ -651,8 +675,11 @@ class ConnectionCoordinator(
 
     /**
      * CP9 §B11: cancels the in-flight SSE feed (foreground ON_STOP /
-     * ViewModel onCleared / process teardown). No longer touches a job —
-     * routes through [StreamingLifecycleCoordinator.onDisconnect] which the
+     * ViewModel onCleared / process teardown). Uses generic Disconnect path
+     * (replacement poller + markGap=true) — NOT the no-source teardown used
+     * by [cancelSseForReconfigure].
+     *
+     * Routes through [StreamingLifecycleCoordinator.onDisconnect] which the
      * Service observes (the coordinator emits StopSse →
      * [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner].disconnect).
      * Does NOT reset the catch-up state machine — the foreground return path
@@ -667,32 +694,30 @@ class ConnectionCoordinator(
     }
 
     /**
-     * §Stage D (gpter 阻塞 #1) + CP9 §B12: tear down any in-flight SSE feed
-     * BEFORE the repository is reconfigured for a host / profile switch.
-     * CP9: routes through [StreamingLifecycleCoordinator.onDisconnect] (the
-     * §4.1 disconnect entry → L3 teardown); the Service observes the
-     * teardown commands and disconnects its owner. Without this, the SSE job
-     * bound to the PREVIOUS host keeps delivering events into AppState while
-     * the new host's health probe is still in flight — those stale events
-     * would pollute the freshly-cleared state for the new profile.
+     * lite-v2 D-barrier-fixup: no-source teardown (no replacement poller,
+     * markGap=false). Stores the pending teardown Job so [coldStartReconnect]
+     * can await it before probing (serializes teardown→bootstrap, equivalent to
+     * the old [ConnectionReconfigureBarrier] serialization).
      *
-     * D3 keeps this as a legacy effect adapter only. It deliberately does not
-     * bump epoch or publish HostReconfigured: ConnectionReconfigureBarrier is
-     * the sole transaction/epoch owner and performs the repository rebuild
-     * only after this lifecycle teardown has joined.
+     * [cancelSse] (generic Disconnect path) is UNCHANGED — it still uses
+     * the generic teardown with replacement poller + markGap=true.
      */
     fun cancelSseForReconfigure() {
-        DebugLog.i("SSE", "cancelSse (reconfigure)")
-        cancelSseInternal(TeardownReason.Disconnect)
+        DebugLog.i("SSE", "cancelSse (reconfigure, no-source)")
+        tokenStreamCoordinator?.let { tsc ->
+            slices.chat.value.currentSessionId?.let { sid -> tsc.close(sid) }
+        }
+        pendingReconfigureTeardown = scope.launch {
+            streamingLifecycleCoordinator?.teardownNoSourceAndAwait()
+        }
     }
 
     /**
-     * Cluster 11 (duplication backlog): the shared body of [cancelSse] /
-     * [cancelSseForReconfigure]. Closes the token stream for the current
-     * session, then tears down the streaming lifecycle with [reason]. The
-     * `DebugLog` in [cancelSseForReconfigure] stays at its call site (BEFORE
-     * this helper) so the pre-dedup log timing is preserved verbatim;
-     * [cancelSse] logs nothing (as before).
+     * Generic teardown shared body used by [cancelSse] only (lags the old name
+     * — [cancelSseForReconfigure] now inlines its own no-source path instead
+     * of routing through this helper). Closes the token stream for the current
+     * session, then tears down the streaming lifecycle with [reason] via the
+     * generic Disconnect path (replacement poller + markGap=true).
      *
      * L4c placement decision: this helper STAYS on the coordinator (it is
      * general teardown, NOT probe-owned — the probe never calls

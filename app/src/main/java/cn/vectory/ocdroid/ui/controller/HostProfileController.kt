@@ -163,9 +163,17 @@ class HostProfileController(
     // ── Reconfigure boundary helpers (cluster 6 barrier folding) ───────────
 
     /**
-     * lite-v2: active host connection-param changes persist + emit RestartRequired
-     * (the app must restart to apply new URL/mTLS/slim/basicAuth — no runtime
-     * hot-reconfigure). Non-active changes run body with no restart signal.
+     * C-8 reconfigure boundary: when [needsReconfigure] is true (active-host
+     * connection-param edit OR profile select), runs [body] then EMITS
+     * [ControllerEffect.RestartRequired] (suspend = SUSPEND-on-full, cannot
+     * lose). Non-active changes run body with no restart signal.
+     *
+     * C-8 full matrix:
+     *  - active profile edit connection params → persist + RestartRequired ✓
+     *  - select another active profile → persist + RestartRequired ✓
+     *  - delete active profile → persist + RestartRequired ✓
+     *  - resetLocalDataAndResync → same-host teardown (no restart) ✓
+     *  - non-active CRUD → persist only (no restart)
      */
     internal suspend fun withHostReconfiguration(
         needsReconfigure: Boolean,
@@ -173,7 +181,9 @@ class HostProfileController(
     ): Unit {
         body()
         if (needsReconfigure) {
-            effects.tryEmitEffect(ControllerEffect.RestartRequired)
+            // FIX-7: suspend emitEffect = SUSPEND-on-full, cannot lose.
+            // tryEmitEffect was the old non-suspend variant that could drop on full bus.
+            effects.emitEffect(ControllerEffect.RestartRequired)
         }
     }
 
@@ -265,29 +275,33 @@ class HostProfileController(
 
     /**
      * Switches to the host profile [profileId], fully resetting all per-host
-     * state (sessions/messages/unread/draft/cache/commands) and reconnecting
-     * to the new host.
+     * state (sessions/messages/unread/draft/cache/commands).
      *
-     * The purge + reconfigure + testConnection sequence is the same as
-     * deleteHostProfile(wasCurrent) — extracted into [purgePerHostState].
+     * **C-8 (lite-v2): active profile select → persist + RestartRequired.**
+     * The app must restart to apply the new host; no runtime reconfigure /
+     * ForceReconnect / HostProfileSwitched (restart supersedes them).
      *
-     * **R-20 Phase 1 (plan §3 v4 momo N-B1 select 4-step):**
+     * The purge + select sequence (no runtime reconfigure):
      *  1. Snapshot `previousFp = hostProfileStore.currentProfile().serverGroupFp`
      *     BEFORE [HostProfileStore.select] (select has a side effect — it
      *     bumps lastUsedAt + sets currentHostProfileId, so reading
      *     currentProfile() AFTER would return the new profile's fp).
-     *  2. `select(profileId)` — mutates the store.
-     *  3. Read `targetFp = returned profile.serverGroupFp`.
-     *  4. Compare: same group → no cache eviction (just memory view switch);
-     *     different group → emit [ControllerEffect.EvictGroup] for previousFp
-     *     (group-scoped memory + persistent cache clear). The new group's
-     *     cache stays intact (it may have been populated by an earlier session
-     *     on a sibling profile in the same group).
+     *  2. Inside the `withHostReconfiguration(needsReconfigure = true)` body:
+     *     a. `activateProfile(profileId)` / `select(profileId)` — mutates the store.
+     *     b. `purgePerHostState` — clears per-profile UX state; preserves
+     *        per-server data iff same group.
+     *     c. Emit `EvictGroup(previousFp)` if cross-group.
+     *     d. `refreshHostProfileState()`.
+     *     e. **NO** `configureRepositoryForProfileRaw` — restart handles it.
+     *  3. After the block, `RestartRequired` is emitted by `withHostReconfiguration`.
+     *     No `ForceReconnect`/`HostProfileSwitched`.
      *
-     * `purgePerHostState` still runs — but with the group-isolated field
-     * classification (see [purgePerHostState] doc): per-profile UX state
-     * (draft / currentWorkdir) is wiped, but per-server-data
-     * (sessions / unread / recentWorkdirs) is preserved iff same group.
+     * **C-8 full matrix (frozen):**
+     *  - active profile edit connection params → persist + RestartRequired ✓
+     *  - select another active profile → persist + RestartRequired ✓ (THIS)
+     *  - delete active profile → persist + RestartRequired ✓
+     *  - resetLocalDataAndResync → same-host teardown (no restart) ✓
+     *  - non-active CRUD → persist only (no restart)
      */
     fun selectHostProfile(profileId: String) {
         scope.launch {
@@ -301,10 +315,11 @@ class HostProfileController(
             val targetBeforeMutation =
                 hostProfileStore.profiles().firstOrNull { it.id == profileId } ?: return@launch
             val sameGroup = previousFp == targetBeforeMutation.serverGroupFp
-            // lite-v2: host switch persists + reconfigures. No RestartRequired
-            // (that's for connection-param changes on the active host only).
-            // EvictGroup fires unconditionally for cross-group switches.
-            withHostReconfiguration(needsReconfigure = false) {
+            // C-8: host switch = restart. withHostReconfiguration(needsReconfigure=true)
+            // persists selection + purges per-host state + emits RestartRequired.
+            // No runtime reconfigure (configureRepositoryForProfileRaw removed),
+            // no ForceReconnect/HostProfileSwitched (restart supersedes them).
+            withHostReconfiguration(needsReconfigure = true) {
                 effectiveConnectionConfigResolver?.activateProfile(profileId)
                 val selected = if (effectiveConnectionConfigResolver != null) {
                     hostProfileStore.currentProfile()
@@ -315,17 +330,10 @@ class HostProfileController(
                 if (!sameGroup) {
                     effects.emitEffect(ControllerEffect.EvictGroup(previousFp))
                 }
-                configureRepositoryForProfileRaw(profile = selected)
                 refreshHostProfileState()
             }
-            // §R18 Phase 3 Wave 1 (P1-3 A 类): scope.launch suspend 上下文 → 用 suspend emitEffect
-            // 可靠+FIFO，不会丢。
-            effects.emitEffect(ControllerEffect.ForceReconnect)
-            // §host-switch-order: only AFTER select + reconnect have settled do
-            // we hand control back for host-scoped post-processing. Doing this
-            // synchronously in the caller raced the launch above and read the
-            // PREVIOUS host's baseUrl.
-            effects.emitEffect(ControllerEffect.HostProfileSwitched)
+            // RestartRequired is emitted by withHostReconfiguration inside the block.
+            // No ForceReconnect / HostProfileSwitched — restart supersedes them.
         }
     }
 
@@ -699,6 +707,9 @@ class HostProfileController(
         // bump ensures any in-flight collector / fetch from the pre-reset
         // state is dropped.
         identityStore?.beginReconfigure()
+        // C-D3 rev-3 same-host reset: rotate the slim-local marker before the
+        // local purge / slice reset (no-op compat shim — see OpenCodeRepository).
+        repository.resetSlimForLocalWipe()
         // remove-message-persistence Task 5: the cacheRepository.clearAll() +
         // appContext.deleteDatabase(...) that used to wipe the SQLite cache DB
         // here were removed together with the persistence layer. The in-memory

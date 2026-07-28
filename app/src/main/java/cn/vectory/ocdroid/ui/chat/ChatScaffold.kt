@@ -90,6 +90,8 @@ import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.visibleMessages
 import cn.vectory.ocdroid.ui.settings.TofuTrustDialog
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
+import cn.vectory.ocdroid.ui.theme.Dimens
+import cn.vectory.ocdroid.ui.theme.StatusBanner
 import kotlinx.coroutines.launch
 
 /**
@@ -934,6 +936,29 @@ fun ChatScaffold(
             onBackToHome = onBackToHome,
             onOpenDrawer = openDrawerAction,
         )
+
+        // §persistent-restart-required (Medium-1): show a persistent error
+        // banner while restartRequired is true (connection params changed,
+        // restart needed). Tied to the state flag — NOT auto-dismiss.
+        if (connection.restartRequired) {
+            StatusBanner(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.errorContainer,
+                border = null,
+            ) {
+                Text(
+                    text = stringResource(R.string.connection_restart_required_title),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = stringResource(R.string.connection_restart_required),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
+        }
 
         // §B6: SessionTabStrip removed. The SessionPickerSheet (opened by
         // tapping the ChatTopBar title) is the sole session-switching surface.

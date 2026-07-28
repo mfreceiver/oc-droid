@@ -45,7 +45,7 @@ import org.junit.Test
  *     + real [SharedStateStore] slices (mirrors [SessionSyncCoordinatorTest]'s
  *     setUp). Asserts the decisions are translated into the right
  *     [ControllerEffect]s on the bus, and the generation guard survives a
- *     HostReconfigured → late-ServerConnected sequence.
+ *     late-ServerConnected sequence (lite-v2: HostReconfigured trigger removed).
  *
  * Scenarios covered (per R19-execution-plan.md §2 S1-T1):
  *  - **1**: delta interrupted → reconnect → ClearDeltaBuffers + ReloadSession(current)
@@ -194,26 +194,6 @@ class GapReconcilePureFunctionsTest {
 
         assertTrue(decisions.isEmpty())
         assertTrue("connectedOnce flips to true", newState.connectedOnce)
-    }
-
-    @Test
-    fun `host reconfigured resets all per-host state and bumps generation`() {
-        val state = SseSyncState(
-            connectedOnce = true,
-            lastDisconnectAt = 100L,
-            sessionsDirty = setOf("A", "B"),
-            hostGeneration = 5L
-        )
-        val trigger = SseReconnectTrigger.HostReconfigured(hostGeneration = 6L)
-
-        val (newState, decisions) = reconcileGap(state, trigger)
-
-        assertTrue(decisions.isEmpty())
-        assertEquals(6L, newState.hostGeneration)
-        // Cold-start semantics under the new generation.
-        assertTrue(!newState.connectedOnce)
-        assertNull(newState.lastDisconnectAt)
-        assertTrue(newState.sessionsDirty.isEmpty())
     }
 
     @Test

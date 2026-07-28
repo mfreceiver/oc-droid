@@ -525,45 +525,33 @@ class HostProfileControllerTest {
      * assert the controller rethrows (not Result.failure).
      */
     @Test
-    fun `selectHostProfile propagates the selected host SSL config to HttpImageHolder`() {
-        // §tofu R2: the legacy "propagates allowInsecure flag" assertion is
-        // gone (no TrustAll anymore). selectHostProfile still calls
-        // configureRepositoryForProfile → HttpImageHolder.updateSsl(...), now
-        // with the resolved TOFU / SystemDefault config. Verify the sync hook
-        // fires (the actual config value comes from currentSslConfig which is
-        // mocked here).
+    fun `selectHostProfile does NOT propagate SSL to HttpImageHolder (no runtime reconfigure)`() {
+        // lite-v2: selectHostProfile does NOT call configureRepositoryForProfileRaw
+        // — SSL propagation happens on restart's configure path, NOT on select.
+        // HttpImageHolder must NOT be touched by selectHostProfile.
         every { store.select("p-B") } returns profileB
-        every { settingsManager.basicAuthPassword("p-B") } returns "secret-b"
-        every { repository.currentSslConfig() } returns SslConfig.SystemDefault
 
         controller.selectHostProfile("p-B")
         runPending()
 
-        // §tofu R2: image client SSL config was synced (SystemDefault for an
-        // unpinned endpoint — the TOFU capture/prompt path is exercised in
-        // ConnectionCoordinatorTest, not here).
-        assertEquals("SYSTEM", HttpImageHolder.lastUpdateSslMode)
+        // HttpImageHolder.updateSsl is NOT called (no configureRepositoryForProfileRaw).
+        assertNull(HttpImageHolder.lastUpdateSslMode)
     }
 
     @Test
-    fun `selectHostProfile mirrors profile serverUrl into settingsManager for token-stream baseUrl`() {
-        // §bugfix-token-stream: configureRepositoryForProfileRaw must sync
-        // settingsManager.serverUrl = profile.serverUrl so the direct readers that
-        // bypass EffectiveConnectionConfigResolver (TokenStreamClient @ControllerModule:273,
-        // ConnectionHealthProbe, getSavedConnectionSettings) observe the live URL in
-        // Profile mode. Before the fix only the manual configureServerRaw path synced
-        // (via activateManual); the profile path skipped it, leaving settingsManager.serverUrl
-        // stale at default localhost:4096 → token-stream 连 localhost → 指数退避重连风暴.
+    fun `selectHostProfile does NOT mirror profile serverUrl into settingsManager (no runtime reconfigure)`() {
+        // lite-v2: selectHostProfile does NOT call configureRepositoryForProfileRaw,
+        // so settingsManager.serverUrl is NOT updated here. The mirror happens
+        // on restart's configure path, not on select. The resolver
+        // (EffectiveConnectionConfigResolver) is the single source of truth.
         every { store.select("p-B") } returns profileB
-        every { settingsManager.basicAuthPassword("p-B") } returns "secret-b"
-        every { repository.currentSslConfig() } returns SslConfig.SystemDefault
 
         controller.selectHostProfile("p-B")
         runPending()
 
-        // profileB.serverUrl ("http://b:4096") mirrored into settingsManager, restoring
-        // the "settingsManager.serverUrl ≡ hostConfig.baseUrl" invariant (ControllerModule:241).
-        verify { settingsManager.serverUrl = profileB.serverUrl }
+        // configureRepositoryForProfileRaw is never called — settingsManager.serverUrl
+        // is NOT written by selectHostProfile.
+        verify(exactly = 0) { settingsManager.serverUrl = any() }
     }
 
     // ── duplicateHostProfile ───────────────────────────────────────────────
@@ -638,24 +626,30 @@ class HostProfileControllerTest {
     }
 
     @Test
-    fun `selectHostProfile reconfigures repository for the selected profile with its derived hostPort`() {
+    fun `selectHostProfile persists selection and emits RestartRequired (no runtime reconfigure)`() {
+        // lite-v2: selectHostProfile must NOT call configureRepositoryForProfileRaw
+        // (no runtime reconfigure — restart handles it). Instead it emits
+        // RestartRequired via withHostReconfiguration(needsReconfigure=true).
+        // No ForceReconnect / HostProfileSwitched.
         every { store.select("p-B") } returns profileB
-        every { settingsManager.basicAuthPassword("p-B") } returns "secret-b"
 
         controller.selectHostProfile("p-B")
         runPending()
 
-        // §tofu R2: 4th arg is hostPort (String?), derived from profileB.serverUrl
-        // ("http://b:4096" → "b:4096").
-        verify {
-            repository.configure(
-                profileB.serverUrl,
-                profileB.basicAuth?.username,
-                "secret-b",
-                "b:4096",
-                any(),
-                any())
-        }
+        // Repository is NOT reconfigured at select time (restart handles it).
+        verify(exactly = 0) { repository.configure(any(), any(), any(), any(), any(), any()) }
+        // RestartRequired is emitted (via withHostReconfiguration).
+        assertEquals(
+            "selectHostProfile emits exactly one RestartRequired",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.RestartRequired>().size)
+        // No runtime reconnect / switch signals (restart supersedes them).
+        assertTrue(
+            "ForceReconnect must NOT be emitted (restart supersedes)",
+            collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().isEmpty())
+        assertTrue(
+            "HostProfileSwitched must NOT be emitted (restart supersedes)",
+            collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().isEmpty())
     }
 
     @Test
@@ -891,10 +885,9 @@ class HostProfileControllerTest {
 
     @Test
     fun `resetLocalDataAndResync uses the same-host slim reset primitive`() {
-
         controller.resetLocalDataAndResync()
 
-        // lite-v2: resetSlimForLocalWipe removed
+        verify(exactly = 1) { repository.resetSlimForLocalWipe() }
     }
 
     @Test

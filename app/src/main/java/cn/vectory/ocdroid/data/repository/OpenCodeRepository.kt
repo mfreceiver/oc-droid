@@ -289,6 +289,15 @@ class OpenCodeRepository @Inject constructor(
      * ReloadIdentity（serverGroupFp + routeInstance）在 SkeletonReloadCoordinator 中
      * 提供了新的 stale response 防护。这些 token 方法保留为兼容层。
      */
+    /**
+     * lite-v2: same-host local-wipe marker rotation seam. The slim incarnation
+     * system is retired (identityStore.beginReconfigure() handles epoch/marker
+     * rotation); this no-op shim is kept as the call-site contract for
+     * resetLocalDataAndResync + testability, consistent with the kept
+     * captureSlimCommitToken compatibility shim.
+     */
+    fun resetSlimForLocalWipe(): Unit = Unit
+
     @Deprecated("lite-v2 compatibility shim", level = DeprecationLevel.WARNING)
     fun captureSlimCommitToken(): SlimCommitToken {
         val identityStore = identityStoreOrFallback()

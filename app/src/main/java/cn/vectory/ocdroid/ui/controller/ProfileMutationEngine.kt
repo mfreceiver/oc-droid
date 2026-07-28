@@ -235,7 +235,12 @@ class ProfileMutationEngine internal constructor(
             }
             // lite-v2: RestartRequired supersedes runtime reconfigure.
             // No ForceReconnect/HostProfileSwitched — restart handles everything.
-            effects.tryEmitEffect(ControllerEffect.RestartRequired)
+            // FIX-7: non-suspend context — keep tryEmitEffect but DO NOT
+            // ignore the return. Bus-full is unlikely but the restart flag is
+            // business-critical and must not be lost silently.
+            if (!effects.tryEmitEffect(ControllerEffect.RestartRequired)) {
+                DebugLog.e(TAG, "RestartRequired effect dropped (bus full) — restart flag may be stale; user must restart manually to apply the active-profile deletion")
+            }
         } else {
             if (remainingInGroup.isEmpty()) {
                 deletedFp?.let {
