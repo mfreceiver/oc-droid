@@ -278,6 +278,24 @@ class TokenStreamCoordinator(
          sessionId: String, messageId: String,
          context: TokenFrameCommitContext,
      ) -> Unit = { _, _, _ -> },
+     /**
+      * B-4 HIGH-2: called when a part snapshot reaches done:true (terminal).
+      * The production implementation clears the per-part revision entry from
+      * the dedup map so it does not grow unbounded across completed parts.
+      */
+     private val onPartDone: (
+         sessionId: String, messageId: String, partId: String,
+     ) -> Unit = { _, _, _ -> },
+     /**
+      * B-4 HIGH-2: called when ALL revision entries for a session should be
+      * reclaimed (stream close, resync, session switch). Prevents unbounded
+      * map growth across the singleton coordinator's lifetime and provides
+      * connection-epoch isolation (stale revisions from a dead connection
+      * cannot block fresh frames on a new connection).
+      */
+     private val clearSessionRevisions: (
+         sessionId: String,
+     ) -> Unit = { _ -> },
  ) {
     // ── State ───────────────────────────────────────────────────────────────
     //
@@ -618,6 +636,10 @@ class TokenStreamCoordinator(
         // was already cancelled by a newer open()).
         ownerByPartId.entries.removeIf { it.value.sid == sid }
         reducerStateBySid.remove(sid)
+        // B-4 HIGH-2: reclaim ALL revision entries for this session on close
+        // (stream teardown, session switch, background — prevents unbounded
+        // growth + provides epoch isolation).
+        clearSessionRevisions(sid)
         attemptBySid.remove(sid)
         consecutive503BySid.remove(sid)
         }
@@ -927,6 +949,12 @@ class TokenStreamCoordinator(
         // (applyMessagePartRemoved / applyMessageRemoved + debounced
         // reconcileActiveSession / MessageRemovedConfirmed dispatch).
         when (effectiveFrame) {
+            is TokenStreamFrame.PartSnapshot -> {
+                // B-4 HIGH-2: reclaim revision entry when part reaches done:true.
+                if (effectiveFrame.done && !effectiveFrame.truncated) {
+                    onPartDone(effectiveFrame.sessionId, effectiveFrame.messageId, effectiveFrame.partId)
+                }
+            }
             is TokenStreamFrame.MessagePartRemoved -> {
                 val msgSeq = effectiveFrame.messageEventSeq ?: 0L
                 if (!isBundleCurrentForCommit(boundBundle)) return
@@ -945,6 +973,12 @@ class TokenStreamCoordinator(
                     effectiveFrame.messageId,
                     commitContext,
                 )
+            }
+            is TokenStreamFrame.Resync -> {
+                // B-4 HIGH-2 + MEDIUM: resync clears ALL parts for the session
+                // (epoch boundary — stale revisions from the old connection
+                // cannot block fresh frames on the new connection).
+                effectiveFrame.sessionId?.let { clearSessionRevisions(it) }
             }
             else -> { /* no hook for other frame types */ }
         }

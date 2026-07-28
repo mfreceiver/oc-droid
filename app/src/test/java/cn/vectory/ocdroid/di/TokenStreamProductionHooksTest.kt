@@ -8,6 +8,7 @@ import cn.vectory.ocdroid.ui.controller.sse.TokenFrameCommitContext
 import io.mockk.mockk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -128,6 +129,80 @@ class TokenStreamProductionHooksTest {
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
         // m2 part should still be rejected (not cleared).
         assertFalse(hooks.dedupPartRevision("s1", "m2", "p2", 5L, ctx))
+    }
+
+    @Test
+    fun `concurrent same revision accepts exactly once`() {
+        val hooks = createHooks()
+        val n = 50
+        val accepted = java.util.concurrent.atomic.AtomicInteger(0)
+        val barrier = java.util.concurrent.CountDownLatch(1)
+        val ready = java.util.concurrent.CountDownLatch(n)
+        val threads = (1..n).map {
+            Thread {
+                ready.countDown()
+                barrier.await()
+                if (hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx)) {
+                    accepted.incrementAndGet()
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        // Wait for all threads to be ready, then release them simultaneously.
+        ready.await()
+        barrier.countDown()
+        threads.forEach { it.join() }
+        assertEquals(1, accepted.get())
+    }
+
+    @Test
+    fun `onPartDone clears revision entry`() {
+        val hooks = createHooks()
+        // rev=5 accepted.
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        // Duplicate rejected.
+        assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        // onPartDone reclaims the revision entry.
+        hooks.onPartDone("s1", "m1", "p1")
+        // Now rev=5 accepted again (entry was reclaimed).
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+    }
+
+    @Test
+    fun `clearSessionRevisions clears all session entries`() {
+        val hooks = createHooks()
+        // Two parts for the same session, both accepted.
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        assertTrue(hooks.dedupPartRevision("s1", "m2", "p2", 3L, ctx))
+        // Both rejected on re-delivery.
+        assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        assertFalse(hooks.dedupPartRevision("s1", "m2", "p2", 3L, ctx))
+
+        // clearSessionRevisions reclaims all entries for s1.
+        hooks.clearSessionRevisions("s1")
+
+        // Both should be accepted again.
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        assertTrue(hooks.dedupPartRevision("s1", "m2", "p2", 3L, ctx))
+    }
+
+    @Test
+    fun `clearSessionRevisions does not affect other sessions`() {
+        val hooks = createHooks()
+        // One part in s1, one in s2.
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        assertTrue(hooks.dedupPartRevision("s2", "m1", "p1", 3L, ctx))
+        // Both duplicates rejected.
+        assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        assertFalse(hooks.dedupPartRevision("s2", "m1", "p1", 3L, ctx))
+
+        // Clear only s1.
+        hooks.clearSessionRevisions("s1")
+
+        // s1 part re-acceptable.
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        // s2 part still rejected (not cleared).
+        assertFalse(hooks.dedupPartRevision("s2", "m1", "p1", 3L, ctx))
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────

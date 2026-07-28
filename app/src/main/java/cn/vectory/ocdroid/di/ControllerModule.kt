@@ -359,6 +359,8 @@ object ControllerModule {
             dedupPartRevision = hooks.dedupPartRevision,
             onMessagePartRemoved = hooks.onMessagePartRemoved,
             onMessageRemoved = hooks.onMessageRemoved,
+            onPartDone = hooks.onPartDone,
+            clearSessionRevisions = hooks.clearSessionRevisions,
         )
     }
 
@@ -490,7 +492,33 @@ internal data class TokenStreamProductionHooks(
         sessionId: String, messageId: String,
         context: TokenFrameCommitContext,
     ) -> Unit,
+    /**
+     * B-4 HIGH-2: called when a part reaches its terminal done:true state.
+     * The production implementation clears the per-part revision entry so the
+     * map does not grow unbounded across completed parts.
+     */
+    val onPartDone: (
+        sessionId: String, messageId: String, partId: String,
+    ) -> Unit = { _, _, _ -> },
+    /**
+     * B-4 HIGH-2: called when ALL revision entries for a session should be
+     * reclaimed (stream close, resync, session switch). Prevents unbounded
+     * map growth across the singleton coordinator's lifetime and provides
+     * connection-epoch isolation (stale revisions from a dead connection
+     * cannot block fresh frames on a new connection).
+     */
+    val clearSessionRevisions: (
+        sessionId: String,
+    ) -> Unit = { _ -> },
 )
+
+/**
+ * B-4 LOW: safe key for revision dedup. Uses \u0001 (SOH) as separator — it
+ * cannot appear in any legitimate opencode session/message/part ID (they are
+ * hex/base58/UUID-based).
+ */
+internal fun revisionKey(sid: String, mid: String, pid: String): String =
+    buildString { append(sid); append('\u0001'); append(mid); append('\u0001'); append(pid) }
 
 /**
  * lite-v2-dev (plan §4.2): constructs the three [TokenStreamCoordinator]
@@ -535,25 +563,30 @@ internal fun tokenStreamProductionHooks(
     return TokenStreamProductionHooks(
         dedupPartRevision = { sid, mid, pid, rev, _ ->
             if (rev == null) {
-                // Fail-open: null revision (older sidecar / status-only frame)
-                // — accept.
+                // Fail-open: null revision — accept.
                 true
             } else {
-                val key = "$sid|$mid|$pid"
-                val last = lastPartRevisions[key]
-                if (last != null && rev <= last) {
-                    // Stale/duplicate frame within the same part — reject
-                    // (strict `>` only).
-                    false
-                } else {
-                    lastPartRevisions[key] = rev
-                    true
+                val key = revisionKey(sid, mid, pid)
+                var accepted = false
+                // Atomic check-and-update: compute() holds the segment lock,
+                // so the strict-`>` check and the revision update are a single
+                // atomic step. Two concurrent calls for the same key serialize
+                // inside compute().
+                lastPartRevisions.compute(key) { _, current ->
+                    if (current != null && rev <= current) {
+                        // Stale/duplicate — reject, keep current.
+                        current
+                    } else {
+                        accepted = true
+                        rev
+                    }
                 }
+                accepted
             }
         },
         onMessagePartRemoved = { sid, mid, pid, _, _ ->
             // B-4: clear this part's revision entry on removal.
-            lastPartRevisions.remove("$sid|$mid|$pid")
+            lastPartRevisions.remove(revisionKey(sid, mid, pid))
             // lite-v2-dev (plan §4.2 (2)): per-(sid|mid) trailing-coalesce
             // debounce → 权威窗口 reload（limit=50）。reload 的 diff 自动发现
             // part 列表变化，不再走单条 /full reconcile。
@@ -568,7 +601,7 @@ internal fun tokenStreamProductionHooks(
         onMessageRemoved = { sid, mid, ctx ->
             // B-4: clear all revision entries for this (sid,mid) on message
             // removal.
-            val msgPrefix = "$sid|$mid|"
+            val msgPrefix = "$sid\u0001$mid\u0001"
             lastPartRevisions.entries.removeIf { it.key.startsWith(msgPrefix) }
             // lite-v2-dev (plan §4.2 (3)): 直接 dispatch
             // MessageRemovedConfirmed（即时移除，不等 reload）。删除 slim commit
@@ -582,6 +615,16 @@ internal fun tokenStreamProductionHooks(
                     bundleStamp = ctx.bundleStamp,
                 ),
             )
+        },
+        onPartDone = { sid, mid, pid ->
+            // B-4 HIGH-2: reclaim revision entry when part reaches done:true.
+            lastPartRevisions.remove(revisionKey(sid, mid, pid))
+        },
+        clearSessionRevisions = { sid ->
+            // B-4 HIGH-2: reclaim ALL revision entries for this session
+            // (close/resync/switch).
+            val sessionPrefix = "$sid\u0001"
+            lastPartRevisions.entries.removeIf { it.key.startsWith(sessionPrefix) }
         },
     )
 }
