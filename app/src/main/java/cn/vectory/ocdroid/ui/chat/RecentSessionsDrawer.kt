@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui.chat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -30,6 +31,92 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.Dimens
+
+/**
+ * §P2-item2: persistent left session sidebar and drawer content pane. Extracted
+ * from [RecentSessionsDrawer]'s body (no [ModalDrawerSheet] wrapper) so it can
+ * be reused as a persistent sidebar on tablet landscape. The caller supplies
+ * the wrapper ([ModalDrawerSheet] for the drawer, [Row] + [VerticalDivider]
+ * for the tablet sidebar).
+ *
+ * Parameters mirror [RecentSessionsDrawer] (minus `interactionsEnabled`, which
+ * the drawer handles by guarding callbacks).
+ *
+ * @param selectedSessionId when non-null, the row matching this id renders
+ *   with a selection highlight ([MaterialTheme.colorScheme.secondaryContainer]).
+ */
+@Composable
+internal fun RecentSessionsPane(
+    sessions: List<Session>,
+    onSelect: (String) -> Unit,
+    onBackToHome: () -> Unit,
+    onStartNewSession: () -> Unit = {},
+    isStartNewSessionEnabled: Boolean = true,
+    sessionErrorsByID: Map<String, SlimSessionLastError> = emptyMap(),
+    selectedSessionId: String? = null,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier) {
+        // ── Header: Home affordance (leading) + new session (trailing) ─────
+        ListItem(
+            leadingContent = {
+                IconButton(onClick = onBackToHome) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = stringResource(R.string.chat_back_to_home),
+                        modifier = Modifier.size(Dimens.iconStd),
+                    )
+                }
+            },
+            headlineContent = {
+                Text(
+                    text = stringResource(R.string.app_name),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            },
+            trailingContent = {
+                IconButton(
+                    onClick = onStartNewSession,
+                    enabled = isStartNewSessionEnabled,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Add,
+                        contentDescription = stringResource(R.string.sessions_new_session_fab),
+                        modifier = Modifier.size(Dimens.iconStd),
+                    )
+                }
+            },
+        )
+
+        // ── Section header ──────────────────────────────────────────────
+        AppSectionHeader(text = stringResource(R.string.home_section_recent))
+
+        // ── Recent sessions list ────────────────────────────────────────
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            items(
+                items = sessions,
+                key = { session -> session.id },
+            ) { session ->
+                RecentSessionRow(
+                    session = session,
+                    onClick = { onSelect(session.id) },
+                    enabled = true,
+                    showErrorIndicator = shouldShowSessionErrorIndicator(
+                        sessionId = session.id,
+                        sessionErrorsById = sessionErrorsByID,
+                    ),
+                    selected = (session.id == selectedSessionId),
+                )
+            }
+            item {
+                Box(modifier = Modifier.padding(Dimens.spacing2))
+            }
+        }
+    }
+}
 
 /**
  * §home-hub T4: tablet-only `ModalNavigationDrawer` content for the Chat
@@ -96,85 +183,16 @@ internal fun RecentSessionsDrawer(
     modifier: Modifier = Modifier,
 ) {
     ModalDrawerSheet(modifier = modifier) {
-        // ── Header: Home affordance (leading) + new session (trailing) ─────
-        // §home-hub T4: the drawer's own "back to home" entry moved to
-        // `leadingContent`. Uses ArrowBack (AutoMirrored for RTL) to mirror
-        // the phone top-left affordance's semantics — "leave chat" —
-        // consistent with the phone ArrowBack's contentDescription
-        // (chat_back_to_home). §drawer-new-session: `trailingContent` now
-        // hosts the new-session Add IconButton (mirrors SessionsScreen's
-        // new-session flow). Per ui-style-spec.md §2 the row primitive is M3
-        // `ListItem` (leading = Home/back IconButton, headline = app-name
-        // titleMedium, trailing = new-session IconButton); IconButton content
-        // uses Dimens.iconStd (24dp). This satisfies MINOR-1 (no hand-rolled
-        // Row for the header).
-        ListItem(
-            leadingContent = {
-                IconButton(
-                    onClick = onBackToHome,
-                    enabled = interactionsEnabled,
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = stringResource(R.string.chat_back_to_home),
-                        modifier = Modifier.size(Dimens.iconStd),
-                    )
-                }
-            },
-            headlineContent = {
-                Text(
-                    text = stringResource(R.string.app_name),
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            },
-            trailingContent = {
-                IconButton(
-                    onClick = onStartNewSession,
-                    enabled = isStartNewSessionEnabled && interactionsEnabled,
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Add,
-                        contentDescription = stringResource(R.string.sessions_new_session_fab),
-                        modifier = Modifier.size(Dimens.iconStd),
-                    )
-                }
-            },
+        RecentSessionsPane(
+            sessions = sessions,
+            onSelect = { sessionId -> if (interactionsEnabled) onSelect(sessionId) },
+            onBackToHome = { if (interactionsEnabled) onBackToHome() },
+            onStartNewSession = onStartNewSession,
+            isStartNewSessionEnabled = isStartNewSessionEnabled && interactionsEnabled,
+            sessionErrorsByID = sessionErrorsById,
+            selectedSessionId = null,
+            modifier = Modifier,
         )
-
-        // ── Section header ──────────────────────────────────────────────
-        // Reuses the shared AppSectionHeader primitive (ui-style-spec.md §2):
-        // titleSmall + onSurfaceVariant + 16/8dp padding.
-        AppSectionHeader(text = stringResource(R.string.home_section_recent))
-
-        // ── Recent sessions list ────────────────────────────────────────
-        LazyColumn(modifier = Modifier.fillMaxSize()) {
-            items(
-                items = sessions,
-                key = { session -> session.id },
-            ) { session ->
-                RecentSessionRow(
-                    session = session,
-                    onClick = { onSelect(session.id) },
-                    enabled = interactionsEnabled,
-                    // §T17: indicator fires iff this session has a SET
-                    // lastError in the canonical T12 store (sid absent →
-                    // no indicator). Pure check, hoisted out of the
-                    // composable for testability.
-                    showErrorIndicator = shouldShowSessionErrorIndicator(
-                        sessionId = session.id,
-                        sessionErrorsById = sessionErrorsById,
-                    ),
-                )
-            }
-            // Trailing breathing room so the last row is not flush against
-            // the navigation-gesture inset.
-            item {
-                Box(modifier = Modifier.padding(Dimens.spacing2))
-            }
-        }
     }
 }
 
@@ -201,11 +219,12 @@ internal fun RecentSessionsDrawer(
  * contract (indicator present iff [showErrorIndicator]) is the T17 gate.
  */
 @Composable
-private fun RecentSessionRow(
+internal fun RecentSessionRow(
     session: Session,
     onClick: () -> Unit,
     enabled: Boolean = true,
     showErrorIndicator: Boolean = false,
+    selected: Boolean = false,
 ) {
     val tone = remember(session.directory) { workdirTone(session.directory) }
     ListItem(
@@ -260,7 +279,12 @@ private fun RecentSessionRow(
                 )
             }
         },
-        modifier = Modifier.clickable(enabled = enabled, onClick = onClick),
+        modifier = Modifier
+            .then(
+                if (selected) Modifier.background(MaterialTheme.colorScheme.secondaryContainer)
+                else Modifier
+            )
+            .clickable(enabled = enabled, onClick = onClick),
     )
 }
 

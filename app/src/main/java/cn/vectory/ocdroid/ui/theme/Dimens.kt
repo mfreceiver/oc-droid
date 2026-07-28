@@ -59,6 +59,8 @@ object Dimens {
     val touchTargetMin: Dp = 48.dp
     /** Bounded overlay height so long status content leaves actions visible. */
     val statusCardMaxHeight: Dp = 360.dp
+    /** Width of the persistent session sidebar shown on tablet landscape (item 2). */
+    val sessionSidebarWidth: Dp = 320.dp
 
     // ── 图标尺寸阶梯（M3 对齐；UI 代码一律走这些 token，禁散落字面量）─────
     // 14 / 18 / 24 / 28 / 32 五档。历史散落的 16→iconSm(18)、20→iconSm(18)、

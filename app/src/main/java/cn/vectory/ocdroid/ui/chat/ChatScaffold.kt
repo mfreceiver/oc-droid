@@ -12,6 +12,7 @@
 
 package cn.vectory.ocdroid.ui.chat
 
+import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,11 +20,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -36,6 +40,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
@@ -48,6 +53,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -360,6 +366,10 @@ fun ChatScaffold(
     val isWide = LocalWindowSizeClass.current
         ?.let { it.widthSizeClass != WindowWidthSizeClass.Compact }
         ?: (LocalConfiguration.current.screenWidthDp >= 600)
+
+    // §P2-item2: persistent left session sidebar on tablet landscape.
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val showSessionSidebar = isWide && isLandscape
 
     // §home-hub T4: drawerState owned here. The Menu button (tablet,
     // ChatTopBar navigationIcon) opens it via [openDrawerAction]; a
@@ -914,280 +924,336 @@ fun ChatScaffold(
     // `onShowWorkdirPicker = { pendingWorkdirPick = true }` keeps
     // pendingWorkdirPick owned+consumed in ChatScaffold (ChatOverlayHost
     // reads it directly).
-    ChatDrawerHost(
-        drawerState = drawerState,
-        sessions = recentSessionsForDrawer,
-        recentWorkdirs = recentWorkdirs,
-        sessionErrorsById = sessionList.sessionErrorsById,
-        sessionVM = sessionVM,
-        closeDrawerAction = closeDrawerAction,
-        onBackToHome = onBackToHome,
-        onShowWorkdirPicker = { pendingWorkdirPick = true },
-        // §B3: drawer session-row tap uses the route-aware open pipeline.
-        onNavigateToChat = { sid -> orchestratorVM.navigateToChat(sid) },
-    ) {
-    Column(modifier = Modifier.fillMaxSize()) {
-        ChatTopBar(
-            state = topBarState,
-            actions = topBarActions,
-            onTitleClick = { showSessionPicker = true },
-            // §home-hub T4 (C1/C3): responsive top-left affordance. ChatTopBar
-            // branches on width internally (phone ArrowBack / tablet Menu).
-            onBackToHome = onBackToHome,
-            onOpenDrawer = openDrawerAction,
-        )
-
-        // §persistent-restart-required (Medium-1): show a persistent error
-        // banner while restartRequired is true (connection params changed,
-        // restart needed). Tied to the state flag — NOT auto-dismiss.
-        if (connection.restartRequired) {
-            StatusBanner(
-                modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.errorContainer,
-                border = null,
-            ) {
-                Text(
-                    text = stringResource(R.string.connection_restart_required_title),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    text = stringResource(R.string.connection_restart_required),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                )
-            }
-        }
-
-        // §B6: SessionTabStrip removed. The SessionPickerSheet (opened by
-        // tapping the ChatTopBar title) is the sole session-switching surface.
-
-        // §PARITY: wide-screen card wrap mirrors ChatScreen 10/§B3. Phase 1B
-        // keeps the wrapping Surface so the chat area looks identical on
-        // Medium/Expanded. (§home-hub T4: `isWide` is now hoisted to the
-        // top of ChatScaffold so it also gates the ModalNavigationDrawer
-        // wrapper below — this branch just reuses the hoisted value.)
-        val cardShape = if (isWide) MaterialTheme.shapes.large else RectangleShape
-        androidx.compose.material3.Surface(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .then(if (isWide) Modifier.padding(8.dp) else Modifier),
-            color = MaterialTheme.colorScheme.surfaceContainerLow,
-            shape = cardShape,
-            shadowElevation = if (isWide) 2.dp else 0.dp,
-            tonalElevation = if (isWide) 1.dp else 0.dp
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                ) {
-                    // §B6: ChatSessionPager deleted. The route-aware detail
-                    // (routeSessionId != null) is the sole chat surface.
-                    if (routeSessionId != null) {
-                        // Route-aware B2 detail: only LoadedContent owned by
-                        // this route instance can become transcript UI.
-                        val routeContent = routeOwnedContent
-                        if (routeContent != null) {
-                            ChatMessageList(
-                                chatVM = chatVM,
-                                composerVM = composerVM,
-                                sessionVM = sessionVM,
-                                orchestratorVM = orchestratorVM,
-                                onFileClick = onChatFileClick,
-                                onOpenChanges = onOpenGitChanges,
-                                savedPositions = savedPositions,
-                                accessOrder = accessOrder,
-                                onCopyMessage = { _, text -> copyToSystemClipboard(context, text) },
-                                onEditAndRerun = { messageId -> chatVM.editFromMessage(messageId) },
-                                onFork = { messageId -> sessionVM.forkSession(routeSessionId, messageId) },
-                                isCurrentSessionSending = isCurrentSessionSending,
-                                routeSessionId = routeSessionId,
-                                routeContent = routeContent,
-                                // §chat-list-detail §11 / G6 (B5): the
-                                // openSubAgent callback that persists the
-                                // captured checkpoint on the parent route
-                                // entry's SavedStateHandle BEFORE route-aware
-                                // navigation to the child.
-                                onOpenSubAgentNavigate = onOpenSubAgentNavigate,
-                            )
-                        } else {
-                            ChatDetailSlice(
-                                routeId = routeSessionId,
-                                chatVM = chatVM,
-                                orchestratorVM = orchestratorVM,
-                            )
-                        }
-                    } else if (composer.draftWorkdir == null) {
-                        ChatEmptyState(
-                            isConnected = connection.isConnected,
-                            isConnecting = connection.isConnecting,
-                            connectionPhase = connection.connectionPhase,
-                            hostName = curHostProfile?.name
-                                ?: curHostProfile?.serverUrl
-                                    ?.substringAfter("://")
-                                    ?.substringBefore("/")
-                                    ?: stringResource(R.string.chat_server_fallback),
-                            onConnect = { connectionVM.testConnection() },
-                            // §new2: when the user closed every tab
-                            // (currentSessionId == null, no draft), the empty
-                            // state's "connected + idle" branch offers a one-
-                            // tap deep-link to the Sessions screen.
-                            onNavigateToSessions = onNavigateToSessions,
-                        )
-                    }
-
-                    // §1C: the single status slot (C.3 / D.2.1). Replaces the
-                    // five competing overlays (thinking / retry / connecting /
-                    // question / permission) that used to stack on top of
-                    // the chat area. Only ONE of (Permission, Question,
-                    // Retry, Compacting, Running, Connecting) renders at any
-                    // time — see [StatusSlotPriority.pick] for the binding
-                    // rule and the priority enum. The pending permission is
-                    // pre-filtered to chat.currentSessionId (P5-7) at the
-                    // call site; the slot does not re-apply the filter.
-                    //
-                    // §1C-FIX-①: the caller MUST NOT pre-filter the inputs
-                    // beyond the P5-7 session-scope rule. The previous
-                    // `curSessionStatus?.takeIf { !chat.isCompacting }` and
-                    // the `curSessionStatus?.isRetry != true` filter on
-                    // currentActivityText were over-eager: they hid a Retry
-                    // status from `pick()` whenever Compacting was also
-                    // true, breaking the C.3 priority (Retry > Compacting).
-                    // pick() is now the SOLE decision point — we hand it
-                    // the canonical inputs and let it return the winning
-                    // class. sessionStatus flows in whole (including
-                    // isRetry even during compaction) and the activity
-                    // text is the raw value (Retry > Running means the
-                    // text is ignored when Retry wins, exactly what the
-                    // scheme specifies).
-                    SnackbarHost(
-                        hostState = snackbarHostState,
-                        modifier = Modifier.align(Alignment.BottomCenter)
-                    )
-                    StatusSlot(
-                        permission = pendingPermission,
-                        question = pendingQuestion,
-                        sessionStatus = curSessionStatus,
-                        isCompacting = chat.isCompacting,
-                        currentActivityText = if (currentSessionIsRunning && currentActivity != null) {
-                            currentActivity.text
-                        } else {
-                            null
-                        },
-                        // §1C-FIX-⑤: pass the startedAt values that the
-                        // Compacting + Running branches need for the
-                        // elapsed timer. The values are non-null when
-                        // the corresponding state is active (see
-                        // ChatActivityHelpers for how currentActivity
-                        // sources startedAtMillis from the latest user
-                        // message's time.created).
-                        currentActivityStartedAtMillis = currentActivity?.startedAtMillis,
-                        compactStartedAt = chat.compactStartedAt,
-                        isConnecting = connection.isConnecting && !connection.isConnected,
-                        // §T17 slimapi v1 §6.1: source the current
-                        // session's lastError from the canonical T12
-                        // store (SessionListState.sessionErrorsById).
-                        // The lookup uses the SAME sid derivation as
-                        // curSessionStatus above (chat.currentSessionId
-                        // → sessionList.sessionStatuses), so the banner
-                        // is in lockstep with the other session-scoped
-                        // slot inputs. Null when the sid is absent from
-                        // the map (no error / recovered) — the slot's
-                        // LastError branch NEVER fires for an absent sid.
-                        // Caller is the sole filter site (file doc rule).
-                        lastError = chromeSessionId?.let { sessionList.sessionErrorsById[it] },
-                        // §1C-FIX-⑧: scheme E.4 metadata. Sourced from
-                        // the canonical slices: host (host.hostProfiles
-                        // + currentHostProfileId), workdir (current
-                        // session's directory or composer draft), session
-                        // (current session's displayName), tool
-                        // (permission.tool), target (permission.metadata
-                        // .filepath — the most common target shape;
-                        // could be extended in future for command-line
-                        // targets).
-                        permissionMetadata = ChatPermissionMetadata(
-                            hostName = curHostProfile?.name,
-                            workdirBasename = (curSession?.directory
-                                ?: composer.draftWorkdir)
-                                ?.split('/')
-                                ?.filter { it.isNotEmpty() }
-                                ?.lastOrNull(),
-                            sessionName = curSession?.displayName,
-                            // The "tool name" the user cares about is
-                            // the permission string itself (e.g.
-                            // "bash" / "edit" / "webfetch"). The
-                            // [PermissionRequest.tool] field is a
-                            // ToolRef (messageId / callId reference)
-                            // and is NOT a human-readable tool name.
-                            toolName = pendingPermission?.permission,
-                            target = pendingPermission?.metadata?.filepath,
-                        ),
-                        onRespondPermission = { response ->
-                            pendingPermission?.let { p ->
-                                // §Phase3b slim: thread the slimapi HMAC the
-                                // sidecar re-injects directory from. Null on
-                                // legacy single-dir path.
-                                orchestratorVM.respondPermission(p.sessionId, p.id, response, p.routeToken)
-                            }
-                        },
-                        onReplyQuestion = { questionId, answers, onError ->
-                            // §Phase3b slim: matchingQuestions holds the same
-                            // QuestionRequest models StatusSlot renders
-                            // (pendingQuestion = matchingQuestions.firstOrNull());
-                            // lookup by id is exact, no implicit slice read.
-                            val routeToken = matchingQuestions.firstOrNull { it.id == questionId }?.routeToken
-                            orchestratorVM.replyQuestion(questionId, answers, routeToken, onError)
-                        },
-                        onRejectQuestion = { questionId, onError ->
-                            val routeToken = matchingQuestions.firstOrNull { it.id == questionId }?.routeToken
-                            orchestratorVM.rejectQuestion(questionId, routeToken, onError)
-                        },
-                        questionQueuePosition = pendingQuestion?.let { q ->
-                            matchingQuestions.indexOfFirst { it.id == q.id } + 1
-                        } ?: 1,
-                        questionQueueTotal = matchingQuestions.size,
-                        onAbort = { chatVM.abortSession(chromeSessionId) },
-                    )
+    // §P2-item2: new-session handler for the persistent sidebar
+    // (mirrors ChatDrawerHost's onStartNewSessionInDrawer but without
+    // drawer close animation — the sidebar is always visible).
+    val onStartNewSessionInSidebar: () -> Unit = remember(recentWorkdirs, sessionVM) {
+        {
+            when {
+                recentWorkdirs.isEmpty() -> Unit
+                recentWorkdirs.size == 1 -> {
+                    sessionVM.createSessionInWorkdir(recentWorkdirs.single())
+                }
+                else -> {
+                    pendingWorkdirPick = true
                 }
             }
         }
-
-        // §PARITY: ChatInputBar moved to the outer Column (below the chat
-        // Surface) so it is not wrapped by the chat card's background /
-        // rounding / elevation. Composer.kt replaces ChatInputBar.kt and
-        // subscribes to the same slices (composerFlow + settingsFlow) and
-        // routes through the same domain methods.
-        if (routeSessionId != null || chat.currentSessionId != null || composer.draftWorkdir != null) {
-            // §1B-FIX (I5): Composer no longer takes connectionVM / hostVM —
-            // it does not render any chrome that needs them (the surface
-            // stays on composerFlow + settingsFlow + a narrow
-            // currentModelFlow projection). Removing the dead injections
-            // enforces "Composer must NOT subscribe to unrelated slices".
-            Composer(
-                chatVM = chatVM,
-                composerVM = composerVM,
-                orchestratorVM = orchestratorVM,
-                isBusy = currentSessionIsRunning || chat.isCompacting,
-                questionPending = pendingQuestion != null,
-                onAddImages = onAddImages,
-                onAbort = { chatVM.abortSession(chromeSessionId) },
-            )
-        }
-
-        // §1C: the bottom-anchored ChatPermissionCard that used to live
-        // here is REMOVED — the single StatusSlot (above the chat Surface)
-        // now renders the permission card for the current session. Cross-
-        // session pending items surface as a Sessions nav-bar badge (Phase
-        // 1A / scheme D.1) and never appear in the chat area. The bottom
-        // space that this Column would have occupied is now empty (the
-        // message Surface above uses weight(1f), so it claims the full
-        // vertical space and the Composer sits flush below).
     }
-    } // §L5a: end ChatDrawerHost content lambda (was ModalNavigationDrawer).
+
+    // §P2-item2: extract the chat body as a reusable composable lambda
+    // so it can be shared between the drawer and the persistent sidebar.
+    val chatBodyContent: @Composable () -> Unit = {
+        Column(modifier = Modifier.fillMaxSize()) {
+            ChatTopBar(
+                state = topBarState,
+                actions = topBarActions,
+                onTitleClick = { showSessionPicker = true },
+                // §home-hub T4 (C1/C3): responsive top-left affordance. ChatTopBar
+                // branches on width internally (phone ArrowBack / tablet Menu).
+                onBackToHome = onBackToHome,
+                onOpenDrawer = openDrawerAction,
+            )
+
+            // §persistent-restart-required (Medium-1): show a persistent error
+            // banner while restartRequired is true (connection params changed,
+            // restart needed). Tied to the state flag — NOT auto-dismiss.
+            if (connection.restartRequired) {
+                StatusBanner(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    border = null,
+                ) {
+                    Text(
+                        text = stringResource(R.string.connection_restart_required_title),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = stringResource(R.string.connection_restart_required),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                }
+            }
+
+            // §B6: SessionTabStrip removed. The SessionPickerSheet (opened by
+            // tapping the ChatTopBar title) is the sole session-switching surface.
+
+            // §PARITY: wide-screen card wrap mirrors ChatScreen 10/§B3. Phase 1B
+            // keeps the wrapping Surface so the chat area looks identical on
+            // Medium/Expanded. (§home-hub T4: `isWide` is now hoisted to the
+            // top of ChatScaffold so it also gates the ModalNavigationDrawer
+            // wrapper below — this branch just reuses the hoisted value.)
+            val cardShape = if (isWide) MaterialTheme.shapes.large else RectangleShape
+            androidx.compose.material3.Surface(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .then(if (isWide) Modifier.padding(8.dp) else Modifier),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                shape = cardShape,
+                shadowElevation = if (isWide) 2.dp else 0.dp,
+                tonalElevation = if (isWide) 1.dp else 0.dp
+            ) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                    ) {
+                        // §B6: ChatSessionPager deleted. The route-aware detail
+                        // (routeSessionId != null) is the sole chat surface.
+                        if (routeSessionId != null) {
+                            // Route-aware B2 detail: only LoadedContent owned by
+                            // this route instance can become transcript UI.
+                            val routeContent = routeOwnedContent
+                            if (routeContent != null) {
+                                ChatMessageList(
+                                    chatVM = chatVM,
+                                    composerVM = composerVM,
+                                    sessionVM = sessionVM,
+                                    orchestratorVM = orchestratorVM,
+                                    onFileClick = onChatFileClick,
+                                    onOpenChanges = onOpenGitChanges,
+                                    savedPositions = savedPositions,
+                                    accessOrder = accessOrder,
+                                    onCopyMessage = { _, text -> copyToSystemClipboard(context, text) },
+                                    onEditAndRerun = { messageId -> chatVM.editFromMessage(messageId) },
+                                    onFork = { messageId -> sessionVM.forkSession(routeSessionId, messageId) },
+                                    isCurrentSessionSending = isCurrentSessionSending,
+                                    routeSessionId = routeSessionId,
+                                    routeContent = routeContent,
+                                    // §chat-list-detail §11 / G6 (B5): the
+                                    // openSubAgent callback that persists the
+                                    // captured checkpoint on the parent route
+                                    // entry's SavedStateHandle BEFORE route-aware
+                                    // navigation to the child.
+                                    onOpenSubAgentNavigate = onOpenSubAgentNavigate,
+                                )
+                            } else {
+                                ChatDetailSlice(
+                                    routeId = routeSessionId,
+                                    chatVM = chatVM,
+                                    orchestratorVM = orchestratorVM,
+                                )
+                            }
+                        } else if (composer.draftWorkdir == null) {
+                            ChatEmptyState(
+                                isConnected = connection.isConnected,
+                                isConnecting = connection.isConnecting,
+                                connectionPhase = connection.connectionPhase,
+                                hostName = curHostProfile?.name
+                                    ?: curHostProfile?.serverUrl
+                                        ?.substringAfter("://")
+                                        ?.substringBefore("/")
+                                        ?: stringResource(R.string.chat_server_fallback),
+                                onConnect = { connectionVM.testConnection() },
+                                // §new2: when the user closed every tab
+                                // (currentSessionId == null, no draft), the empty
+                                // state's "connected + idle" branch offers a one-
+                                // tap deep-link to the Sessions screen.
+                                onNavigateToSessions = onNavigateToSessions,
+                            )
+                        }
+
+                        // §1C: the single status slot (C.3 / D.2.1). Replaces the
+                        // five competing overlays (thinking / retry / connecting /
+                        // question / permission) that used to stack on top of
+                        // the chat area. Only ONE of (Permission, Question,
+                        // Retry, Compacting, Running, Connecting) renders at any
+                        // time — see [StatusSlotPriority.pick] for the binding
+                        // rule and the priority enum. The pending permission is
+                        // pre-filtered to chat.currentSessionId (P5-7) at the
+                        // call site; the slot does not re-apply the filter.
+                        //
+                        // §1C-FIX-①: the caller MUST NOT pre-filter the inputs
+                        // beyond the P5-7 session-scope rule. The previous
+                        // `curSessionStatus?.takeIf { !chat.isCompacting }` and
+                        // the `curSessionStatus?.isRetry != true` filter on
+                        // currentActivityText were over-eager: they hid a Retry
+                        // status from `pick()` whenever Compacting was also
+                        // true, breaking the C.3 priority (Retry > Compacting).
+                        // pick() is now the SOLE decision point — we hand it
+                        // the canonical inputs and let it return the winning
+                        // class. sessionStatus flows in whole (including
+                        // isRetry even during compaction) and the activity
+                        // text is the raw value (Retry > Running means the
+                        // text is ignored when Retry wins, exactly what the
+                        // scheme specifies).
+                        SnackbarHost(
+                            hostState = snackbarHostState,
+                            modifier = Modifier.align(Alignment.BottomCenter)
+                        )
+                        StatusSlot(
+                            permission = pendingPermission,
+                            question = pendingQuestion,
+                            sessionStatus = curSessionStatus,
+                            isCompacting = chat.isCompacting,
+                            currentActivityText = if (currentSessionIsRunning && currentActivity != null) {
+                                currentActivity.text
+                            } else {
+                                null
+                            },
+                            // §1C-FIX-⑤: pass the startedAt values that the
+                            // Compacting + Running branches need for the
+                            // elapsed timer. The values are non-null when
+                            // the corresponding state is active (see
+                            // ChatActivityHelpers for how currentActivity
+                            // sources startedAtMillis from the latest user
+                            // message's time.created).
+                            currentActivityStartedAtMillis = currentActivity?.startedAtMillis,
+                            compactStartedAt = chat.compactStartedAt,
+                            isConnecting = connection.isConnecting && !connection.isConnected,
+                            // §T17 slimapi v1 §6.1: source the current
+                            // session's lastError from the canonical T12
+                            // store (SessionListState.sessionErrorsById).
+                            // The lookup uses the SAME sid derivation as
+                            // curSessionStatus above (chat.currentSessionId
+                            // → sessionList.sessionStatuses), so the banner
+                            // is in lockstep with the other session-scoped
+                            // slot inputs. Null when the sid is absent from
+                            // the map (no error / recovered) — the slot's
+                            // LastError branch NEVER fires for an absent sid.
+                            // Caller is the sole filter site (file doc rule).
+                            lastError = chromeSessionId?.let { sessionList.sessionErrorsById[it] },
+                            // §1C-FIX-⑧: scheme E.4 metadata. Sourced from
+                            // the canonical slices: host (host.hostProfiles
+                            // + currentHostProfileId), workdir (current
+                            // session's directory or composer draft), session
+                            // (current session's displayName), tool
+                            // (permission.tool), target (permission.metadata
+                            // .filepath — the most common target shape;
+                            // could be extended in future for command-line
+                            // targets).
+                            permissionMetadata = ChatPermissionMetadata(
+                                hostName = curHostProfile?.name,
+                                workdirBasename = (curSession?.directory
+                                    ?: composer.draftWorkdir)
+                                    ?.split('/')
+                                    ?.filter { it.isNotEmpty() }
+                                    ?.lastOrNull(),
+                                sessionName = curSession?.displayName,
+                                // The "tool name" the user cares about is
+                                // the permission string itself (e.g.
+                                // "bash" / "edit" / "webfetch"). The
+                                // [PermissionRequest.tool] field is a
+                                // ToolRef (messageId / callId reference)
+                                // and is NOT a human-readable tool name.
+                                toolName = pendingPermission?.permission,
+                                target = pendingPermission?.metadata?.filepath,
+                            ),
+                            onRespondPermission = { response ->
+                                pendingPermission?.let { p ->
+                                    // §Phase3b slim: thread the slimapi HMAC the
+                                    // sidecar re-injects directory from. Null on
+                                    // legacy single-dir path.
+                                    orchestratorVM.respondPermission(p.sessionId, p.id, response, p.routeToken)
+                                }
+                            },
+                            onReplyQuestion = { questionId, answers, onError ->
+                                // §Phase3b slim: matchingQuestions holds the same
+                                // QuestionRequest models StatusSlot renders
+                                // (pendingQuestion = matchingQuestions.firstOrNull());
+                                // lookup by id is exact, no implicit slice read.
+                                val routeToken = matchingQuestions.firstOrNull { it.id == questionId }?.routeToken
+                                orchestratorVM.replyQuestion(questionId, answers, routeToken, onError)
+                            },
+                            onRejectQuestion = { questionId, onError ->
+                                val routeToken = matchingQuestions.firstOrNull { it.id == questionId }?.routeToken
+                                orchestratorVM.rejectQuestion(questionId, routeToken, onError)
+                            },
+                            questionQueuePosition = pendingQuestion?.let { q ->
+                                matchingQuestions.indexOfFirst { it.id == q.id } + 1
+                            } ?: 1,
+                            questionQueueTotal = matchingQuestions.size,
+                            onAbort = { chatVM.abortSession(chromeSessionId) },
+                        )
+                    }
+                }
+            }
+
+            // §PARITY: ChatInputBar moved to the outer Column (below the chat
+            // Surface) so it is not wrapped by the chat card's background /
+            // rounding / elevation. Composer.kt replaces ChatInputBar.kt and
+            // subscribes to the same slices (composerFlow + settingsFlow) and
+            // routes through the same domain methods.
+            if (routeSessionId != null || chat.currentSessionId != null || composer.draftWorkdir != null) {
+                // §1B-FIX (I5): Composer no longer takes connectionVM / hostVM —
+                // it does not render any chrome that needs them (the surface
+                // stays on composerFlow + settingsFlow + a narrow
+                // currentModelFlow projection). Removing the dead injections
+                // enforces "Composer must NOT subscribe to unrelated slices".
+                Composer(
+                    chatVM = chatVM,
+                    composerVM = composerVM,
+                    orchestratorVM = orchestratorVM,
+                    isBusy = currentSessionIsRunning || chat.isCompacting,
+                    questionPending = pendingQuestion != null,
+                    onAddImages = onAddImages,
+                    onAbort = { chatVM.abortSession(chromeSessionId) },
+                )
+            }
+
+            // §1C: the bottom-anchored ChatPermissionCard that used to live
+            // here is REMOVED — the single StatusSlot (above the chat Surface)
+            // now renders the permission card for the current session. Cross-
+            // session pending items surface as a Sessions nav-bar badge (Phase
+            // 1A / scheme D.1) and never appear in the chat area. The bottom
+            // space that this Column would have occupied is now empty (the
+            // message Surface above uses weight(1f), so it claims the full
+            // vertical space and the Composer sits flush below).
+        }
+    }
+
+    // §P2-item2: SaveableStateHolder that survives the branch swap
+    // (when showSessionSidebar flips on rotation, chatBodyContent moves
+    // between ChatDrawerHost and Row/Box parents — without this holder,
+    // rememberSaveable keys are positional and get re-initialized,
+    // losing scroll position, followBottom, and Composer sheet state).
+    val chatBodySaveableHolder = rememberSaveableStateHolder()
+
+    // §P2-item2: branch — persistent sidebar on tablet landscape,
+    // drawer on phone / portrait-tablet.
+    if (showSessionSidebar) {
+        Row(modifier = Modifier.fillMaxSize()) {
+            RecentSessionsPane(
+                sessions = recentSessionsForDrawer,
+                onSelect = { sid ->
+                    if (sid != chromeSessionId) orchestratorVM.navigateToChat(sid)
+                },
+                onBackToHome = onBackToHome,
+                onStartNewSession = onStartNewSessionInSidebar,
+                isStartNewSessionEnabled = recentWorkdirs.isNotEmpty(),
+                sessionErrorsByID = sessionList.sessionErrorsById,
+                selectedSessionId = chromeSessionId,
+                modifier = Modifier.width(Dimens.sessionSidebarWidth).fillMaxHeight(),
+            )
+            VerticalDivider(Modifier.fillMaxHeight())
+            Box(modifier = Modifier.weight(1f)) {
+                chatBodySaveableHolder.SaveableStateProvider(key = "chatBody") {
+                    chatBodyContent()
+                }
+            }
+        }
+    } else {
+        ChatDrawerHost(
+            drawerState = drawerState,
+            sessions = recentSessionsForDrawer,
+            recentWorkdirs = recentWorkdirs,
+            sessionErrorsById = sessionList.sessionErrorsById,
+            sessionVM = sessionVM,
+            closeDrawerAction = closeDrawerAction,
+            onBackToHome = onBackToHome,
+            onShowWorkdirPicker = { pendingWorkdirPick = true },
+            onNavigateToChat = { sid -> orchestratorVM.navigateToChat(sid) },
+        ) {
+            chatBodySaveableHolder.SaveableStateProvider(key = "chatBody") {
+                chatBodyContent()
+            }
+        }
+    }
 
     // ── Phase 1B sheets / overflows / dialogs (new) ──────────────────────
     ChatOverlayHost(
