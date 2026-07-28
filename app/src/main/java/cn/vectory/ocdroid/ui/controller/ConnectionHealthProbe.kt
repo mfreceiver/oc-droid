@@ -710,18 +710,6 @@ internal class ConnectionHealthProbe(
                             onSettled?.invoke(false)
                             return@launch
                         }
-                        ConnectionBootstrapOutcome.ReconfigureInProgress -> {
-                            if (attempt >= delays.size) {
-                                writeConnection {
-                                    it.copy(isConnected = false, isConnecting = false,
-                                        connectionPhase = ConnectionPhase.Disconnected)
-                                }
-                                settled = true
-                                onSettled?.invoke(false)
-                                return@launch
-                            }
-                            delay(delays[attempt++])
-                        }
                         is ConnectionBootstrapOutcome.Failed -> {
                             if (attempt >= delays.size) {
                                 effects.tryEmitUiEvent(

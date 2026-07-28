@@ -614,4 +614,6 @@
          Partial incompleteness is signal-only (no toast on every resync). -->
     <string name="error_slim_questions_fetch_failed">Failed to refresh pending questions; showing the previous state.</string>
     <string name="error_slim_permissions_fetch_failed">Failed to refresh pending permissions; showing the previous state.</string>
+    <string name="connection_restart_required">连接参数已更改，请重启应用以生效</string>
+    <string name="connection_restart_required_title">需要重启</string>
 </resources>

@@ -37,10 +37,6 @@ class ConnectionBootstrapRunner @Inject constructor(
                 DebugLog.i(TAG, "runBootstrap: TOFU degraded for ${result.hostPort}")
                 BootstrapResult.TofuNeedsActivity(result.hostPort)
             }
-            ConnectionBootstrapOutcome.ReconfigureInProgress -> {
-                DebugLog.i(TAG, "runBootstrap deferred: reconfigure in progress")
-                BootstrapResult.Failed
-            }
             is ConnectionBootstrapOutcome.Failed -> {
                 DebugLog.w(TAG, "runBootstrap failed: ${result.error.message}")
                 BootstrapResult.Failed

@@ -683,7 +683,7 @@ class ConnectionCoordinator(
      */
     fun cancelSseForReconfigure() {
         DebugLog.i("SSE", "cancelSse (reconfigure)")
-        cancelSseInternal(TeardownReason.Reconfigure)
+        cancelSseInternal(TeardownReason.Disconnect)
     }
 
     /**

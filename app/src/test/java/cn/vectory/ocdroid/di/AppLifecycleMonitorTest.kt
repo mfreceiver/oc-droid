@@ -831,7 +831,7 @@ class AppLifecycleMonitorTest {
                     // Mid-flight host switch (production reconfigure order):
                     // identity + slim marker rotate BEFORE configure rewires.
                     identityStore.beginReconfigure()
-                    val ticket = realRepo.beginSlimReconfigure()
+                    // lite-v2: beginSlimReconfigure removed
                     realRepo.configure(
                         baseUrl = baseUrlA,
                         slim = true,

@@ -88,8 +88,7 @@ internal suspend fun getSlimapiSessionsDelegate(
             return@runSuspendCatching SlimSessionsPage(
                 sessions = sessions,
                 complete = headers?.get("X-Complete")?.toBooleanStrictOrNull(),
-                discoveryDirectories = headers?.get("X-Discovery-Directories")?.toIntOrNull(),
-                discoveryReady = headers?.get("X-Discovery-Ready")?.toBooleanStrictOrNull(),
+
             )
         }
         // Non-2xx: read the sidecar's coded envelope ONCE (errorBody is

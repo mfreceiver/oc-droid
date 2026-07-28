@@ -743,14 +743,16 @@ class ConnectionCoordinatorTest {
         coordinator.cancelSseForReconfigure()
         runPending()
         assertEquals(epochBefore, identityStore.currentEpoch())
-        assertTrue(collectedEffects.none { it is ControllerEffect.HostReconfigured })
+        // lite-v2: HostReconfigured removed
+        assertTrue(collectedEffects.isEmpty())
     }
 
     @Test
     fun `cancelSseForReconfigure is neutral with no active feed`() {
         coordinator.cancelSseForReconfigure()
         runPending()
-        assertTrue(collectedEffects.none { it is ControllerEffect.HostReconfigured })
+        // lite-v2: HostReconfigured removed
+        assertTrue(collectedEffects.isEmpty())
     }
 
     // ── loadInitialData (§best-effort: directory onFailure is non-fatal) ───

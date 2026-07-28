@@ -271,55 +271,12 @@ class OpenCodeRepository @Inject constructor(
     // incarnation 保护语义本身已弱化），故以 **no-op stub** 形式保留符号，使全部引用
     // 解析、barrier 系统以 best-effort 继续运行。
 
-    /** lite-v2 stub: typed stale-marker exception（catch 站点仍 catch）。 */
-    @Deprecated("lite-v2 compatibility shim; stale-write protection via ReloadIdentity.serverGroupFp + routeInstance", level = DeprecationLevel.WARNING)
+    // lite-v2: slim incarnation stubs removed (incarnation protocol fully retired).
+    // The remaining StaleSlimCommitException is kept for PermissionRefreshOrchestrator
+    // catch site — it will be removed in a follow-up cleanup.
+    @Deprecated("lite-v2 compatibility shim", level = DeprecationLevel.WARNING)
     class StaleSlimCommitException internal constructor() :
         java.io.IOException("stale or not-ready slim repository incarnation")
-
-    /** lite-v2 stub: reconfigure transaction handle（barrier 系统仍传递）。 */
-    @Deprecated("lite-v2: incarnation protocol retired; host switch = app restart")
-    class SlimReconfigureTicket internal constructor(internal val marker: Any)
-
-    /** lite-v2 stub: superseded-transaction marker（barrier/ProfileMutation 引用）。 */
-    @Deprecated("lite-v2 compatibility shim; stale-write protection via ReloadIdentity.serverGroupFp + routeInstance", level = DeprecationLevel.WARNING)
-    class SupersededSlimReconfigureException internal constructor() :
-        java.io.IOException("superseded slim reconfigure transaction")
-
-    /** lite-v2 stub: concurrent-reconfigure marker（ConnectionBootstrapEngine 引用）。 */
-    @Deprecated("lite-v2 compatibility shim; stale-write protection via ReloadIdentity.serverGroupFp + routeInstance", level = DeprecationLevel.WARNING)
-    class SlimReconfigureInProgressException internal constructor() :
-        java.io.IOException("slim reconfigure already in progress")
-
-    /** lite-v2 stub: no-op incarnation begin（barrier 系统仍调用）。返回一个
-     *  一次性 ticket 句柄；不再旋转 marker / 清 SSE state（incarnation 保护弱化）。 */
-    @Deprecated("lite-v2: incarnation protocol retired; no-op")
-    fun beginSlimReconfigure(): SlimReconfigureTicket =
-        SlimReconfigureTicket(Any())
-
-    /** lite-v2 stub: no-op incarnation complete. */
-    @Deprecated("lite-v2: incarnation protocol retired; no-op")
-    fun completeSlimReconfigure(ticket: SlimReconfigureTicket): Unit = Unit
-
-    /** lite-v2 stub: no-op incarnation failure mark. */
-    @Deprecated("lite-v2: incarnation protocol retired; no-op")
-    fun markSlimReconfigureFailed(ticket: SlimReconfigureTicket): Unit = Unit
-
-    /** lite-v2 stub: incarnation 永远 ready（C2: host 切换 = 重启）。 */
-    @Deprecated("lite-v2: incarnation protocol retired; always ready")
-    fun isSlimIncarnationReady(): Boolean = true
-
-    /** lite-v2 stub: 永不 failed。 */
-    @Deprecated("lite-v2: incarnation protocol retired; never failed")
-    fun isSlimIncarnationFailed(): Boolean = false
-
-    /** lite-v2 stub: 永不 reconfiguring。 */
-    @Deprecated("lite-v2: incarnation protocol retired; never reconfiguring")
-    fun isSlimIncarnationReconfiguring(): Boolean = false
-
-    /** lite-v2 stub: same-host local wipe（清 authoritative store，保留 transport）。 */
-    @Deprecated("lite-v2: slim state machine retired; no-op")
-    fun resetSlimForLocalWipe(): Unit = Unit
-    // ── end lite-v2 stubs ─────────────────────────────────────────────────────
 
     // lite-v2: 在 C2 约束下（host 切换 = 进程重启），跨连接 stale write 不可能发生。
     // ReloadIdentity（serverGroupFp + routeInstance）在 SkeletonReloadCoordinator 中
@@ -2229,25 +2186,6 @@ class OpenCodeRepository @Inject constructor(
          */
         private const val TAG = "OpenCodeRepository"
     }
-
-    /**
-     * lite-v2-dev: invalidate the thin-route cache for the current host.
-     * ExpandBatchEngine retired; this is now a no-op (the N×/full loop does
-     * not cache). Kept on OCR's public surface so callers resolve unchanged.
-     */
-    fun invalidateThinRouteCache(): Unit = Unit
-
-    /**
-     * lite-v2-dev: was the slim SSE state machine's atomic watermark clear.
-     * SlimSseStateMachine retired; this is now a no-op. Kept on OCR's public
-     * surface so session-eviction callers (AppCore / SessionSwitcher) resolve
-     * unchanged — without the slim SSE state, there is no local-applied
-     * watermark to invalidate.
-     */
-    fun invalidateSlimLocalApplied(
-        sessionId: String,
-        @Suppress("UNUSED_PARAMETER") token: SlimCommitToken,
-    ): Unit = Unit
 
     /**
      * lite-v2-dev: was the slim cursor-endpoint paged fetch. The slim

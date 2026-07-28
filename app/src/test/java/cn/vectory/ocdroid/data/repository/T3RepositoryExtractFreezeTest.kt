@@ -40,8 +40,6 @@ import javax.inject.Inject
  *
  * Inner to extract carefully (frozen in §4):
  *  - SlimSseState — the per-session bookmark map.
- *  - SlimCommitToken / SlimReconfigureTicket / StaleSlimCommitException /
- *    SupersededSlimReconfigureException (nested in OpenCodeRepository) — the
  *    slim incarnation token / ticket types consumed by
  *    SessionSyncCoordinator (SSC).
  *  - slimStateLock — the per-repository atomic state boundary.
@@ -121,17 +119,11 @@ class T3RepositoryExtractFreezeTest {
             "requireSlimTokenCurrent must exist",
             hasMethod(cls, "requireSlimTokenCurrent"),
         )
-        assertTrue("beginSlimReconfigure must exist", hasMethod(cls, "beginSlimReconfigure"))
-        assertTrue(
-            "completeSlimReconfigure must exist",
-            hasMethod(cls, "completeSlimReconfigure"),
-        )
 
         // ── slim per-session bookmark state (V2: slim state machine retired) ─
         // applySlimDigest, getSlimSessionState, markSlimSessionDeleted,
         // clearSlimLocalMessages, markSlimReconcileFailure,
         // markSlimReconcileAligned, markSlimDirty were removed in slimapi V2.
-        assertTrue("invalidateSlimLocalApplied must exist", hasMethod(cls, "invalidateSlimLocalApplied"))
 
         // ── slim messages (frozen by SlimapiEndpointsTest) ────────────────
         // coldStartSlimSync was removed in slimapi V2.
@@ -142,7 +134,6 @@ class T3RepositoryExtractFreezeTest {
         assertTrue("getMessages must exist", hasMethod(cls, "getMessages"))
         assertTrue("sendMessage must exist", hasMethod(cls, "sendMessage"))
         assertTrue("connectSSE must exist", hasMethod(cls, "connectSSE"))
-        assertTrue("invalidateThinRouteCache must exist", hasMethod(cls, "invalidateThinRouteCache"))
 
         // ── companion constant surface ───────────────────────────────────
         // DEFAULT_SERVER is the legacy default URL (mirrored from
@@ -391,7 +382,6 @@ class T3RepositoryExtractFreezeTest {
             "HostConfig" to "HostConfig",
             "LegacyApiFacade" to "OpenCodeApi (Retrofit interface)",
             "SlimApiFacade" to "OpenCodeApi (slimapi methods) + SlimapiContract",
-            "SlimStateManager" to "SlimSseState (+ SlimCommitToken / SlimReconfigureTicket)",
             "RepositoryRuntime" to "OpenCodeRepository (orchestrating facade)",
         )
 
@@ -458,23 +448,13 @@ class T3RepositoryExtractFreezeTest {
             OpenCodeRepository.SlimCommitToken::class.java.name,
         )
         assertEquals(
-            "SlimReconfigureTicket nested FQN must remain OpenCodeRepository.SlimReconfigureTicket",
-            "cn.vectory.ocdroid.data.repository.OpenCodeRepository\$SlimReconfigureTicket",
-            OpenCodeRepository.SlimReconfigureTicket::class.java.name,
-        )
-        assertEquals(
             "StaleSlimCommitException nested FQN must remain OpenCodeRepository.StaleSlimCommitException",
             "cn.vectory.ocdroid.data.repository.OpenCodeRepository\$StaleSlimCommitException",
             OpenCodeRepository.StaleSlimCommitException::class.java.name,
         )
-        assertEquals(
-            "SupersededSlimReconfigureException nested FQN must remain OpenCodeRepository.SupersededSlimReconfigureException",
-            "cn.vectory.ocdroid.data.repository.OpenCodeRepository\$SupersededSlimReconfigureException",
-            OpenCodeRepository.SupersededSlimReconfigureException::class.java.name,
-        )
 
-        // Binary-compat on the EXCEPTION hierarchy: the two slim
-        // exceptions MUST remain java.io.IOException subclasses (the
+        // Binary-compat on the EXCEPTION hierarchy: the slim exception
+        // MUST remain a java.io.IOException subclass (the
         // runSuspendCatching plumbing + the coordinator's failure
         // branching depends on this; changing to RuntimeException would
         // invert the surface).
@@ -482,12 +462,6 @@ class T3RepositoryExtractFreezeTest {
             "StaleSlimCommitException must remain a java.io.IOException",
             java.io.IOException::class.java.isAssignableFrom(
                 OpenCodeRepository.StaleSlimCommitException::class.java,
-            ),
-        )
-        assertTrue(
-            "SupersededSlimReconfigureException must remain a java.io.IOException",
-            java.io.IOException::class.java.isAssignableFrom(
-                OpenCodeRepository.SupersededSlimReconfigureException::class.java,
             ),
         )
 

@@ -482,7 +482,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             ControllerEffect.ResetLocalDataAndResync,
             ControllerEffect.ClearSessionWindowCache,
             // Connection
-            ControllerEffect.HostReconfigured(epoch = 0L),
+            // lite-v2: HostReconfigured removed
             ControllerEffect.LoadSessions,
             ControllerEffect.LoadAgents,
             ControllerEffect.LoadProviders,

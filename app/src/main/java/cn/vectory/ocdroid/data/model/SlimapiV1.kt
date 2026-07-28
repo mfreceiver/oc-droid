@@ -212,18 +212,6 @@ data class SlimSessionsPage(
      * might be missing rows if it applies limit + got `complete=false`.
      */
     val complete: Boolean? = null,
-    /**
-     * `X-Discovery-Directories`: allowlist size (NOT hit count). Int
-     * representation (the header string is parseable as an integer).
-     */
-    val discoveryDirectories: Int? = null,
-    /**
-     * `X-Discovery-Ready`: `"true"` if the sidecar has a last-known-good
-     * snapshot. `"false"` = discovery not ready — the client MUST NOT treat
-     * empty/null sessions as authoritative empty wipe. Null = old sidecar
-     * (pre-rev-F) — preserve original behavior.
-     */
-    val discoveryReady: Boolean? = null,
 )
 
 

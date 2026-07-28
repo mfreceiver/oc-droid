@@ -57,12 +57,6 @@ abstract class StreamingModule {
 
     @Binds
     @Singleton
-    abstract fun bindReconfigureTeardown(
-        impl: cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator,
-    ): cn.vectory.ocdroid.service.ReconfigureTeardown
-
-    @Binds
-    @Singleton
     abstract fun bindEffectiveConnectionConfigResolver(
         impl: DefaultEffectiveConnectionConfigResolver,
     ): EffectiveConnectionConfigResolver

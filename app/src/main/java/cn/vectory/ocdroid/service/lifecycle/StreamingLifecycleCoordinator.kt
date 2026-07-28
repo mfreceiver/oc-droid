@@ -1,7 +1,6 @@
 package cn.vectory.ocdroid.service.lifecycle
 
 import cn.vectory.ocdroid.di.UiApplicationScope
-import cn.vectory.ocdroid.service.ReconfigureTeardown
 import cn.vectory.ocdroid.service.StreamingOwnershipGate
 import cn.vectory.ocdroid.service.TeardownReason
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
@@ -111,7 +110,7 @@ class StreamingLifecycleCoordinator @Inject constructor(
     private val statusAggregator: StatusAggregator,
     @UiApplicationScope private val scope: CoroutineScope,
     private val ownershipGate: StreamingOwnershipGate? = null,
-) : ReconfigureTeardown {
+) {
     /**
      * The layered lifecycle state (FGS spec §4.1). See [Layer] for the
      * invariant each value carries. Consumers (notification display layer,
@@ -334,15 +333,9 @@ class StreamingLifecycleCoordinator @Inject constructor(
     /**
      * D4-B — the CANONICAL awaitable teardown path. Every teardown entry
      * (onDisconnect / onTimeout / requestUserClose / terminal SSE callback /
-     * bootstrap failure / reconfigure) routes through here.
+     * bootstrap failure) routes through here.
      *
      * Reason-specific behavior:
-     *  - [TeardownReason.Reconfigure] (M4): intentional no-source barrier —
-     *    cancels pending handoff, emits StopPoller + StopSse + StopForeground
-     *    + StopSelf, sets L3, releases ownership; does NOT emit a replacement
-     *    StartPoller (old identity is intentionally invalid post-
-     *    `beginReconfigure()`). The no-source window lasts only through the
-     *    serialized repository rebuild.
      *  - [TeardownReason.BootstrapFailure] (B1): forces terminal shell cleanup
      *    EVEN WHEN the lifecycle layer is already L3 (a live placeholder
      *    Service holding Starting ownership must be fully torn down). Does
@@ -354,10 +347,9 @@ class StreamingLifecycleCoordinator @Inject constructor(
      *    if leaving L1/L2); then releases ownership via
      *    [StreamingOwnershipGate.disconnectAndRelease].
      */
-    override suspend fun teardownAndAwait(reason: TeardownReason) {
+    suspend fun teardownAndAwait(reason: TeardownReason) {
         DebugLog.i(TAG, "teardownAndAwait(reason=$reason)")
         when (reason) {
-            TeardownReason.Reconfigure -> teardownForReconfigure()
             TeardownReason.BootstrapFailure -> teardownForBootstrapFailure()
             TeardownReason.Timeout, TeardownReason.UserClose, TeardownReason.Disconnect -> {
                 teardown()
@@ -657,35 +649,8 @@ class StreamingLifecycleCoordinator @Inject constructor(
      * [ConnectionReconfigureBarrier] runs after this returns (spec §4.4
      * exception).
      *
-     * Sequence: cancel pending handoff → StopPoller (terminate old-identity
-     * process poller) → StopSse + await cancellation (via the ownership
-     * disconnect callback) → StopForeground → StopSelf → enter L3 → release
-     * ownership. Does NOT emit StartPoller.
-     */
-    private suspend fun teardownForReconfigure() {
-        mutex.withLock {
-            cancelDebounce()
-            cancelPendingHandoff()
-            // Terminate the old-identity process poller (L3 source contract
-            // is void during reconfigure — the new bootstrap will start a
-            // fresh poller bound to the new identity). D5 (#2): emit
-            // StopPoller directly (not via stopPollerIfActiveLocked) because
-            // the old-identity poller may be running as an external source
-            // not tracked by pollerRuntime.
-            emit(StopPoller)
-            pollerRuntime = PollerRuntime.Stopped
-            emit(StopSse)
-            emit(StopForeground)
-            emit(StopSelf)
-            _layer.value = Layer.L3
-        }
-        layer.first { it == Layer.L3 }
-        // disconnectAndRelease joins the SSE collector cancellation BEFORE
-        // the barrier's repository rebuild runs.
-        ownershipGate?.disconnectAndRelease(markGap = false)
-    }
-
-    /**
+     * lite-v2: teardownForReconfigure removed (no runtime reconfigure).
+     *
      * D4-B B1 — the BootstrapFailure teardown. Forces terminal shell cleanup
      * EVEN WHEN the lifecycle layer is already L3 (a live placeholder
      * Service holding Starting ownership must be fully torn down: the
@@ -709,10 +674,7 @@ class StreamingLifecycleCoordinator @Inject constructor(
 
     /**
      * Wave-3 L3c — the BootstrapFailure teardown command emit sequence.
-     *
-     * Order is SPECIFIC to BootstrapFailure and DIFFERS from the reconfigure
-     * teardown (which emits `StopPoller → StopSse → StopForeground → StopSelf`
-     * — see [teardownForReconfigure]). DO NOT unify the two sequences:
+     * lite-v2: the reconfigure-variant removal note is deleted.
      *
      *   StopSse → stopPollerIfActiveLocked (StopPoller once if active)
      *         → StopForeground → StopSelf

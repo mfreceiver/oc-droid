@@ -4,6 +4,7 @@ import android.content.Context
 import cn.vectory.ocdroid.data.model.*
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.service.bridge.SseEventBridge
@@ -783,16 +784,7 @@ class AppCore @Inject constructor(
             // was deleted together with the CacheRepository surface — the
             // process-in LRU is the sole cache layer now.
             //
-            // T11 round-3 (oracle D1 part b): ALSO invalidate the repo's
-            // per-session localApplied* watermark. Without this, a later
-            // /since fetch anchored on the (still-set) watermark would
-            // return an empty tail and never rebuild the user's cached
-            // older messages. Clearing localApplied* makes the next fetch
-            // start fresh (cursor drain). Route through the repo's atomic
-            // [slimStateLock] boundary via [invalidateSlimLocalApplied].
-            // No-op when the session has no slim SSE state.
             sessionSwitcher.evictSession(effect.serverGroupFp, effect.sessionId)
-            repository.invalidateSlimLocalApplied(effect.sessionId, repository.captureSlimCommitToken())
             true
         }
         is ControllerEffect.EvictGroup -> {
@@ -807,19 +799,16 @@ class AppCore @Inject constructor(
             sessionSwitcher.clearMemoryForGroup(effect.serverGroupFp)
             true
         }
+        is ControllerEffect.RestartRequired -> {
+            store.slices.mutateConnection { it.copy(restartRequired = true) }
+            effectBus.tryEmitUiEvent(UiEvent.Error(R.string.connection_restart_required))
+            true
+        }
         else -> false
     }
 
     /** ConnectionCoordinator-owned effects. */
     internal fun dispatchConnectionEffect(effect: ControllerEffect): Boolean = when (effect) {
-        is ControllerEffect.HostReconfigured -> {
-            // CP1: HostReconfigured carries the new epoch. Reset the
-            // foreground catch-up state machine (idempotent) — SSC's init
-            // collector independently reads effect.epoch to reset its overlay
-            // to this exact generation.
-            foregroundCatchUpController.onHostReconfigured()
-            true
-        }
         is ControllerEffect.LoadSessions -> {
             loadSessionsForEffect()
             true

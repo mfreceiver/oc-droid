@@ -124,44 +124,6 @@ class OwnershipAndReconfigureIntegrationTest {
     // ── M4: reconfigure is an intentional no-source barrier ─────────────────
 
     @Test
-    fun `M4 - reconfigure teardown emits NO StartPoller and forces L3 + StopSse`() = runTest {
-        val status = RecordingStatusAggregator()
-        val store = ConnectionIdentityStore()
-        store.bind("group", "/work", "endpoint")
-        val boundIdentity = store.currentIdentity.value!!
-        val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
-        val inForeground = MutableStateFlow(false)
-        val commands = mutableListOf<LifecycleCommand>()
-        backgroundScope.launch { coordinator.commands.collect { commands += it } }
-        coordinator.start(inForeground)
-        // Drive bootstrap to L2Active (SSE on).
-        status.setState(GlobalBusyState.Busy)
-        coordinator.onBootstrapResult(boundIdentity, GlobalBusyState.Busy)
-        runCurrent()
-        val bootstrapSse = commands.filterIsInstance<LifecycleCommand.StartSse>().single()
-        coordinator.onActivationAck(bootstrapSse.handoffToken, SourceActivation.Ready)
-        runCurrent()
-        assertEquals(Layer.L2Active, coordinator.layer.value)
-        commands.clear()
-
-        // Reconfigure teardown: dedicated no-source path.
-        coordinator.teardownAndAwait(TeardownReason.Reconfigure)
-        runCurrent()
-
-        assertEquals("L3 after reconfigure", Layer.L3, coordinator.layer.value)
-        assertFalse(
-            "M4: NO StartPoller emitted (no replacement poller for invalid identity)",
-            commands.any { it is LifecycleCommand.StartPoller },
-        )
-        assertTrue("StopSse emitted", commands.contains(LifecycleCommand.StopSse))
-        assertTrue("StopPoller emitted (terminate old-identity poller)", commands.contains(LifecycleCommand.StopPoller))
-        assertTrue("StopForeground emitted", commands.contains(LifecycleCommand.StopForeground))
-        assertTrue("StopSelf emitted", commands.contains(LifecycleCommand.StopSelf))
-    }
-
-    // ── B1: BootstrapFailure forces terminal cleanup even from L3 ───────────
-
-    @Test
     fun `B1 - BootstrapFailure teardown forces StopSse + StopForeground + StopSelf even from L3`() = runTest {
         val status = RecordingStatusAggregator()
         val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)

@@ -579,26 +579,6 @@ class SessionSyncCoordinator(
                         val trigger = SseReconnectTrigger.Disconnected(now, dirty, gen)
                         sseSyncState = reconcileGap(sseSyncState, trigger).first
                     }
-                    is ControllerEffect.HostReconfigured -> {
-                        // §P1-10 scenario 4 + CP1: the epoch carried on the
-                        // effect IS the new generation (bumped synchronously
-                        // by ConnectionIdentityStore.beginReconfigure at the
-                        // HostProfileController barrier origin). Reset the
-                        // overlay to a fresh cold-start under this epoch so
-                        // any in-flight ServerConnected from the PREVIOUS
-                        // host's cancelled SSE job becomes a stale-trigger
-                        // no-op.
-                        val trigger = SseReconnectTrigger.HostReconfigured(effect.epoch)
-                        sseSyncState = reconcileGap(sseSyncState, trigger).first
-
-                        // lite-v2-dev: trigger skeleton reload on host reconfigure.
-                        skeletonReloadCoordinator?.let { skeleton ->
-                            scope.launch {
-                                val currentSid = slices.chat.value.currentSessionId
-                                if (currentSid != null) skeleton.requestReload(currentSid, 200)
-                            }
-                        }
-                    }
                     else -> {}
                 }
             }

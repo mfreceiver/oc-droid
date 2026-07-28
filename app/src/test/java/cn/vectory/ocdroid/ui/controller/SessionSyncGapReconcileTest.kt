@@ -686,50 +686,6 @@ class GapReconcileIntegrationTest {
     // ── scenario 4 ──────────────────────────────────────────────────────────
 
     @Test
-    fun `scenario 4 integration - host reconfigure resets connectedOnce so next server connected is cold-start`() {
-        // §R-19 Sprint 1 Lane A (P1-10) scenario 4 + fix Blocker 1:
-        //
-        // The PRODUCTION stale-host guard lives in ConnectionCoordinator.
-        // launchSseCollection (per-event generation check, drops stale events
-        // BEFORE they're forwarded as OnSseEvent). That guard is exercised in
-        // ConnectionCoordinatorTest. This integration test asserts the
-        // SessionSyncCoordinator side of the contract: HostReconfigured resets
-        // connectedOnce=false so the next (new-host) server.connected is treated
-        // as a cold-start (no ReloadSession), NOT as an implicit gap recovery
-        // of the previous host's session.
-        setCurrentSession("session-A")
-        // First connect on generation 0 (cold start) → connectedOnce=true.
-        coordinator.handleEvent(event("server.connected") {})
-        collectedEffects.clear()
-
-        // Disconnect, then host reconfigure bumps the generation to 1 and
-        // resets connectedOnce=false.
-        effects.tryEmitEffect(ControllerEffect.CancelSse)
-        // CP1: HostReconfigured carries the epoch from beginReconfigure (same
-        // as production CC.cancelSseForReconfigure).
-        val newEpoch = identityStore.beginReconfigure()
-        effects.tryEmitEffect(ControllerEffect.HostReconfigured(epoch = newEpoch))
-        collectedEffects.clear()
-
-        val stateAfterReconfigure = coordinator.sseSyncStateSnapshot()
-        assertTrue(
-            "expected connectedOnce=false after HostReconfigured; was $stateAfterReconfigure",
-            !stateAfterReconfigure.connectedOnce
-        )
-
-        // Simulate the NEW host's first server.connected — this is a cold
-        // start under gen 1 and should mark connectedOnce=true, no ReloadSession
-        // decision (the cold-start loader handles initial snapshot).
-        coordinator.handleEvent(event("server.connected") {})
-
-        assertTrue(
-            "cold-start under new host does NOT emit LoadMessages",
-            collectedEffects.filterIsInstance<ControllerEffect.LoadMessages>().isEmpty()
-        )
-        assertTrue(coordinator.sseSyncStateSnapshot().connectedOnce)
-    }
-
-    @Test
     fun `fix blocker 3 integration - second server connected without explicit disconnect fires implicit gap recovery`() {
         // §R-19 fix Blocker 3 integration: a server.connected arriving after
         // the cold-start, with no explicit CancelSse in between (simulating
@@ -765,24 +721,6 @@ class GapReconcileIntegrationTest {
             "session-A NOT in sessionsDirty (no Disconnected trigger fired; idle-dedup removed)",
             coordinator.sseSyncStateSnapshot().sessionsDirty.contains("session-A")
         )
-    }
-
-    @Test
-    fun `host reconfigure clears sessionsDirty accumulated by prior disconnects`() {
-        setCurrentSession("session-A")
-        coordinator.handleEvent(event("server.connected") {})  // cold start
-        effects.tryEmitEffect(ControllerEffect.CancelSse)  // marks session-A dirty
-        assertTrue(coordinator.sseSyncStateSnapshot().sessionsDirty.contains("session-A"))
-
-        // CP1: HostReconfigured carries the epoch from beginReconfigure (same
-        // as production CC.cancelSseForReconfigure).
-        val newEpoch = identityStore.beginReconfigure()
-        effects.tryEmitEffect(ControllerEffect.HostReconfigured(epoch = newEpoch))
-
-        val snap = coordinator.sseSyncStateSnapshot()
-        assertTrue("sessionsDirty cleared on HostReconfigured", snap.sessionsDirty.isEmpty())
-        assertTrue("lastDisconnectAt cleared on HostReconfigured", snap.lastDisconnectAt == null)
-        assertTrue("connectedOnce cleared on HostReconfigured", !snap.connectedOnce)
     }
 
     @Test

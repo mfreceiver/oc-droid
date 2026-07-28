@@ -2647,31 +2647,6 @@ class SessionSyncCoordinatorTest {
      * to the EXACT epoch carried on the effect.
      */
     @Test
-    fun `CP1 HostReconfigured resets SSC overlay to the carried epoch`() {
-        // Establish some overlay state under epoch 0.
-        setCurrentSession("s1")
-        coordinator.handleEvent(event("server.connected") {})  // cold-start: connectedOnce=true
-        assertTrue("baseline connectedOnce=true", coordinator.sseSyncStateSnapshot().connectedOnce)
-
-        // Reconfigure: bump the store epoch + emit HostReconfigured carrying it.
-        val newEpoch = identityStore.beginReconfigure()
-        effects.tryEmitEffect(ControllerEffect.HostReconfigured(epoch = newEpoch))
-
-        val snap = coordinator.sseSyncStateSnapshot()
-        assertEquals(
-            "SSC overlay hostGeneration must match the effect's epoch",
-            newEpoch,
-            snap.hostGeneration)
-        assertFalse("connectedOnce reset by HostReconfigured", snap.connectedOnce)
-        assertTrue("sessionsDirty cleared", snap.sessionsDirty.isEmpty())
-        assertNull("lastDisconnectAt cleared", snap.lastDisconnectAt)
-    }
-
-    /**
-     * CP1 spec test: the current-identity frame (matching the store's bound
-     * identity + epoch) passes through the identity gate and folds normally.
-     */
-    @Test
     fun `CP1 current-identity SSE frame passes the gate and folds`() {
         val identity = identityStore.bind("test-fp", "/proj", "test-endpoint")
         setCurrentSession("s1")
