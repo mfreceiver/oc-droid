@@ -65,20 +65,7 @@ import cn.vectory.ocdroid.ui.ContextUsage
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.Dimens
-import java.util.Locale
 import kotlinx.coroutines.launch
-
-/**
- * R-28: fixed currency symbol for the context-usage cost display.
- *
- * Confirmed with the user: this value is always CNY regardless of device
- * locale (the upstream server reports cost in CNY), so we deliberately do NOT
- * use NumberFormat.getCurrencyInstance(locale) — that would render "$" or
- * "€" on non-CNY devices and mislead the user. Pinned to "¥" with the same
- * 4-decimal formatting as before, so the visual is unchanged; the constant
- * centralises the policy and documents why locale is intentionally ignored.
- */
-private const val CURRENCY_SYMBOL = "¥"
 
 @Composable
 internal fun ContextUsageDialog(
@@ -161,8 +148,10 @@ internal fun ContextUsageDialog(
                 )
             } else {
                 ContextUsageSection(stringResource(R.string.chat_context_model_section)) {
-                    ContextUsageRow(stringResource(R.string.chat_context_provider), usage.providerId ?: stringResource(R.string.chat_context_unknown))
-                    ContextUsageRow(stringResource(R.string.chat_context_model), usage.modelId ?: stringResource(R.string.chat_context_unknown))
+                    ContextUsageRow(
+                        stringResource(R.string.chat_context_model),
+                        "${usage.providerId ?: stringResource(R.string.chat_context_unknown)}/${usage.modelId ?: stringResource(R.string.chat_context_unknown)}"
+                    )
                     ContextUsageRow(stringResource(R.string.chat_context_limit), formatCount(usage.contextLimit))
                 }
                 ContextUsageSection(stringResource(R.string.chat_context_tokens)) {
@@ -172,9 +161,6 @@ internal fun ContextUsageDialog(
                     ContextUsageRow(stringResource(R.string.chat_context_reasoning), formatOptionalCount(usage.reasoningTokens))
                     ContextUsageRow(stringResource(R.string.chat_context_cached_read), formatOptionalCount(usage.cachedReadTokens))
                     ContextUsageRow(stringResource(R.string.chat_context_cached_write), formatOptionalCount(usage.cachedWriteTokens))
-                }
-                ContextUsageSection(stringResource(R.string.chat_context_cost)) {
-                    ContextUsageRow(stringResource(R.string.chat_context_cost), usage.cost?.let { "$CURRENCY_SYMBOL${String.format(Locale.US, "%.4f", it)}" } ?: stringResource(R.string.chat_context_no_cost))
                 }
             }
         }

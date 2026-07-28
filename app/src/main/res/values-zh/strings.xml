@@ -176,7 +176,6 @@
     <string name="chat_server_fallback">服务器</string>
     <string name="chat_no_usage_data">没有用量数据</string>
     <string name="chat_context_model_section">模型</string>
-    <string name="chat_context_provider">Provider</string>
     <string name="chat_context_model">模型</string>
     <string name="chat_context_limit">上下文上限</string>
     <string name="chat_context_tokens">Tokens</string>
@@ -186,8 +185,6 @@
     <string name="chat_context_reasoning">推理</string>
     <string name="chat_context_cached_read">缓存读取</string>
     <string name="chat_context_cached_write">缓存写入</string>
-    <string name="chat_context_cost">费用</string>
-    <string name="chat_context_no_cost">没有费用数据</string>
     <string name="chat_context_unknown">未知</string>
     <string name="chat_context_compact">压缩</string>
     <string name="chat_add_image">添加图片</string>
