@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.Text
@@ -279,12 +280,19 @@ internal fun RecentSessionRow(
                 )
             }
         },
-        modifier = Modifier
-            .then(
-                if (selected) Modifier.background(MaterialTheme.colorScheme.secondaryContainer)
-                else Modifier
-            )
-            .clickable(enabled = enabled, onClick = onClick),
+        // §P2-item2 (rev-gpt gate fix): drive the selection highlight via ListItem's
+        // `colors` containerColor. An external Modifier.background() is painted over by
+        // ListItem's own opaque container layer, hiding the highlight. Using the colors
+        // param is the M3-contract way to set the row container color, so the
+        // secondaryContainer highlight renders deterministically (no emulator needed to
+        // trust the API). Text colors stay default (onSurface contrasts fine on the
+        // muted secondaryContainer in both light/dark themes).
+        colors = if (selected) {
+            ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+        } else {
+            ListItemDefaults.colors()
+        },
+        modifier = Modifier.clickable(enabled = enabled, onClick = onClick),
     )
 }
 
