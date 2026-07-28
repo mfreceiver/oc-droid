@@ -201,7 +201,7 @@ internal fun RecentSessionsDrawer(
             onSelect = { sessionId -> if (interactionsEnabled) onSelect(sessionId) },
             onBackToHome = { if (interactionsEnabled) onBackToHome() },
             onStartNewSession = onStartNewSession,
-            onRefreshSessions = onRefreshSessions,
+            onRefreshSessions = { if (interactionsEnabled) onRefreshSessions() },
             isStartNewSessionEnabled = isStartNewSessionEnabled && interactionsEnabled,
             sessionErrorsByID = sessionErrorsById,
             selectedSessionId = null,

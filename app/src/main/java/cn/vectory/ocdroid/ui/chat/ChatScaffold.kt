@@ -1271,7 +1271,15 @@ fun ChatScaffold(
                 chatVM.core.effectBus.tryEmitEffect(ControllerEffect.LoadSessions)
             },
             onShowWorkdirPicker = { pendingWorkdirPick = true },
-            onNavigateToChat = { sid -> orchestratorVM.navigateToChat(sid) },
+                // §P2-3 (rev-glm): guard against re-navigating to the current
+                // session (idempotent freshness-token renewal, but wasteful);
+                // mirrors the sidebar path's `if (sid != chromeSessionId)`.
+                // closeDrawerAction() still runs in ChatDrawerHost.onSelect so
+                // tapping the current row dismisses the drawer without a
+                // redundant nav dispatch.
+                onNavigateToChat = { sid ->
+                    if (sid != chromeSessionId) orchestratorVM.navigateToChat(sid)
+                },
         ) {
             chatBodySaveableHolder.SaveableStateProvider(key = "chatBody") {
                 chatBodyContent()
