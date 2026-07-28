@@ -14,8 +14,8 @@
 | `emulator-debug.md` | 模拟器调试指南（启停流程、adb、集成测试） |
 | `mtls-setup-guide.md` | mTLS（stunnel）服务端配置与客户端证书导入指南 |
 | `ui-style-spec.md` | UI 样式规范（三层 overlay 规则 + `ui/theme/` 共享原语，MANDATORY） |
-| `slim-mode-api-routing.md` | 省流模式 API 路由权威契约（A/B/C/D 桶、INTERFACE_MAP、health 形状） |
-| `sse-client-spec.md` | SSE 客户端规范（legacy `/global/event` + slim `/slimapi/events` 控制面） |
+| `slim-mode-api-routing.md` | 省流模式 API 路由权威契约（A/B/C/D 桶、v2 端点表、catch-all 写透传、health schema 回显） |
+| `sse-client-spec.md` | SSE 客户端规范（legacy `/global/event` + slim `/slimapi/events` 控制面；v2 策展帧集——digest / session.error / q/p 观察信号 / lifecycle） |
 
 > **引用约定**
 > - 本目录内文档互相引用用相对路径 `./<file>.md`。

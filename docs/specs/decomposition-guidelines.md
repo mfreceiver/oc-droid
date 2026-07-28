@@ -99,7 +99,7 @@ class Facade @Inject constructor(
 
 ### 4.3 能力读模型（Capability Read-Model）
 把「连接具备什么能力」从裸布尔标志（`isSlimMode`）提升为**语义能力查询**，供 L4+ 消费者读。
-先例：`ServerCompatProfile`（`supportsWatermarkResync` / `usesSlimStatusFanOut` / `supportsTokenStreamResync`）。
+先例：`ServerCompatProfile`（`supportsWatermarkResync` / `usesSlimStatusFanOut` / `supportsTokenStreamResync`；V2 语义见 `./architecture.md` §4.3 说明——watermark 为 `(updatedAt,messageID)` 2-tuple，status fan-out 由 digest 替代）。
 **规则**：L4+ 不直接读 raw mode 标志，只读 capability；mode 是 source-of-truth，capability 是访问语义。
 
 ### 4.4 纯状态对象 / Reducer（状态机内聚）

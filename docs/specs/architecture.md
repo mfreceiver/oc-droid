@@ -15,7 +15,7 @@ ocdroid 是 [opencode](https://github.com/) 的 Android 客户端（Kotlin / Jet
 长期同时兼容两套服务端 API：
 
 - **标准 API（legacy）**：直连 opencode，`/session`、`/global`、`/file`、`/vcs`、`/question`、`/permission` 等。
-- **精简 API（slim / oc-slimapi sidecar）**：经 sidecar 代理的 `/slimapi/…`，带 watermark / routeToken / 聚合信封 / 版本协商。
+- **精简 API（slim / oc-slimapi sidecar）**：经 sidecar 代理的 `/slimapi/…`，带 watermark（`(updatedAt,messageID)` 2-tuple）/ 版本协商（`X-Slimapi-Version: 2`）。写操作经 catch-all 透传上游（无 routeToken、无聚合信件端点）。
 
 两套 API **形状相同（域模型复用）、取数方式不同（端点 / 分页 / 状态机 / 协商）**。本规范定义二者如何长期共存而不互相腐蚀。
 
@@ -97,7 +97,7 @@ SlimMessageSource(
 ### 4.3 能力读模型（L4+ 模式盲）
 L4+（协调 / service / UI）**禁读裸 `repository.isSlimMode`**，改读**语义能力查询**：
 - 真相源：`ServerCompatProfile.slimConnection`（`@Volatile`，唯一受管写点 = `configure()` 的 `setSlimConnection`，在 `completeSlimReconfigure` 之后发布 = "最近一次成功 live 的 mode"）。
-- 派生查询（纯计算）：`supportsWatermarkResync`（= slimConnection）、`supportsTokenStreamResync`（= slimConnection ∧ `slimapiTokenStreamEnabled`）、`usesSlimStatusFanOut`（= slimConnection）。
+- 派生查询（纯计算）：`supportsWatermarkResync`（= slimConnection，V2 watermark 语义：`(updatedAt,messageID)` 2-tuple 字典序，`updatedAt` 为 sidecar wall-clock）、`supportsTokenStreamResync`（= slimConnection ∧ `slimapiTokenStreamEnabled`，token stream resync 恒带 sessionID）、`usesSlimStatusFanOut`（= slimConnection，V2 中由 digest 替代 legacy status fan-out）。
 - OCR forwarder（零涟漪访问面）：`repository.supportsWatermarkResync` 等 → 透传 `serverCompatProfile`。多数 L4+ 已持 repository 句柄，直接读 forwarder，无需新注入。
 - **mode vs readiness**：`slimConnection` 反映"最近成功 live 的 mode"，**不是** health/readiness（后者 = probe 字段 + `completeSlimReconfigure` readiness）。勿把 `supportsX` 当 readiness 用。
 
@@ -116,7 +116,7 @@ L4+（协调 / service / UI）**禁读裸 `repository.isSlimMode`**，改读**�
 - **I15 token threading**：`SlimCommitToken` 外层 capture / 内层 require，端口化须原样穿透。
 - **I20 公共 FQN 向后兼容**：`OpenCodeApi`/`SSEClient`/`SlimapiContract`/`HostConfig` + 嵌套 `SlimCommitToken`/`StaleSlimCommitException`/`SlimReconfigureTicket`/`SupersededSlimReconfigureException` 不动；上游 import 零改（调用经门面 / L2 端口）。
 - **并发路由位 `@Volatile`**：`configure()` `@Synchronized` 内写、运行时 lock-free 读的可变 ref（`api`/`commandApi`/`mutationApi`/`apiV2`/`sseClient`/`sessionSource`/`messageSource`）均 `@Volatile`；纯 builder 字段（`retrofit`/`*Http`，仅 `rebuildClients` 内写读）不加。
-- **freeze 行为保持**：端口化 / 能力化是纯加法 + 内部委托，公共签名 / 返回类型 / 错误语义（`Result` + `parseErrorCode` + `DebugLog.w` + rethrow）/ `X-Slimapi-Version=1`（不 bump）逐字不变。
+- **freeze 行为保持**：端口化 / 能力化是纯加法 + 内部委托，公共签名 / 返回类型 / 错误语义（`Result` + `parseErrorCode` + `DebugLog.w` + rethrow）/ `X-Slimapi-Version=2`（不 bump）逐字不变。
 
 **v0.13.5 新增不变量（连接 / identity / SSE transport / 持久化 / 流式渲染）**：
 
