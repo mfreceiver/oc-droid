@@ -846,6 +846,209 @@ class ConnectionCoordinatorConcurrentTest {
     }
 
     /**
+     * D-fixup-r4 (Item ① close): the clear→probe window test.
+     *
+     * After [coldStartReconnect] releases [reconfigureLock] (probe coroutine
+     * enqueued via scope.launch but not yet running on Dispatchers.Default), a
+     * teardown registered in that window MUST be joined by the probe before it
+     * does any real work (checkHealth). This is the vacuous-edge gap the old
+     * [onHandoffProbeAboutToRun]-only test (which fires inside the lock BEFORE
+     * launch) could not capture.
+     *
+     * Determinism: the probe coroutine fires [onProbeCoroutineStarted] at its
+     * FIRST instruction (after launch, before the recheck). The test parks the
+     * probe there, registers a teardown via a REAL cancelSseForReconfigure
+     * call (real thread, real lock), then releases the probe. The probe's
+     * recheck MUST find the teardown and join it; checkHealth MUST NOT be
+     * reached until the teardown completes.
+     *
+     * Non-vacuous: without the recheck (the bug), the probe skips straight to
+     * checkHealth while the teardown is still in flight — the first key
+     * assertion (checkHealth NOT reached while teardown blocked) fails.
+     */
+    @Test
+    fun `probe joins teardown registered in clear-to-probe window`() {
+        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val probeStarted = CountDownLatch(1)
+        val teardownRegistered = CountDownLatch(1)
+        val teardownStarted = CountDownLatch(1)
+        val teardownRelease = CountDownLatch(1)
+        val checkHealthReached = CountDownLatch(1)
+
+        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+            teardownStarted.countDown()
+            teardownRelease.await()
+            Unit
+        }
+        coEvery { repository.checkHealth() } coAnswers {
+            checkHealthReached.countDown()
+            Result.success(HealthResponse(healthy = false, version = "1.0"))
+        }
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        val cc = ConnectionCoordinator(
+            scope = scope,
+            slices = slices,
+            repository = repository,
+            settingsManager = settingsManager,
+            effects = effects,
+            serverCompatProfile = ServerCompatProfile(),
+            clock = { now },
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            streamingServiceLauncher = launcher,
+            streamingLifecycleCoordinator = lifecycleCoordinator,
+        )
+
+        // Park the probe coroutine at its FIRST instruction. coldStart has
+        // already released reconfigureLock by the time this fires — this is
+        // the clear→probe window.
+        cc.onProbeCoroutineStarted = {
+            probeStarted.countDown()
+            teardownRegistered.await()
+        }
+
+        // coldStart: no initial teardown → straight to handoff → launch probe
+        // → release lock → probe coroutine fires the seam → parks.
+        scope.launch { cc.coldStartReconnect() }
+
+        assertTrue(
+            "probe coroutine must enter its seam (lock already released)",
+            probeStarted.await(10, TimeUnit.SECONDS),
+        )
+
+        // ── THE CLEAR→PROBE WINDOW ──
+        // Register a teardown via a REAL cancelSseForReconfigure. This call
+        // acquires reconfigureLock (free now), registers the pending
+        // teardown, and starts the lazy async. It arrived AFTER the lock was
+        // released and while the probe coroutine is parked — exactly the race
+        // the old test could not capture.
+        cc.cancelSseForReconfigure()
+        assertTrue("teardown body must start", teardownStarted.await(10, TimeUnit.SECONDS))
+
+        // Release the probe seam → recheck runs → finds the pending teardown.
+        teardownRegistered.countDown()
+
+        // KEY ASSERTION 1 (non-vacuous): the teardown is still in flight
+        // (blocked on teardownRelease). The probe MUST have joined it, so
+        // checkHealth MUST NOT be reached yet. Without the recheck fix the
+        // probe would skip straight to checkHealth and this assertion fails.
+        assertFalse(
+            "checkHealth must NOT be reached while teardown is still in flight " +
+                "(probe must join the teardown first)",
+            checkHealthReached.await(500, TimeUnit.MILLISECONDS),
+        )
+
+        // Release the teardown → the probe's join completes → probe proceeds.
+        teardownRelease.countDown()
+
+        // KEY ASSERTION 2: checkHealth IS reached now — the probe proceeded
+        // only AFTER the teardown completed. Proves teardown-before-checkHealth
+        // ordering, i.e. the clear→probe window is closed.
+        assertTrue(
+            "probe must reach checkHealth after the teardown completes",
+            checkHealthReached.await(10, TimeUnit.SECONDS),
+        )
+
+        scope.cancel()
+    }
+
+    /**
+     * D-fixup-r4 (Item ① close): clear→probe window on the PRODUCTION engine
+     * path. Production always wires [connectionBootstrapEngine]
+     * (ControllerModule), so coldStartReconnect → testConnection takes the
+     * [testConnectionWithEngine] branch (a SEPARATE scope.launch from the
+     * legacy path). This test proves the recheck closes the window on the
+     * engine path too: engine.bootstrap() is NOT reached while a teardown
+     * registered in the clear→probe window is still in flight.
+     *
+     * Non-vacuous: without the engine-path recheck, engine.bootstrap() is
+     * reached immediately while the teardown blocks — the first key assertion
+     * fails. (rev-gpt round-3 found the legacy-only recheck insufficient.)
+     */
+    @Test
+    fun `probe joins teardown registered in clear-to-probe window - engine path`() {
+        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val engine = mockk<cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine>()
+        val probeStarted = CountDownLatch(1)
+        val teardownRegistered = CountDownLatch(1)
+        val teardownStarted = CountDownLatch(1)
+        val teardownRelease = CountDownLatch(1)
+        val bootstrapReached = CountDownLatch(1)
+
+        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+            teardownStarted.countDown()
+            teardownRelease.await()
+            Unit
+        }
+        coEvery { engine.bootstrap() } coAnswers {
+            bootstrapReached.countDown()
+            cn.vectory.ocdroid.service.streaming.ConnectionBootstrapOutcome.Failed(
+                IOException("test"),
+            )
+        }
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        val cc = ConnectionCoordinator(
+            scope = scope,
+            slices = slices,
+            repository = repository,
+            settingsManager = settingsManager,
+            effects = effects,
+            serverCompatProfile = ServerCompatProfile(),
+            clock = { now },
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            streamingServiceLauncher = launcher,
+            streamingLifecycleCoordinator = lifecycleCoordinator,
+            connectionBootstrapEngine = engine,
+        )
+
+        // Same seam as the legacy test — fires at the engine coroutine's FIRST
+        // instruction, AFTER coldStart released reconfigureLock.
+        cc.onProbeCoroutineStarted = {
+            probeStarted.countDown()
+            teardownRegistered.await()
+        }
+
+        // coldStart → testConnection(force=true) → engine non-null →
+        // testConnectionWithEngine → scope.launch → seam → park.
+        scope.launch { cc.coldStartReconnect() }
+
+        assertTrue(
+            "probe coroutine must enter its seam (engine path, lock already released)",
+            probeStarted.await(10, TimeUnit.SECONDS),
+        )
+
+        // ── THE CLEAR→PROBE WINDOW (engine path) ──
+        cc.cancelSseForReconfigure()
+        assertTrue("teardown body must start", teardownStarted.await(10, TimeUnit.SECONDS))
+
+        // Release the probe seam → recheck runs → finds pending teardown.
+        teardownRegistered.countDown()
+
+        // KEY ASSERTION 1 (non-vacuous): teardown in flight → probe joined it →
+        // engine.bootstrap() NOT reached yet. Without the engine-path recheck
+        // the probe skips straight to bootstrap and this assertion fails.
+        assertFalse(
+            "engine.bootstrap() must NOT be reached while teardown is still in flight " +
+                "(probe must join the teardown first)",
+            bootstrapReached.await(500, TimeUnit.MILLISECONDS),
+        )
+
+        // Release the teardown → probe's join completes → bootstrap reached.
+        teardownRelease.countDown()
+
+        // KEY ASSERTION 2: bootstrap IS reached after teardown completes.
+        assertTrue(
+            "probe must reach engine.bootstrap() after the teardown completes",
+            bootstrapReached.await(10, TimeUnit.SECONDS),
+        )
+
+        scope.cancel()
+    }
+
+    /**
      * Complementary test: a teardown registered BEFORE coldStartReconnect
      * acquires the handoff lock is caught by the re-check and awaited before
      * the probe (the pre-existing "teardown before handoff" path).

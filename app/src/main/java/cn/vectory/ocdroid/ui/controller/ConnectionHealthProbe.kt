@@ -106,6 +106,23 @@ internal class ConnectionHealthProbe(
      * two call sites below.
      */
     private val effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver? = null,
+    /**
+     * lite-v2 D-fixup-r4 (Item ① close): re-check + join any teardown
+     * registered in the clear→probe window. Invoked at the probe coroutine's
+     * FIRST instruction (after launch, before checkHealth/SSE start). Returns
+     * true if the probe may proceed (no pending teardown or it succeeded);
+     * false if a pending teardown FAILED (probe should abort, mirroring
+     * coldStartReconnect's skip-on-corrupted-teardown). Default `{ true }`
+     * preserves legacy/test construction.
+     */
+    private val awaitPendingReconfigureTeardown: suspend () -> Boolean = { true },
+    /**
+     * @VisibleForTesting: fired at the probe coroutine's FIRST instruction,
+     * BEFORE [awaitPendingReconfigureTeardown]. Tests park the probe here to
+     * deterministically register a teardown in the clear→probe window (the
+     * gap the old inside-lock handoff seam could not capture). Default `{}`.
+     */
+    private val onProbeCoroutineStartedHook: () -> Unit = {},
 ) {
     private var lastHealthCheckTime = 0L
 
@@ -236,6 +253,14 @@ internal class ConnectionHealthProbe(
             return
         }
         scope.launch {
+            // lite-v2 D-fixup-r4 (Item ① close): fire the test seam at the
+            // probe coroutine's FIRST instruction, then re-check/join any
+            // teardown registered in the clear→probe window BEFORE any real
+            // work. coldStartReconnect releases reconfigureLock before this
+            // coroutine runs; without this recheck a teardown arriving in
+            // that window would be bypassed. See
+            // ConnectionCoordinator.awaitPendingReconfigureTeardown.
+            onProbeCoroutineStartedHook()
             // §onSettled-exactly-once (gpt-1 🔴 / glm-1): the original post-loop
             // `onSettled?.invoke(false)` was UNREACHABLE on cancellation —
             // `delay()` / `checkHealth()` throw CancellationException when the
@@ -248,6 +273,16 @@ internal class ConnectionHealthProbe(
             // preserving structured-concurrency teardown.
             var settled = false
             try {
+                // lite-v2 D-fixup-r4 (Item ① close): clear→probe recheck. The
+                // recheck returns false only if a pending teardown FAILED —
+                // abort the probe (mirrors coldStartReconnect's
+                // skip-on-corrupted-teardown), invoking onSettled(false) once.
+                if (!awaitPendingReconfigureTeardown()) {
+                    DebugLog.i(TAG, "testConnection: aborted — pending teardown failed during probe-entry recheck")
+                    settled = true
+                    onSettled?.invoke(false)
+                    return@launch
+                }
                 // §R-17 batch2: error is now a one-shot UiEvent. There's no
                 // persistent `error` field to clear at the start of a probe —
                 // any prior failure was already consumed app-wide. Connection
@@ -610,8 +645,21 @@ internal class ConnectionHealthProbe(
         onSettled: ((Boolean) -> Unit)?,
     ) {
         scope.launch {
+            // lite-v2 D-fixup-r4 (Item ① close): same clear→probe recheck as
+            // the legacy path — the engine path IS production (ControllerModule
+            // always wires connectionBootstrapEngine), so this coroutine MUST
+            // also re-check/join any teardown registered in the clear→probe
+            // window before engine.bootstrap().
+            onProbeCoroutineStartedHook()
             var settled = false
             try {
+                // lite-v2 D-fixup-r4 (Item ① close): clear→probe recheck.
+                if (!awaitPendingReconfigureTeardown()) {
+                    DebugLog.i(TAG, "testConnectionWithEngine: aborted — pending teardown failed during probe-entry recheck")
+                    settled = true
+                    onSettled?.invoke(false)
+                    return@launch
+                }
                 writeConnection { it.copy(isConnecting = true, connectionPhase = ConnectionPhase.Connecting) }
                 val delays = bootstrapRetryPolicy.delaysMs.take(retries.coerceAtLeast(0))
                 var attempt = 0

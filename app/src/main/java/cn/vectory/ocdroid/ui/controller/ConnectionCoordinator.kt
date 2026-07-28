@@ -276,6 +276,17 @@ class ConnectionCoordinator(
      */
     internal var onHandoffProbeAboutToRun: (() -> Unit)? = null
 
+    /**
+     * @VisibleForTesting: fired at the probe coroutine's FIRST instruction
+     * (after [scope.launch] enqueues it), BEFORE the clear→probe recheck. This
+     * is AFTER coldStartReconnect has released [reconfigureLock] — exactly the
+     * window the old inside-lock handoff seam ([onHandoffProbeAboutToRun])
+     * could not capture. Tests park the probe here to deterministically
+     * register a teardown via [cancelSseForReconfigure] and prove the recheck
+     * joins it. Forwarded to the probe via its constructor hook.
+     */
+    internal var onProbeCoroutineStarted: (() -> Unit)? = null
+
     private val healthProbe = ConnectionHealthProbe(
         scope = scope,
         slices = slices,
@@ -295,6 +306,8 @@ class ConnectionCoordinator(
         loadInitialData = ::loadInitialData,
         startSSE = ::startSSE,
         effectiveConnectionConfigResolver = effectiveConnectionConfigResolver,
+        awaitPendingReconfigureTeardown = ::awaitPendingReconfigureTeardown,
+        onProbeCoroutineStartedHook = { onProbeCoroutineStarted?.invoke() },
     )
 
     /**
@@ -429,6 +442,46 @@ class ConnectionCoordinator(
                     return@launch
                 }
             }
+        }
+    }
+
+    /**
+     * lite-v2 D-fixup-r4 (Item ① close): re-check + join any teardown
+     * registered in the clear→probe window. Called by the probe coroutine
+     * ([ConnectionHealthProbe.testConnection]) at its FIRST instruction,
+     * BEFORE checkHealth/SSE start.
+     *
+     * **Why this exists**: [coldStartReconnect] performs the handoff inside
+     * [reconfigureLock], but `healthProbe.coldStartReconnect()` →
+     * `testConnection()` → `scope.launch{}` returns ASYNCHRONOUSLY — the lock
+     * is released before the probe coroutine runs. A concurrent
+     * [cancelSseForReconfigure] arriving in that window registers a teardown
+     * the probe would otherwise bypass (clear→probe race). This method closes
+     * that window: the probe coroutine, once dispatched, re-acquires the lock,
+     * re-checks [pendingReconfigureTeardown], and joins any teardown that
+     * appeared.
+     *
+     * Mirrors [coldStartReconnect]'s identity-guarded join loop. Returns true
+     * if the probe may proceed (no pending teardown, or it succeeded); false
+     * if a pending teardown FAILED — the probe should abort, mirroring
+     * coldStart's "skip probe on corrupted teardown". The field is consumed
+     * (nulled) in both cases so a subsequent coldStart sees a clean slate.
+     */
+    private suspend fun awaitPendingReconfigureTeardown(): Boolean {
+        while (true) {
+            val d: Deferred<Result<Unit>>?
+            synchronized(reconfigureLock) { d = pendingReconfigureTeardown }
+            if (d == null) return true
+            val result = d.await()
+            synchronized(reconfigureLock) {
+                if (pendingReconfigureTeardown === d) {
+                    pendingReconfigureTeardown = null
+                    return result.isSuccess.also { ok ->
+                        if (!ok) DebugLog.w(TAG, "probe-entry recheck: pending teardown failed, aborting probe")
+                    }
+                }
+            }
+            // identity mismatch → a newer teardown arrived during await; loop
         }
     }
 
