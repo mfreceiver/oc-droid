@@ -89,12 +89,13 @@ data class TokenStreamReducerState(
  *    A fresh snapshot for a part already in the map overwrites its text +
  *    state (the server is re-establishing the authoritative prefix; the
  *    token stream trusts snapshot over accumulated deltas).
- *  - `snapshot(done=true)` → DONE. If `text` is present it REPLACES the
- *    buffer; if `text` is null/absent the accumulated buffer is KEPT (avoids
- *    blanking the part before the authoritative `/since` reconcile — bilateral
- *    §5 C-1). No further deltas are accepted for this part (late deltas are
- *    dropped, see [reduceDelta]); emits zero effects (authoritative text
- *    arrives via the digest/`/since` path).
+ *  - `snapshot(done=true)` → DONE. V2 §3.x.2 杠杆1: done marker carries NO
+ *    text — only marks DONE + triggers authoritative fetch. The accumulated
+ *    buffer is preserved until REST replaces it (`frame.text` is NEVER
+ *    consumed — even if non-null, it is a transport artifact, not authoritative
+ *    content). No further deltas are accepted for this part (late deltas are
+ *    dropped, see [reduceDelta]); emits [TriggerSinceFetch] (authoritative
+ *    text arrives via the REST `/since` / skeleton reload path).
  *  - `snapshot(truncated=true)` → clear that part from the reducer state +
  *    [ClearPartState]({partId}) + [TriggerSinceFetch](sid, authoritative=true).
  *    `truncated` takes priority over `done` (a truncated part is by definition
@@ -168,24 +169,23 @@ object TokenStreamReducer {
             return cleared to effects
         }
         if (frame.done) {
-            // §5 C-1: a done snapshot may omit text (`text:null`, status-only
-            // terminal). Overwriting the buffer with "" here would propagate
-            // through bridgePartToChatState → TokenStreamPartUpdated(text="")
-            // → StreamingBufferFieldsReducer sets streamingPartTexts[partId]=""
-            // and the UI's `streamingTextOverride ?: part.text` would render a
-            // BLANK window (the non-null "" override shadows the real part
-            // text) until an authoritative /since reconcile arrives. So when
-            // text is null, KEEP the accumulated buffer (or "" if the part had
-            // no prior snapshot — nothing to preserve). When text is non-null,
-            // it is the authoritative final value → use it (existing behavior).
-            // The part still transitions to DONE.
+            // V2 §3.x.2 杠杆1: done marker carries NO text — only mark DONE
+            // + trigger authoritative fetch; accumulated buffer is preserved
+            // until REST replaces it. `frame.text` is NEVER consumed here
+            // (even if non-null, it is a transport artifact, not authoritative
+            // content — the authoritative full text comes from REST
+            // `/messages/{sid}` / `/full/{mid}`, which idempotently overrides
+            // all token frames).
+            //
+            // Old behavior (pre-V2-fix): if frame.text was present, it replaced
+            // the buffer. This violated V2 §3.x.2 杠杆1 — a done-true marker's
+            // text field is a transport artifact, not authoritative content.
             //
             // lite-v2-dev (plan §2.2 / §4.2): done:true → TriggerSinceFetch →
-            // skeleton reload（limit=50，终态文本收敛）。旧的「依赖 digest//since
-            // 自动收敛」路径在 lite-v2 改为显式 reload——权威窗口 diff 一次拿到
+            // skeleton reload（limit=50，终态文本收敛）。权威窗口 diff 一次拿到
             // 终态全文（覆盖 overlay）。
             val existing = state.parts[frame.partId]
-            val terminalText = frame.text ?: existing?.text ?: ""
+            val terminalText = existing?.text ?: ""
             val terminal = TokenPartAcc(
                 sessionId = frame.sessionId,
                 messageId = frame.messageId,

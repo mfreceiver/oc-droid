@@ -369,8 +369,9 @@ class OpenCodeRepositorySlimapiEndpointsTest {
 
     @Test
     fun `SlimapiErrorCodes B1-additive constants pin server snake_case values`() {
-        // b1-foldin T1 amendment: focused constant-pin for the 4 B1-additive
-        // codes. Cheap regression guard against drift in either direction
+        // b1-foldin T1 amendment: focused constant-pin for the 3 B1-additive
+        // codes (INVALID_ROUTE_TOKEN removed in V2 — spec §7:231 routeToken
+        // deleted). Cheap regression guard against drift in either direction
         // (server renames a code → this trips; client typo on the constant
         // string → this trips). The comprehensive T1-C4 list lives in
         // SlimapiV1ModelsTest; this focused test co-locates with the new
@@ -386,10 +387,6 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         assertEquals(
             "invalid_directory_count",
             cn.vectory.ocdroid.data.repository.http.SlimapiErrorCodes.INVALID_DIRECTORY_COUNT,
-        )
-        assertEquals(
-            "invalid_route_token",
-            cn.vectory.ocdroid.data.repository.http.SlimapiErrorCodes.INVALID_ROUTE_TOKEN,
         )
     }
 
@@ -927,10 +924,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
             "legacy getSessions MUST NOT carry X-Slimapi-Version: ${sessionsReq.headers}",
             sessionsReq.getHeader(cn.vectory.ocdroid.data.repository.http.SlimapiContract.X_SLIMAPI_VERSION),
         )
-        assertNull(
-            "legacy getSessions MUST NOT carry X-Slimapi-Capabilities: ${sessionsReq.headers}",
-            sessionsReq.getHeader(cn.vectory.ocdroid.data.repository.http.SlimapiContract.X_SLIMAPI_CAPABILITIES),
-        )
+        // V2: capabilities header removed (spec §1:34) — no assertion needed.
 
         // getMessagesPaged → legacy /session/{id}/message (no /slimapi/ prefix).
         server.enqueue(
@@ -949,20 +943,16 @@ class OpenCodeRepositorySlimapiEndpointsTest {
             "legacy getMessagesPaged MUST NOT carry X-Slimapi-Version",
             msgsReq.getHeader(cn.vectory.ocdroid.data.repository.http.SlimapiContract.X_SLIMAPI_VERSION),
         )
-        assertNull(
-            "legacy getMessagesPaged MUST NOT carry X-Slimapi-Capabilities",
-            msgsReq.getHeader(cn.vectory.ocdroid.data.repository.http.SlimapiContract.X_SLIMAPI_CAPABILITIES),
-        )
+        // V2: capabilities header removed (spec §1:34) — no assertion needed.
     }
 
     /**
      * T0-P2 slim wire-shape: with `slim=true`, a `/slimapi/` REST method MUST
-     * carry BOTH `X-Slimapi-Version` AND `X-Slimapi-Capabilities` together
-     * (the double-door AND). Pins that neither interceptor's path-prefix door
-     * nor the slim-flag door can be dropped silently.
+     * carry `X-Slimapi-Version` (V2 removed Opt-A capability header,
+     * spec §1:34 — only version header remains).
      */
     @Test
-    fun `T0-P2 slim mode emits both slimapi version and capabilities headers on slimapi path`() = runBlocking {
+    fun `T0-P2 slim mode emits slimapi version header on slimapi path`() = runBlocking {
         // `repository` from setUp is configured slim=true.
         server.enqueue(jsonResponse("[]"))
         repository.getSlimapiSessions()
@@ -976,11 +966,6 @@ class OpenCodeRepositorySlimapiEndpointsTest {
             "slimapi path MUST carry X-Slimapi-Version == SLIMAPI_CLIENT_VERSION",
             cn.vectory.ocdroid.data.repository.http.SlimapiContract.SLIMAPI_CLIENT_VERSION.toString(),
             req.getHeader(cn.vectory.ocdroid.data.repository.http.SlimapiContract.X_SLIMAPI_VERSION),
-        )
-        assertEquals(
-            "slimapi path MUST carry X-Slimapi-Capabilities == mid-partial-envelope=1",
-            cn.vectory.ocdroid.data.repository.http.SlimapiContract.MID_PARTIAL_ENVELOPE_CAPABILITY,
-            req.getHeader(cn.vectory.ocdroid.data.repository.http.SlimapiContract.X_SLIMAPI_CAPABILITIES),
         )
     }
 

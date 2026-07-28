@@ -14,6 +14,7 @@ import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.SseSideEffect
 import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.ui.controller.applyPermissionAsked
+import cn.vectory.ocdroid.ui.controller.applyPermissionResolved
 import cn.vectory.ocdroid.ui.controller.applyQuestionAsked
 import cn.vectory.ocdroid.ui.controller.applyQuestionResolved
 import cn.vectory.ocdroid.ui.controller.applySessionCreated
@@ -51,7 +52,11 @@ class LegacySseHandler(private val host: SseDispatchHost) : SseEventHandler {
         "session.updated",
         "session.status",
         "permission.asked",
+        "permission.resolved",
+        "permission.v2.asked",
+        "permission.v2.resolved",
         "question.asked",
+        "question.v2.asked",
         "question.replied",
         "question.rejected",
         "todo.updated",
@@ -65,8 +70,9 @@ class LegacySseHandler(private val host: SseDispatchHost) : SseEventHandler {
             "session.created" -> handleSessionCreated(event)
             "session.updated" -> handleSessionUpdated(event)
             "session.status" -> handleSessionStatus(event)
-            "permission.asked" -> handlePermissionAsked(event)
-            "question.asked" -> handleQuestionAsked(event)
+            "permission.asked", "permission.v2.asked" -> handlePermissionAsked(event)
+            "permission.resolved", "permission.v2.resolved" -> handlePermissionResolved(event)
+            "question.asked", "question.v2.asked" -> handleQuestionAsked(event)
             "question.replied", "question.rejected" -> handleQuestionResolved(event)
             "todo.updated" -> handleTodoUpdated(event)
             "session.diff" -> handleSessionDiff(event)
@@ -178,11 +184,27 @@ class LegacySseHandler(private val host: SseDispatchHost) : SseEventHandler {
         }
     }
 
-    // ── permission.asked (SSC:1580) ─────────────────────────────────────────
+    // ── permission.asked / permission.v2.asked (SSC:1580, V2 §3:98-100) ──
     private fun handlePermissionAsked(event: SSEEvent) {
         val slimPermission = parsePermissionAskedEvent(event)
-        if (slimPermission != null && !slimPermission.routeToken.isNullOrBlank()) {
+        // V2 §2:66: routeToken is absent for v2 permission events. Apply the
+        // permission as long as it parsed successfully (no routeToken guard).
+        if (slimPermission != null) {
             host.slices.mutateSessionList { s -> s.applyPermissionAsked(slimPermission).first }
+        }
+        host.applySseSideEffects(listOf(SseSideEffect.LoadPendingPermissions))
+    }
+
+    // ── permission.resolved / permission.v2.resolved (V2 §3:98-100) ────────
+    // permission was resolved upstream. Drop the pending permission by its
+    // request id (analogous to question.replied/rejected).
+    private fun handlePermissionResolved(event: SSEEvent) {
+        val requestId = event.payload.getString("requestID")
+            ?: event.payload.getString("id")
+        if (requestId != null) {
+            host.slices.mutateSessionList { currentState ->
+                currentState.applyPermissionResolved(requestId).first
+            }
         }
         host.applySseSideEffects(listOf(SseSideEffect.LoadPendingPermissions))
     }

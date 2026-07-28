@@ -2134,6 +2134,32 @@ class SessionSyncCoordinatorTest {
         assertEquals(R.string.error_session_sse_unnamed, err.resId)
     }
 
+    @Test
+    fun `session error with MessageAbortedError produces no error effect`() {
+        // V2 §3:95: abort (MessageAbortedError) must be silently discarded —
+        // no UiEvent.Error, no chat error attachment, no durable banner.
+        setCurrentSession("s1")
+        seed {
+            it.copy(messages = listOf(
+                Message(id = "m-user", role = "user"),
+                Message(id = "m-bot", role = "assistant")))
+        }
+
+        coordinator.handleEvent(event("session.error") {
+            put("sessionID", JsonPrimitive("s1"))
+            put("error", buildJsonObject {
+                put("name", JsonPrimitive("MessageAbortedError"))
+                put("data", buildJsonObject { put("message", JsonPrimitive("aborted")) })
+            })
+        })
+
+        // No UiEvent.Error should be emitted
+        assertTrue(recordedUiEvents.filterIsInstance<cn.vectory.ocdroid.ui.UiEvent.Error>().isEmpty())
+        // No chat error should be attached to the last assistant message
+        val bot = slices.chat.value.messages.first { it.id == "m-bot" }
+        assertNull(bot.error)
+    }
+
     // ── §task7-coverage: markSessionColdSnapshotted branches ────────────────
 
     @Test

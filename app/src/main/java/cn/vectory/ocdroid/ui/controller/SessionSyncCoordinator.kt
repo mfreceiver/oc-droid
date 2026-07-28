@@ -1009,15 +1009,22 @@ class SessionSyncCoordinator(
         when (lastErrorEl) {
             is JsonObject -> {
                 val name = (lastErrorEl["name"] as? JsonPrimitive)?.content
-                val message = (lastErrorEl["message"] as? JsonPrimitive)?.content
-                val at = (lastErrorEl["at"] as? JsonPrimitive)?.longOrNull
-                val banner = SlimSessionLastError(
-                    name = name ?: "Unknown",
-                    message = message,
-                    at = at,
-                )
-                slices.mutateSessionList { s ->
-                    s.copy(sessionErrorsById = s.sessionErrorsById + (sid to banner))
+                // V2 §3:95: abort (MessageAbortedError) is silently discarded
+                // — do not set an error banner for it (defensive; sidecar
+                // already filters it).
+                if (name == "MessageAbortedError") {
+                    // Treat like absent lastError — do not set the banner.
+                } else {
+                    val message = (lastErrorEl["message"] as? JsonPrimitive)?.content
+                    val at = (lastErrorEl["at"] as? JsonPrimitive)?.longOrNull
+                    val banner = SlimSessionLastError(
+                        name = name ?: "Unknown",
+                        message = message,
+                        at = at,
+                    )
+                    slices.mutateSessionList { s ->
+                        s.copy(sessionErrorsById = s.sessionErrorsById + (sid to banner))
+                    }
                 }
             }
             is JsonNull -> {

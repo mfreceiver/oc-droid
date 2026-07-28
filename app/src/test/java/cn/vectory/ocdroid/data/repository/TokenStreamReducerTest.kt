@@ -102,18 +102,19 @@ class TokenStreamReducerTest {
     // ── done:true → DONE + REPLACE final text ────────────────────────────
 
     @Test
-    fun `snapshot done true transitions to DONE and replaces final text`() {
+    fun `snapshot done true transitions to DONE and preserves accumulated buffer`() {
         val streaming = TokenStreamReducer.reduce(
             TokenStreamReducerState(),
             snapshot(text = "partial"),
         ).first
-        // Accumulate some deltas, then a terminal snapshot replaces.
+        // Accumulate some deltas, then a terminal snapshot.
         val withDeltas = TokenStreamReducer.reduce(streaming, delta(text = "+")).first
         val (state, effects) = TokenStreamReducer.reduce(
             withDeltas,
             snapshot(text = "FINAL", done = true),
         )
-        assertEquals("FINAL", state.parts["p1"]?.text)
+        // V2 §3.x.2 杠杆1: done marker carries NO text — buffer preserved.
+        assertEquals("partial+", state.parts["p1"]?.text)
         assertEquals(TokenPartStreamState.DONE, state.parts["p1"]?.state)
         // lite-v2-dev: done:true → TriggerSinceFetch (skeleton reload).
         assertEquals(1, effects.size)
@@ -165,8 +166,9 @@ class TokenStreamReducerTest {
     }
 
     @Test
-    fun `done snapshot with non-null text still replaces the buffer (C-1 preserves existing behavior)`() {
-        // Regression guard: done with explicit text remains authoritative.
+    fun `done snapshot with non-null text preserves accumulated buffer (V2 杠杆1)`() {
+        // V2 §3.x.2 杠杆1: done marker carries NO text — even if frame.text
+        // is non-null, the accumulated buffer MUST be preserved.
         var state = TokenStreamReducer.reduce(
             TokenStreamReducerState(),
             snapshot(text = "partial"),
@@ -175,7 +177,8 @@ class TokenStreamReducerTest {
         assertEquals("partial+", state.parts["p1"]?.text)
 
         val (next, effects) = TokenStreamReducer.reduce(state, snapshot(text = "FINAL", done = true))
-        assertEquals("FINAL", next.parts["p1"]?.text)
+        // V2: accumulated buffer is preserved, "FINAL" is NOT adopted.
+        assertEquals("partial+", next.parts["p1"]?.text)
         assertEquals(TokenPartStreamState.DONE, next.parts["p1"]?.state)
         // lite-v2-dev: done:true → TriggerSinceFetch (skeleton reload).
         assertEquals(1, effects.size)
@@ -282,18 +285,40 @@ class TokenStreamReducerTest {
     }
 
     @Test
-    fun `orphan delta then snapshot done=true with final text replaces`() {
-        // Terminal snapshot(done=true) with explicit final text → the final
-        // text is authoritative regardless of what was accumulated. The part
-        // transitions to DONE.
+    fun `orphan delta then snapshot done=true with text preserves accumulated (V2 杠杆1)`() {
+        // Terminal snapshot(done=true) — V2 §3.x.2 杠杆1: done marker carries
+        // NO text. Even if frame.text is non-null, the accumulated delta text
+        // is preserved. The part transitions to DONE and awaits REST override.
         var state = TokenStreamReducer.reduce(
             TokenStreamReducerState(),
             delta(text = "partial"),
         ).first
         assertEquals("partial", state.parts["p1"]?.text)
         state = TokenStreamReducer.reduce(state, snapshot(text = "final answer", done = true)).first
-        assertEquals("final answer", state.parts["p1"]?.text)
+        assertEquals("partial", state.parts["p1"]?.text)
         assertEquals(TokenPartStreamState.DONE, state.parts["p1"]?.state)
+    }
+
+    @Test
+    fun `done marker with malicious text is not adopted (V2 杠杆1)`() {
+        // V2 §3.x.2 杠杆1: done marker carries NO text — only completion
+        // marker. Even if frame.text is non-null, the reducer must NOT consume
+        // it. The accumulated buffer is preserved until REST replaces it.
+        var state = TokenStreamReducer.reduce(
+            TokenStreamReducerState(),
+            snapshot(done = false, text = "accumulated"),
+        ).first
+        // done=true with a non-null "MALICIOUS_OVERRIDE" text — this MUST be
+        // ignored per V2 contract (done marker carries no text).
+        val (next, effects) = TokenStreamReducer.reduce(
+            state,
+            snapshot(done = true, text = "MALICIOUS_OVERRIDE"),
+        )
+        val acc = next.parts["p1"]
+        assertEquals("accumulated", acc?.text)
+        assertEquals(TokenPartStreamState.DONE, acc?.state)
+        assertEquals(1, effects.size)
+        assertTrue(effects[0] is TokenStreamCoordinatorEffect.TriggerSinceFetch)
     }
 
     @Test
@@ -312,14 +337,17 @@ class TokenStreamReducerTest {
 
     @Test
     fun `late delta after DONE is dropped and counted`() {
-        val done = TokenStreamReducer.reduce(
+        // V2 §3.x.2 杠杆1: done marker carries no text — establish buffer
+        // via a streaming snapshot, then mark DONE.
+        val streamState = TokenStreamReducer.reduce(
             TokenStreamReducerState(),
-            snapshot(text = "final", done = true),
+            snapshot(text = "streamed", done = false),
         ).first
+        val done = TokenStreamReducer.reduce(streamState, snapshot(text = null, done = true)).first
         assertEquals(0L, done.droppedDeltaCount)
         val (state, effects) = TokenStreamReducer.reduce(done, delta(text = "late"))
-        // Text unchanged.
-        assertEquals("final", state.parts["p1"]?.text)
+        // Text unchanged (accumulated buffer preserved; late delta dropped).
+        assertEquals("streamed", state.parts["p1"]?.text)
         assertEquals(TokenPartStreamState.DONE, state.parts["p1"]?.state)
         // Dropped + counted.
         assertEquals(1L, state.droppedDeltaCount)

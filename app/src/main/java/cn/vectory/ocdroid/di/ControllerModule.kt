@@ -505,9 +505,9 @@ internal data class TokenStreamProductionHooks(
  *
  * # Hook semantics (post lite-v2 rewiring)
  *
- *  - **dedupPartRevision**: no-op `true`. Token hub per-frame revision 保证
- *    已经做了 per-frame 去重（plan §4.2 (1)），本 hook 不再需要 slim
- *    watermark / commit token 去重——fail-open 到 accept。
+ *  - **dedupPartRevision**: per-(sid|mid|pid) strict `>` revision dedup
+ *    (V2 §3.x.2:153). Null revision → fail-open accept; `revision <= last`
+ *    → reject. Revision entries are cleaned up on part/message removal.
  *
  *  - **onMessagePartRemoved**: per-(sid|mid) trailing-coalesce 100ms debounce
  *    → [SkeletonReloadCoordinator.requestReload]`(sid, 50)`。权威窗口 diff
@@ -531,13 +531,33 @@ internal fun tokenStreamProductionHooks(
     // prior pending Job and re-schedules.
     val partRemovalDebounceJobs = ConcurrentHashMap<String, Job>()
 
+    // B-4: per-(sid|mid|pid) last-applied revision for strict `>` dedup
+    // (V2 §3.x.2:153). null revision → fail-open (accept); revision <= last
+    // → reject (duplicate/out-of-order).
+    val lastPartRevisions = ConcurrentHashMap<String, Long>()
+
     return TokenStreamProductionHooks(
-        dedupPartRevision = { _, _, _, _, _ ->
-            // lite-v2-dev (plan §4.2 (1)): token hub per-frame revision 保证
-            // 已去重；本 hook 不再需要 slim watermark 去重，fail-open accept。
-            true
+        dedupPartRevision = { sid, mid, pid, rev, _ ->
+            if (rev == null) {
+                // Fail-open: null revision (older sidecar / status-only frame)
+                // — accept.
+                true
+            } else {
+                val key = "$sid|$mid|$pid"
+                val last = lastPartRevisions[key]
+                if (last != null && rev <= last) {
+                    // Stale/duplicate frame within the same part — reject
+                    // (strict `>` only).
+                    false
+                } else {
+                    lastPartRevisions[key] = rev
+                    true
+                }
+            }
         },
-        onMessagePartRemoved = { sid, mid, _, _, _ ->
+        onMessagePartRemoved = { sid, mid, pid, _, _ ->
+            // B-4: clear this part's revision entry on removal.
+            lastPartRevisions.remove("$sid|$mid|$pid")
             // lite-v2-dev (plan §4.2 (2)): per-(sid|mid) trailing-coalesce
             // debounce → 权威窗口 reload（limit=50）。reload 的 diff 自动发现
             // part 列表变化，不再走单条 /full reconcile。
@@ -550,6 +570,10 @@ internal fun tokenStreamProductionHooks(
             }
         },
         onMessageRemoved = { sid, mid, ctx ->
+            // B-4: clear all revision entries for this (sid,mid) on message
+            // removal.
+            val msgPrefix = "$sid|$mid|"
+            lastPartRevisions.entries.removeIf { it.key.startsWith(msgPrefix) }
             // lite-v2-dev (plan §4.2 (3)): 直接 dispatch
             // MessageRemovedConfirmed（即时移除，不等 reload）。删除 slim commit
             // token + applyMessageRemoved——权威窗口 reload 会最终收敛，但 token

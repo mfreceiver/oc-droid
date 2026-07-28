@@ -410,6 +410,15 @@ internal fun SessionListState.applyQuestionResolved(requestId: String): Pair<Ses
     copy(pendingQuestions = pendingQuestions.filter { it.id != requestId }) to emptyList()
 
 /**
+ * permission.resolved / permission.v2.resolved → drop the pending permission
+ * whose id matches [requestId]. Pure. Mirrors [applyQuestionResolved].
+ */
+internal fun SessionListState.applyPermissionResolved(
+    requestId: String,
+): Pair<SessionListState, List<SseSideEffect>> =
+    copy(pendingPermissions = pendingPermissions.filter { it.id != requestId }) to emptyList()
+
+/**
  * todo.updated → upsert [todos] under [sessionId] in
  * [SessionListState.sessionTodos]. Pure.
  */

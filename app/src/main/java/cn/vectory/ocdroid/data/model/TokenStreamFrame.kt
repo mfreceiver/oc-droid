@@ -56,7 +56,11 @@ sealed interface TokenStreamFrame {
     /**
      * Full or terminal snapshot of a part's text. Per §3.3 state machine:
      *  - `done=false, truncated=false` → REPLACE the part buffer + STREAMING.
-     *  - `done=true` → terminal; REPLACE the final text + DONE.
+     *  - `done=true` → terminal completion marker ONLY (V2 §3.x.2 杠杆1:
+     *    done marker carries NO text). The reducer preserves the accumulated
+     *    buffer and triggers an authoritative REST fetch. The authoritative
+     *    full text comes from `/messages/{sid}` / `/full/{mid}` (idempotent,
+     *    overrides all token frames).
      *  - `truncated=true` → the server dropped in-flight state; the consumer
      *    MUST clear the part and re-fetch authoritatively.
      *
