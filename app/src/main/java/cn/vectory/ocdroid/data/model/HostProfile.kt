@@ -31,7 +31,6 @@ data class HostProfile(
     @SerialName("serverURL")
     val serverUrl: String,
     val basicAuth: BasicAuthConfig? = null,
-    val tunnelPasswordId: String? = null,
     /**
      * User-maintained server-group key.
      *

@@ -127,7 +127,6 @@ class SessionSwitcherTest {
                 isConnecting = s.isConnecting,
                 serverVersion = s.serverVersion,
                 connectionPhase = s.connectionPhase,
-                tunnelActivationState = s.tunnelActivationState
             )
         }
         slices.mutateTraffic {

@@ -38,7 +38,7 @@ import org.robolectric.annotation.Config
  * 覆盖：
  *  - 偏好项 round-trip（连接信息 / 字体 / 流量计数 / per-session map）。
  *  - **`clearAllLocalData()` preserved-keys 白名单**（本类最重要的防回归契约）：
- *    普通键被清、`basic_auth_password_*` / `tunnel_password_*` / 连接信息键保留。
+ *    普通键被清、`basic_auth_password_*` / 连接信息键保留。
  *  - clearAllLocalData() 后再写入能正常读回（验证 Tink 状态没被破坏）。
  */
 @RunWith(RobolectricTestRunner::class)
@@ -447,14 +447,6 @@ class SettingsManagerTest {
         assertNull(settings.basicAuthPassword("host-abc"))
     }
 
-    @Test
-    fun `tunnel password round trip and clear`() {
-        settings.setTunnelPassword("tun-1", "tpw")
-        assertEquals("tpw", settings.getTunnelPassword("tun-1"))
-        settings.clearTunnelPassword("tun-1")
-        assertNull(settings.getTunnelPassword("tun-1"))
-    }
-
     // §chat-ux-batch T8 (B3): the former `session agent map round trip` test
     // was DELETED here. The legacy `setAgentForSession` / `getAgentForSession`
     // API was removed (T7 rewired agent selection to TRANSIENT pendingAgent).
@@ -480,12 +472,11 @@ class SettingsManagerTest {
      *  - 连接信息键（server_url / username / password / host_profiles_json /
      *    current_host_profile_id）
      *  - 所有 `basic_auth_password_*` 前缀键
-     *  - 所有 `tunnel_password_*` 前缀键
      *
      * 同时必须擦除：session_id / workdir / nav page / theme / 字体 / 流量计数 /
      * drafts / session agents / open sessions / session cache。
      *
-     * 通过 setBasicAuthPassword / setTunnelPassword 写入（这些走的是带前缀的真键），
+     * 通过 setBasicAuthPassword 写入（这些走的是带前缀的真键），
      * 而非直接 putString("basic_auth_password_xxx")，保证白名单匹配的就是生产代码
      * 实际写入的键名。
      */
@@ -499,7 +490,6 @@ class SettingsManagerTest {
         settings.currentHostProfileId = "h1"
         settings.setBasicAuthPassword("h1", "ba-keep")
         settings.setBasicAuthPassword("h2", "ba-keep-2")
-        settings.setTunnelPassword("t1", "tun-keep")
         // §fix-3 (max-1 S4): mTLS 客户端证书材料（p12/pw/ca）也走保留白名单——
         // 否则 clearAllLocalData 会删证书但 host_profiles_json 仍带 mtlsEnabled=true/
         // clientCertId → 悬空引用、mTLS 静默失效。
@@ -537,11 +527,9 @@ class SettingsManagerTest {
         // clear 后再写一个普通键 + 一个 preserved 前缀键，都能正常读回
         settings.currentSessionId = "new-session"
         settings.setBasicAuthPassword("new-host", "new-ba")
-        settings.setTunnelPassword("new-tun", "new-tun-pw")
 
         assertEquals("new-session", settings.currentSessionId)
         assertEquals("new-ba", settings.basicAuthPassword("new-host"))
-        assertEquals("new-tun-pw", settings.getTunnelPassword("new-tun"))
         // preserved 仍在
         assertEquals("https://keep.example.com", settings.serverUrl)
     }
@@ -568,12 +556,10 @@ class SettingsManagerTest {
      * 的两个键被保留即可——这是契约的全部范围。
      */
     @Test
-    fun `multiple basic auth and tunnel passwords all preserved`() {
+    fun `multiple basic auth passwords all preserved`() {
         settings.setBasicAuthPassword("host-a", "pa")
         settings.setBasicAuthPassword("host-b", "pb")
         settings.setBasicAuthPassword("host-c", "pc")
-        settings.setTunnelPassword("tun-a", "ta")
-        settings.setTunnelPassword("tun-b", "tb")
         settings.currentSessionId = "wipe"
 
         settings.clearAllLocalData()
@@ -581,8 +567,6 @@ class SettingsManagerTest {
         assertEquals("pa", settings.basicAuthPassword("host-a"))
         assertEquals("pb", settings.basicAuthPassword("host-b"))
         assertEquals("pc", settings.basicAuthPassword("host-c"))
-        assertEquals("ta", settings.getTunnelPassword("tun-a"))
-        assertEquals("tb", settings.getTunnelPassword("tun-b"))
         assertNull(settings.currentSessionId)
     }
 

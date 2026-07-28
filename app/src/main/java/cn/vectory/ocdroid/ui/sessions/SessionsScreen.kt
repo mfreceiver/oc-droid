@@ -83,9 +83,10 @@ fun SessionsScreen(
      * architecture. When non-empty, the session-row tap calls this INSTEAD
      * of [onSwitchToChat] — it drives [OrchestratorViewModel.navigateToChat]
      * (route chat/{id} + LoadedContent + freshness token). The other entries
-     * (new-session / Files / picker / drawer) still use [onSwitchToChat] (B3
-     * migrates them). Default empty → falls back to the old path (backward-
-     * compatible for any caller that doesn't pass it).
+     * (new-session / Files / picker / drawer) use [onSwitchToChat] which is
+     * now wired to [OrchestratorViewModel.requestNavigate] (§unified-nav A2:
+     * an explicit nav intent that always bumps navEpoch). Default empty for
+     * signature stability; the prod call site always wires it.
      */
     onNavigateToChat: (String) -> Unit = {},
     /**
@@ -121,11 +122,14 @@ fun SessionsScreen(
      */
     onOpenGit: (workdir: String) -> Unit = {},
     /**
-     * home-hub T3 (NEW, backward-compatible): opens the Settings tab from the
-     * server-management dialog's Settings IconButton. Defaults to a no-op so
-     * AppShell's existing call site keeps compiling; T7 wires the navigation.
+     * home-hub T3: opens the Settings tab from the server-management dialog's
+     * Settings IconButton. REQUIRED (§unified-nav A6): the single prod call site
+     * (AppShell.kt) always passes it; removing the default makes a future caller
+     * that forgets to wire it a compile error instead of a silent no-op (item 8
+     * root cause was a stale-mirror no-op — a missing callback would be the
+     * same class of bug).
      */
-    onNavigateToSettings: () -> Unit = {},
+    onNavigateToSettings: () -> Unit,
     /**
      * §debug-escape: long-press on the server status icon navigates to the
      * debug settings page. Defaults to a no-op for backward compatibility.
@@ -345,8 +349,6 @@ fun SessionsScreen(
                             isSseConnected = isSseConnected,
                             hostProfiles = host.hostProfiles,
                             currentHostProfileId = host.currentHostProfileId,
-                            tunnelActivationState = connection.tunnelActivationState,
-                            showTunnelAuth = (curHostProfile?.tunnelPasswordId != null),
                             serverVersion = connection.serverVersion,
                             onSelectHost = { id -> hostVM?.selectHostProfile(id) },
                             // §final-review F1: home popup "force refresh" does
@@ -367,7 +369,6 @@ fun SessionsScreen(
                                 connectionVM?.coldStartReconnect()
                                 connectionVM?.refreshTrafficStats()
                             },
-                            onActivateTunnel = { hostVM?.activateTunnelForCurrentHost() },
                             onNavigateToSettings = onNavigateToSettings,
                             onLongClickServer = onLongClickServer,
                         )

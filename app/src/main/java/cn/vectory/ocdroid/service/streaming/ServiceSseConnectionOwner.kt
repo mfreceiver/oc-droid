@@ -593,6 +593,23 @@ class ServiceSseConnectionOwner(
                     // flag (a new connect / reconfigure re-arms it).
                     setSseConnected(false, generation)
                     // Write the shared connection state to disconnected/degraded.
+                    // §red-dot-trace: escalate the silent retry-budget exhaustion
+                    // to WARN/ERROR so the red indicator is traceable. The
+                    // per-retry attempts above only log at INFO (line ~615),
+                    // which is why the red dot appeared with "no exception" in
+                    // the debug log. .e when a real exception is present, else .w.
+                    if (failure != null) {
+                        DebugLog.e(
+                            TAG,
+                            "SSE retry budget exhausted retriesUsed=$retriesUsed attempts=${recoveryPolicy.attempts} (gen=$generation, epoch=${identity.epoch}) -> Disconnected",
+                            failure,
+                        )
+                    } else {
+                        DebugLog.w(
+                            TAG,
+                            "SSE retry budget exhausted retriesUsed=$retriesUsed attempts=${recoveryPolicy.attempts} (gen=$generation, epoch=${identity.epoch}) -> Disconnected (flow completed without error)",
+                        )
+                    }
                     sharedStateStore.mutateConnection {
                         it.copy(
                             isConnected = false,

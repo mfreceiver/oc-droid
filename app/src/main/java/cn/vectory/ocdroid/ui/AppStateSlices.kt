@@ -72,13 +72,6 @@ data class SlimAggregationSignal(
     val failureMessage: String? = null,
 )
 
-sealed class TunnelActivationState {
-    data object Idle : TunnelActivationState()
-    data object Loading : TunnelActivationState()
-    data object Success : TunnelActivationState()
-    data class Error(val message: String) : TunnelActivationState()
-}
-
 /**
  * §R18 Phase 2-I: replacement for the legacy `connectionPhase: String?`
  * (which used free-form strings "connecting"/"connected"/"disconnected"/
@@ -145,7 +138,6 @@ data class ConnectionState(
     val isConnecting: Boolean = false,
     val serverVersion: String? = null,
     val connectionPhase: ConnectionPhase = ConnectionPhase.Idle,
-    val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle,
     /**
      * §O-C weak-network §4: stale indicator. `true` when the last metadata
      * refresh (cold-start / resync) failed (or we are serving cached data

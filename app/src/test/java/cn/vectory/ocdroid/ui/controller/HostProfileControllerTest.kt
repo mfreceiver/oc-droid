@@ -20,7 +20,6 @@ import cn.vectory.ocdroid.ui.SettingsState
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.TrafficState
-import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.UnreadState
 import cn.vectory.ocdroid.ui.settings.CaStage
@@ -58,7 +57,7 @@ import java.security.KeyStore
  *
  * Zero reflection — the controller is driven entirely through its public API
  * (saveHostProfile / duplicateHostProfile / deleteHostProfile / selectHostProfile /
- * configureServer / configureRepositoryForProfile / activateTunnelForCurrentHost /
+ * configureServer / configureRepositoryForProfile /
  * resetLocalDataAndResync / accessors) and asserted via:
  *  - the emitted [ControllerEffect]s on a real [SharedEffectBus] (a coroutine
  *    in the test scope drains every effect into [collectedEffects] + every
@@ -71,8 +70,7 @@ import java.security.KeyStore
  *
  * Note: `testConnection` itself stays in [ConnectionCoordinator] (see
  * controller kdoc), so the state-machine coverage here targets the
- * tunnel-activation flow (Idle → Loading → Success/Error), which is the
- * equivalent isConnecting-style progression owned by this controller.
+ * profile CRUD + reconfigure flow owned by this controller.
  */
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class HostProfileControllerTest {
@@ -127,7 +125,7 @@ class HostProfileControllerTest {
 
     @Before
     fun setUp() {
-        // HostProfileController.activateTunnelForCurrentHost calls Log.d/Log.e.
+        // HostProfileController.saveHostProfile may touch ESP.
         mockkStatic(Log::class)
         appStateFixture = SeedFixture()
         // §R18 Phase 4 (P0-9): SliceFlows is built via a SharedStateStore; the
@@ -148,8 +146,7 @@ class HostProfileControllerTest {
         // §batch 3b: dual-scope setup. [scope] (StandardTestDispatcher) drives
         // the controller — its scope.launch bodies are queued and drained via
         // [runPending] (advanceUntilIdle), preserving the
-        // `Loading set synchronously before the async probe` invariant the
-        // tunnel test relies on. [collectorScope] (UnconfinedTestDispatcher)
+        // synchronous-before-async-probe invariant. [collectorScope] (UnconfinedTestDispatcher)
         // drains the effects bus collector eagerly so emissions land in
         // [collectedEffects] synchronously when the controller calls tryEmit.
         scope = TestScope()
@@ -210,7 +207,6 @@ class HostProfileControllerTest {
                 isConnecting = s.isConnecting,
                 serverVersion = s.serverVersion,
                 connectionPhase = s.connectionPhase,
-                tunnelActivationState = s.tunnelActivationState
             )
         }
         slices.mutateTraffic {
@@ -323,8 +319,6 @@ class HostProfileControllerTest {
             username = "alice",
             password = "secret",
             workdir = "/work",
-            tunnelPasswordId = null,
-            tunnelPassword = null,
             clientCertId = null,
             mtlsEnabled = false,
             slim = false)
@@ -425,20 +419,6 @@ class HostProfileControllerTest {
         runTest { controller.saveHostProfile(profileA, basicAuthEdited = false) }
 
         verify { settingsManager.setBasicAuthPassword("p-A", "") }
-    }
-
-    @Test
-    fun `saveHostProfile writes tunnel password when tunnelEdited is true`() {
-        runTest {
-            controller.saveHostProfile(
-                profileB,
-                basicAuthEdited = false,
-                tunnelPassword = "tpw",
-                tunnelEdited = true
-            )
-        }
-
-        verify { settingsManager.setTunnelPassword("p-B", "tpw") }
     }
 
     @Test
@@ -749,84 +729,6 @@ class HostProfileControllerTest {
         }
     }
 
-    // ── activateTunnelForCurrentHost (state machine) ───────────────────────
-
-    @Test
-    fun `activateTunnel with no tunnelPasswordId sets error and TunnelActivationState_Error without launching`() {
-        every { store.currentProfile() } returns profileA // tunnelPasswordId == null
-
-        controller.activateTunnelForCurrentHost()
-
-        assertEquals(TunnelActivationState.Error("未设置隧道密码"), slices.connection.value.tunnelActivationState)
-        val errorEvent = recordedEvents.filterIsInstance<UiEvent.Error>().single()
-        // §R18 Phase 2-G: tunnel-password-unset path emits the dedicated resId.
-        assertEquals(R.string.error_tunnel_password_unset, errorEvent.resId)
-        // No network call scheduled.
-        coVerify(exactly = 0) { repository.activateTunnel(any(), any(), any()) }
-    }
-
-    @Test
-    fun `activateTunnel with blank stored password sets error and TunnelActivationState_Error without launching`() {
-        val profile = profileA.copy(tunnelPasswordId = "t1")
-        every { store.currentProfile() } returns profile
-        every { settingsManager.getTunnelPassword("t1") } returns "" // blank
-
-        controller.activateTunnelForCurrentHost()
-
-        assertEquals(TunnelActivationState.Error("隧道密码为空"), slices.connection.value.tunnelActivationState)
-        coVerify(exactly = 0) { repository.activateTunnel(any(), any(), any()) }
-    }
-
-    @Test
-    fun `activateTunnel success transitions Loading then Success and surfaces TUNNEL_SUCCESS_TOAST`() {
-        val profile = profileA.copy(tunnelPasswordId = "t1")
-        every { store.currentProfile() } returns profile
-        every { settingsManager.getTunnelPassword("t1") } returns "real-pw"
-        // §tofu R2: activateTunnel now takes hostPort (String?) — the controller
-        // derives it via hostPortFromUrl(profile.serverUrl) → "a:4096".
-        coEvery { repository.activateTunnel(profile.serverUrl, "real-pw", "a:4096") } returns
-            Result.success(Unit)
-
-        controller.activateTunnelForCurrentHost()
-
-        // Loading is set synchronously before the launched probe runs.
-        assertEquals(
-            "Loading state set synchronously before the async probe",
-            TunnelActivationState.Loading,
-            slices.connection.value.tunnelActivationState
-        )
-        runPending()
-
-        assertEquals(TunnelActivationState.Success, slices.connection.value.tunnelActivationState)
-        // §success-channel / §R-17 batch2: success now rides a UiEvent.Success
-        // (NOT Error) so ChatScreen renders a positive toast.
-        // §R18 Phase 2-G: success-toast text is now R.string.success_tunnel_activated.
-        val successEvent = recordedEvents.filterIsInstance<UiEvent.Success>().single()
-        assertEquals(R.string.success_tunnel_activated, successEvent.resId)
-        coVerify { repository.activateTunnel(profile.serverUrl, "real-pw", "a:4096") }
-    }
-
-    @Test
-    fun `activateTunnel failure transitions Loading then Error with the exception message`() {
-        val profile = profileA.copy(tunnelPasswordId = "t1")
-        every { store.currentProfile() } returns profile
-        every { settingsManager.getTunnelPassword("t1") } returns "real-pw"
-        val failure = RuntimeException("boom-network")
-        coEvery { repository.activateTunnel(any(), any(), any()) } returns Result.failure(failure)
-
-        controller.activateTunnelForCurrentHost()
-        runPending()
-
-        val tunnelState = slices.connection.value.tunnelActivationState
-        assertTrue("failure yields TunnelActivationState.Error", tunnelState is TunnelActivationState.Error)
-        assertEquals("boom-network", (tunnelState as TunnelActivationState.Error).message)
-        val errorEvent = recordedEvents.filterIsInstance<UiEvent.Error>().single()
-        // §R18 Phase 2-G: tunnel-activation failure emits the dedicated resId
-        // with the resolved exception message as the single arg.
-        assertEquals(R.string.error_tunnel_activation_failed, errorEvent.resId)
-        assertTrue("error toast includes exception message", errorEvent.args.single().toString().contains("boom-network"))
-    }
-
     // ── resetLocalDataAndResync ────────────────────────────────────────────
 
     @Test
@@ -859,7 +761,6 @@ class HostProfileControllerTest {
         assertEquals(ConnectionPhase.Reconnecting, slices.connection.value.connectionPhase)
         assertEquals(0L, slices.traffic.value.trafficSent)
         assertEquals(0L, slices.traffic.value.trafficReceived)
-        assertEquals(TunnelActivationState.Idle, slices.connection.value.tunnelActivationState)
     }
 
     @Test

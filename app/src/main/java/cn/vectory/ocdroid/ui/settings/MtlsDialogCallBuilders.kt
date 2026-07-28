@@ -64,8 +64,6 @@ data class SaveCallResult(
     val saved: HostProfile,
     val authPw: String,
     val effectivePasswordEdited: Boolean,
-    val tunnelPw: String,
-    val tunnelEd: Boolean,
     val mtlsOn: Boolean,
     val slimOn: Boolean,
     val stagedP12: ByteArray?,
@@ -106,13 +104,13 @@ data class TestCallResult(
 /**
  * §review-r4 (gpter R4 #3): pure builder for the dialog's Save `onClick`
  * snapshot. Hoisted out of the Compose `onClick` lambda so the section-off
- * credential-clearing rules (basicAuth / tunnel / mTLS), the
+ * credential-clearing rules (basicAuth / mTLS), the
  * `name.ifBlank{"Untitled"}` fallback, the `selectedGroup != initialGroup`
  * groupFp rewrite, the `effectivePasswordEdited` forced-clear, and the
  * `hasMaterial` gating are all unit-testable without spinning up Compose (see
  * [MtlsDialogCallBuildersTest]).
  *
- * Returns a [SaveCallResult] whose field order matches the 11-arg `onSave`
+ * Returns a [SaveCallResult] whose field order matches the 9-arg `onSave`
  * positional call site (so the dialog can splat the result without
  * re-ordering).
  */
@@ -126,9 +124,6 @@ internal fun buildSaveCall(
     authUsername: String,
     authPassword: String,
     passwordEdited: Boolean,
-    tunnelEnabled: Boolean,
-    tunnelPassword: String,
-    tunnelEdited: Boolean,
     mtlsEnabled: Boolean,
     slimEnabled: Boolean,
     clientCleared: Boolean,
@@ -148,26 +143,10 @@ internal fun buildSaveCall(
         authUsername.isBlank() && initial.basicAuth != null -> true
         else -> passwordEdited
     }
-    //   隧道区关：清 tunnelId，且若原 profile 有隧道口令则强制
-    //   tunnelEdited=true + 空密码使 ESP 清掉遗留口令（saveHostProfile
-    //   无「无 id 即清口令」的兜底，须显式发清指令）。
-    val effectiveTunnelPw: String
-    val effectiveTunnelEd: Boolean
-    val tunnelId = if (tunnelEnabled) {
-        effectiveTunnelPw = tunnelPassword
-        effectiveTunnelEd = tunnelEdited
-        if (tunnelEdited) tunnelPassword.ifBlank { null }?.let { initial.id }
-        else initial.tunnelPasswordId
-    } else {
-        effectiveTunnelPw = ""
-        effectiveTunnelEd = initial.tunnelPasswordId != null
-        null
-    }
     val saved = initial.copy(
         name = name.ifBlank { "Untitled" },
         serverUrl = serverUrl,
         basicAuth = basicAuth,
-        tunnelPasswordId = tunnelId,
         slim = slimEnabled,
         serverGroupFp = if (selectedGroup != initialGroup) {
             selectedGroup ?: initial.id
@@ -185,8 +164,6 @@ internal fun buildSaveCall(
         saved = saved,
         authPw = effectiveAuthPw,
         effectivePasswordEdited = effectivePasswordEdited,
-        tunnelPw = effectiveTunnelPw,
-        tunnelEd = effectiveTunnelEd,
         mtlsOn = mtlsEnabled,
         slimOn = slimEnabled,
         stagedP12 = stagedP12,

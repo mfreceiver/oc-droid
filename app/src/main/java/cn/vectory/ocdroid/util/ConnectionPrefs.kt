@@ -10,7 +10,7 @@ import java.util.Base64
  * Owns the persisted server-connection scalars and ALL encrypted per-host
  * secrets: legacy direct-form credentials, host-profile JSON, the active
  * profile id, the effective-connection-source marker, per-host basic-auth
- * passwords, per-host tunnel passwords, and per-host mTLS client-cert
+ * passwords, and per-host mTLS client-cert
  * triplets (p12 / password / CA).
  *
  * §L4b ESP-key ownership: this class is the SOLE owner of read/write for
@@ -64,20 +64,6 @@ internal class ConnectionPrefs(
         encryptedPrefs.edit().apply {
             if (value.isNullOrBlank()) remove(basicAuthPasswordKey(passwordId)) else putString(basicAuthPasswordKey(passwordId), value)
         }.apply()
-    }
-
-    fun getTunnelPassword(id: String): String? {
-        return encryptedPrefs.getString(tunnelPasswordKey(id), null)
-    }
-
-    fun setTunnelPassword(id: String, password: String?) {
-        encryptedPrefs.edit().apply {
-            if (password.isNullOrBlank()) remove(tunnelPasswordKey(id)) else putString(tunnelPasswordKey(id), password)
-        }.apply()
-    }
-
-    fun clearTunnelPassword(id: String) {
-        encryptedPrefs.edit().remove(tunnelPasswordKey(id)).apply()
     }
 
     // ── §2.3: mTLS 客户端证书（PKCS12 / 密码 / CA）存取 ─────────────────────
@@ -167,9 +153,8 @@ internal class ConnectionPrefs(
         internal const val KEY_EFFECTIVE_CONNECTION_SOURCE = "effective_connection_source"
 
         internal fun basicAuthPasswordKey(passwordId: String): String = "basic_auth_password_$passwordId"
-        internal fun tunnelPasswordKey(id: String): String = "tunnel_password_$id"
 
-        // §2.3: mTLS 客户端证书 key 后缀（与 basic_auth_password_ / tunnel_password_ 同构）。
+        // §2.3: mTLS 客户端证书 key 后缀（与 basic_auth_password_ 同构）。
         internal fun clientCertP12Key(id: String): String = "client_cert_p12_$id"
         internal fun clientCertPasswordKey(id: String): String = "client_cert_pw_$id"
         internal fun clientCertCaKey(id: String): String = "client_cert_ca_$id"

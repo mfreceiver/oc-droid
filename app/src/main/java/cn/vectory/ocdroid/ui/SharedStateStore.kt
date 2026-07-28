@@ -168,6 +168,21 @@ class SharedStateStore @Inject constructor() {
         state.update { snapshot -> snapshot.copy(unread = transform(snapshot)) }
     /** Internal aggregate CAS for controllers that must commit multiple slices together. */
     internal fun mutateState(transform: (StoreState) -> StoreState) = state.update(transform)
+
+    /**
+     * §unified-nav (A4): aggregate CAS that RETURNS the committed snapshot. Used
+     * by call sites that must read a value minted INSIDE the transform (e.g.
+     * [cn.vectory.ocdroid.ui.OrchestratorViewModel.navigateToChat]'s route-
+     * instance token + [cn.vectory.ocdroid.ui.adoptMaterializedSessionRoute]'s
+     * adoption CAS) without a separate `.value` re-read that could observe a
+     * concurrent writer's state (the token-capture race). Backed by
+     * [MutableStateFlow.updateAndGet] (kotlinx's CAS retry loop), so the
+     * returned [StoreState] is the truly committed value.
+     *
+     * Main-thread contract: like every other mutateXxx, callers MUST run on
+     * Dispatchers.Main.immediate so the mint-then-read pair is serial.
+     */
+    internal fun mutateStateAndGet(transform: (StoreState) -> StoreState): StoreState = state.updateAndGet(transform)
     fun mutateHost(transform: (HostState) -> HostState) =
         state.update { it.copy(host = transform(it.host)) }
     /** §history-load-fix / §A5-3 B1: CAS write of the expansion map. */

@@ -2,7 +2,6 @@ package cn.vectory.ocdroid
 
 import android.util.Log
 import cn.vectory.ocdroid.data.model.BasicAuthConfig
-import cn.vectory.ocdroid.data.model.HealthResponse
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.MessageWithParts
@@ -25,7 +24,6 @@ import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
-import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.currentSession
 import cn.vectory.ocdroid.ui.session.buildSessionTree
@@ -166,190 +164,6 @@ class HostViewModelTest : MainViewModelTestBase() {
         )
 
         verify(exactly = 0) { settingsManager.setBasicAuthPassword(any(), any()) }
-    }
-
-    @Test
-    fun `saveHostProfile skips tunnel write when tunnelEdited is false`() = runTest {
-        val profile = HostProfile.defaultDirect("http://server.test").copy(
-            id = "profile-1",
-            tunnelPasswordId = "profile-1"
-        )
-
-        val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
-        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
-        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
-        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
-        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
-        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
-        val viewModel = HostViewModel(core)  // primary VM under test
-        hostVM.saveHostProfile(
-            profile,
-            tunnelPassword = "ignored",
-            tunnelEdited = false
-        )
-
-        verify(exactly = 0) { settingsManager.setTunnelPassword(any(), any()) }
-    }
-
-    @Test
-    fun `saveHostProfile writes tunnel password when tunnelEdited is true`() = runTest {
-        val profile = HostProfile.defaultDirect("http://server.test").copy(
-            id = "profile-1",
-            tunnelPasswordId = "profile-1"
-        )
-
-        val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
-        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
-        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
-        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
-        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
-        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
-        val viewModel = HostViewModel(core)  // primary VM under test
-        hostVM.saveHostProfile(
-            profile,
-            tunnelPassword = "tunnel-secret",
-            tunnelEdited = true
-        )
-        advanceUntilIdle()
-
-        verify { settingsManager.setTunnelPassword("profile-1", "tunnel-secret") }
-    }
-
-    @Test
-    fun `saveHostProfile clears tunnel password when edited and blank`() = runTest {
-        val profile = HostProfile.defaultDirect("http://server.test").copy(
-            id = "profile-1",
-            tunnelPasswordId = "profile-1"
-        )
-
-        val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
-        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
-        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
-        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
-        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
-        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
-        val viewModel = HostViewModel(core)  // primary VM under test
-        hostVM.saveHostProfile(
-            profile,
-            tunnelPassword = "",
-            tunnelEdited = true
-        )
-        advanceUntilIdle()
-
-        // blank → setTunnelPassword with "" which SettingsManager maps to remove.
-        verify { settingsManager.setTunnelPassword("profile-1", "") }
-    }
-
-    @Test
-    fun `activateTunnelForCurrentHost surfaces error when profile has no tunnelPasswordId`() = runTest {
-        val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
-        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
-        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
-        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
-        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
-        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
-        val viewModel = HostViewModel(core)  // primary VM under test
-        advanceUntilIdle()
-
-        hostVM.activateTunnelForCurrentHost()
-        advanceUntilIdle()
-
-        // Does not call the repository, but now surfaces a specific error so the
-        // user knows why activation did nothing (previously a silent no-op).
-        coVerify(exactly = 0) { repository.activateTunnel(any(), any()) }
-        assertTrue(connectionVM.connectionFlow.value.tunnelActivationState is TunnelActivationState.Error)
-        assertNotNull(core.recentTestErrors.lastOrNull())
-    }
-
-    @Test
-    fun `activateTunnelForCurrentHost surfaces error when tunnel password is empty`() = runTest {
-        val profileWithTunnel = HostProfile.defaultDirect("http://server.test").copy(
-            tunnelPasswordId = "profile-1"
-        )
-        every { hostProfileStore.currentProfile() } returns profileWithTunnel
-        every { settingsManager.getTunnelPassword("profile-1") } returns null
-
-        val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
-        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
-        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
-        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
-        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
-        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
-        val viewModel = HostViewModel(core)  // primary VM under test
-        advanceUntilIdle()
-
-        hostVM.activateTunnelForCurrentHost()
-        advanceUntilIdle()
-
-        coVerify(exactly = 0) { repository.activateTunnel(any(), any()) }
-        assertTrue(connectionVM.connectionFlow.value.tunnelActivationState is TunnelActivationState.Error)
-        assertNotNull(core.recentTestErrors.lastOrNull())
-    }
-
-    @Test
-    fun `activateTunnelForCurrentHost sets Loading then Success on success`() = runTest {
-        val profileWithTunnel = HostProfile.defaultDirect("http://server.test").copy(
-            tunnelPasswordId = "profile-1"
-        )
-        every { hostProfileStore.currentProfile() } returns profileWithTunnel
-        every { settingsManager.getTunnelPassword("profile-1") } returns "tunnel-secret"
-        coEvery { repository.activateTunnel("http://server.test", "tunnel-secret", "server.test:80") } returns Result.success(Unit)
-        // §tunnel-refresh: mock checkHealth for auto coldStartReconnect after tunnel activation
-        coEvery { repository.checkHealth() } returns
-            Result.success(HealthResponse(healthy = true, version = "1.0"))
-
-        val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
-        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
-        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
-        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
-        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
-        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
-        val viewModel = HostViewModel(core)  // primary VM under test
-        advanceUntilIdle()
-
-        hostVM.activateTunnelForCurrentHost()
-        advanceUntilIdle()
-
-        coVerify { repository.activateTunnel("http://server.test", "tunnel-secret", "server.test:80") }
-        assertEquals(
-            cn.vectory.ocdroid.ui.TunnelActivationState.Success,
-            connectionVM.connectionFlow.value.tunnelActivationState
-        )
-    }
-
-    @Test
-    fun `activateTunnelForCurrentHost sets Error on failure`() = runTest {
-        val profileWithTunnel = HostProfile.defaultDirect("http://server.test").copy(
-            tunnelPasswordId = "profile-1"
-        )
-        every { hostProfileStore.currentProfile() } returns profileWithTunnel
-        every { settingsManager.getTunnelPassword("profile-1") } returns "bad-password"
-        coEvery {
-            repository.activateTunnel("http://server.test", "bad-password", "server.test:80")
-        } returns Result.failure(IllegalStateException("Tunnel activation failed 403: Forbidden"))
-
-        val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
-        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
-        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
-        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
-        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
-        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
-        val viewModel = HostViewModel(core)  // primary VM under test
-        advanceUntilIdle()
-
-        hostVM.activateTunnelForCurrentHost()
-        advanceUntilIdle()
-
-        val activationState = connectionVM.connectionFlow.value.tunnelActivationState
-        assertTrue(activationState is cn.vectory.ocdroid.ui.TunnelActivationState.Error)
-        assertTrue((activationState as cn.vectory.ocdroid.ui.TunnelActivationState.Error).message.contains("403"))
     }
 
     @Test

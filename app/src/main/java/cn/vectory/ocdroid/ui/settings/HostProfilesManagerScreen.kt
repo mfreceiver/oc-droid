@@ -265,7 +265,7 @@ internal fun HostProfilesManagerScreen(
             // The screen observes saveState via LaunchedEffect above (close on
             // success + profileId match, error on failure) and gates the Save
             // button via isSaving (single-flight — double-submit ignored).
-            onSave = { saved, basicAuthPassword, basicAuthEdited, tunnelPassword, tunnelEdited,
+            onSave = { saved, basicAuthPassword, basicAuthEdited,
                        mtlsEnabled, slimEnabled, stagedP12, caStage, p12Password, p12PasswordEdited, hasImportedP12 ->
                 val clientCertEdit = if (mtlsEnabled) {
                     ClientCertEditIntent.Update(stagedP12, caStage, p12Password, p12PasswordEdited, hasImportedP12)
@@ -276,8 +276,6 @@ internal fun HostProfilesManagerScreen(
                     saved,
                     basicAuthPassword = basicAuthPassword,
                     basicAuthEdited = basicAuthEdited,
-                    tunnelPassword = tunnelPassword,
-                    tunnelEdited = tunnelEdited,
                     clientCertEdit = clientCertEdit,
                 )
             },

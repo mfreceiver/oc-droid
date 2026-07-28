@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.ui
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.annotation.MainThread
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.PermissionResponse
 import cn.vectory.ocdroid.util.DebugLog
@@ -89,44 +90,95 @@ class OrchestratorViewModel @Inject constructor(
         core.store.mutateNav { it.copy(lastRoute = route.route, lastNavPage = clamped) }
     }
 
+    /**
+     * §unified-nav (A1): the PASSIVE mirror setter. Writes [NavState.lastRoute]
+     * ONLY — NEVER touches [NavState.navEpoch]. This is called SOLELY by the
+     * AppShell destination observer (A3) to reconcile the mirror when the
+     * NavController's committed back-stack entry diverges from the mirror (e.g.
+     * system BACK popping chat→sessions while the mirror still reads "chat/…"
+     * — item 6). Because it does NOT bump [navEpoch], it cannot feed the nav
+     * synchronizer back into a loop (the synchronizer observes navEpoch; a
+     * passive mirror write leaves it unchanged → the synchronizer's
+     * `alreadyThere` guard no-ops).
+     *
+     * The short-circuit guard (`state.lastRoute == route.route → return`) is
+     * retained: a redundant passive write (the mirror already matches) is a
+     * no-op, avoiding a pointless CAS + StateFlow emission.
+     */
     fun setLastRoute(route: NavRoute) {
         val state = core.store.navFlow.value
         // Authority is lastRoute only; lastNavPage is a deprecated mirror and is
         // intentionally not co-written by the lastRoute-only migration paths.
+        // §unified-nav: passive mirror — NO navEpoch bump here.
         if (state.lastRoute == route.route) return
         core.settingsManager.lastRoute = route.route
         core.store.mutateNav { it.copy(lastRoute = route.route) }
     }
 
     /**
-     * §B3-C2: force-navigate to Sessions (home hub), bypassing [setLastRoute]'s
-     * idempotent guard. [setLastRoute] short-circuits when [NavState.lastRoute]
-     * already equals the target — but Files/Git entry does NOT update
-     * [NavState.lastRoute] (it stays `"sessions"` per AppShell design), so a
-     * no-id/malformed notification fallback calling [setLastRoute] would be a
-     * no-op, leaving the user on Files/Git instead of navigating home.
+     * §unified-nav (A1): the EXPLICIT nav-command setter. Every call is an
+     * explicit navigation intent from a user/external action (new-draft → Chat,
+     * server popup → Settings, Chat → Settings, Files switch → Chat,
+     * backToHome → Sessions, etc.). It ALWAYS bumps [NavState.navEpoch] (+1L)
+     * so the nav synchronizer re-fires EVEN when [lastRoute] is structurally
+     * identical to the current value (item 6: new session → BACK → "+" again →
+     * mirror already "chat" but the NavController is on Sessions → without the
+     * epoch bump the synchronizer's `alreadyThere` guard no-ops and nothing
+     * happens; item 8: server popup → Settings when the mirror already reads
+     * "settings" from a stale state). There is NO short-circuit: every call is
+     * an explicit intent and always re-fires the synchronizer.
      *
-     * This method ALWAYS writes the Sessions route via [mutateNav] AND bumps
-     * [NavState.navEpoch] (+1), guaranteeing the [DerivedStateFlow] emits a
-     * new [NavState] instance even when every other field is structurally equal
-     * to the current value. The AppShell synchronizer (`LaunchedEffect(navState.lastRoute, navState.navEpoch)`)
-     * then re-fires and navigates the NavController to Sessions unconditionally.
-     *
-     * [setLastRoute] does NOT touch [navEpoch] — its short-circuit guard is
-     * intentional for the Chat/Settings clean-exit path where the synchronizer
-     * already fires because [lastRoute] actually changed. Only the force-path
-     * bumps this counter.
+     * Main-thread contract: nav commands originate from Compose callbacks
+     * (Dispatchers.Main.immediate) or Activity onNewIntent (Main). The
+     * settingsManager.lastRoute write + the mutateNav CAS are both main-thread
+     * safe + serial.
      */
-    internal fun forceNavigateToSessions() {
-        core.settingsManager.lastRoute = NavRoute.Sessions.route
+    @MainThread
+    fun requestNavigate(route: NavRoute) {
+        core.settingsManager.lastRoute = route.route
         core.store.mutateNav {
             it.copy(
-                lastRoute = NavRoute.Sessions.route,
-                // lastNavPage omitted — authority is lastRoute
-                navEpoch = it.navEpoch + 1L, // Always changes → StateFlow emits
+                lastRoute = route.route,
+                // Always bump → synchronizer re-fires unconditionally.
+                navEpoch = it.navEpoch + 1L,
             )
         }
     }
+
+    /**
+     * §unified-nav (A5.2): PASSIVE setter for the runtime-only resolved actual
+     * destination. Writes [NavState.activeDestination] + bumps
+     * [NavState.activeDestinationEpoch]. Does NOT touch [lastRoute] /
+     * [navEpoch], so it NEVER fires the nav synchronizer (the synchronizer
+     * observes lastRoute + navEpoch only). Called by the AppShell destination
+     * listener (A3) on every committed back-stack entry change.
+     *
+     * The [destination] string is the resolved literal (e.g. `"chat/ses_X"`,
+     * `"sessions"`, `"settings"`, `"files/…"`). The epoch bump is monotonic so
+     * a captured [DraftRouteOrigin] can detect that the user navigated away
+     * even when the new destination string happens to match the captured one.
+     */
+    @MainThread
+    internal fun setActiveDestination(destination: String) {
+        core.store.mutateNav {
+            it.copy(
+                activeDestination = destination,
+                activeDestinationEpoch = it.activeDestinationEpoch + 1L,
+            )
+        }
+    }
+
+    /**
+     * §unified-nav (A1 optional cleanup): force-navigate to Sessions is now
+     * delegated to [requestNavigate] (Sessions) so there is ONE explicit nav-
+     * command API. Behavior is identical to the prior inline impl: writes
+     * settingsManager.lastRoute = Sessions + bumps navEpoch (requestNavigate
+     * always bumps). Used by the MainActivity deep-link fail-safe (malformed
+     * session id → Sessions) where [setLastRoute] would short-circuit when the
+     * mirror already reads "sessions" (which it does on Files/Git — those
+     * destinations do not update navState).
+     */
+    internal fun forceNavigateToSessions() = requestNavigate(NavRoute.Sessions)
 
     /**
      * §chat-list-detail §8.2: explicit chat/{id} navigation API — the
@@ -174,20 +226,43 @@ class OrchestratorViewModel @Inject constructor(
      * ChatContentLoaded, guarding the ENTIRE completion transaction (§7.2).
      *
      * [sessionId] == null (chat/new) is deferred to a later batch. Other
-     * entries (Files / MainActivity / picker / drawer) STAY on [setLastRoute].
+     * entries use [requestNavigate] (the explicit nav-command setter): Files
+     * / new-draft → Chat / server popup → Settings. MainActivity deeplinks
+     * use [navigateToChat] (session-scoped). The passive [setLastRoute] is now
+     * used ONLY by the AppShell destination observer (A3 mirror reconciliation).
+     *
+     * §unified-nav (A4): the token is now minted INSIDE the mutateStateAndGet
+     * transform and read from the RETURNED committed snapshot (closes the
+     * token-capture race where two concurrent calls read the same post-image
+     * value). See the body comment for details.
      */
+    @MainThread
     fun navigateToChat(sessionId: String?) {
         val sid = sessionId ?: return // chat/new path deferred.
         val route = "chat/$sid"
         // Persist the parameterized route (safe — cold start ignores it per §5 P3).
         core.settingsManager.lastRoute = route
-        // 1. Atomic CAS: mint token + write navState.lastRoute + clear content.
-        // §navEpoch-fix (2026-07-26): bump navEpoch alongside lastRoute.
-        // Without this, re-selecting a previously-visited session (after
-        // backToHome) leaves navState structurally unchanged (lastRoute
-        // already "chat/$sid") → DerivedStateFlow doesn't emit →
-        // LaunchedEffect doesn't re-fire → NavController never navigates.
-        core.store.mutateState {
+        // §unified-nav (A4 token-capture race): mint the token INSIDE the
+        // mutateStateAndGet transform and read it back from the RETURNED
+        // committed snapshot. The prior code did `mutateState { ... mint T ... }`
+        // then a SEPARATE `stateFlow.value.chatRouteInstance` re-read — two
+        // concurrent navigateToChat calls could both mint T from the same
+        // pre-image and then both read the SAME post-image value (the second
+        // CAS won, so both saw its token), producing a duplicated token. Reading
+        // the token from the committed snapshot returned by updateAndGet
+        // guarantees each call sees ITS OWN committed token (the CAS retry loop
+        // serializes concurrent writers; each returned snapshot reflects that
+        // writer's mint). Atomic: route + token + content-clear in ONE CAS.
+        //
+        // §navEpoch: bump alongside lastRoute so re-selecting a previously-
+        // visited session (after backToHome) re-fires the synchronizer even
+        // when lastRoute is structurally unchanged.
+        //
+        // Main-thread contract: navigateToChat originates from Compose
+        // callbacks / Activity onNewIntent (Dispatchers.Main.immediate). The
+        // mutateStateAndGet CAS + the subsequent openForRoute are both main-
+        // thread serial; no concurrent writer can interleave.
+        val committed = core.store.mutateStateAndGet {
             val next = it.chatRouteInstance + 1L
             it.copy(
                 chatRouteInstance = next,
@@ -200,7 +275,7 @@ class OrchestratorViewModel @Inject constructor(
         }
         // 2. Route-aware open: bypasses same-session guard, does full session
         //    housekeeping, emits VerifyAndHydrate(expectedRouteInstance=T).
-        val mintedToken = core.store.stateFlow.value.chatRouteInstance
+        val mintedToken = committed.chatRouteInstance
         core.sessionSwitcher.openForRoute(sid, mintedToken)
     }
 

@@ -26,12 +26,10 @@ class SettingsSectionsInstrumentedTest {
                 HostProfileEditorDialog(
                     initial = profile,
                     onDismiss = {},
-                    // onSave arity is Function12 (profile, basicAuthPassword,
-                    // basicAuthEdited, tunnelPassword, tunnelEdited, mtlsEnabled,
-                    // slimEnabled, stagedP12, caStage, p12Password, p12PasswordEdited,
-                    // hasImportedP12). slimEnabled (§R8) is the reconfigure-triggering
-                    // toggle added between mtlsEnabled and stagedP12.
-                    onSave = { _, _, _, _, _, _, _, _, _, _, _, _ -> },
+                    // onSave arity is Function10 (profile, basicAuthPassword,
+                    // basicAuthEdited, mtlsEnabled, slimEnabled, stagedP12,
+                    // caStage, p12Password, p12PasswordEdited, hasImportedP12).
+                    onSave = { _, _, _, _, _, _, _, _, _, _ -> },
                 )
             }
         }

@@ -58,12 +58,11 @@ class ProfileMutationEngine internal constructor(
 ) {
 
     /**
-     * Persists [profile] and conditionally writes/clears the Basic Auth and
-     * tunnel passwords according to the explicit three-state contract (Fix #5):
+     * Persists [profile] and conditionally writes/clears the Basic Auth
+     * password according to the explicit three-state contract (Fix #5):
      *
      *  - [basicAuthEdited] = true  → write [basicAuthPassword] (blank removes).
      *  - [basicAuthEdited] = false → skip (preserve stored value).
-     *  - [tunnelEdited] / [tunnelPassword] follow the same rule.
      *
      * When basicAuth is null, the orphaned password is always cleared.
      *
@@ -79,8 +78,6 @@ class ProfileMutationEngine internal constructor(
         profile: HostProfile,
         basicAuthPassword: String = "",
         basicAuthEdited: Boolean = false,
-        tunnelPassword: String = "",
-        tunnelEdited: Boolean = false,
         clientCertEdit: ClientCertEditIntent = ClientCertEditIntent.Unchanged,
     ): Result<Unit> = runSuspendCatching {
         var normalized = if (profile.basicAuth != null) {
@@ -122,9 +119,6 @@ class ProfileMutationEngine internal constructor(
             normalized = applyClientCertSave(normalized, clientCertEdit)
             if (basicAuthEdited) {
                 settingsManager.setBasicAuthPassword(normalized.id, basicAuthPassword)
-            }
-            if (tunnelEdited) {
-                settingsManager.setTunnelPassword(normalized.id, tunnelPassword)
             }
             if (normalized.basicAuth == null) {
                 settingsManager.setBasicAuthPassword(normalized.id, "")

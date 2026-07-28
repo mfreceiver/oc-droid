@@ -38,7 +38,7 @@ sealed interface CertSlotStatus {
  * §mtls-clipboard: a section header (title + optional subtitle on the left,
  * [Switch] on the right) that reveals [content] only while [checked] is true.
  *
- * Used to collapse the Basic Auth, Tunnel, and mTLS groups so a new profile
+ * Used to collapse the Basic Auth and mTLS groups so a new profile
  * (all OFF) shows only Name + URL + Server group + Insecure toggle, while an
  * existing profile expands the sections it actually uses. The card-style
  * container gives each group clear visual weight inside the editor dialog.
@@ -55,8 +55,8 @@ internal fun CollapsibleSection(
 ) {
     // §review-r5 (layout): flat full-width section — no Surface/card wrapper, so
     // the header + content align with sibling sections (e.g. the insecure-HTTPS
-    // Row) instead of being inset by card padding (which made mTLS/Basic-Auth/
-    // Tunnel render narrower than the flat sections above them).
+    // Row) instead of being inset by card padding (which made mTLS/Basic-Auth
+    // render narrower than the flat sections above them).
     Column(modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),

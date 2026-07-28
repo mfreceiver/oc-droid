@@ -33,16 +33,6 @@ import javax.inject.Named
 import javax.inject.Singleton
 
 /**
- * §R18 Phase 2-G: this constant was the hardcoded success-toast text for
- * tunnel activation. The toast now rides `UiEvent.Success(R.string
- * .success_tunnel_activated)` (i18n'd). The constant is retained only as
- * a documentation anchor — production code MUST NOT reference it (it has
- * no runtime value post-i18n). Tests assert on the resId directly.
- */
-@Deprecated("Use R.string.success_tunnel_activated via UiEvent.Success(resId).")
-const val TUNNEL_SUCCESS_TOAST: String = "隧道激活成功"
-
-/**
  * R-17 batch3 → batch3d: application-scoped engine that owns the 6 controllers
  * + the cross-domain orchestration logic (only ~6 methods that span 3+ domains).
  *

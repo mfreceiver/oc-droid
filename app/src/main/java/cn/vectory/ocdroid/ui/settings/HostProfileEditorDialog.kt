@@ -68,8 +68,6 @@ internal fun HostProfileEditorDialog(
         profile: HostProfile,
         basicAuthPassword: String,
         basicAuthEdited: Boolean,
-        tunnelPassword: String,
-        tunnelEdited: Boolean,
         // §2.7 mTLS 编辑意图（VM 据此写 ESP，原子提交；Dialog 不碰 ESP）：
         mtlsEnabled: Boolean,
         slimEnabled: Boolean,
@@ -134,10 +132,7 @@ internal fun HostProfileEditorDialog(
     var authUsername by remember(initial.id) { mutableStateOf(initial.basicAuth?.username.orEmpty()) }
     var authPassword by remember(initial.id) { mutableStateOf("") }
     var passwordEdited by remember(initial.id) { mutableStateOf(false) }
-    var tunnelPassword by remember(initial.id) { mutableStateOf("") }
-    var tunnelEdited by remember(initial.id) { mutableStateOf(false) }
     var showBasicPassword by remember(initial.id) { mutableStateOf(false) }
-    var showTunnelPassword by remember(initial.id) { mutableStateOf(false) }
     var showDeleteConfirm by remember(initial.id) { mutableStateOf(false) }
     val initialGroup = remember(initial.id, initial.serverGroupFp) {
         initial.serverGroupFp.takeIf { it in groupLabels }
@@ -149,10 +144,9 @@ internal fun HostProfileEditorDialog(
     // cert and asks the user to Accept once / Trust / Cancel). No editor
     // state needed.
     // §mtls-clipboard: 折叠区开关——新 profile 全 false（§design E），既有 profile
-    // 按是否配置了对应凭据种子。三个区（Basic Auth / 隧道 / mTLS）共用
+    // 按是否配置了对应凭据种子。两个区（Basic Auth / mTLS）共用
     // [CollapsibleSection] 容器，关则隐藏内容并在保存时清空对应凭据。
     var basicAuthEnabled by remember(initial.id) { mutableStateOf(initial.basicAuth != null) }
-    var tunnelEnabled by remember(initial.id) { mutableStateOf(initial.tunnelPasswordId != null) }
     var mtlsEnabled by remember(initial.id) { mutableStateOf(initial.mtlsEnabled) }
     // §R8 slim-mode UI: 省流模式开关——与 mTLS 正交，形成四配置组合。
     var slimEnabled by remember(initial.id) { mutableStateOf(initial.slim) }
@@ -457,9 +451,6 @@ internal fun HostProfileEditorDialog(
                                 authUsername = authUsername,
                                 authPassword = authPassword,
                                 passwordEdited = passwordEdited,
-                                tunnelEnabled = tunnelEnabled,
-                                tunnelPassword = tunnelPassword,
-                                tunnelEdited = tunnelEdited,
                                 mtlsEnabled = mtlsEnabled,
                                 slimEnabled = slimEnabled,
                                 clientCleared = clientCleared,
@@ -472,8 +463,6 @@ internal fun HostProfileEditorDialog(
                                 saveResult.saved,
                                 saveResult.authPw,
                                 saveResult.effectivePasswordEdited,
-                                saveResult.tunnelPw,
-                                saveResult.tunnelEd,
                                 saveResult.mtlsOn,
                                 saveResult.slimOn,
                                 saveResult.stagedP12,
@@ -523,13 +512,12 @@ internal fun HostProfileEditorDialog(
             modifier = Modifier.fillMaxWidth()
         )
         Spacer(modifier = Modifier.height(Dimens.spacing3))
-        // §profile-cleanup R1: hide Tunnel password behind an Advanced expander.
-        // Default expanded when an existing tunnel is configured so the
+        // §profile-cleanup R1: hide advanced credentials behind an Advanced expander.
+        // Default expanded when an existing credential is configured so the
         // credential stays discoverable; collapsed for new profiles.
         var advancedExpanded by remember(initial.id) {
             mutableStateOf(
-                initial.tunnelPasswordId != null ||
-                    initial.basicAuth != null ||
+                initial.basicAuth != null ||
                     initial.mtlsEnabled ||
                     initial.slim ||
                     initial.serverGroupFp in listOf("A", "B", "C", "D")
@@ -602,45 +590,6 @@ internal fun HostProfileEditorDialog(
                             Icon(
                                 if (showBasicPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
                                 contentDescription = if (showBasicPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
-                            )
-                        }
-                    }
-                )
-            }
-            Spacer(modifier = Modifier.height(Dimens.spacing2))
-            CollapsibleSection(
-                title = stringResource(R.string.host_section_tunnel_title),
-                subtitle = stringResource(R.string.host_section_tunnel_sub),
-                checked = tunnelEnabled,
-                onCheckedChange = { tunnelEnabled = it },
-            ) {
-                // Tunnel auth (optional, masked) — label 槽（§issue-6）
-                OutlinedTextField(
-                    value = tunnelPassword,
-                    onValueChange = {
-                        tunnelEdited = true
-                        tunnelPassword = it
-                    },
-                    label = { Text(stringResource(R.string.host_profile_tunnel_password_label)) },
-                    placeholder = {
-                        // When a tunnel password is already stored for this host
-                        // (and the user hasn't started editing), show masked dots
-                        // so reopening the editor doesn't look like the credential
-                        // vanished. The field stays write-only (the actual password
-                        // is never echoed back), but the dots signal "data present".
-                        Text(
-                            if (initial.tunnelPasswordId != null && !tunnelEdited) stringResource(R.string.host_profile_password_masked_placeholder)
-                            else stringResource(R.string.common_optional)
-                        )
-                    },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    visualTransformation = if (showTunnelPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = {
-                        IconButton(onClick = { showTunnelPassword = !showTunnelPassword }) {
-                            Icon(
-                                if (showTunnelPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                contentDescription = if (showTunnelPassword) stringResource(R.string.settings_hide_password) else stringResource(R.string.settings_show_password)
                             )
                         }
                     }

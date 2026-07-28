@@ -751,6 +751,9 @@ class SessionStreamingService : Service() {
                     extracted?.disconnectAndJoin?.invoke(false)
                     extracted?.abortStartup?.invoke()
                     // (3) write shared connection state Disconnected.
+                    // §red-dot-trace: surface the silent B1 bootstrap-failure
+                    // disconnect so the red indicator is traceable.
+                    DebugLog.w(TAG, "session streaming service bootstrap failed (identity epoch=${identity?.epoch}) -> Disconnected")
                     sharedStateStore.mutateConnection {
                         it.copy(
                             isConnected = false,

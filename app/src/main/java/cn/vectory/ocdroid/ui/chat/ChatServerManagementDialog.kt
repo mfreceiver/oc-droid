@@ -1,5 +1,5 @@
 // ChatServerManagementDialog.kt — server management popup (host profile list,
-// refresh, tunnel-activation, settings entry). Pure relocation from ChatTopBar.kt
+// refresh, settings entry). Pure relocation from ChatTopBar.kt
 // with no behaviour change.
 
 package cn.vectory.ocdroid.ui.chat
@@ -12,15 +12,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -36,18 +33,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
-import cn.vectory.ocdroid.ui.TunnelActivationState
 
 @Composable
 internal fun ServerManagementDialog(
     hostProfiles: List<HostProfile>,
     currentHostProfileId: String?,
-    tunnelActivationState: TunnelActivationState,
-    showTunnelAuth: Boolean,
     serverVersion: String?,
     onSelectHost: (String) -> Unit,
     onRefresh: () -> Unit,
-    onActivateTunnel: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -128,7 +121,7 @@ internal fun ServerManagementDialog(
                     }
                 }
 
-                // --- Action icon row: Settings / Tunnel / Refresh ---
+                // --- Action icon row: Settings / Refresh ---
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -152,27 +145,6 @@ internal fun ServerManagementDialog(
                             contentDescription = stringResource(R.string.server_dialog_system_settings),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                    }
-                    if (showTunnelAuth) {
-                        val isActivating = tunnelActivationState is TunnelActivationState.Loading
-                        IconButton(
-                            onClick = onActivateTunnel,
-                            enabled = !isActivating
-                        ) {
-                            if (isActivating) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Default.VpnKey,
-                                    contentDescription = stringResource(R.string.server_dialog_activate_tunnel),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
                     }
                     IconButton(onClick = onRefresh) {
                         Icon(

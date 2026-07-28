@@ -57,7 +57,6 @@ import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SettingsState
 import cn.vectory.ocdroid.ui.TrafficState
 import cn.vectory.ocdroid.ui.UnreadState
-import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.ui.controller.questionRootIds
 import cn.vectory.ocdroid.ui.currentHostProfile
@@ -84,8 +83,6 @@ internal data class ChatTopBarState(
     val connectionPhase: ConnectionPhase = ConnectionPhase.Idle,
     val hostProfiles: List<HostProfile> = emptyList(),
     val currentHostProfileId: String? = null,
-    val tunnelActivationState: TunnelActivationState = TunnelActivationState.Idle,
-    val showTunnelAuth: Boolean = false,
     /**
      * Session IDs with unread activity (an out-of-band message arrived
      * while the session was not the current one). Drives a small dot badge on
@@ -259,8 +256,6 @@ internal fun rememberChatTopBarState(
             connectionPhase = connectionState.value.connectionPhase,
             hostProfiles = hostState.value.hostProfiles,
             currentHostProfileId = hostState.value.currentHostProfileId,
-            tunnelActivationState = connectionState.value.tunnelActivationState,
-            showTunnelAuth = (curHostProfile?.tunnelPasswordId != null),
             unreadSessions = unreadState.value.unreadSessions,
             questionSessionIds = questionRootIds(sessionListState.value.pendingQuestions, sessionsById),
             draftWorkdir = composerState.value.draftWorkdir,
@@ -303,7 +298,6 @@ internal data class ChatTopBarActions(
     val onSelectAgent: (String?) -> Unit = {},
     val onNavigateToSettings: () -> Unit = {},
     val onSelectHost: (String) -> Unit = {},
-    val onActivateTunnel: () -> Unit = {},
     /**
      * §Manual message refresh for the current session (NON-destructive
      * tail fetch — keeps scrolled-up history + cursor + streaming overlay).

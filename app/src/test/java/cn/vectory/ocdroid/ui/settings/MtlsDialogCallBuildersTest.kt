@@ -14,7 +14,7 @@ import org.junit.Test
  * §review-r4 (gpter R4 #3): JVM unit tests for the pure [buildSaveCall] /
  * [buildTestCall] dialog snapshot builders — hoisted out of the Compose Save
  * `onClick` lambda and the `triggerTestConnection` local `fun` so the
- * section-off credential-clearing rules (basicAuth / tunnel / mTLS), the
+ * section-off credential-clearing rules (basicAuth / mTLS), the
  * `name.ifBlank{"Untitled"}` fallback, the `selectedGroup != initialGroup`
  * groupFp rewrite, the `effectivePasswordEdited` forced-clear, and the
  * `hasMaterial` gating via [mtlsHasMaterial] are all unit-testable without
@@ -34,7 +34,6 @@ class MtlsDialogCallBuildersTest {
         name: String = "Localhost",
         serverUrl: String = "http://localhost:4096",
         basicAuth: BasicAuthConfig? = null,
-        tunnelPasswordId: String? = null,
         serverGroupFp: String = "",
         mtlsEnabled: Boolean = false,
         clientCertId: String? = null,
@@ -43,7 +42,6 @@ class MtlsDialogCallBuildersTest {
         name = name,
         serverUrl = serverUrl,
         basicAuth = basicAuth,
-        tunnelPasswordId = tunnelPasswordId,
         serverGroupFp = serverGroupFp,
         mtlsEnabled = mtlsEnabled,
         clientCertId = clientCertId,
@@ -73,9 +71,6 @@ class MtlsDialogCallBuildersTest {
         authUsername = "",
         authPassword = "",
         passwordEdited = false,
-        tunnelEnabled = false,
-        tunnelPassword = "",
-        tunnelEdited = false,
         mtlsEnabled = false,
         slimEnabled = slimEnabled,
         clientCleared = clientCleared,
@@ -124,7 +119,6 @@ class MtlsDialogCallBuildersTest {
         assertEquals("Localhost", r.saved.name)
         assertEquals("http://localhost:4096", r.saved.serverUrl)
         assertNull(r.saved.basicAuth)
-        assertNull(r.saved.tunnelPasswordId)
         // §tofu R2: allowInsecureConnections field removed — no assertion.
         assertFalse(r.effectivePasswordEdited)
         assertFalse(r.hasMaterial)
@@ -133,7 +127,7 @@ class MtlsDialogCallBuildersTest {
     @Test
     fun `buildSaveCall all sections on with existing cert populates all three credentials`() {
         // §kover-4.5: covers the 2nd case from the task list (basicAuth on with
-        // username+password, tunnel on with edited password, mTLS on with
+        // username+password, mTLS on with
         // existing cert untouched).
         val initial = profile(clientCertId = "cert-1", name = "Original")
         val r = buildSaveCall(
@@ -146,9 +140,6 @@ class MtlsDialogCallBuildersTest {
             authUsername = "alice",
             authPassword = "pw",
             passwordEdited = true,
-            tunnelEnabled = true,
-            tunnelPassword = "tp",
-            tunnelEdited = true,
             mtlsEnabled = true,
             slimEnabled = false,
             clientCleared = false,
@@ -160,8 +151,6 @@ class MtlsDialogCallBuildersTest {
         assertNotNull(r.saved.basicAuth)
         assertEquals("alice", r.saved.basicAuth?.username)
         assertEquals("p1", r.saved.basicAuth?.passwordId)
-        // tunnelEdited=true, password not blank → tunnelPasswordId = initial.id
-        assertEquals("p1", r.saved.tunnelPasswordId)
         // §tofu R2: allowInsecureConnections field removed — no assertion.
         // mtlsEnabled=true + clientCertId!=null + !clientCleared → hasMaterial
         assertTrue(r.hasMaterial)
@@ -198,9 +187,6 @@ class MtlsDialogCallBuildersTest {
             authUsername = "",
             authPassword = "",
             passwordEdited = false, // user did not edit
-            tunnelEnabled = false,
-            tunnelPassword = "",
-            tunnelEdited = false,
             mtlsEnabled = false,
             slimEnabled = false,
             clientCleared = false,
@@ -208,75 +194,6 @@ class MtlsDialogCallBuildersTest {
             caStage = CaStage.Unchanged,
         )
         assertTrue(r.effectivePasswordEdited)
-    }
-
-    @Test
-    fun `buildSaveCall tunnel off on profile with existing tunnelPasswordId clears it`() {
-        // §kover-4.5: covers the 5th case (tunnelEnabled=false on a profile
-        // whose initial.tunnelPasswordId != null → saved.tunnelPasswordId=null
-        // and effectiveTunnelEd=true so ESP clears stored password).
-        val initial = profile(tunnelPasswordId = "p1")
-        val r = saveAllOff(initial)
-        assertNull(r.saved.tunnelPasswordId)
-        assertTrue(r.tunnelEd) // section-off → force-clear signal
-        assertEquals("", r.tunnelPw)
-    }
-
-    @Test
-    fun `buildSaveCall tunnel on with blank password and edited yields no tunnelId`() {
-        // §kover-4.5: covers the 6th case (tunnelEnabled=true, tunnelEdited=true,
-        // tunnelPassword blank → tunnelPasswordId=null).
-        val initial = profile()
-        val r = buildSaveCall(
-            initial = initial,
-            name = "Test",
-            serverUrl = "http://localhost:4096",
-            selectedGroup = null,
-            initialGroup = null,
-            basicAuthEnabled = false,
-            authUsername = "",
-            authPassword = "",
-            passwordEdited = false,
-            tunnelEnabled = true,
-            tunnelPassword = "",
-            tunnelEdited = true,
-            mtlsEnabled = false,
-            slimEnabled = false,
-            clientCleared = false,
-            stagedP12 = null,
-            caStage = CaStage.Unchanged,
-        )
-        assertNull(r.saved.tunnelPasswordId)
-        assertEquals("", r.tunnelPw)
-        assertTrue(r.tunnelEd)
-    }
-
-    @Test
-    fun `buildSaveCall tunnel on with edit false keeps existing tunnelPasswordId`() {
-        // §kover-4.5: covers the 7th case (tunnelEnabled=true, tunnelEdited=false
-        // → tunnelPasswordId untouched at initial.tunnelPasswordId).
-        val initial = profile(tunnelPasswordId = "existing")
-        val r = buildSaveCall(
-            initial = initial,
-            name = "Test",
-            serverUrl = "http://localhost:4096",
-            selectedGroup = null,
-            initialGroup = null,
-            basicAuthEnabled = false,
-            authUsername = "",
-            authPassword = "",
-            passwordEdited = false,
-            tunnelEnabled = true,
-            tunnelPassword = "",
-            tunnelEdited = false,
-            mtlsEnabled = false,
-            slimEnabled = false,
-            clientCleared = false,
-            stagedP12 = null,
-            caStage = CaStage.Unchanged,
-        )
-        assertEquals("existing", r.saved.tunnelPasswordId)
-        assertFalse(r.tunnelEd)
     }
 
     @Test
@@ -296,9 +213,6 @@ class MtlsDialogCallBuildersTest {
             authUsername = "",
             authPassword = "",
             passwordEdited = false,
-            tunnelEnabled = false,
-            tunnelPassword = "",
-            tunnelEdited = false,
             mtlsEnabled = true,
             slimEnabled = false,
             clientCleared = true,
@@ -334,9 +248,6 @@ class MtlsDialogCallBuildersTest {
             authUsername = "",
             authPassword = "",
             passwordEdited = false,
-            tunnelEnabled = false,
-            tunnelPassword = "",
-            tunnelEdited = false,
             mtlsEnabled = true,
             slimEnabled = false,
             clientCleared = false,
@@ -371,9 +282,6 @@ class MtlsDialogCallBuildersTest {
             authUsername = "",
             authPassword = "",
             passwordEdited = false,
-            tunnelEnabled = false,
-            tunnelPassword = "",
-            tunnelEdited = false,
             mtlsEnabled = false,
             slimEnabled = false,
             clientCleared = false,
@@ -399,9 +307,6 @@ class MtlsDialogCallBuildersTest {
             authUsername = "",
             authPassword = "",
             passwordEdited = false,
-            tunnelEnabled = false,
-            tunnelPassword = "",
-            tunnelEdited = false,
             mtlsEnabled = false,
             slimEnabled = false,
             clientCleared = false,
@@ -427,9 +332,6 @@ class MtlsDialogCallBuildersTest {
             authUsername = "",
             authPassword = "",
             passwordEdited = false,
-            tunnelEnabled = false,
-            tunnelPassword = "",
-            tunnelEdited = false,
             mtlsEnabled = false,
             slimEnabled = false,
             clientCleared = false,
@@ -455,9 +357,6 @@ class MtlsDialogCallBuildersTest {
             authUsername = "",
             authPassword = "",
             passwordEdited = false,
-            tunnelEnabled = false,
-            tunnelPassword = "",
-            tunnelEdited = false,
             mtlsEnabled = false,
             slimEnabled = false,
             clientCleared = false,

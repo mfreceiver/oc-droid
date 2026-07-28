@@ -39,7 +39,6 @@ class HostProfileSerializationTest {
             name = "Server",
             serverUrl = "https://opencode.example.com",
             basicAuth = BasicAuthConfig(username = "user", passwordId = "secret-1"),
-            tunnelPasswordId = null,
             lastUsedAt = 1234L
         )
         val encoded = json.encodeToString(profile)
@@ -68,7 +67,6 @@ class HostProfileSerializationTest {
         )
         assertEquals("x", decoded.id)
         assertNull(decoded.basicAuth)
-        assertNull(decoded.tunnelPasswordId)
         assertNull(decoded.lastUsedAt)
     }
 

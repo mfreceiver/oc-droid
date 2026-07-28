@@ -190,11 +190,14 @@ class MainActivity : AppCompatActivity() {
         // predicate which is intentionally lenient on tail charset and cannot
         // protect against id values that would create a multi-segment route.
         //
-        // The fallback uses [forceNavigateToSessions] instead of [setLastRoute]
-        // to guarantee the synchronizer fires even when [NavState.lastRoute]
+        // The fallback uses [forceNavigateToSessions] (which delegates to
+        // [requestNavigate] — §unified-nav A1) instead of [setLastRoute] to
+        // guarantee the synchronizer fires even when [NavState.lastRoute]
         // already equals "sessions" (which it does while on Files/Git — those
-        // destinations do not update navState). [setLastRoute] would short-
-        // circuit in that case, leaving the user on the wrong screen.
+        // destinations do not update navState). [requestNavigate] ALWAYS bumps
+        // [NavState.navEpoch], so the synchronizer re-fires unconditionally;
+        // [setLastRoute] is the passive mirror setter (no epoch bump) and would
+        // short-circuit in that case, leaving the user on the wrong screen.
         if (!isNavigableChatSessionId(sessionId)) {
             mainViewModel?.forceNavigateToSessions()
             return

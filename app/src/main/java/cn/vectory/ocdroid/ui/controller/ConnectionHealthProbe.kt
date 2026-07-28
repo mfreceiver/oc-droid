@@ -164,6 +164,10 @@ internal class ConnectionHealthProbe(
 
     private fun promoteDegradedTofuIfNeeded() {
         val challenge = tofu.promoteDegradedToPending() ?: return
+        // §red-dot-trace: surface the silent degraded-TOFU promotion to
+        // AwaitingTofuTrust (isConnected=false && isConnecting=false &&
+        // phase != Idle -> red state).
+        DebugLog.w(TAG, "promoteDegradedTofuIfNeeded: degraded tofu awaiting activity for ${challenge.hostPort} -> AwaitingTofuTrust")
         writeConnection {
             it.copy(
                 pendingTofuCapture = challenge.capture,
@@ -176,6 +180,10 @@ internal class ConnectionHealthProbe(
             when (val decision = challenge.decision.await()) {
                 TofuDecision.Cancel -> {
                     tofu.clearPendingTofu()
+                    // §red-dot-trace: surface the silent degraded-TOFU cancel
+                    // disconnect (isConnected=false && isConnecting=false &&
+                    // phase=Disconnected -> red state).
+                    DebugLog.w(TAG, "promoteDegradedTofuIfNeeded: degraded tofu cancel for ${challenge.hostPort} -> Disconnected")
                     writeConnection {
                         it.copy(
                             pendingTofuCapture = null,
@@ -566,6 +574,9 @@ internal class ConnectionHealthProbe(
                                         }
                                         TofuDecision.Cancel -> {
                                             // User declined — terminal failure.
+                                            // §red-dot-trace: surface the silent
+                                            // TOFU-cancel disconnect (red state).
+                                            DebugLog.w(TAG, "testConnection: tofu decision cancel for $hostPort -> Disconnected")
                                             writeConnection {
                                                 it.copy(
                                                     isConnected = false,
@@ -609,6 +620,24 @@ internal class ConnectionHealthProbe(
                         // still describe the same failure).
                         healthResult.exceptionOrNull()?.let { e ->
                             effects.tryEmitUiEvent(UiEvent.Error(R.string.error_connection_failed, listOf(errorMessageOrFallback(e, "unknown error"))))
+                        }
+                        // §red-dot-trace: make the silent retry-exhaustion
+                        // disconnect visible so the red indicator is traceable.
+                        // The UiEvent.Error above only fires when an exception
+                        // exists; a 200-OK with healthy=false reached here with
+                        // NO log line (the "no exception" symptom in the task).
+                        val termExc = healthResult.exceptionOrNull()
+                        if (termExc != null) {
+                            DebugLog.e(
+                                TAG,
+                                "testConnection: retry exhausted attempt=$attempt/$maxAttempts -> Disconnected",
+                                termExc,
+                            )
+                        } else {
+                            DebugLog.w(
+                                TAG,
+                                "testConnection: health probe: server reported healthy=false (attempt=$attempt/$maxAttempts) -> Disconnected",
+                            )
                         }
                         writeConnection {
                             it.copy(
@@ -746,6 +775,10 @@ internal class ConnectionHealthProbe(
                             return@launch
                         }
                         is ConnectionBootstrapOutcome.TofuNeedsActivity -> {
+                            // §red-dot-trace: surface the silent AwaitingTofuTrust
+                            // transition (isConnected=false && isConnecting=false
+                            // && phase != Idle -> red state).
+                            DebugLog.w(TAG, "testConnectionWithEngine: tofu needs activity (AwaitingTofuTrust)")
                             writeConnection {
                                 it.copy(
                                     isConnected = false,

@@ -8,6 +8,7 @@ import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.repository.MessagesPage
+import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.AppCore
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
@@ -46,6 +47,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -1490,5 +1492,424 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         // /proj-a/ is normalized to /proj-a (NOT the raw "/proj-a/" form);
         // /proj-b/ is normalized to /proj-b.
         assertEquals(listOf("/proj-a", "/proj-b"), result)
+    }
+
+    // ── §unified-nav A5: materialized-session route adoption ordering ──────────
+
+    /**
+     * §unified-nav A5.3/A5.4 (item 10-A): the FIRST text-send in a freshly-
+     * created draft session MUST adopt the route SYNCHRONOUSLY inside the
+     * materialize CAS — BEFORE the POST. This test captures the store state at
+     * the moment [repository.sendMessage] is invoked (via an answers block) and
+     * asserts the 4-way CAS (nav.lastRoute + navEpoch + currentSessionId + token
+     * + content envelope) was committed atomically before the POST left the
+     * device. Also verifies the captured payload's text/attachments reached the
+     * wire (not wiped) and a pre-filled effect bus does not interfere.
+     */
+    @Test
+    fun `first text send in draft adopts route BEFORE the POST via the aggregate CAS`() = runTest {
+        val created = Session(id = "ses_new", directory = "/proj")
+        coEvery { repository.createSession(title = null, directory = any()) } returns Result.success(created)
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        coEvery { repository.getSession(any()) } returns Result.success(created)
+
+        // Capture the store state AT the moment repository.sendMessage is called.
+        // Use a nullable holder so the answers block (set up before wire()) can
+        // reference the wired core without resolving to the uninitialized field.
+        var coreRef: cn.vectory.ocdroid.ui.AppCore? = null
+        var capturedNavEpoch: Long = -1
+        var capturedLastRoute: String? = null
+        var capturedCurrentSid: String? = null
+        var capturedToken: Long = -1
+        var capturedContentSid: String? = null
+        var capturedContentRouteInstance: Long = -1
+        var sentText: String? = null
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } answers {
+            val c = coreRef!!
+            val nav = c.store.navFlow.value
+            val chat = c.store.chatFlow.value
+            capturedNavEpoch = nav.navEpoch
+            capturedLastRoute = nav.lastRoute
+            capturedCurrentSid = chat.currentSessionId
+            capturedToken = c.store.stateFlow.value.chatRouteInstance
+            capturedContentSid = chat.content?.sessionId
+            capturedContentRouteInstance = chat.content?.routeInstance ?: -1
+            sentText = secondArg()
+            Result.success(Unit)
+        }
+
+        val core = wire().also { coreRef = it }
+        val oldEpoch = core.store.navFlow.value.navEpoch
+        val oldToken = core.store.stateFlow.value.chatRouteInstance
+        core.writeComposer { it.copy(inputText = "hello draft", draftWorkdir = "/proj") }
+
+        core.sendMessage()
+        advanceUntilIdle()
+
+        // BEFORE the POST, the CAS committed the route/nav/token/content.
+        assertEquals("chat/ses_new", capturedLastRoute)
+        assertEquals(oldEpoch + 1L, capturedNavEpoch)
+        assertEquals("ses_new", capturedCurrentSid)
+        assertEquals(oldToken + 1L, capturedToken)
+        assertEquals("ses_new", capturedContentSid)
+        assertEquals(capturedToken, capturedContentRouteInstance)
+        // routeInstanceFor("ses_new") returns the token (route id + currentSessionId match).
+        assertEquals(capturedToken, core.store.slices.routeInstanceFor("ses_new"))
+        // Captured payload's text reached the wire (not wiped).
+        assertEquals("hello draft", sentText)
+    }
+
+    /**
+     * §unified-nav A5.4 (item 10-A): an SSE message.updated dispatched during
+     * the initial-GET window (after the CAS, before the GET completes) lands in
+     * BOTH flat messages AND content.messages keyed by the CAS token. The empty
+     * initial-GET that follows does NOT wipe it (the SSE message survives).
+     */
+    @Test
+    fun `SSE message updated during initial GET lands in flat and content keyed by CAS token`() = runTest {
+        val created = Session(id = "ses_new", directory = "/proj")
+        coEvery { repository.createSession(title = null, directory = any()) } returns Result.success(created)
+        coEvery { repository.getSession(any()) } returns Result.success(created)
+
+        var coreRef: cn.vectory.ocdroid.ui.AppCore? = null
+        val userMsg = Message(id = "m1", role = "user")
+        // The unanchored GET returns empty; we inject the SSE message DURING
+        // the GET (inside the answers block, before returning the empty page).
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } answers {
+            val c = coreRef!!
+            // Inject an SSE message.updated with the CAS token. The token is
+            // chatRouteInstance at this point (the CAS already committed).
+            val token = c.store.stateFlow.value.chatRouteInstance
+            c.store.dispatch(
+                AppAction.MessageUpdatedApplied(
+                    message = userMsg,
+                    expectedRouteInstance = token,
+                    sessionId = "ses_new",
+                )
+            )
+            Result.success(MessagesPage(emptyList(), null))
+        }
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+
+        val core = wire().also { coreRef = it }
+        core.writeComposer { it.copy(inputText = "hi", draftWorkdir = "/proj") }
+        core.sendMessage()
+        advanceUntilIdle()
+
+        val chat = core.store.chatFlow.value
+        val token = core.store.stateFlow.value.chatRouteInstance
+        // Flat messages contain the injected message.
+        assertTrue("flat messages contain the SSE message", chat.messages.any { it.id == "m1" })
+        // Content messages also contain it (synced via withRouteContentSynced).
+        assertEquals("ses_new", chat.content?.sessionId)
+        assertEquals(token, chat.content?.routeInstance)
+        assertTrue("content messages contain the SSE message", chat.content?.messages?.any { it.id == "m1" } == true)
+        // The empty initial-GET did NOT wipe the content (routeInstance unchanged).
+        assertEquals(token, chat.content?.routeInstance)
+    }
+
+    /**
+     * §unified-nav A5.3: adoption failure (user navigated away mid-create) is
+     * list-only — the session is upserted + pendingCreate tracked, but NO
+     * route/nav/content/currentSessionId transition. The captured payload is
+     * still POSTed as a background send.
+     */
+    @Test
+    fun `adoption failure when user navigated away is list-only with background send`() = runTest {
+        val created = Session(id = "ses_new", directory = "/proj")
+        coEvery { repository.createSession(title = null, directory = any()) } returns Result.success(created)
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        coEvery { repository.getSession(any()) } returns Result.success(created)
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+
+        val core = wire()
+        core.writeComposer { it.copy(inputText = "hi", draftWorkdir = "/proj") }
+
+        // Simulate the user navigating away DURING createSession: the answers
+        // block bumps navEpoch (a route transition) BEFORE returning, so
+        // stillOwnsDraftSurface fails.
+        coEvery { repository.createSession(title = null, directory = any()) } answers {
+            core.store.mutateNav { it.copy(navEpoch = it.navEpoch + 1L) }
+            Result.success(created)
+        }
+
+        core.sendMessage()
+        advanceUntilIdle()
+
+        // List-only: session upserted + pendingCreate tracked.
+        assertTrue("session upserted", core.store.sessionListFlow.value.sessions.any { it.id == "ses_new" })
+        assertTrue("pendingCreate tracked", core.store.sessionListFlow.value.pendingCreateIds.contains("ses_new"))
+        // NO route/nav/content transition.
+        assertNotEquals("chat/ses_new", core.store.navFlow.value.lastRoute)
+        assertNull("currentSessionId NOT set (list-only)", core.store.chatFlow.value.currentSessionId)
+        assertNull("content NOT set (list-only)", core.store.chatFlow.value.content)
+        // Background send still fired.
+        coVerify { repository.sendMessage("ses_new", any(), any(), any(), any()) }
+    }
+
+    // ── §unified-nav B (item 10-B): title retry loop ────────────────────────────
+
+    @Test
+    fun `title retry stops on first non-blank title and merges title into sessions and directorySessions`() = runTest {
+        val created = Session(id = "ses_new", directory = "/proj")
+        val titled = created.copy(title = "Generated Title")
+        coEvery { repository.createSession(title = null, directory = any()) } returns Result.success(created)
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        // First 2 attempts: null/blank title. Third: non-blank.
+        var attempt = 0
+        coEvery { repository.getSession("ses_new") } answers {
+            attempt++
+            Result.success(when (attempt) {
+                1 -> created // title null
+                2 -> created.copy(title = "  ") // blank
+                else -> titled // non-blank
+            })
+        }
+
+        val core = wire()
+        // Pre-populate directorySessions so we can verify the title merges there too.
+        core.writeSessionList {
+            it.copy(directorySessions = mapOf("/proj" to listOf(created)))
+        }
+        core.writeComposer { it.copy(inputText = "hi", draftWorkdir = "/proj") }
+        core.sendMessage()
+        advanceUntilIdle()
+
+        val st = core.store.sessionListFlow.value
+        // Title merged into sessions list.
+        val inSessions = st.sessions.firstOrNull { it.id == "ses_new" }
+        assertEquals("Generated Title", inSessions?.title)
+        // Title merged into directorySessions.
+        val inDir = st.directorySessions["/proj"]?.firstOrNull { it.id == "ses_new" }
+        assertEquals("Generated Title", inDir?.title)
+        // Stopped after 3 attempts (not all 6).
+        assertEquals(3, attempt)
+    }
+
+    @Test
+    fun `title retry stops at deadline when all attempts return null title`() = runTest {
+        val created = Session(id = "ses_new", directory = "/proj")
+        coEvery { repository.createSession(title = null, directory = any()) } returns Result.success(created)
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        var attempt = 0
+        coEvery { repository.getSession("ses_new") } answers {
+            attempt++
+            Result.success(created) // always null title
+        }
+
+        val core = wire()
+        core.writeComposer { it.copy(inputText = "hi", draftWorkdir = "/proj") }
+        core.sendMessage()
+        advanceUntilIdle()
+
+        // Exhausted all 6 attempts.
+        assertEquals(6, attempt)
+        // Title still null (never wrote back null).
+        val inSessions = core.store.sessionListFlow.value.sessions.firstOrNull { it.id == "ses_new" }
+        assertNull(inSessions?.title)
+    }
+
+    @Test
+    fun `title retry does NOT overwrite a newer title with a null blank response`() = runTest {
+        // The CAS upserts the createSession result (title="Initial") into the
+        // store. The retry's getSession returns null title. The retry MUST NOT
+        // overwrite the "Initial" title with null/blank.
+        val initial = Session(id = "ses_new", directory = "/proj", title = "Initial Title")
+        coEvery { repository.createSession(title = null, directory = any()) } returns Result.success(initial)
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        // getSession returns a null-title copy every time (never a non-blank).
+        coEvery { repository.getSession("ses_new") } returns Result.success(initial.copy(title = null))
+
+        val core = wire()
+        core.writeComposer { it.copy(inputText = "hi", draftWorkdir = "/proj") }
+        core.sendMessage()
+        advanceUntilIdle()
+
+        // The "Initial Title" survived (null/blank retry never overwrote it).
+        val inSessions = core.store.sessionListFlow.value.sessions.firstOrNull { it.id == "ses_new" }
+        assertEquals("Initial Title", inSessions?.title)
+    }
+
+    @Test
+    fun `title retry retries on REST failure then succeeds`() = runTest {
+        val created = Session(id = "ses_new", directory = "/proj")
+        val titled = created.copy(title = "Final Title")
+        coEvery { repository.createSession(title = null, directory = any()) } returns Result.success(created)
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        var attempt = 0
+        coEvery { repository.getSession("ses_new") } answers {
+            attempt++
+            if (attempt == 1) Result.failure(java.io.IOException("timeout"))
+            else Result.success(titled)
+        }
+
+        val core = wire()
+        core.writeComposer { it.copy(inputText = "hi", draftWorkdir = "/proj") }
+        core.sendMessage()
+        advanceUntilIdle()
+
+        // Retried after the failure, then succeeded on attempt 2.
+        assertEquals(2, attempt)
+        val inSessions = core.store.sessionListFlow.value.sessions.firstOrNull { it.id == "ses_new" }
+        assertEquals("Final Title", inSessions?.title)
+    }
+
+    // ── §blocker1: create-during-edit preservation ──────────────────────────────
+
+    /**
+     * §blocker1: createSession is a SUSPEND boundary; the user can keep typing
+     * during the await. On success, the captured payload A is POSTed (correct —
+     * click-time intent), but the composer's NEWER text B must SURVIVE (compare-
+     * and-clear: only clear if current == captured). Pre-fix, dispatchCapturedSend
+     * UNCONDITIONALLY wiped inputText → B was lost.
+     */
+    @Test
+    fun `create-during-edit preserves newer composer text while POSTing the captured payload`() = runTest {
+        val created = Session(id = "ses_new", directory = "/proj")
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.getSession(any()) } returns Result.success(created)
+
+        val core = wire()
+        // Set up createSession to simulate the user typing MORE during the
+        // suspended await. `core` (local) is in scope here.
+        coEvery { repository.createSession(title = null, directory = any()) } answers {
+            core.writeComposer { it.copy(inputText = "A then B") }
+            Result.success(created)
+        }
+        core.writeComposer { it.copy(inputText = "A", draftWorkdir = "/proj") }
+        core.sendMessage()
+        advanceUntilIdle()
+
+        // The CAPTURED payload "A" was POSTed (not "A then B").
+        coVerify { repository.sendMessage("ses_new", eq("A"), any(), any(), any()) }
+        // The composer STILL holds the user's newer text "A then B" (compare-and-
+        // clear preserved it — not wiped).
+        assertEquals("A then B", core.composerFlow.value.inputText)
+    }
+
+    // ── §blocker1: command create-failure payload restore ───────────────────────
+
+    /**
+     * §blocker1: a /command in draft mode that FAILS to createSession must
+     * PRESERVE the command text so the user can retry. Pre-fix, executeCommand
+     * cleared inputText BEFORE materializeDraftSession, and on create-failure
+     * only draftWorkdir was restored — the command text was lost.
+     */
+    @Test
+    fun `command create-failure preserves command text for retry`() = runTest {
+        coEvery { repository.createSession(title = null, directory = any()) } returns Result.failure(IllegalStateException("nope"))
+
+        val core = wire()
+        core.writeComposer { it.copy(inputText = "/compact extra", draftWorkdir = "/proj") }
+
+        core.executeCommand(command = "/compact", arguments = "extra")
+        advanceUntilIdle()
+
+        // The command text SURVIVED (user can retry).
+        assertEquals("/compact extra", core.composerFlow.value.inputText)
+        // draftWorkdir restored (ownership guard: still on draft surface).
+        assertEquals("/proj", core.composerFlow.value.draftWorkdir)
+        // Route did NOT jump (create failed).
+        assertNotEquals("chat/ses_new", core.store.navFlow.value.lastRoute)
+        // Error surfaced.
+        assertNotNull(core.recentTestErrors.lastOrNull())
+    }
+
+    // ── §blocker2: host switch during create rejects adoption ───────────────────
+
+    /**
+     * §blocker2: a host/profile switch during the suspended createSession must
+     * REJECT the adoption (list-only: session upserted, but currentSessionId /
+     * nav / content NOT set, NO hydration, NO send to the wrong host). Pre-fix,
+     * stillOwnsDraftSurface did not compare host identity → the old-host response
+     * wrote into the WRONG host's state.
+     */
+    @Test
+    fun `host switch during create rejects adoption and does not send to wrong host`() = runTest {
+        val created = Session(id = "ses_new", directory = "/proj")
+        coEvery { repository.createSession(title = null, directory = any()) } returns Result.success(created)
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        coEvery { repository.sendMessage(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.getSession(any()) } returns Result.success(created)
+
+        val core = wire()
+        // Set an initial host identity so the origin captures a non-null hostProfileId.
+        core.writeHost { it.copy(currentHostProfileId = "host_A") }
+
+        core.writeComposer { it.copy(inputText = "hi", draftWorkdir = "/proj") }
+
+        // Simulate a host switch DURING createSession: the answers block changes
+        // currentHostProfileId BEFORE returning, so stillOwnsDraftSurface fails.
+        coEvery { repository.createSession(title = null, directory = any()) } answers {
+            core.writeHost { it.copy(currentHostProfileId = "host_B") }
+            Result.success(created)
+        }
+
+        core.sendMessage()
+        advanceUntilIdle()
+
+        // List-only: session upserted + pendingCreate tracked.
+        assertTrue("session upserted", core.store.sessionListFlow.value.sessions.any { it.id == "ses_new" })
+        assertTrue("pendingCreate tracked", core.store.sessionListFlow.value.pendingCreateIds.contains("ses_new"))
+        // NO route/nav/content transition.
+        assertNotEquals("chat/ses_new", core.store.navFlow.value.lastRoute)
+        assertNull("currentSessionId NOT set (list-only)", core.store.chatFlow.value.currentSessionId)
+        assertNull("content NOT set (list-only)", core.store.chatFlow.value.content)
+        // NO send to the wrong host (host-changed gate dropped it).
+        coVerify(exactly = 0) { repository.sendMessage(any(), any(), any(), any(), any()) }
+    }
+
+    // ── §blocker1-command: command create-SUCCESS-during-edit preservation ──────
+
+    /**
+     * §blocker1-command: a /command in draft mode that SUCCEEDS in creating a
+     * session, but during the createSession suspend boundary the user typed NEW
+     * content into the composer. The captured cmd/arguments are what gets
+     * executed (click-time intent — correct), but the composer's NEWER text must
+     * SURVIVE (compare-and-clear on the command-success path). Pre-fix, the
+     * command-success branch did an UNCONDITIONAL `setInputText("")` → the
+     * user's newer content was wiped.
+     */
+    @Test
+    fun `command create-SUCCESS preserves newer composer text while executing the captured command`() = runTest {
+        val created = Session(id = "ses_new", directory = "/proj")
+        coEvery { repository.createSession(title = null, directory = any()) } returns Result.success(created)
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        coEvery { repository.executeCommand(any(), any(), any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.getSession(any()) } returns Result.success(created)
+
+        val core = wire()
+        // Set up createSession to simulate the user typing NEW content during
+        // the suspended await. `core` (local) is in scope here.
+        coEvery { repository.createSession(title = null, directory = any()) } answers {
+            core.writeComposer { it.copy(inputText = "/compact extra then B") }
+            Result.success(created)
+        }
+        core.writeComposer { it.copy(inputText = "/compact extra", draftWorkdir = "/proj") }
+
+        core.executeCommand(command = "/compact", arguments = "extra")
+        advanceUntilIdle()
+
+        // (a) executeCommand was called with the CAPTURED cmd/arguments
+        // (click-time intent — "compact" / "extra"), NOT the newer text.
+        coVerify { repository.executeCommand("ses_new", "compact", "extra", any(), any()) }
+        // (b) The composer STILL holds the user's newer text (compare-and-clear
+        // preserved it — NOT wiped by the unconditional clear).
+        assertEquals("/compact extra then B", core.composerFlow.value.inputText)
     }
 }

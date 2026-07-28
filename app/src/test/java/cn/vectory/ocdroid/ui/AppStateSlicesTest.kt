@@ -165,20 +165,6 @@ class AppStateSlicesTest {
         assertEquals(3, retrying.maxAttempts)
     }
 
-    @Test
-    fun `TunnelActivationState has the expected variants`() {
-        val idle: TunnelActivationState = TunnelActivationState.Idle
-        val loading: TunnelActivationState = TunnelActivationState.Loading
-        val success: TunnelActivationState = TunnelActivationState.Success
-        val error: TunnelActivationState = TunnelActivationState.Error("boom")
-
-        assertTrue(idle is TunnelActivationState.Idle)
-        assertTrue(loading is TunnelActivationState.Loading)
-        assertTrue(success is TunnelActivationState.Success)
-        assertTrue(error is TunnelActivationState.Error)
-        assertEquals("boom", (error as TunnelActivationState.Error).message)
-    }
-
     // R-20 Phase 2 / remove-message-persistence Task 4: the legacy single-gap
     // `GapInfo` class + its constructor round-trip test were removed, then the
     // entire multi-gap replacement (the contract GapMarker + the GapFill

@@ -10,11 +10,17 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavController
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -56,8 +62,10 @@ import cn.vectory.ocdroid.ui.workspace.GitScreen
  * `restoreLastRoute()` runs (the method was removed — dead code after the
  * bottom-bar removal); `requestedRoute == Sessions == startDestination`
  * so the `LaunchedEffect(requestedRoute)` hop short-circuits. Explicit
- * `setLastRoute(...)` (deeplink / notification / in-session nav) still fires
- * the hop.
+ * `requestNavigate(...)` / `navigateToChat(...)` (deeplink / notification /
+ * in-session nav / new-draft → Chat / server popup → Settings) still fire
+ * the hop — requestNavigate always bumps navEpoch so the synchronizer re-fires
+ * even on a same-target re-entry (items 6 + 8).
  */
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
@@ -80,6 +88,11 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
     val navState by orchestratorVM.navFlow.collectAsStateWithLifecycle()
     val sessionListState by sessionVM.sessionListFlow.collectAsStateWithLifecycle()
     val chatState by chatVM.chatFlow.collectAsStateWithLifecycle()
+    // §unified-nav A5.5: the chat-route-instance token for the staged-route
+    // bridge (the 4-way CAS that decides whether the bare "chat" composable
+    // renders the materialized session's detail during the one-frame gap
+    // before the chat/{sessionId} NavBackStackEntry manifests).
+    val chatRouteInstance by orchestratorVM.chatRouteInstanceFlow.collectAsStateWithLifecycle()
 
     fun navigateTopLevel(route: NavRoute) {
         navController.navigate(route.route) {
@@ -88,43 +101,80 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
         }
     }
 
-    // §CRITICAL-1 (hub-back-trap fix): centralized "return to home hub"
-    // operation. Files / Git are entered via direct `navController.navigate(
-    // filesRoute(workdir, …))` (necessary because the workdir param can't be
-    // carried by `setLastRoute` — it only takes a NavRoute identity). So on
-    // entry the navState.lastRoute STAYS Sessions; on exit, calling
-    // setLastRoute(Sessions) would SHORT-CIRCUIT (state already Sessions) →
-    // no navFlow emission → the nav synchronizer never fires → user trapped
-    // on Files/Git. The fix decouples the return NAVIGATION (popBackStack —
-    // always works regardless of navState) from the navState UPDATE
-    // (setLastRoute — for consistency so the synchronizer doesn't fight
-    // afterward).
-    //
-    // §12 B1: the synchronizer is now `LaunchedEffect(navState.lastRoute)`
-    // (the unified synchronizer, NOT the old `LaunchedEffect(requestedRoute)`
-    // mirror). The guard skips navigation when NavController is already at
-    // the target — after popBackStack moves to Sessions, the synchronizer
-    // fires on the lastRoute change but the guard finds NavController
-    // already at Sessions → no-op. ✓
-    // popBackStack(route, inclusive=false) pops everything above the Sessions
-    // destination, leaving it at the top. Sessions is startDestination so it
-    // is always on the back stack; the Boolean return covers the (impossible
-    // in practice) case where it isn't, falling back to navigateTopLevel.
+    // §unified-nav A3: backToHome. The explicit closeDetail() that used to live
+    // here was MIGRATED to the destination-transition listener below (the SOLE
+    // place closeDetail runs for chat→Sessions), so backToHome no longer calls
+    // it — its popBackStack(Sessions) triggers the listener which does
+    // closeDetail exactly once. setLastRoute(Sessions) → requestNavigate(
+    // Sessions) (the explicit nav-command setter that ALWAYS bumps navEpoch so
+    // the synchronizer re-fires even when lastRoute already reads "sessions").
+    // The syncer's alreadyThere guard prevents a double-push (after popBackStack
+    // moves to Sessions, the synchronizer fires but finds NavController already
+    // at Sessions → no-op).
     fun backToHome() {
-        // §B2 rev-gpt #2: when leaving the parameterized chat/{sessionId}
-        // detail route, advance the §7.2 route-instance token + clear the
-        // route-owned LoadedContent so a stale route-aware completion (delta /
-        // load / load-more carrying the prior token) is rejected by the
-        // existing freshness CAS. Gated on the parameterized detail route so
-        // the legacy bare-chat path (NavRoute.Chat) keeps its flat messages
-        // across a leave-and-return — reduceCloseDetail clears the flat
-        // payload too, which would otherwise regress the legacy surface.
-        if (destRoute == "chat/{sessionId}") {
-            orchestratorVM.closeDetail()
-        }
-        orchestratorVM.setLastRoute(NavRoute.Sessions)
+        orchestratorVM.requestNavigate(NavRoute.Sessions)
         if (!navController.popBackStack(NavRoute.Sessions.route, inclusive = false)) {
             navigateTopLevel(NavRoute.Sessions)
+        }
+    }
+
+    // §unified-nav A3: the REAL destination listener (NOT a loose LaunchedEffect).
+    // Registered via DisposableEffect so it is unregistered on dispose. This is
+    // the SOLE place that:
+    //  (1) reconciles the PASSIVE mirror (setLastRoute — no epoch bump) when the
+    //      committed destination diverges from navState.lastRoute (item 6:
+    //      system BACK pops chat→sessions while the mirror still reads
+    //      "chat/…"); and
+    //  (2) runs closeDetail() on the EXACT committed transition
+    //      chat/{sessionId} → sessions (restoring the leave-detail transaction
+    //      that native popBackStack bypasses — route-instance/CAS invalidation
+    //      + clear route-owned content). CRITICAL GATING: closeDetail fires ONLY
+    //      on this exact transition; it does NOT fire on predictive-back CANCEL
+    //      (destination unchanged → no listener fire), chat/{parent}→chat/{child},
+    //      chat/{child}→chat/{parent}, chat→preview, preview→chat, config change,
+    //      or initial app entry to Sessions.
+    //  (3) writes NavState.activeDestination + epoch (A5.2 passive — never fires
+    //      the syncer) so the materialize CAS can detect mid-create navigation.
+    //
+    // No feedback loop: the observer key is the COMMITTED destination (not
+    // navState), and setLastRoute does NOT bump navEpoch, so the nav
+    // synchronizer's alreadyThere guard no-ops (NavController already moved to
+    // the destination that triggered this listener).
+    val navStateRef = rememberUpdatedState(navState)
+    var prevCommittedPattern by remember { mutableStateOf<String?>(null) }
+    DisposableEffect(navController) {
+        val listener = NavController.OnDestinationChangedListener { _, destination, arguments ->
+            val newPattern = destination.route
+            // §unified-nav A5.2: resolve the ACTUAL destination literal + write
+            // it to NavState.activeDestination (passive setter — never touches
+            // lastRoute/navEpoch, so the syncer never re-fires from this).
+            val actualDestination = resolveActualDestination(destination.route, arguments)
+            orchestratorVM.setActiveDestination(actualDestination)
+            // §unified-nav A3.1: passive mirror reconciliation. When the
+            // committed destination is Sessions but the mirror still reads a
+            // chat route, reconcile the mirror so item 6 (new session → BACK →
+            // "+" again) does not strand the mirror on a stale "chat/…" value.
+            // setLastRoute is passive (no epoch bump) → no loop.
+            if (newPattern == NavRoute.Sessions.route &&
+                navStateRef.value.lastRoute != NavRoute.Sessions.route
+            ) {
+                orchestratorVM.setLastRoute(NavRoute.Sessions)
+            }
+            // §unified-nav A3.2: closeDetail on the EXACT committed transition
+            // chat/{sessionId} → sessions. This is the SOLE closeDetail site
+            // for chat→Sessions (the explicit call was migrated OUT of
+            // backToHome so it runs exactly once). prevCommittedPattern is null
+            // on the initial fire (app entry to Sessions) → no closeDetail.
+            if (prevCommittedPattern == "chat/{sessionId}" &&
+                newPattern == NavRoute.Sessions.route
+            ) {
+                orchestratorVM.closeDetail()
+            }
+            prevCommittedPattern = newPattern
+        }
+        navController.addOnDestinationChangedListener(listener)
+        onDispose {
+            navController.removeOnDestinationChangedListener(listener)
         }
     }
 
@@ -266,6 +316,24 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                 .imePadding(),
         ) {
             composable(NavRoute.Chat.route) {
+                // §unified-nav A5.5: staged-route bridge. Because NavHost
+                // manifests the chat/{sessionId} entry ONE FRAME after the
+                // materialize CAS committed the route, the bare "chat"
+                // composable computes a STRICT staged id (4-way CAS: requested
+                // route id == currentSessionId == content.sessionId AND
+                // content.routeInstance == live token) and passes it as
+                // routeSessionId. This is NOT a relaxed flat-currentSessionId
+                // render — it enforces the structural+temporal CAS using the
+                // already-committed store route until the NavController entry
+                // appears. Once chat/{sessionId} exists it takes over.
+                val stagedSid = navState.lastRoute
+                    .takeIf { it.startsWith("chat/") }
+                    ?.removePrefix("chat/")
+                    ?.takeIf { sid ->
+                        chatState.currentSessionId == sid &&
+                            chatState.content?.sessionId == sid &&
+                            chatState.content?.routeInstance == chatRouteInstance
+                    }
                 ChatScreen(
                     chatVM = chatVM,
                     composerVM = composerVM,
@@ -274,7 +342,8 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                     hostVM = hostVM,
                     orchestratorVM = orchestratorVM,
                     settingsVM = settingsVM,
-                    onNavigateToSettings = { orchestratorVM.setLastRoute(NavRoute.Settings) },
+                    routeSessionId = stagedSid,
+                    onNavigateToSettings = { orchestratorVM.requestNavigate(NavRoute.Settings) },
                     // §CRITICAL-1: explicit pop-to-Sessions (not just
                     // setLastRoute) — see backToHome() doc above.
                     onNavigateToSessions = { backToHome() },
@@ -342,7 +411,7 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                         // The handle's lifecycle is bound to this
                         // NavBackStackEntry; pop auto-cleans the checkpoint.
                         routeSavedStateHandle = routeEntry.savedStateHandle,
-                        onNavigateToSettings = { orchestratorVM.setLastRoute(NavRoute.Settings) },
+                        onNavigateToSettings = { orchestratorVM.requestNavigate(NavRoute.Settings) },
                         onNavigateToSessions = { backToHome() },
                         onBackToHome = { backToHome() },
                         onOpenChatFilePreview = { workdir, path ->
@@ -367,7 +436,10 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                     repository = filesVM.repository,
                     connectionVM = connectionVM,
                     hostVM = hostVM,
-                    onSwitchToChat = { orchestratorVM.setLastRoute(NavRoute.Chat) },
+                    // §unified-nav A2: new-draft → Chat is an explicit nav intent
+                    // → requestNavigate (always bumps navEpoch so re-entry works
+                    // even when the mirror already reads "chat" — item 6).
+                    onSwitchToChat = { orchestratorVM.requestNavigate(NavRoute.Chat) },
                     // §chat-list-detail §12 B0.5: the ONE entry swap — the
                     // Sessions→tap→chat path uses navigateToChat (route-driven
                     // chat/{id} + LoadedContent + freshness token). Other entries
@@ -380,7 +452,11 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                     onOpenGit = { workdir ->
                         navController.navigate(NavRoute.gitRoute(workdir = workdir))
                     },
-                    onNavigateToSettings = { orchestratorVM.setLastRoute(NavRoute.Settings) },
+                    // §unified-nav A2 (item 8): server popup → Settings is an
+                    // explicit nav intent → requestNavigate (always bumps
+                    // navEpoch so it fires even when the mirror already reads
+                    // "settings" from a stale state).
+                    onNavigateToSettings = { orchestratorVM.requestNavigate(NavRoute.Settings) },
                     onLongClickServer = { navController.navigate(NavRoute.settingsDebugRoute) },
                     showBackNavigation = false,
                 )
@@ -405,7 +481,9 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                     sessions = sessionListState.sessions,
                     activeSessionId = chatState.currentSessionId,
                     initialWorkdir = explicitWorkdir,
-                    onSwitchToChat = { orchestratorVM.setLastRoute(NavRoute.Chat) },
+                    // §unified-nav A2: Files legacy switch → Chat is an explicit
+                    // nav intent → requestNavigate.
+                    onSwitchToChat = { orchestratorVM.requestNavigate(NavRoute.Chat) },
                     // §CRITICAL-1: FilesScreen's root-tier onExit must reach
                     // Sessions via the explicit pop (not just setLastRoute,
                     // which no-ops because Files entry doesn't update
@@ -445,11 +523,10 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                     composerVM = composerVM,
                     connectionVM = connectionVM,
                     settingsVM = settingsVM,
-                    // §CRITICAL-1: Settings is entered via setLastRoute(
-                    // Settings) from the server popup, so setLastRoute(
-                    // Sessions) WOULD emit — but use backToHome() for a
-                    // single canonical path that also works for the
-                    // (defensive) case where the entry path changes.
+                    // §unified-nav A2: Settings is entered via requestNavigate(
+                    // Settings) from the server popup / Chat overflow (always
+                    // bumps navEpoch). backToHome() (requestNavigate(Sessions)
+                    // + popBackStack) is the single canonical back path.
                     onBack = { backToHome() },
                     onNavigateSection = navController::navigate,
                 )
@@ -503,19 +580,26 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
     // back to Sessions (home). Sessions (root) → disabled (system-back exits).
     // Nested Settings → disabled (sub-route scaffolds pop naturally).
     //
-    // §CRITICAL-1: uses backToHome() (explicit popBackStack + setLastRoute)
+    // §CRITICAL-1: uses backToHome() (explicit popBackStack + requestNavigate)
     // so Git back works even though Git entry doesn't update navState (direct
     // navigate for the workdir param).
     //
-    // §IMPORTANT-1 (Chat back precedence): Chat is EXCLUDED from this handler
-    // so ChatScaffold (T4) owns system Back on the Chat destination in its
-    // own LIFO priority — drawer-open → close drawer; parent-session →
-    // returnToParent; root-session → onBackToHome → backToHome(). This shell
-    // handler is composed AFTER the NavHost (so it would otherwise OUTRANK
-    // ChatScaffold's BackHandlers in the LIFO dispatch and steal every press
-    // → home, regressing T4's drawer/parent precedence). Excluding Chat
-    // restores the in-screen priority AND keeps root Chat back → home working
-    // via ChatScaffold's own root BackHandler → onBackToHome → backToHome().
+    // §unified-nav A7 (rewritten — was stale): Chat is EXCLUDED from this
+    // handler. On the Chat destination system Back is handled by:
+    //  - ChatScaffold's parent-session BackHandler (enabled when parentId !=
+    //    null) → returnToParent (子→父 pop-restore via navigateToChat);
+    //  - ChatScaffold's drawer-open BackHandler (enabled when drawer open) →
+    //    close drawer.
+    //  - When NEITHER is active (root session, drawer closed), NO custom
+    //    BackHandler is enabled → the NavHost's NATIVE predictive-back handler
+    //    fires → popBackStack to Sessions with the system "shrink + reveal"
+    //    animation. The committed pop triggers the destination listener (A3)
+    //    which reconciles the mirror to Sessions + calls closeDetail() exactly
+    //    once (restoring the leave-detail transaction). There is NO
+    //    "ChatScaffold's own root BackHandler" — it was REMOVED for predictive-
+    //    back support (see ChatScaffold §predictive-back-fix). Excluding Chat
+    //    from this shell handler keeps the in-screen LIFO priority so the
+    //    parent/drawer handlers preempt the NavHost native handler.
     //
     // §files-back-fix (Blocker-2, PRESERVED): FilesScreen must own its
     // system-back entirely (preview open → close preview; preview closed →
@@ -528,8 +612,8 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
     //
     // Net coverage after both exclusions: Git (no internal BackHandler) and
     // top-level Settings → backToHome(). Files → onExit → backToHome().
-    // Chat → ChatScaffold's own chain (root path → backToHome()). Sessions
-    // (root) → system exits.
+    // Chat → ChatScaffold's parent/drawer chain OR NavHost native predictive
+    // back (root path → Sessions). Sessions (root) → system exits.
     BackHandler(
         enabled = !isNestedSettings &&
             currentRoute != NavRoute.Sessions &&
@@ -537,5 +621,24 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
             currentRoute != NavRoute.Chat,
     ) {
         backToHome()
+    }
+}
+
+/**
+ * §unified-nav A5.2: resolve the ACTUAL destination literal from a committed
+ * [NavDestination.route] pattern + the entry's arguments. Reconstructs the
+ * literal `chat/$sid` from the `sessionId` arg so the materialize CAS's
+ * [DraftRouteOrigin] comparison is exact (the bare pattern `"chat/{sessionId}"`
+ * is not distinctive enough). Falls back to the route base (query stripped) for
+ * non-parameterized destinations. Pure (no VM / state reads).
+ */
+private fun resolveActualDestination(routePattern: String?, arguments: android.os.Bundle?): String {
+    if (routePattern == null) return "unknown"
+    return when {
+        routePattern == "chat/{sessionId}" -> {
+            val sid = arguments?.getString("sessionId")
+            if (sid != null) "chat/$sid" else "chat"
+        }
+        else -> routePattern.substringBefore('?')
     }
 }

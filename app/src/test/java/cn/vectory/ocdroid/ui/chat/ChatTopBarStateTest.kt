@@ -9,7 +9,6 @@ import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ContextUsage
-import cn.vectory.ocdroid.ui.TunnelActivationState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -52,8 +51,6 @@ class ChatTopBarStateTest {
         assertEquals(ConnectionPhase.Idle, s.connectionPhase)
         assertEquals(emptyList<HostProfile>(), s.hostProfiles)
         assertEquals(null, s.currentHostProfileId)
-        assertEquals(TunnelActivationState.Idle, s.tunnelActivationState)
-        assertEquals(false, s.showTunnelAuth)
         assertEquals(emptySet<String>(), s.unreadSessions)
         assertEquals(null, s.draftWorkdir)
         assertEquals(null, s.parentSessionId)
@@ -101,8 +98,6 @@ class ChatTopBarStateTest {
             connectionPhase = ConnectionPhase.Connected,
             hostProfiles = listOf(hostProfile),
             currentHostProfileId = "h1",
-            tunnelActivationState = TunnelActivationState.Loading,
-            showTunnelAuth = true,
             unreadSessions = setOf("s1"),
             draftWorkdir = "/draft",
             parentSessionId = "parent",
@@ -132,8 +127,6 @@ class ChatTopBarStateTest {
         assertEquals(ConnectionPhase.Connected, s.connectionPhase)
         assertEquals(listOf(hostProfile), s.hostProfiles)
         assertEquals("h1", s.currentHostProfileId)
-        assertEquals(TunnelActivationState.Loading, s.tunnelActivationState)
-        assertEquals(true, s.showTunnelAuth)
         assertEquals(setOf("s1"), s.unreadSessions)
         assertEquals("/draft", s.draftWorkdir)
         assertEquals("parent", s.parentSessionId)
@@ -179,7 +172,6 @@ class ChatTopBarStateTest {
 
         a.onNavigateToSettings()
         a.onSelectHost("h1")
-        a.onActivateTunnel()
         a.onRefreshMessages()
         a.onOpenSessionPicker()
         a.onOpenOverflow()
@@ -191,7 +183,6 @@ class ChatTopBarStateTest {
         var selectAgentCalls = mutableListOf<String?>()
         var navSettings = 0
         var selectHost = ""
-        var activateTunnel = 0
         var refreshMessages = 0
         var openSessionPicker = 0
         var openOverflow = 0
@@ -202,7 +193,6 @@ class ChatTopBarStateTest {
             onSelectAgent = { selectAgentCalls += it },
             onNavigateToSettings = { navSettings += 1 },
             onSelectHost = { selectHost = it },
-            onActivateTunnel = { activateTunnel += 1 },
             onRefreshMessages = { refreshMessages += 1 },
             onOpenSessionPicker = { openSessionPicker += 1 },
             onOpenOverflow = { openOverflow += 1 },
@@ -212,7 +202,6 @@ class ChatTopBarStateTest {
         a.onSelectAgent("code")
         a.onNavigateToSettings()
         a.onSelectHost("h1")
-        a.onActivateTunnel()
         a.onRefreshMessages()
         a.onOpenSessionPicker()
         a.onOpenOverflow()
@@ -221,7 +210,6 @@ class ChatTopBarStateTest {
         assertEquals(listOf("code"), selectAgentCalls)
         assertEquals(1, navSettings)
         assertEquals("h1", selectHost)
-        assertEquals(1, activateTunnel)
         assertEquals(1, refreshMessages)
         assertEquals(1, openSessionPicker)
         assertEquals(1, openOverflow)

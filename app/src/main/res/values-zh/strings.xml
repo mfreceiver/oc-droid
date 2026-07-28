@@ -255,8 +255,6 @@
     <string name="host_profile_name">配置名称</string>
     <string name="host_profile_basic_auth_username">Basic Auth 用户名（可选）</string>
     <string name="host_profile_basic_auth_password">Basic Auth 密码（可选）</string>
-    <string name="host_profile_tunnel_password">隧道密码</string>
-    <string name="host_profile_tunnel_password_label">认证密码（内网穿透）</string>
     <!-- §tofu R2: SSH 式「首次连接信任」证书指纹 pinning。旧的
          host_allow_insecure_title / host_allow_insecure_summary 字符串已删除——
          自签名 endpoint 现在在首次连接时弹出 TOFU 信任对话框，不再用按 profile 的
@@ -285,8 +283,6 @@
     <string name="host_cert_err_ca">CA 证书无效</string>
     <string name="host_section_basic_auth_title">Basic 认证</string>
     <string name="host_section_basic_auth_sub">用户名 / 密码</string>
-    <string name="host_section_tunnel_title">隧道口令</string>
-    <string name="host_section_tunnel_sub">内网穿透</string>
     <!-- §profile-cleanup R1: 主机配置编辑器中的“高级”展开器标签。 -->
     <string name="host_advanced">高级</string>
     <!-- §profile-cleanup R1: 紧凑 mTLS 证书行标签。 -->
@@ -345,7 +341,6 @@
     <string name="server_dialog_title">服务器</string>
     <string name="server_dialog_no_hosts">未配置主机</string>
     <string name="server_dialog_refresh">刷新</string>
-    <string name="server_dialog_activate_tunnel">激活隧道</string>
     <string name="chat_parent_session">父会话</string>
     <string name="chat_back_to_parent_session">返回父会话</string>
     <string name="chat_switch_agent">切换智能体</string>
@@ -373,8 +368,8 @@
     <string name="settings_danger_zone">清除数据</string>
     <string name="settings_clear_local_data">清除全部本地数据</string>
     <string name="settings_clear_local_data_title">清除全部本地数据？</string>
-    <string name="settings_clear_local_data_warning">将清除本地数据并从服务器重新拉取。仅保留服务器连接信息和隧道口令。</string>
-    <string name="settings_clear_local_data_keeps">保留：服务器连接信息、主机配置、隧道口令。</string>
+    <string name="settings_clear_local_data_warning">将清除本地数据并从服务器重新拉取。仅保留服务器连接信息。</string>
+    <string name="settings_clear_local_data_keeps">保留：服务器连接信息、主机配置。</string>
     <string name="settings_clear_local_data_clears">将清除本地全部数据并重新同步：草稿、模型/Agent 偏好、当前会话与工作目录、导航与界面状态、主题、语言、流量统计，以及已缓存的消息。所有服务器均受影响。</string>
     <string name="settings_clear_local_data_irreversible">操作不可撤销。</string>
     <string name="chat_model_picker_title">选择模型</string>
@@ -507,10 +502,6 @@
     <string name="error_delete_session_failed">删除会话失败：%1$s</string>
     <string name="error_send_message_failed">发送消息失败：%1$s</string>
     <string name="error_child_session_unavailable">子任务会话不可用</string>
-    <string name="error_tunnel_password_unset">隧道激活失败：未设置隧道认证密码。请在「服务器」设置中填写隧道密码并保存后再试。</string>
-    <string name="error_tunnel_password_empty">隧道激活失败：已配置密码标识但存储为空（可能保存时未输入）。请重新输入隧道密码并保存。</string>
-    <string name="success_tunnel_activated">隧道激活成功</string>
-    <string name="error_tunnel_activation_failed">隧道激活失败：%1$s</string>
     <string name="error_connection_failed">连接失败：%1$s</string>
     <string name="error_sse_failed">SSE 错误：%1$s</string>
     <string name="error_respond_permission_failed">响应权限请求失败：%1$s</string>

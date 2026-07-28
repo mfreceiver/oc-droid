@@ -39,7 +39,6 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.MediaType.Companion.toMediaType
@@ -1853,55 +1852,6 @@ class OpenCodeRepository @Inject constructor(
             slimMode = bundle.hostSnapshot.slimHost,
             )
         }
-
-    /**
-     * Activates a tunnel by POSTing the password to the tunnel endpoint.
-     * Uses an independent OkHttpClient without any Basic Auth interceptor,
-     * since tunnel authentication uses form-encoded POST (not HTTP Basic Auth).
-     *
-     * §tofu R2: [hostPort] (host:port authority of [tunnelUrl]) replaces the
-     * legacy `allowInsecure: Boolean`; it keys the TOFU pin lookup for the
-     * one-shot tunnel POST.
-     */
-    suspend fun activateTunnel(
-        tunnelUrl: String,
-        password: String,
-        hostPort: String? = null
-    ): Result<Unit> = withContext(Dispatchers.IO) {
-        runSuspendCatching {
-            try {
-                val client = networkGraph.clientFactory.tunnelClient(hostPort)
-                val formBody = FormBody.Builder()
-                    .add("persist_auth", "off")
-                    .add("pw", password)
-                    .build()
-                val request = okhttp3.Request.Builder()
-                    .url(tunnelUrl)
-                    .post(formBody)
-                    .build()
-                val response = client.newCall(request).execute()
-                response.use {
-                    if (!it.isSuccessful) {
-                        val body = it.body?.string().orEmpty()
-                        throw Exception("HTTP ${it.code}${if (it.message.isNotBlank()) " ${it.message}" else ""}: ${body.ifBlank { "(空响应体)" }}")
-                    }
-                }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                if (e.message?.startsWith("HTTP ") == true) throw e
-                throw Exception(buildString {
-                    append(e::class.simpleName ?: "Exception")
-                    e.message?.takeIf { it.isNotBlank() }?.let { append(": ").append(it) }
-                    e.cause?.let { c ->
-                        append(" ← ")
-                        append(c::class.simpleName ?: "")
-                        c.message?.takeIf { it.isNotBlank() }?.let { append(": ").append(it) }
-                    }
-                }, e)
-            }
-        }
-    }
 
     // ---- Traffic debug ----
 

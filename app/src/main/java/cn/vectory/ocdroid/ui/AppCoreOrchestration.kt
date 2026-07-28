@@ -1,6 +1,8 @@
 package cn.vectory.ocdroid.ui
 
+import androidx.annotation.MainThread
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
@@ -37,6 +39,106 @@ import java.util.Locale
 // ════════════════════════════════════════════════════════════════════════════
 // Cross-domain orchestration (the ~6 methods that span 3+ domains)
 // ════════════════════════════════════════════════════════════════════════════
+
+// ── §unified-nav A5: synchronous materialized-session route adoption ─────────
+//
+// Item 10-A root cause: materializeDraftSession dispatched DraftSessionMaterialized
+// (which set currentSessionId + session-list upsert) but did NOT transition the
+// route (no nav.lastRoute = "chat/$sid", no navEpoch bump, no route-instance
+// token, no LoadedContent envelope). So the first SEND landed in a chat pane
+// that was still showing the bare "chat" / ChatEmptyState surface (the route
+// never flipped to chat/{sessionId}), while a "thinking" capsule showed because
+// the send was in flight. The fix (A5) adopts the route SYNCHRONOUSLY inside
+// the materialize success block via a single aggregate CAS that atomically
+// commits {session upsert, currentSessionId, chatRouteInstance, content
+// envelope, lastRoute, navEpoch, unread/lastViewed, draftWorkdir=null}. Then
+// the post-CAS ordering (A-E) runs the persistence side-effect, the route
+// hydration, the captured send, and the title refresh — all using the token
+// minted inside the CAS.
+
+/**
+ * §unified-nav (A5.1) + §blocker1: the IMMUTABLE send payload captured at
+ * send-entry time, BEFORE materializeDraftSession. Do NOT re-read the composer
+ * after createSession (the user may have typed more; the route adoption's
+ * clearedChat may have wiped inputText). The captured values are what goes on
+ * the wire.
+ *
+ * [agent] / [model] are the RESOLVED values (pendingAgent ?: infer ?: null)
+ * at send-click, NOT a re-inference after the route flip.
+ *
+ * §blocker1: [fileReferences] is captured so the compare-and-clear in
+ * [dispatchCapturedSend] can decide whether the chips still match the click-
+ * time set (only clear if unchanged; preserve if the user edited during the
+ * createSession await).
+ */
+internal data class CapturedSendPayload(
+    val text: String,
+    val attachments: List<ComposerImageAttachment>,
+    val agent: String?,
+    val model: Message.ModelInfo?,
+    val fileReferences: List<ComposerFileReference> = emptyList(),
+)
+
+/**
+ * §unified-nav (A5.3) + §blocker2: the snapshot of the draft surface captured at
+ * send-click time, used by [adoptMaterializedSessionRoute]'s CAS to decide
+ * whether the user is STILL on the draft surface when createSession returns
+ * (the network round-trip is a suspend point; the user may have navigated away
+ * mid-create). If [stillOwnsDraftSurface] returns false against the live
+ * committed [StoreState], the adoption is list-only (session upsert +
+ * pendingCreate, NO route/nav/content transition) — the user left the draft
+ * surface, so the route must NOT hijack the new screen.
+ *
+ * §blocker2: [hostProfileId] is captured from [HostState.currentHostProfileId]
+ * (a [StoreState] field that IS updated on host switch — see
+ * HostProfileController / ConnectionActions). A host/profile switch during the
+ * createSession suspend boundary clears currentSessionId/content/draftWorkdir
+ * but does NOT advance [StoreState.chatRouteInstance] or nav identity, so the
+ * pre-blocker2 ownership predicate would still pass and the old-host response
+ * would write into the WRONG host's state. Adding the host-identity comparison
+ * makes a mid-create host switch fail the lease → list-only adoption.
+ */
+internal data class DraftRouteOrigin(
+    val activeDestination: String?,
+    val activeDestinationEpoch: Long,
+    val requestedRoute: String,
+    val requestedNavEpoch: Long,
+    val routeInstance: Long,
+    val serverGroupFp: String,
+    /** §blocker2: the host profile id at send-click; compared inside the CAS. */
+    val hostProfileId: String?,
+) {
+    /**
+     * §unified-nav (A5.3) + §blocker2: returns true IFF the live committed
+     * [before] still matches the snapshot captured at send-click. A mismatch
+     * means the user navigated away mid-create (activeDestination/epoch changed,
+     * OR currentSessionId is no longer null — another session was selected, OR
+     * the nav identity changed — a route/navEpoch transition, OR the route-
+     * instance token advanced — a chat open/close happened, OR the host identity
+     * changed — a host/profile switch). In that case the adoption is list-only.
+     */
+    fun stillOwnsDraftSurface(before: StoreState): Boolean =
+        before.nav.activeDestination == activeDestination &&
+            before.nav.activeDestinationEpoch == activeDestinationEpoch &&
+            before.chat.currentSessionId == null &&
+            before.nav.lastRoute == requestedRoute &&
+            before.nav.navEpoch == requestedNavEpoch &&
+            before.chatRouteInstance == routeInstance &&
+            before.host.currentHostProfileId == hostProfileId
+}
+
+/**
+ * §unified-nav (A5.3): the result of [adoptMaterializedSessionRoute]. [adopted]
+ * is true IFF the route/nav/content transition committed atomically. [routeInstance]
+ * is the minted token (read from the committed snapshot) when adopted, null
+ * otherwise. Callers gate the post-CAS ordering (A-E) on [adopted] / a non-null
+ * [routeInstance].
+ */
+internal data class MaterializedRouteAdoption(
+    val sessionId: String,
+    val routeInstance: Long?,
+    val adopted: Boolean,
+)
 
 /**
  * §R18 Phase 2-E step 1 → §issue-1 Phase 2a Fix A: resolves the directory
@@ -217,7 +319,6 @@ internal fun AppCore.executeCommand(command: String, arguments: String) {
         }
         else -> {
             val existing = store.chatFlow.value.currentSessionId
-            composerController.setInputText("")
             // §R18 Phase 2-E step 1: resolve the directory for the slash
             // command's session explicitly. Was repository.getCurrentDirectory()
             // (the global currentDirectory); now derived from the current
@@ -233,44 +334,41 @@ internal fun AppCore.executeCommand(command: String, arguments: String) {
                     ?: settingsManager.currentWorkdir
                 )
             if (existing != null) {
+                // §blocker1: existing-session path — clear input immediately
+                // (the command is consumed synchronously).
+                composerController.setInputText("")
                 appScope.launch {
                     repository.executeCommand(existing, cmd, arguments, directory = commandDirectory)
                         .onFailure { error ->
-                            // §grouping-rewrite item 4: command POST runs on
-                            // a 300 s-read-timeout client (OkHttpClientFactory.
-                            // commandClient). A read-side SocketTimeoutException
-                            // means even that window expired waiting for the
-                            // server's ACK — but SSE (its own client, read
-                            // timeout 0) is still delivering results, so that
-                            // case is non-fatal: emit a neutral Info snackbar
-                            // and let SSE update the UI.
-                            //
-                            // §grouping-rewrite Round-2 D2: but a CONNECT-side
-                            // SocketTimeoutException (server unreachable / DNS /
-                            // TLS handshake) means the POST never reached the
-                            // server → SSE will not deliver → must surface as a
-                            // real Error. OkHttp's exception message distinguishes
-                            // the two ("connect timeout" / "failed to connect" vs
-                            // "timeout" / "read timeout"); we case-insensitively
-                            // sniff for "connect". All non-timeout failures stay
-                            // Error.
                             effectBus.tryEmitUiEvent(classifyCommandPostError(error, cmd))
                         }
                 }
             } else if (store.composerFlow.value.draftWorkdir != null) {
-                // §bug2: materialize draft session, then execute the command on the new session
-                materializeDraftSession { sessionId ->
-                    appScope.launch {
-                        repository.executeCommand(sessionId, cmd, arguments, directory = commandDirectory)
+                // §bug2 + §unified-nav A5.1 + §blocker1 + §blocker1-command:
+                // materialize draft session, then execute the command on the
+                // new session. The command payload (cmd / arguments /
+                // commandDirectory) is captured here BEFORE
+                // materializeDraftSession. Do NOT clear inputText here —
+                // materializeDraftSession clears it on SUCCESSFUL adoption via
+                // compare-and-clear (only if the user did NOT type new content
+                // during the createSession await); on FAILURE the text survives
+                // so the user can retry the command (do not lose it).
+                //
+                // §blocker1-command: capture the raw command text at click time
+                // so the compare-and-clear on success can decide whether the
+                // user typed more during the suspend boundary.
+                val capturedCommandText = store.composerFlow.value.inputText
+                materializeDraftSession(
+                    capturedCommandText = capturedCommandText,
+                    commandPost = { sid ->
+                        repository.executeCommand(sid, cmd, arguments, directory = commandDirectory)
                             .onFailure { error ->
-                                // §grouping-rewrite item 4 + Round-2 D2: see
-                                // comment in the non-draft branch above — same
-                                // connect-vs-read timeout classification.
                                 effectBus.tryEmitUiEvent(classifyCommandPostError(error, cmd))
                             }
                     }
-                }
+                )
             } else {
+                composerController.setInputText("")
                 effectBus.tryEmitUiEvent(UiEvent.Error(R.string.chat_command_no_session, listOf(cmd)))
             }
             return
@@ -279,6 +377,7 @@ internal fun AppCore.executeCommand(command: String, arguments: String) {
 }
 
 /** composer → chat → session creation. The full send-while-in-draft path. */
+@MainThread
 internal fun AppCore.sendMessage() {
     val draftWorkdir = store.composerFlow.value.draftWorkdir
     val existingSessionId = store.chatFlow.value.currentSessionId
@@ -287,7 +386,24 @@ internal fun AppCore.sendMessage() {
     if (text.isEmpty() && attachments.isEmpty()) return
 
     if (draftWorkdir != null && existingSessionId == null) {
-        materializeDraftSession { sessionId -> dispatchSendMessage(sessionId) }
+        // §unified-nav A5.1: capture the IMMUTABLE send payload BEFORE
+        // materializeDraftSession. Do NOT re-read the composer after
+        // createSession (the user may have typed; the route adoption may
+        // have cleared inputText). The captured values go on the wire.
+        val chatState = store.chatFlow.value
+        val visibleAgents = store.settingsFlow.value.agents
+            .filter { it.isVisible }
+            .map { it.name }
+            .toSet()
+        val payload = CapturedSendPayload(
+            text = text,
+            attachments = attachments.toList(),
+            agent = chatState.pendingAgent ?: inferCurrentAgent(chatState.messages, visibleAgents),
+            model = chatState.pendingModel ?: inferCurrentModel(chatState.messages, visibleAgents),
+            // §blocker1: capture fileReferences for compare-and-clear.
+            fileReferences = store.composerFlow.value.fileReferences.toList(),
+        )
+        materializeDraftSession(capturedPayload = payload)
         return
     }
 
@@ -297,49 +413,430 @@ internal fun AppCore.sendMessage() {
 }
 
 /**
- * §bug2: Shared draft-session materialization. Detects draft mode (composer
- * has a draftWorkdir but no current session yet), clears the draft, creates a
- * new session, wires it into the session-list / chat / unread slices, copies
- * the current model + agent selections to per-session storage, schedules a
- * title refresh, then invokes [onSessionReady] with the new session id. On
- * failure: emits UiEvent.Error and restores the composer draftWorkdir —
- * callers do not need their own failure path. Used by both [sendMessage] and
- * [executeCommand] so the first /cmd in a draft session no longer errors with
- * "Open or create a session before running /cmd".
+ * §bug2 → §unified-nav A5: Shared draft-session materialization. Detects draft
+ * mode (composer has a draftWorkdir but no current session yet), captures the
+ * [DraftRouteOrigin] snapshot, clears the draft, creates a new session, then
+ * SYNCHRONOUSLY adopts the route via [adoptMaterializedSessionRoute] (the
+ * aggregate CAS that fixes item 10-A), runs the post-CAS ordering (A-E), and
+ * finally dispatches the captured send payload OR the command.
+ *
+ * Exactly ONE of [capturedPayload] / [commandPost] is non-null:
+ *  - [capturedPayload] (send path from [sendMessage]): step D runs
+ *    [dispatchCapturedSend].
+ *  - [commandPost] (command path from [executeCommand]): step D runs the
+ *    suspend command callback on appScope.
+ *
+ * [capturedCommandText] is the raw composer inputText at command-click time
+ * (command path only). On adoption SUCCESS, the composer inputText is cleared
+ * ONLY if its current value still equals [capturedCommandText] (compare-and-
+ * clear — the user may have typed new content during the createSession suspend
+ * boundary). If the user typed more, the newer content is PRESERVED.
+ *
+ * # Adoption success (routeInstance != null) — post-CAS strict ordering:
+ *  A. settingsManager.lastRoute = "chat/$sid"   (persistence side-effect)
+ *  B. persistSessionCache(...)
+ *  C. startMaterializedRouteHydration(adoption)  (DIRECT call, NOT effect bus)
+ *  D. dispatchCapturedSend(sid, payload, token)  OR  commandPost(sid)
+ *  E. scheduleTitleRefreshAfterFirstMessage(sid)
+ *
+ * # Adoption failed (user navigated away mid-create):
+ *  - do NOT set route/nav/content (the CAS was list-only);
+ *  - still POST the captured payload as a background send for the new sid
+ *    (do NOT hijack the current UI);
+ *  - draftWorkdir is NOT restored (the user left the draft surface — that is
+ *    WHY adoption failed).
+ *
+ * # createSession failure:
+ *  - emit UiEvent.Error;
+ *  - restore draftWorkdir WITH ownership guard (only if still on the draft
+ *    surface — otherwise the user navigated away and the draft is gone).
  */
-internal fun AppCore.materializeDraftSession(onSessionReady: (String) -> Unit) {
+@MainThread
+internal fun AppCore.materializeDraftSession(
+    capturedPayload: CapturedSendPayload? = null,
+    capturedCommandText: String? = null,
+    commandPost: (suspend (sessionId: String) -> Unit)? = null,
+) {
     val draftWorkdir = store.composerFlow.value.draftWorkdir ?: return
+    // §unified-nav A5.3: capture the draft-surface origin snapshot BEFORE
+    // clearing draftWorkdir. The CAS inside adoptMaterializedSessionRoute
+    // compares this against the live committed state to decide adoption vs
+    // list-only.
+    val origin = captureDraftRouteOrigin()
     writeComposer { it.copy(draftWorkdir = null) }
     appScope.launch {
         repository.createSession(title = null, directory = draftWorkdir)   // §R18 Final 终审 fix (gpter): route to the draft workdir
             .onSuccess { session ->
                 val now = System.currentTimeMillis()
-                // §A5-3 Phase B2 + §B4: success-path collapses into ONE atomic
-                // dispatch — sessionList upsert (no open-tabs-list), chat
-                // currentSessionId, unread, composer.draftWorkdir clear.
-                store.dispatch(
-                    AppAction.DraftSessionMaterialized(
-                        session = session,
-                        viewedAt = now,
+                // §unified-nav A5.3: the aggregate adoption CAS. Commits
+                // {session upsert, currentSessionId, chatRouteInstance token,
+                // LoadedContent envelope, lastRoute, navEpoch, unread/lastViewed,
+                // draftWorkdir=null} in ONE atomic mutateStateAndGet — NEVER
+                // split into multiple writes (splitting reproduces item 10-A's
+                // intermediate state where the route flipped but content was
+                // stale/empty). On adoption failure (user navigated away) it
+                // is list-only (session upsert + pendingCreate, NO route/nav/
+                // content).
+                val adoption = adoptMaterializedSessionRoute(session, now, origin)
+                if (adoption.adopted) {
+                    val token = adoption.routeInstance!!
+                    // A. persistence side-effect.
+                    settingsManager.lastRoute = "chat/${session.id}"
+                    // B. persist the session cache.
+                    persistSessionCache(
+                        settingsManager = settingsManager,
+                        sessions = store.sessionListFlow.value.sessions,
+                        currentId = session.id,
+                        currentWorkdir = settingsManager.currentWorkdir,
+                        revertCutoffs = store.chatFlow.value.revertCutoffs,
                     )
-                )
-                // §R18 Phase 2-F: chatFlow.currentSessionId is the sole runtime
-                // source; the AppCore init collector persists session.id.
-                persistSessionCache(
-                    settingsManager = settingsManager,
-                    sessions = store.sessionListFlow.value.sessions,
-                    currentId = session.id,
-                    currentWorkdir = settingsManager.currentWorkdir,
-                    revertCutoffs = store.chatFlow.value.revertCutoffs,
-                )
-                scheduleTitleRefreshAfterFirstMessage(session.id)
-                onSessionReady(session.id)
+                    // C. DIRECT route hydration (NOT effect bus, NOT
+                    //    VerifyAndHydrate). Pre-creates the empty
+                    //    LoadedContent(sid, token) envelope in the CAS above;
+                    //    the first real message arrives via SSE message.updated
+                    //    and lands in this envelope. loadMessagesForEffect will
+                    //    dispatch ChatContentLoaded(expectedRouteInstance=token)
+                    //    which the CAS-guarded reducer accepts.
+                    startMaterializedRouteHydration(adoption)
+                    // D. dispatch the captured payload (send) OR the command.
+                    if (capturedPayload != null) {
+                        dispatchCapturedSend(session.id, capturedPayload, token)
+                    } else if (commandPost != null) {
+                        // §blocker1-command compare-and-clear: createSession is a
+                        // SUSPEND boundary — the user may have typed NEW content
+                        // into the composer during the await. Only clear the
+                        // command text if its CURRENT value still equals the
+                        // CAPTURED command text (trimmed-equals, same
+                        // normalization as the send path). If the user typed
+                        // more (current != captured), PRESERVE the current
+                        // content — the command itself still uses the captured
+                        // cmd/arguments (the click-time intent); only the CLEAR
+                        // is conditional. Mirrors [dispatchCapturedSend]'s
+                        // compare-and-clear for the send path.
+                        val commandTextMatches = capturedCommandText != null &&
+                            store.composerFlow.value.inputText.trim() == capturedCommandText.trim()
+                        if (commandTextMatches) {
+                            composerController.setInputText("")
+                        }
+                        appScope.launch { commandPost(session.id) }
+                    }
+                    // E. schedule the title refresh (bounded retry, item 10-B).
+                    scheduleTitleRefreshAfterFirstMessage(session.id)
+                } else {
+                    // §unified-nav A5.4 + §blocker2: adoption failed (user
+                    // navigated away OR host switched mid-create). Do NOT set
+                    // route/nav/content (the CAS was list-only).
+                    //
+                    // §blocker2 host-switch gate: if the host identity changed
+                    // during createSession, do NOT send the payload to the WRONG
+                    // host's repository. The session was still created (list-only
+                    // upsert) but the send would cross-host-pollute. Drop it +
+                    // surface a brief error so the user knows.
+                    // §blocker2 host-switch gate: check BOTH the store's
+                    // hostProfileId (the field the CAS compares — updated on
+                    // selectHostProfile / connect) AND the fp provider. Either
+                    // changing means the host identity changed mid-create → do
+                    // NOT send to the wrong host.
+                    val hostChanged = store.hostFlow.value.currentHostProfileId != origin.hostProfileId ||
+                        currentServerGroupFp() != origin.serverGroupFp
+                    if (hostChanged) {
+                        DebugLog.w(
+                            "Materialize",
+                            "adoption failed (host switched mid-create): sid=${session.id} send DROPPED (would cross-host)",
+                        )
+                        effectBus.tryEmitUiEvent(
+                            UiEvent.Error(R.string.error_create_session_in_workdir_failed, listOf(draftWorkdir, "host switched")),
+                        )
+                    } else if (capturedPayload != null) {
+                        // Same host, user navigated away: POST the captured
+                        // payload as a background send for the new sid (do NOT
+                        // hijack the current UI — the user is elsewhere).
+                        DebugLog.i(
+                            "Materialize",
+                            "adoption failed (user navigated away): sid=${session.id} still background-sending",
+                        )
+                        launchBackgroundSendForMaterializeFailure(session.id, capturedPayload)
+                    } else if (commandPost != null) {
+                        DebugLog.i(
+                            "Materialize",
+                            "adoption failed (user navigated away): sid=${session.id} still executing command",
+                        )
+                        appScope.launch { commandPost(session.id) }
+                    }
+                }
             }
             .onFailure { error ->
-                writeComposer { it.copy(draftWorkdir = draftWorkdir) }
+                // §unified-nav A5.4: restore draftWorkdir WITH ownership guard
+                // — only if the user is STILL on the draft surface (origin
+                // still owns the live state). If the user navigated away, the
+                // draft is gone and restoring would re-enter draft mode on the
+                // wrong screen.
+                if (origin.stillOwnsDraftSurface(store.stateFlow.value)) {
+                    writeComposer { it.copy(draftWorkdir = draftWorkdir) }
+                }
                 effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_create_session_in_workdir_failed, listOf(draftWorkdir, error.message ?: "unknown error")))
             }
     }
+}
+
+/**
+ * §unified-nav A5.3: capture the [DraftRouteOrigin] snapshot from the live
+ * committed state. Called at send-entry (BEFORE clearing draftWorkdir) so the
+ * CAS can later detect whether the user navigated away mid-create.
+ */
+private fun AppCore.captureDraftRouteOrigin(): DraftRouteOrigin {
+    val nav = store.navFlow.value
+    return DraftRouteOrigin(
+        activeDestination = nav.activeDestination,
+        activeDestinationEpoch = nav.activeDestinationEpoch,
+        requestedRoute = nav.lastRoute,
+        requestedNavEpoch = nav.navEpoch,
+        routeInstance = store.stateFlow.value.chatRouteInstance,
+        serverGroupFp = currentServerGroupFp(),
+        // §blocker2: capture the host profile id so the CAS can detect a
+        // mid-create host switch (host.currentHostProfileId changes on
+        // selectHostProfile / connect).
+        hostProfileId = store.hostFlow.value.currentHostProfileId,
+    )
+}
+
+/**
+ * §unified-nav A5.3: the aggregate adoption CAS. Runs inside the materialize
+ * success block (BEFORE the send/command). Mints the route-instance token
+ * INSIDE the transform, commits the route/nav/content/currentSessionId/unread
+ * atomically, and returns the [MaterializedRouteAdoption] verdict. On adoption
+ * failure (user navigated away) it is list-only.
+ *
+ * Main-thread contract: called from appScope (Dispatchers.Main.immediate) after
+ * the createSession suspend point. The mutateStateAndGet CAS is main-thread
+ * serial.
+ */
+@MainThread
+internal fun AppCore.adoptMaterializedSessionRoute(
+    session: Session,
+    viewedAt: Long,
+    origin: DraftRouteOrigin,
+): MaterializedRouteAdoption {
+    val route = "chat/${session.id}"
+    val committed = store.mutateStateAndGet { before ->
+        if (!origin.stillOwnsDraftSurface(before)) {
+            // User navigated away mid-create: upsert session + pendingCreate
+            // ONLY — do NOT set currentSessionId / nav / content. The send is
+            // a background op; the route must NOT hijack the new screen.
+            materializeListOnly(before, session, viewedAt)
+        } else {
+            val token = before.chatRouteInstance + 1L
+            val materialized = reduceDraftSessionMaterialized(
+                before,
+                AppAction.DraftSessionMaterialized(session, viewedAt),
+            )
+            // §7.2: clear the loaded-chat payload (the prior session's content
+            // must NOT survive the route flip), then weld the new session id +
+            // the fresh token onto the LoadedContent envelope. IMPORTANT: do
+            // NOT fabricate an optimistic user Message — there is no client
+            // temp-ID reconciliation; the empty LoadedContent(sid, token)
+            // envelope is pre-created so the first real message (SSE
+            // message.updated) lands in it.
+            val clearedChat = materialized.chat.clearLoadedChatPayload()
+            materialized.copy(
+                chatRouteInstance = token,
+                chat = clearedChat.copy(
+                    currentSessionId = session.id,
+                    content = LoadedContent(sessionId = session.id, routeInstance = token),
+                ),
+                nav = materialized.nav.copy(
+                    lastRoute = route,
+                    navEpoch = materialized.nav.navEpoch + 1L,
+                ),
+            )
+        }
+    }
+    val adopted = committed.nav.lastRoute == route &&
+        committed.chat.currentSessionId == session.id &&
+        committed.chat.content?.sessionId == session.id &&
+        committed.chat.content?.routeInstance == committed.chatRouteInstance
+    return MaterializedRouteAdoption(
+        sessionId = session.id,
+        routeInstance = if (adopted) committed.chatRouteInstance else null,
+        adopted = adopted,
+    )
+}
+
+/**
+ * §unified-nav A5.3: list-only upsert (adoption-failure path). Upserts the
+ * session + pendingCreate tracking but does NOT set currentSessionId / nav /
+ * content. The session appears in the list for a later manual open.
+ */
+private fun materializeListOnly(before: StoreState, session: Session, viewedAt: Long): StoreState = before.copy(
+    sessionList = before.sessionList.copy(
+        sessions = upsertSession(before.sessionList.sessions, session),
+        pendingCreateIds = before.sessionList.pendingCreateIds + session.id,
+        pendingCreatedAt = before.sessionList.pendingCreatedAt + (session.id to viewedAt),
+    ),
+)
+
+/**
+ * §unified-nav A5.4-C: DIRECT route hydration call (NOT effect bus, NOT
+ * VerifyAndHydrate). The CAS already pre-created the empty
+ * LoadedContent(sid, token) envelope; this launches the message load which
+ * dispatches ChatContentLoaded(expectedRouteInstance=token). The §7.2 CAS in
+ * [reduceChatContentLoaded] accepts IFF the live token + currentSessionId
+ * match — both were set in the adoption CAS — so the loaded content lands in
+ * the envelope. forceInitialWindow=true bypasses any stale slim watermark.
+ */
+@MainThread
+internal fun AppCore.startMaterializedRouteHydration(adoption: MaterializedRouteAdoption) {
+    val token = adoption.routeInstance ?: return
+    loadMessagesForEffect(
+        sessionId = adoption.sessionId,
+        resetLimit = true,
+        forceInitialWindow = true,
+        expectedRouteInstance = token,
+    )
+}
+
+/**
+ * §unified-nav (A5.4-D) + §blocker1: dispatch the captured send payload using
+ * the token minted in the adoption CAS (NOT a fresh store.slices.routeInstanceFor(sid)
+ * read). The post-send refresh guard uses the captured token: only refreshes if
+ * the route still owns this session under the token (routeInstanceFor(sid)==token).
+ *
+ * §blocker1 compare-and-clear: createSession is a SUSPEND boundary — the user
+ * can keep typing in Composer during the await (there is no materialize-in-
+ * flight disable). On success, the composer is cleared ONLY for fields whose
+ * CURRENT value still equals the CAPTURED payload value. If the user typed more
+ * (current != captured), the user's newer content is PRESERVED — the captured
+ * payload is still what gets POSTed (the click-time intent), but the user's
+ * in-progress edit must survive for their next send. The persisted draft is
+ * only cleared when the text field was actually cleared.
+ */
+@MainThread
+internal fun AppCore.dispatchCapturedSend(
+    sessionId: String,
+    payload: CapturedSendPayload,
+    expectedRouteInstance: Long,
+) {
+    if (payload.text.isEmpty() && payload.attachments.isEmpty()) return
+    if (store.composerFlow.value.sendingSessionIds.contains(sessionId)) return
+
+    writeComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds + sessionId) }
+
+    // §blocker1 compare-and-clear: only clear a field if its CURRENT value
+    // still equals the captured payload value. The captured payload is still
+    // what gets POSTed (correct — the send is the click-time intent). Only the
+    // CLEAR is conditional so the user's newer text/attachments survive.
+    val currentComposer = store.composerFlow.value
+    val textMatches = currentComposer.inputText.trim() == payload.text
+    val attachmentsMatch = currentComposer.imageAttachments == payload.attachments
+    val fileRefsMatch = currentComposer.fileReferences == payload.fileReferences
+    writeComposer { c ->
+        c.copy(
+            inputText = if (textMatches) "" else c.inputText,
+            imageAttachments = if (attachmentsMatch) emptyList() else c.imageAttachments,
+            fileReferences = if (fileRefsMatch) emptyList() else c.fileReferences,
+        )
+    }
+    // Only persist the draft clear if the text was actually cleared (otherwise
+    // the user's newer text is still in the composer and the normal draft
+    // debounce will persist it).
+    if (textMatches) {
+        settingsManager.setDraftText(currentServerGroupFp(), sessionId, "")
+        settingsManager.flushDraftText()
+    }
+
+    // §Wave5b-Q13: snap the message list to the newest message on send.
+    sessionSwitcher.requestLatestScroll(sessionId)
+
+    val currentSession = currentSession(store.sessionListFlow.value.sessions, store.chatFlow.value.currentSessionId)
+    if (currentSession?.isArchived == true) {
+        appScope.launch {
+            repository.updateSessionArchived(sessionId, -1L)
+                .onSuccess { updated ->
+                    store.dispatch(AppAction.SessionUpserted(updated))
+                    launchCapturedSend(sessionId, payload, expectedRouteInstance)
+                }
+                .onFailure { error ->
+                    effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_restore_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
+                    writeComposer { c -> c.copy(sendingSessionIds = c.sendingSessionIds - sessionId) }
+                }
+        }
+        return
+    }
+    launchCapturedSend(sessionId, payload, expectedRouteInstance)
+}
+
+/**
+ * §unified-nav (A5.4-D) + §blocker1: the captured-payload launchSendMessage call. Uses the
+ * captured text / attachments / agent / model (NOT a composer re-read). The
+ * onRefreshMessages guard uses the captured [expectedRouteInstance]: only
+ * refreshes if routeInstanceFor(sid) still equals the token (the route still
+ * owns this session); a route flip (user navigated away) drops the refresh.
+ */
+private fun AppCore.launchCapturedSend(
+    sessionId: String,
+    payload: CapturedSendPayload,
+    expectedRouteInstance: Long,
+) {
+    launchSendMessage(
+        scope = appScope,
+        repository = repository,
+        slices = store.slices,
+        sessionId = sessionId,
+        text = payload.text,
+        attachments = payload.attachments,
+        agent = payload.agent,
+        model = payload.model,
+        // §unified-nav A5.4-D: post-send refresh guard uses the CAPTURED token.
+        // Only refresh if routeInstanceFor(sid)==token (the route still owns
+        // this session); otherwise the user navigated away and the refresh
+        // would clobber the new screen's content.
+        onRefreshMessages = { sid, reset ->
+            val liveToken = store.slices.routeInstanceFor(sid)
+            if (liveToken == expectedRouteInstance) {
+                loadMessagesForEffect(sid, reset, expectedRouteInstance = expectedRouteInstance)
+            }
+        },
+        onSuccess = {
+            // §blocker1: composer clear + draft persist were handled by the
+            // compare-and-clear in dispatchCapturedSend. onSuccess is a no-op
+            // for the composer (the user's newer text, if any, was already
+            // preserved). The sendingSessionIds clear is in onComplete below.
+        },
+        onComplete = {
+            writeComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds - sessionId) }
+        },
+        emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
+    )
+    // §chat-ux-batch T7 (B2): clear the transient pending picks AFTER the send
+    // launches — the picks were consumed; the next send starts fresh.
+    store.mutateChat { it.copy(pendingAgent = null, pendingModel = null) }
+}
+
+/**
+ * §unified-nav A5.4: adoption-failure background send. The user navigated away
+ * mid-create; the captured payload is still POSTed for the new sid so the
+ * session is not lost, but the UI is NOT hijacked (the user is on a different
+ * screen). Uses the captured payload verbatim; no composer mutation.
+ */
+private fun AppCore.launchBackgroundSendForMaterializeFailure(
+    sessionId: String,
+    payload: CapturedSendPayload,
+) {
+    launchSendMessage(
+        scope = appScope,
+        repository = repository,
+        slices = store.slices,
+        sessionId = sessionId,
+        text = payload.text,
+        attachments = payload.attachments,
+        agent = payload.agent,
+        model = payload.model,
+        // Background send: no refresh (the user is not viewing this session).
+        onRefreshMessages = { _, _ -> },
+        onSuccess = { },
+        onComplete = { },
+        emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
+    )
 }
 
 /** Full-stack local reset (host → connection → session purge → chat clear). */
@@ -385,23 +882,59 @@ internal fun classifyCommandPostError(error: Throwable, cmd: String): UiEvent {
 
 // ── sendMessage helpers (private to this file) ─────────────────────────────
 
+/**
+ * §unified-nav B (item 10-B): bounded retry loop for the LLM-generated title
+ * after a new session's first message. The server generates the title
+ * asynchronously in prompt-loop step 1; the title may not be ready by the
+ * first fetch, so this retries up to [TITLE_RETRY_MAX_ATTEMPTS] times with
+ * [MainViewModelTimings.titleRefreshDelayMs] between each (~5s initial, ~5s
+ * between, max ~6 attempts / ~35s window).
+ *
+ * Success condition: `refreshed.title?.isNotBlank() == true`. CRITICAL: a
+ * null/blank title snapshot is NEVER written back (it would overwrite a newer
+ * SSE/REST title that arrived during the retry window). On success, ONLY the
+ * `title` field is merged into the existing session object(s) — NOT a whole-
+ * object `upsertSession` replace (which would clobber newer state).
+ *
+ * Updates BOTH [SessionListState.sessions] AND every entry of that id in
+ * [SessionListState.directorySessions] so the new title surfaces in the
+ * sessions list (home hub) AND the chat top bar (which resolves the session
+ * from the union store).
+ *
+ * Virtual-time friendly: uses `delay()` which the test dispatcher (via
+ * [MainDispatcherRule]) drives with virtual time — no real sleeps.
+ */
 private fun AppCore.scheduleTitleRefreshAfterFirstMessage(sessionId: String) {
     appScope.launch {
-        delay(MainViewModelTimings.titleRefreshDelayMs)
-        repository.getSession(sessionId)
-            .onSuccess { refreshed ->
+        var attempts = 0
+        while (attempts < TITLE_RETRY_MAX_ATTEMPTS) {
+            delay(MainViewModelTimings.titleRefreshDelayMs)
+            attempts++
+            val refreshed = runSuspendCatching { repository.getSession(sessionId).getOrNull() }.getOrNull()
+            val title = refreshed?.title
+            if (!title.isNullOrBlank()) {
+                // SUCCESS: merge ONLY the title field into the existing session
+                // object(s). Do NOT whole-object replace (would overwrite newer
+                // SSE/REST state). Do NOT write null/blank.
                 writeSessionList { state ->
                     state.copy(
-                        sessions = upsertSession(state.sessions, refreshed),
+                        sessions = state.sessions.map { if (it.id == sessionId) it.copy(title = title) else it },
                         directorySessions = state.directorySessions.mapValues { (_, list) ->
-                            list.map { if (it.id == sessionId) refreshed else it }
+                            list.map { if (it.id == sessionId) it.copy(title = title) else it }
                         },
                     )
                 }
+                return@launch
             }
-            .onFailure { }
+            // null/blank title → retry (do NOT write back null/blank).
+        }
+        // Deadline reached: stop. The next REST refresh / SSE session.updated
+        // will land the title when the server eventually generates it.
     }
 }
+
+/** §unified-nav B: max fetch attempts for the title retry loop. */
+private const val TITLE_RETRY_MAX_ATTEMPTS = 6
 
 private fun AppCore.dispatchSendMessage(sessionId: String) {
     val composer = store.composerFlow.value

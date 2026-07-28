@@ -105,7 +105,7 @@ sealed class ControllerEffect {
     data object StartSse : ControllerEffect()
     /** Host profile switched + settled → reload per-host state. */
     data object HostProfileSwitched : ControllerEffect()
-    /** Force reconnect with cold-start retries (used by tunnel/reset paths). */
+    /** Force reconnect with cold-start retries (used by reset paths). */
     data object ColdStartReconnect : ControllerEffect()
     /** Reset all local data + reconnect (full reset path). */
     data object ResetLocalDataAndResync : ControllerEffect()

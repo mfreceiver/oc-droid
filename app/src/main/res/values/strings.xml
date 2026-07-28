@@ -266,8 +266,6 @@
     <string name="host_profile_name">Profile name</string>
     <string name="host_profile_basic_auth_username">Basic Auth username (optional)</string>
     <string name="host_profile_basic_auth_password">Basic Auth password (optional)</string>
-    <string name="host_profile_tunnel_password">Tunnel Password</string>
-    <string name="host_profile_tunnel_password_label">Tunnel Password (intranet penetration)</string>
     <!-- §tofu R2: SSH-style trust-on-first-use cert fingerprint pinning. The
          legacy host_allow_insecure_title / host_allow_insecure_summary strings
          are REMOVED — self-signed endpoints now surface the TOFU trust dialog
@@ -297,8 +295,6 @@
     <string name="host_cert_err_ca">Invalid CA certificate</string>
     <string name="host_section_basic_auth_title">Basic Auth</string>
     <string name="host_section_basic_auth_sub">Username / password</string>
-    <string name="host_section_tunnel_title">Tunnel password</string>
-    <string name="host_section_tunnel_sub">Private network access</string>
     <!-- §profile-cleanup R1: Advanced expander label in the host profile editor. -->
     <string name="host_advanced">Advanced</string>
     <!-- §profile-cleanup R1: compact mTLS cert row labels. -->
@@ -360,7 +356,6 @@
     <string name="server_dialog_title">Servers</string>
     <string name="server_dialog_no_hosts">No hosts configured</string>
     <string name="server_dialog_refresh">Refresh</string>
-    <string name="server_dialog_activate_tunnel">Activate Tunnel</string>
     <string name="chat_parent_session">Parent session</string>
     <string name="chat_back_to_parent_session">Back to parent session</string>
     <string name="chat_switch_agent">Switch agent</string>
@@ -392,8 +387,8 @@
     <string name="settings_danger_zone">Clear Data</string>
     <string name="settings_clear_local_data">Clear all local data</string>
     <string name="settings_clear_local_data_title">Clear all local data?</string>
-    <string name="settings_clear_local_data_warning">Wipes local data and re-fetches from the server. Connection info and tunnel passwords are preserved.</string>
-    <string name="settings_clear_local_data_keeps">Kept: server connection info, host profiles, tunnel passwords.</string>
+    <string name="settings_clear_local_data_warning">Wipes local data and re-fetches from the server. Connection info is preserved.</string>
+    <string name="settings_clear_local_data_keeps">Kept: server connection info, host profiles.</string>
     <string name="settings_clear_local_data_clears">Clears all local data and re-syncs: drafts, model/agent preferences, current session and working directory, navigation and UI state, theme, language, traffic counters, and cached messages. Affects all servers.</string>
     <string name="settings_clear_local_data_irreversible">This action cannot be undone.</string>
     <string name="chat_model_picker_title">Select model</string>
@@ -543,10 +538,6 @@
     <string name="error_delete_session_failed">Failed to delete session: %1$s</string>
     <string name="error_send_message_failed">Failed to send message: %1$s</string>
     <string name="error_child_session_unavailable">Sub-agent session unavailable</string>
-    <string name="error_tunnel_password_unset">Tunnel activation failed: tunnel auth password not set. Please fill in the tunnel password in Server settings and save before retrying.</string>
-    <string name="error_tunnel_password_empty">Tunnel activation failed: password id is configured but the stored value is empty (possibly not entered when saving). Please re-enter the tunnel password and save.</string>
-    <string name="success_tunnel_activated">Tunnel activated successfully</string>
-    <string name="error_tunnel_activation_failed">Tunnel activation failed: %1$s</string>
     <string name="error_connection_failed">Connection failed: %1$s</string>
     <string name="error_sse_failed">SSE Error: %1$s</string>
     <string name="error_respond_permission_failed">Failed to respond to permission: %1$s</string>

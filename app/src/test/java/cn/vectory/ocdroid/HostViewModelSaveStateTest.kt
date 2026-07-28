@@ -5,6 +5,7 @@ import cn.vectory.ocdroid.ui.HostProfileSaveState
 import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.controller.HostProfileController
+import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -87,7 +88,7 @@ class HostViewModelSaveStateTest {
     @Test
     fun `saveHostProfile double-submit while Saving is ignored (single-flight)`() = runTest {
         coEvery {
-            controller.saveHostProfile(any(), any(), any(), any(), any(), any())
+            controller.saveHostProfile(any(), any(), any(), any<ClientCertEditIntent>())
         } returns Result.success(Unit)
 
         val profileA = HostProfile(id = "p-a", serverUrl = "http://a", name = "A")
@@ -124,7 +125,7 @@ class HostViewModelSaveStateTest {
         // Controller received exactly ONE call — for profileA. profileB never
         // reached it (single-flight).
         coVerify(exactly = 1) {
-            controller.saveHostProfile(any(), any(), any(), any(), any(), any())
+            controller.saveHostProfile(any(), any(), any(), any<ClientCertEditIntent>())
         }
     }
 
@@ -137,7 +138,7 @@ class HostViewModelSaveStateTest {
     @Test
     fun `saveHostProfile recovery after error accepts retry`() = runTest {
         coEvery {
-            controller.saveHostProfile(any(), any(), any(), any(), any(), any())
+            controller.saveHostProfile(any(), any(), any(), any<ClientCertEditIntent>())
         } returnsMany listOf(
             Result.failure(IOException("first fails")),
             Result.success(Unit),
@@ -172,7 +173,7 @@ class HostViewModelSaveStateTest {
 
         // Controller was called exactly twice (first fail + retry success).
         coVerify(exactly = 2) {
-            controller.saveHostProfile(any(), any(), any(), any(), any(), any())
+            controller.saveHostProfile(any(), any(), any(), any<ClientCertEditIntent>())
         }
     }
 
@@ -194,7 +195,7 @@ class HostViewModelSaveStateTest {
     @Test
     fun `Done carries the profileId of the save that produced it (screen guard invariant)`() = runTest {
         coEvery {
-            controller.saveHostProfile(any(), any(), any(), any(), any(), any())
+            controller.saveHostProfile(any(), any(), any(), any<ClientCertEditIntent>())
         } returns Result.success(Unit)
         val profile = HostProfile(id = "p-specific", serverUrl = "http://x", name = "X")
 
@@ -251,7 +252,7 @@ class HostViewModelSaveStateTest {
     @Test
     fun `consumeSaveState while Saving is a no-op (does not clobber in-flight save)`() = runTest {
         coEvery {
-            controller.saveHostProfile(any(), any(), any(), any(), any(), any())
+            controller.saveHostProfile(any(), any(), any(), any<ClientCertEditIntent>())
         } returns Result.success(Unit)
         val profile = HostProfile(id = "p-m1", serverUrl = "http://m", name = "M")
 
@@ -281,7 +282,7 @@ class HostViewModelSaveStateTest {
         assertTrue("save completed despite mid-flight consumeSaveState", done.result.isSuccess)
 
         coVerify(exactly = 1) {
-            controller.saveHostProfile(any(), any(), any(), any(), any(), any())
+            controller.saveHostProfile(any(), any(), any(), any<ClientCertEditIntent>())
         }
     }
 }

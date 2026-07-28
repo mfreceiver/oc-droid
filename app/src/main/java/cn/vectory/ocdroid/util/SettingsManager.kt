@@ -35,8 +35,8 @@ import javax.inject.Singleton
  *     [COMPOSITE_KEY_SEPARATOR]) from their owning domain Prefs.
  *
  * Domain ownership (see each Prefs file for the key→domain inventory):
- *  - [ConnectionPrefs] — connection scalars + ALL ESP per-host secrets
- *    (basic-auth / tunnel / mTLS client-cert triplets).
+     *  - [ConnectionPrefs] — connection scalars + ALL ESP per-host secrets
+     *    (basic-auth / mTLS client-cert triplets).
  *  - [NavigationPrefs] — session id + top-level nav persistence.
  *  - [WorkdirPrefs] — current workdir + reactive mirror + per-fp recent
  *    workdirs (+ cluster 17 `isValidFp` guard).
@@ -126,13 +126,6 @@ class SettingsManager @Inject constructor(
 
     fun setBasicAuthPassword(passwordId: String, value: String?) =
         connectionPrefs.setBasicAuthPassword(passwordId, value)
-
-    fun getTunnelPassword(id: String): String? = connectionPrefs.getTunnelPassword(id)
-
-    fun setTunnelPassword(id: String, password: String?) =
-        connectionPrefs.setTunnelPassword(id, password)
-
-    fun clearTunnelPassword(id: String) = connectionPrefs.clearTunnelPassword(id)
 
     fun getClientCertP12(id: String): ByteArray? = connectionPrefs.getClientCertP12(id)
 
@@ -338,10 +331,10 @@ class SettingsManager @Inject constructor(
 
     /**
      * Hard reset: wipes EVERY persisted key EXCEPT the connection-credential
-     * keys and the per-host password secrets (basic-auth + tunnel), then leaves
+     * keys and the per-host password secrets (basic-auth), then leaves
      * the encrypted prefs otherwise intact for those preserved entries.
      *
-     * PRESERVED (the "server connection info + tunnel passwords" invariant):
+     * PRESERVED (the "server connection info" invariant):
      *  - [ConnectionPrefs.KEY_SERVER_URL], [ConnectionPrefs.KEY_USERNAME],
      *    [ConnectionPrefs.KEY_PASSWORD] (legacy direct form)
      *  - [ConnectionPrefs.KEY_HOST_PROFILES], [ConnectionPrefs.KEY_CURRENT_HOST_PROFILE_ID]
@@ -349,7 +342,6 @@ class SettingsManager @Inject constructor(
      *  - per-host basic-auth passwords (`basic_auth_password_*`) — these back
      *    [HostProfile.basicAuth.passwordId]; wiping them would silently break
      *    every saved host's authentication on reconnect.
-     *  - per-host tunnel passwords (`tunnel_password_*`)
      *  - §2.3: per-host mTLS client certificates (`client_cert_p12_*` /
      *    `client_cert_pw_*` / `client_cert_ca_*`) — same semantics as the
      *    connection credentials: wiping them while [ConnectionPrefs.KEY_HOST_PROFILES]
@@ -375,7 +367,7 @@ class SettingsManager @Inject constructor(
      * Implementation iterates the live key set and `.remove()`s each non-
      * preserved key in a single batched edit. This deliberately avoids
      * `.clear()` (which would also nuke the connection keys) and never touches
-     * the `basic_auth_password_*` / `tunnel_password_*` / `client_cert_*`
+     * the `basic_auth_password_*` / `client_cert_*`
      * prefixes.
      */
     fun clearAllLocalData() {
@@ -395,7 +387,6 @@ class SettingsManager @Inject constructor(
         for (k in encryptedPrefs.all.keys) {
             val preserved = k in preservedKeys ||
                 k.startsWith("basic_auth_password_") ||
-                k.startsWith("tunnel_password_") ||
                 k.startsWith("client_cert_p12_") ||
                 k.startsWith("client_cert_pw_") ||
                 k.startsWith("client_cert_ca_")

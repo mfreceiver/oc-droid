@@ -58,7 +58,7 @@ sealed interface HostProfileSaveState {
 
 /**
  * R-17 batch3 → batch3d: Host-profile-domain ViewModel. Owns the host slice
- * + Host Profile CRUD + repository reconfiguration + tunnel activation.
+ * + Host Profile CRUD + repository reconfiguration.
  *
  * **batch3d**: method bodies physically moved here from [AppCore]. The VM
  * calls its domain controller ([HostProfileController]) directly — no
@@ -128,8 +128,6 @@ class HostViewModel @Inject constructor(
         profile: HostProfile,
         basicAuthPassword: String = "",
         basicAuthEdited: Boolean = false,
-        tunnelPassword: String = "",
-        tunnelEdited: Boolean = false,
         // §2.7 fix-3 (gpt-2#3): 显式 mTLS 编辑意图，默认 Unchanged（不动既有证书）。
         // Dialog 路径构造 Update / Disable；其它调用方默认 Unchanged 不破坏。
         clientCertEdit: ClientCertEditIntent = ClientCertEditIntent.Unchanged,
@@ -141,7 +139,7 @@ class HostViewModel @Inject constructor(
         _saveState.value = HostProfileSaveState.Saving(profile.id)
         viewModelScope.launch {
             val result = hostProfileController.saveHostProfile(
-                profile, basicAuthPassword, basicAuthEdited, tunnelPassword, tunnelEdited,
+                profile, basicAuthPassword, basicAuthEdited,
                 clientCertEdit = clientCertEdit,
             )
             _saveState.value = HostProfileSaveState.Done(profile.id, result)
@@ -287,10 +285,6 @@ class HostViewModel @Inject constructor(
 
     fun getSavedConnectionSettings(): ConnectionFormSettings =
         hostProfileController.getSavedConnectionSettings()
-
-    fun activateTunnelForCurrentHost() {
-        hostProfileController.activateTunnelForCurrentHost()
-    }
 
     /**
      * Cross-domain full-stack reset. R-19 P2-5: the [AppCore] extension

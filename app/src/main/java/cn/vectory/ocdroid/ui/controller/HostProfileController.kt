@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.controller
 
-import android.util.Log
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.repository.HostProfileStore
@@ -20,10 +19,8 @@ import cn.vectory.ocdroid.ui.SettingsState
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.TrafficState
-import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.UnreadState
-import cn.vectory.ocdroid.ui.errorMessageOrFallback
 import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
 import cn.vectory.ocdroid.ui.settings.resolveMtlsDegradationMessage
 import cn.vectory.ocdroid.ui.util.HttpImageHolder
@@ -31,14 +28,13 @@ import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
  * R-16 M3 → R-17 batch3b: owns Host Profile CRUD + repository reconfiguration
- * + tunnel activation + full local-data reset.
+ * + full local-data reset.
  *
  * **Migration (batch 3b)**: the [HostProfileCallbacks] interface was
  * eliminated. The 4 cross-domain signals (cancelSseForReconfigure /
@@ -57,7 +53,6 @@ import kotlinx.coroutines.launch
  *    `exportHostProfile` — profile CRUD + three-state password contract.
  *  - `configureServer` / `configureRepositoryForProfile` — repository
  *    reconfiguration with SSL allowInsecure wire (R-01).
- *  - `activateTunnelForCurrentHost` — tunnel activation state machine.
  *  - `resetLocalDataAndResync` — full local-data wipe + reconnect.
  *  - `getHostProfiles` / `currentHostProfile` / `getSavedConnectionSettings` /
  *    `refreshHostProfileState` — accessors.
@@ -190,12 +185,11 @@ class HostProfileController(
     // ── Profile CRUD ───────────────────────────────────────────────────────
 
     /**
-     * Persists [profile] and conditionally writes/clears the Basic Auth and
-     * tunnel passwords according to the explicit three-state contract (Fix #5):
+     * Persists [profile] and conditionally writes/clears the Basic Auth
+     * password according to the explicit three-state contract (Fix #5):
      *
      *  - [basicAuthEdited] = true  → write [basicAuthPassword] (blank removes).
      *  - [basicAuthEdited] = false → skip (preserve stored value).
-     *  - [tunnelEdited] / [tunnelPassword] follow the same rule.
      *
      * When basicAuth is null, the orphaned password is always cleared.
      *
@@ -230,8 +224,6 @@ class HostProfileController(
         profile: HostProfile,
         basicAuthPassword: String = "",
         basicAuthEdited: Boolean = false,
-        tunnelPassword: String = "",
-        tunnelEdited: Boolean = false,
         // §2.7 fix-3（gpt-2#3 阻断）: 显式 mTLS 编辑意图，默认 [ClientCertEditIntent.Unchanged]
         // ——「未提供」≠「禁用」。非 Dialog 调用方（含 test pass-through）默认不动 ESP /
         // 不改 profile 的 mTLS 字段，避免误清既有证书。
@@ -240,8 +232,6 @@ class HostProfileController(
         profile = profile,
         basicAuthPassword = basicAuthPassword,
         basicAuthEdited = basicAuthEdited,
-        tunnelPassword = tunnelPassword,
-        tunnelEdited = tunnelEdited,
         clientCertEdit = clientCertEdit,
     )
 
@@ -618,84 +608,13 @@ class HostProfileController(
         }
     }
 
-    // ── Tunnel activation ──────────────────────────────────────────────────
-
-    /**
-     * Activates the tunnel for the current host profile. Surfaces
-     * loading/error/success state through `tunnelActivationState` on the
-     * connection slice + UiEvent.Error/Success via [effects.uiEvents].
-     * §tofu R2: passes the host:port authority (derived from the profile URL)
-     * so the tunnel client honors any TOFU pin for this endpoint.
-     */
-    fun activateTunnelForCurrentHost() {
-        val profile = hostProfileStore.currentProfile()
-        val passwordId = profile.tunnelPasswordId
-        if (passwordId == null) {
-            slices.mutateConnection {
-                it.copy(
-                    tunnelActivationState = TunnelActivationState.Error("未设置隧道密码")
-                )
-            }
-            effects.tryEmitUiEvent(UiEvent.Error(R.string.error_tunnel_password_unset))
-            return
-        }
-        val password = settingsManager.getTunnelPassword(passwordId)
-        if (password.isNullOrBlank()) {
-            slices.mutateConnection {
-                it.copy(
-                    tunnelActivationState = TunnelActivationState.Error("隧道密码为空")
-                )
-            }
-            effects.tryEmitUiEvent(UiEvent.Error(R.string.error_tunnel_password_empty))
-            return
-        }
-
-        slices.mutateConnection { it.copy(tunnelActivationState = TunnelActivationState.Loading) }
-        scope.launch {
-            repository.activateTunnel(
-                profile.serverUrl, password,
-                hostPort = hostPortFromUrl(profile.serverUrl)
-            )
-                .onSuccess {
-                    slices.mutateConnection {
-                        it.copy(
-                            // §success-channel / §R-17 batch2: success now rides a
-                            // UiEvent.Success (NOT error) so ChatScreen renders a
-                            // success snackbar instead of "发生错误" + "查看". The
-                            // sticky tunnelActivationState=Success still drives the
-                            // ServerManagementDialog's success indicator.
-                            tunnelActivationState = TunnelActivationState.Success
-                        )
-                    }
-                    effects.tryEmitUiEvent(UiEvent.Success(R.string.success_tunnel_activated))
-                    Log.d(TAG, "Tunnel activated successfully for ${profile.serverUrl}")
-                    // §user-req: tunnel 激活后自动冷启动级刷新。1.5s 经验值——cloudflared
-                    // 类守护进程在 activate API 返回后需要短暂时间建立路由。coldStartReconnect
-                    // 自带 3 次退避重试（1/2/4s）兜底，即使首次探测失败也会在 ~7s 内成功。
-                    delay(1500)
-                    // §R18 Phase 3 Wave 1 (P1-3 A 类): activateTunnel scope.launch onSuccess suspend 上下文 → suspend emitEffect。
-                    effects.emitEffect(ControllerEffect.ColdStartReconnect)
-                }
-                .onFailure { error ->
-                    val msg = errorMessageOrFallback(error, "未知错误（无异常信息）")
-                    slices.mutateConnection {
-                        it.copy(
-                            tunnelActivationState = TunnelActivationState.Error(msg)
-                        )
-                    }
-                    effects.tryEmitUiEvent(UiEvent.Error(R.string.error_tunnel_activation_failed, listOf(msg)))
-                    Log.e(TAG, "Tunnel activation failed", error)
-                }
-        }
-    }
-
     // ── Full local-data reset ──────────────────────────────────────────────
 
     /**
      * Hard reset of ALL local data, then reconnect + re-fetch from the server.
      *
      * Wipes everything persisted by SettingsManager EXCEPT server connection
-     * info + tunnel passwords. Resets in-memory AppState to a clean slate
+     * info. Resets in-memory AppState to a clean slate
      * (preserving host profile list + current id), tears down SSE, resets all
      * slice flows, then reconnects via coldStartReconnect which re-runs
      * loadInitialData on a healthy connection.
@@ -715,7 +634,7 @@ class HostProfileController(
         // here were removed together with the persistence layer. The in-memory
         // session-window cache is still cleared via the
         // [ControllerEffect.ClearSessionWindowCache] emission below (step 3).
-        // 1. Wipe persisted local data (preserves connection + tunnel creds).
+        // 1. Wipe persisted local data (preserves connection creds).
         settingsManager.clearAllLocalData()
         // 2. Zero the in-memory traffic tracker (direct — same domain).
         trafficTracker.reset()

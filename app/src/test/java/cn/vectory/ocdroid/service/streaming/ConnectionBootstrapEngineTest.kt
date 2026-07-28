@@ -29,7 +29,6 @@ class ConnectionBootstrapEngineTest {
         id = "profile",
         name = "Test",
         serverUrl = "https://server:443",
-        tunnelPasswordId = "tunnel",
         serverGroupFp = "group",
     )
 
@@ -41,12 +40,10 @@ class ConnectionBootstrapEngineTest {
         val resolver: EffectiveConnectionConfigResolver,
     )
 
-    private fun fixture(hasActivity: Boolean, withTunnel: Boolean = true, slim: Boolean = false): Fixture {
+    private fun fixture(hasActivity: Boolean, slim: Boolean = false): Fixture {
         val settings = mockk<SettingsManager>(relaxed = true)
         val repository = mockk<OpenCodeRepository>(relaxed = true)
-        val selected = if (withTunnel) profile else profile.copy(tunnelPasswordId = null)
         every { settings.currentWorkdir } returns "/work"
-        every { settings.getTunnelPassword("tunnel") } returns "secret"
         every { repository.pinnedSpkiFor(any()) } returns null
         every { repository.isMutualTlsActive() } returns false
         val store = ConnectionIdentityStore()
@@ -54,14 +51,12 @@ class ConnectionBootstrapEngineTest {
         val resolver = mockk<EffectiveConnectionConfigResolver>()
         every { resolver.resolve() } returns EffectiveConnectionConfig(
             source = EffectiveConnectionSource.Profile,
-            profileId = selected.id,
-            serverGroupFp = selected.serverGroupFp,
-            url = selected.serverUrl,
+            profileId = profile.id,
+            serverGroupFp = profile.serverGroupFp,
+            url = profile.serverUrl,
             username = null,
             password = null,
             workdir = "/work",
-            tunnelPasswordId = selected.tunnelPasswordId,
-            tunnelPassword = selected.tunnelPasswordId?.let { "secret" },
             clientCertId = null,
             mtlsEnabled = false,
             slim = slim,
@@ -84,10 +79,9 @@ class ConnectionBootstrapEngineTest {
     }
 
     @Test
-    fun `fresh process persisted profile configures tunnel probes and binds once`() = runTest {
+    fun `fresh process persisted profile configures and binds once`() = runTest {
         val f = fixture(hasActivity = false)
         every { f.repository.configure(any(), any(), any(), any(), any(), any()) } returns Unit
-        coEvery { f.repository.activateTunnel(any(), any(), any()) } returns Result.success(Unit)
         coEvery { f.repository.checkHealth() } returns Result.success(HealthResponse(true, "1.2.3"))
 
         val result = f.engine.bootstrap() as ConnectionBootstrapOutcome.Success
@@ -95,7 +89,6 @@ class ConnectionBootstrapEngineTest {
         verify(exactly = 1) {
             f.repository.configure("https://server:443", null, null, "server:443", null, false)
         }
-        coVerify(exactly = 1) { f.repository.activateTunnel("https://server:443", "secret", "server:443") }
         coVerify(exactly = 1) { f.repository.checkHealth() }
         assertEquals(result.identity, f.store.currentIdentity.value)
         assertEquals("group", result.identity.serverGroupFp)
@@ -113,8 +106,6 @@ class ConnectionBootstrapEngineTest {
             username = "manual-user",
             password = "manual-pass",
             workdir = "/manual-work",
-            tunnelPasswordId = null,
-            tunnelPassword = null,
             clientCertId = null,
             mtlsEnabled = false,
         )
@@ -150,7 +141,7 @@ class ConnectionBootstrapEngineTest {
 
     @Test
     fun `no Activity TLS failure retains degraded capture without waiting decision`() = runTest {
-        val f = fixture(hasActivity = false, withTunnel = false)
+        val f = fixture(hasActivity = false)
         every { f.repository.configure(any(), any(), any(), any(), any(), any()) } returns Unit
         val failure = SSLHandshakeException("unknown CA")
         coEvery { f.repository.checkHealth() } returns Result.failure(failure)
@@ -168,7 +159,7 @@ class ConnectionBootstrapEngineTest {
 
     @Test
     fun `concurrent CC and Service bootstrap join one health probe`() = runTest {
-        val f = fixture(hasActivity = true, withTunnel = false)
+        val f = fixture(hasActivity = true)
         every { f.repository.configure(any(), any(), any(), any(), any(), any()) } returns Unit
         val health = CompletableDeferred<Result<HealthResponse>>()
         coEvery { f.repository.checkHealth() } coAnswers { health.await() }
@@ -194,7 +185,7 @@ class ConnectionBootstrapEngineTest {
 
     @Test
     fun `slim profile propagates slim=true to repository configure`() = runTest {
-        val f = fixture(hasActivity = false, withTunnel = false, slim = true)
+        val f = fixture(hasActivity = false, slim = true)
         every { f.repository.configure(any(), any(), any(), any(), any(), any()) } returns Unit
         coEvery { f.repository.checkHealth() } returns Result.success(HealthResponse(true, "1.0"))
 
@@ -207,7 +198,7 @@ class ConnectionBootstrapEngineTest {
 
     @Test
     fun `legacy profile propagates slim=false to repository configure`() = runTest {
-        val f = fixture(hasActivity = false, withTunnel = false, slim = false)
+        val f = fixture(hasActivity = false, slim = false)
         every { f.repository.configure(any(), any(), any(), any(), any(), any()) } returns Unit
         coEvery { f.repository.checkHealth() } returns Result.success(HealthResponse(true, "1.0"))
 
@@ -225,7 +216,7 @@ class ConnectionBootstrapEngineTest {
         // value would route SSE/health to the wrong endpoint family).
         // Engine's configuredKey != key check uses EffectiveConnectionConfig
         // holistic equality; slim is part of that record.
-        val f = fixture(hasActivity = false, withTunnel = false, slim = false)
+        val f = fixture(hasActivity = false, slim = false)
         every { f.repository.configure(any(), any(), any(), any(), any(), any()) } returns Unit
         coEvery { f.repository.checkHealth() } returns Result.success(HealthResponse(true, "1.0"))
 
@@ -244,7 +235,7 @@ class ConnectionBootstrapEngineTest {
 
     @Test
     fun `matching host with unready slim incarnation reconfigures and restores readiness`() = runTest {
-        val f = fixture(hasActivity = false, withTunnel = false, slim = true)
+        val f = fixture(hasActivity = false, slim = true)
         var ready = false
         every { f.repository.configure(any(), any(), any(), any(), any(), any()) } answers {
             ready = true
@@ -263,7 +254,7 @@ class ConnectionBootstrapEngineTest {
 
     @Test
     fun `configure failure remains Failed and never reports Connected`() = runTest {
-        val f = fixture(hasActivity = false, withTunnel = false, slim = true)
+        val f = fixture(hasActivity = false, slim = true)
         var failed = true
         val failure = IllegalStateException("configure failed")
         every { f.repository.configure(any(), any(), any(), any(), any(), any()) } answers {

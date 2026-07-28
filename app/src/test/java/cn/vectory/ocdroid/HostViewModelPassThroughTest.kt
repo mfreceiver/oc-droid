@@ -172,7 +172,7 @@ class HostViewModelPassThroughTest : MainViewModelTestBase() {
         val vm = HostViewModel(core)
         val profile = HostProfile(id = "p1", serverUrl = "http://x", name = "P1")
 
-        // Call with defaults (basicAuthEdited=false, tunnelEdited=false).
+        // Call with defaults (basicAuthEdited=false).
         vm.saveHostProfile(profile)
         advanceUntilIdle()
     }

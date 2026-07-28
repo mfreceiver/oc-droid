@@ -11,13 +11,13 @@ import java.util.concurrent.TimeUnit
 
 /**
  * R-18: unified factory for the OkHttp clients used by
- * `OpenCodeRepository` (REST / SSE / tunnel / health / command / mutation).
+ * `OpenCodeRepository` (REST / SSE / health / command / mutation).
  * Owns the singleton HTTP cache, wires the per-purpose interceptor chain,
  * and routes every client through the shared [SslConfigFactory] / [applySsl]
  * entry point so the trust-all decision lives in exactly one place — this
  * is the consolidation of the four previously duplicated
  * `applySsl(sslConfigFor(...))` blocks in `buildRestClient` /
- * `buildSseClient` / `buildTunnelOkHttpClient` / `checkHealthFor`.
+ * `buildSseClient` / `checkHealthFor`.
  *
  * Client variants:
  *  - [restClient]: base chain + response-size guard (OOM P0) + 30 s read
@@ -28,7 +28,6 @@ import java.util.concurrent.TimeUnit
  *  - [commandClient]: base chain + response-size guard + 300 s read
  *    + `retryOnConnectionFailure(false)` (POST executeCommand — long server
  *    work + never auto-retry).
- *  - [tunnelClient]: SSL + 10 s/10 s timeouts, no interceptors (form POST auth).
  *  - [healthClient]: SSL + 10 s/10 s timeouts, no interceptors (one-shot probe).
  *
  * §tofu R2: every variant takes `hostPort: String?` (the host:port authority
@@ -305,16 +304,6 @@ class OkHttpClientFactory private constructor(
             .readTimeout(300, TimeUnit.SECONDS)
             .retryOnConnectionFailure(false)
             .build()
-
-    /**
-     * Tunnel activation client: SSL via the shared entry point + 15 s/15 s
-     * timeouts, NO base interceptors — tunnel auth uses a form-encoded POST
-     * (not HTTP Basic Auth), so the [AuthInterceptor] MUST NOT touch this
-     * client (cf. `activateTunnel does not carry Basic Auth header`).
-     *
-     * §tofu R2: takes [hostPort] for TOFU pin resolution (was `allowInsecure`).
-     */
-    fun tunnelClient(hostPort: String?): OkHttpClient = bareClient(hostPort)
 
     /**
      * One-shot health-probe client: SSL via the shared entry point + 15 s /

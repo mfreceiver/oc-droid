@@ -55,7 +55,6 @@ class ConnectionBootstrapEngine internal constructor(
     private val mutex = Mutex()
     private var inFlight: InFlight? = null
     private var configuredKey: EffectiveConnectionConfig? = null
-    private var tunnelActivatedKey: EffectiveConnectionConfig? = null
 
     suspend fun bootstrap(): ConnectionBootstrapOutcome {
         while (true) {
@@ -133,21 +132,6 @@ class ConnectionBootstrapEngine internal constructor(
             identityStore.currentEpoch() != expectedEpoch
         ) {
             return ConnectionBootstrapOutcome.Failed(IllegalStateException("Config or epoch changed"))
-        }
-        if (key.tunnelPasswordId != null && tunnelActivatedKey != key) {
-            val password = key.tunnelPassword
-                ?: return ConnectionBootstrapOutcome.Failed(IllegalStateException("Tunnel password unavailable"))
-            repository.activateTunnel(
-                key.url,
-                password,
-                hostPort = hostPortFromUrl(key.url),
-            ).getOrElse { return ConnectionBootstrapOutcome.Failed(it) }
-            tunnelActivatedKey = key
-            if (configResolver.resolve() != key ||
-                identityStore.currentEpoch() != expectedEpoch
-            ) {
-                return ConnectionBootstrapOutcome.Failed(IllegalStateException("Config or epoch changed after tunnel"))
-            }
         }
 
         while (true) {

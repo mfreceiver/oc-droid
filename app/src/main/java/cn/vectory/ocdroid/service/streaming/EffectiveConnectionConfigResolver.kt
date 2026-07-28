@@ -38,8 +38,8 @@ data class ResolvedEndpoint internal constructor(
  *
  * **设计权衡**：把 slim 放进 EffectiveConnectionConfig（而不是让 bootstrap
  * engine 直接读 HostProfile）的理由——
- *  1. 与 [mtlsEnabled] / [clientCertId] / [tunnelPasswordId] 同源：这些都是
- *     「当前生效连接」的属性，由 resolver 集中解析（Profile 源 vs Manual 源），
+     *  1. 与 [mtlsEnabled] / [clientCertId] 同源：这些都是
+     *     「当前生效连接」的属性，由 resolver 集中解析（Profile 源 vs Manual 源），
  *     engine 只消费 EffectiveConnectionConfig、不直接碰 HostProfileStore——
  *     单一职责 + 测试隔离。
  *  2. `configuredKey != key` 比较：engine 用 EffectiveConnectionConfig 整体
@@ -57,8 +57,6 @@ data class EffectiveConnectionConfig(
     val username: String?,
     val password: String?,
     val workdir: String,
-    val tunnelPasswordId: String?,
-    val tunnelPassword: String?,
     val clientCertId: String?,
     val mtlsEnabled: Boolean,
     val slim: Boolean = false,
@@ -137,8 +135,6 @@ class DefaultEffectiveConnectionConfigResolver @Inject constructor(
             username = settingsManager.username,
             password = settingsManager.password,
             workdir = settingsManager.currentWorkdir.orEmpty(),
-            tunnelPasswordId = null,
-            tunnelPassword = null,
             clientCertId = profile?.clientCertId?.takeIf { profile.mtlsEnabled },
             mtlsEnabled = profile?.mtlsEnabled == true,
             // R8 slim-mode foundation / Cluster B: 手动 URL 沿用当前 profile 的 slim
@@ -160,8 +156,6 @@ class DefaultEffectiveConnectionConfigResolver @Inject constructor(
             username = profile.basicAuth?.username,
             password = profile.basicAuth?.passwordId?.let(settingsManager::basicAuthPassword),
             workdir = settingsManager.currentWorkdir.orEmpty(),
-            tunnelPasswordId = profile.tunnelPasswordId,
-            tunnelPassword = profile.tunnelPasswordId?.let(settingsManager::getTunnelPassword),
             clientCertId = profile.clientCertId.takeIf { profile.mtlsEnabled },
             mtlsEnabled = profile.mtlsEnabled,
             // R8 slim-mode foundation / Cluster B: 直接透传 profile.slim。

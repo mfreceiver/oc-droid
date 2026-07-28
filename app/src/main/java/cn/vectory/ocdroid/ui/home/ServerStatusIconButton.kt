@@ -45,7 +45,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.stringResource
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
-import cn.vectory.ocdroid.ui.TunnelActivationState
 import cn.vectory.ocdroid.ui.chat.ServerManagementDialog
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.theme.SemanticColors
@@ -90,12 +89,9 @@ import cn.vectory.ocdroid.ui.theme.SemanticColors
  *                              health-settle); the two can differ transiently.
  * @param hostProfiles         configured host profiles (dialog list).
  * @param currentHostProfileId the active host profile id (dialog highlight).
- * @param tunnelActivationState tunnel-activation slice (dialog button state).
- * @param showTunnelAuth       whether the dialog should render the tunnel button.
  * @param serverVersion        connected server version (dialog display).
  * @param onSelectHost         switch host profile (dialog row tap).
  * @param onRefresh            refresh messages (dialog refresh button).
- * @param onActivateTunnel     activate the tunnel for the current host.
  * @param onNavigateToSettings open the Settings tab (dialog settings button).
  * @param onLongClickServer    navigate to the debug settings page (long-press).
  * @param modifier             applied to the outer [BadgedBox].
@@ -110,12 +106,9 @@ internal fun ServerStatusIconButton(
     isSseConnected: Boolean,
     hostProfiles: List<HostProfile>,
     currentHostProfileId: String?,
-    tunnelActivationState: TunnelActivationState,
-    showTunnelAuth: Boolean,
     serverVersion: String?,
     onSelectHost: (String) -> Unit,
     onRefresh: () -> Unit,
-    onActivateTunnel: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onLongClickServer: () -> Unit = {},
     modifier: Modifier = Modifier,
@@ -232,12 +225,9 @@ internal fun ServerStatusIconButton(
         ServerManagementDialog(
             hostProfiles = hostProfiles,
             currentHostProfileId = currentHostProfileId,
-            tunnelActivationState = tunnelActivationState,
-            showTunnelAuth = showTunnelAuth,
             serverVersion = serverVersion,
             onSelectHost = onSelectHost,
             onRefresh = onRefresh,
-            onActivateTunnel = onActivateTunnel,
             onNavigateToSettings = onNavigateToSettings,
             onDismiss = { showDialog = false },
         )
