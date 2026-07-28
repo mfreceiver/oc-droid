@@ -1053,7 +1053,15 @@ class SkeletonReloadCoordinator(
                         val chat = slices.chat.value
                         if (chat.currentSessionId != identity.sessionId) return@withLock
                         if (currentServerGroupFp() != identity.serverGroupFp) return@withLock
-                        if (page.items.isEmpty()) return@withLock
+                        if (page.items.isEmpty()) {
+                            // 空页不清 transcript（mergeSkeletonIntoChatSlice 内部 isEmpty 早退），
+                            // 但成功 HTTP 必须复位失败标记 + 退避计数 + disarm watchdog，
+                            // 否则 watchdog 继续以指数退避空转。
+                            ownerState.failed = false
+                            ownerState.retryAttempt = 0
+                            watchdogJobs.remove(sessionId)?.cancel()
+                            return@withLock
+                        }
                         mergeSkeletonIntoChatSlice(chat, sessionId, page, identity)
                         ownerState.failed = false
                         ownerState.retryAttempt = 0

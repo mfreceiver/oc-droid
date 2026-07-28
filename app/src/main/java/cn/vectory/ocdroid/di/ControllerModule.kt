@@ -493,9 +493,10 @@ internal data class TokenStreamProductionHooks(
         context: TokenFrameCommitContext,
     ) -> Unit,
     /**
-     * B-4 HIGH-2: called when a part reaches its terminal done:true state.
-     * The production implementation clears the per-part revision entry so the
-     * map does not grow unbounded across completed parts.
+     * B-4 HIGH-2: called when a part reaches its terminal state
+     * (done:true OR truncated:true). The production implementation marks the
+     * revision entry as terminal tombstone, rejecting ALL subsequent revisions
+     * (same, lower, higher, null) until epoch-boundary clearSession.
      */
     val onPartDone: (
         sessionId: String, messageId: String, partId: String,
@@ -513,14 +514,6 @@ internal data class TokenStreamProductionHooks(
 )
 
 /**
- * B-4 LOW: safe key for revision dedup. Uses \u0001 (SOH) as separator — it
- * cannot appear in any legitimate opencode session/message/part ID (they are
- * hex/base58/UUID-based).
- */
-internal fun revisionKey(sid: String, mid: String, pid: String): String =
-    buildString { append(sid); append('\u0001'); append(mid); append('\u0001'); append(pid) }
-
-/**
  * lite-v2-dev (plan §4.2): constructs the three [TokenStreamCoordinator]
  * commit hooks bound to the LIVE chat slice + [SkeletonReloadCoordinator].
  * Extracted to a top-level internal function so
@@ -530,8 +523,11 @@ internal fun revisionKey(sid: String, mid: String, pid: String): String =
  * # Hook semantics (post lite-v2 rewiring)
  *
  *  - **dedupPartRevision**: per-(sid|mid|pid) strict `>` revision dedup
- *    (V2 §3.x.2:153). Null revision → fail-open accept; `revision <= last`
- *    → reject. Revision entries are cleaned up on part/message removal.
+ *    (V2 §3.x.2:153). Null revision is processed through the ledger:
+ *    active key null → fail-open compatible; terminal key null → fail-closed;
+ *    new null key occupies a bounded slot; cap full → fail-closed.
+ *    `revision <= last` → reject. Revision entries are cleaned up on
+ *    part/message removal.
  *
  *  - **onMessagePartRemoved**: per-(sid|mid) trailing-coalesce 100ms debounce
  *    → [SkeletonReloadCoordinator.requestReload]`(sid, 50)`。权威窗口 diff
@@ -555,38 +551,28 @@ internal fun tokenStreamProductionHooks(
     // prior pending Job and re-schedules.
     val partRemovalDebounceJobs = ConcurrentHashMap<String, Job>()
 
-    // B-4: per-(sid|mid|pid) last-applied revision for strict `>` dedup
-    // (V2 §3.x.2:153). null revision → fail-open (accept); revision <= last
-    // → reject (duplicate/out-of-order).
-    val lastPartRevisions = ConcurrentHashMap<String, Long>()
+    // B-4 HIGH-2 (rev-gpt): per-session bounded revision ledger with terminal
+    // tombstone semantics. Replaces the pre-rev-gpt `ConcurrentHashMap<String, Long>`.
+    //  - terminal done/truncated → markTerminal (tombstone, NOT remove) so
+    //    same/lower revisions cannot resurrect a done part.
+    //  - per-session capacity ≤ [PartRevisionLedger.MAX_REVISIONS_PER_SESSION];
+    //    overflow is fail-closed (new keys rejected). There is NO automatic
+    //    recovery for overflow — recovery depends on existing lifecycle paths
+    //    (close/open, resync, reconcile).
+    //  - null revision → admitted through the ledger (active key: fail-open
+    //    compatible; terminal key: fail-closed; new null key occupies a
+    //    bounded slot; cap full → fail-closed).
+    val revisionLedger = PartRevisionLedger()
 
     return TokenStreamProductionHooks(
         dedupPartRevision = { sid, mid, pid, rev, _ ->
-            if (rev == null) {
-                // Fail-open: null revision — accept.
-                true
-            } else {
-                val key = revisionKey(sid, mid, pid)
-                var accepted = false
-                // Atomic check-and-update: compute() holds the segment lock,
-                // so the strict-`>` check and the revision update are a single
-                // atomic step. Two concurrent calls for the same key serialize
-                // inside compute().
-                lastPartRevisions.compute(key) { _, current ->
-                    if (current != null && rev <= current) {
-                        // Stale/duplicate — reject, keep current.
-                        current
-                    } else {
-                        accepted = true
-                        rev
-                    }
-                }
-                accepted
-            }
+            revisionLedger.admit(sid, mid, pid, rev)
         },
         onMessagePartRemoved = { sid, mid, pid, _, _ ->
-            // B-4: clear this part's revision entry on removal.
-            lastPartRevisions.remove(revisionKey(sid, mid, pid))
+            // B-4: clear this part's revision entry on removal (existing
+            // protocol — part.removed means the part is gone, so the dedup
+            // history is cleared).
+            revisionLedger.remove(sid, mid, pid)
             // lite-v2-dev (plan §4.2 (2)): per-(sid|mid) trailing-coalesce
             // debounce → 权威窗口 reload（limit=50）。reload 的 diff 自动发现
             // part 列表变化，不再走单条 /full reconcile。
@@ -600,9 +586,8 @@ internal fun tokenStreamProductionHooks(
         },
         onMessageRemoved = { sid, mid, ctx ->
             // B-4: clear all revision entries for this (sid,mid) on message
-            // removal.
-            val msgPrefix = "$sid\u0001$mid\u0001"
-            lastPartRevisions.entries.removeIf { it.key.startsWith(msgPrefix) }
+            // removal (existing protocol — message.removed = all parts gone).
+            revisionLedger.removeMessage(sid, mid)
             // lite-v2-dev (plan §4.2 (3)): 直接 dispatch
             // MessageRemovedConfirmed（即时移除，不等 reload）。删除 slim commit
             // token + applyMessageRemoved——权威窗口 reload 会最终收敛，但 token
@@ -617,14 +602,18 @@ internal fun tokenStreamProductionHooks(
             )
         },
         onPartDone = { sid, mid, pid ->
-            // B-4 HIGH-2: reclaim revision entry when part reaches done:true.
-            lastPartRevisions.remove(revisionKey(sid, mid, pid))
+            // B-4 HIGH-2 (rev-gpt): mark revision entry as TERMINAL instead of
+            // removing it. A terminal tombstone prevents ALL subsequent revisions
+            // (same, lower, higher, null) from being admitted — no resurrection
+            // after done/truncated. Only clearSessionRevisions (epoch/lifecycle
+            // boundary) removes terminal tombstones.
+            revisionLedger.markTerminal(sid, mid, pid)
         },
         clearSessionRevisions = { sid ->
-            // B-4 HIGH-2: reclaim ALL revision entries for this session
-            // (close/resync/switch).
-            val sessionPrefix = "$sid\u0001"
-            lastPartRevisions.entries.removeIf { it.key.startsWith(sessionPrefix) }
+            // B-4 HIGH-2 (rev-gpt): reclaim ALL revision entries for this
+            // session (close/resync/switch). This is the ONLY mechanism that
+            // clears terminal tombstones, providing epoch/lifecycle isolation.
+            revisionLedger.clearSession(sid)
         },
     )
 }

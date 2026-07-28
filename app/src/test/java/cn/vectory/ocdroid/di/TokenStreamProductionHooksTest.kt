@@ -12,13 +12,28 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * B-4: verifies the strict `>` revision dedup in
- * [tokenStreamProductionHooks] (V2 §3.x.2:153). Tests the
- * [TokenStreamProductionHooks.dedupPartRevision] lambda and its interaction
- * with [TokenStreamProductionHooks.onMessagePartRemoved] /
- * [TokenStreamProductionHooks.onMessageRemoved] lifecycle cleanup.
+ * [tokenStreamProductionHooks] (V2 §3.x.2:153), now backed by a
+ * [PartRevisionLedger] with terminal tombstone semantics (rev-gpt fix).
+ *
+ * Tests the [TokenStreamProductionHooks.dedupPartRevision] lambda and its
+ * interaction with [TokenStreamProductionHooks.onPartDone] (terminal
+ * tombstone, NOT remove), [TokenStreamProductionHooks.onMessagePartRemoved],
+ * [TokenStreamProductionHooks.onMessageRemoved], and
+ * [TokenStreamProductionHooks.clearSessionRevisions].
+ *
+ * # Semantic changes from pre-rev-gpt:
+ * - `onPartDone` marks the revision entry as TERMINAL instead of removing it.
+ *   ALL revisions (same, lower, higher) after terminal are REJECTED.
+ * - `dedupPartRevision` no longer bypasses the ledger for null revisions;
+ *   null is handled within the ledger (active key: fail-open; terminal:
+ *   fail-closed; new null key: bounded slot).
+ * - The dedup map is per-session bounded at [PartRevisionLedger.MAX_REVISIONS_PER_SESSION].
  *
  * Each test calls [tokenStreamProductionHooks] with minimal live/mock
  * dependencies and exercises the returned hooks directly.
@@ -30,64 +45,66 @@ class TokenStreamProductionHooksTest {
         bundleStamp = BundleStamp(generation = 0L, endpointFp = ""),
     )
 
+    // ── Baseline strict `>` dedup ──────────────────────────────────────────
+
     @Test
     fun `dedup rejects duplicate revision`() {
         val hooks = createHooks()
-        // First frame with rev=5 accepted.
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
-        // Second frame with same rev=5 for same (sid,mid,pid) rejected.
         assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
     }
 
     @Test
     fun `dedup rejects out-of-order lower revision`() {
         val hooks = createHooks()
-        // First frame with rev=10 accepted.
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 10L, ctx))
-        // Second frame with rev=8 (lower than last applied) rejected.
         assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 8L, ctx))
     }
 
     @Test
     fun `dedup accepts higher revision`() {
         val hooks = createHooks()
-        // rev=5 accepted.
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
-        // rev=6 (higher) accepted.
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 6L, ctx))
-        // rev=5 again (lower than 6) rejected.
         assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
     }
 
+    // ── Null revision semantics through production hooks ──────────────────
+
     @Test
-    fun `dedup fail-open on null revision`() {
+    fun `dedup fail-open on null revision for active key`() {
         val hooks = createHooks()
-        // Establish a non-null revision first.
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
-        // Null revision always returns true regardless of prior state.
+        // Null after non-null active key: accepted (fail-open compatible).
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", null, ctx))
+        // Repeated null: still accepted.
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", null, ctx))
+    }
+
+    @Test
+    fun `dedup fail-closed on null revision after terminal`() {
+        val hooks = createHooks()
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        hooks.onPartDone("s1", "m1", "p1")
+        // Null after terminal: must be rejected.
+        assertFalse("null after terminal must be rejected", hooks.dedupPartRevision("s1", "m1", "p1", null, ctx))
     }
 
     @Test
     fun `dedup per-part cardinality is isolated across part IDs`() {
         val hooks = createHooks()
-        // Two different parts in the same message have independent revision tracking:
-        // p1 rev=5 and p2 rev=5 are both accepted (different parts, same rev is fine).
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p2", 5L, ctx))
-        // p2 rev=5 again → rejected (duplicate for p2, strict `>` only).
         assertFalse(hooks.dedupPartRevision("s1", "m1", "p2", 5L, ctx))
-        // p1 rev=5 again → rejected (duplicate for p1).
         assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
     }
+
+    // ── Lifecycle cleanup (removals still clear entries) ───────────────────
 
     @Test
     fun `part removal clears revision entry`() {
         val hooks = createHooks()
-        // First rev=5 accepted.
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
-        // Duplicate rejected.
         assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
         // onMessagePartRemoved clears the entry for this part.
         hooks.onMessagePartRemoved("s1", "m1", "p1", 7L, ctx)
@@ -98,17 +115,13 @@ class TokenStreamProductionHooksTest {
     @Test
     fun `message removal clears all part entries`() {
         val hooks = createHooks()
-        // Two parts for the same message, both accepted.
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p2", 3L, ctx))
-        // Both rejected on re-delivery.
         assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
         assertFalse(hooks.dedupPartRevision("s1", "m1", "p2", 3L, ctx))
 
-        // onMessageRemoved clears all entries for (s1,m1).
         hooks.onMessageRemoved("s1", "m1", ctx)
 
-        // Both should be accepted again after message removal.
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p2", 3L, ctx))
     }
@@ -116,28 +129,152 @@ class TokenStreamProductionHooksTest {
     @Test
     fun `message removal does not affect other messages`() {
         val hooks = createHooks()
-        // Part in m1 and part in m2.
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
         assertTrue(hooks.dedupPartRevision("s1", "m2", "p2", 5L, ctx))
-        // m2 duplicate rejected.
         assertFalse(hooks.dedupPartRevision("s1", "m2", "p2", 5L, ctx))
 
-        // Remove m1 only.
         hooks.onMessageRemoved("s1", "m1", ctx)
 
-        // m1 part should be re-acceptable.
         assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
-        // m2 part should still be rejected (not cleared).
         assertFalse(hooks.dedupPartRevision("s1", "m2", "p2", 5L, ctx))
     }
+
+    // ── E: onPartDone marks terminal, rejects ALL revisions ───────────────
+
+    @Test
+    fun `E onPartDone marks terminal rejects same revision`() {
+        val hooks = createHooks()
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        // onPartDone marks the revision entry as TERMINAL (not remove).
+        hooks.onPartDone("s1", "m1", "p1")
+        // Same revision after terminal: must be REJECTED (no resurrection).
+        assertFalse(
+            "terminal done must reject same revision, not resurrect",
+            hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx),
+        )
+    }
+
+    @Test
+    fun `E onPartDone terminal rejects lower revision`() {
+        val hooks = createHooks()
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 10L, ctx))
+        hooks.onPartDone("s1", "m1", "p1")
+        assertFalse(
+            "terminal done must reject lower revision",
+            hooks.dedupPartRevision("s1", "m1", "p1", 8L, ctx),
+        )
+    }
+
+    @Test
+    fun `E onPartDone terminal rejects strictly higher revision`() {
+        val hooks = createHooks()
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        hooks.onPartDone("s1", "m1", "p1")
+        // A strictly higher revision after terminal: must be REJECTED
+        // (terminal tombstone prevents ALL revisions until clearSession).
+        assertFalse(
+            "terminal done must reject strictly higher revision",
+            hooks.dedupPartRevision("s1", "m1", "p1", 11L, ctx),
+        )
+    }
+
+    // ── A: Terminal tombstone through production hooks ─────────────────────
+
+    @Test
+    fun `A onPartDone terminal does not affect other parts`() {
+        val hooks = createHooks()
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p2", 5L, ctx))
+        hooks.onPartDone("s1", "m1", "p1")
+        // p1 terminal → same revision rejected.
+        assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        // p2 unaffected.
+        assertFalse(hooks.dedupPartRevision("s1", "m1", "p2", 5L, ctx))
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p2", 6L, ctx))
+    }
+
+    // ── Capacity limiting (B: 33+ parts cap) ───────────────────────────────
+
+    @Test
+    fun `B ledger rejects 33rd distinct partId through hooks`() {
+        val hooks = createHooks()
+        // Admit 32 distinct (sid,mid,pid) combos.
+        for (i in 1..32) {
+            assertTrue("entry $i must be accepted", hooks.dedupPartRevision("s1", "m$i", "p$i", 1L, ctx))
+        }
+        // 33rd distinct key must be rejected (fail-closed cap).
+        assertFalse(
+            "33rd distinct partId must be rejected at cap",
+            hooks.dedupPartRevision("s1", "m33", "p33", 1L, ctx),
+        )
+    }
+
+    @Test
+    fun `B clearSession recovers capacity`() {
+        val hooks = createHooks()
+        for (i in 1..32) {
+            hooks.dedupPartRevision("s1", "m$i", "p$i", 1L, ctx)
+        }
+        assertFalse(hooks.dedupPartRevision("s1", "m33", "p33", 1L, ctx))
+
+        hooks.clearSessionRevisions("s1")
+
+        // After clear, new entries accepted.
+        assertTrue("clearSession must recover capacity", hooks.dedupPartRevision("s1", "m33", "p33", 1L, ctx))
+    }
+
+    @Test
+    fun `B capacity is per-session`() {
+        val hooks = createHooks()
+        for (i in 1..32) {
+            hooks.dedupPartRevision("s1", "m$i", "p$i", 1L, ctx)
+        }
+        assertFalse("s1 at cap", hooks.dedupPartRevision("s1", "m33", "p33", 1L, ctx))
+        // Different session still accepts.
+        assertTrue("s2 must have independent capacity", hooks.dedupPartRevision("s2", "m1", "p1", 1L, ctx))
+    }
+
+    // ── C: Still-live key strict `>` ───────────────────────────────────────
+
+    @Test
+    fun `C non-terminal strict greater works`() {
+        val hooks = createHooks()
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 6L, ctx))
+        assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 6L, ctx))
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 10L, ctx))
+    }
+
+    @Test
+    fun `C terminal rejects strictly higher revision`() {
+        val hooks = createHooks()
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        hooks.onPartDone("s1", "m1", "p1")
+        // After terminal, even a strictly higher revision is rejected
+        // (the terminal tombstone blocks ALL revisions until clearSession).
+        assertFalse("terminal must reject higher revision", hooks.dedupPartRevision("s1", "m1", "p1", 10L, ctx))
+    }
+
+    @Test
+    fun `C different partId with same revision after terminal unaffected`() {
+        val hooks = createHooks()
+        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
+        hooks.onPartDone("s1", "m1", "p1")
+        // Same revision for a different partId is still accepted.
+        assertTrue("different partId must be unaffected by terminal", hooks.dedupPartRevision("s1", "m1", "p2", 5L, ctx))
+    }
+
+    // ── Concurrent safety ─────────────────────────────────────────────────
 
     @Test
     fun `concurrent same revision accepts exactly once`() {
         val hooks = createHooks()
         val n = 50
-        val accepted = java.util.concurrent.atomic.AtomicInteger(0)
-        val barrier = java.util.concurrent.CountDownLatch(1)
-        val ready = java.util.concurrent.CountDownLatch(n)
+        val accepted = AtomicInteger(0)
+        val barrier = CountDownLatch(1)
+        val ready = CountDownLatch(n)
         val threads = (1..n).map {
             Thread {
                 ready.countDown()
@@ -148,61 +285,10 @@ class TokenStreamProductionHooksTest {
             }
         }
         threads.forEach { it.start() }
-        // Wait for all threads to be ready, then release them simultaneously.
         ready.await()
         barrier.countDown()
-        threads.forEach { it.join() }
+        threads.forEach { it.join(5000) } // 5s timeout
         assertEquals(1, accepted.get())
-    }
-
-    @Test
-    fun `onPartDone clears revision entry`() {
-        val hooks = createHooks()
-        // rev=5 accepted.
-        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
-        // Duplicate rejected.
-        assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
-        // onPartDone reclaims the revision entry.
-        hooks.onPartDone("s1", "m1", "p1")
-        // Now rev=5 accepted again (entry was reclaimed).
-        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
-    }
-
-    @Test
-    fun `clearSessionRevisions clears all session entries`() {
-        val hooks = createHooks()
-        // Two parts for the same session, both accepted.
-        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
-        assertTrue(hooks.dedupPartRevision("s1", "m2", "p2", 3L, ctx))
-        // Both rejected on re-delivery.
-        assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
-        assertFalse(hooks.dedupPartRevision("s1", "m2", "p2", 3L, ctx))
-
-        // clearSessionRevisions reclaims all entries for s1.
-        hooks.clearSessionRevisions("s1")
-
-        // Both should be accepted again.
-        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
-        assertTrue(hooks.dedupPartRevision("s1", "m2", "p2", 3L, ctx))
-    }
-
-    @Test
-    fun `clearSessionRevisions does not affect other sessions`() {
-        val hooks = createHooks()
-        // One part in s1, one in s2.
-        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
-        assertTrue(hooks.dedupPartRevision("s2", "m1", "p1", 3L, ctx))
-        // Both duplicates rejected.
-        assertFalse(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
-        assertFalse(hooks.dedupPartRevision("s2", "m1", "p1", 3L, ctx))
-
-        // Clear only s1.
-        hooks.clearSessionRevisions("s1")
-
-        // s1 part re-acceptable.
-        assertTrue(hooks.dedupPartRevision("s1", "m1", "p1", 5L, ctx))
-        // s2 part still rejected (not cleared).
-        assertFalse(hooks.dedupPartRevision("s2", "m1", "p1", 3L, ctx))
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────
@@ -220,7 +306,7 @@ class TokenStreamProductionHooksTest {
             store = store,
             skeletonReloadCoordinator = skeletonReloadCoordinator,
             appScope = CoroutineScope(Dispatchers.Unconfined),
-            debounceMs = 0L, // Immediate debounce for deterministic tests.
+            debounceMs = 0L,
         )
     }
 }

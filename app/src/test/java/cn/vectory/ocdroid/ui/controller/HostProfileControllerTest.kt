@@ -1204,4 +1204,50 @@ class HostProfileControllerTest {
         assertNull(slices.connection.value.mtlsDegradedError)
         assertTrue(recordedEvents.filterIsInstance<UiEvent.Error>().isEmpty())
     }
+
+    // ── §emitEffect reliability (must not use tryEmitEffect for critical effects) ──
+
+    @Test
+    fun `deleteHostProfile of current profile emits RestartRequired through suspend emitEffect not tryEmit`() {
+        // Regression: RestartRequired must use emitEffect (suspend-on-full) not
+        // tryEmitEffect (can drop silently). The test asserts the effect appears
+        // after runPending (scope.launch { emitEffect(...) }).
+        seed { it.copy(currentHostProfileId = "p-A") }
+        every { store.currentProfile() } returns profileB
+
+        controller.deleteHostProfile("p-A")
+        scope.testScheduler.advanceUntilIdle()
+
+        assertEquals(
+            "RestartRequired must be emitted (suspend emitEffect, not dropped tryEmit)",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.RestartRequired>().size,
+        )
+    }
+
+    @Test
+    fun `resetLocalDataAndResync emits three critical effects FIFO via suspend emitEffect`() {
+        // Regression: ClearSessionWindowCache, CancelSseForReconfigure,
+        // ColdStartReconnect must use suspend emitEffect (not tryEmitEffect)
+        // and must appear in FIFO order. They are now wrapped in a single
+        // scope.launch { emitEffect(A); emitEffect(B); emitEffect(C) }.
+        controller.resetLocalDataAndResync()
+        runPending()
+
+        val clearIdx = collectedEffects.indexOfFirst { it is ControllerEffect.ClearSessionWindowCache }
+        val cancelIdx = collectedEffects.indexOfFirst { it is ControllerEffect.CancelSseForReconfigure }
+        val coldIdx = collectedEffects.indexOfFirst { it is ControllerEffect.ColdStartReconnect }
+
+        assertTrue("ClearSessionWindowCache must be present", clearIdx >= 0)
+        assertTrue("CancelSseForReconfigure must be present", cancelIdx >= 0)
+        assertTrue("ColdStartReconnect must be present", coldIdx >= 0)
+        assertTrue(
+            "ClearSessionWindowCache must precede CancelSseForReconfigure: $clearIdx vs $cancelIdx",
+            clearIdx < cancelIdx,
+        )
+        assertTrue(
+            "CancelSseForReconfigure must precede ColdStartReconnect: $cancelIdx vs $coldIdx",
+            cancelIdx < coldIdx,
+        )
+    }
 }

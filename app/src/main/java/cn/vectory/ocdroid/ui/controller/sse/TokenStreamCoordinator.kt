@@ -544,6 +544,19 @@ class TokenStreamCoordinator(
             }
             DebugLog.i(TAG, "open($sid) bundle changed during guard revalidation — superseding (source=$source)")
         }
+        // B-4 HIGH-2: when switching to a DIFFERENT sid (not same-sid
+        // reopen like reconnect), reclaim ALL revision entries for the
+        // previous session so stale per-part revisions from the dead
+        // connection cannot block fresh frames on the new session's
+        // connection. Checked BEFORE currentSid.set(sid) so the previous
+        // value is still available. Same-sid (currentSid == new sid) is
+        // the idempotent-guard fall-through case (bundle-rotated reopen
+        // or navigateToChat same-session re-entry) — must NOT clear
+        // its own revisions.
+        val prevSid = currentSid.get()
+        if (prevSid != null && prevSid != sid) {
+            clearSessionRevisions(prevSid)
+        }
         currentSid.set(sid)
         currentDirectory.set(directory)
         // §B4 rev-gpt round3 MAJOR: capture this lifecycle's route token for
@@ -950,8 +963,12 @@ class TokenStreamCoordinator(
         // reconcileActiveSession / MessageRemovedConfirmed dispatch).
         when (effectiveFrame) {
             is TokenStreamFrame.PartSnapshot -> {
-                // B-4 HIGH-2: reclaim revision entry when part reaches done:true.
-                if (effectiveFrame.done && !effectiveFrame.truncated) {
+                // B-4 HIGH-2 + HIGH-1: reclaim revision entry when part reaches
+                // done:true OR truncated:true. Both are terminal: the reducer
+                // removes the part from the overlay (ClearPartState) and the
+                // dedup revision map must not retain an entry that could block
+                // a future frame for the same partId.
+                if (effectiveFrame.done || effectiveFrame.truncated) {
                     onPartDone(effectiveFrame.sessionId, effectiveFrame.messageId, effectiveFrame.partId)
                 }
             }

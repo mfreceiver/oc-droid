@@ -13,6 +13,7 @@ import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.runSuspendCatching
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import java.util.UUID
 
 /**
@@ -235,11 +236,12 @@ class ProfileMutationEngine internal constructor(
             }
             // lite-v2: RestartRequired supersedes runtime reconfigure.
             // No ForceReconnect/HostProfileSwitched — restart handles everything.
-            // FIX-7: non-suspend context — keep tryEmitEffect but DO NOT
-            // ignore the return. Bus-full is unlikely but the restart flag is
-            // business-critical and must not be lost silently.
-            if (!effects.tryEmitEffect(ControllerEffect.RestartRequired)) {
-                DebugLog.e(TAG, "RestartRequired effect dropped (bus full) — restart flag may be stale; user must restart manually to apply the active-profile deletion")
+            // Lane A: use suspend emitEffect (not tryEmitEffect) so the effect
+            // is never silently dropped — bus-full would suspend the producer
+            // instead of logging and losing the restart signal. Non-suspend
+            // context → wrap in scope.launch.
+            scope.launch {
+                effects.emitEffect(ControllerEffect.RestartRequired)
             }
         } else {
             if (remainingInGroup.isEmpty()) {

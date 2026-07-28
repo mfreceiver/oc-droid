@@ -26,8 +26,11 @@ import cn.vectory.ocdroid.ui.launchLoadProviders
 import cn.vectory.ocdroid.ui.reportNonFatalIssue
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -219,13 +222,44 @@ class ConnectionCoordinator(
      * pre-extraction wiring timing verbatim.
      */
     /**
-     * lite-v2 D-barrier-fixup: stores the no-source teardown Job from
-     * cancelSseForReconfigure so coldStartReconnect can await it before
-     * probing. Volatile for safe cross-coroutine read without synchronisation
-     * (single-assignment: written once per teardown, cleared once on join).
+     * lite-v2 D-barrier-fixup + lane A ABA fix: stores the no-source teardown
+     * Job from cancelSseForReconfigure so coldStartReconnect can await it before
+     * probing.
+     *
+     * **Job chaining (thread-safe)**: each new `cancelSseForReconfigure` joins
+     * the previous job first (`prev?.join()`) — serializes teardowns transitively.
+     * The read-modify-write of this field is protected by [reconfigureLock]
+     * (`synchronized`) so concurrent callers from multiple threads cannot both
+     * read `null` and launch parallel teardowns (the @Volatile-only race).
+     *
+     * **Identity-guarded loop join**: `coldStartReconnect` enters a while loop
+     * that repeatedly reads this field under [reconfigureLock], joins the job,
+     * then loops to check for new jobs that were registered during the join.
+     * The atomic read-and-clear inside the lock eliminates the TOCTOU between
+     * the identity check and the field nullification that a concurrent
+     * `cancelSseForReconfigure` could otherwise exploit.
+     *
+     * Locking note: both [cancelSseForReconfigure] and [coldStartReconnect] use
+     * the same [reconfigureLock]. [synchronized] is safe here because the
+     * critical sections are brief (field read/write + `scope.async` which is
+     * non-blocking and returns immediately). On `Dispatchers.Main.immediate`
+     * (production dispatcher) the coroutine body from `scope.async` is
+     * scheduled on the main queue — it does NOT run inside the lock.
+     *
+     * **Result-aware barrier (rev-gpt R2 fix):** [pendingReconfigureTeardown] is
+     * typed as [Deferred]&lt;[Result]&lt;[Unit]&gt;&gt; so the caller can distinguish
+     * successful teardown from exceptional teardown. Each body step (token-stream
+     * close / lifecycle teardown) catches non-[CancellationException] errors
+     * independently — a close failure NEVER skips the lifecycle teardown. The
+     * deferred completes with [Result.success] iff both steps succeed.
+     * [coldStartReconnect] joins the tail: on success it clears the field and
+     * probes; on failure it clears the field, logs a diagnostic, and does NOT
+     * probe (no bootstrap on a corrupted teardown). A newer successful full
+     * teardown (chained via prev?.await()) recovers the barrier.
      */
+    private val reconfigureLock = Any()
     @Volatile
-    private var pendingReconfigureTeardown: Job? = null
+    private var pendingReconfigureTeardown: Deferred<Result<Unit>>? = null
 
     private val healthProbe = ConnectionHealthProbe(
         scope = scope,
@@ -306,15 +340,50 @@ class ConnectionCoordinator(
      * `ConnectionViewModel.coldStartReconnect()`) see no change.
      */
     fun coldStartReconnect() {
-        val pending = pendingReconfigureTeardown
-        if (pending != null) {
-            scope.launch {
-                pending.join()
-                pendingReconfigureTeardown = null
+        scope.launch {
+            // Result-aware barrier loop: joins the pending teardown [Deferred]
+            // and checks its [Result]:
+            //
+            //   - **null** (no pending teardown): exit loop, probe immediately.
+            //   - **Result.success**: identity-guarded clear, exit loop, probe.
+            //   - **Result.failure**: identity-guarded clear, log diagnostic,
+            //     exit loop WITHOUT probing (no bootstrap on a corrupted
+            //     teardown). A subsequent cancelSseForReconfigure → coldStart
+            //     cycle (or an external reconnect trigger) recovers.
+            //   - **identity mismatch** (concurrent cancelSseForReconfigure
+            //     fired during await): loop back to read and await the new
+            //     deferred.
+            //
+            // Non-[CancellationException] is never thrown from await() because
+            // every teardown body wraps its steps in try-catch and completes
+            // the deferred with [Result]. [CancellationException] propagates.
+            var shouldProbe = true
+            while (true) {
+                val d: Deferred<Result<Unit>>?
+                synchronized(reconfigureLock) {
+                    d = pendingReconfigureTeardown
+                }
+                if (d == null) break
+                val result = d.await()
+                synchronized(reconfigureLock) {
+                    if (pendingReconfigureTeardown === d) {
+                        result
+                            .onSuccess { pendingReconfigureTeardown = null }
+                            .onFailure { e ->
+                                pendingReconfigureTeardown = null
+                                DebugLog.w(
+                                    TAG,
+                                    "coldStartReconnect: teardown failed (${e.message}), skipping probe",
+                                )
+                                shouldProbe = false
+                            }
+                        break
+                    }
+                }
+            }
+            if (shouldProbe) {
                 healthProbe.coldStartReconnect()
             }
-        } else {
-            healthProbe.coldStartReconnect()
         }
     }
 
@@ -704,12 +773,63 @@ class ConnectionCoordinator(
      */
     fun cancelSseForReconfigure() {
         DebugLog.i("SSE", "cancelSse (reconfigure, no-source)")
-        tokenStreamCoordinator?.let { tsc ->
-            slices.chat.value.currentSessionId?.let { sid -> tsc.close(sid) }
+        // Capture sid before the lock; close will run inside the chained
+        // Deferred body so there is no window between side effect start and
+        // registration — coldStartReconnect always sees a non-null pending
+        // teardown and joins it before probing.
+        val currentSid = slices.chat.value.currentSessionId
+        // Atomic create-and-register: the LAZY Deferred body
+        // (prev?.await() → token close → lifecycle teardown → Result<Unit>)
+        // does NOT start until [deferred.start()] is called outside the lock,
+        // so the assignment is visible before any teardown side effect begins.
+        //
+        // Result-aware barrier: each step (close / lifecycle) independently
+        // catches non-[CancellationException] exceptions — a close failure
+        // NEVER skips the lifecycle teardown. The deferred completes with
+        // [Result.success] iff both steps succeed.
+        val deferred = synchronized(reconfigureLock) {
+            val prev = pendingReconfigureTeardown
+            val newDef = scope.async(start = CoroutineStart.LAZY) {
+                // Serialization only: await the previous teardown (if any)
+                // before starting this one. The prev's result does NOT gate
+                // this node's execution — every node always runs its full
+                // close + lifecycle.
+                prev?.await()
+                var allOk = true
+
+                // Step 1: token-stream close — errors are captured, lifecycle
+                // continues regardless. CancellationException propagates.
+                try {
+                    tokenStreamCoordinator?.let { tsc ->
+                        currentSid?.let { sid -> tsc.close(sid) }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    DebugLog.e(TAG, "cancelSseForReconfigure: close failed", e)
+                    allOk = false
+                }
+
+                // Step 2: lifecycle teardown — errors are captured.
+                // CancellationException propagates.
+                try {
+                    streamingLifecycleCoordinator?.teardownNoSourceAndAwait()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    DebugLog.e(TAG, "cancelSseForReconfigure: teardown failed", e)
+                    allOk = false
+                }
+
+                if (allOk) Result.success(Unit) else Result.failure(TeardownException("one or more steps failed"))
+            }
+            pendingReconfigureTeardown = newDef
+            newDef
         }
-        pendingReconfigureTeardown = scope.launch {
-            streamingLifecycleCoordinator?.teardownNoSourceAndAwait()
-        }
+        // Start outside the lock — the field is already set so concurrent
+        // coldStartReconnect / cancelSseForReconfigure see the Deferred
+        // immediately.
+        deferred.start()
     }
 
     /**
@@ -736,6 +856,8 @@ class ConnectionCoordinator(
             streamingLifecycleCoordinator?.teardownAndAwait(reason)
         }
     }
+
+    internal class TeardownException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
     companion object {
         private const val TAG = "ConnectionCoordinator"

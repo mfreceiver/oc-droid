@@ -719,26 +719,17 @@ class HostProfileController(
         settingsManager.clearAllLocalData()
         // 2. Zero the in-memory traffic tracker (direct — same domain).
         trafficTracker.reset()
-        // 3. Drop the per-session message-window cache (sibling controller).
-        // §R18 Phase 3 Wave 1 (P1-3 C 类): resetLocalDataAndResync 多发顺序敏感 (Clear → Cancel → ColdStart) → 保持同步 tryEmitEffect。
-        effects.tryEmitEffect(ControllerEffect.ClearSessionWindowCache)
-        // 4. Tear down SSE + reset catch-up flags.
-        effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
-        // 5. T1b residual: chat + sessionList + unread via HostStatePurged
-        //    (superset of the prior mutateChat field set + epoch bump —
-        //    deliberate §fix-leak-window / ABA improvement). Connection /
-        //    traffic / composer / file / settings still need the full
-        //    reconnect defaults (isConnecting / Reconnecting / input wipe)
-        //    which HostStatePurged does not cover — those stay as explicit
-        //    slice resets below (effects stay at the call site).
+        // 3-8. Lane A: three critical effects (ClearSessionWindowCache →
+        // CancelSseForReconfigure → ColdStartReconnect) use suspend emitEffect
+        // (not tryEmitEffect) so none are silently dropped. FIFO is preserved
+        // by emitting sequentially in a single scope.launch. Slice resets
+        // (HostStatePurged, mutateXxx) are synchronous BEFORE the launch so
+        // collectors see the clean state before effects are dispatched.
         slices.store.dispatch(
             cn.vectory.ocdroid.ui.AppAction.HostStatePurged(
                 preserveServerGroupData = false,
             )
         )
-        // 6. Reset the connection + traffic slices to "reconnecting / zeroed".
-        //    Defaults already cover tunnelActivationState=Idle; we override
-        //    isConnecting + connectionPhase to signal the in-flight reconnect.
         slices.mutateConnection {
             ConnectionState(
                 isConnecting = true,
@@ -746,12 +737,14 @@ class HostProfileController(
             )
         }
         slices.mutateTraffic { TrafficState(resetAt = trafficTracker.resetAt) }
-        // 7. Reset the composer/file/settings slices to defaults.
         slices.mutateComposer { ComposerState() }
         slices.mutateFile { FileState() }
         slices.mutateSettings { SettingsState() }
-        // 8. Reconnect only after the same-host reset has rotated its marker.
-        effects.tryEmitEffect(ControllerEffect.ColdStartReconnect)
+        scope.launch {
+            effects.emitEffect(ControllerEffect.ClearSessionWindowCache)
+            effects.emitEffect(ControllerEffect.CancelSseForReconfigure)
+            effects.emitEffect(ControllerEffect.ColdStartReconnect)
+        }
     }
 
     private companion object {
