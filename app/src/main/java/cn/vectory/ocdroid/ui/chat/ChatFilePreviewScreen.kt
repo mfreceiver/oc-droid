@@ -1,8 +1,11 @@
 package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
@@ -26,6 +29,7 @@ import cn.vectory.ocdroid.data.model.FileContent
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.files.FilePreviewPane
 import cn.vectory.ocdroid.ui.files.resolveRelativePreviewPath
+import cn.vectory.ocdroid.ui.theme.Dimens
 import kotlinx.coroutines.CancellationException
 
 /** Repository-backed Chat preview with no dependency on mutable FilesViewModel state. */
@@ -79,6 +83,8 @@ internal fun ChatFilePreviewScreen(
         Scaffold(
             topBar = {
                 TopAppBar(
+                    modifier = Modifier.statusBarsPadding().height(Dimens.topBarHeight),
+                    windowInsets = WindowInsets(0, 0, 0, 0),
                     title = { Text(path?.substringAfterLast('/').orEmpty()) },
                     navigationIcon = {
                         IconButton(onClick = onClose) {

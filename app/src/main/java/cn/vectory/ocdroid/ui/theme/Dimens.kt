@@ -59,8 +59,29 @@ object Dimens {
     val touchTargetMin: Dp = 48.dp
     /** Bounded overlay height so long status content leaves actions visible. */
     val statusCardMaxHeight: Dp = 360.dp
-    /** Width of the persistent session sidebar shown on tablet landscape (item 2). */
-    val sessionSidebarWidth: Dp = 320.dp
+    /**
+     * Compressed top-app-bar content height (§polish ⑤). Applied to every
+     * TopAppBar/LargeTopAppBar project-wide so all screens share one compact
+     * bar height. 48dp is the floor (IconButton 48dp touch target).
+     *
+     * Usage contract: set the bar's `modifier = Modifier.statusBarsPadding()
+     * .height(topBarHeight)` and `windowInsets = WindowInsets(0, 0, 0, 0)`.
+     * Modifier order matters — outer `statusBarsPadding()` then inner
+     * `.height(topBarHeight)` yields total = statusBarTop + 48, so the 48dp is
+     * pure content sitting below the status bar. Neutralizing the bar's own
+     * `windowInsets` prevents the inset being subtracted from the 48dp (which
+     * would clip the icons/title). Worst case if a bar ignores the imposed
+     * height: it stays at its M3 default (no regression, just uncompressed).
+     */
+    val topBarHeight: Dp = 48.dp
+    /**
+     * Persistent session sidebar widths (item 2 + §polish ④) — responsive by
+     * window-width bucket so a narrower tablet doesn't waste horizontal space.
+     * Medium (600–840dp) → 280dp; Expanded (≥840dp) → 320dp. Chosen by
+     * [cn.vectory.ocdroid.ui.chat.ChatScaffold] from the M3 WindowSizeClass.
+     */
+    val sessionSidebarWidthMedium: Dp = 280.dp
+    val sessionSidebarWidthExpanded: Dp = 320.dp
 
     // ── 图标尺寸阶梯（M3 对齐；UI 代码一律走这些 token，禁散落字面量）─────
     // 14 / 18 / 24 / 28 / 32 五档。历史散落的 16→iconSm(18)、20→iconSm(18)、

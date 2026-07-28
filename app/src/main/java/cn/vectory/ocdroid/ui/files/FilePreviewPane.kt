@@ -16,8 +16,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Article
@@ -52,6 +55,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
+import cn.vectory.ocdroid.ui.theme.Dimens
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import cn.vectory.ocdroid.R
@@ -131,6 +135,8 @@ internal fun FilePreviewPane(
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
+            modifier = Modifier.statusBarsPadding().height(Dimens.topBarHeight),
+            windowInsets = WindowInsets(0, 0, 0, 0),
             title = { Text(path.substringAfterLast('/'), style = MaterialTheme.typography.titleSmall) },
             navigationIcon = {
                 IconButton(onClick = onClose) {

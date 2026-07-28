@@ -2,7 +2,10 @@ package cn.vectory.ocdroid.ui.workspace
 
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -32,6 +35,7 @@ import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.files.FilesViewModel
 import cn.vectory.ocdroid.ui.files.WorkdirControl
+import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.controller.allSessionsById
 import kotlinx.coroutines.flow.filter
 
@@ -133,6 +137,8 @@ fun GitScreen(
     Scaffold(
         topBar = {
             TopAppBar(
+                modifier = Modifier.statusBarsPadding().height(Dimens.topBarHeight),
+                windowInsets = WindowInsets(0, 0, 0, 0),
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(

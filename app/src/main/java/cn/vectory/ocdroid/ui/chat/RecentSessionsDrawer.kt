@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -14,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
@@ -52,6 +54,7 @@ internal fun RecentSessionsPane(
     onSelect: (String) -> Unit,
     onBackToHome: () -> Unit,
     onStartNewSession: () -> Unit = {},
+    onRefreshSessions: () -> Unit = {},
     isStartNewSessionEnabled: Boolean = true,
     sessionErrorsByID: Map<String, SlimSessionLastError> = emptyMap(),
     selectedSessionId: String? = null,
@@ -60,6 +63,7 @@ internal fun RecentSessionsPane(
     Column(modifier = modifier) {
         // ── Header: Home affordance (leading) + new session (trailing) ─────
         ListItem(
+            modifier = Modifier.height(Dimens.topBarHeight),
             leadingContent = {
                 IconButton(onClick = onBackToHome) {
                     Icon(
@@ -79,6 +83,13 @@ internal fun RecentSessionsPane(
                 )
             },
             trailingContent = {
+                IconButton(onClick = onRefreshSessions) {
+                    Icon(
+                        imageVector = Icons.Filled.Refresh,
+                        contentDescription = stringResource(R.string.common_refresh),
+                        modifier = Modifier.size(Dimens.iconStd),
+                    )
+                }
                 IconButton(
                     onClick = onStartNewSession,
                     enabled = isStartNewSessionEnabled,
@@ -178,6 +189,7 @@ internal fun RecentSessionsDrawer(
     onSelect: (String) -> Unit,
     onBackToHome: () -> Unit,
     onStartNewSession: () -> Unit = {},
+    onRefreshSessions: () -> Unit = {},
     isStartNewSessionEnabled: Boolean = true,
     interactionsEnabled: Boolean = true,
     sessionErrorsById: Map<String, SlimSessionLastError> = emptyMap(),
@@ -189,6 +201,7 @@ internal fun RecentSessionsDrawer(
             onSelect = { sessionId -> if (interactionsEnabled) onSelect(sessionId) },
             onBackToHome = { if (interactionsEnabled) onBackToHome() },
             onStartNewSession = onStartNewSession,
+            onRefreshSessions = onRefreshSessions,
             isStartNewSessionEnabled = isStartNewSessionEnabled && interactionsEnabled,
             sessionErrorsByID = sessionErrorsById,
             selectedSessionId = null,
@@ -232,7 +245,7 @@ internal fun RecentSessionRow(
         headlineContent = {
             Text(
                 text = session.displayName,
-                style = MaterialTheme.typography.bodyLarge,
+                style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

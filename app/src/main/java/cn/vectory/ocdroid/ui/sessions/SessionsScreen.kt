@@ -304,6 +304,8 @@ fun SessionsScreen(
         Scaffold(
             topBar = {
                 TopAppBar(
+                    modifier = Modifier.statusBarsPadding().height(Dimens.topBarHeight),
+                    windowInsets = WindowInsets(0, 0, 0, 0),
                     title = {
                         Text(
                             text = homeTitle,

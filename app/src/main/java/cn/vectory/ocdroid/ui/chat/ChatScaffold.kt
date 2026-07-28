@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -370,6 +371,13 @@ fun ChatScaffold(
     // §P2-item2: persistent left session sidebar on tablet landscape.
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     val showSessionSidebar = isWide && isLandscape
+    // §polish ④: responsive sidebar width by window bucket (Medium 280 /
+    // Expanded 320) so a narrower tablet doesn't waste horizontal space.
+    val sidebarWidth = if (LocalWindowSizeClass.current?.widthSizeClass == WindowWidthSizeClass.Expanded) {
+        Dimens.sessionSidebarWidthExpanded
+    } else {
+        Dimens.sessionSidebarWidthMedium
+    }
 
     // §home-hub T4: drawerState owned here. The Menu button (tablet,
     // ChatTopBar navigationIcon) opens it via [openDrawerAction]; a
@@ -1224,11 +1232,24 @@ fun ChatScaffold(
                     if (sid != chromeSessionId) orchestratorVM.navigateToChat(sid)
                 },
                 onBackToHome = onBackToHome,
+                onRefreshSessions = {
+                    chatVM.core.effectBus.tryEmitEffect(ControllerEffect.LoadSessions)
+                },
                 onStartNewSession = onStartNewSessionInSidebar,
                 isStartNewSessionEnabled = recentWorkdirs.isNotEmpty(),
                 sessionErrorsByID = sessionList.sessionErrorsById,
                 selectedSessionId = chromeSessionId,
-                modifier = Modifier.width(Dimens.sessionSidebarWidth).fillMaxHeight(),
+                // §polish ②: statusBarsPadding on the pane so its header starts
+                // below the status bar (aligned with ChatTopBar's top baseline)
+                // — the bare Column had no inset handling (intruded under the
+                // status bar). Applied at the sidebar call site ONLY (the drawer
+                // wraps RecentSessionsPane in ModalDrawerSheet which already
+                // insets). §polish ④: sidebarWidth (Medium/Expanded) not the
+                // old fixed 320dp.
+                modifier = Modifier
+                    .width(sidebarWidth)
+                    .fillMaxHeight()
+                    .statusBarsPadding(),
             )
             VerticalDivider(Modifier.fillMaxHeight())
             Box(modifier = Modifier.weight(1f)) {
@@ -1246,6 +1267,9 @@ fun ChatScaffold(
             sessionVM = sessionVM,
             closeDrawerAction = closeDrawerAction,
             onBackToHome = onBackToHome,
+            onRefreshSessions = {
+                chatVM.core.effectBus.tryEmitEffect(ControllerEffect.LoadSessions)
+            },
             onShowWorkdirPicker = { pendingWorkdirPick = true },
             onNavigateToChat = { sid -> orchestratorVM.navigateToChat(sid) },
         ) {

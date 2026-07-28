@@ -3,9 +3,12 @@ package cn.vectory.ocdroid.ui.chat
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -456,8 +459,8 @@ internal fun ChatTopBar(
     var overflowExpanded by remember { mutableStateOf(false) }
 
     TopAppBar(
-        modifier = modifier,
-        windowInsets = TopAppBarDefaults.windowInsets,
+        modifier = modifier.statusBarsPadding().height(Dimens.topBarHeight),
+        windowInsets = WindowInsets(0, 0, 0, 0),
         // §tablet-back-unify (2026-07-26): ArrowBack → onBackToHome on BOTH
         // phone and tablet (previously tablet branched to a Menu button that
         // opened the drawer). The 24dp icon tier + contentDescription are

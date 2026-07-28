@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -115,17 +116,18 @@ fun SettingsScreen(
     // The `onBack` param was already in the signature (line 108) — just
     // rendering it now.
     Scaffold(
-        // §bug-5.1: zero contentWindowInsets — the TopAppBar already consumes
-        // the status-bar inset via its own TopAppBarDefaults.windowInsets, so
-        // the default safeDrawing here was double-counting statusBars.top on
-        // top of the bar height, producing the ~1-item empty band between the
-        // "设置" title and the first row. Zeroing it makes contentPadding.top
-        // == topBar height only (no residual inset). fix-8 had removed the
-        // explicit .statusBarsPadding() on the LazyColumn but NOT this nested
-        // Scaffold default — that was the leftover source of the gap.
+        // §bug-5.1 (+ §polish ⑤): zero contentWindowInsets. The TopAppBar
+        // consumes the status-bar inset via its modifier now
+        // (statusBarsPadding().height(topBarHeight), windowInsets = 0); the
+        // default safeDrawing here would otherwise double-count statusBars.top
+        // on top of the bar height, producing the ~1-item empty band between
+        // the title and the first row. Zeroing it keeps contentPadding.top ==
+        // topBar height (no residual inset).
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
+                modifier = Modifier.statusBarsPadding().height(Dimens.topBarHeight),
+                windowInsets = WindowInsets(0, 0, 0, 0),
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(
@@ -231,13 +233,16 @@ internal fun SettingsSubRouteScaffold(
     content: @Composable (Modifier) -> Unit,
 ) {
     Scaffold(
-        // §bug-5.1: same nested-Scaffold inset double-count fix as the root
-        // SettingsScreen — the TopAppBar consumes statusBars itself; zeroing
-        // contentWindowInsets removes the residual statusBars.top that was
-        // pushing the first section ~1 item below the sub-route title.
+        // §bug-5.1 (+ §polish ⑤): same nested-Scaffold inset double-count fix
+        // as the root SettingsScreen — the TopAppBar consumes statusBars via
+        // its modifier (statusBarsPadding().height(topBarHeight),
+        // windowInsets = 0); zeroing contentWindowInsets removes the residual
+        // statusBars.top that would push the first section below the title.
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
+                modifier = Modifier.statusBarsPadding().height(Dimens.topBarHeight),
+                windowInsets = WindowInsets(0, 0, 0, 0),
                 title = { Text(stringResource(titleRes)) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {

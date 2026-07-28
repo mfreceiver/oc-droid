@@ -66,6 +66,7 @@ internal fun ChatDrawerHost(
     sessionVM: SessionViewModel,
     closeDrawerAction: () -> Unit,
     onBackToHome: () -> Unit,
+    onRefreshSessions: () -> Unit = {},
     onShowWorkdirPicker: () -> Unit,
     // §B3: the drawer session-row tap is a session-OPENING entry point — the
     // caller supplies the route-aware navigation (navigateToChat) so the drawer
@@ -189,6 +190,7 @@ internal fun ChatDrawerHost(
                     closeDrawerAction()
                     onBackToHome()
                 },
+                onRefreshSessions = onRefreshSessions,
                 onStartNewSession = onStartNewSessionInDrawer,
                 isStartNewSessionEnabled = recentWorkdirs.isNotEmpty(),
                 interactionsEnabled = !drawerInteractionLocked,
