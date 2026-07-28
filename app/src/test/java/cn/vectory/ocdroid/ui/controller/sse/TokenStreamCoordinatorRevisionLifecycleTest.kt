@@ -382,6 +382,10 @@ class TokenStreamCoordinatorRevisionLifecycleTest {
         // close with bundle A guard could also be tested (close uses
         // currentBundleProvider which now returns bundleB).
         assertFalse("onPartDone must NOT fire for retired bundle", partDoneFired)
+        assertFalse(
+            "clearSessionRevisions must NOT fire for retired bundle (clearFired must be false)",
+            clearFired,
+        )
     }
 
     // ═══════════════════════════════════════════════════════════════════════

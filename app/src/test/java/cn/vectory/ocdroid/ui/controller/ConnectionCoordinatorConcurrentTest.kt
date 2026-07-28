@@ -731,4 +731,181 @@ class ConnectionCoordinatorConcurrentTest {
         assertEquals(2, closeCallCount.get())
         scope.cancel()
     }
+
+    // ── Item ①: Atomic handoff (probe inside lock, real thread competition) ──
+
+    /**
+     * RED-GREEN: coldStartReconnect's atomic handoff holds [reconfigureLock]
+     * across the final pending==null check AND the probe invocation. A
+     * concurrent [cancelSseForReconfigure] from a REAL second thread is
+     * blocked by the held lock and cannot register until the probe completes.
+     *
+     * The [onHandoffProbeAboutToRun] seam blocks inside [reconfigureLock]
+     * (via latches), creating an observable window where:
+     *
+     *   1. The cancel thread is released (cancelProceed) and signals
+     *      [cancelAboutToBlock] just before entering [synchronized].
+     *   2. The lock is still held by the seam — the cancel thread is BLOCKED.
+     *   3. The main test thread verifies [cancelCompleted] is NOT counted
+     *      down (cancel is blocked).
+     *   4. The test releases the seam (continueSeam), probe runs inside lock.
+     *   5. After probe returns → lock released → cancel thread acquires
+     *      lock → registers → completes.
+     *
+     * This is qualitatively different from the old [onBeforeHandoffRecheck]
+     * callback which called [cancelSseForReconfigure] in the SAME thread
+     * via reentrant synchronized — that only proved reentrant lock
+     * semantics, not real thread competition.
+     */
+    @Test
+    fun `atomic handoff blocks concurrent cancel during probe via real thread`() {
+        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val probeLatch = CountDownLatch(1)
+        val aboutToProbe = CountDownLatch(1)
+        val cancelProceed = CountDownLatch(1)
+        val cancelAboutToBlock = CountDownLatch(1)
+        val continueSeam = CountDownLatch(1)
+        val cancelCompleted = CountDownLatch(1)
+
+        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } returns Unit
+        coEvery { repository.checkHealth() } coAnswers {
+            probeLatch.countDown()
+            Result.success(HealthResponse(healthy = false, version = "1.0"))
+        }
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        val cc = ConnectionCoordinator(
+            scope = scope,
+            slices = slices,
+            repository = repository,
+            settingsManager = settingsManager,
+            effects = effects,
+            serverCompatProfile = ServerCompatProfile(),
+            clock = { now },
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            streamingServiceLauncher = launcher,
+            streamingLifecycleCoordinator = lifecycleCoordinator,
+        )
+
+        // Seam: fires inside reconfigureLock, blocks to create observable window.
+        cc.onHandoffProbeAboutToRun = {
+            cancelProceed.countDown()               // (1) release cancel thread
+            cancelAboutToBlock.await()               // (2) wait for cancel to signal attempt
+            aboutToProbe.countDown()                 // (3) tell test coldStart is at handoff
+            continueSeam.await()                     // (4) wait for test to verify block
+            // (5) seam returns → coldStartReconnect runs inside lock
+        }
+
+        // ── Real cancel thread ──
+        val cancelThread = Thread {
+            cancelProceed.await()                    // wait for seam signal
+            cancelAboutToBlock.countDown()           // signal: about to try lock
+            cc.cancelSseForReconfigure()             // BLOCKED on reconfigureLock
+            cancelCompleted.countDown()
+        }
+        cancelThread.start()
+
+        // ── Launch coldStartReconnect (no initial teardown) ──
+        scope.launch { cc.coldStartReconnect() }
+
+        // Wait for aboutToProbe: coldStart is inside reconfigureLock,
+        // holding it via the seam's latches.
+        assertTrue(
+            "coldStart must reach handoff probe point",
+            aboutToProbe.await(10, TimeUnit.SECONDS),
+        )
+
+        // KEY ASSERTION: cancel thread has NOT completed its cancel call.
+        // It is blocked on synchronized(reconfigureLock) — the lock is held
+        // by the seam (which is awaiting continueSeam).
+        assertFalse(
+            "cancelSseForReconfigure must be blocked during handoff " +
+                "(lock held by seam inside reconfigureLock)",
+            cancelCompleted.await(500, TimeUnit.MILLISECONDS),
+        )
+
+        // Release the seam → coldStartReconnect runs inside the lock.
+        // Cancel thread remains blocked until probe returns and lock exits.
+        continueSeam.countDown()
+
+        // Verify probe ran
+        assertTrue(
+            "probe must run after handoff",
+            probeLatch.await(5, TimeUnit.SECONDS),
+        )
+
+        // Verify cancel completed after probe (lock released)
+        assertTrue(
+            "cancelSseForReconfigure must complete after probe releases the lock",
+            cancelCompleted.await(10, TimeUnit.SECONDS),
+        )
+        assertFalse("cancel thread joined", cancelThread.isAlive)
+
+        scope.cancel()
+    }
+
+    /**
+     * Complementary test: a teardown registered BEFORE coldStartReconnect
+     * acquires the handoff lock is caught by the re-check and awaited before
+     * the probe (the pre-existing "teardown before handoff" path).
+     *
+     * pendingReconfigureTeardown is already non-null when coldStart enters
+     * the handoff synchronized block, so it loops back to the outer while
+     * and joins instead of probing.
+     */
+    @Test
+    fun `atomic handoff loops back when teardown registered before lock`() {
+        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val probeBarrier = CompletableDeferred<Unit>()
+        val teardownBarrier = CompletableDeferred<Unit>()
+        val teardownEntered = CountDownLatch(1)
+
+        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+            teardownEntered.countDown()
+            teardownBarrier.await()
+            Unit
+        }
+        coEvery { repository.checkHealth() } coAnswers {
+            probeBarrier.await()
+            Result.success(HealthResponse(healthy = false, version = "1.0"))
+        }
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        val cc = ConnectionCoordinator(
+            scope = scope,
+            slices = slices,
+            repository = repository,
+            settingsManager = settingsManager,
+            effects = effects,
+            serverCompatProfile = ServerCompatProfile(),
+            clock = { now },
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            streamingServiceLauncher = launcher,
+            streamingLifecycleCoordinator = lifecycleCoordinator,
+        )
+
+        // Step 1: Register teardown before coldStart
+        scope.launch { cc.cancelSseForReconfigure() }
+        assertTrue("teardown started", teardownEntered.await(5, TimeUnit.SECONDS))
+
+        // Step 2: Launch coldStart — enters inner loop, finds d != null,
+        // joins on d.await() (blocked on teardownBarrier).
+        scope.launch { cc.coldStartReconnect() }
+        Thread.sleep(300)
+
+        // No probe while teardown is blocked
+        coVerify(exactly = 0) { repository.checkHealth() }
+
+        // Step 3: Release teardown → coldStart identity check → clear →
+        // enters handoff synchronized → re-check → null → probes
+        teardownBarrier.complete(Unit)
+        Thread.sleep(500)
+
+        coVerify(atLeast = 1) { repository.checkHealth() }
+
+        probeBarrier.complete(Unit)
+        scope.cancel()
+    }
 }

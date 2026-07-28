@@ -407,19 +407,34 @@ class SlimV2WireRegressionTest {
         )
         assertEquals("first revision must be checked by dedup", 1, dedupCalls.size)
 
+        // Capture full chat state before duplicate dispatch.
+        val beforeChat = store.chatFlow.value
+
         // Second frame with same rev=5 — should be rejected (duplicate).
-        val beforeStateKeys = store.chatFlow.value.streamOwned.keys
         coordinator.dispatchEpochFrame(
             sid = "s1", epoch = epoch, gen = gen,
             frame = TokenStreamFrame.PartSnapshot("s1", "m1", "p1", "updated", false, false, partEventRevision = 5),
             capturedRouteInstance = 0L, boundBundle = bundle,
         )
-        // Stream-owned state must not change (rejected frame skips reducer).
+        // Full chat state must not change (rejected frame skips reducer entirely).
+        // This catches ANY field drift, not just streamOwned/streamingPartTexts.
+        val afterChat = store.chatFlow.value
         assertEquals(
-            "duplicate revision must NOT update streamOwned",
-            beforeStateKeys,
-            store.chatFlow.value.streamOwned.keys,
+            "B4 duplicate revision must produce identical full chat state",
+            beforeChat, afterChat,
         )
+        // Earliest frame text ("text") must survive; "updated" must be rejected.
+        assertEquals(
+            "duplicate revision must NOT change text in streamingPartTexts",
+            "text",
+            afterChat.streamingPartTexts["p1"],
+        )
+        // dedupCount=2: second call reaches hook but is rejected by the dedup ledger.
+        assertEquals(
+            "dedupPartRevision must be called twice (second reaches hook, rejected by ledger)",
+            2, dedupCalls.size,
+        )
+        assertEquals("both calls carry same revision=5", listOf(5L, 5L), dedupCalls)
     }
 
     @Test

@@ -7,10 +7,18 @@ import cn.vectory.ocdroid.data.repository.MessagesPage
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.every
 import io.mockk.mockk
+import io.mockk.spyk
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import org.junit.Assert.assertEquals
@@ -18,6 +26,10 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 测试组1：SkeletonReloadCoordinator 核心行为测试。
@@ -159,23 +171,80 @@ class SkeletonReloadCoordinatorCoreTest {
         } finally { cs.cancel() }
     }
 
+    // ─── (a) authoritative=false 直接断言 ──────────────────────────────────
+    //
+    // 不再仅靠 streamOwned 间接推断，而是捕获 dispatch 的 ChatContentLoaded
+    // action 直接验证 authoritative==false。
+
     @Test
-    fun `(a) reload dispatches authoritative false for skeleton`() {
+    fun `(a) skeleton reload dispatches ChatContentLoaded with authoritative false directly captured`() {
         val cs = CoordinatorScope()
         try {
-            val store = createReadyStore("s", routeInstance = 42L)
+            // Create real store with initial state, then spy on it.
+            val realStore = SharedStateStore()
+            realStore.mutateState {
+                it.copy(
+                    chat = it.chat.copy(
+                        currentSessionId = "s",
+                        messages = emptyList(),
+                    ),
+                    nav = it.nav.copy(lastRoute = "chat/s"),
+                    chatRouteInstance = 42L,
+                )
+            }
+            // Seed busy status so streamingFinalized=false → authoritative=false.
+            realStore.mutateSessionList {
+                it.copy(sessionStatuses = mapOf(
+                    "s" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"),
+                ))
+            }
+            val store = spyk(realStore)
+
+            // Re-route slices through the spy so slices.store.dispatch is intercepted.
+            val spiedSlices = SliceFlows(store)
+            every { store.slices } returns spiedSlices
+
             val items = listOf(
                 mwp(msg("m1", created = 100L)),
-                mwp(msg("m2", created = 200L, role = "assistant")),
             )
             val repo = mockk<OpenCodeRepository>(relaxed = false)
             coEvery { repo.getSlimapiMessagesSkeleton("s", any(), any()) } returns MessagesPage(items, null)
+
+            // Capture ChatContentLoaded actions via any() + type-check in answers block.
+            // slot<T> with subtype dispatch can fail — this approach is compile-safe.
+            val capturedActions = mutableListOf<AppAction.ChatContentLoaded>()
+            every { store.dispatch(any()) } answers {
+                val action = firstArg<AppAction>()
+                if (action is AppAction.ChatContentLoaded) {
+                    capturedActions.add(action)
+                }
+                callOriginal()
+            }
 
             val c = cs.coordinator(store, repo)
             c.requestReload("s")
             cs.advance()
 
-            assertEquals(listOf("m1", "m2"), store.slices.chat.value.messages.map { it.id })
+            // Direct assertion: the captured action has authoritative=false.
+            assertEquals(
+                "exactly one ChatContentLoaded must be dispatched",
+                1, capturedActions.size,
+            )
+            assertFalse(
+                "skeleton reload must dispatch ChatContentLoaded with authoritative=false",
+                capturedActions.single().authoritative,
+            )
+            assertEquals(
+                "ChatContentLoaded must carry expectedRouteInstance=42L",
+                42L, capturedActions.single().expectedRouteInstance,
+            )
+            assertEquals(
+                "ChatContentLoaded must carry sessionId=s",
+                "s", capturedActions.single().sessionId,
+            )
+
+            // Verify the reducer committed the data.
+            assertEquals(listOf("m1"), store.slices.chat.value.messages.map { it.id })
         } finally { cs.cancel() }
     }
 
@@ -223,16 +292,12 @@ class SkeletonReloadCoordinatorCoreTest {
 
     // ─── (b) watchdog retry 获得 HTTP 成功空页时 failed/retry/watchdog 被复位 ──
     //
-    // 【已知生产缺陷】watchdog 重试获得空页时，`page.items.isEmpty() → return@withLock`
-    // 跳过了 `ownerState.failed = false`、`ownerState.retryAttempt = 0`、
-    // `watchdogJobs.remove(sessionId)?.cancel()`，导致 watchdog 不 disarm，
-    // failed/retryAttempt 不被复位，watchdog 继续以指数退避空转。
-    //
-    // 正确行为：HTTP 成功（即使空页）应复位失败状态。本测试使用正确断言，
-    // 在修复前会失败（prod bug：callCount 会 ≥3 表示 watchdog 空转）。
+    // v2.7-final 修复：空页成功 HTTP 分支在早退前执行 ownerState.failed = false、
+    // ownerState.retryAttempt = 0、watchdogJobs.remove(sessionId)?.cancel()，
+    // 确保 watchdog 被正确 disarm。
 
     @Test
-    fun `(b) FOCUSED watchdog retry with empty page should reset failed state but current prod code does NOT`() {
+    fun `(b) watchdog retry with empty page resets failed state and disarms watchdog`() {
         val cs = CoordinatorScope()
         try {
             val store = createReadyStore("s", routeInstance = 42L)
@@ -411,22 +476,56 @@ class SkeletonReloadCoordinatorCoreTest {
     }
 
     @Test
-    fun `(f) clear locallyInjected when message confirmed by server`() {
+    fun `(f) clear locallyInjected marker when message confirmed by server then cleanup on second fetch absence`() {
         val cs = CoordinatorScope()
         try {
-            val existing = listOf(msg("injected-now-confirmed", created = 100L))
+            var callCount = 0
+            // State has only the injected message (created=100).
+            val existing = listOf(msg("injected", created = 100L))
             val store = createReadyStore("s", routeInstance = 42L, messages = existing)
             val repo = mockk<OpenCodeRepository>(relaxed = false)
-            coEvery { repo.getSlimapiMessagesSkeleton("s", any(), any()) } returns
-                MessagesPage(listOf(mwp(msg("injected-now-confirmed", created = 100L))), null)
+            coEvery { repo.getSlimapiMessagesSkeleton("s", any(), any()) } coAnswers {
+                callCount++
+                when (callCount) {
+                    1 -> MessagesPage(listOf(
+                        // First reload: injected IS in fetched → marker cleared.
+                        mwp(msg("injected", created = 100L)),
+                        // low and high define a window [50, 200] for the second reload.
+                        mwp(msg("low", created = 50L)),
+                        mwp(msg("high", created = 200L)),
+                    ), null)
+                    2 -> MessagesPage(listOf(
+                        // Second reload: only low and high (injected ABSENT).
+                        // Window is still [50, 200]. Since injected(100) is NOT in
+                        // fetched, NOT in locallyInjected (cleared by reload 1),
+                        // and strictly inside window (50 < 100 < 200), it IS deleted.
+                        mwp(msg("low", created = 50L)),
+                        mwp(msg("high", created = 200L)),
+                    ), null)
+                    else -> MessagesPage(emptyList(), null)
+                }
+            }
 
             val c = cs.coordinator(store, repo)
-            c.markLocallyInjected("s", "injected-now-confirmed")
+            c.markLocallyInjected("s", "injected")
+
+            // Reload 1: injected(100) confirmed by server → survives, marker cleared.
             c.requestReload("s")
             cs.advance()
-
+            assertEquals(1, callCount)
             assertTrue(
-                store.slices.chat.value.messages.map { it.id }.contains("injected-now-confirmed"),
+                "confirmed message must survive first reload",
+                store.slices.chat.value.messages.map { it.id }.contains("injected"),
+            )
+
+            // Reload 2: injected(100) absent from fetched AND marker was cleared
+            // by reload 1 → strictly inside window (50 < 100 < 200) → DELETED.
+            c.requestReload("s")
+            cs.advance()
+            assertEquals(2, callCount)
+            assertFalse(
+                "injected must be deleted on second fetch-absence because marker was cleared",
+                store.slices.chat.value.messages.map { it.id }.contains("injected"),
             )
         } finally { cs.cancel() }
     }
@@ -486,4 +585,282 @@ class SkeletonReloadCoordinatorCoreTest {
             assertEquals("watchdog disarmed by digest reset", 2, callCount)
         } finally { cs.cancel() }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 缺口①②：ABA 同 sid A₁→B(onSessionClosed)→A₂ + cancelAndJoin late-return
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // A₁ 的 repository mock 直接 blocking（不使用 withContext/Dispatchers.Default，
+    // 无 suspend/dispatcher re-entry 边界），coAnswers 在同线程栈同步阻塞后
+    // 直接返回 stale MessagesPage。
+    //
+    // 流程：
+    //   1) A₁ 在 Default worker 进入 coAnswers，capture 其 job，signal entered，
+    //      同步阻塞 a1Release.await()（CountDownLatch，非 suspend）。
+    //   2) 启动 onSessionClosed：stateMutex → remove entries → cancelAndJoin(A₁)。
+    //      cancel() 标记 job cancelled，join() 阻塞（A₁ 线程仍 blocked on latch）。
+    //   3) 确定性等待 A₁ job 进入 cancelled state，断言 close 尚未完成。
+    //   4) A₁ 仍阻塞时，用新 routeInstance (43L) 启动同 sid A₂。
+    //      确定性等待 A₂ 完成，断言 a2-fresh 已提交。
+    //   5) Release A₁：coAnswers 在同一 worker 栈直接返回 MessagesPage(a1-stale)。
+    //      A₁ 协程恢复→withSessionLock 入口检查 cancelled state→throw CE，
+    //      catch(ce) throw ce → finally NonCancellable 进入 stateMutex。
+    //      此时 reloadStates[sessionId] 已为空（onSessionClosed 已 remove），
+    //      current !== ownerState → finally 的簿记清理被跳过，
+    //      stale inFlight/flags 不会误写回 map——这也防止了清理 A₂ state。
+    //      不是 stateMutex 的"merge 入口拒绝 stale page 值"（CE 在 merge 前已抛，
+    //      stale page 从未进入 merge）。
+    //   6) Close 完成（join 等 A₁ 结束），断言 A₂ 未被 A₁ 污染、无 watchdog。
+    //
+    // 使用真实 CoroutineScope(Dispatchers.Default)，禁止 withContext/delay/
+    // suspendCoroutine/Dispatcher re-entry。
+
+    @Test
+    fun `ABA same sid with onSessionClosed cancelAndJoin and deterministic late return`() {
+        val realScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            // ── Latch + capture setup ──
+            val a1Entered = CountDownLatch(1)
+            val a1Release = CountDownLatch(1)
+            val a1Returned = AtomicBoolean(false)
+            var capturedA1Job: Job? = null
+            val callCount = AtomicInteger(0)
+
+            val store = createReadyStore("s", routeInstance = 42L)
+            val repo = mockk<OpenCodeRepository>(relaxed = false)
+            coEvery { repo.getSlimapiMessagesSkeleton("s", any(), any()) } coAnswers {
+                callCount.incrementAndGet()
+                when (callCount.get()) {
+                    1 -> {
+                        // A₁: capture our own Job, signal entered, block directly
+                        // on latch — no withContext, no dispatcher swap.
+                        capturedA1Job = currentCoroutineContext()[Job]
+                        a1Entered.countDown()
+                        a1Release.await()
+                        val result = MessagesPage(listOf(mwp(msg("a1-stale", created = 300L))), null)
+                        a1Returned.set(true)
+                        result
+                    }
+                    2 -> {
+                        // A₂: succeed immediately.
+                        MessagesPage(listOf(mwp(msg("a2-fresh", created = 300L))), null)
+                    }
+                    else -> MessagesPage(emptyList(), null)
+                }
+            }
+
+            val c = SkeletonReloadCoordinator(
+                scope = realScope,
+                repository = repo,
+                slices = store.slices,
+                currentServerGroupFp = { "fp1" },
+            )
+
+            // ── (1) A₁: start reload → blocks on repo mock ──
+            c.requestReload("s")
+            assertTrue(
+                "A₁ entered mock barrier",
+                a1Entered.await(5, TimeUnit.SECONDS),
+            )
+            assertEquals("A₁ call recorded", 1, callCount.get())
+
+            // ── (2) B: onSessionClosed → cancelAndJoin(A₁) — join blocks ──
+            val closeDone = CountDownLatch(1)
+            realScope.launch {
+                c.onSessionClosed("s")
+                closeDone.countDown()
+            }
+
+            // ── (3) Deterministically wait for A₁ Job to enter cancelled state ──
+            val capturedJob = capturedA1Job
+                ?: throw AssertionError("A₁ job must have been captured")
+            var deadline = System.currentTimeMillis() + 5000
+            while (!capturedJob.isCancelled && System.currentTimeMillis() < deadline) {
+                Thread.sleep(5)
+            }
+            assertTrue("A₁ job must be cancelled by onSessionClosed", capturedJob.isCancelled)
+            assertFalse(
+                "onSessionClosed must be blocked on cancelAndJoin (A₁ still blocked on latch)",
+                closeDone.await(0, TimeUnit.MILLISECONDS),
+            )
+
+            // ── (4) A₂: new routeInstance while A₁ still blocked ──
+            store.mutateState {
+                it.copy(chatRouteInstance = 43L)
+            }
+            c.requestReload("s")
+
+            // Wait until A₂'s fresh data is committed in the StateFlow.
+            // Do NOT use callCount as commit latch — callCount increments when the
+            // repository coAnswers returns, BEFORE merge/dispatch in the coordinator.
+            deadline = System.currentTimeMillis() + 5000
+            var a2Messages: List<String> = emptyList()
+            while (System.currentTimeMillis() < deadline) {
+                a2Messages = store.slices.chat.value.messages.map { it.id }
+                if (a2Messages == listOf("a2-fresh")) break
+                Thread.sleep(10)
+            }
+            assertEquals(
+                "A₂ must commit its fresh messages while A₁ is still blocked",
+                listOf("a2-fresh"), a2Messages,
+            )
+            assertEquals("A₂ repository call recorded", 2, callCount.get())
+
+            // ── (5) Release A₁ latch → coAnswers returns stale value on same stack ──
+            a1Release.countDown()
+
+            // Wait for close to complete (A₁ must finish first for join to unblock).
+            assertTrue(
+                "onSessionClosed must complete after A₁ finishes (cancelAndJoin waited)",
+                closeDone.await(5, TimeUnit.SECONDS),
+            )
+
+            // ── (6) Assert: A₁ stale value did NOT pollute A₂ ──
+            assertTrue(
+                "A₁ mock must have returned its stale value",
+                a1Returned.get(),
+            )
+            val afterA1 = store.slices.chat.value.messages.map { it.id }
+            assertEquals(
+                "A₁ late return must NOT pollute A₂'s state",
+                listOf("a2-fresh"), afterA1,
+            )
+            assertFalse(
+                "a1-stale must NEVER appear in state",
+                afterA1.contains("a1-stale"),
+            )
+
+            // A₁ catch(ce) rethrows CE (not an Exception), so armWatchdog is NOT called.
+            // No third repository call.
+            assertEquals(
+                "A₁ must NOT have armed watchdog (CE rethrown, armWatchdog not reached);" +
+                " no third call expected",
+                2, callCount.get(),
+            )
+        } finally {
+            realScope.cancel(CancellationException("test done"))
+        }
+    }
+
+    // ─── focused watchdog cancellation test ─────────────────────────────
+    //
+    // 单独验证：onSessionClosed 取消 watchdog 后，watchdog 即使到触发时刻
+    // 也不再执行重试（精确推进 15s 后无调用）。
+
+    @Test
+    fun `onSessionClosed cancels watchdog and it does not fire after deadline`() {
+        val cs = CoordinatorScope()
+        try {
+            val store = createReadyStore("s", routeInstance = 42L)
+            var callCount = 0
+            val repo = mockk<OpenCodeRepository>(relaxed = false)
+            coEvery { repo.getSlimapiMessagesSkeleton("s", any(), any()) } coAnswers {
+                callCount++
+                throw IOException("fail always")
+            }
+
+            val c = cs.coordinator(store, repo)
+
+            // Initial fail → arm watchdog (15s)
+            c.requestReload("s")
+            cs.runCurrent()
+            assertEquals("initial fail", 1, callCount)
+
+            // Advance to 14.999s → watchdog should NOT fire yet.
+            cs.advance(14_999)
+            assertEquals("no watchdog before 15s boundary", 1, callCount)
+
+            // ── onSessionClosed: must cancel watchdog ──
+            cs.scope.launch { c.onSessionClosed("s") }
+            cs.advance()
+
+            // Advance 1ms → watchdog deadline reached (15s)
+            cs.advance(1)
+            // Watchdog should NOT fire because it was cancelled by onSessionClosed.
+            assertEquals(
+                "watchdog must NOT fire after onSessionClosed cancelled it",
+                1, callCount,
+            )
+
+            // Advance further (full 300s window) → still no retry.
+            cs.advance(300_000)
+            assertEquals("no retry even after 300s (watchdog cancelled)", 1, callCount)
+        } finally { cs.cancel() }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 缺口③：watchdog 完整阶梯 + 精确边界断言 + 跨多次 arm retryAttempt 持久化
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // Watchdog 退避是累进的（15s → 30s → 60s → 300s capped），每次 delay
+    // 从本次 retryAttempt 计算，NOT 从起点累计。验证：
+    //   (a) 每次失败 catch 都调 armWatchdog，但 active job 使其 no-op
+    //       → retryAttempt 不重置
+    //   (b) 每档截止前 -1ms 不提前调用
+    //   (c) 边界 +1ms 后精确递增
+    //   (d) 第二个 300s 封顶周期
+
+    @Test
+    fun `(b) watchdog full backoff with precise boundary assertions and retryAttempt persistence`() {
+        val cs = CoordinatorScope()
+        try {
+            val store = createReadyStore("s", routeInstance = 42L)
+            var callCount = 0
+            val repo = mockk<OpenCodeRepository>(relaxed = false)
+            coEvery { repo.getSlimapiMessagesSkeleton("s", any(), any()) } coAnswers {
+                callCount++
+                throw IOException("fail #$callCount")
+            }
+
+            val c = cs.coordinator(store, repo)
+
+            // ── Initial failure → armWatchdog (retryAttempt=0) ──
+            c.requestReload("s")
+            cs.runCurrent()
+            assertEquals("initial fail", 1, callCount)
+
+            // ── #1: 15s window ───────────────────────────────────────────
+            // delay(14,999) from arm → no fire
+            cs.advance(14_999)
+            assertEquals("no retry at 14,999ms", 1, callCount)
+            // +1ms = 15,000 → fire #1 (retryAttempt 0→1)
+            cs.advance(1)
+            assertEquals("15s retry at boundary", 2, callCount)
+
+            // ── #2: 30s window (from this retry, not from start) ────────
+            // delay(29,999) from fire #1 time → no fire
+            cs.advance(29_999)
+            assertEquals("no retry at 29,999ms from fire #1", 2, callCount)
+            // +1ms → fire #2 (retryAttempt 1→2)
+            cs.advance(1)
+            assertEquals("30s retry at boundary", 3, callCount)
+
+            // ── #3: 60s window ──────────────────────────────────────────
+            cs.advance(59_999)
+            assertEquals("no retry at 59,999ms from fire #2", 3, callCount)
+            cs.advance(1)
+            assertEquals("60s retry at boundary", 4, callCount)
+
+            // ── #4 onwards: 300s capped window ──────────────────────────
+            // First 300s cap
+            cs.advance(299_999)
+            assertEquals("no retry at 299,999ms from fire #3", 4, callCount)
+            cs.advance(1)
+            assertEquals("300s retry #1 at boundary", 5, callCount)
+
+            // Second 300s cap (retryAttempt 4→5)
+            cs.advance(299_999)
+            assertEquals("no retry at second 299,999ms", 5, callCount)
+            cs.advance(1)
+            assertEquals("300s retry #2 (cap verified)", 6, callCount)
+
+            // Verify retryAttempt persists across multiple armWatchdog calls.
+            // Each failure catch calls armWatchdog again, but since the watchdog
+            // job is already active (isActive==true), armWatchdog no-ops.
+            // This means retryAttempt is NOT reset by the re-arm - it stays
+            // persistent in ReloadState, proving the watchdog loop uses the
+            // same retryAttempt for all its retries.
+        } finally { cs.cancel() }
+    }
+
 }

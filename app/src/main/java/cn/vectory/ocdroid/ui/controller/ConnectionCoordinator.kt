@@ -261,6 +261,21 @@ class ConnectionCoordinator(
     @Volatile
     private var pendingReconfigureTeardown: Deferred<Result<Unit>>? = null
 
+    /**
+     * @VisibleForTesting: seam fired inside [reconfigureLock] just before
+     * the handoff-probe invocation. Tests use this to deterministically
+     * trigger a REAL second thread to call [cancelSseForReconfigure] while
+     * the lock is held — proving the concurrent call is blocked until the
+     * probe completes and the lock is released. This is the ONLY way to
+     * reproduce the lock-contention window without fragile sleeps or
+     * private-field reflection.
+     *
+     * Unlike the previous [onBeforeHandoffRecheck] callback, this seam does
+     * NOT itself call [cancelSseForReconfigure] (that would be reentrant
+     * synchronized and would NOT test real thread competition).
+     */
+    internal var onHandoffProbeAboutToRun: (() -> Unit)? = null
+
     private val healthProbe = ConnectionHealthProbe(
         scope = scope,
         slices = slices,
@@ -344,12 +359,13 @@ class ConnectionCoordinator(
             // Result-aware barrier loop: joins the pending teardown [Deferred]
             // and checks its [Result]:
             //
-            //   - **null** (no pending teardown): exit loop, probe immediately.
-            //   - **Result.success**: identity-guarded clear, exit loop, probe.
+            //   - **null** (no pending teardown): break to handoff re-check.
+            //   - **Result.success**: identity-guarded clear, break to handoff
+            //     re-check (or loop back if new teardown arrived during window).
             //   - **Result.failure**: identity-guarded clear, log diagnostic,
-            //     exit loop WITHOUT probing (no bootstrap on a corrupted
-            //     teardown). A subsequent cancelSseForReconfigure → coldStart
-            //     cycle (or an external reconnect trigger) recovers.
+            //     return WITHOUT probing (no bootstrap on a corrupted teardown).
+            //     A subsequent cancelSseForReconfigure → coldStart cycle (or an
+            //     external reconnect trigger) recovers.
             //   - **identity mismatch** (concurrent cancelSseForReconfigure
             //     fired during await): loop back to read and await the new
             //     deferred.
@@ -357,32 +373,61 @@ class ConnectionCoordinator(
             // Non-[CancellationException] is never thrown from await() because
             // every teardown body wraps its steps in try-catch and completes
             // the deferred with [Result]. [CancellationException] propagates.
-            var shouldProbe = true
-            while (true) {
-                val d: Deferred<Result<Unit>>?
-                synchronized(reconfigureLock) {
-                    d = pendingReconfigureTeardown
-                }
-                if (d == null) break
-                val result = d.await()
-                synchronized(reconfigureLock) {
-                    if (pendingReconfigureTeardown === d) {
-                        result
-                            .onSuccess { pendingReconfigureTeardown = null }
-                            .onFailure { e ->
-                                pendingReconfigureTeardown = null
-                                DebugLog.w(
-                                    TAG,
-                                    "coldStartReconnect: teardown failed (${e.message}), skipping probe",
-                                )
-                                shouldProbe = false
-                            }
-                        break
+            //
+            // ## Atomic handoff (Item ① fix)
+            //
+            // The handoff (final pending==null check + probe invocation) is
+            // performed INSIDE [reconfigureLock]. A concurrent
+            // [cancelSseForReconfigure] that arrives:
+            //   (a) before the check → caught by the != null branch → loops back.
+            //   (b) during the probe → blocked by [synchronized] until the
+            //       probe returns (probe is non-suspend and short). No race
+            //       window exists.
+            outer@ while (true) {
+                var shouldProbe = true
+                inner@ while (true) {
+                    val d: Deferred<Result<Unit>>?
+                    synchronized(reconfigureLock) {
+                        d = pendingReconfigureTeardown
+                    }
+                    if (d == null) break@inner
+                    val result = d.await()
+                    synchronized(reconfigureLock) {
+                        if (pendingReconfigureTeardown === d) {
+                            result
+                                .onSuccess { pendingReconfigureTeardown = null }
+                                .onFailure { e ->
+                                    pendingReconfigureTeardown = null
+                                    DebugLog.w(
+                                        TAG,
+                                        "coldStartReconnect: teardown failed (${e.message}), skipping probe",
+                                    )
+                                    shouldProbe = false
+                                }
+                            break@inner
+                        }
+                        // identity mismatch → loop back to @inner
                     }
                 }
-            }
-            if (shouldProbe) {
-                healthProbe.coldStartReconnect()
+
+                if (!shouldProbe) return@launch
+
+                // Atomic handoff: re-check AND probe under reconfigureLock.
+                synchronized(reconfigureLock) {
+                    if (pendingReconfigureTeardown != null) {
+                        // A concurrent cancel registered during the join
+                        // window — loop back to join it.
+                        continue@outer
+                    }
+                    // @VisibleForTesting: test seam fires inside the lock,
+                    // just before the probe. A concurrent thread calling
+                    // cancelSseForReconfigure is blocked by this very
+                    // synchronized block — cannot register until the probe
+                    // returns and the lock is released.
+                    onHandoffProbeAboutToRun?.invoke()
+                    healthProbe.coldStartReconnect()
+                    return@launch
+                }
             }
         }
     }

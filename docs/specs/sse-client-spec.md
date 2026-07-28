@@ -165,8 +165,8 @@ slimapi `/slimapi/events` 输出 wrapped `SSEEvent{directory,payload}` 形状—
 |---|---|---|
 | `session.digest` | wrapped（`payload.type = "session.digest"`），properties 含 `{sessionID, directory, status?, messageID?, updatedAt?, archived?, deleted?, lastError?}` | debounce 250ms/session，仅发有变化的字段。**`updatedAt` = sidecar wall-clock epoch-ms**（非上游 `info.time.updated`），跨窗口严格单调性不保证——客户端 watermark 比较必须用 `(updatedAt, messageID)` 二元组字典序（见 §5.5）。`archived` ← `session.updated` 的 `info.time.archived`（有值→时间戳）。`lastError` 三态 wire：对象（新 error / sticky 保留）、显式 `null`（`status=busy` 清除）、省略（无 error）；abort（`MessageAbortedError`）静默丢弃。`deleted=true` 的 digest 强制省略 `lastError`。 |
 | `session.error` | wrapped（`payload.type = "session.error"`），properties 含 `{directory?, name, message, at}` | **无 sessionID 时立即直推**（G1-B），不走 debounce；abort 静默丢弃。有 sid 的 error 走 digest `lastError` 而非本帧。 |
-| `question.asked` / `v2.asked` | wrapped（`payload.type`），properties 含 `{directory, type, properties}` | **立即直推**——仅作观察信号；v2 删除了 q/p 写端点与 routeToken，客户端应答 q/p 走 catch-all + `X-Opencode-Directory` 透传上游。 |
-| `permission.asked` / `permission.resolved` / `v2.asked` / `v2.resolved` | wrapped（同上） | **立即直推**——仅作观察信号（同上）。 |
+| `question.asked` / `question.v2.asked` | wrapped（`payload.type`），properties 含 `{directory, type, properties}` | **立即直推**——仅作观察信号；v2 删除了 q/p 写端点与 routeToken，客户端应答 q/p 走 catch-all + `X-Opencode-Directory` 透传上游。 |
+| `permission.asked` / `permission.resolved` / `permission.v2.asked` / `permission.v2.resolved` | wrapped（同上） | **立即直推**——仅作观察信号（同上）。 |
 | `server.connected` | wrapped | 订阅即吐；sidecar 进程重启 = 连接断开 → 重连收此帧，应视为 cold-start（§5.5）。 |
 | `server.heartbeat` | wrapped | 10s 间隔。**不等同于上游健康**——仅证 sidecar + 订阅存活；上游 outage 探测委托 `/slimapi/ready` 或自然 fetch/write 失败。 |
 | `resync` | **SSE `event:` 字段为 `resync`**，data 为 `{"reason":"reconnect_no_replay"}` 或 `{"reason":"subscriber_backpressure"}` | 重连首帧，无 replay。客户端必须主动 catch-up（§5.5）。 |

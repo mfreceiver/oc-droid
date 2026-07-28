@@ -10,21 +10,23 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * B-4 HIGH-2: verifies the concurrent-safe per-session bounded revision ledger
- * with terminal tombstone semantics (rev-gpt fix).
+ * with terminal tombstone semantics and LRU eviction (rev-gpt fix).
  *
  * The [PartRevisionLedger] replaces the raw `ConcurrentHashMap<String, Long>`
  * that was used in the original production hooks. The key differences:
  *  - terminal (done/truncated) frames set a tombstone instead of removing the
  *    entry, so ALL revisions (same, lower, higher, null) after terminal are
  *    rejected — no part resurrection.
- *  - per-session capacity capped at 32 entries; overflow is fail-closed.
- *    The cap is HARD under concurrent distinct keys (per-session mutex).
- *  - `clearSessionRevisions` is the sole mechanism to purge tombstones (at
- *    epoch/lifecycle boundaries).
+ *  - per-session capacity capped at 32 entries; when at capacity, the
+ *    least-recently-used terminal entry is evicted (LRU by recency order).
+ *    Active entries are NEVER evicted. If all entries are active, overflow
+ *    is fail-closed.
+ *  - `clearSessionRevisions` clears all tombstones; LRU eviction may also
+ *    silently remove terminal entries under capacity pressure.
  *  - nullable `partEventRevision` is now incorporated into the ledger.
  *
  * Each test calls [PartRevisionLedger] methods directly to verify the
- * admission + tombstone + capacity invariants.
+ * admission + tombstone + capacity + LRU invariants.
  */
 class PartRevisionLedgerTest {
 
@@ -276,13 +278,22 @@ class PartRevisionLedgerTest {
     }
 
     @Test
-    fun `B terminal entries count toward capacity`() {
+    fun `B LRU evicts oldest terminal when at capacity`() {
+        // With LRU eviction: cap=2, m1 terminal, m2 active.
+        // 3rd distinct key (m3) evicts oldest terminal (m1) and is admitted.
         val ledger = PartRevisionLedger(maxEntriesPerSession = 2)
         assertTrue(ledger.admit("s1", "m1", "p1", 1L))
         assertTrue(ledger.admit("s1", "m2", "p2", 1L))
         ledger.markTerminal("s1", "m1", "p1")
-        // Terminal entries count toward the cap, so a 3rd distinct key is still rejected.
-        assertFalse("terminal entries count toward cap", ledger.admit("s1", "m3", "p3", 1L))
+        // m3 MUST be accepted — evicts oldest terminal (m1)
+        assertTrue("m3 must be accepted via LRU eviction of terminal m1",
+            ledger.admit("s1", "m3", "p3", 1L))
+        assertEquals("size must stay at cap=2", 2, ledger.sessionEntryCount("s1"))
+        // m1 was evicted — the composite key no longer exists
+        assertNull("evicted m1 must have no entry", ledger.isTerminal("s1", "m1", "p1"))
+        // m2 (active) must still be intact
+        assertTrue("active m2 must still accept higher revision",
+            ledger.admit("s1", "m2", "p2", 2L))
     }
 
     // ── Remove / removeMessage (onMessagePartRemoved / onMessageRemoved) ─────
@@ -313,6 +324,156 @@ class PartRevisionLedgerTest {
         assertTrue("m1 p2 after removeMessage", ledger.admit("s1", "m1", "p2", 1L))
         // m2 should be unaffected
         assertFalse("m2 p1 must still be a duplicate", ledger.admit("s1", "m2", "p1", 1L))
+    }
+
+    @Test
+    fun `B LRU evicts oldest terminal not active entries`() {
+        val ledger = PartRevisionLedger(maxEntriesPerSession = 3)
+        assertTrue(ledger.admit("s1", "m1", "p1", 1L)) // active
+        assertTrue(ledger.admit("s1", "m2", "p2", 1L)) // terminal
+        assertTrue(ledger.admit("s1", "m3", "p3", 1L)) // active
+        ledger.markTerminal("s1", "m2", "p2")
+
+        // 4th key — evicts oldest terminal (m2), admits m4
+        assertTrue("m4 must evict terminal m2 and be admitted",
+            ledger.admit("s1", "m4", "p4", 1L))
+        assertEquals(3, ledger.sessionEntryCount("s1"))
+
+        // Active entries (m1, m3) must still reject duplicates
+        assertFalse("active m1 duplicate still rejected",
+            ledger.admit("s1", "m1", "p1", 1L))
+        assertTrue("active m1 can still accept higher revision",
+            ledger.admit("s1", "m1", "p1", 2L))
+        assertFalse("active m3 duplicate still rejected",
+            ledger.admit("s1", "m3", "p3", 1L))
+        assertTrue("active m3 can still accept higher revision",
+            ledger.admit("s1", "m3", "p3", 2L))
+
+        // m2 was evicted (terminal tombstone removed from ledger)
+        assertNull("evicted m2 entry must be absent", ledger.isTerminal("s1", "m2", "p2"))
+    }
+
+    @Test
+    fun `B cap at 32 default with LRU accepts 33rd key when terminals exist`() {
+        val ledger = PartRevisionLedger() // default MAX_REVISIONS_PER_SESSION = 32
+        for (i in 1..32) {
+            assertTrue("entry $i must be accepted", ledger.admit("s1", "m$i", "p$i", 1L))
+        }
+        // Mark first 16 as terminal (oldest entries)
+        for (i in 1..16) {
+            ledger.markTerminal("s1", "m$i", "p$i")
+        }
+        // 33rd distinct key must be accepted via LRU eviction of oldest terminal (m1)
+        assertTrue("33rd key must be accepted via LRU eviction of oldest terminal",
+            ledger.admit("s1", "m33", "p33", 1L))
+        assertEquals(32, ledger.sessionEntryCount("s1"))
+        // m1 was evicted (no longer in ledger)
+        assertNull("evicted m1 entry must be absent",
+            ledger.isTerminal("s1", "m1", "p1"))
+        // Other terminals still protected (m2 is now oldest, still present)
+        assertTrue("m2 terminal still present",
+            ledger.isTerminal("s1", "m2", "p2") == true)
+    }
+
+    @Test
+    fun `B LRU evicts oldest terminal among multiple terminals`() {
+        val ledger = PartRevisionLedger(maxEntriesPerSession = 3)
+        assertTrue(ledger.admit("s1", "old", "old", 1L)) // first → oldest
+        assertTrue(ledger.admit("s1", "mid", "mid", 1L))
+        assertTrue(ledger.admit("s1", "new", "new", 1L)) // third → newest
+        ledger.markTerminal("s1", "old", "old")
+        ledger.markTerminal("s1", "mid", "mid")
+        ledger.markTerminal("s1", "new", "new")
+
+        // 4th key — evicts oldest terminal ("old")
+        assertTrue("new key evicts oldest terminal ('old')",
+            ledger.admit("s1", "extra", "extra", 1L))
+        assertEquals(3, ledger.sessionEntryCount("s1"))
+        assertNull("'old' was evicted", ledger.isTerminal("s1", "old", "old"))
+
+        // 'mid' and 'new' still present as terminal
+        assertEquals(true, ledger.isTerminal("s1", "mid", "mid"))
+        assertEquals(true, ledger.isTerminal("s1", "new", "new"))
+    }
+
+    @Test
+    fun `B LRU no-op when cap full with no terminals to evict`() {
+        // When all entries are non-terminal (active), new key is rejected.
+        val ledger = PartRevisionLedger(maxEntriesPerSession = 2)
+        assertTrue(ledger.admit("s1", "m1", "p1", 1L))
+        assertTrue(ledger.admit("s1", "m2", "p2", 1L))
+        // Both active, no terminals → 3rd rejected
+        assertFalse("no terminals to evict — 3rd key must be rejected",
+            ledger.admit("s1", "m3", "p3", 1L))
+    }
+
+    @Test
+    fun `B LRU preserves terminal semantics for non-evicted entries`() {
+        // Entries that survive LRU eviction still have their terminal protection.
+        val ledger = PartRevisionLedger(maxEntriesPerSession = 2)
+        assertTrue(ledger.admit("s1", "m1", "p1", 1L))
+        assertTrue(ledger.admit("s1", "m2", "p2", 1L))
+        ledger.markTerminal("s1", "m1", "p1")
+        ledger.markTerminal("s1", "m2", "p2")
+
+        // 3rd key evicts oldest terminal (m1)
+        assertTrue("m3 evicts m1", ledger.admit("s1", "m3", "p3", 1L))
+        // m2 is still present and terminal — must reject higher revision
+        assertFalse("surviving terminal m2 must reject higher revision",
+            ledger.admit("s1", "m2", "p2", 2L))
+    }
+
+    @Test
+    fun `B LRU distinguishes FIFO from recency`() {
+        // With FIFO (insertionOrder immutable), "old" inserted first and
+        // marked terminal last would be evicted first (not LRU).
+        // With LRU (lastUsedOrder updated on every touch), "old" has the
+        // HIGHEST touch count (touched most recently via late markTerminal),
+        // so "mid" (touched earlier, now stale) is evicted first.
+        val ledger = PartRevisionLedger(maxEntriesPerSession = 3)
+        // "old" inserted first (touchOrder=0)
+        assertTrue(ledger.admit("s1", "old", "old", 1L))
+        // "mid" inserted second (touchOrder=1)
+        assertTrue(ledger.admit("s1", "mid", "mid", 1L))
+        // "new" inserted third (touchOrder=2)
+        assertTrue(ledger.admit("s1", "new", "new", 1L))
+
+        // Touch "new" frequently — update revision (touchOrder=3)
+        assertTrue(ledger.admit("s1", "new", "new", 2L))
+        // Touch "new" again (touchOrder=4)
+        assertTrue(ledger.admit("s1", "new", "new", 3L))
+
+        // Mark "new" terminal (touchOrder=5)
+        ledger.markTerminal("s1", "new", "new")
+        // Mark "mid" terminal (touchOrder=6) — mid untouched since admit
+        ledger.markTerminal("s1", "mid", "mid")
+        // Mark "old" terminal last (touchOrder=7) — old has the HIGHEST order
+        ledger.markTerminal("s1", "old", "old")
+
+        // 4th key — must evict LRU terminal (lowest lastUsedOrder).
+        // Recency order: new(5) > old(7) > … wait, that's wrong.
+        // Let me trace:
+        //   old: admit(0) → markTerminal(7) → lastUsed=7
+        //   mid: admit(1) → markTerminal(6) → lastUsed=6
+        //   new: admit(2) → admit(3) → admit(4) → markTerminal(5) → lastUsed=5
+        //
+        // So new=5, mid=6, old=7. LRU evicts new (lowest=5).
+        //
+        // With FIFO immutable insertionOrder:
+        //   old=0, mid=1, new=2 → evicts old (FIFO oldest).
+        //
+        // This test passes only with recency-based LRU.
+        assertTrue("m4 evicts 'new' (LRU: lowest lastUsedOrder=5)",
+            ledger.admit("s1", "m4", "p4", 1L))
+        assertEquals(3, ledger.sessionEntryCount("s1"))
+
+        // "new" was evicted (lowest lastUsedOrder among terminals)
+        assertNull("'new' must be evicted (LRU: least recently used)",
+            ledger.isTerminal("s1", "new", "new"))
+
+        // "old" and "mid" survive
+        assertEquals(true, ledger.isTerminal("s1", "old", "old"))
+        assertEquals(true, ledger.isTerminal("s1", "mid", "mid"))
     }
 
     // ── ClearSessionRevisions (C: lifecycle boundary) ───────────────────────
@@ -417,7 +578,7 @@ class PartRevisionLedgerTest {
      * capacity. Both `accepted` and `size` must never exceed cap.
      */
     @Test
-    fun `high-concurrency distinct keys never exceed cap`() {
+    fun `high-concurrency distinct keys exactly cap with all threads exited`() {
         val cap = 32
         val ledger = PartRevisionLedger(maxEntriesPerSession = cap)
         val nKeys = 100 // many more than cap
@@ -436,17 +597,28 @@ class PartRevisionLedgerTest {
         threads.forEach { it.start() }
         ready.await()
         barrier.countDown()
-        threads.forEach { it.join(10000) }
+        threads.forEach { t ->
+            t.join(10000)
+            assertFalse(
+                "thread must exit within timeout, still alive",
+                t.isAlive,
+            )
+        }
 
         val acceptedCount = accepted.get()
         val size = ledger.sessionEntryCount("s1")
-        assertTrue(
-            "accepted ($acceptedCount) must be <= cap ($cap); got $acceptedCount",
-            acceptedCount <= cap,
+
+        // With synchronized per-session admission, exactly cap entries
+        // succeed (the first cap threads to acquire the lock).
+        assertEquals(
+            "accepted must be exactly cap ($cap) under synchronized admission; got $acceptedCount",
+            cap,
+            acceptedCount,
         )
-        assertTrue(
-            "ledger size ($size) must be <= cap ($cap); got $size",
-            size <= cap,
+        assertEquals(
+            "ledger size must equal cap ($cap); got $size",
+            cap,
+            size,
         )
     }
 
@@ -482,7 +654,13 @@ class PartRevisionLedgerTest {
         threads.forEach { it.start() }
         ready.await()
         barrier.countDown()
-        threads.forEach { it.join(10000) }
+        threads.forEach { t ->
+            t.join(10000)
+            assertFalse(
+                "thread must exit within timeout, still alive",
+                t.isAlive,
+            )
+        }
 
         val size = ledger.sessionEntryCount("s1")
         assertTrue(
@@ -522,7 +700,13 @@ class PartRevisionLedgerTest {
         threads.forEach { it.start() }
         ready.await()
         barrier.countDown()
-        threads.forEach { it.join(10000) }
+        threads.forEach { t ->
+            t.join(10000)
+            assertFalse(
+                "thread must exit within timeout, still alive",
+                t.isAlive,
+            )
+        }
 
         val a1 = acceptedS1.get()
         val a2 = acceptedS2.get()
