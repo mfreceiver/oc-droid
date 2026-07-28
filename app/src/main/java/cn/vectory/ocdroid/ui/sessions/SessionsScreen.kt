@@ -566,6 +566,9 @@ fun SessionsScreen(
                                 onSelectSession = { sessionId ->
                                     onNavigateToChat(sessionId)
                                 },
+                                onRename = { renameSession = it },
+                                onArchive = { pendingArchiveSession = it },
+                                onCopyId = { copyToSystemClipboard(context, it) },
                                 sessionStatuses = sessionListState.sessionStatuses,
                                 unreadSessions = unreadSessions,
                                 effectiveBusy = effectiveBusy,
@@ -728,6 +731,9 @@ private fun HomeWorkdirRow(
     onOpenGit: () -> Unit,
     onCreateSession: () -> Unit,
     onSelectSession: (String) -> Unit,
+    onRename: (Session) -> Unit,
+    onArchive: (Session) -> Unit,
+    onCopyId: (String) -> Unit,
     sessionStatuses: Map<String, SessionStatus>,
     unreadSessions: Set<String>,
     effectiveBusy: Set<String>,
@@ -804,16 +810,55 @@ private fun HomeWorkdirRow(
                 if (sessionsInWorkdir.isEmpty()) {
                     EmptyWorkdirPlaceholder(onClick = onCreateSession)
                 }
+                var menuSession by remember { mutableStateOf<Session?>(null) }
+                var pressOffset by remember { mutableStateOf(DpOffset.Zero) }
+                val density = LocalDensity.current
                 sessionsInWorkdir.forEach { session ->
-                    SessionCard(
-                        session = session,
-                        isUnread = session.id in unreadSessions && session.id !in effectiveBusy,
-                        status = sessionStatuses[session.id],
-                        onClick = { onSelectSession(session.id) },
-                        onLongClick = {},
-                        onArchive = null,
-                        showWorkdir = false,
-                    )
+                    Box {
+                        SessionCard(
+                            session = session,
+                            isUnread = session.id in unreadSessions && session.id !in effectiveBusy,
+                            status = sessionStatuses[session.id],
+                            onClick = { onSelectSession(session.id) },
+                            onLongClick = { offset ->
+                                pressOffset = with(density) {
+                                    DpOffset(offset.x.toDp(), offset.y.toDp())
+                                }
+                                menuSession = session
+                            },
+                            onArchive = null,
+                            showWorkdir = false,
+                        )
+                        DropdownMenu(
+                            expanded = menuSession?.id == session.id,
+                            onDismissRequest = {
+                                if (menuSession?.id == session.id) menuSession = null
+                            },
+                            offset = pressOffset,
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.sessions_rename)) },
+                                onClick = {
+                                    onRename(session)
+                                    menuSession = null
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.sessions_archive)) },
+                                onClick = {
+                                    onArchive(session)
+                                    menuSession = null
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.sessions_copy_id)) },
+                                onClick = {
+                                    onCopyId(session.id)
+                                    menuSession = null
+                                },
+                            )
+                        }
+                    }
                 }
             }
         }
