@@ -16,11 +16,9 @@ import retrofit2.http.*
  * FQN is unchanged.
  */
 interface StandardApi {
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("global/health")
     suspend fun getHealth(): HealthResponse
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session")
     suspend fun getSessions(
         @Query("limit") limit: Int? = null,
@@ -40,7 +38,6 @@ interface StandardApi {
         @Header(HttpHeaders.DIRECTORY_HEADER) directory: String?
     ): Session
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session/{id}")
     suspend fun getSession(@Path("id") sessionId: String): Session
 
@@ -49,27 +46,21 @@ interface StandardApi {
      * the `task` tool. Used to render sub-agent cards and to navigate into a
      * child session's conversation.
      */
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session/{id}/children")
     suspend fun getChildren(@Path("id") sessionId: String): List<Session>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @PATCH("session/{id}")
     suspend fun updateSession(@Path("id") sessionId: String, @Body body: UpdateSessionRequest): Session
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @DELETE("session/{id}")
     suspend fun deleteSession(@Path("id") sessionId: String): Response<Unit>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session/status")
     suspend fun getSessionStatus(): Map<String, SessionStatus>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("api/session/active")
     suspend fun getActiveSessions(): ActiveSessionsResponse
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session/{id}/message")
     suspend fun getMessages(
         @Path("id") sessionId: String,
@@ -83,7 +74,6 @@ interface StandardApi {
         @Body body: PromptRequest
     ): Response<Unit>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @POST("session/{id}/abort")
     suspend fun abortSession(@Path("id") sessionId: String): Response<Unit>
 
@@ -93,31 +83,25 @@ interface StandardApi {
      * free up context window. Returns true; compaction runs async and the
      * resulting message/part SSE events drive the message reload
      * automatically (the app already listens to SSE).
-     *
-     * Carries the same Skip-Dir marker as abort/fork/revert.
      */
-    @Headers("X-Opencode-Skip-Dir: 1")
     @POST("session/{id}/summarize")
     suspend fun summarizeSession(
         @Path("id") sessionId: String,
         @Body body: SummarizeRequest
     ): Response<Boolean>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @POST("session/{id}/fork")
     suspend fun forkSession(
         @Path("id") sessionId: String,
         @Body body: ForkSessionRequest
     ): Session
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @POST("session/{id}/revert")
     suspend fun revertSession(
         @Path("id") sessionId: String,
         @Body body: RevertSessionRequest
     ): Session
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @POST("session/{id}/permissions/{permissionId}")
     suspend fun respondPermission(
         @Path("id") sessionId: String,
@@ -125,7 +109,6 @@ interface StandardApi {
         @Body body: PermissionResponseRequest
     ): Response<Unit>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("permission")
     suspend fun getPendingPermissions(): List<PermissionRequest>
 
@@ -157,11 +140,9 @@ interface StandardApi {
         @Header(HttpHeaders.DIRECTORY_HEADER) directory: String?
     ): Response<Unit>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("config/providers")
     suspend fun getProviders(): ProvidersResponse
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("agent")
     suspend fun getAgents(): List<AgentInfo>
 
@@ -171,10 +152,7 @@ interface StandardApi {
      * single client-side command (`/clear`) plus a few client-known commands
      * (/compact, /undo, /redo) in the ViewModel before being
      * exposed to the UI.
-     *
-     * Marked Skip-Dir: the command list is global and not scoped to a workdir.
      */
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("command")
     suspend fun getCommands(): List<CommandInfo>
 
@@ -183,7 +161,7 @@ interface StandardApi {
      * the directory context is now supplied EXPLICITLY by the caller via
      * @Header(directory) (the session's workdir). The interceptor preserves
      * the caller-supplied header (it does NOT overwrite with the global
-     * workdir fallback), so this method deliberately does NOT carry Skip-Dir.
+     * workdir fallback).
      *
      * Returns Unit on success; failures surface through the Result wrapper in
      * the repository.
@@ -195,22 +173,15 @@ interface StandardApi {
         @Header(HttpHeaders.DIRECTORY_HEADER) directory: String?
     ): Response<Unit>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session/{id}/diff")
     suspend fun getSessionDiff(@Path("id") sessionId: String): List<FileDiff>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("session/{id}/todo")
     suspend fun getSessionTodos(@Path("id") sessionId: String): List<TodoItem>
 
     // §R-17 batch4 / §R18 Phase 2-E step 2: file* endpoints carry an EXPLICIT
-    // `@Query("directory")` + the `X-Opencode-Skip-Dir` marker. The directory
-    // is supplied by the caller (no global state involved). The Skip-Dir
-    // marker makes [DirectoryHeaderInterceptor] skip its workdir injection,
-    // and the interceptor still mirrors `?directory` into the query for
-    // proxy-safe routing when the caller supplies it via `@Header` (see
-    // [getFileTreeForDirectory] for the @Header variant used by the picker).
-    @Headers("X-Opencode-Skip-Dir: 1")
+    // `@Query("directory")`. The directory is supplied by the caller (no
+    // global state involved).
     @GET("file")
     suspend fun getFileTree(
         @Query("path") path: String? = "",
@@ -219,49 +190,38 @@ interface StandardApi {
 
     /**
      * Variant of [getFileTree] for browsing an arbitrary directory that is
-     * independent of the current session's workdir. Carries the
-     * `X-Opencode-Skip-Dir` marker so the OkHttp interceptor does NOT overwrite
-     * the explicit `X-Opencode-Directory` header we pass for the browse target.
-     * Used by the "connect new project" directory picker.
+     * independent of the current session's workdir. Used by the "connect new
+     * project" directory picker.
      */
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("file")
     suspend fun getFileTreeForDirectory(
         @Header("X-Opencode-Directory") directory: String,
         @Query("path") path: String? = ""
     ): List<FileNode>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("file/content")
     suspend fun getFileContent(
         @Query("path") path: String,
         @Query("directory") directory: String? = null
     ): FileContent
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("file/status")
     suspend fun getFileStatus(@Query("directory") directory: String? = null): List<FileStatusEntry>
 
     // §vcs-section: v1 /vcs* endpoints mirror the file* directory-scoped GET
-    // style — explicit `?directory` query + the X-Opencode-Skip-Dir marker so
-    // DirectoryHeaderInterceptor skips its workdir injection (the directory is
-    // supplied by the caller, no global state involved). Read-only.
-    @Headers("X-Opencode-Skip-Dir: 1")
+    // style — explicit `?directory` query. Read-only.
     @GET("vcs")
     suspend fun getVcs(@Query("directory") directory: String?): VcsInfo
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("vcs/status")
     suspend fun getVcsStatus(@Query("directory") directory: String?): List<VcsStatusEntry>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("vcs/diff")
     suspend fun getVcsDiff(
         @Query("mode") mode: String,
         @Query("directory") directory: String?
     ): List<FileDiff>
 
-    @Headers("X-Opencode-Skip-Dir: 1")
     @GET("find/file")
     suspend fun findFile(
         @Query("query") query: String,

@@ -205,17 +205,17 @@ class TokenStreamCoordinator(
       * caller DROPS the frame (returns from [dispatchEpochFrame]
       * without bridging / state mutation).
       *
-      * Default `{ _, _, _, _, _ -> true }` (accept all) preserves the
-      * pre-B-P0-1 behavior — no dedup is performed when the hook is
-      * unset. Production wiring (B-P0-1) injects
-      * [cn.vectory.ocdroid.data.repository.SlimSseStateMachine.applyTokenPartRevision]
-      * captured against the lifecycle's slim commit token; the
-      * coordinator stays free of the data/repository layer dependency.
-      *
-      * `partEventRevision == null` (older sidecar / status-only frame)
-      * MUST be accepted (`true`) — without a revision counter the
-      * dedup-layer cannot operate, and the caller falls back to its
-      * pre-B-P0-1 behavior.
+       * Default `{ _, _, _, _, _ -> true }` (accept all) preserves the
+       * pre-B-P0-1 behavior — no dedup is performed when the hook is
+       * unset. Production wiring (B-P0-1) injects
+       * a token-part-revision dedup checker captured against the
+       * lifecycle's slim commit token; the coordinator stays free of
+       * the data/repository layer dependency.
+       *
+       * `partEventRevision == null` (older sidecar / status-only frame)
+       * MUST be accepted (`true`) — without a revision counter the
+       * dedup-layer cannot operate, and the caller falls back to its
+       * pre-B-P0-1 behavior.
       *
       * §Stage-B C3: the [context] carries the route + bundle snapshot
       * captured at THIS frame's dispatch entry; production wiring MAY
@@ -230,11 +230,10 @@ class TokenStreamCoordinator(
       * `message.part.removed` token frame clears the epoch + bundle
       * guards. The callback is responsible for:
       *
-      *  1. Applying the part-removal to the per-message watermark map
-      *     (advances `messageEventSeq` monotonically, drops the
-      *     removed partID, flags `needsFullRecheck = true`) via
-      *     [cn.vectory.ocdroid.data.repository.SlimSseStateMachine.applyMessagePartRemoved]
-      *     captured against the lifecycle's slim commit token.
+       *  1. Applying the part-removal to the per-message watermark map
+       *     (advances `messageEventSeq` monotonically, drops the
+       *     removed partID, flags `needsFullRecheck = true`) via the
+       *     slim commit token-guarded in-memory state update.
       *  2. Scheduling a 100ms-debounced R2 /full reconcile for the
       *     message so the chat slice's part cache reflects the
       *     upstream removal.
@@ -261,9 +260,8 @@ class TokenStreamCoordinator(
       * frame clears the epoch + bundle guards. The callback is
       * responsible for:
       *
-      *  1. Removing the per-message watermark entry via
-      *     [cn.vectory.ocdroid.data.repository.SlimSseStateMachine.applyMessageRemoved]
-      *     (token-guarded).
+       *  1. Removing the per-message watermark entry via the slim
+       *     commit token-guarded in-memory state update.
       *  2. Evicting the message from the chat slice (`messages` list
       *     + `partsByMessage` map) and dropping its tuple from any
       *     `maxMessageTuple` cache (MAJOR 4 cleanup).
@@ -863,9 +861,8 @@ class TokenStreamCoordinator(
         // dedup BEFORE the streaming reducer. A `false` return means
         // the frame is a re-delivery within the 250ms debounce window
         // — drop it (no reducer state mutation, no bridge, no effects).
-        // The hook is the injected [dedupPartRevision] callback, which
-        // production wires to SlimSseStateMachine.applyTokenPartRevision;
-        // it is null-safe (a null partEventRevision always returns true
+        // The hook is the injected [dedupPartRevision] callback; it is
+        // null-safe (a null partEventRevision always returns true
         // — accept every frame, matching the pre-B-P0-1 behavior).
         //
         // Per the B-P0-3 frozen contract: the dedup MUST run BEFORE
@@ -928,11 +925,10 @@ class TokenStreamCoordinator(
         // The hook implementations are no-ops by default; B-P0-2's DI wiring
         // (Lane I, ControllerModule) injects the production callbacks
         // (applyMessagePartRemoved / applyMessageRemoved + debounced
-        // SlimFullReconciler.reconcileActiveSession / MessageRemovedConfirmed
-        // dispatch).
+        // reconcileActiveSession / MessageRemovedConfirmed dispatch).
         when (effectiveFrame) {
             is TokenStreamFrame.MessagePartRemoved -> {
-                val msgSeq = effectiveFrame.messageEventSeq
+                val msgSeq = effectiveFrame.messageEventSeq ?: 0L
                 if (!isBundleCurrentForCommit(boundBundle)) return
                 onMessagePartRemoved(
                     effectiveFrame.sessionId,

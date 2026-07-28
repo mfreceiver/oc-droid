@@ -150,7 +150,7 @@ class ChatViewModel @Inject constructor(
         // edit-and-rerun that only hits this path also opens the stream (max-1 +
         // debounce makes any dual-open with loadMessagesForEffect harmless).
         if (shouldOpenTokenStream(
-                core.serverCompatProfile.slimapiTokenStreamEnabled,
+                core.serverCompatProfile.tokenStreamEnabled,
                 core.store.slices.chat.value.currentSessionId,
                 sessionId,
             )

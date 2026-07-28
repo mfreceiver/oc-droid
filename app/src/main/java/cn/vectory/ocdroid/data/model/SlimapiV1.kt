@@ -226,41 +226,4 @@ data class SlimSessionsPage(
     val discoveryReady: Boolean? = null,
 )
 
-// ── §5 G6 batch full envelope ────────────────────────────────────────────
 
-/**
- * Task 1 (slimapi v1 §5 G6) — per-message failure carried inside the
- * `errors[]` array of a [SlimapiMessageFullBatch] response. The HTTP
- * status stays 200 when only SOME of the requested ids failed; the
- * client marks just those messages' expand-state as failed.
- *
- * `messageID` is the wire name (the rest of the codebase uses the same
- * `messageID` SerialName on [Part] / [Message]); `code` is one of the
- * [cn.vectory.ocdroid.data.repository.http.SlimapiErrorCodes] values
- * (typically [MESSAGE_NOT_FOUND]).
- */
-@Serializable
-data class SlimapiMessageBatchError(
-    @SerialName("messageID") val messageId: String,
-    val code: String? = null
-)
-
-/**
- * Task 1 (slimapi v1 §5 G6) — response envelope for
- * `GET /slimapi/messages/{sid}/full?ids=m1,m2,…&mode=full`. The sidecar
- * returns 200 with `items[]` carrying the resolved [MessageWithParts]
- * (in the requested id order, de-duplicated) and `errors[]` carrying
- * per-message failures (typically [SlimapiMessageBatchError] with
- * [cn.vectory.ocdroid.data.repository.http.SlimapiErrorCodes.MESSAGE_NOT_FOUND]
- * for ids the upstream no longer has).
- *
- * Both lists defaulted empty so a fully-empty 200 (`{"items":[],"errors":[]}`)
- * decodes cleanly. Pattern mirrors the existing
- * [SlimapiQuestionAggregation] / [SlimapiPermissionAggregation]
- * envelopes (Cluster A).
- */
-@Serializable
-data class SlimapiMessageFullBatch(
-    val items: List<MessageWithParts> = emptyList(),
-    val errors: List<SlimapiMessageBatchError> = emptyList()
-)

@@ -29,8 +29,12 @@ class TokenStreamWiringTest {
     // ── (a) Gate predicate truth table ─────────────────────────────────────
 
     @Test
-    fun `gate opens when slimapiTokenStreamEnabled AND sessionId matches currentSessionId`() = runTest {
+    fun `gate opens when tokenStreamEnabled AND sessionId matches currentSessionId`() = runTest {
         val profile = ServerCompatProfile()
+        // slimapi V2: tokenStreamEnabled derives from slimConnection, not
+        // from the health-payload features. Set slimConnection=true to
+        // enable the token-stream gate.
+        profile.setSlimConnection(true)
         profile.updateSlimapi(
             SlimapiHealthPayload(
                 sidecarOk = true,
@@ -47,19 +51,19 @@ class TokenStreamWiringTest {
 
         assertTrue(
             "gate must open when both conditions true",
-            shouldOpenTokenStream(profile.slimapiTokenStreamEnabled, chatState.value.currentSessionId, "sess-A"),
+            shouldOpenTokenStream(profile.tokenStreamEnabled, chatState.value.currentSessionId, "sess-A"),
         )
 
         assertFalse(
             "gate must NOT open when sessionId differs",
-            shouldOpenTokenStream(profile.slimapiTokenStreamEnabled, chatState.value.currentSessionId, "sess-B"),
+            shouldOpenTokenStream(profile.tokenStreamEnabled, chatState.value.currentSessionId, "sess-B"),
         )
     }
 
     @Test
-    fun `gate skips when slimapiTokenStreamEnabled is false`() = runTest {
+    fun `gate skips when tokenStreamEnabled is false`() = runTest {
         val profile = ServerCompatProfile()
-        // Default: slimapiTokenStreamEnabled == false
+        // Default: tokenStreamEnabled == false
 
         val chatState = MutableStateFlow(
             ChatState(currentSessionId = "sess-A")
@@ -67,7 +71,7 @@ class TokenStreamWiringTest {
 
         assertFalse(
             "gate must skip when feature disabled",
-            shouldOpenTokenStream(profile.slimapiTokenStreamEnabled, chatState.value.currentSessionId, "sess-A"),
+            shouldOpenTokenStream(profile.tokenStreamEnabled, chatState.value.currentSessionId, "sess-A"),
         )
     }
 
@@ -90,7 +94,7 @@ class TokenStreamWiringTest {
 
         assertFalse(
             "gate must skip when session not foreground",
-            shouldOpenTokenStream(profile.slimapiTokenStreamEnabled, chatState.value.currentSessionId, "sess-A"),
+            shouldOpenTokenStream(profile.tokenStreamEnabled, chatState.value.currentSessionId, "sess-A"),
         )
     }
 

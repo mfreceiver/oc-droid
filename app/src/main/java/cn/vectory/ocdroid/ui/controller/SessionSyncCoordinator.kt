@@ -12,14 +12,13 @@ import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.LastErrorField
+import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.SlimSessionDigest
 import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ProbeResult
 import cn.vectory.ocdroid.data.repository.SlimColdStartSnapshot
-import cn.vectory.ocdroid.data.repository.SlimFullReconciler
-import cn.vectory.ocdroid.data.repository.SlimSessionState
 import cn.vectory.ocdroid.data.repository.catchUpSet
 import cn.vectory.ocdroid.data.repository.needsCatchUp
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
@@ -37,6 +36,7 @@ import cn.vectory.ocdroid.ui.StreamOwnedState
 import cn.vectory.ocdroid.ui.chronological
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
+import cn.vectory.ocdroid.ui.SkeletonReloadCoordinator
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.UnreadState
 import cn.vectory.ocdroid.ui.lenientJson
@@ -73,8 +73,12 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.longOrNull
 
 /**
  * R-16 M4 → R-17 batch3b → R-17 batch5: owns the SSE event → slice fold (the
@@ -208,33 +212,13 @@ class SessionSyncCoordinator(
     /** Worker lane for network/reconcile computation. UI commits switch to Main. */
     internal val reconcileDispatcher: CoroutineDispatcher = Dispatchers.Default,
     /**
-     * C2 CRITICAL (digest → R1 + reconnect R1 trigger chain): the R1
-     * bounded `/full` reconcile coordinator. Injected by Lane I
-     * (ControllerModule.provideSlimFullReconciler); nullable so legacy /
-     * test constructions that don't exercise the C2 trigger chain keep
-     * working byte-identically (a null reconciler makes
-     * [requestDigestFullSweep] / [reconcileFullAfterTransportReset]
-     * no-ops).
-     *
-     * # No callback / no SSC reference
-     *
-     * The reconciler holds NO CoroutineScope, NO SSC reference. The two
-     * entry points used here ([SlimFullReconciler.reconcileActiveSession]
-     * for digest debounce + [SlimFullReconciler.reconcileReconnect] for
-     * server.connected) are suspend; SSC launches them on [scope].
-     *
-     * # Token + route threading (freeze protocol)
-     *
-     * Both trigger paths capture the route instance + slim token at the
-     * TRIGGER and thread them UNCHANGED across the entire fetch (no
-     * recapture, no dynamic read). The reconciler's per-message worker
-     * re-validates `isTokenCurrent` after every network suspension + every
-     * backoff sleep (M6); the dispatched [AppAction.SlimFullMessageReconciled]
-     * carries the captured [SlimFullReconciler.FullReconcileContext] so the
-     * reducer's route + bundle CAS can reject stale dispatches.
+     * lite-v2-dev (plan §4.2/§4.5): the single authoritative sync path.
+     * digest / reconnect 触发点改为调用 [SkeletonReloadCoordinator.onDigestChange]
+     * / [requestReload]。Nullable so legacy/test constructions keep working —
+     * when null, the lite-v2 reload path is a no-op.
      */
-    internal val slimFullReconciler: SlimFullReconciler? = null,
-) : SseDispatchHost, StripeLock, SlimEffectsPort {
+    internal val skeletonReloadCoordinator: SkeletonReloadCoordinator? = null,
+) : SseDispatchHost, StripeLock {
     /** Tag for [reportNonFatalIssue]; mirrors the original MainViewModel TAG. */
     private val tag: String = "SessionSyncCoordinator"
 
@@ -265,26 +249,6 @@ class SessionSyncCoordinator(
      * or use @Synchronized.
      */
     private val flushJobs = mutableMapOf<String, Job>()
-
-    /**
-     * C2 CRITICAL (digest → R1 active sweep): per-session debounce Job
-     * references for [requestDigestFullSweep]. Mirrors [flushJobs]'s
-     * pattern: a Job is neither serializable nor a value type, so it
-     * stays on the coordinator (bound to [scope]) rather than in a slice.
-     *
-     * # Thread confinement
-     *
-     * Main-thread confined — all access runs on appScope
-     * (Dispatchers.Main.immediate). Same discipline as [flushJobs].
-     *
-     * # Lifecycle
-     *
-     * The leading-edge digest cancels any in-flight pending sweep and
-     * schedules a fresh one (trailing-edge debounce). The Job self-removes
-     * on completion (post-delay). A scope cancel (e.g. host reconfigure)
-     * propagates cancellation to every pending sweep cleanly.
-     */
-    private val digestFullSweepJobs = mutableMapOf<String, Job>()
 
     /**
      * Task 11 round-2 (oracle I5 — fixed striped locks): a fixed array of
@@ -571,211 +535,14 @@ class SessionSyncCoordinator(
     internal var resyncClockMsForTest: (() -> Long)? = null
         set(value) { field = value; clockOverride = value }
 
-    /**
-     * P3 §5.2: the bounded re-sync cadence, extracted to a PURE state object
-     * ([SlimResyncCadence]). It owns the cadence AtomicReference + the three
-     * state transitions; SSC keeps only the thin delegates below + the worker
-     * launch inside [finishResyncCadence]. See [SlimResyncCadence] for the DAG /
-     * purity contract (§11.2 ①③⑤⑥⑦).
-     *
-     * Clock: constructed with `clock = this.clock`, so the cadence reads the
-     * live [clockOverride] seam (set by [resyncClockMsForTest]) on every call —
-     * the existing test seam is unchanged, and the cadence itself never touches
-     * `System.currentTimeMillis` / [clockOverride] directly (§5.2 snag fixed).
-     */
-    private val cadence = SlimResyncCadence(clock = clock)
+    // ── lite-v2-dev (plan §4.1/§4.7): SlimResyncCadence RETIRED ─────────────
+    // The bounded re-sync cadence + its delegate methods have been deleted.
+    // server.connected / host-reconfigured now trigger skeleton reload directly.
 
-    /**
-     * G-F1: reset the cadence state for a new host generation. Clears any
-     * in-flight / trailing / dirty state and sets the generation.
-     */
-    private fun resetCadenceForGeneration(gen: Long) {
-        cadence.resetCadenceForGeneration(gen)
-    }
-
-    /**
-     * G-F1: bounded re-sync cadence guard. Returns true if the sweep should
-     * proceed (respecting interval, single-flight, trailing). Delegates the pure
-     * state transition to [SlimResyncCadence] and translates its sealed
-     * [SlimResyncCadence.ScheduleDecision] (§11.2 ⑤) to the Boolean the worker
-     * ([performSlimResync]) expects.
-     *
-     * See [SlimResyncCadence.maybeScheduleResync] for the full contract.
-     */
-    private fun maybeScheduleResync(
-        triggerGeneration: Long,
-        isManual: Boolean = false,
-        bypassIntervalCheck: Boolean = false,
-    ): Boolean =
-        cadence.maybeScheduleResync(triggerGeneration, isManual, bypassIntervalCheck) is
-            SlimResyncCadence.ScheduleDecision.Proceed
-
-    /**
-     * G-F1: call AFTER [performSlimResync] completes (success or failure).
-     * Delegates the pure state transition to [SlimResyncCadence] and, when it
-     * returns [SlimResyncCadence.TrailingDecision.RelaunchTrailing] (sealed
-     * command, §11.2 ⑤), performs the worker launch HERE — the cadence never
-     * launches the worker itself (§11.2 ⑥ "worker 执行留 SSC", ③ no callback).
-     */
-    private fun finishResyncCadence(hadFailure: Boolean) {
-        val decision = cadence.finishResyncCadence(hadFailure)
-        if (decision is SlimResyncCadence.TrailingDecision.RelaunchTrailing) {
-            // Trailing runs with bypassIntervalCheck=true (was pre-approved when
-            // queued). The internal guard inside performSlimResync is the SOLE
-            // cadence authority — launching UNCONDITIONALLY here (NOT wrapping in
-            // maybeScheduleResync) avoids the double-guard that re-set inFlight and
-            // made the internal guard decline -> emptyMap -> finishResyncCadence
-            // re-launch -> livelock (B1.5). inFlight was cleared by the cadence;
-            // trailingQueued was cleared by the cadence; bypassIntervalCheck=true
-            // skips the 15-min interval.
-            scope.launch {
-                val outcomes = performSlimResync(bypassIntervalCheck = true)
-                finishResyncCadence(
-                    hadFailure = outcomes.any { (_, r) ->
-                        r is ReconcileResult.Failure ||
-                            r is ReconcileResult.TimedOut ||
-                            r is ReconcileResult.Stale
-                    }
-                )
-            }
-        }
-    }
-
-    // ── P4-B + P5 wiring (shared ports → reconciler → loader/applier) ──────
-    //
-    // P4: the reconciliation core lives in [SlimSessionReconciler].
-    // P5: the question loader lives in [SlimQuestionLoader]; the cold-start
-    // snapshot applier lives in [SlimColdStartSnapshotApplier].
-    //
-    // SSC retains: the frozen façades (`reconcileSession` /
-    // `reconcileSessionExposed`, both `applySlimColdStartSnapshot` overloads,
-    // `loadPendingQuestionsAllWorkdirs`), the digest event parsing
-    // (`handleSessionDigestImpl`), the resync worker
-    // (`performSlimResync`), the cadence (`SlimResyncCadence`), the
-    // coroutine `scope`, and the resync catch-up orchestrator
-    // (`performResyncCatchUp`).
-    //
-    // See docs/ocmar/plans/2026-07-24-p4-slim-session-reconciler-design.md and
-    // docs/ocmar/plans/2026-07-24-p5-slim-question-loader-design.md.
-    //
-    // P4-B command interpreter: SSC is the SOLE executor of the resync
-    // worker launch (`scope.launch { performSlimResync(...) }`). The
-    // reconciler returns a [SlimReconcileCommand]; SSC interprets it.
-
-    // P5 §2.3: shared P4 ports — constructed ONCE, reused by reconciler +
-    // loader + applier (no second store/repo incarnation).
-    private val slimRepositoryPort: SlimReconcileRepositoryPort? =
-        repository?.let(::OpenCodeSlimReconcileRepositoryPort)
-    private val slimStorePort: SlimReconcileStorePort =
-        DefaultSlimReconcileStorePort(slices, settingsManager)
-
-    /**
-     * P4 §4.3: the extracted reconciler. Constructed with SSC's own
-     * [StripeLock] / [SlimEffectsPort] impls + the shared repo/store ports,
-     * so there is exactly one stripe array, one effects bus, one repo
-     * incarnation (§11 acceptance: single SlimEffectsPort + single
-     * StripeLock).
-     *
-     * Ownership confirmations (per §4.3):
-     *  - `stripeLock = this` — SSC is the sole [StripeLock] impl; the
-     *    reconciler uses `stripeLock.stripeFor(sid).withLock` on SSC's
-     *    existing 64-entry `reconcileStripes` array (no second array).
-     *  - `effects = this` — SSC is the sole [SlimEffectsPort] impl; every
-     *    slim side-effect still funnels through SSC's single `effects` bus.
-     *  - [slimRepositoryPort] — ONE repo adapter (no second incarnation);
-     *    null when SSC has no repo.
-     *  - No `CoroutineScope` / `SlimResyncCadence` / `currentEpoch` /
-     *    `performSlimResync` callback is injected (§4.3 exclusions).
-     */
-    private val slimSessionReconciler = SlimSessionReconciler(
-        repository = slimRepositoryPort,
-        store = slimStorePort,
-        stripeLock = this,
-        effects = this,
-        supportsWatermarkResync = supportsWatermarkResync,
-        currentServerGroupFp = currentServerGroupFp,
-        reconcileDispatcher = reconcileDispatcher,
-    )
-
-    /**
-     * P5 §2.1: the extracted question loader. Owns the legacy all-workdir
-     * fan-out + the slim single-shot question aggregation. Returns a sealed
-     * [SlimQuestionLoadCommand]; SSC owns the `scope.launch`. Holds NO
-     * `CoroutineScope` and NO SSC reference.
-     */
-    private val slimQuestionLoader = SlimQuestionLoader(
-        store = slimStorePort,
-        effects = this,
-        supportsWatermarkResync = supportsWatermarkResync,
-        currentWorkdir = { settingsManager.currentWorkdir },
-        recentWorkdirs = { settingsManager.getRecentWorkdirs(currentServerGroupFp()) },
-    )
-
-    /**
-     * P5 §2.2: the extracted cold-start snapshot applier. Owns both
-     * snapshot-application workflows. Message merging delegates ONLY to
-     * [slimSessionReconciler.mergeSlimMessagesIntoChat] (one-way child dep
-     * — no duplicate merge/authoritative logic). Holds NO `CoroutineScope`
-     * and NO SSC reference.
-     */
-    private val slimColdStartSnapshotApplier = SlimColdStartSnapshotApplier(
-        repository = slimRepositoryPort,
-        store = slimStorePort,
-        effects = this,
-        reconciler = slimSessionReconciler,
-        supportsWatermarkResync = supportsWatermarkResync,
-    )
-
-    /**
-     * P4-A §3.1: maps SSC's frozen [ReconcileMode] to the reconciler's
-     * internal [SlimReconcileMode]. 1:1.
-     */
-    private fun ReconcileMode.toSlimMode(): SlimReconcileMode = when (this) {
-        ReconcileMode.DIGEST_FOCUS -> SlimReconcileMode.DIGEST_FOCUS
-        ReconcileMode.DIGEST_BACKGROUND -> SlimReconcileMode.DIGEST_BACKGROUND
-        ReconcileMode.RESYNC -> SlimReconcileMode.RESYNC
-    }
-
-    /**
-     * P4-A §3.2: maps the reconciler's internal [SlimReconcileResult] back
-     * to SSC's frozen [ReconcileResult]. Exhaustive over all 9 variants — a
-     * future variant added to [SlimReconcileResult] without a mapping here
-     * is a compile error (sealed `when`).
-     */
-    private fun SlimReconcileResult.toFacadeResult(): ReconcileResult = when (this) {
-        is SlimReconcileResult.Aligned -> ReconcileResult.Aligned(sid)
-        is SlimReconcileResult.Reconciled -> ReconcileResult.Reconciled(sid, items)
-        is SlimReconcileResult.RefreshRow -> ReconcileResult.RefreshRow(sid)
-        is SlimReconcileResult.MarkDeleted -> ReconcileResult.MarkDeleted(sid)
-        is SlimReconcileResult.ClearLocal -> ReconcileResult.ClearLocal(sid)
-        is SlimReconcileResult.Failure -> ReconcileResult.Failure(sid)
-        is SlimReconcileResult.TimedOut -> ReconcileResult.TimedOut(sid)
-        is SlimReconcileResult.NoRepository -> ReconcileResult.NoRepository(sid)
-        is SlimReconcileResult.Stale -> ReconcileResult.Stale(sid)
-    }
-
-    /**
-     * P4-A §6.1: SSC's command interpreter. The reconciler returns a
-     * [SlimReconcileCommand]; SSC is the SOLE executor of the resync worker
-     * launch (`scope.launch { performSlimResync(...) }`).
-     *
-     * NO outer cadence guard here — [performSlimResync] has the sole cadence
-     * authority inside its own `maybeScheduleResync` check. An outer guard
-     * would recreate the B1.5 double-guard livelock.
-     */
-    private fun executeSlimReconcileCommand(command: SlimReconcileCommand) {
-        when (command) {
-            SlimReconcileCommand.None -> Unit
-            is SlimReconcileCommand.LaunchSlimResync -> {
-                scope.launch {
-                    performSlimResync(
-                        sessionsDirty = command.sessionsDirty,
-                        isManual = command.isManual,
-                    )
-                }
-            }
-        }
-    }
+    // ── lite-v2-dev (plan §4.1): P4/P5 slim reconcile infra RETIRED ──────────
+    // SlimSessionReconciler + SlimQuestionLoader + SlimColdStartSnapshotApplier +
+    // SlimReconcileRepositoryPort + SlimReconcileStorePort + all command/result/
+    // mode types deleted. The digest path routes to SkeletonReloadCoordinator.
 
     init {
         // §P1-10: observe the disconnect / host-reconfigure signals that the
@@ -824,11 +591,13 @@ class SessionSyncCoordinator(
                         val trigger = SseReconnectTrigger.HostReconfigured(effect.epoch)
                         sseSyncState = reconcileGap(sseSyncState, trigger).first
 
-                        // G-F1 cadence reset + schedule on host reconfigured.
-                        val gen = effect.epoch
-                        resetCadenceForGeneration(gen)
-                        // Internal guard in performSlimResync handles cadence.
-                        scope.launch { performSlimResync(isManual = false) }
+                        // lite-v2-dev: trigger skeleton reload on host reconfigure.
+                        skeletonReloadCoordinator?.let { skeleton ->
+                            scope.launch {
+                                val currentSid = slices.chat.value.currentSessionId
+                                if (currentSid != null) skeleton.requestReload(currentSid, 200)
+                            }
+                        }
                     }
                     else -> {}
                 }
@@ -909,14 +678,15 @@ class SessionSyncCoordinator(
             sseSyncState = nextState
             applySseSyncDecisions(decisions)
 
-            // G-F1 cadence reset + schedule on server connected.
-            resetCadenceForGeneration(gen)
-            // Only launch performSlimResync on RE-connect (not cold-start first connect).
-            // The initial cold-start snapshot is already handled by the normal
-            // reconcileSession path; triggering a superfluous resync here would
-            // cause extra HTTP requests that break the golden-path test expectations.
+            // lite-v2-dev: on RE-connect, trigger skeleton reload for the current
+            // session (slim resync cadence retired, plan §4.1).
             if (connectedOnceBefore) {
-                scope.launch { performSlimResync(isManual = false) }
+                skeletonReloadCoordinator?.let { skeleton ->
+                    scope.launch {
+                        val currentSid = slices.chat.value.currentSessionId
+                        if (currentSid != null) skeleton.requestReload(currentSid, 200)
+                    }
+                }
             }
         }
         dispatchSseEvent(event)
@@ -1208,94 +978,110 @@ class SessionSyncCoordinator(
     override fun sseClock(): Long = clock()
     override fun supportsDurableSessionErrorBanner(): Boolean = supportsWatermarkResync()
     override fun isFlushActiveForPart(partId: String): Boolean = flushJobs[partId]?.isActive == true
+    override fun markLocallyInjected(sessionId: String, messageId: String) {
+        skeletonReloadCoordinator?.markLocallyInjected(sessionId, messageId)
+    }
+
     override fun handleSessionDigest(event: SSEEvent) {
-        // P4-C §6.3: thin decision interpreter. The digest-event PREPARATION
-        // (parse + status/archive/timestamp + mode selection + token capture
-        // before first suspend + request construction) lives in
-        // [SlimSessionReconciler.prepareSessionDigest] (synchronous; returns a
-        // decision; does NOT launch). SSC owns the coroutine launch + command
-        // interpretation (the reconciler never launches).
-        //  - [SlimDigestDecision.Done] → no-op (non-slim / malformed / no-repo).
-        //  - [SlimDigestDecision.Reconcile] → SSC launches the digest-reconcile
-        //    coroutine; the reconciler returns a command (propagated UNCHANGED
-        //    from `reconcileSessionLocked` — NOT flattened, so the BACKGROUND
-        //    `LaunchSlimResync` survives); SSC interprets it BEFORE applying the
-        //    result (matches the pre-extraction ordering: launch was inside
-        //    reconcileSessionLocked before the caller applied the result).
-        when (val decision = slimSessionReconciler.prepareSessionDigest(event)) {
-            SlimDigestDecision.Done -> Unit
-            is SlimDigestDecision.Reconcile -> {
-                scope.launch {
-                    val attempt = slimSessionReconciler.reconcileDigest(decision.request)
-                    executeSlimReconcileCommand(attempt.outcome.command)
-                    slimSessionReconciler.applyReconcileResult(attempt)
-                    // C2 CRITICAL (digest contentRevisions → R1 active sweep):
-                    // only DIGEST_FOCUS triggers the /full sweep immediately —
-                    // the user is viewing this session, so any watermark
-                    // needsFullRecheck flag set by the digest's reducer apply
-                    // (contentRevisions / message.part.removed) MUST be consumed
-                    // by a bounded reconcileActiveSession batch.
-                    //
-                    // BACKGROUND digests deliberately SKIP the sweep (the user
-                    // is NOT viewing this session — a background /full storm
-                    // would burn quota on stale tabs). The flag stays set +
-                    // is consumed by the next focus sweep (user switches to
-                    // that session) or the next reconnect R1 batch
-                    // ([reconcileFullAfterTransportReset]).
-                    //
-                    // Token + route threading: the request's captured token +
-                    // route instance are passed through UNCHANGED (no
-                    // recapture) — see [requestDigestFullSweep].
-                    if (decision.request.mode == SlimReconcileMode.DIGEST_FOCUS) {
-                        requestDigestFullSweep(
-                            sessionId = decision.request.sid,
-                            token = decision.request.token,
-                            expectedRouteInstance = decision.request.routeInstance,
-                        )
-                    }
-                }
+        // lite-v2-dev (plan §4.2/§4.5): digest → skeleton reload 直连。
+        // SlimSessionReconciler / SlimDigestDecision / reconcile command 链路退役。
+        //
+        // digest 控制面字段消费（status / archived / deleted / lastError）：
+        // 在 skeleton reload 之前，把 digest 的控制面字段投影到对应的 slice，
+        // 与 session.status / session.updated archived / session.error 路径对齐。
+        val sid = event.payload.getString("sessionID") ?: return
+
+        val props = event.payload.properties
+        val status = event.payload.getString("status")
+        val archived = (props?.get("archived") as? JsonPrimitive)?.longOrNull
+        val deleted = (props?.get("deleted") as? JsonPrimitive)?.booleanOrNull
+        val lastErrorEl = props?.get("lastError")
+
+        // status 投影 → SessionListState.sessionStatuses（与 session.status 同 reducer）
+        if (status != null) {
+            slices.mutateSessionList {
+                it.applySessionStatus(sid, SessionStatus(type = status)).first
             }
         }
+
+        // lastError 三态投影 → SessionListState.sessionErrorsById
+        //   present-object → SET；present-null(JsonNull) → CLEAR；absent → no-op
+        when (lastErrorEl) {
+            is JsonObject -> {
+                val name = (lastErrorEl["name"] as? JsonPrimitive)?.content
+                val message = (lastErrorEl["message"] as? JsonPrimitive)?.content
+                val at = (lastErrorEl["at"] as? JsonPrimitive)?.longOrNull
+                val banner = SlimSessionLastError(
+                    name = name ?: "Unknown",
+                    message = message,
+                    at = at,
+                )
+                slices.mutateSessionList { s ->
+                    s.copy(sessionErrorsById = s.sessionErrorsById + (sid to banner))
+                }
+            }
+            is JsonNull -> {
+                slices.mutateSessionList { s ->
+                    s.copy(sessionErrorsById = s.sessionErrorsById - sid)
+                }
+            }
+            else -> { /* absent: 保留现有 banner（LastErrorField.Omitted 语义） */ }
+        }
+
+        // deleted / archived → 驱逐 session（与 session.updated archived +
+        // applySlimStatusFanOutSummary 的 EvictSession 路径一致）
+        // §critical-eviction-delivery: 关键驱逐不可丢弃 — 走可靠发送路径。
+        if (deleted == true || (archived != null && archived > 0L)) {
+            emitCriticalEffect(scope, ControllerEffect.EvictSession(currentServerGroupFp(), sid))
+            return
+        }
+
+        // archived == 0 → 从归档恢复：被归档的 session 此前已被 EvictSession 驱逐
+        // （不再是 currentSessionId），单靠下方的 onDigestChange 不会触发列表刷新，
+        // 恢复的 session 会从列表里消失。先发 RefreshSessions 让 AppCore 重拉
+        // session 列表；不 return——继续触发 reload，因为 session 可能仍是
+        // currentSessionId（用户从未离开），仍需重建权威窗口。
+        // §critical-eviction-delivery: RefreshSessions 同样走可靠投递，避免列表
+        // 在 effect buffer 满时漏刷。
+        if (archived == 0L) {
+            emitCriticalEffect(scope, ControllerEffect.RefreshSessions)
+        }
+
+        // 触发 skeleton reload（权威窗口 diff）
+        skeletonReloadCoordinator?.onDigestChange(sid)
     }
 
     // ── C2 CRITICAL (digest → R1 active sweep + reconnect R1) ──────────────
 
     /**
-     * C2 CRITICAL (digest contentRevisions → R1 active sweep): schedules a
-     * per-session [DIGEST_FULL_SWEEP_DEBOUNCE_MS] debounce that aggregates
-     * rapid digest frames into a SINGLE
-     * [SlimFullReconciler.reconcileActiveSession] call. The captured entry
+     * C2 CRITICAL (digest → skeleton reload): schedules a per-session
+     * [DIGEST_FULL_SWEEP_DEBOUNCE_MS] debounce that aggregates
+     * rapid digest frames into a SINGLE skeleton reload. The captured entry
      * token + route instance from the digest request are threaded UNCHANGED
-     * (no recapture — the digest's [SlimDigestReconcileRequest.token] /
-     * [.routeInstance] are the request-scoped guards).
+     * (no recapture — the digest's request-scoped guards).
      *
      * # Debounce
      *
-     * Multiple contentRevisions-bearing digests for the same session inside
-     * the debounce window coalesce into ONE R1 batch (the trailing digest
-     * wins; the prior pending job is cancelled). This bounds the /full
-     * fetch rate when the sidecar bursts several revisions in quick
-     * succession. Mirrors [scheduleDeltaFlushImpl]'s trailing-coalesce
-     * pattern.
+     * Multiple digests for the same session inside the debounce window
+     * coalesce into ONE reload batch (the trailing digest wins; the prior
+     * pending job is cancelled).
      *
      * # Token / route invariants (freeze protocol)
      *
      *  - [token] is the digest's entry token — captured BEFORE the first
-     *    suspend point in [SlimSessionReconciler.prepareSessionDigest].
-     *    Re-capturing here would break the "single entry token, no
-     *    recapture" invariant (C-D3 v2 §1.8).
+     *    suspend point. Re-capturing here would break the "single entry
+     *    token, no recapture" invariant (C-D3 v2 §1.8).
      *  - [expectedRouteInstance] is the route instance captured at digest
      *    prep time. The reducer's route CAS-check rejects any dispatch
      *    whose route has advanced under the user's tab switch.
      *
      * # Background-digest invariant
      *
-     * Only [SlimReconcileMode.DIGEST_FOCUS] digests trigger this sweep
-     * (the caller guards). BACKGROUND digests leave the watermark's
-     * `needsFullRecheck` flag in place; it is picked up by the next focus
-     * sweep or the next [reconcileFullAfterTransportReset] reconnect
-     * batch. This avoids a background /full storm on sessions the user is
-     * not viewing.
+     * Only DIGEST_FOCUS digests trigger this sweep (the caller guards).
+     * BACKGROUND digests leave the watermark's `needsFullRecheck` flag
+     * in place; it is picked up by the next focus sweep or the next
+     * [reconcileFullAfterTransportReset] reconnect batch. This avoids a
+     * background reload storm on sessions the user is not viewing.
      *
      * # bundleStamp capture
      *
@@ -1305,77 +1091,33 @@ class SessionSyncCoordinator(
      * [AppAction.SlimFullMessageReconciled] carries the CURRENT bundle
      * identity, which is what the reducer's bundle CAS validates.
      *
-     * # No reconciler / no repository
+     * # No repository
      *
-     * No-op when [slimFullReconciler] or [repository] is null (legacy /
-     * test constructions). The reconcileActiveSession call is wrapped in
-     * a CE-propagating try/catch so a transient failure logs and the flag
-     * stays set for the next sweep (matches SlimFullReconciler's own
-     * "stay flagged on failure" semantics).
+     * No-op when [repository] is null (legacy / test constructions).
      */
     internal fun requestDigestFullSweep(
         sessionId: String,
-        token: OpenCodeRepository.SlimCommitToken,
-        expectedRouteInstance: Long,
+        @Suppress("UNUSED_PARAMETER") token: OpenCodeRepository.SlimCommitToken,
+        @Suppress("UNUSED_PARAMETER") expectedRouteInstance: Long,
     ) {
-        val reconciler = slimFullReconciler ?: return
-        // Per-sid trailing debounce: cancel any in-flight pending sweep and
-        // schedule a fresh one. The leading-edge digest's token + route
-        // instance REPLACE the prior pending sweep's (the trailing digest
-        // is the most-recent view).
-        digestFullSweepJobs[sessionId]?.cancel()
-        digestFullSweepJobs[sessionId] = scope.launch {
-            delay(DIGEST_FULL_SWEEP_DEBOUNCE_MS)
-            digestFullSweepJobs.remove(sessionId)
-            // bundleStamp captured AT SWEEP time (post-delay) so a bundle
-            // rotation during the debounce window is reflected.
-            val bundle = repository?.currentClientBundle()
-            val bundleStamp = if (bundle != null) {
-                BundleStamp(bundle.generation, bundle.endpointFp)
-            } else {
-                BundleStamp(0L, "")
-            }
-            val context = SlimFullReconciler.FullReconcileContext(
-                expectedRouteInstance = expectedRouteInstance,
-                bundleStamp = bundleStamp,
-            )
-            try {
-                val outcome = reconciler.reconcileActiveSession(
-                    sessionId = sessionId,
-                    token = token,
-                    context = context,
-                )
-                if (outcome is SlimFullReconciler.BatchOutcome.Stale) {
-                    DebugLog.i(
-                        tag,
-                        "digest full sweep sid=$sessionId stale token — flag preserved for next sweep",
-                    )
-                }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                DebugLog.w(tag, "digest full sweep sid=$sessionId failed: ${e.message}")
-            }
-        }
+        // lite-v2-dev (plan §4.2/§4.5): digest → skeleton reload（权威窗口 diff）。
+        // 旧的 SlimFullReconciler.reconcileActiveSession 单条 /full 路径退役。
+        // legacy/test 构造（skeletonReloadCoordinator == null）下 no-op。
+        skeletonReloadCoordinator?.onDigestChange(sessionId)
     }
 
     /**
      * C2 CRITICAL (server.connected / resync → reconnect R1): the SINGLE
-     * wiring point for reconnecting `/full` reconciliation after a transport
-     * reset. Called by [SessionStreamingService.onResync] BEFORE
-     * [performSlimResync] so the watermark reset + per-message R2 fan-out
-     * (Lane R's [SlimFullReconciler.reconcileReconnect]) land ahead of the
-     * Stage-A metadata + /since reconcile.
+     * wiring point for reconnecting after a transport reset. Called by
+     * [SessionStreamingService.onResync] BEFORE [performSlimResync] so
+     * the watermark reset lands ahead of the Stage-A metadata + /since
+     * reconcile.
      *
      * # Single wiring point (anti-double-reset)
      *
      * This is the ONLY server.connected-path call site. Do NOT add a
      * parallel call from ServiceSseConnectionOwner's first-frame handler
-     * or from [handleEvent]'s server.connected branch — a second
-     * [SlimFullReconciler.reconcileReconnect] would run
-     * [OpenCodeRepository.clearWatermarksForReconnect] a second time (the
-     * second call returns emptyMap, but the per-message work fan-out would
-     * race the first).
+     * or from [handleEvent]'s server.connected branch.
      *
      * # Token + context capture
      *
@@ -1398,64 +1140,30 @@ class SessionSyncCoordinator(
      * concurrently on different lanes (reconnect R1 = per-message /full;
      * performSlimResync = Stage-A metadata + /since).
      *
-     * # No reconciler / no repository
+     * # No repository
      *
-     * No-op when [slimFullReconciler] or [repository] is null (legacy /
-     * test constructions).
+     * No-op when [repository] is null (legacy / test constructions).
      */
     internal fun reconcileFullAfterTransportReset(
         isStillCurrent: () -> Boolean,
     ) {
-        val reconciler = slimFullReconciler ?: return
-        val repo = repository ?: return
-        scope.launch {
-            // Gate 1: transport currency (onResync's view of the same
-            // transport generation). A false here means a newer transport
-            // superseded this resync trigger — abort cleanly.
-            if (!isStillCurrent()) return@launch
-            // ONE token captured at workflow entry (the reconnect is a
-            // single workflow — no per-message recapture).
-            val token = repo.captureSlimCommitToken()
-            // Gate 2: token currency — incarnation not rotated between the
-            // transport gate above and the token capture.
-            if (!repo.isSlimCommitTokenCurrent(token)) return@launch
-            // Capture the current route instance (0L when no chat tab open)
-            // + the live bundle stamp → FullReconcileContext. Threading
-            // these UNCHANGED across the entire fetch is what enables the
-            // reducer's route + bundle CAS to reject stale dispatches.
-            val currentSid = slices.chat.value.currentSessionId
-            val routeInstance = currentSid?.let { slices.routeInstanceFor(it) } ?: 0L
-            val bundle = repo.currentClientBundle()
-            val bundleStamp = if (bundle != null) {
-                BundleStamp(bundle.generation, bundle.endpointFp)
-            } else {
-                BundleStamp(0L, "")
+        // lite-v2-dev (plan §4.2/§2.2): server.connected / resync → skeleton
+        // reload（权威窗口 diff，limit=200 全量收敛）。旧的
+        // SlimFullReconciler.reconcileReconnect 单条 /full 路径退役。
+        val skeleton = skeletonReloadCoordinator
+        if (skeleton != null) {
+            scope.launch {
+                // Gate 1: transport currency (onResync's view of the same
+                // transport generation). A false here means a newer transport
+                // superseded this resync trigger — abort cleanly.
+                if (!isStillCurrent()) return@launch
+                val currentSid = slices.chat.value.currentSessionId ?: return@launch
+                skeleton.requestReload(currentSid, 200)
             }
-            val context = SlimFullReconciler.FullReconcileContext(
-                expectedRouteInstance = routeInstance,
-                bundleStamp = bundleStamp,
-            )
-            try {
-                // reconcileReconnect internally calls
-                // clearWatermarksForReconnect(token) — token-guarded,
-                // TOCTOU-safe (Lane R rev-b-fix M3). Per-message work
-                // fans out under DEFAULT_RECONNECT_CONCURRENCY (=8).
-                val outcome = reconciler.reconcileReconnect(
-                    context = context,
-                    token = token,
-                )
-                if (outcome is SlimFullReconciler.BatchOutcome.Stale) {
-                    DebugLog.i(
-                        tag,
-                        "reconnect full sweep stale token — flags preserved for next sweep",
-                    )
-                }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                DebugLog.w(tag, "reconnect full sweep failed: ${e.message}")
-            }
+            return
         }
+        // legacy/test 构造（无 skeletonReloadCoordinator）下 no-op。
+        return
     }
 
     /**
@@ -1489,10 +1197,48 @@ class SessionSyncCoordinator(
     // companion as the single source of truth.
     override val stripeCount: Int get() = STRIPES
 
-    override fun tryEmitEffect(effect: ControllerEffect): Boolean = effects.tryEmitEffect(effect)
-    override suspend fun emitEffect(effect: ControllerEffect) = effects.emitEffect(effect)
-    override fun tryEmitUiEvent(event: UiEvent): Boolean = effects.tryEmitUiEvent(event)
-    override suspend fun emitUiEvent(event: UiEvent) = effects.emitUiEvent(event)
+    fun tryEmitEffect(effect: ControllerEffect): Boolean = effects.tryEmitEffect(effect)
+    suspend fun emitEffect(effect: ControllerEffect) = effects.emitEffect(effect)
+    fun tryEmitUiEvent(event: UiEvent): Boolean = effects.tryEmitUiEvent(event)
+    suspend fun emitUiEvent(event: UiEvent) = effects.emitUiEvent(event)
+
+    /**
+     * §critical-eviction-delivery: best-effort reliable delivery for CRITICAL
+     * effects whose loss would corrupt state (e.g. [ControllerEffect.EvictSession],
+     * [ControllerEffect.RefreshSessions] from the archived-restore branch).
+     *
+     * # Why not a plain [tryEmitEffect]
+     *
+     * The synchronous [tryEmitEffect] is preferred (preserves FIFO order across
+     * a multi-emit burst) — but it FAILS when the effect buffer is full,
+     * silently dropping the effect. A dropped [ControllerEffect.EvictSession]
+     * leaves a stale session row + window cache that corrupts state.
+     *
+     * # Strategy: tryEmit then fallback to a suspending emit
+     *
+     * If [tryEmitEffect] fails (buffer full), a suspending [emitEffect] is
+     * [launched][scope.launch] on [scope] so the effect is queued as soon as a
+     * slot frees up. This is best-effort: the launched block calls suspending
+     * [emitEffect] which BLOCKS on a full buffer (does not fail), but:
+     * - If [scope] is cancelled, the coroutine never executes (effect lost).
+     * - The effect bus is SharedFlow with replay=0; emit succeeds even with
+     *   no active collector, but the event is not retained for future subscribers.
+     * - A delayed effect queued during buffer pressure may be consumed after
+     *   a host switch; EvictSession carries serverGroupFp for isolation at the
+     *   handler (AppCore.dispatchHostEffect checks group fp before evicting).
+     *   tokenStreamCoordinator.close(sid) is NOT group-isolated — pre-existing
+     *   limitation, not introduced by lite-v2.
+     * - [scope] is a process-level SupervisorJob; host switch does NOT cancel it.
+     *
+     * In practice, buffer-full is rare (256 slots) and scope cancellation means
+     * coordinator teardown; the next cold start / resync rebuilds session state.
+     * There is no direct reducer action for EvictSession to bypass the bus.
+     */
+    private fun emitCriticalEffect(scope: CoroutineScope, effect: ControllerEffect) {
+        if (!effects.tryEmitEffect(effect)) {
+            scope.launch { effects.emitEffect(effect) }
+        }
+    }
 
     // ── §R18 Phase 3 Wave 1 (P1-9): multi-workdir pending questions fan-out ──
 
@@ -1534,15 +1280,24 @@ class SessionSyncCoordinator(
     }
 
     private fun launchLatestQuestionReconcile(repository: OpenCodeRepository, generation: Long) {
-        val command = slimQuestionLoader.planLoad(OpenCodeSlimQuestionRepositoryPort(repository))
-        if (command is SlimQuestionLoadCommand.None) {
-            finishQuestionReconcile()
-            return
-        }
+        // lite-v2-dev: SlimQuestionLoader retired; inline the question fan-out.
+        // Fetch questions for current + recent workdirs, merge into the slice.
         scope.launch {
             try {
-                slimQuestionLoader.execute(command) {
-                    generation == questionReconcileGeneration
+                val currentWd = settingsManager.currentWorkdir
+                val recentWds = settingsManager.getRecentWorkdirs(currentServerGroupFp())
+                val allDirs = (recentWds + listOfNotNull(currentWd))
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                val allQuestions = mutableListOf<QuestionRequest>()
+                for (dir in allDirs) {
+                    repository.getPendingQuestions(dir)
+                        .onSuccess { allQuestions += it }
+                }
+                if (generation == questionReconcileGeneration) {
+                    slices.mutateSessionList { state ->
+                        state.copy(pendingQuestions = allQuestions)
+                    }
                 }
             } finally {
                 finishQuestionReconcile()
@@ -1563,23 +1318,23 @@ class SessionSyncCoordinator(
     }
 
     /**
-     * P5: the legacy fan-out + slim single-shot bodies MOVED to
-     * [SlimQuestionLoader] ([executeLegacy] / [executeSlim]). The private
-     * `loadPendingQuestionsSlim` was removed (not F5). Timing invariants
-     * preserved: mode selection / workdir computation / logging / empty-set
-     * early-return are synchronous in `planLoad`; `startIds` capture +
-     * slim token capture happen inside the launched `execute`.
+     * P5: the legacy fan-out + slim single-shot bodies were extracted
+     * into a separate loader. The private `loadPendingQuestionsSlim`
+     * was removed (not F5). Timing invariants preserved: mode selection /
+     * workdir computation / logging / empty-set early-return are synchronous
+     * in `planLoad`; `startIds` capture + slim token capture happen inside
+     * the launched `execute`.
      */
 
     /**
      * Task 12 (slimapi v1 §2 / §6.1 + §G2 — T12-C2): folds a decoded
      * `session.digest.lastError` three-state value into the canonical
      * [SessionListState.sessionErrorsById] map. Called from
-     * [slimSessionReconciler.reconcileDigest] INSIDE T11's per-sid stripe
+     * the reconcileDigest path INSIDE T11's per-sid stripe
      * (round-2 I1 fix) so the fold serializes against session.error map
      * writes + the reconcile body for the same sid.
      *
-     * P4-B: the body MOVED to [SlimSessionReconciler.applyDigestLastErrorToBanner];
+     * P4-B: the body was moved to the session reconciler layer;
      * the kdoc is retained here as a cross-reference (the slim stripe
      * serialization contract is documented above).
      */
@@ -1588,167 +1343,11 @@ class SessionSyncCoordinator(
      * Cluster A / Phase 2 → Task 11 (slimapi v1 §3 / §4 reconcile lane):
      * `session.digest` frame handler.
      *
-     * P4-C: the body MOVED to [SlimSessionReconciler.prepareSessionDigest]
-     * (§6.3 — synchronous digest-event preparation: parse + status/archive/
-     * timestamp + mode selection + token capture before first suspend +
-     * [SlimDigestReconcileRequest] construction; returns a [SlimDigestDecision];
-     * does NOT launch). SSC's [handleSessionDigest] override is now the thin
-     * §6.3 decision interpreter: `Done` → no-op; `Reconcile` → SSC launches
-     * `{ reconciler.reconcileDigest(request);
-     * executeSlimReconcileCommand(attempt.outcome.command);
-     * reconciler.applyReconcileResult(attempt) }`. The `applySseSideEffects(
-     * ReportNonFatal)` calls became the reconciler's injected `reportNonFatal`
-     * lambda (§5 audit). The kdoc is retained here as a cross-reference (the
-     * NON-COERCING-Json / CE-discipline / workflow-serialization contracts are
-     * documented in [SlimSessionReconciler.prepareSessionDigest]).
+     * lite-v2-dev: slim reconcileSession / reconcileSessionExposed RETIRED.
+     * The digest path now routes to SkeletonReloadCoordinator directly.
      */
 
-    /**
-     * T11 round-3 (oracle workflow-serialization): the digest-driven
-     * per-sid workflow entry. Acquires [stripeFor] ONCE for the WHOLE
-     * workflow (reducer apply + reconcile body) so competing digest /
-     * reconcile triggers for the same sid serialize end-to-end.
-     *
-     * P4-B: the body MOVED to [SlimSessionReconciler.reconcileDigest] (§6.4
-     * EXACT — propagates the command from `reconcileSessionLocked`, does NOT
-     * flatten to RefreshRow so the BACKGROUND `LaunchSlimResync` survives).
-     * SSC's [handleSessionDigestImpl] builds a [SlimDigestReconcileRequest]
-     * and launches `{ reconciler.reconcileDigest(request);
-     * executeSlimReconcileCommand(attempt.outcome.command);
-     * reconciler.applyReconcileResult(attempt) }`. The kdoc is retained here
-     * as a cross-reference (the workflow-serialization + network IO +
-     * CE-discipline contracts are documented above).
-     */
-
-    /**
-     * Task 11 round-2 (slimapi v1 §3 / §4 — per-session reconciler): the
-     * SINGLE entry point that serves BOTH digest-driven updates AND resync
-     * catch-up. Branch logic per [ReconcileMode]'s matrix (oracle I4).
-     *
-     * # P4-B façade (§6.2)
-     *
-     * The reconcile core now lives in [slimSessionReconciler]. This is the
-     * frozen thin façade: map mode → reconciler → execute command → apply →
-     * map result. **Ordering preserved**: command execution happens BEFORE
-     * `applyReconcileResult` (matches the pre-extraction flow where the
-     * BACKGROUND launch happened inside `reconcileSessionLocked` before the
-     * caller applied the result).
-     *
-     * The façade signature / visibility / params / return type are FROZEN
-     * (F5 — `handleEvent`, `performResyncCatchUp`, `performSlimResync`, and
-     * the characterization tests all call this).
-     *
-     * # Idle/non-slim guard
-     *
-     * When [repository] is null OR [supportsWatermarkResync] is false, the
-     * reconciler returns [SlimReconcileResult.NoRepository], which maps to
-     * [ReconcileResult.NoRepository] here. The legacy non-slim path is
-     * byte-for-byte unchanged (digest is recognized but not reconciled).
-     *
-     * @param sid the session id to reconcile.
-     * @param mode the calling context — see [ReconcileMode] for the
-     *   branch matrix.
-     */
-    internal suspend fun reconcileSession(sid: String, mode: ReconcileMode): ReconcileResult {
-        val attempt = slimSessionReconciler.reconcileSession(sid = sid, mode = mode.toSlimMode())
-        // Preserve old ordering: launch was inside reconcileSessionLocked,
-        // before applyReconcileResult. The command is executed here (SSC is
-        // the SOLE executor of performSlimResync); the reconciler never
-        // launches a coroutine.
-        executeSlimReconcileCommand(attempt.outcome.command)
-        return slimSessionReconciler.applyReconcileResult(attempt).toFacadeResult()
-    }
-
-    /**
-     * C-D3 v2 §1.8: shared reconcile body that threads an externally-
-     * supplied token through the stripe + reconcile body. Used by:
-     *  - [slimSessionReconciler.reconcileSession] (public entry, captures fresh).
-     *  - [performResyncCatchUp] (uses the orchestrator's entry token,
-     *    no recapture).
-     *
-     * P4-B: the body MOVED to [SlimSessionReconciler.reconcileSessionWithToken]
-     * (returns [SlimReconcileOutcome] propagating the locked outcome
-     * unchanged; SSC's `performResyncCatchUp` now calls the reconciler +
-     * `executeSlimReconcileCommand(outcome.command)` + applies outside the
-     * timeout block).
-     *
-     * The resync path MUST call this (NOT public [reconcileSession]) so
-     * the orchestrator's single-entry-token invariant holds.
-     */
-
-    /**
-     * Test-visible alias for [reconcileSession] — same semantics, named to
-     * make it obvious in stack traces + tests that this is the entry under
-     * test. Production callers ([handleSessionDigest],
-     * [performResyncCatchUp], [performSlimResync]) go through
-     * [reconcileSession] directly.
-     */
-    internal suspend fun reconcileSessionExposed(sid: String, mode: ReconcileMode): ReconcileResult =
-        reconcileSession(sid, mode)
-
-    /**
-     * Task 11: the reconciler body, called under the per-sid stripe lock.
-     * Reads the latest [SlimSessionState] (the reducer / a prior reconcile
-     * may have mutated it while this dispatch waited for the lock),
-     * probes, and dispatches to the appropriate T6 primitive via the
-     * repository's public mutators (which hold the repo-level atomic
-     * boundary).
-     *
-     * P4-B: the body MOVED to [SlimSessionReconciler.reconcileSessionLocked]
-     * (THE crossing point — the BACKGROUND `!mode.mayFetch()` branch returns
-     * [SlimReconcileCommand.LaunchSlimResync]`(setOf(sid), isManual=false)`
-     * instead of `scope.launch { performSlimResync(...) }`; NO direct launch,
-     * NO currentEpoch, NO `performSlimResync` symbol in the reconciler).
-     *
-     * Branch matrix per [ReconcileMode] (oracle I4).
-     */
-    /**
-     * Task 11 round-2: shared fold for both fetch paths (/since and
-     * cursor-drain). On success: merge into chat slice (if current
-     * session) + return Reconciled. On failure: keep dirty + return
-     * Failure. The watermark advancement + dirty clear happens INSIDE
-     * `bumpSlimBookmarkFromItems` (the repo atomic boundary with dirty
-     * re-evaluation) — the coordinator doesn't double-clear here.
-     *
-     * P4-B: the body MOVED to [SlimSessionReconciler.foldRestFetch] (repo
-     * port; returns [SlimReconcileResult]). No SSC caller remains.
-     */
-
-    /**
-     * Task 11: fold a [ReconcileResult] into UI side effects that can't
-     * live inside the repository's pure state-derive layer. Called by
-     * [handleSessionDigest] after [reconcileSession] returns.
-     *
-     * P4-B: the body MOVED to [SlimSessionReconciler.applyReconcileResult]
-     * (repo port + store port + dispatcher; accepts result/token/mode;
-     * does NOT execute commands) + [SlimSessionReconciler.applyCurrentReconcileResult]
-     * (repo port + store port + SlimEffectsPort + supportsWatermarkResync +
-     * currentServerGroupFp). The `resultSid` helper was REMOVED (use
-     * [SlimReconcileResult.sid], which is now an abstract property on the
-     * sealed hierarchy). The `snapshot: ResyncUiSnapshot?` parameter was
-     * dropped (it was unused since T2 Phase 3 — the OUTER focus-snapshot
-     * gate is gone; the chat-merge self-gates inside applyCurrentReconcileResult).
-     *
-     *  - [ReconcileResult.MarkDeleted] → drop the session from the open-tabs
-     *    list + dispatch [AppAction.SessionArchived] so the row vanishes.
-     *    (The repository's `markSlimSessionDeleted` only flips the
-     *    `deleted` flag on the slim SSE state; the UI list mutation lives
-     *    in the reconciler.)
-     *  - [ReconcileResult.ClearLocal] → wipe the chat slice's message
-     *    cache for [ReconcileResult.ClearLocal.sid] if it's the current
-     *    session (the reducer / a prior merge may have left stale rows).
-     *  - Other variants → state already updated inside the reconciler;
-     *    no additional side effects.
-     */
     data class ResyncUiSnapshot(val currentSessionId: String?)
-
-    /**
-     * C-D3 v2 §1.10: the current-reincarnation body. Runs inside the
-     * [commitIfSlimTokenCurrent] atomic region — every branch stays
-     * synchronous (no network, no delay, no blocking IO).
-     *
-     * P4-B: the body MOVED to [SlimSessionReconciler.applyCurrentReconcileResult].
-     */
 
     /**
      * T13 — fold a slim on-demand fan-out summary into coordinator side
@@ -1784,8 +1383,9 @@ class SessionSyncCoordinator(
         val fp = currentServerGroupFp()
         // T13-C3: missingSids → delete-session effect per sid. 404 and
         // fake-idle (T13-C5) both land here (folded by [foldStatusOutcomes]).
+        // §critical-eviction-delivery: 关键驱逐不可丢弃 — 走可靠发送路径。
         for (sid in summary.missingSids) {
-            effects.tryEmitEffect(ControllerEffect.EvictSession(fp, sid))
+            emitCriticalEffect(scope, ControllerEffect.EvictSession(fp, sid))
         }
         // T13-C4: retryableCount > 0 → ask the poller to schedule backoff;
         // retryableCount == 0 → ask the poller to reset backoff to base
@@ -1798,511 +1398,11 @@ class SessionSyncCoordinator(
         }
     }
 
-    /**
-     * Task 11 (slimapi v1 §3 / §4 resync catch-up): orchestrate a
-     * catch-up sweep across the union of (catchUpSet) per the contract §3
-     * catch-up-set definition. Each sid is reconciled via
-     * [reconcileSession] (probe + dispatch) with [ReconcileMode.RESYNC].
-     *
-     * # Concurrency model (T11-C5)
-     *
-     *  - [supervisorScope]: a single slow / failing sid does NOT propagate
-     *    its exception to the sweep (other sids still complete). A sid
-     *    throwing inside its [withTimeout] is caught here as a
-     *    [TimeoutCancellationException] (a CE subclass) → the per-sid job
-     *    completes-with-exception silently + the per-sid outcome is
-     *    recorded as [ReconcileResult.TimedOut] for diagnostics.
-     *  - [resyncConcurrencySemaphore] (Semaphore(4)): bounds the global
-     *    in-flight REST fetch count so a 50-session sweep doesn't
-     *    stampede the sidecar. Per the contract's performance hint
-     *    ("可加客户端并发上限（如 4）").
-     *  - **per-sid deadline** ([withTimeout]`[perSidDeadlineMs]`):
-     *    prevents ONE slow / hung sid from blocking the entire batch.
-     *
-     * # T11 round-2 (oracle D4 — timeout ordering)
-     *
-     * The ordering is `semaphore.withPermit { withTimeout { reconcile } }`
-     * (NOT `withTimeout { semaphore.withPermit { ... } }`). The deadline
-     * starts when the WORK starts (after the permit is acquired), not
-     * when the sid is QUEUED on the semaphore. Otherwise a sid that
-     * waited 5s for a permit would have only 3s of work budget left —
-     * premature timeouts under sustained load.
-     *
-     * # Idempotency (T11-C6)
-     *
-     * Each per-sid reconcile goes through [reconcileSession] → [stripeFor],
-     * so a digest arriving mid-sweep for a sid already being reconciled
-     * serializes (no double-apply).
-     *
-     * # CE discipline
-     *
-     * [supervisorScope] + [withTimeout] propagate CE correctly. A
-     * [scope] cancel mid-sweep cancels every per-sid job; partial state
-     * mutations are absent (each sid's state mutation is atomic inside
-     * the repository's [slimStateLock] boundary).
-     *
-     * @param catchUpSet the pre-computed catch-up set (focus ∪ localAll ∪
-     *   dirty). Caller (typically [performSlimResync]) is responsible for
-     *   building it so the snapshot timing is well-defined.
-     * @param perSidDeadlineMs per-sid timeout. Defaults to
-     *   [defaultResyncPerSidDeadlineMs]; tests pass a shorter value.
-     * @return per-sid outcomes (oracle D4 — observable timeout/failure
-     *   for diagnostics + dirty-preservation verification).
-     */
-    suspend fun performResyncCatchUp(
-        catchUpSet: Set<String>,
-        perSidDeadlineMs: Long = defaultResyncPerSidDeadlineMs,
-        token: OpenCodeRepository.SlimCommitToken? = null,
-        isStillCurrent: () -> Boolean = { true },
-        snapshot: ResyncUiSnapshot? = null,
-    ): Map<String, ReconcileResult> {
-        // UI state is Main-confined: capture it before entering the worker lane.
-        val resyncUiSnapshot = snapshot ?: ResyncUiSnapshot(slices.chat.value.currentSessionId)
-        return withContext(reconcileDispatcher) {
-            performResyncCatchUpOnWorker(
-                catchUpSet,
-                perSidDeadlineMs,
-                token,
-                isStillCurrent,
-                resyncUiSnapshot,
-            )
-        }
-    }
-
-    private suspend fun performResyncCatchUpOnWorker(
-        catchUpSet: Set<String>,
-        perSidDeadlineMs: Long = defaultResyncPerSidDeadlineMs,
-        /**
-         * C-D3 v2 §1.11: orchestrator-supplied entry token. The whole
-         * sweep uses THIS token; NO recapture inside per-sid children.
-         * Defaults to a fresh capture for backwards-compat with the
-         * public surface (callers that don't have one handy still get
-         * per-call current-token semantics).
-         */
-        token: OpenCodeRepository.SlimCommitToken? = null,
-        /**
-         * C-D3 v2 §1.11: orchestrator-supplied "still current" predicate
-         * (e.g. the SSE identity is still the live transport). Combined
-         * with the token check inside.
-         */
-        isStillCurrent: () -> Boolean = { true },
-        resyncUiSnapshot: ResyncUiSnapshot,
-    ): Map<String, ReconcileResult> {
-        val repo = repository ?: return emptyMap()
-        if (!supportsWatermarkResync() || catchUpSet.isEmpty()) return emptyMap()
-
-        // C-D3 v2 §1.11: prefer the orchestrator-supplied token; fall
-        // back to a fresh capture for the legacy single-call surface.
-        val entryToken = token ?: repo.captureSlimCommitToken()
-
-        fun current(): Boolean =
-            isStillCurrent() && repo.isSlimCommitTokenCurrent(entryToken)
-
-        if (!current()) {
-            // Stale at the gate: every sid is Stale (NO probe / fetch
-            // attempt — the orchestrator's token is already superseded).
-            return catchUpSet.associateWith { ReconcileResult.Stale(it) }
-        }
-
-        DebugLog.i(
-            "Sync",
-            "performResyncCatchUp union=${catchUpSet.size} deadlineMs=$perSidDeadlineMs",
-        )
-        val outcomes = java.util.concurrent.ConcurrentHashMap<String, ReconcileResult>()
-        // supervisorScope: a per-sid failure / timeout does NOT propagate
-        // to the sweep. Each per-sid launch is independent.
-        supervisorScope {
-            for (sid in catchUpSet) {
-                // Capture the route incarnation before the per-sid REST work;
-                // a late A result must not be stamped with a newer A token
-                // after an A→B→A navigation cycle.
-                val routeInstance = slices.routeInstanceFor(sid)
-                launch {
-                    // D4 timeout ordering: acquire the permit FIRST, then
-                    // start the deadline. A sid queued behind others does
-                    // not "use up" its deadline while waiting.
-                    resyncConcurrencySemaphore.withPermit {
-                        // P4-B §6.5: per-sid reconcile now routes through
-                        // the reconciler. The outcome carries an optional
-                        // command (RESYNC currently never produces one, but
-                        // the protocol is exhaustive + future-safe).
-                        val outcome = try {
-                            withTimeout(perSidDeadlineMs) {
-                                // C-D3 v2 §1.11: per-sid reconcile uses
-                                // the SAME entry token (NO recapture).
-                                slimSessionReconciler.reconcileSessionWithToken(
-                                    sid = sid,
-                                    mode = SlimReconcileMode.RESYNC,
-                                    token = entryToken,
-                                    isStillCurrent = isStillCurrent,
-                                )
-                            }
-                        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-                            // Per-sid deadline exceeded.
-                            if (!current()) {
-                                SlimReconcileOutcome(SlimReconcileResult.Stale(sid))
-                            } else {
-                                DebugLog.w(tag, "reconcileSession sid=$sid RESYNC timed out after ${perSidDeadlineMs}ms")
-                                SlimReconcileOutcome(SlimReconcileResult.TimedOut(sid))
-                            }
-                        } catch (e: kotlinx.coroutines.CancellationException) {
-                            // §stale-crash-fix (2026-07-26): CE must propagate —
-                            // never swallow scope cancellation. The broadened
-                            // Exception catch below would otherwise absorb it,
-                            // breaking structured concurrency.
-                            throw e
-                        } catch (e: OpenCodeRepository.StaleSlimCommitException) {
-                            // §stale-crash-fix (2026-07-26): the repository
-                            // incarnation rotated mid-reconcile (host reconfigure
-                            // / cold-start race). The entry token is no longer
-                            // current, so the results would be meaningless
-                            // anyway. Return Stale (same as the at-gate check)
-                            // instead of letting the throw escape the per-sid
-                            // launch → supervisorScope → uncaught on
-                            // Dispatchers.Main.immediate → app crash. This was
-                            // the root cause of the "打开应用时闪退" crash:
-                            // `reconcileSessionWithToken` → `probeLatest(token)`
-                            // → `requireSlimTokenCurrent` throws directly, and
-                            // the old catch only handled TimeoutCancellation.
-                            DebugLog.d(tag, "reconcileSession sid=$sid RESYNC stale token — incarnation rotated")
-                            SlimReconcileOutcome(SlimReconcileResult.Stale(sid))
-                        } catch (e: Exception) {
-                            // §stale-crash-fix: defense-in-depth — ANY other
-                            // exception from the reconcile path (network, parse,
-                            // unexpected runtime) must not escape the per-sid
-                            // launch. Log + return Failed so the sweep
-                            // completes cleanly. CE is re-thrown above.
-                            DebugLog.w(tag, "reconcileSession sid=$sid RESYNC failed: ${e::class.simpleName} ${e.message}")
-                            SlimReconcileOutcome(SlimReconcileResult.Failure(sid))
-                        }
-                        // §6.5: execute the command (if any) AFTER the
-                        // timeout block. RESYNC never produces a command,
-                        // but interpreting it makes propagation exhaustive.
-                        executeSlimReconcileCommand(outcome.command)
-                        // Apply outside the timeout (preserving current
-                        // timeout boundaries). Main switch/commit is
-                        // deliberately outside the network timeout and
-                        // outside any worker lock.
-                        val applied = if (
-                            outcome.result is SlimReconcileResult.TimedOut ||
-                            outcome.result is SlimReconcileResult.Stale
-                        ) {
-                            outcome.result
-                        } else {
-                            slimSessionReconciler.applyReconcileResult(
-                                result = outcome.result,
-                                token = entryToken,
-                                mode = SlimReconcileMode.RESYNC,
-                                expectedRouteInstance = routeInstance,
-                            )
-                        }
-                        outcomes[sid] = applied.toFacadeResult()
-                    }
-                }
-            }
-        }
-        return outcomes.toMap()
-    }
-
-    /**
-     * Task 11 round-2 (oracle I1 — Coordinator-owned `performSlimResync`
-     * orchestrator): the SINGLE method [SessionStreamingService.onResync]
-     * calls. Replaces the round-1 direct `repository.coldStartSlimSync`
-     * invocation (which produced a snapshot but did NOT run the per-sid
-     * reconcile sweep, leaving [performResyncCatchUp] as dead code).
-     *
-     * # Ordering (oracle I1)
-     *
-     *  1. **Capture** the current focus + pre-refresh known SIDs + dirty
-     *     SIDs. The pre-refresh snapshot is the fallback catch-up set if
-     *     the metadata refresh fails.
-     *  2. **Metadata refresh**: `repository.coldStartSlimSync(openSessionId
-     *     = null, directories = ...)` — metadata-only (NO open-session
-     *     message fetch; the per-sid reconcile handles that uniformly).
-     *  3. **Fold** the snapshot via [applySlimColdStartSnapshot] (D2
-     *     nullable semantics — null pieces keep prior; empty replaces).
-     *  4. **Build catch-up set** = pre-refresh SIDs ∪ refreshed session
-     *     list ∪ SlimSseState keys ∪ dirty.
-     *  5. **[performResyncCatchUp]** with [ReconcileMode.RESYNC] for EVERY
-     *     sid in the union.
-     *
-     * If the metadata refresh fails, the catch-up still runs against the
-     * pre-refresh known set (oracle I1: "If metadata refresh fails, still
-     * catch up the pre-refresh known set").
-     *
-     * # Open-session message fetch policy
-     *
-     * `openSessionId = null` is passed to `coldStartSlimSync` so the
-     * metadata refresh does NOT fetch the open session's messages. The
-     * per-sid reconcile handles that uniformly (watermark-branched:
-     * `/since/{ts}` if localAppliedUpdatedAt set, else bounded cursor
-     * drain). This avoids a double-fetch race between cold-start snapshot
-     * apply and the reconcile sweep.
-     *
-     * # CE discipline
-     *
-     * `coldStartSlimSync` uses [runSuspendCatching]; CE propagates. The
-     * supervisorScope inside [performResyncCatchUp] isolates per-sid
-     * failures. A scope cancel mid-orchestration terminates cleanly
-     * (state mutations are atomic at the repo boundary).
-     *
-     * @param directories the workdirs to refresh (current + recent); null
-     *   = let the sidecar decide scope.
-     * @param sessionsDirty sessions explicitly marked dirty by the SSE
-     *   gap overlay (e.g. the prior current session at disconnect time).
-     * @return per-sid outcomes from the catch-up sweep (empty if the
-     *   sweep was skipped — no repo / non-slim / empty catch-up set).
-     */
-    suspend fun performSlimResync(
-        directories: List<String>? = null,
-        sessionsDirty: Set<String> = emptySet(),
-        perSidDeadlineMs: Long = defaultResyncPerSidDeadlineMs,
-        isStillCurrent: () -> Boolean = { true },
-        isManual: Boolean = false,
-        bypassIntervalCheck: Boolean = false,
-    ): Map<String, ReconcileResult> {
-        val repo = repository ?: return emptyMap()
-        if (!supportsWatermarkResync()) return emptyMap()
-
-        // Cadence guard: if the cadence declines (stale gen / too soon / in-flight),
-        // skip the sweep entirely (caller may still have the partial/single-flight
-        // fallback from maybeScheduleResync returning false).
-        if (!maybeScheduleResync(currentEpoch(), isManual, bypassIntervalCheck)) return emptyMap()
-
-        var hadFailure = true
-        try {
-            // C-D3 v2 §1.12: ONE entry token; NO recapture after this point.
-            val token = repo.captureSlimCommitToken()
-
-            fun current(): Boolean =
-                isStillCurrent() && repo.isSlimCommitTokenCurrent(token)
-
-            if (!current()) {
-                hadFailure = false
-                return emptyMap()
-            }
-
-            // ── Step 1: capture pre-refresh state ───────────────────────────
-            val resyncUiSnapshot = ResyncUiSnapshot(slices.chat.value.currentSessionId)
-            val focus = resyncUiSnapshot.currentSessionId
-            val preRefreshLocalAll = repo.snapshotSlimSseState().keys
-            val preRefreshSessions = slices.sessionList.value.sessions.map { it.id }.toSet()
-
-            // T11 round-3 (oracle I1 — dirty overlay wiring fix): the
-            // coordinator reads its OWN dirty overlay (`sseSyncState.sessionsDirty`)
-            // and unions it into the catch-up set. The Service-passed
-            // [sessionsDirty] param is ALSO unioned (caller-supplied extra
-            // dirty) but is no longer relied on as the sole dirty source —
-            // round-2 had Service pass `emptySet()` here which silently
-            // dropped every disconnected dirty sid. The coordinator owns the
-            // overlay; it must read it directly. (Service passing emptySet
-            // is now harmless.)
-            val overlayDirty = sseSyncState.sessionsDirty
-
-            // ── Step 2: metadata-only refresh (no open-session fetch) ───────
-            // §session-scope-narrow: union currentWorkdir into the snapshot dirs so the
-            // currently-viewed project is always in scope, even if addRecentWorkdir hasn't
-            // persisted it yet (race / migration gap).
-            val currentWd = settingsManager.currentWorkdir
-            val recentWorkdirs = settingsManager.getRecentWorkdirs(currentServerGroupFp())
-            val effectiveDirs = (recentWorkdirs + listOfNotNull(currentWd))
-                .filter { it.isNotBlank() }
-                .distinct()
-            val snapshotDirectories = if (effectiveDirs.isNotEmpty()) effectiveDirs else directories
-
-            val snapshotResult = repo.coldStartSlimSync(
-                openSessionId = null,
-                directories = snapshotDirectories,
-                token = token,
-            )
-            val snapshot = snapshotResult.getOrNull()
-
-            // C-D3 v2 §1.5/§1.12: a stale incarnation makes coldStartSlimSync
-            // fail with StaleSlimCommitException (NOT collapse to null). The
-            // outer Result.failure surface is identical to other transport
-            // failures from the caller's perspective, but the token recheck
-            // below catches it either way.
-            if (!current()) {
-                hadFailure = false
-                return emptyMap()
-            }
-
-            if (snapshot == null) {
-                DebugLog.w(
-                    tag,
-                    "performSlimResync metadata refresh failed: ${snapshotResult.exceptionOrNull()?.message} — " +
-                        "falling back to pre-refresh known set",
-                )
-                // O-C weak-network §4: mark connection state as stale since we are
-                // serving cached (pre-refresh) data.
-                slices.mutateConnection { it.copy(stale = true) }
-            } else {
-                // ── Step 3: fold snapshot under the same entry token ───────
-                if (!current()) {
-                    hadFailure = false
-                    return emptyMap()
-                }
-                // C-D3 v2 §3.6: token-gated snapshot fold. If the gate
-                // rejects, the snapshot is dropped and we abort the sweep
-                // (token superseded between cold-start commit and fold).
-                // §Stage-B §3.4: resync snapshot is authoritative — fetched
-                // messages are the final view, owned streaming parts cleared.
-                if (!applySlimColdStartSnapshot(snapshot, token, authoritative = true)) {
-                    hadFailure = false
-                    return emptyMap()
-                }
-                // O-C weak-network §4: refresh succeeded → clear stale flag.
-                slices.mutateConnection { it.copy(stale = false) }
-            }
-
-            if (!current()) {
-                hadFailure = false
-                return emptyMap()
-            }
-
-            // ── Step 4: build catch-up set (oracle I1 union, slimmed) ────────
-            // Slimmed catch-up: focus + dirty (overlay + caller-supplied).
-            //
-            // Pre-fix this ALSO unioned preRefreshLocalAll + preRefreshSessions
-            // + refreshedSessions + postRefreshLocalAll — i.e. ≈ ALL ~150
-            // sessions × ≤250 skeletons — which ran on Main.immediate and
-            // blocked the user's session switch (loadMessagesForEffect waits
-            // on this sweep). Those un-reconciled sessions are now left to
-            // the on-demand path: when the user actually switches to them,
-            // loadMessagesForEffect + the slim digest reconciliation corrects
-            // their state lazily. focus + dirty must stay here because:
-            //  - focus is the session the user is currently looking at (any
-            //    gap there is immediately visible);
-            //  - dirty marks sessions with a known SSE gap that the user
-            //    might switch to next.
-            //
-            // (refreshedSessions / postRefreshLocalAll are still computed
-            // below for the diagnostic DebugLog only — the size telemetry
-            // stays useful and is NOT what made the sweep slow; the per-sid
-            // reconcile in performResyncCatchUp was.)
-            val refreshedSessions = snapshot?.sessions?.map { it.id }?.toSet() ?: emptySet()
-            val postRefreshLocalAll = repo.snapshotSlimSseState().keys
-            val catchUp = buildSet {
-                focus?.let { add(it) }
-                addAll(overlayDirty)
-                addAll(sessionsDirty)
-            }
-            if (catchUp.isEmpty()) {
-                hadFailure = false
-                return emptyMap()
-            }
-            DebugLog.i(
-                "Sync",
-                "performSlimResync focus=$focus preRefreshLocal=${preRefreshLocalAll.size} " +
-                    "preRefreshSessions=${preRefreshSessions.size} refreshed=${refreshedSessions.size} " +
-                    "postRefreshLocal=${postRefreshLocalAll.size} overlayDirty=${overlayDirty.size} " +
-                    "callerDirty=${sessionsDirty.size} union=${catchUp.size} deadlineMs=$perSidDeadlineMs",
-            )
-
-            // ── Step 5: per-sid reconcile sweep using the SAME entry token ─
-            if (!current()) {
-                hadFailure = false
-                return emptyMap()
-            }
-            val result = performResyncCatchUp(
-                catchUpSet = catchUp,
-                perSidDeadlineMs = perSidDeadlineMs,
-                token = token,
-                isStillCurrent = isStillCurrent,
-                snapshot = resyncUiSnapshot,
-            )
-            hadFailure = false
-            return result
-        } finally {
-            finishResyncCadence(hadFailure)
-        }
-    }
-
-    /**
-     * Cluster A / Phase 2: merge [MessageWithParts] skeletons into the open
-     * chat slice by messageID (patch-if-found + insert-if-absent for messages;
-     * parts map overwritten per fetched id). Mirrors message.updated fold.
-     *
-     * T1b: routes through [AppAction.SlimMessagesMerged] → [mergeSlimMessages]
-     * (1:1 with the pre-T1b private mutateChat loop).
-     *
-     * §Stage-B §3.4: [authoritative] threads the splice/merge contract — see
-     * [mergeSlimMessages] + [isAuthoritativeSlimMerge].
-     *
-     * P4-B: the body MOVED to [SlimSessionReconciler.mergeSlimMessagesIntoChat]
-     * (internal — SSC's cold-start snapshot path delegates to
-     * `slimSessionReconciler.mergeSlimMessagesIntoChat(...)`; no duplicate impl).
-     */
-
-    /**
-     * §Stage-B §3.4 (grok MF-1 caller decision rule): decide whether a slim
-     * reconcile merge should be authoritative (fetched content wins, owned
-     * streaming parts cleared) or skeleton (owned streaming parts preserved).
-     *
-     * P4-B: the body MOVED to the file-level `isAuthoritativeSlimMerge(mode:
-     * SlimReconcileMode, ...)` in [SlimSessionReconciler.kt] (pure; the
-     * expression is unchanged — only the [mode] type changed from
-     * [ReconcileMode] to [SlimReconcileMode]). Pinned by the §8.4 policy
-     * tests (`SlimSessionReconcilerTest`).
-     */
-
-    /**
-     * Cluster A / Phase 2 (P2.4 / P2.5): fold a [SlimColdStartSnapshot] (from
-     * [OpenCodeRepository.coldStartSlimSync] — also the resync path) into the
-     * UI slices. Called by [cn.vectory.ocdroid.service.SessionStreamingService]
-     * after a successful cold-start / resync fetch. Failures are partial
-     * (null pieces — see T11 round-2 / oracle D2 below); null messages means
-     * no open-session fetch was requested.
-     *
-     * # T11 round-2 (oracle D2 — typed null/empty outcomes)
-     *
-     * The metadata pieces (`sessions` / `questions` / `permissions`) are
-     * NULLABLE on the snapshot:
-     *
-     *  - `null` → fetch FAILED. Keep the prior list (cannot tell "server
-     *    authoritative empty" from "server unreachable").
-     *  - `emptyList()` → fetch succeeded with no entries. REPLACE the prior
-     *    list with empty (the server's authoritative view is "nothing").
-     *  - non-empty → fetch succeeded; replace prior list.
-     *
-     * Pre-T11-round-2 the snapshot folded null→emptyList, which made it
-     * impossible to clear stale rows when the server genuinely returned an
-     * empty list. The nullable shape fixes this.
-     */
-    fun applySlimColdStartSnapshot(snapshot: SlimColdStartSnapshot): Boolean =
-        // P5 §2.2: thin F5 wrapper. The applier owns the slim-only guard +
-        // repository lookup + token capture + delegation to the token-aware
-        // overload. Returns true iff the snapshot landed (or was a valid
-        // no-op for null pieces / complete=false).
-        slimColdStartSnapshotApplier.apply(snapshot) is SlimSnapshotApplyResult.Applied
-
-    /**
-     * C-D3 v2 §3.6: token-aware cold-start snapshot fold. Returns `false`
-     * when the gate rejects (caller MUST abort the surrounding workflow
-     * — e.g. [performSlimResync] returns emptyMap). Returns `true` when
-     * the snapshot landed (or was a no-op for null pieces).
-     *
-     * P5 §2.2: thin F5 wrapper. The body MOVED to
-     * [SlimColdStartSnapshotApplier.apply] (token-aware overload). All
-     * slice + effect commits run inside ONE `commitIfTokenCurrent`
-     * atomic region. Message merging delegates ONLY to
-     * [SlimSessionReconciler.mergeSlimMessagesIntoChat] (no duplicate impl).
-     *
-     * §Stage-B §3.4: [authoritative] controls the messages-merge contract
-     * — default `false` (cold-start skeleton: preserve any in-flight token-
-     * stream owned parts). Resync / watchdog callers pass `true` (the
-     * snapshot's messages are the authoritative final view).
-     */
-    fun applySlimColdStartSnapshot(
-        snapshot: SlimColdStartSnapshot,
-        token: OpenCodeRepository.SlimCommitToken,
-        authoritative: Boolean = false,
-    ): Boolean =
-        slimColdStartSnapshotApplier.apply(
-            snapshot = snapshot,
-            token = token,
-            authoritative = authoritative,
-        ) is SlimSnapshotApplyResult.Applied
+    // ── lite-v2-dev (plan §4.1/§4.7): slim resync + snapshot methods RETIRED ──
+    // performResyncCatchUp / performResyncCatchUpOnWorker / performSlimResync /
+    // applySlimColdStartSnapshot (both overloads) — ALL delegated to deleted
+    // SlimSessionReconciler / SlimColdStartSnapshotApplier. The resync path
+    // now uses SkeletonReloadCoordinator.requestReload directly.
 
     companion object {
         /**
@@ -2315,10 +1415,9 @@ class SessionSyncCoordinator(
 
         /**
          * C2 CRITICAL: per-session debounce window for the digest → R1
-         * active sweep ([requestDigestFullSweep]). Multiple
-         * contentRevisions-bearing digests for the same session within
-         * this window coalesce into ONE [SlimFullReconciler.reconcileActiveSession]
-         * call. Frozen at 100ms (matches DELTA_COALESCE_MS — the
+         * active sweep ([requestDigestFullSweep]). Multiple digests for
+         * the same session within this window coalesce into ONE skeleton
+         * reload call. Frozen at 100ms (matches DELTA_COALESCE_MS — the
          * sidecar's burst cadence is the same order of magnitude as the
          * token-stream delta cadence).
          */

@@ -115,6 +115,7 @@ class B2RouteWiringSequenceTest {
         override fun supportsDurableSessionErrorBanner(): Boolean = false
         override fun isFlushActiveForPart(partId: String): Boolean = false
         override fun handleSessionDigest(event: SSEEvent) {}
+        override fun markLocallyInjected(sessionId: String, messageId: String) {}
         override fun dispatchBundleBound(
             actionFactory: (cn.vectory.ocdroid.ui.BundleStamp) -> cn.vectory.ocdroid.ui.AppAction,
         ): Boolean {

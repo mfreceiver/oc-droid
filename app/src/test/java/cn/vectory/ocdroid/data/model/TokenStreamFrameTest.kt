@@ -197,16 +197,15 @@ class TokenStreamFrameTest {
     }
 
     @Test
-    fun `message_part_removed missing messageEventSeq yields null`() {
-        // messageEventSeq is REQUIRED on a message.part.removed frame
-        // (the bilateral wire contract). A frame missing it is
-        // malformed → drop.
-        assertNull(
-            TokenStreamFrame.parse(
-                "message.part.removed",
-                """{"sessionID":"s1","messageID":"m1","partID":"p2"}""",
-            )
-        )
+    fun `message_part_removed missing messageEventSeq yields null messageEventSeq`() {
+        // lite-v2-dev: messageEventSeq is now optional (Long? = null).
+        // a frame missing it still parses successfully, but
+        // messageEventSeq is null.
+        val frame = TokenStreamFrame.parse(
+            "message.part.removed",
+            """{"sessionID":"s1","messageID":"m1","partID":"p2"}""",
+        ) as TokenStreamFrame.MessagePartRemoved
+        assertNull(frame.messageEventSeq)
     }
 
     @Test
@@ -230,13 +229,14 @@ class TokenStreamFrameTest {
     }
 
     @Test
-    fun `message_part_removed messageEventSeq null JSON yields null`() {
-        assertNull(
-            TokenStreamFrame.parse(
-                "message.part.removed",
-                """{"sessionID":"s1","messageID":"m1","partID":"p2","messageEventSeq":null}""",
-            )
-        )
+    fun `message_part_removed messageEventSeq null JSON yields null messageEventSeq`() {
+        // lite-v2-dev: messageEventSeq is optional (Long? = null); JSON
+        // null is parsed as null, not a rejection.
+        val frame = TokenStreamFrame.parse(
+            "message.part.removed",
+            """{"sessionID":"s1","messageID":"m1","partID":"p2","messageEventSeq":null}""",
+        ) as TokenStreamFrame.MessagePartRemoved
+        assertNull(frame.messageEventSeq)
     }
 
     @Test

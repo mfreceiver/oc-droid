@@ -76,9 +76,7 @@ sealed interface TokenStreamFrame {
          * Optional (null when absent — older sidecar or status-only
          * snapshot). Used by [MessageWatermarkState.applyPartRevision]
          * ONLY for 250ms-debounce-window dedup against a re-delivered
-         * snapshot/delta for the same partID; it is NOT a change-
-         * detection key (change detection rides the digest's
-         * [SlimSessionDigest.contentRevisions] / messageEventSeq).
+         * snapshot/delta for the same partID.
          *
          * Monotonic per-part; the sidecar bumps it on every
          * `message.part.updated` (initial snapshot included) and on
@@ -119,7 +117,7 @@ sealed interface TokenStreamFrame {
         val sessionId: String,
         val messageId: String,
         val partId: String,
-        val messageEventSeq: Long,
+        val messageEventSeq: Long? = null,
     ) : TokenStreamFrame
 
     /**
@@ -231,7 +229,7 @@ sealed interface TokenStreamFrame {
                     val sid = root.str("sessionID") ?: return null
                     val mid = root.str("messageID") ?: return null
                     val pid = root.str("partID") ?: return null
-                    val seq = root.longOrNull("messageEventSeq") ?: return null
+                    val seq = root.longOrNull("messageEventSeq")
                     MessagePartRemoved(
                         sessionId = sid,
                         messageId = mid,

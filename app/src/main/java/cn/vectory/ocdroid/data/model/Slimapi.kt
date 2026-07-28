@@ -79,23 +79,6 @@ data class SlimapiPermissionEntry(
  * Field names match the v1 contract verbatim.
  */
 /**
- * Cluster A: envelope returned by `GET /slimapi/questions` and
- * `GET /slimapi/permissions` (oc-slimapi `routes/questions.py::_aggregate`).
- * The sidecar always returns `{"items": [...], "errors": [...]}` — a bare
- * list would have been simpler, but the sidecar needs to surface per-
- * directory upstream failures (e.g. one opencode down) without failing the
- * whole aggregate (status stays 200 unless ALL directories failed → 503).
- *
- * v1 client policy: surface [items] to the UI; log [errors] but do NOT
- * propagate per-directory failures to the user (the sidecar already degrades
- * gracefully — a partial result is preferable to no result). v2 may surface
- * a "1 directory unavailable" warning if metrics show it's actionable.
- *
- * **Contract**: oc-slimapi/docs/v1-contract.md §2 + design-v2 §1.7 + the
- * routing doc `docs/specs/slim-mode-api-routing.md` line 273 already pin this
- * envelope — this client shape MUST mirror the sidecar's `_aggregate` output.
- */
-/**
  * Cluster A (slimapi v0.2.2 client-adapt): the sidecar readiness scope
  * returned on the q/p aggregation envelope. Added so the client can tell
  * "sidecar allowlist not yet ready" ([directories] == 0) from
@@ -118,43 +101,6 @@ data class SlimapiPermissionEntry(
 @Serializable
 data class SlimapiScope(
     val directories: Int = 0,
-)
-
-/**
- * Cluster A: envelope returned by `GET /slimapi/questions` and
- * `GET /slimapi/permissions` (oc-slimapi `routes/questions.py::_aggregate`).
- * The sidecar always returns `{"items": [...], "errors": [...]}` — a bare
- * list would have been simpler, but the sidecar needs to surface per-
- * directory upstream failures (e.g. one opencode down) without failing the
- * whole aggregate (status stays 200 unless ALL directories failed → 503).
- *
- * v1 client policy: surface [items] to the UI; log [errors] but do NOT
- * propagate per-directory failures to the user (the sidecar already degrades
- * gracefully — a partial result is preferable to no result). v2 may surface
- * a "1 directory unavailable" warning if metrics show it's actionable.
- *
- * **Contract**: oc-slimapi/docs/v1-contract.md §2 + design-v2 §1.7 + the
- * routing doc `docs/specs/slim-mode-api-routing.md` line 273 already pin this
- * envelope — this client shape MUST mirror the sidecar's `_aggregate` output.
- *
- * **scope** (v0.2.2 additive): see [SlimapiScope]. Absent on pre-0.2.2
- * sidecars and on 503 (all-fail) responses → null. The client treats null
- * as "original behavior" (clear), 0 as "retain prior" (not ready), and >0
- * as "authoritative" (clear or replace as usual).
- */
-@Serializable
-data class SlimapiQuestionAggregation(
-    val items: List<SlimapiQuestionEntry> = emptyList(),
-    val errors: List<SlimapiAggregationError> = emptyList(),
-    val scope: SlimapiScope? = null,
-)
-
-/** Cluster A: permissions aggregate envelope — see [SlimapiQuestionAggregation]. */
-@Serializable
-data class SlimapiPermissionAggregation(
-    val items: List<SlimapiPermissionEntry> = emptyList(),
-    val errors: List<SlimapiAggregationError> = emptyList(),
-    val scope: SlimapiScope? = null,
 )
 
 /**
@@ -192,29 +138,4 @@ data class SlimSessionDigest(
      */
     @Serializable(with = LastErrorFieldSerializer::class)
     val lastError: LastErrorField = LastErrorField.Omitted,
-    /**
-     * B-P0-3 (R1+R2 recovery strategy): per-message event-seq snapshot the
-     * sidecar carries on a digest. Maps `messageID` → `messageEventSeq`
-     * (the per-message monotonic event counter; 0 = uninitialised).
-     *
-     * Absent (null) on digests that carry no part-event information
-     * (status-only / archived / deleted digests). The reducer folds each
-     * present entry into the per-session [MessageWatermark] map via
-     * [cn.vectory.ocdroid.data.repository.MessageWatermarkState.applyDigestRevision]:
-     *  - incoming seq > local seq ⇒ advance + flag `needsFullRecheck=true`
-     *    (B-P0-1 will consume the flag to drive a `/full` for that message).
-     *  - incoming seq == 0 ⇒ the sidecar just restarted and lost its seq
-     *    state; do NOT trust the value, flag `needsFullRecheck=true` (R1
-     *    rebuild).
-     *  - incoming seq <= local seq ⇒ no-op (stale debounce re-emit).
-     *
-     * Wire name: `contentRevisions` (plural — the map field name on the
-     * digest). The per-message value is the same `messageEventSeq` Long
-     * that token frames carry as `partEventRevision` (per-part) and that
-     * the `/full` response advertises via the `X-Message-Event-Seq`
-     * header. The map shape (vs a single scalar) lets one digest advance
-     * the watermark of several messages at once (e.g. after the sidecar
-     * finishes a batch of part-event replays on reconnect).
-     */
-    val contentRevisions: Map<String, Long>? = null,
 )

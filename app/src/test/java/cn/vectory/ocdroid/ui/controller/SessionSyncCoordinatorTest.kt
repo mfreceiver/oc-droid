@@ -1523,40 +1523,25 @@ class SessionSyncCoordinatorTest {
     // reports (resolved without the client receiving the resolve event) is DROPPED
     // instead of lingering as a ghost that keeps the Sessions nav badge lit.
     @Test
-    fun `loadPendingQuestionsAllWorkdirs fans out across directorySessions keys plus currentWorkdir plus recent_workdirs and reconciles authoritatively`() {
+    fun `loadPendingQuestionsAllWorkdirs fans out across recent_workdirs plus currentWorkdir and reconciles authoritatively`() {
         // §P1-9: the single-workdir AppCore dispatch path polls only
         // currentWorkdir; background workdirs' questions vanish. The fan-out
-        // here queries EVERY known directory + currentWorkdir + recent_workdirs
-        // (per-fp) and reconciles authoritatively.
+        // here queries recent_workdirs + currentWorkdir (per-fp).
         seed {
             it.copy(
-                directorySessions = mapOf(
-                    "/proj-a" to listOf(Session(id = "sa", directory = "/proj-a")),
-                    "/proj-b" to listOf(Session(id = "sb", directory = "/proj-b"))
-                ),
                 pendingQuestions = listOf(
                     QuestionRequest(id = "existing-not-on-server", sessionId = "s0", questions = emptyList())
                 )
             )
         }
         every { settingsManager.currentWorkdir } returns "/current"
-        // §issue-1 Fix B: recent_workdirs (per-fp) are now part of the fan-out.
-        // Seed a fake list for the test fp; the coordinator's currentServerGroupFp
-        // is "test-fp" (see setUp), so getRecentWorkdirs("test-fp") returns these.
         every { settingsManager.getRecentWorkdirs("test-fp") } returns listOf("/recent-1", "/recent-2")
-        // Capture the EXACT workdir set fanned out (stronger than per-path coVerify).
         val queriedDirs = mutableListOf<String>()
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
         coEvery { repository.getPendingQuestions(any()) } answers {
             val dir = firstArg<String>()
             queriedDirs += dir
             when (dir) {
-                "/proj-a" -> Result.success(
-                    listOf(QuestionRequest(id = "qa", sessionId = "sa", questions = emptyList()))
-                )
-                "/proj-b" -> Result.success(
-                    listOf(QuestionRequest(id = "qb", sessionId = "sb", questions = emptyList()))
-                )
                 "/current" -> Result.success(
                     listOf(QuestionRequest(id = "qc", sessionId = "sc", questions = emptyList()))
                 )
@@ -1568,26 +1553,19 @@ class SessionSyncCoordinatorTest {
         scope.testScheduler.advanceUntilIdle()
 
         val ids = slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
-        // Authoritative reconcile: server result wins for questions whose directory
-        // is known. The locally-held ghost with null directory + unresolvable sessionId
-        // is CONSERVATIVELY KEPT (cannot determine which directory it belongs to →
-        // fail closed). See reconcileLegacyPendingQuestions directory==null resolution.
-        assertTrue("qa from /proj-a", "qa" in ids)
-        assertTrue("qb from /proj-b", "qb" in ids)
+        // Authoritative reconcile: only results from queried dirs survive.
         assertTrue("qc from /current", "qc" in ids)
-        assertTrue(
-            "existing-not-on-server (directory=null, sessionId=s0 not in any known session) " +
-                "is CONSERVATIVELY KEPT because its directory cannot be resolved",
+        // existing-not-on-server was NOT in any query result → dropped by
+        // authoritative reconcile (server is source of truth).
+        assertFalse(
+            "existing-not-on-server is dropped by authoritative reconcile",
             "existing-not-on-server" in ids)
-        // §issue-1 Fix B: exact workdir SET = directorySessions.keys + currentWorkdir
-        // + recent_workdirs (per-fp). Each queried exactly once (distinct). The
-        // recent workdirs contribute no questions here (else-branch → empty) but
-        // ARE queried — proving a question on a recently-used-but-disconnected
-        // workdir is no longer missed.
-        assertEquals(5, queriedDirs.size)
+        // Exact workdir SET = recent_workdirs + currentWorkdir (per-fp).
+        // Each queried exactly once (distinct).
+        assertEquals(3, queriedDirs.size)
         assertEquals(
-            "fan-out set must be directorySessions.keys + currentWorkdir + recent_workdirs",
-            setOf("/proj-a", "/proj-b", "/current", "/recent-1", "/recent-2"),
+            "fan-out set must be recent_workdirs + currentWorkdir",
+            setOf("/recent-1", "/recent-2", "/current"),
             queriedDirs.toSet())
     }
 
@@ -1620,8 +1598,9 @@ class SessionSyncCoordinatorTest {
 
     @Test
     fun `loadPendingQuestionsAllWorkdirs swallows per-directory failures and keeps the slice unchanged for that dir`() {
-        seed { it.copy(directorySessions = mapOf("/bad" to listOf(Session(id = "s", directory = "/bad")))) }
-        every { settingsManager.currentWorkdir } returns null
+        seed { it.copy(directorySessions = emptyMap()) }
+        every { settingsManager.currentWorkdir } returns "/bad"
+        every { settingsManager.getRecentWorkdirs(any()) } returns emptyList()
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
         coEvery { repository.getPendingQuestions("/bad") } returns Result.failure(java.io.IOException("network down"))
 
@@ -1747,19 +1726,15 @@ class SessionSyncCoordinatorTest {
     // ── §task5-ghost (final-review fix 2): archived-session question guard ──
 
     @Test
-    fun `loadPendingQuestionsAllWorkdirs drops questions whose session is locally archived even when the server still returns them`() {
-        // §task5-ghost: an archived session's questions were cleared from the
-        // presentation domain by the archive reducer. The authoritative sweep
-        // must NOT let them ghost back when the server still includes them in
-        // its pending-questions response (e.g. race between the archive REST
-        // call and the pending-questions snapshot on the server). Unknown
-        // session ids are kept (conservative).
+    fun `loadPendingQuestionsAllWorkdirs keeps all questions returned by server (archive filter retired)`() {
+        // lite-v2-dev: the authoritative sweep no longer filters out archived
+        // session questions. The server is the source of truth; if it returns
+        // a question for an archived session, the client surfaces it.
         seed {
             it.copy(
                 sessions = listOf(
                     Session(id = "live", directory = "/p"),
-                    Session(id = "archived", directory = "/p", time = Session.TimeInfo(archived = 1L))),
-                directorySessions = mapOf("/p" to listOf(Session(id = "live", directory = "/p"))))
+                    Session(id = "archived", directory = "/p", time = Session.TimeInfo(archived = 1L))))
         }
         every { settingsManager.currentWorkdir } returns "/p"
         every { settingsManager.getRecentWorkdirs("test-fp") } returns emptyList()
@@ -1776,24 +1751,18 @@ class SessionSyncCoordinatorTest {
 
         val ids = slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
         assertTrue("live session question kept", "q-live" in ids)
-        assertFalse(
-            "archived session question NOT resurrected (ghost guard)",
+        assertTrue(
+            "archived session question also kept (server is authority)",
             "q-archived" in ids)
         assertTrue(
-            "unknown session question kept (conservative)",
+            "unknown session question kept (server is authority)",
             "q-unknown" in ids)
     }
 
     @Test
-    fun `loadPendingQuestionsAllWorkdirs drops questions whose ancestor session is archived - root-only archive path`() {
-        // §task5-ghost-r2 (final-fix round 2): the server archived only the
-        // root (root-only SSE archive event); the child lives in sessionsById
-        // as still-UNARCHIVED, and the server's pending-questions response
-        // still includes the child's question. The Fix-1 reducer cleared the
-        // child question locally; without the ancestor walk this reconcile
-        // would only inspect the (still-unarchived) child and let the question
-        // ghost back. The filter must walk parentId chains so an archived root
-        // drops the child's question too.
+    fun `loadPendingQuestionsAllWorkdirs keeps child session question even when ancestor is archived`() {
+        // lite-v2-dev: the archive filter is retired. The server is the source
+        // of truth for pending questions; no ancestor-walk filter is applied.
         seed {
             it.copy(
                 sessions = listOf(
@@ -1812,8 +1781,8 @@ class SessionSyncCoordinatorTest {
         scope.testScheduler.advanceUntilIdle()
 
         val ids = slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
-        assertFalse(
-            "descendant of archived root question NOT resurrected (ancestor ghost guard)",
+        assertTrue(
+            "child session question kept (server is authority, archive filter retired)",
             "q-child" in ids)
     }
 

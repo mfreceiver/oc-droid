@@ -31,7 +31,7 @@ import kotlinx.coroutines.sync.Mutex
  * # Scaffold status (P3)
  *
  * Defined + implemented by SSC in P3. No child consumes it yet — P4
- * (`SlimSessionReconciler`) is the first extractor to inject it (the reconcile
+ * is the first consumer to inject it (the reconcile
  * body wraps `stripeLock.stripeFor(sid).withLock { ... }`). Defining it now
  * keeps P4 a pure move.
  */

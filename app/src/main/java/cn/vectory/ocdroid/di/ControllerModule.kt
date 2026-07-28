@@ -4,7 +4,7 @@ import cn.vectory.ocdroid.data.api.TokenStreamClient
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
-import cn.vectory.ocdroid.data.repository.SlimFullReconciler
+import cn.vectory.ocdroid.ui.SkeletonReloadCoordinator
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.AppAction
@@ -21,7 +21,6 @@ import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.sse.TokenFrameCommitContext
 import cn.vectory.ocdroid.ui.controller.sse.TokenStreamConnection
 import cn.vectory.ocdroid.ui.controller.sse.TokenStreamCoordinator
-import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
 import dagger.Module
@@ -29,7 +28,6 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -220,7 +218,7 @@ object ControllerModule {
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
         statusAggregatorInput: cn.vectory.ocdroid.service.status.StatusAggregatorInput,
         repository: OpenCodeRepository,
-        slimFullReconciler: SlimFullReconciler,
+        skeletonReloadCoordinator: SkeletonReloadCoordinator,
     ): SessionSyncCoordinator = SessionSyncCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -249,12 +247,12 @@ object ControllerModule {
         supportsWatermarkResync = { repository.supportsWatermarkResync },
         repository = repository,
         reconcileDispatcher = Dispatchers.Default,
-        // C2/C3 (Lane I production wiring): pass the @Singleton
-        // SlimFullReconciler so SSC's digest debounce + reconnect R1 trigger
-        // chain (requestDigestFullSweep / reconcileFullAfterTransportReset)
-        // actually drive /full fetches. Without this, both are no-ops and
-        // the C2 critical path stays at the fake-test level.
-        slimFullReconciler = slimFullReconciler,
+        // lite-v2-dev (plan §4.2/§4.5): SlimFullReconciler 全量退役——digest /
+        // reconnect 不再走 /full 单条 reconcile，改为 skeleton reload（见
+        // [SkeletonReloadCoordinator.onDigestChange] / [requestReload]）。SSC 的
+        // slimFullReconciler 形参默认 null（slim 触发路径 no-op）；新的权威同步
+        // 由 skeletonReloadCoordinator 承担。
+        skeletonReloadCoordinator = skeletonReloadCoordinator,
     )
 
     /**
@@ -296,17 +294,14 @@ object ControllerModule {
         // SslConfigFactory bindings are now orphaned here — left in place for the
         // Option A follow-up that unifies ownership; do NOT delete.)
         repository: OpenCodeRepository,
-        sessionSyncCoordinator: SessionSyncCoordinator,
+        @Suppress("UNUSED_PARAMETER") sessionSyncCoordinator: SessionSyncCoordinator,
         bundleEndpointResolver: cn.vectory.ocdroid.service.streaming.BundleEndpointResolver,
         settingsManager: cn.vectory.ocdroid.util.SettingsManager,
-        // C2/C3 (Lane I production wiring): the @Singleton SlimFullReconciler.
-        // The three TokenStreamCoordinator commit hooks (dedupPartRevision /
-        // onMessagePartRemoved / onMessageRemoved) MUST be wired to the LIVE
-        // repository + reconciler so the slim watermark dedup + R2 reconcile
-        // + chat eviction paths actually run in production. Without this the
-        // default no-op hooks stay in place and B-P0-1 / B-P0-2 regress to
-        // "data layer has tests but production is silent".
-        slimFullReconciler: SlimFullReconciler,
+        // lite-v2-dev (plan §4.2): SlimFullReconciler 全量退役。三个 commit hook
+        // （dedupPartRevision / onMessagePartRemoved / onMessageRemoved）+ TriggerSinceFetch
+        // 全部重接线到 [SkeletonReloadCoordinator]——digest/done/resync/part.removed
+        // 统一走权威窗口 skeleton reload（一条同步路径，见 plan §2.2）。
+        skeletonReloadCoordinator: SkeletonReloadCoordinator,
     ): TokenStreamCoordinator {
         synchronized(repository) {
             repository.onBundlePublished = { generation, endpointFp ->
@@ -339,14 +334,12 @@ object ControllerModule {
             )
         }
 
-        // C2/C3: build the three production hooks against the LIVE repository +
-        // store + reconciler. Extracted to [tokenStreamProductionHooks] so the
-        // M7 closed-loop test can construct the SAME wiring against a real OCR
-        // fixture and prove the hooks are non-no-op.
+        // lite-v2-dev: build the three production hooks against the LIVE store +
+        // skeletonReloadCoordinator. Token hub per-frame revision 保证让 dedup 成为
+        // no-op；part.removed / message.removed 走权威 reload / 直接 dispatch。
         val hooks = tokenStreamProductionHooks(
-            repository = repository,
             store = store,
-            slimFullReconciler = slimFullReconciler,
+            skeletonReloadCoordinator = skeletonReloadCoordinator,
             appScope = appScope,
         )
 
@@ -359,23 +352,14 @@ object ControllerModule {
             streamConnectionProvider = streamConnectionProvider,
             bundleCommitLock = repository,
             currentBundleProvider = { repository.currentClientBundle() },
-            triggerSinceFetch = { sid, auth ->
-                appScope.launch {
-                    sessionSyncCoordinator.reconcileSession(
-                        sid,
-                        if (auth) SessionSyncCoordinator.ReconcileMode.RESYNC
-                        else SessionSyncCoordinator.ReconcileMode.DIGEST_FOCUS,
-                    )
-                }
+            // lite-v2-dev (plan §4.2): TriggerSinceFetch → skeleton reload
+            // （终态文本 / resync 收敛统一走权威窗口，不再走 reconcileSession）。
+            triggerSinceFetch = { sid, _ ->
+                skeletonReloadCoordinator.requestReload(sid, 50)
             },
             // §sse-disabled-debug-toggle: gate per-session token stream on the DEBUG
             // flag (REST-only mode). Read live so toggling takes effect on next open.
             sseDisabled = { settingsManager.sseDisabled },
-            // C2/C3 production hooks (Lane I): the three commit hooks are now
-            // bound to the LIVE repository + reconciler. Each captures a fresh
-            // slim commit token inside the TokenStreamCoordinator's
-            // `synchronized(bundleCommitLock)` critical section (no rotation
-            // possible between capture and apply).
             dedupPartRevision = hooks.dedupPartRevision,
             onMessagePartRemoved = hooks.onMessagePartRemoved,
             onMessageRemoved = hooks.onMessageRemoved,
@@ -440,169 +424,62 @@ object ControllerModule {
     )
 
     /**
-     * B-P0-2: provides the [SlimFullReconciler] singleton — the R1+R2
-     * `/full` recovery coordinator. Every port delegates to the LIVE
-     * repository + chat slice so the data-layer reconciler stays free
-     * of UI/repository coupling.
+     * lite-v2-dev (plan §4.2/§4.3): provides the [SkeletonReloadCoordinator]
+     * singleton — the single authoritative sync path. digest / done:true /
+     * resync / busy→idle / part.removed / message.removed 全部收敛到
+     * `requestReload(sid, limit)` → sidecar skeleton 单页 → 权威窗口 diff merge
+     * 进 chat slice（见 [SkeletonReloadCoordinator]）。
      *
-     * # Port wiring
+     * # 取代旧的全量 reconcile 路径
      *
-     *  - [tokenProvider] / [isTokenCurrent] / [requireTokenCurrent] /
-     *    [fetchFull] / [parseSeqHeader] / [parseRetryAfterMs] /
-     *    [snapshotSessionWatermarks] / [clearFullRecheckFlag] /
-     *    [clearWatermarksForReconnect]: 1:1 forwarders on
-     *    [OpenCodeRepository] (B-P0-2 added these slim watermark
-     *    forwarders alongside the B-P0-1 fetch / parse surface).
-     *  - [messageUpdatedAt] / [messagePartCount] / [messageMaxPartId]:
-     *    read the chat slice's `messages` list + `partsByMessage` map.
-     *    Cold-start (no entry) returns null — fingerprint omitted,
-     *    sidecar forces a 200 (correct degraded behaviour).
-     *  - [partIsStreaming]: reads the chat slice's `streamOwned[partId]`
-     *    map. `STREAMING` == active token stream (done=false) → /full
-     *    drops the part; the token stream wins. `DONE` / absent →
-     *    /full authoritative.
-     *  - [onMessageGone] (MAJOR 4): runs the /full 404 cleanup —
-     *    `applyMessageRemoved` (watermark), chat-slice eviction,
-     *    maxMessageTuple drop. Token-guarded inside the callback.
-     *  - [ioDispatcher]: `Dispatchers.IO` for the network-bound body.
+     * 旧的 /full reconcile 单条路径已全量退役（plan §4.1）。
+     * 该协调器不再依赖 SlimCommitToken / watermark / reconfigure 协议——skeleton
+     * 端点每次 re-GET upstream opencode，不读 sidecar 内存（read-after-event 见
+     * plan §4.3.2）。
      *
-     * # /since orthogonality
+     * # 注入依赖
      *
-     * The reconciler advances ONLY the per-message `needsFullRecheck`
-     * flag (via [clearFullRecheckFlag]) and the chat slice's parts.
-     * `/since` advances `localApplied*` / `remoteUpdatedAt` via the
-     * existing reducer — no field overlap, no mutex required.
+     *  - [UiApplicationScope] appScope：reload / watchdog / debounce 协程的宿主。
+     *  - repository：`getSlimapiMessagesSkeleton` fetch 原语（plan §4.3.7）。
+     *  - store.slices：chat slice 读写 + sessionLock。
+     *  - currentServerGroupFp：ReloadIdentity launch 时捕获（防 cross-group 误写）。
      */
     @Provides
     @Singleton
-    fun provideSlimFullReconciler(
+    fun provideSkeletonReloadCoordinator(
+        @UiApplicationScope appScope: CoroutineScope,
         store: SharedStateStore,
         repository: OpenCodeRepository,
-    ): SlimFullReconciler = SlimFullReconciler(
-        tokenProvider = { repository.captureSlimCommitToken() },
-        isTokenCurrent = { repository.isSlimCommitTokenCurrent(it) },
-        requireTokenCurrent = { repository.requireSlimTokenCurrent(it) },
-        fetchFull = { sid, mid, maxP, pc, seq ->
-            repository.getSlimapiMessageFullWithFingerprint(sid, mid, maxP, pc, seq)
-        },
-        parseSeqHeader = { repository.parseMessageEventSeqHeader(it) },
-        parseRetryAfterMs = { resp ->
-            repository.retryAfterHeaderToMs(resp.headers()["Retry-After"])
-        },
-        snapshotSessionWatermarks = { sid ->
-            repository.snapshotSessionWatermarks(sid)
-        },
-        // rev-b-fix §3/§4 (C4 — Lane W atomic commit ports): the 200 / 304
-        // flag-clear + seq-advance + UI dispatch now run inside ONE slim-
-        // state-lock critical section via the OCR forwarders. The legacy
-        // clearFullRecheckFlag port is REMOVED (superseded by commitFull200/
-        // commitFull304 which clear the flag atomically).
-        //
-        // rev-ogpt #2: commitFull200's commitUi now returns Boolean —
-        // the watermark mutation is GATED on the UI verdict. The forwarder
-        // passes the lambda through unchanged; the Boolean flows back from
-        // dispatchSlimFullReconciled below.
-        commitFull200 = { sid, mid, requestSeq, responseSeq, token, commitUi ->
-            repository.commitFull200(sid, mid, requestSeq, responseSeq, token, commitUi)
-        },
-        commitFull304 = { sid, mid, requestSeq, token ->
-            repository.commitFull304(sid, mid, requestSeq, token)
-        },
-        // rev-b-fix M3: token-guarded reconnect reset (TOCTOU-safe).
-        clearWatermarksForReconnect = { token ->
-            repository.clearWatermarksForReconnect(token)
-        },
-        // Sort key + R2 fingerprint sources: chat slice (cold-start = null).
-        messageUpdatedAt = { sid, mid ->
-            store.slices.chat.value.messages
-                .firstOrNull { it.id == mid }
-                ?.time?.updated
-        },
-        messagePartCount = { sid, mid ->
-            store.slices.chat.value.partsByMessage[mid]?.size
-        },
-        messageMaxPartId = { sid, mid ->
-            store.slices.chat.value.partsByMessage[mid]
-                ?.maxByOrNull { it.id }?.id
-        },
-        // B-P0-2 replacement edge: STREAMING == active token stream
-        // (done=false) → /full drops the part. DONE/absent → /full wins.
-        partIsStreaming = { _, _, pid ->
-            store.slices.chat.value.streamOwned[pid] ==
-                cn.vectory.ocdroid.ui.StreamOwnedState.STREAMING
-        },
-        // rev-b-fix C4 + rev-ogpt #2 (Lane U dispatch): 200 Reconciled
-        // transcript merge, route-guarded. Runs inside commitFull200's
-        // commitUi lambda. Returns Boolean so commitFull200 can gate the
-        // watermark mutation on the reducer's verdict:
-        //   true  = dispatch accepted (route+session CAS passed + the
-        //           dispatch was issued). Watermark advances + flag clears.
-        //   false = dispatch would have been CAS-rejected (route advanced
-        //           or session deselected during the network window).
-        //           Dispatch is SKIPPED; watermark + flag are PRESERVED.
-        //
-        // §rev-2 TOCTOU fix: dispatch via [dispatchAndVerify] which runs
-        // the reducer INSIDE the CAS retry loop and returns the actual
-        // commit verdict. The pre-check (route/bundle/session) is now
-        // performed by the reducer within the CAS — no TOCTOU window.
-        dispatchSlimFullReconciled = { sid, msg, ctx ->
-            store.slices.store.dispatchAndVerify(
-                AppAction.SlimFullMessageReconciled(
-                    sessionId = sid,
-                    message = msg,
-                    expectedRouteInstance = ctx.expectedRouteInstance,
-                    bundleStamp = ctx.bundleStamp,
-                ),
-            )
-        },
-        // §rev-2 TOCTOU fix: dispatch via [dispatchAndVerify]. No pre-check
-        // — the reducer's bundle/route/session CAS inside the retry loop
-        // is authoritative. The return value (Boolean) is discarded by the
-        // SlimFullReconciler's `Unit` port signature; the side-effect (the
-        // dispatch) either commits or is CAS-rejected atomically.
-        dispatchMessageRemoved = { sid, mid, ctx ->
-            store.slices.store.dispatchAndVerify(
-                AppAction.MessageRemovedConfirmed(
-                    sessionId = sid,
-                    messageId = mid,
-                    expectedRouteInstance = ctx.expectedRouteInstance,
-                    bundleStamp = ctx.bundleStamp,
-                ),
-            )
-        },
-        // B-P0-2 MAJOR 4: /full 404 WATERMARK/REPOSITORY cleanup only.
-        // The UI-side eviction is now dispatched via dispatchMessageRemoved
-        // (MessageRemovedConfirmed — route-guarded). The legacy
-        // MessageRemovedFromFull dispatch is stripped from this callback.
-        onMessageGone = { sid, mid, token ->
-            repository.applyMessageRemoved(sid, mid, token)
-        },
-        ioDispatcher = Dispatchers.IO,
+        @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
+    ): SkeletonReloadCoordinator = SkeletonReloadCoordinator(
+        scope = appScope,
+        repository = repository,
+        slices = store.slices,
+        currentServerGroupFp = currentServerGroupFp,
     )
 }
 
-// ── C2/C3 production hook factory (Lane I) ───────────────────────────────
+// ── lite-v2-dev production hook factory (plan §4.2) ───────────────────────
 //
-// Extracted from [ControllerModule.provideTokenStreamCoordinator] so the M7
-// production closed-loop test can construct the SAME three hooks against a
-// real OCR + store + SlimFullReconciler fixture and prove the wiring is
-// non-no-op (the oracle risk #11 "default no-op hook stays in production"
-// cannot regress without breaking that test).
+// Extracted from [ControllerModule.provideTokenStreamCoordinator] so the
+// TokenStreamCoordinator commit hooks share ONE production implementation.
+// lite-v2-dev: 全量重接线——SlimFullReconciler / slim commit token / watermark
+// 全部退役，统一走 [SkeletonReloadCoordinator]（一条权威同步路径，见 plan §2.2）。
 
 /**
  * C2/C3 (Lane I production wiring): the per-(sid|mid) debounce window for
- * the onMessagePartRemoved → R2 reconcile. Mirrors the sidecar's 100ms
+ * the onMessagePartRemoved → skeleton reload. Mirrors the sidecar's 100ms
  * content-burst window so a rapid sequence of `message.part.removed` frames
- * for the same message coalesces into ONE /full fetch.
+ * for the same message coalesces into ONE reload.
  */
 internal const val PART_REMOVAL_RECONCILE_DEBOUNCE_MS = 100L
 
 /**
- * C2/C3 (Lane I production wiring): the three [TokenStreamCoordinator]
- * commit hooks bound to the LIVE repository + chat slice +
- * [SlimFullReconciler]. Each hook is constructed by [tokenStreamProductionHooks]
- * so [ControllerModule.provideTokenStreamCoordinator] and the M7 closed-loop
- * test share the SAME production implementation.
+ * lite-v2-dev (plan §4.2): the three [TokenStreamCoordinator] commit hooks
+ * bound to the LIVE chat slice + [SkeletonReloadCoordinator]. Each hook is
+ * constructed by [tokenStreamProductionHooks] so
+ * [ControllerModule.provideTokenStreamCoordinator] shares the SAME production
+ * implementation.
  */
 internal data class TokenStreamProductionHooks(
     val dedupPartRevision: (
@@ -620,147 +497,63 @@ internal data class TokenStreamProductionHooks(
 )
 
 /**
- * C2/C3 (Lane I production wiring): constructs the three
- * [TokenStreamCoordinator] commit hooks bound to the LIVE repository +
- * chat slice + [SlimFullReconciler]. Extracted to a top-level internal
- * function so [ControllerModule.provideTokenStreamCoordinator] and the M7
- * production closed-loop test ([ControllerModuleProductionHooksTest]) share
- * the SAME implementation — the test is a regression guard for oracle risk
- * #11 ("default no-op hook stays in production").
+ * lite-v2-dev (plan §4.2): constructs the three [TokenStreamCoordinator]
+ * commit hooks bound to the LIVE chat slice + [SkeletonReloadCoordinator].
+ * Extracted to a top-level internal function so
+ * [ControllerModule.provideTokenStreamCoordinator] shares the SAME
+ * implementation.
  *
- * # Token capture inside the bundleCommitLock critical section
+ * # Hook semantics (post lite-v2 rewiring)
  *
- * Each hook is invoked by [TokenStreamCoordinator.dispatchEpochFrame]
- * INSIDE `synchronized(bundleCommitLock)` (where `bundleCommitLock =
- * repository`). Capturing a fresh slim commit token via
- * [OpenCodeRepository.captureSlimCommitToken] acquires the slimStateMachine's
- * OWN `slimStateLock` (a different monitor), NOT the OCR monitor, so there
- * is no nested-synchronization concern.
+ *  - **dedupPartRevision**: no-op `true`. Token hub per-frame revision 保证
+ *    已经做了 per-frame 去重（plan §4.2 (1)），本 hook 不再需要 slim
+ *    watermark / commit token 去重——fail-open 到 accept。
  *
- * # Hook semantics
+ *  - **onMessagePartRemoved**: per-(sid|mid) trailing-coalesce 100ms debounce
+ *    → [SkeletonReloadCoordinator.requestReload]`(sid, 50)`。权威窗口 diff
+ *    自动发现 part 列表变化（plan §4.2 (2)）。
  *
- *  - **dedupPartRevision**: capture token →
- *    [OpenCodeRepository.applyTokenPartRevision] (strict `>` revision
- *    dedup). Pure local dedup; no token guard at the hook boundary (the
- *    apply is itself token-guarded; a stale token fail-opens to `true`).
+ *  - **onMessageRemoved**: 直接 dispatch [AppAction.MessageRemovedConfirmed]
+ *    （即时移除，不等 reload）。删除 slim commit token + applyMessageRemoved
+ *    （plan §4.2 (3)）。
  *
- *  - **onMessagePartRemoved**:
- *     1. Capture token → [OpenCodeRepository.applyMessagePartRemoved]
- *        (advances messageEventSeq, drops the partId, flags
- *        `needsFullRecheck = true`).
- *     2. Per-(sid|mid) trailing-coalesce 100ms debounce →
- *        [SlimFullReconciler.reconcileMessage] (R2 single-message). The
- *        captured [TokenFrameCommitContext] is converted 1:1 into a
- *        [SlimFullReconciler.FullReconcileContext] and threaded UNCHANGED
- *        across the entire fetch (no recapture). Token currency is
- *        re-checked AFTER the delay; a rotated token short-circuits (the
- *        flag stays set for the next digest sweep — Lane O1's
- *        `requestDigestFullSweep` picks it up).
- *
- *  - **onMessageRemoved**:
- *     1. Capture token → [OpenCodeRepository.applyMessageRemoved]
- *        (removes the per-message watermark entry; no /full — nothing to
- *        fetch).
- *     2. Dispatch [AppAction.MessageRemovedConfirmed] carrying the captured
- *        route + bundle. A `route=0` ctx (no active route) is dispatched
- *        anyway — the reducer's freeze-protocol guard returns state
- *        unchanged, exactly as designed (no transcript write when there is
- *        no active route; only the watermark/repository cleanup above ran).
- *
- * @param appScope the [UiApplicationScope]-qualified [CoroutineScope] the
- *   debounce launches on. Production: Main.immediate singleton. Tests: the
- *   [kotlinx.coroutines.test.TestScope] so virtual time controls the
- *   debounce.
  * @param debounceMs overridable for deterministic tests (default
  *   [PART_REMOVAL_RECONCILE_DEBOUNCE_MS] = 100ms).
  */
 internal fun tokenStreamProductionHooks(
-    repository: OpenCodeRepository,
     store: SharedStateStore,
-    slimFullReconciler: SlimFullReconciler,
-    appScope: CoroutineScope,
+    skeletonReloadCoordinator: SkeletonReloadCoordinator,
+    appScope: CoroutineScope = CoroutineScope(Dispatchers.Default),
     debounceMs: Long = PART_REMOVAL_RECONCILE_DEBOUNCE_MS,
 ): TokenStreamProductionHooks {
-    // Per-(sid|mid) debounce Job map for the onMessagePartRemoved → R2
-    // single-message reconcile. Trailing-coalesce: a re-entry within the
-    // debounce window cancels the prior pending Job and re-schedules. The
-    // map is local to ONE TokenStreamCoordinator instance — production
-    // (singleton TSC) gets one; tests get a fresh map per fixture.
+    // Per-(sid|mid) debounce Job map for the onMessagePartRemoved → reload.
+    // Trailing-coalesce: a re-entry within the debounce window cancels the
+    // prior pending Job and re-schedules.
     val partRemovalDebounceJobs = ConcurrentHashMap<String, Job>()
 
     return TokenStreamProductionHooks(
-        dedupPartRevision = { sid, mid, pid, rev, _ ->
-            // Pure local dedup. captureSlimCommitToken acquires slimStateLock
-            // (NOT the OCR monitor held by dispatchEpochFrame's
-            // bundleCommitLock), so no nested synchronization. A stale token
-            // fail-opens to `true` (without applying dedup we cannot drop,
-            // so the caller falls back to accept).
-            val token = repository.captureSlimCommitToken()
-            repository.applyTokenPartRevision(sid, mid, pid, rev, token)
+        dedupPartRevision = { _, _, _, _, _ ->
+            // lite-v2-dev (plan §4.2 (1)): token hub per-frame revision 保证
+            // 已去重；本 hook 不再需要 slim watermark 去重，fail-open accept。
+            true
         },
-        onMessagePartRemoved = { sid, mid, pid, seq, ctx ->
-            // 1. Token-guarded watermark mutation: advance messageEventSeq
-            //    (monotonic), drop the removed partId, flag
-            //    needsFullRecheck = true so the R2 reconcile below (and the
-            //    next digest sweep) pick it up.
-            val token = repository.captureSlimCommitToken()
-            repository.applyMessagePartRemoved(sid, mid, pid, seq, token)
-            // 2. Per-(sid|mid) trailing-coalesce debounce → R2 reconcile.
-            //    The captured ctx (route + bundle snapshot) is the request
-            //    guard for the entire fetch — no recapture inside the
-            //    debounce (freeze protocol: single entry context).
+        onMessagePartRemoved = { sid, mid, _, _, _ ->
+            // lite-v2-dev (plan §4.2 (2)): per-(sid|mid) trailing-coalesce
+            // debounce → 权威窗口 reload（limit=50）。reload 的 diff 自动发现
+            // part 列表变化，不再走单条 /full reconcile。
             val key = "$sid|$mid"
             partRemovalDebounceJobs[key]?.cancel()
             partRemovalDebounceJobs[key] = appScope.launch {
                 delay(debounceMs)
                 partRemovalDebounceJobs.remove(key)
-                // Token currency: the token captured at hook entry may have
-                // rotated during the debounce delay (host reconfigure). The
-                // reconciler re-validates after every network suspension,
-                // but we short-circuit here to avoid a guaranteed-stale
-                // fetch (the flag is preserved for the next digest sweep).
-                if (!repository.isSlimCommitTokenCurrent(token)) {
-                    DebugLog.i(
-                        "ControllerModule",
-                        "part-removed debounce sid=$sid mid=$mid stale token — flag preserved for next sweep",
-                    )
-                    return@launch
-                }
-                val context = SlimFullReconciler.FullReconcileContext(
-                    expectedRouteInstance = ctx.expectedRouteInstance,
-                    bundleStamp = ctx.bundleStamp,
-                )
-                try {
-                    slimFullReconciler.reconcileMessage(sid, mid, token, context)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Throwable) {
-                    // Stay-flagged semantics: the per-message flag is
-                    // preserved on failure; the next digest debounce or
-                    // reconnect sweep will re-attempt.
-                    DebugLog.w(
-                        "ControllerModule",
-                        "part-removed reconcile sid=$sid mid=$mid failed: ${e.message}",
-                    )
-                }
+                skeletonReloadCoordinator.requestReload(sid, 50)
             }
         },
         onMessageRemoved = { sid, mid, ctx ->
-            // 1. Token-guarded watermark removal (no /full — nothing to
-            //    fetch; the message is gone).
-            val token = repository.captureSlimCommitToken()
-            repository.applyMessageRemoved(sid, mid, token)
-            // 2. §rev-2 TOCTOU fix: dispatch via [dispatchAndVerify]. No
-            //    pre-check — the reducer's bundle/route/session CAS inside
-            //    the retry loop is authoritative. If the route or bundle has
-            //    advanced since ctx was captured, the reducer returns state
-            //    unchanged and dispatchAndVerify returns false — the
-            //    watermark cleanup in step 1 is independent and has already
-            //    run (it does not need a route token). A route=0 ctx with
-            //    expectedRouteInstance==0L is rejected by the reducer
-            //    (reduceMessageRemovedConfirmed returns state unchanged for
-            //    route=0), which is correct — no transcript write when there
-            //    is no active route.
+            // lite-v2-dev (plan §4.2 (3)): 直接 dispatch
+            // MessageRemovedConfirmed（即时移除，不等 reload）。删除 slim commit
+            // token + applyMessageRemoved——权威窗口 reload 会最终收敛，但 token
+            // stream 的 message.removed 应即时反映。
             store.slices.store.dispatchAndVerify(
                 AppAction.MessageRemovedConfirmed(
                     sessionId = sid,

@@ -790,19 +790,21 @@ class AppLifecycleMonitorTest {
 
                     // Delayed A-permissions response. The 400ms bodyDelay gives
                     // the test window to reconfigure mid-flight.
+                    // lite-v2-dev: standard /permission returns a bare
+                    // List<PermissionRequest> (NO {items,errors} envelope — that
+                    // was the V1 slimapi shape). routeToken is slimapi-only →
+                    // omitted so the body deserializes and the permission
+                    // actually reaches the fence (otherwise the list is empty
+                    // and the lateClaim assertion passes vacuously).
                     val body = """
-                        {
-                          "items": [
-                            {
-                              "id": "p-old",
-                              "sessionID": "s-old",
-                              "permission": "edit",
-                              "directory": "/a",
-                              "routeToken": "rt-stale"
-                            }
-                          ],
-                          "errors": []
-                        }
+                        [
+                          {
+                            "id": "p-old",
+                            "sessionID": "s-old",
+                            "permission": "edit",
+                            "directory": "/a"
+                          }
+                        ]
                     """.trimIndent()
                     server.enqueue(
                         okhttp3.mockwebserver.MockResponse()
@@ -819,9 +821,11 @@ class AppLifecycleMonitorTest {
                     // Confirm the request actually hit A's MockWebServer.
                     val started = server.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS)
                     assertNotNull("permissions request must start under A", started)
+                    // lite-v2-dev: /slimapi/permissions endpoint removed; always
+                    // uses standard API @GET("permission") even under slim mode.
                     assertTrue(
-                        "path must be slim permissions: ${started!!.path}",
-                        started.path!!.startsWith("/slimapi/permissions"),
+                        "path must be permissions: ${started!!.path}",
+                        started.path!!.startsWith("/permission"),
                     )
 
                     // Mid-flight host switch (production reconfigure order):
@@ -831,7 +835,6 @@ class AppLifecycleMonitorTest {
                     realRepo.configure(
                         baseUrl = baseUrlA,
                         slim = true,
-                        reconfigureTicket = ticket,
                     )
 
                     // Wait for the poll to drain the delayed response + run

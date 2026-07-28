@@ -231,7 +231,7 @@ class SlimapiVersionInterceptorTest {
     fun `slimapi client version is the documented value`() {
         // Pinning the value here forces a deliberate test update when bumped;
         // docs/specs/slim-mode-api-routing.md §3 documents this as `1`.
-        assertEquals(1, SlimapiContract.SLIMAPI_CLIENT_VERSION)
+        assertEquals(2, SlimapiContract.SLIMAPI_CLIENT_VERSION)
     }
 
     @Test

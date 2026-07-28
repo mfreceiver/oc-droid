@@ -468,7 +468,7 @@ class HostProfileControllerTest {
         // Reconfigured for the updated profileA with the new URL; 4th arg is
         // hostPort (String?) — match anything (the controller derives it via
         // hostPortFromUrl).
-        verify { repository.configure(moved.serverUrl, any(), any(), any(), any(), any(), any()) }
+        verify { repository.configure(moved.serverUrl, any(), any(), any(), any(), any()) }
         // forceReconnect fired so the new endpoint takes effect immediately.
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
         // configureRepositoryForProfile cancels SSE once.
@@ -537,7 +537,7 @@ class HostProfileControllerTest {
         verify { settingsManager.setBasicAuthPassword("p-B", "new-secret") }
         // Reconfigure fired for the active host — the live clients pick up the
         // new credential via configureRepositoryForProfileRaw → repository.configure.
-        verify { repository.configure(profileB.serverUrl, any(), any(), any(), any(), any(), any()) }
+        verify { repository.configure(profileB.serverUrl, any(), any(), any(), any(), any()) }
         assertEquals(
             "ForceReconnect must fire for an active-host basicAuth-only edit",
             1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
@@ -561,7 +561,7 @@ class HostProfileControllerTest {
         }
 
         // Reconfigure fired (username change → basicAuthUsernameChanged).
-        verify { repository.configure(renamed.serverUrl, "user-b-renamed", any(), any(), any(), any(), any()) }
+        verify { repository.configure(renamed.serverUrl, "user-b-renamed", any(), any(), any(), any()) }
         assertEquals(
             "ForceReconnect must fire for an active-host username-only edit",
             1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
@@ -706,7 +706,7 @@ class HostProfileControllerTest {
         // Reconfigures repository for the (unchanged) current host profileA.
         // §tofu R2: 4th arg is hostPort (String?), derived by the controller
         // via hostPortFromUrl(profileA.serverUrl) → "a:4096".
-        verify { repository.configure(profileA.serverUrl, any(), any(), "a:4096", any(), any(), any()) }
+        verify { repository.configure(profileA.serverUrl, any(), any(), "a:4096", any(), any()) }
         // NOT current → no purge, no reconnect.
         assertTrue(collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().isEmpty())
         assertTrue(collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().isEmpty())
@@ -735,7 +735,7 @@ class HostProfileControllerTest {
 
         // Reconfigured for the replacement profileB (§tofu R2: hostPort
         // derived as "b:4096").
-        verify { repository.configure(profileB.serverUrl, any(), any(), "b:4096", any(), any(), any()) }
+        verify { repository.configure(profileB.serverUrl, any(), any(), "b:4096", any(), any()) }
         // wasCurrent → purge + forceReconnect.
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
         // §review-fix #5/#6: ClearSessionWindowCache was removed from
@@ -828,7 +828,6 @@ class HostProfileControllerTest {
                 profileB.basicAuth?.username,
                 "secret-b",
                 "b:4096",
-                any(),
                 any(),
                 any())
         }
@@ -936,7 +935,7 @@ class HostProfileControllerTest {
         verify { settingsManager.username = "mu" }
         verify { settingsManager.password = "mp" }
         // §tofu R2: 4th arg = hostPortFromUrl("http://manual:4096") = "manual:4096".
-        verify { repository.configure("http://manual:4096", "mu", "mp", "manual:4096", any(), any(), any()) }
+        verify { repository.configure("http://manual:4096", "mu", "mp", "manual:4096", any(), any()) }
         // §tofu R2: image client SSL sync fires (SystemDefault for an unpinned
         // endpoint — TrustAll no longer exists).
         assertEquals("SYSTEM", HttpImageHolder.lastUpdateSslMode)
@@ -950,7 +949,7 @@ class HostProfileControllerTest {
 
         verify { settingsManager.username = null }
         verify { settingsManager.password = null }
-        verify { repository.configure("http://m:4096", null, null, any(), any(), any(), any()) }
+        verify { repository.configure("http://m:4096", null, null, any(), any(), any()) }
     }
 
     // ── configureRepositoryForProfile ──────────────────────────────────────
@@ -969,7 +968,6 @@ class HostProfileControllerTest {
                 profileB.basicAuth?.username,
                 "secret-b",
                 "b:4096",
-                any(),
                 any(),
                 any())
         }
@@ -995,7 +993,6 @@ class HostProfileControllerTest {
                 profileA.basicAuth?.username,
                 any(),
                 "a:4096",
-                any(),
                 any(),
                 any())
         }
@@ -1296,7 +1293,7 @@ class HostProfileControllerTest {
         verify { settingsManager.clearModelDataForGroup("g-A") }
         // Reconfigured for the updated profileA at the new URL; §tofu R2: 4th
         // arg = hostPortFromUrl("http://new-host:4096") = "new-host:4096".
-        verify { repository.configure(moved.serverUrl, any(), any(), "new-host:4096", any(), any(), any()) }
+        verify { repository.configure(moved.serverUrl, any(), any(), "new-host:4096", any(), any()) }
         // forceReconnect fired so clients rebuild against the new endpoint.
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
         // §disabled-models-consistency: per-host state reloaded for the new baseUrl.
@@ -1318,7 +1315,7 @@ class HostProfileControllerTest {
         scope.testScheduler.advanceUntilIdle()
 
         verify(exactly = 1) { settingsManager.clearModelDataForGroup("g-A") }
-        verify { repository.configure("http://new:4096", any(), any(), "new:4096", any(), any(), any()) }
+        verify { repository.configure("http://new:4096", any(), any(), "new:4096", any(), any()) }
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().size)
     }
@@ -1345,7 +1342,7 @@ class HostProfileControllerTest {
         // Deleted active host's old URL model data purged.
         verify { settingsManager.clearModelDataForGroup("g-A") }
         // Reconfigured for the replacement profileB (§tofu R2: hostPort "b:4096").
-        verify { repository.configure(profileB.serverUrl, any(), any(), "b:4096", any(), any(), any()) }
+        verify { repository.configure(profileB.serverUrl, any(), any(), "b:4096", any(), any()) }
         // wasCurrent → purge + forceReconnect + hostProfileSwitched.
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().size)
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().size)
@@ -1397,7 +1394,7 @@ class HostProfileControllerTest {
         verify { settingsManager.username = "u" }
         verify { settingsManager.password = "p" }
         // §tofu R2: 4th arg = hostPortFromUrl("http://same:4096") = "same:4096".
-        verify { repository.configure("http://same:4096", "u", "p", "same:4096", any(), any(), any()) }
+        verify { repository.configure("http://same:4096", "u", "p", "same:4096", any(), any()) }
         // No host switch → no HostProfileSwitched effect.
         assertTrue("HostProfileSwitched must NOT fire on unchanged URL",
             collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().isEmpty())

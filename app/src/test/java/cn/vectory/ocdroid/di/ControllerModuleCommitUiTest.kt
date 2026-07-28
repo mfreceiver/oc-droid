@@ -235,7 +235,7 @@ class ControllerModuleCommitUiTest {
         // copy(chat = ...).withRouteContentSynced(0, sid) — withRouteContentSynced
         // is a no-op for route=0. So the message IS merged (state changes).
         //
-        // In production, the caller in SlimFullReconciler short-circuits route=0
+        // In production, the caller short-circuits route=0
         // and NEVER calls dispatchSlimFullReconciled — but if it did, this
         // action would be accepted (legacy compatibility path).
         val action = AppAction.SlimFullMessageReconciled(

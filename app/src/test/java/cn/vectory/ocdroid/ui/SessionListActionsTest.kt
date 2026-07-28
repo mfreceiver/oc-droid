@@ -1784,12 +1784,12 @@ class SessionListActionsTest {
             val started = server.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS)
             assertNotNull("permissions request must start under A", started)
             assertTrue(
-                "path must be slim permissions: ${started!!.path}",
-                started.path!!.startsWith("/slimapi/permissions"))
+                "path must be standard permission endpoint: ${started!!.path}",
+                started.path!!.startsWith("/permission"))
 
             // C-D3 rev-3: beginSlimReconfigure before configure (purge window).
             val ticket = realRepo.beginSlimReconfigure()
-            realRepo.configure(baseUrl = baseUrl, slim = true, reconfigureTicket = ticket)
+            realRepo.configure(baseUrl = baseUrl, slim = true)
 
             kotlinx.coroutines.delay(800)
             collector.cancel()

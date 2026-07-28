@@ -474,7 +474,9 @@ class CatchUpActionsTest {
      * status map shape).
      */
     @Test
-    fun `four-combination contract - status uses slim path`() = runTest {
+    fun `four-combination contract - status uses standard path`() = runTest {
+        // lite-v2-dev: getSlimapiSessionsStatus delegates to standard API
+        // GET /session/status (the slim status endpoint was removed).
         val server = MockWebServer()
         server.start()
         try {
@@ -501,54 +503,10 @@ class CatchUpActionsTest {
             assertEquals("idle", statusMap["s1"]?.type)
             assertEquals("busy", statusMap["s2"]?.type)
             val statusReq = server.takeRequest()
-            assertTrue(
-                "status path must be slim /slimapi/sessions/status, got: ${statusReq.path}",
-                statusReq.path!!.startsWith("/slimapi/sessions/status"),
-            )
-            assertTrue(
-                "status path must carry directory param, got: ${statusReq.path}",
-                statusReq.path!!.contains("directory=%2Fproj"),
-            )
-        } finally {
-            server.shutdown()
-        }
-    }
-
-    @Test
-    fun `four-combination contract - message since uses slim path`() = runTest {
-        val server = MockWebServer()
-        server.start()
-        try {
-            DebugLog.clear()
-            val realRepo = OpenCodeRepository(
-                mockk(relaxed = true),
-                mockk(relaxed = true),
-            )
-            realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
-            realRepo.configure(
-                baseUrl = server.url("/").toString().trimEnd('/'),
-                slim = true,
-            )
-
-            server.enqueue(
-                MockResponse().setResponseCode(200)
-                    .setBody("""[{"info":{"id":"m1","role":"assistant","time":{"created":100,"updated":200}},"parts":[]}]""")
-                    .setHeader("Content-Type", "application/json"),
-            )
-            val token = realRepo.captureSlimCommitToken()
-            val msgResult = realRepo.fetchSinceForStageA("s1", since = 150L, limit = 50, token = token)
-            assertTrue("message since call must succeed: $msgResult", msgResult is cn.vectory.ocdroid.data.repository.SlimSinceStageAOutcome.Staged)
-            val msgs = (msgResult as cn.vectory.ocdroid.data.repository.SlimSinceStageAOutcome.Staged).items
-            assertEquals("fetched 1 message", 1, msgs.size)
-            assertEquals("m1", msgs[0].info.id)
-            val msgReq = server.takeRequest()
-            assertTrue(
-                "message path must be slim /slimapi/messages/{sid}/since/{ts}, got: ${msgReq.path}",
-                msgReq.path!!.startsWith("/slimapi/messages/s1/since/150"),
-            )
-            assertTrue(
-                "message since must forward limit, got: ${msgReq.path}",
-                msgReq.path!!.contains("limit=50"),
+            assertEquals(
+                "status path must be standard /session/status, got: ${statusReq.path}",
+                "/session/status",
+                statusReq.path,
             )
         } finally {
             server.shutdown()
@@ -595,11 +553,11 @@ class CatchUpActionsTest {
     }
 
     @Test
-    fun `four-combination contract - REST fallback thin_route_not_found`() = runBlocking {
-        // Real OpenCodeRepository + MockWebServer socket IO + production
-        // withTimeout budget — must use runBlocking (real time), not runTest
-        // virtual time. Same discipline as OpenCodeRepositoryExpandBudgetTest /
-        // OpenCodeRepositorySlimapiEndpointsTest expand cases.
+    fun `four-combination contract - expand uses direct single-full path`() = runBlocking {
+        // lite-v2-dev: expandMessagesFullBatch iterates individually per
+        // messageId via getSlimapiMessageFull, not batch+tier-2 fallback.
+        // The batch path is removed; a single GET /slimapi/messages/{sid}/full/{mid}
+        // is made per message.
         val server = MockWebServer()
         server.start()
         try {
@@ -614,38 +572,26 @@ class CatchUpActionsTest {
                 slim = true,
             )
 
-            // thin_route_not_found → single-full fallback
-            server.enqueue(
-                MockResponse().setResponseCode(404)
-                    .setBody("""{"code":"thin_route_not_found"}""")
-                    .setHeader("Content-Type", "application/json"),
-            )
             server.enqueue(
                 MockResponse().setResponseCode(200)
                     .setBody("""{"info":{"id":"m_full","role":"user"},"parts":[{"id":"p1","type":"text","text":"expanded"}]}""")
                     .setHeader("Content-Type", "application/json"),
             )
 
-            // Capture token BEFORE the call to avoid token rotation issues
             val token = realRepo.captureSlimCommitToken()
-            val expandResult = realRepo.expandMessagesFullBatch(sessionId = "s1", ids = listOf("m_full"), token = token)
+            val expandResult = realRepo.expandMessagesFullBatch(sessionId = "s1", messageIds = setOf("m_full"), token = token)
             assertTrue(
-                "thin_route_not_found must fall back to single-full (Ok). Actual: ${expandResult::class.simpleName} $expandResult",
+                "expand must succeed. Actual: ${expandResult::class.simpleName} $expandResult",
                 expandResult is cn.vectory.ocdroid.data.repository.ExpandOutcome.Ok,
             )
             val ok = expandResult as cn.vectory.ocdroid.data.repository.ExpandOutcome.Ok
-            assertFalse("fallback path must mark usedBatch=false", ok.usedBatch)
-            assertEquals("m_full loaded via fallback", listOf("m_full"), ok.items.map { it.info.id })
-            val batchReq = server.takeRequest()
-            assertTrue(
-                "batch probe path must be /slimapi/messages/{sid}/full?ids=, got: ${batchReq.path}",
-                batchReq.path!!.startsWith("/slimapi/messages/s1/full?ids="),
-            )
-            val fallbackReq = server.takeRequest()
+            assertFalse("lite-v2-dev always uses usedBatch=false", ok.usedBatch)
+            assertEquals("m_full loaded via direct full", listOf("m_full"), ok.items.map { it.info.id })
+            val fullReq = server.takeRequest()
             assertEquals(
-                "fallback single-full path, got: ${fallbackReq.path}",
+                "single-full path must be /slimapi/messages/{sid}/full/{mid}, got: ${fullReq.path}",
                 "/slimapi/messages/s1/full/m_full",
-                fallbackReq.path,
+                fullReq.path,
             )
         } finally {
             server.shutdown()

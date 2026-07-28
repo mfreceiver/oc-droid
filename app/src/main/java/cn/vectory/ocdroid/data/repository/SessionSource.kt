@@ -34,7 +34,7 @@ internal class StandardSessionSource(private val apiProvider: () -> OpenCodeApi)
  * **v0.9.0 503 backoff** — [parseErrorCode] / [retryAfterHeaderToMs] are injected
  * as lambdas that delegate to the OCR `internal fun`s of the same name (the
  * single source of truth for coded-envelope parsing + Retry-After decoding),
- * mirroring the [ExpandBatchEngine] injection pattern. No helper is re-defined
+ * mirroring the OCR injection pattern. No helper is re-defined
  * here.
  */
 internal class SlimSessionSource(
@@ -55,11 +55,11 @@ internal class SlimSessionSource(
  * Extracted delegate — mirrors [OpenCodeRepository.getSlimapiSessions] body
  * verbatim. Encapsulates the slimapi sessions Retrofit call + non-2xx error
  * decoding + the v0.9.0 `503 transform_busy` Retry-After backoff (mirrors
- * [ExpandBatchEngine] L440-460: ≤3 attempts, Retry-After header honored with
+ * ≤3 attempts, Retry-After header honored with
  * exponential-backoff fall-back, only `503 + transform_busy` retries; every
  * other status fails immediately preserving prior behavior).
  *
- * **One-shot errorBody discipline** (mirrors ExpandBatchEngine `else` arm):
+ * **One-shot errorBody discipline**:
  * the sidecar's coded envelope is read EXACTLY ONCE via the injected
  * [parseErrorCode] (OkHttp buffers errorBody for one-shot consumption); the
  * parsed `code` is then used for BOTH the retry decision AND WARN-level

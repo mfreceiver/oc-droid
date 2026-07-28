@@ -321,7 +321,7 @@ class ConnectionCoordinator(
         // settling slimapiTokenStreamEnabled. If the feature is on, clear any
         // stale degrade state for the current session so the token stream can
         // be opened (a transient cap-8 admission state may have cleared).
-        if (serverCompatProfile.slimapiTokenStreamEnabled) {
+        if (serverCompatProfile.tokenStreamEnabled) {
             tokenStreamCoordinator?.let { tsc ->
                 slices.chat.value.currentSessionId?.let { sid -> tsc.resetDegraded(sid) }
             }

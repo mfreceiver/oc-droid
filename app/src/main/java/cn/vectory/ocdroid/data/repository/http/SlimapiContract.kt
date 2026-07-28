@@ -9,8 +9,8 @@ package cn.vectory.ocdroid.data.repository.http
  * X_SLIMAPI_VERSION / SLIMAPI_PATH_PREFIX，避免散落字面量漂移（与 HttpHeaders
  * 同模式）。
  *
- * **版本来源**：客户端硬编码 1，与 oc-slimapi 当前 SERVER_API_VERSION=1 +
- * ACCEPTED_CLIENT_VERSIONS=(1,1) 对齐（见 docs/specs/slim-mode-api-routing.md §3）。
+ * **版本来源**：客户端硬编码 2，与 oc-slimapi 当前 SERVER_API_VERSION=1 +
+ * ACCEPTED_CLIENT_VERSIONS=(1,2) 对齐（见 docs/specs/slim-mode-api-routing.md §3）。
  * 未来 slimapi bump major 时同步本常量；旧客户端打新 sidecar 会触发
  * 400 version_incompatible，由 M2 自检的版本区间检查预先标记。
  *
@@ -32,7 +32,7 @@ object SlimapiContract {
      * X_SLIMAPI_VERSION 头；同时用于 M2 自检——本值必须落在 sidecar 返回的
      * accepted_client_versions 闭区间内，否则标记为不兼容。
      */
-    const val SLIMAPI_CLIENT_VERSION: Int = 1
+    const val SLIMAPI_CLIENT_VERSION: Int = 2
 
     /**
      * slimapi 路由前缀。版本头拦截器用 startsWith 匹配——所有以此前缀开头的

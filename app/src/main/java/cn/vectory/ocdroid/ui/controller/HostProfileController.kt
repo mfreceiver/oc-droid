@@ -100,8 +100,7 @@ class HostProfileController(
     /**
      * §P9: profile save/delete + clientCert mutation engine (extracted from
      * the 5 CRUD methods below). See [ProfileMutationEngine] for the full
-     * contract. Field-init mirrors the [SlimSyncEngine] pattern (provider-
-     * lambda injection, `by lazy`).
+     * contract. Field-init uses provider-lambda injection, `by lazy`.
      *
      * The injected lambdas capture `this` so they re-read live controller
      * state on every call — [withHostReconfiguration] / [beginReconfigureBoundary]
@@ -183,6 +182,8 @@ class HostProfileController(
      *  test @1088). */
     private fun beginReconfigureBoundary(): OpenCodeRepository.SlimReconfigureTicket {
         identityStore?.beginReconfigure()
+        // lite-v2 TODO: 此处仍执行运行时 reconfigure；C2 设计要求 host 切换 = 重启。
+        // 后续应删除此路径，改为重启 app。
         val ticket = repository.beginSlimReconfigure()
         effects.tryEmitEffect(ControllerEffect.CancelSseForReconfigure)
         return ticket
@@ -591,7 +592,9 @@ class HostProfileController(
             // left a slim-profile host routed as legacy after a manual URL
             // change. See OpenCodeRepository.configure slim param.
             slim = profile.slim,
-            reconfigureTicket = ticket,
+            // lite-v2-dev: reconfigureTicket 形参已从 configure() 移除（incarnation
+            // 协议退役，见 OpenCodeRepository.configure）。ticket 仍在 barrier 层流转
+            // 但不再传入 configure。
         )
         // #12 / §2.5(b): mirror the host's TLS trust policy (incl. mTLS) into
         // the markdown image client (same as configureRepositoryForProfile).
@@ -686,7 +689,7 @@ class HostProfileController(
             // legacy opencode). Was defaulting to false, leaving slim profiles
             // mis-routed on selectHostProfile / deleteHostProfile / testConnection.
             slim = profile.slim,
-            reconfigureTicket = ticket,
+            // lite-v2-dev: reconfigureTicket 形参已从 configure() 移除（见上）。
         )
         // #12 / §2.5(a): keep the markdown image HTTP client's TLS trust policy
         // in sync with the active host (now incl. mTLS) so self-signed HTTPS

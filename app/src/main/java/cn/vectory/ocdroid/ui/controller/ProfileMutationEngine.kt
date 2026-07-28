@@ -33,7 +33,7 @@ import java.util.UUID
  * lock, reconfigure ticket lifecycle, or EvictGroup placement — those
  * sequencing decisions are the controller's (the caller's) responsibility.
  *
- * **Field-init pattern** (mirrors [cn.vectory.ocdroid.data.repository.SlimSyncEngine]):
+ * **Field-init pattern**:
  * wired via `by lazy` in [HostProfileController] — zero change to the 11-arg
  * public/test-visible constructor (F6 freeze). The injected lambdas capture
  * `this` (the controller) so they re-read live controller state on every call.
@@ -66,8 +66,8 @@ class ProfileMutationEngine internal constructor(
     private val reconfigureBarrier: ConnectionReconfigureBarrier?,
     // ── Controller ops (reconfigure boundary + configure + state helpers) ──
     // These stay in HostProfileController; injected as lambdas so the engine
-    // does not reference the controller type directly (mirrors SlimSyncEngine's
-    // provider-lambda discipline). All withHostReconfiguration callers use
+    // does not reference the controller type directly (provider-lambda
+    // discipline). All withHostReconfiguration callers use
     // Unit-returning bodies, so the generic <T> collapses to Unit here.
     private val withHostReconfiguration: suspend (
         needsReconfigure: Boolean,

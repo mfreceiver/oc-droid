@@ -57,7 +57,7 @@ import kotlinx.coroutines.launch
  *
  * Single-user product — no compat gating. Does NOT modify the manual tap
  * path ([ChatViewModel.expandParts]); does NOT add a ControllerEffect;
- * does NOT change [cn.vectory.ocdroid.data.repository.ExpandBatchEngine].
+ * does NOT change the ExpandBatchEngine behavior (retired).
  */
 internal fun launchAutoExpandOmittedParts(
     scope: CoroutineScope,

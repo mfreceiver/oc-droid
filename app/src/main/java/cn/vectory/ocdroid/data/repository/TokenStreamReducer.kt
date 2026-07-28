@@ -139,8 +139,8 @@ object TokenStreamReducer {
         is TokenStreamFrame.Resync -> reduceResync(state, frame, ownedBySession)
         // B-P0-3 §Stage-B M5: removal events carry no streaming-text
         // mutation of their own (the per-message watermark is updated via
-        // a SEPARATE path — [MessageWatermarkState], owned by
-        // [SlimSseStateMachine]). But the reducer OWNS the streaming-text
+        // a SEPARATE path — [MessageWatermarkState]). But the reducer OWNS
+        // the streaming-text
         // overlay, so a removal MUST (a) drop the removed part(s) from
         // the reducer's working map so a late straggler frame cannot
         // re-establish them, AND (b) emit [ClearPartState] so the
@@ -178,9 +178,12 @@ object TokenStreamReducer {
             // text is null, KEEP the accumulated buffer (or "" if the part had
             // no prior snapshot — nothing to preserve). When text is non-null,
             // it is the authoritative final value → use it (existing behavior).
-            // The part still transitions to DONE; NO TriggerSinceFetch is
-            // emitted here (option A — keep buffer; the existing digest/`/since`
-            // reconcile path supplies authoritative text, NOT auto-fetch).
+            // The part still transitions to DONE.
+            //
+            // lite-v2-dev (plan §2.2 / §4.2): done:true → TriggerSinceFetch →
+            // skeleton reload（limit=50，终态文本收敛）。旧的「依赖 digest//since
+            // 自动收敛」路径在 lite-v2 改为显式 reload——权威窗口 diff 一次拿到
+            // 终态全文（覆盖 overlay）。
             val existing = state.parts[frame.partId]
             val terminalText = frame.text ?: existing?.text ?: ""
             val terminal = TokenPartAcc(
@@ -190,7 +193,10 @@ object TokenStreamReducer {
                 text = terminalText,
                 state = TokenPartStreamState.DONE,
             )
-            return state.copy(parts = state.parts + (frame.partId to terminal)) to emptyList()
+            val effects = listOf(
+                TokenStreamCoordinatorEffect.TriggerSinceFetch(frame.sessionId, authoritative = true),
+            )
+            return state.copy(parts = state.parts + (frame.partId to terminal)) to effects
         }
         // snapshot(done=false, truncated=false) → REPLACE buffer + STREAMING.
         // §orphan-delta-guard (rev-gpt concern #1): if a provisional entry

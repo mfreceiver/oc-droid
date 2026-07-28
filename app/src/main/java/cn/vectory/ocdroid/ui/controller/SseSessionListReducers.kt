@@ -185,7 +185,7 @@ internal fun <Wire, Ui> applyAggregationOutcome(
  * a fallback for ids that never get confirmed).
  */
 internal fun SessionListState.applySessionCreated(session: Session): Pair<SessionListState, List<SseSideEffect>> =
-    upsertAndInvalidateTree(session).copy(
+    upsertAndInvalidateTree(session, invalidateRoot = true).copy(
         pendingCreateIds = pendingCreateIds - session.id,
         pendingCreatedAt = pendingCreatedAt - session.id,
     ) to emptyList()
@@ -201,12 +201,12 @@ internal fun SessionListState.applySessionCreated(session: Session): Pair<Sessio
  * applySessionCreated and the REST sweep.
  */
 internal fun SessionListState.applySessionUpsert(updated: Session): Pair<SessionListState, List<SseSideEffect>> =
-    upsertAndInvalidateTree(updated).copy(
+    upsertAndInvalidateTree(updated, invalidateRoot = false).copy(
         pendingCreateIds = pendingCreateIds - updated.id,
         pendingCreatedAt = pendingCreatedAt - updated.id,
     ) to emptyList()
 
-private fun SessionListState.upsertAndInvalidateTree(session: Session): SessionListState {
+private fun SessionListState.upsertAndInvalidateTree(session: Session, invalidateRoot: Boolean): SessionListState {
     val updatedSessions = upsertSession(sessions, session)
     // §title-sync: also propagate the upsert into every directorySessions
     // bucket (conditional replace — do NOT append to buckets that don't
@@ -220,17 +220,21 @@ private fun SessionListState.upsertAndInvalidateTree(session: Session): SessionL
     }
     val byId = allSessionsById(updatedSessions, updatedDirectorySessions, childSessions)
     val rootId = rootIdOf(session.id, byId)
+    // Root invalidation only on structural changes (session.created /
+    // session.deleted). Digest-only updates (messageID, updatedAt, status)
+    // do NOT trigger a root re-fetch — skipping this avoids the polling
+    // feedback loop (~10.1 Hz /children + /messages traffic on every digest).
+    val invalidatedRootIds = if (invalidateRoot) {
+        if (rootId == null) emptySet() else completeRootIds - rootId
+    } else {
+        completeRootIds
+    }
+    val epoch = if (invalidateRoot) completenessEpoch + 1L else completenessEpoch
     return copy(
         sessions = updatedSessions,
         directorySessions = updatedDirectorySessions,
-        // An unresolved parent chain cannot be attributed safely. Invalidate
-        // every completeness proof rather than risk a false "all descendants
-        // idle" result until hydration reconnects the new node to its root.
-        completeRootIds = if (rootId == null) emptySet() else completeRootIds - rootId,
-        // §gpter-blocker: bump the invalidation epoch so any in-flight
-        // hydration (started before this SSE event) drops its result at
-        // commit instead of re-certifying the now-stale root.
-        completenessEpoch = completenessEpoch + 1L,
+        completeRootIds = invalidatedRootIds,
+        completenessEpoch = epoch,
     )
 }
 

@@ -884,7 +884,7 @@ internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolea
     // idle and is closed on background / session-switch. Capability gate:
     // slimapiTokenStreamEnabled == false → zero-regression (existing behavior).
     if (shouldOpenTokenStream(
-            serverCompatProfile.slimapiTokenStreamEnabled,
+            serverCompatProfile.tokenStreamEnabled,
             store.slices.chat.value.currentSessionId,
             sessionId,
         )

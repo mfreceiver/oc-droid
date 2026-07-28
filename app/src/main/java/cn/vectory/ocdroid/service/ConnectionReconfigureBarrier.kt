@@ -89,6 +89,8 @@ class ConnectionReconfigureBarrier @Inject constructor(
         // rejected. The returned ticket threads through [block] to configure
         // so the SAME transaction both invalidates and activates — closing
         // the T1/T2 completion race.
+        // lite-v2 TODO: 此处仍执行运行时 reconfigure；C2 设计要求 host 切换 = 重启。
+        // 后续应删除此路径，改为重启 app。
         val slimTicket = repository.beginSlimReconfigure()
         teardown.teardownAndAwait(TeardownReason.Reconfigure)
         val context = ConnectionReconfigureContext(epoch = epoch, slimTicket = slimTicket)

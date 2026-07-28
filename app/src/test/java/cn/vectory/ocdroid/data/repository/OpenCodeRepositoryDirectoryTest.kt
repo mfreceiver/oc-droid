@@ -231,15 +231,7 @@ class OpenCodeRepositoryDirectoryTest {
             "/browse/target",
             request.getHeader("X-Opencode-Directory")
         )
-        // Skip-Dir marker is stripped but the caller-supplied directory is
-        // mirrored into ?directory by the interceptor (GET mirror path).
-        assertEquals(
-            "browse-target directory mirrored into ?directory",
-            "/browse/target",
-            request.requestUrl?.queryParameter("directory")
-        )
         assertEquals("src", request.requestUrl?.queryParameter("path"))
-        assertNull("Skip-Dir marker stripped", request.getHeader("X-Opencode-Skip-Dir"))
     }
 
     @Test

@@ -115,7 +115,11 @@ class TokenStreamReducerTest {
         )
         assertEquals("FINAL", state.parts["p1"]?.text)
         assertEquals(TokenPartStreamState.DONE, state.parts["p1"]?.state)
-        assertTrue(effects.isEmpty())
+        // lite-v2-dev: done:true → TriggerSinceFetch (skeleton reload).
+        assertEquals(1, effects.size)
+        val trigger = effects[0] as TokenStreamCoordinatorEffect.TriggerSinceFetch
+        assertEquals("s1", trigger.sessionId)
+        assertTrue(trigger.authoritative)
     }
 
     // ── §5 C-1: done:true with null text keeps accumulated buffer ──────────
@@ -136,21 +140,28 @@ class TokenStreamReducerTest {
         val acc = next.parts["p1"]
         assertEquals("accumulated text must be preserved on done+null text", "hello", acc?.text)
         assertEquals(TokenPartStreamState.DONE, acc?.state)
-        // §5 C-1 option A: NO TriggerSinceFetch on done (buffer kept, not auto-fetch).
-        assertTrue("done must not emit any effects", effects.isEmpty())
+        // lite-v2-dev: done:true → TriggerSinceFetch (skeleton reload),
+        // even with null text. Buffer is preserved, but a reload is triggered.
+        assertEquals(1, effects.size)
+        val trigger = effects[0] as TokenStreamCoordinatorEffect.TriggerSinceFetch
+        assertEquals("s1", trigger.sessionId)
+        assertTrue(trigger.authoritative)
     }
 
     @Test
     fun `done snapshot with null text and no prior buffer yields empty DONE`() {
         // No prior snapshot — done+null text on a fresh part: "" is correct
-        // (there was nothing to preserve). Still DONE, no effects.
+        // (there was nothing to preserve). Still DONE, emits TriggerSinceFetch.
         val (state, effects) = TokenStreamReducer.reduce(
             TokenStreamReducerState(),
             snapshot(text = null, done = true),
         )
         assertEquals("", state.parts["p1"]?.text)
         assertEquals(TokenPartStreamState.DONE, state.parts["p1"]?.state)
-        assertTrue(effects.isEmpty())
+        assertEquals(1, effects.size)
+        val trigger = effects[0] as TokenStreamCoordinatorEffect.TriggerSinceFetch
+        assertEquals("s1", trigger.sessionId)
+        assertTrue(trigger.authoritative)
     }
 
     @Test
@@ -166,7 +177,11 @@ class TokenStreamReducerTest {
         val (next, effects) = TokenStreamReducer.reduce(state, snapshot(text = "FINAL", done = true))
         assertEquals("FINAL", next.parts["p1"]?.text)
         assertEquals(TokenPartStreamState.DONE, next.parts["p1"]?.state)
-        assertTrue(effects.isEmpty())
+        // lite-v2-dev: done:true → TriggerSinceFetch (skeleton reload).
+        assertEquals(1, effects.size)
+        val trigger = effects[0] as TokenStreamCoordinatorEffect.TriggerSinceFetch
+        assertEquals("s1", trigger.sessionId)
+        assertTrue(trigger.authoritative)
     }
 
     // ── truncated → clear + ClearPartState + TriggerSinceFetch ───────────

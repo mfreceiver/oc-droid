@@ -383,7 +383,7 @@ class OkHttpClientFactory private constructor(
      * What it DOES carry (all from the shared base chain's component set):
      *  - SSL via the single [applySsl] / [sslConfigFactory.sslConfigFor] entry
      *    point (TOFU pin / mTLS resolution identical to every other client).
-     *  - [slimapiVersionInterceptor] → injects `X-Slimapi-Version: 1` (the
+     *  - [slimapiVersionInterceptor] → injects `X-Slimapi-Version: 2` (the
      *    path is under `/slimapi/`, so the version gate applies — without it
      *    the sidecar returns 400 version_required).
      *  - [authInterceptor] → Basic Auth when the host profile carries creds.

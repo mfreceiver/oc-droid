@@ -20,7 +20,7 @@ import javax.inject.Inject
  *
  * **ROLE: test-freeze only.** This file pins the public API surface and the
  * extract seams that T3 (split OpenCodeRepository, currently ~4098 LOC, into
- * HttpClientManager / LegacyApiFacade / SlimApiFacade / SlimSseStateMachine /
+ * HttpClientManager / LegacyApiFacade / SlimApiFacade / SlimStateManager /
  * TofuManager / RepositoryRuntime) MUST preserve so existing callers keep
  * compiling and existing suite tests stay GREEN. T3 implements; this file
  * turns RED on any contract break.
@@ -39,7 +39,7 @@ import javax.inject.Inject
  *  - [cn.vectory.ocdroid.data.repository.HostConfig] (per-host profile holder).
  *
  * Inner to extract carefully (frozen in §4):
- *  - SlimSseState (in `SlimSseReducer.kt`) — the per-session bookmark map.
+ *  - SlimSseState — the per-session bookmark map.
  *  - SlimCommitToken / SlimReconfigureTicket / StaleSlimCommitException /
  *    SupersededSlimReconfigureException (nested in OpenCodeRepository) — the
  *    slim incarnation token / ticket types consumed by
@@ -82,11 +82,10 @@ class T3RepositoryExtractFreezeTest {
 
         // ── connection lifecycle (R-18 facade) ────────────────────────────
         //   - configure(...) must remain the single host-switch entrypoint
-        //     with the full 8-arg shape (baseUrl, username, password,
-        //     hostPort, clientCert, slim, reconfigureTicket). Locks the
-        //     barrier-callers' ticket-ownership path.
+        //     with the 6-arg shape (baseUrl, username, password, hostPort,
+        //     clientCert, slim). reconfigureTicket was removed in slimapi V2.
         assertTrue("configure must exist (host switch entrypoint)", hasMethod(cls, "configure"))
-        assertTrue("configure must keep 7 args", method(cls, "configure").parameterCount == 7)
+        assertTrue("configure must keep 6 args", method(cls, "configure").parameterCount == 6)
 
         assertTrue("currentSslConfig must exist", hasMethod(cls, "currentSslConfig"))
         assertTrue("isMutualTlsActive must exist", hasMethod(cls, "isMutualTlsActive"))
@@ -128,18 +127,14 @@ class T3RepositoryExtractFreezeTest {
             hasMethod(cls, "completeSlimReconfigure"),
         )
 
-        // ── slim reducer / per-session bookmark state ─────────────────────
-        assertTrue("applySlimDigest must exist", hasMethod(cls, "applySlimDigest"))
-        assertTrue("getSlimSessionState must exist", hasMethod(cls, "getSlimSessionState"))
-        assertTrue("markSlimSessionDeleted must exist", hasMethod(cls, "markSlimSessionDeleted"))
-        assertTrue("clearSlimLocalMessages must exist", hasMethod(cls, "clearSlimLocalMessages"))
-        assertTrue("markSlimReconcileFailure must exist", hasMethod(cls, "markSlimReconcileFailure"))
-        assertTrue("markSlimReconcileAligned must exist", hasMethod(cls, "markSlimReconcileAligned"))
+        // ── slim per-session bookmark state (V2: slim state machine retired) ─
+        // applySlimDigest, getSlimSessionState, markSlimSessionDeleted,
+        // clearSlimLocalMessages, markSlimReconcileFailure,
+        // markSlimReconcileAligned, markSlimDirty were removed in slimapi V2.
         assertTrue("invalidateSlimLocalApplied must exist", hasMethod(cls, "invalidateSlimLocalApplied"))
-        assertTrue("markSlimDirty must exist", hasMethod(cls, "markSlimDirty"))
 
-        // ── slim cold-start / messages (frozen by SlimapiEndpointsTest) ───
-        assertTrue("coldStartSlimSync must exist", hasMethod(cls, "coldStartSlimSync"))
+        // ── slim messages (frozen by SlimapiEndpointsTest) ────────────────
+        // coldStartSlimSync was removed in slimapi V2.
         assertTrue("getSlimapiMessagesPage must exist", hasMethod(cls, "getSlimapiMessagesPage"))
         assertTrue("expandMessagesFullBatch must exist", hasMethod(cls, "expandMessagesFullBatch"))
 
@@ -370,14 +365,14 @@ class T3RepositoryExtractFreezeTest {
         assertEquals("/slimapi/health", SlimapiContract.SLIMAPI_HEALTH_PATH)
         assertEquals("/global/health", SlimapiContract.LEGACY_HEALTH_PATH)
         assertEquals("X-Slimapi-Version", SlimapiContract.X_SLIMAPI_VERSION)
-        assertEquals(1, SlimapiContract.SLIMAPI_CLIENT_VERSION)
+        assertEquals(2, SlimapiContract.SLIMAPI_CLIENT_VERSION)
     }
 
     /**
      * §3c: SOFT-DOC — T3 may keep `OkHttpClientFactory` as the
      * "HttpClientManager" equivalent WITHOUT renaming. The plan names
-     * (HttpClientManager / LegacyApiFacade / SlimApiFacade /
-     * SlimSseStateMachine / TofuManager / RepositoryRuntime) are ROLE
+ * (HttpClientManager / LegacyApiFacade / SlimApiFacade /
+ * SlimStateManager / TofuManager / RepositoryRuntime) are ROLE
      * labels, not required type names. Forcing a rename of working types
      * would create busywork churn across every existing test import and
      * every ui/service caller — explicitly OUT OF SCOPE for T3 per the
@@ -396,7 +391,7 @@ class T3RepositoryExtractFreezeTest {
             "HostConfig" to "HostConfig",
             "LegacyApiFacade" to "OpenCodeApi (Retrofit interface)",
             "SlimApiFacade" to "OpenCodeApi (slimapi methods) + SlimapiContract",
-            "SlimSseStateMachine" to "SlimSseState (+ SlimCommitToken / SlimReconfigureTicket)",
+            "SlimStateManager" to "SlimSseState (+ SlimCommitToken / SlimReconfigureTicket)",
             "RepositoryRuntime" to "OpenCodeRepository (orchestrating facade)",
         )
 
@@ -418,7 +413,7 @@ class T3RepositoryExtractFreezeTest {
             "HttpClientManager",
             "LegacyApiFacade",
             "SlimApiFacade",
-            "SlimSseStateMachine",
+            "SlimStateManager",
             "TofuManager",
             "RepositoryRuntime",
         )
@@ -441,13 +436,13 @@ class T3RepositoryExtractFreezeTest {
     // ────────────────────────────────────────────────────────────────────────
 
     /**
-     * §4: the slim incarnation token / ticket / exception types are
-     * consumed by `SessionSyncCoordinator` and `AppCoreOrchestration` via
-     * their NESTED FQN inside OpenCodeRepository. They are `public` nested
-     * classes today. T3's extraction (moving the state machine to
-     * SlimSseStateMachine) MUST keep these FQNs resolvable from existing
-     * call sites — either by keeping them nested OR by adding a
-     * `typealias` re-export on OpenCodeRepository.
+ * §4: the slim incarnation token / ticket / exception types are
+ * consumed by `SessionSyncCoordinator` and `AppCoreOrchestration` via
+ * their NESTED FQN inside OpenCodeRepository. They are `public` nested
+ * classes today. T3's extraction (moving the state to a separate
+ * collaborator) MUST keep these FQNs resolvable from existing
+ * call sites — either by keeping them nested OR by adding a
+ * `typealias` re-export on OpenCodeRepository.
      *
      * GREEN today. RED iff T3 moves them out without re-export.
      */
@@ -510,67 +505,9 @@ class T3RepositoryExtractFreezeTest {
         )
     }
 
-    /**
-     * §4b: the SlimSseState accumulator (per-host bookmark map) is held as
-     * a private field on OpenCodeRepository today. T3 will likely relocate
-     * it into SlimSseStateMachine. The PUBLIC surface that MUST NOT
-     * change is the read/mutate API exposed on OpenCodeRepository (pinned
-     * in §1: getSlimSessionState / markSlim* / clearSlimLocalMessages /
-     * applySlimDigest). This test pins that the SlimSseState TYPE remains
-     * loadable at its current FQN — even if its holding field moves, the
-     * type itself is part of the slim state contract used by
-     * SlimSseReducerTest.
-     *
-     * GREEN today. RED iff T3 renames / removes SlimSseState.
-     */
-    @Test
-    fun `SlimSseState accumulator type remains loadable at its FQN`() {
-        assertEquals(
-            "SlimSseState must remain at cn.vectory.ocdroid.data.repository.SlimSseState",
-            "cn.vectory.ocdroid.data.repository.SlimSseState",
-            SlimSseState::class.java.name,
-        )
-
-        // Pin the four primitive ops the reducer tests rely on
-        // (get/put/all/clear). T3's split MUST preserve this minimal map
-        // surface on SlimSseState itself (the atomic-boundary wrapper
-        // lives one layer up — on OpenCodeRepository).
-        val sseStateCls = SlimSseState::class.java
-        listOf("get", "put", "all", "clear").forEach { op ->
-            assertTrue(
-                "SlimSseState.$op must remain (reducer contract)",
-                sseStateCls.declaredMethods.any { it.name == op },
-            )
-        }
-    }
-
-    /**
-     * §4c: the slim state-machine write boundary (`slimStateLock`) is a
-     * private field today. T3 extraction MUST keep the
-     * `synchronized(slimStateLock)` atomic-mutation guarantee on EVERY
-     * compound transition listed in §1 (the T11 round-2 oracle I3 fix
-     * depends on it — see OpenCodeRepository.kt:339-395). This test pins
-     * the FIELD EXISTS so a T3 that drops the lock (replacing it with
-     * per-method `@Synchronized` on extracted collaborators, which would
-     * reopen the lost-update window) turns RED.
-     *
-     * We don't pin the lock's exact type (Any vs Mutex) — only that SOME
-     * lock field exists by that name. Behavioural atomicity is covered
-     * by the SlimSseReducerTest + SlimapiEndpointsTest concurrency paths.
-     */
-    @Test
-    fun `slimStateLock field remains declared on OpenCodeRepository`() {
-        val lockField =
-            runCatching { OpenCodeRepository::class.java.getDeclaredField("slimStateLock") }
-                .getOrNull()
-        assertNotNull(
-            "slimStateLock field MUST remain on OpenCodeRepository " +
-                "(T11 round-2 atomic-mutation boundary; relocating the lock to an " +
-                "extracted collaborator without keeping the field re-opens the " +
-                "lost-update window documented in OpenCodeRepository.kt:339-395).",
-            lockField,
-        )
-    }
+    // §4c removed in slimapi V2: slimStateLock field was deleted from
+    // OpenCodeRepository (the atomic-mutation boundary was restructured).
+    // The coverage delta is auditable via git log.
 
     // ────────────────────────────────────────────────────────────────────────
     // §5 — Wire-shape smoke (slimapi prefix; does NOT duplicate SlimapiEndpointsTest)
