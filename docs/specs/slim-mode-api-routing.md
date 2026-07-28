@@ -10,8 +10,8 @@
 > 自 slimapi。
 >
 > **权威基准**：以 oc-slimapi **v2** 契约（`v2-contract.md`）为唯一 wire 基准：
-> - [`oc-slimapi/docs/specs/v2-contract.md`](../../oc-slimapi/docs/specs/v2-contract.md) — 锁定的 v2 wire 契约（权威）。
-> - [`oc-slimapi/docs/specs/CLIENT_CHANGES.md`](../../oc-slimapi/docs/specs/CLIENT_CHANGES.md) — 客户端影响清单。
+> - [`oc-slimapi/docs/specs/v2-contract.md`](../../../oc-slimapi/docs/specs/v2-contract.md) — 锁定的 v2 wire 契约（权威）。
+> - [`oc-slimapi/docs/specs/CLIENT_CHANGES.md`](../../../oc-slimapi/docs/specs/CLIENT_CHANGES.md) — 客户端影响清单。
 > - v1 契约（`v1-contract.md`）已废弃，仅保留历史参考——**不以之为基准**。
 >
 > **版本契约基线**：路径扁平 `/slimapi/*`（**不**用 `/slimapi/v2/*`），
@@ -33,13 +33,13 @@
 
 ### 1.1 模型定义
 
-`HostConfig`（[`data/repository/HostConfig.kt`](../app/src/main/java/cn/vectory/ocdroid/data/repository/HostConfig.kt)）
+`HostConfig`（[`data/repository/HostConfig.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/HostConfig.kt)）
 持有当前所选 server 的 `_baseUrl` / `_username` / `_password` / `_hostPort`。
-`configure(baseUrl, ...)`（[:69](../app/src/main/java/cn/vectory/ocdroid/data/repository/HostConfig.kt)）
+`configure(baseUrl, ...)`（[:69](../../app/src/main/java/cn/vectory/ocdroid/data/repository/HostConfig.kt)）
 是 `@Synchronized` 的原子 host 切换。
 
 `OpenCodeRepository.configure()` → `hostConfig.configure(...)` →
-`rebuildClients()`（[`OpenCodeRepository.kt:202`](../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt)）
+`rebuildClients()`（[`OpenCodeRepository.kt:202`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt)）
 整体重建：
 
 - `restHttp` / `restRetrofit` / `api`（REST 主接口）
@@ -307,58 +307,58 @@ connection-failure（`IOException`）/ upstream 4xx5xx / 503 `upstream_unavailab
 > **当前对接状态**：客户端**已对接**全部 B 桶端点（在 legacy 模式下直连 opencode，
 > 省流模式下经 slimapi catch-all 透传给 opencode）。下表逐条列出。
 
-#### 4.2.1 B 桶 — 通过 Retrofit `OpenCodeApi`（接口：[`data/api/OpenCodeApi.kt`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt)）
+#### 4.2.1 B 桶 — 通过 Retrofit `OpenCodeApi`（接口：[`data/api/OpenCodeApi.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt)）
 
 | # | 调用点 | HTTP 方法+路径 | 用途 | Skip-Dir | 备注 |
 |---|---|---|---|---|---|
-| B1 | [`OpenCodeApi.kt:12`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("global/health")` | `GET /global/health` | 健康探针、版本识别 | ✓ | `/slimapi/ready` 上游等价；省流模式应迁移到 A12（带版本头） |
-| B2 | [`OpenCodeApi.kt:16`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("session")` | `GET /session?limit=&directory=&roots=` | 列 session | ✓ | 省流目标迁移到 A1（骨架） |
-| B3 | [`OpenCodeApi.kt:29`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session")` | `POST /session`（body: CreateSessionRequest）+ `@Header(directory)` | 创建 session | ✗（**显式 directory header**） | §6 写路径 routeToken/directory 注入说明 |
-| B4 | [`OpenCodeApi.kt:36`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("session/{id}")` | `GET /session/{id}` | 单 session by id | ✓ | — |
-| B5 | [`OpenCodeApi.kt:45`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("session/{id}/children")` | `GET /session/{id}/children` | 子（sub-agent）session 列表 | ✓ | — |
-| B6 | [`OpenCodeApi.kt:49`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@PATCH("session/{id}")` | `PATCH /session/{id}`（body: UpdateSessionRequest） | 改 title / archived | ✓ | — |
-| B7 | [`OpenCodeApi.kt:53`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@DELETE("session/{id}")` | `DELETE /session/{id}` | 删 session | ✓ | — |
-| B8 | [`OpenCodeApi.kt:57`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("session/status")` | `GET /session/status` | 批量 status map | ✓ | V2 已删除 `/slimapi/sessions/status`；省流模式下经 catch-all 透传 (B 桶保留) |
-| B9 | [`OpenCodeApi.kt:61`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("api/session/active")` | `GET /api/session/active` | 活跃 session 集合 | ✓ | 由 `UnreadSoakController` 30s 轮询（无 SSE 等价） |
-| B10 | [`OpenCodeApi.kt:65`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("session/{id}/message")` | `GET /session/{id}/message?limit=&before=` | 消息分页（含 `X-Next-Cursor`） | ✓ | 省流目标迁移到 A4 |
-| B11 | [`OpenCodeApi.kt:72`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session/{id}/prompt_async")` | `POST /session/{id}/prompt_async`（body: PromptRequest） | 发消息（异步） | ✗（默认走 directory interceptor） | **mutation 不双发**（design-v2 §3.5） |
-| B12 | [`OpenCodeApi.kt:79`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session/{id}/abort")` | `POST /session/{id}/abort` | 中止 session | ✓ | — |
-| B13 | [`OpenCodeApi.kt:92`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session/{id}/summarize")` | `POST /session/{id}/summarize`（body: SummarizeRequest） | 触发上下文压缩 | ✓ | 压缩结果通过 SSE 投递 |
-| B14 | [`OpenCodeApi.kt:99`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session/{id}/fork")` | `POST /session/{id}/fork`（body: ForkSessionRequest） | fork session | ✓ | — |
-| B15 | [`OpenCodeApi.kt:106`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session/{id}/revert")` | `POST /session/{id}/revert`（body: RevertSessionRequest） | 回滚到 messageId | ✓ | — |
-| B16 | [`OpenCodeApi.kt:113`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session/{id}/permissions/{permissionId}")` | `POST /session/{id}/permissions/{permissionId}`（body: PermissionResponseRequest） | 应答 permission | ✓ | **V2 变化**：routeToken 在 v2 中不存在；permission 应答走 catch-all + `X-Opencode-Directory`（header directory），不再有 routeToken body 字段 |
-| B17 | [`OpenCodeApi.kt:121`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("permission")` | `GET /permission` | pending permission 列表 | ✓ | V2 已删除聚合端点；省流模式下经 catch-all 透传 upstream（B 桶保留） |
-| B18 | [`OpenCodeApi.kt:134`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("question")` | `GET /question`（+ `@Header(directory)`） | pending question 列表 | ✗（**显式 directory header**） | V2 已删除聚合端点；省流模式下经 catch-all 透传 upstream（B 桶保留） |
-| B19 | [`OpenCodeApi.kt:139`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("question/{requestId}/reply")` | `POST /question/{requestId}/reply`（body: QuestionReplyRequest + `@Header(directory)`） | 回复 question | ✗（**显式 directory header**） | **V2 变化**：routeToken 整体下线；走 catch-all + `X-Opencode-Directory` 透传（不再带 routeToken body 字段） |
-| B20 | [`OpenCodeApi.kt:146`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("question/{requestId}/reject")` | `POST /question/{requestId}/reject`（+ `@Header(directory)`） | 拒绝 question | ✗（**显式 directory header**） | 同上 |
-| B21 | [`OpenCodeApi.kt:153`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("config/providers")` | `GET /config/providers` | 模型 catalog（**含 apiKey 字段**，客户端忽略未知键丢弃） | ✓ | 不缓存（`HttpHeaders.CACHEABLE_PATHS` 故意外排） |
-| B22 | [`OpenCodeApi.kt:157`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("agent")` | `GET /agent` | agent 列表 | ✓ | 缓存（在 `CACHEABLE_PATHS` 内） |
-| B23 | [`OpenCodeApi.kt:170`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("command")` | `GET /command` | slash 命令列表 | ✓ | 缓存 |
-| B24 | [`OpenCodeApi.kt:183`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session/{id}/command")` | `POST /session/{id}/command`（body: CommandRequest + `@Header(directory)`） | 执行 slash 命令 | ✗（**显式 directory header**） | 走 `commandApi`（300s read timeout） |
-| B25 | [`OpenCodeApi.kt:191`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("session/{id}/diff")` | `GET /session/{id}/diff` | session 文件 diff | ✓ | — |
-| B26 | [`OpenCodeApi.kt:195`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("session/{id}/todo")` | `GET /session/{id}/todo` | session todo 列表 | ✓ | — |
-| B27 | [`OpenCodeApi.kt:206`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("file")` | `GET /file?path=&directory=` | 文件树（current workdir） | ✓ | 显式 `?directory` query |
-| B28 | [`OpenCodeApi.kt:220`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("file")`（variant） | `GET /file?path=` + `@Header(X-Opencode-Directory)` | 文件树（任意 directory，picker 用） | ✓ | — |
-| B29 | [`OpenCodeApi.kt:227`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("file/content")` | `GET /file/content?path=&directory=` | 文件内容 | ✓ | — |
-| B30 | [`OpenCodeApi.kt:234`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("file/status")` | `GET /file/status?directory=` | 文件状态 | ✓ | — |
-| B31 | [`OpenCodeApi.kt:242`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("vcs")` | `GET /vcs?directory=` | VCS 信息 | ✓ | — |
-| B32 | [`OpenCodeApi.kt:246`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("vcs/status")` | `GET /vcs/status?directory=` | VCS 状态 | ✓ | — |
-| B33 | [`OpenCodeApi.kt:250`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("vcs/diff")` | `GET /vcs/diff?mode=&directory=` | VCS diff | ✓ | — |
-| B34 | [`OpenCodeApi.kt:257`](../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("find/file")` | `GET /find/file?query=&limit=&directory=` | 文件查找 | ✓ | — |
+| B1 | [`OpenCodeApi.kt:12`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("global/health")` | `GET /global/health` | 健康探针、版本识别 | ✓ | `/slimapi/ready` 上游等价；省流模式应迁移到 A12（带版本头） |
+| B2 | [`OpenCodeApi.kt:16`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("session")` | `GET /session?limit=&directory=&roots=` | 列 session | ✓ | 省流目标迁移到 A1（骨架） |
+| B3 | [`OpenCodeApi.kt:29`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session")` | `POST /session`（body: CreateSessionRequest）+ `@Header(directory)` | 创建 session | ✗（**显式 directory header**） | §6 写路径 routeToken/directory 注入说明 |
+| B4 | [`OpenCodeApi.kt:36`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("session/{id}")` | `GET /session/{id}` | 单 session by id | ✓ | — |
+| B5 | [`OpenCodeApi.kt:45`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("session/{id}/children")` | `GET /session/{id}/children` | 子（sub-agent）session 列表 | ✓ | — |
+| B6 | [`OpenCodeApi.kt:49`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@PATCH("session/{id}")` | `PATCH /session/{id}`（body: UpdateSessionRequest） | 改 title / archived | ✓ | — |
+| B7 | [`OpenCodeApi.kt:53`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@DELETE("session/{id}")` | `DELETE /session/{id}` | 删 session | ✓ | — |
+| B8 | [`OpenCodeApi.kt:57`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("session/status")` | `GET /session/status` | 批量 status map | ✓ | V2 已删除 `/slimapi/sessions/status`；省流模式下经 catch-all 透传 (B 桶保留) |
+| B9 | [`OpenCodeApi.kt:61`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("api/session/active")` | `GET /api/session/active` | 活跃 session 集合 | ✓ | 由 `UnreadSoakController` 30s 轮询（无 SSE 等价） |
+| B10 | [`OpenCodeApi.kt:65`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("session/{id}/message")` | `GET /session/{id}/message?limit=&before=` | 消息分页（含 `X-Next-Cursor`） | ✓ | 省流目标迁移到 A4 |
+| B11 | [`OpenCodeApi.kt:72`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session/{id}/prompt_async")` | `POST /session/{id}/prompt_async`（body: PromptRequest） | 发消息（异步） | ✗（默认走 directory interceptor） | **mutation 不双发**（design-v2 §3.5） |
+| B12 | [`OpenCodeApi.kt:79`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session/{id}/abort")` | `POST /session/{id}/abort` | 中止 session | ✓ | — |
+| B13 | [`OpenCodeApi.kt:92`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session/{id}/summarize")` | `POST /session/{id}/summarize`（body: SummarizeRequest） | 触发上下文压缩 | ✓ | 压缩结果通过 SSE 投递 |
+| B14 | [`OpenCodeApi.kt:99`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session/{id}/fork")` | `POST /session/{id}/fork`（body: ForkSessionRequest） | fork session | ✓ | — |
+| B15 | [`OpenCodeApi.kt:106`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session/{id}/revert")` | `POST /session/{id}/revert`（body: RevertSessionRequest） | 回滚到 messageId | ✓ | — |
+| B16 | [`OpenCodeApi.kt:113`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session/{id}/permissions/{permissionId}")` | `POST /session/{id}/permissions/{permissionId}`（body: PermissionResponseRequest） | 应答 permission | ✓ | **V2 变化**：routeToken 在 v2 中不存在；permission 应答走 catch-all + `X-Opencode-Directory`（header directory），不再有 routeToken body 字段 |
+| B17 | [`OpenCodeApi.kt:121`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("permission")` | `GET /permission` | pending permission 列表 | ✓ | V2 已删除聚合端点；省流模式下经 catch-all 透传 upstream（B 桶保留） |
+| B18 | [`OpenCodeApi.kt:134`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("question")` | `GET /question`（+ `@Header(directory)`） | pending question 列表 | ✗（**显式 directory header**） | V2 已删除聚合端点；省流模式下经 catch-all 透传 upstream（B 桶保留） |
+| B19 | [`OpenCodeApi.kt:139`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("question/{requestId}/reply")` | `POST /question/{requestId}/reply`（body: QuestionReplyRequest + `@Header(directory)`） | 回复 question | ✗（**显式 directory header**） | **V2 变化**：routeToken 整体下线；走 catch-all + `X-Opencode-Directory` 透传（不再带 routeToken body 字段） |
+| B20 | [`OpenCodeApi.kt:146`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("question/{requestId}/reject")` | `POST /question/{requestId}/reject`（+ `@Header(directory)`） | 拒绝 question | ✗（**显式 directory header**） | 同上 |
+| B21 | [`OpenCodeApi.kt:153`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("config/providers")` | `GET /config/providers` | 模型 catalog（**含 apiKey 字段**，客户端忽略未知键丢弃） | ✓ | 不缓存（`HttpHeaders.CACHEABLE_PATHS` 故意外排） |
+| B22 | [`OpenCodeApi.kt:157`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("agent")` | `GET /agent` | agent 列表 | ✓ | 缓存（在 `CACHEABLE_PATHS` 内） |
+| B23 | [`OpenCodeApi.kt:170`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("command")` | `GET /command` | slash 命令列表 | ✓ | 缓存 |
+| B24 | [`OpenCodeApi.kt:183`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@POST("session/{id}/command")` | `POST /session/{id}/command`（body: CommandRequest + `@Header(directory)`） | 执行 slash 命令 | ✗（**显式 directory header**） | 走 `commandApi`（300s read timeout） |
+| B25 | [`OpenCodeApi.kt:191`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("session/{id}/diff")` | `GET /session/{id}/diff` | session 文件 diff | ✓ | — |
+| B26 | [`OpenCodeApi.kt:195`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("session/{id}/todo")` | `GET /session/{id}/todo` | session todo 列表 | ✓ | — |
+| B27 | [`OpenCodeApi.kt:206`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("file")` | `GET /file?path=&directory=` | 文件树（current workdir） | ✓ | 显式 `?directory` query |
+| B28 | [`OpenCodeApi.kt:220`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("file")`（variant） | `GET /file?path=` + `@Header(X-Opencode-Directory)` | 文件树（任意 directory，picker 用） | ✓ | — |
+| B29 | [`OpenCodeApi.kt:227`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("file/content")` | `GET /file/content?path=&directory=` | 文件内容 | ✓ | — |
+| B30 | [`OpenCodeApi.kt:234`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("file/status")` | `GET /file/status?directory=` | 文件状态 | ✓ | — |
+| B31 | [`OpenCodeApi.kt:242`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("vcs")` | `GET /vcs?directory=` | VCS 信息 | ✓ | — |
+| B32 | [`OpenCodeApi.kt:246`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("vcs/status")` | `GET /vcs/status?directory=` | VCS 状态 | ✓ | — |
+| B33 | [`OpenCodeApi.kt:250`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("vcs/diff")` | `GET /vcs/diff?mode=&directory=` | VCS diff | ✓ | — |
+| B34 | [`OpenCodeApi.kt:257`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("find/file")` | `GET /find/file?query=&limit=&directory=` | 文件查找 | ✓ | — |
 
-#### 4.2.2 B 桶 — 通过 Retrofit `OpenCodeApiV2`（接口：[`data/api/v2/OpenCodeApiV2.kt`](../app/src/main/java/cn/vectory/ocdroid/data/api/v2/OpenCodeApiV2.kt)，根 `<base>/api/`）
+#### 4.2.2 B 桶 — 通过 Retrofit `OpenCodeApiV2`（接口：[`data/api/v2/OpenCodeApiV2.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/api/v2/OpenCodeApiV2.kt)，根 `<base>/api/`）
 
 | # | 调用点 | HTTP 方法+路径 | 用途 | 备注 |
 |---|---|---|---|---|
-| B35 | [`OpenCodeApiV2.kt:50`](../app/src/main/java/cn/vectory/ocdroid/data/api/v2/OpenCodeApiV2.kt) `@GET("model")` | `GET /api/model` | 模型 catalog（v2 形态，无 apiKey） | **debug-only**（`OpenCodeRepository.getModels`，无生产调用）；与 B21 二选一，当前生产用 B21 |
-| B36 | [`OpenCodeApiV2.kt:54`](../app/src/main/java/cn/vectory/ocdroid/data/api/v2/OpenCodeApiV2.kt) `@GET("provider")` | `GET /api/provider` | provider catalog（v2 形态） | 同上，debug-only |
+| B35 | [`OpenCodeApiV2.kt:50`](../../app/src/main/java/cn/vectory/ocdroid/data/api/v2/OpenCodeApiV2.kt) `@GET("model")` | `GET /api/model` | 模型 catalog（v2 形态，无 apiKey） | **debug-only**（`OpenCodeRepository.getModels`，无生产调用）；与 B21 二选一，当前生产用 B21 |
+| B36 | [`OpenCodeApiV2.kt:54`](../../app/src/main/java/cn/vectory/ocdroid/data/api/v2/OpenCodeApiV2.kt) `@GET("provider")` | `GET /api/provider` | provider catalog（v2 形态） | 同上，debug-only |
 
 #### 4.2.3 B 桶 — 裸 OkHttp（非 Retrofit）
 
 | # | 调用点 | HTTP 方法+路径 | 用途 | 备注 |
 |---|---|---|---|---|
-| B37 | [`OpenCodeRepository.kt:890`](../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt) `connectSSE` → `SSEClient.connect` → [`SSEClient.kt:102`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) | `GET {base}/global/event`（SSE） | 全局事件流 | 省流目标迁移到 A5 |
-| B38 | [`OpenCodeRepository.kt:429`](../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt) `checkHealthFor` → [`:445-446`](../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt) | `GET {baseUrl}/global/health`（裸 OkHttp `healthClient`） | host 列表 "Test" 探针（非 mutative） | 省流模式应改为探 `/slimapi/health` + `/slimapi/ready`（带版本头） |
+| B37 | [`OpenCodeRepository.kt:890`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt) `connectSSE` → `SSEClient.connect` → [`SSEClient.kt:102`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) | `GET {base}/global/event`（SSE） | 全局事件流 | 省流目标迁移到 A5 |
+| B38 | [`OpenCodeRepository.kt:429`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt) `checkHealthFor` → [`:445-446`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt) | `GET {baseUrl}/global/health`（裸 OkHttp `healthClient`） | host 列表 "Test" 探针（非 mutative） | 省流模式应改为探 `/slimapi/health` + `/slimapi/ready`（带版本头） |
 
 ### 4.3 C 桶 — direct-opencode 违规（见 §7 详细列表）
 
@@ -383,7 +383,7 @@ connection-failure（`IOException`）/ upstream 4xx5xx / 503 `upstream_unavailab
 ## 5. A 桶明细 + 期望 slimapi 响应形状
 
 > 客户端当前**未对接**任何 A 桶；下表是迁移完成后的契约。**权威定义见
-> [`oc-slimapi/docs/specs/v2-contract.md`](../../oc-slimapi/docs/specs/v2-contract.md)
+> [`oc-slimapi/docs/specs/v2-contract.md`](../../../oc-slimapi/docs/specs/v2-contract.md)
 > §2-§7**，本文不复述。
 
 ### 5.1 响应形状速查
@@ -394,7 +394,7 @@ connection-failure（`IOException`）/ upstream 4xx5xx / 503 `upstream_unavailab
 | `GET /slimapi/messages/{sid}?limit=1&mode=skeleton`（`probeLatestSlim`） | `MessageWithParts[]`（取首项的 `messageID` + `info.time.updated`） | **无 ETag/304 协议**——客户端不发送 `If-None-Match`；返回值经 `ProbeResult`（T2） |
 | `GET /slimapi/messages/{sid}?mode=skeleton` | `List<MessageWithParts>` 裸数组 + `X-Next-Cursor`（opaque base64url，不 decode/re-encode）；`Cache-Control:no-store`；**`?mode=full` 被静默忽略**——恒返回 skeleton | skeleton upstream body >64 MiB → 413 `response_too_large`；转换槽满 → 503 `transform_busy`；列表按 `time.created` 升序；`?before` cursor 翻向旧方向 |
 | `GET /slimapi/messages/{sid}/full/{mid}` | 单 `MessageWithParts` + `Cache-Control:no-store`；**v2 简化：恒 200，无 304/ETag/`X-Message-Event-Seq`/`?known.*`** | >32 MiB → 413 `message_too_large`（带 `limitBytes`）；mid-stream 异常 → 503 `upstream_unavailable` |
-| `GET /slimapi/events`（SSE） | `text/event-stream`；**无 query 参数**（`directory`/`sessionId`/`stream` 在 v2 中已移除）；curated 帧类型见 §5.5（G4 透传矩阵） | **no-replay**；queue=256 背压；满则丢最旧 + STOP 断慢消费者；客户端**不发送** `Last-Event-ID` |
+| `GET /slimapi/events`（SSE） | `text/event-stream`；**无 query 参数**（`directory`/`sessionId`/`stream` 在 v2 中已移除）；curated 帧类型见 §5.5（G4 透传矩阵） | **no-replay**；背压：每 subscriber buffer 2MiB + 单帧 256KiB，溢出→清 queue/deltas/dirty + `resync{reason:"subscriber_backpressure"}` + STOP 断开慢消费者；客户端**可带** `Last-Event-ID` 但其值被忽略（仅触发首帧 `resync{reconnect_no_replay}`） |
 | `GET /slimapi/health` | `{"sidecar":{"ok","version"},"schema":{"degraded","version","clientMin","clientMax"},"server":{"api_version","accepted_client_versions"}}` | **liveness**，不代表 upstream 可达；schema 三键为**诊断回显**（非 feature discovery） |
 | `GET /slimapi/ready` | `{"upstream":{"ok","latencyMs"},"schema":{"degraded","version","clientMin","clientMax"},"server":{"api_version"}}` | 探 upstream；<300 → 200，否则/异常 → 503 |
 | `GET /slimapi/metrics`（T3） | 订阅者/queue/hub 指标 JSON；`batch` 字段恒为 `null`（BatchLedger 已移除） | 监控用，客户端通常不直接消费 |
@@ -489,7 +489,7 @@ slimapi 上游订阅**单一** `/global/event`（进程级 GlobalBus，全实例
 | `server.connected` | 订阅建立时 slimapi 自吐 | subscribe 时入队首帧 | 连接就绪信号；客户端 **SHOULD** cold-start（一次 reconcile，幂等）；**sidecar 重启后重连也触发** |
 | `server.heartbeat` | slimapi 自治（10s 周期） | heartbeat_loop | 看门狗喂狗；**≠上游健康**——仅证 sidecar + 订阅存活；outage 探测用 `/slimapi/ready` 或自然 fetch/write 失败 |
 | `resync` | 上游断开重连后 slimapi 自治 | `run()` 重连后 `resync_all()` 向所有 subscriber 扇出 | 客户端走冷启动级 catch-up（A1 + 当前 ses 的 A3）；**无 replay——客户端可带 `Last-Event-ID` 但其值被忽略（仅触发首帧 `resync{reconnect_no_replay}`）**；同一连接建立期与 `server.connected` coalesce（once-latch，至多一次 reconcile） |
-| `STOP`（控制帧，非 `event:`） | subscriber queue 满（256） | 立即清 queue/deltas/dirty + 排 `resync{reason:"subscriber_backpressure"}` + STOP 断开 | 慢消费者识别：onClosed 时与心跳看门狗区分 |
+| `STOP`（控制帧，非 `event:`） | subscriber 溢出（buffer 2MiB / 单帧 256KiB） | 立即清 queue/deltas/dirty + 排 `resync{reason:"subscriber_backpressure"}` + STOP 断开 | 慢消费者识别：onClosed 时与心跳看门狗区分 |
 
 > **digest `lastError` 三态 wire（v2 保留）**：对象 `{name,message,at}`（新 error
 > 或 sticky 仍存在）| 显式 `null`（`status=busy` 时 pop sticky）| 省略（无 sticky）。
@@ -524,7 +524,7 @@ slimapi 上游订阅**单一** `/global/event`（进程级 GlobalBus，全实例
 
 ### 6.1 当前写路径的 directory 注入机制（legacy / B 桶）
 
-[`DirectoryHeaderInterceptor`](../app/src/main/java/cn/vectory/ocdroid/data/repository/http/DirectoryHeaderInterceptor.kt)
+[`DirectoryHeaderInterceptor`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/http/DirectoryHeaderInterceptor.kt)
 对**所有**请求（REST + SSE）执行：
 
 1. 读 caller-supplied `X-Opencode-Directory` header（`@Header` 参数）。
@@ -631,7 +631,7 @@ val restHttp = OkHttpClient.Builder()
 
 ### C1 — `HttpImageHolder.downloadAndCache` 裸 OkHttp 拉图（不挂 directory/version/header）
 
-- **调用点**：[`ui/util/HttpImageHolder.kt:282-316`](../app/src/main/java/cn/vectory/ocdroid/ui/util/HttpImageHolder.kt)
+- **调用点**：[`ui/util/HttpImageHolder.kt:282-316`](../../app/src/main/java/cn/vectory/ocdroid/ui/util/HttpImageHolder.kt)
   ```kotlin
   private suspend fun downloadAndCache(url: String) {
       ...
@@ -639,19 +639,19 @@ val restHttp = OkHttpClient.Builder()
       imageHttpClient.newCall(request).execute().use { response -> ... }
   }
   ```
-- **URL 来源**：`DataUriImageTransformer.transform(link)`（[`ui/util/DataUriImageTransformer.kt:84-86`](../app/src/main/java/cn/vectory/ocdroid/ui/util/DataUriImageTransformer.kt)）
+- **URL 来源**：`DataUriImageTransformer.transform(link)`（[`ui/util/DataUriImageTransformer.kt:84-86`](../../app/src/main/java/cn/vectory/ocdroid/ui/util/DataUriImageTransformer.kt)）
   从 markdown 图片链接收到 `https://` / `http://` URL 后转发到此处。
 - **违规性质**：`url` 是从消息 markdown 内容里**原样**抽取的绝对 URL。当服务端
   在消息里嵌入 workspace 文件链接（如 opencode file proxy URL `http://<host>:4096/file/...`
   或经 stunnel 的 `https://<host>:14096/file/...`）时，这个 GET **直连 opencode**，
-  绕过 slimapi——客户端的 `imageHttpClient` 是独立的 OkHttpClient（[`HttpImageHolder.kt:143-148`](../app/src/main/java/cn/vectory/ocdroid/ui/util/HttpImageHolder.kt)），
+  绕过 slimapi——客户端的 `imageHttpClient` 是独立的 OkHttpClient（[`HttpImageHolder.kt:143-148`](../../app/src/main/java/cn/vectory/ocdroid/ui/util/HttpImageHolder.kt)），
   **不**经过 `DirectoryHeaderInterceptor`、**不**经过版本头拦截器、**不**经
   slimapi 的 catch-all。
 - **为何算违规**：省流模式下用户选 slimapi 为 server，期待所有 opencode 形态
   流量经 slimapi。但 markdown 图片如果用 opencode absolute URL 加载，会**绕过**
   slimapi——既丢失省流（图片字节大）、又破坏"无直连 opencode"不变量。
 - **复杂度**：当前 `imageHttpClient` 用 `OpenCodeRepository.currentSslConfig()`
-  同步 SSL 配置（[`HttpImageHolder.kt:166-179`](../app/src/main/java/cn/vectory/ocdroid/ui/util/HttpImageHolder.kt)），
+  同步 SSL 配置（[`HttpImageHolder.kt:166-179`](../../app/src/main/java/cn/vectory/ocdroid/ui/util/HttpImageHolder.kt)），
   所以 hostPort/TOFU/mTLS 与 REST 一致——但 **URL rewriting 未做**。
 - **迁移要求**：
   - **M-C1a**（短期）：识别 host 等于当前 `HostConfig.hostPort` 的 URL，rewrite
@@ -664,7 +664,7 @@ val restHttp = OkHttpClient.Builder()
 
 ### C2 — `OpenCodeRepository.captureServerCert` 一次性 mTLS/TOFU 探针绕过 slimapi
 
-- **调用点**：[`OpenCodeRepository.kt:317-365`](../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt)
+- **调用点**：[`OpenCodeRepository.kt:317-365`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt)
   ```kotlin
   val normalizedUrl = (if (baseUrl.startsWith("http")) baseUrl else "https://$baseUrl")
       .trimEnd('/') + "/global/health"
@@ -691,7 +691,7 @@ val restHttp = OkHttpClient.Builder()
 
 ### C3 — `OpenCodeRepository.checkHealthFor` 健康探针绕过 slimapi
 
-- **调用点**：[`OpenCodeRepository.kt:429-462`](../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt)
+- **调用点**：[`OpenCodeRepository.kt:429-462`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt)
   ```kotlin
   val normalizedUrl = (if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl")
       .trimEnd('/') + "/global/health"
@@ -718,9 +718,9 @@ val restHttp = OkHttpClient.Builder()
 ### C4 — `HostConfig.DEFAULT_SERVER` / `HostProfile.defaultDirect` / `SettingsManager.DEFAULT_SERVER` 硬编码 `localhost:4096`
 
 - **调用点**：
-  - [`HostConfig.kt:88`](../app/src/main/java/cn/vectory/ocdroid/data/repository/HostConfig.kt) `const val DEFAULT_SERVER = "http://localhost:4096"`
-  - [`HostProfile.kt:85`](../app/src/main/java/cn/vectory/ocdroid/data/model/HostProfile.kt) `serverUrl: String = "http://localhost:4096"`
-  - [`SettingsManager.kt:873`](../app/src/main/java/cn/vectory/ocdroid/util/SettingsManager.kt) `const val DEFAULT_SERVER = "http://localhost:4096"`
+  - [`HostConfig.kt:88`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/HostConfig.kt) `const val DEFAULT_SERVER = "http://localhost:4096"`
+  - [`HostProfile.kt:85`](../../app/src/main/java/cn/vectory/ocdroid/data/model/HostProfile.kt) `serverUrl: String = "http://localhost:4096"`
+  - [`SettingsManager.kt:873`](../../app/src/main/java/cn/vectory/ocdroid/util/SettingsManager.kt) `const val DEFAULT_SERVER = "http://localhost:4096"`
 - **违规性质**：这是**默认值**，不是 bypass 路径——用户首次安装时无 profile，
   fallback 到 `localhost:4096` 直连 opencode。
 - **为何算违规**（边缘）：严格说这不是 C 桶违规——省流模式由用户显式选 slimapi
@@ -736,7 +736,7 @@ val restHttp = OkHttpClient.Builder()
 
 ### C5 — `OpenCodeApp.warmUpWebViewAfterLaunch` 已删除（确认无残留）
 
-- **历史调用点**：[`OpenCodeApp.kt:52-57`](../app/src/main/java/cn/vectory/ocdroid/OpenCodeApp.kt)
+- **历史调用点**：[`OpenCodeApp.kt:52-57`](../../app/src/main/java/cn/vectory/ocdroid/OpenCodeApp.kt)
   R-06 注释指出此函数已**删除**（原预渲染一个 throwaway WebView 加速首屏）。
 - **当前状态**：无 HTTP egress；保留此条仅为记录"已检查无残留"。
 
@@ -752,7 +752,7 @@ val restHttp = OkHttpClient.Builder()
 
 ### D1 — `OpenCodeRepository.activateTunnel` 隧道表单认证
 
-- **调用点**：[`OpenCodeRepository.kt:902-940`](../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt)
+- **调用点**：[`OpenCodeRepository.kt:902-940`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt)
   ```kotlin
   val client = clientFactory.tunnelClient(hostPort)
   val formBody = FormBody.Builder()
@@ -772,7 +772,7 @@ val restHttp = OkHttpClient.Builder()
 
 ### D2 — `MarkdownWebPreviewPane` 外链浏览器跳转
 
-- **调用点**：[`ui/files/MarkdownWebPreviewPane.kt:268-273`](../app/src/main/java/cn/vectory/ocdroid/ui/files/MarkdownWebPreviewPane.kt)
+- **调用点**：[`ui/files/MarkdownWebPreviewPane.kt:268-273`](../../app/src/main/java/cn/vectory/ocdroid/ui/files/MarkdownWebPreviewPane.kt)
   ```kotlin
   "link" -> {
       val href = payload.optString("href")
@@ -781,14 +781,14 @@ val restHttp = OkHttpClient.Builder()
       }
   }
   ```
-  + `shouldOverrideUrlLoading`（[:214](../app/src/main/java/cn/vectory/ocdroid/ui/files/MarkdownWebPreviewPane.kt)）
+  + `shouldOverrideUrlLoading`（[:214](../../app/src/main/java/cn/vectory/ocdroid/ui/files/MarkdownWebPreviewPane.kt)）
 - **归类理由**：这是用户主动点击 markdown 里的外链 → 触发 `ACTION_VIEW` Intent
   交给**系统浏览器**打开。**不**走 in-process HTTP。
 - **省流影响**：无。
 
 ### D3 — `HttpImageHolder.downloadAndCache` 外网图片（imgur 等）
 
-- **调用点**：同 C1（[`HttpImageHolder.kt:282-316`](../app/src/main/java/cn/vectory/ocdroid/ui/util/HttpImageHolder.kt)），
+- **调用点**：同 C1（[`HttpImageHolder.kt:282-316`](../../app/src/main/java/cn/vectory/ocdroid/ui/util/HttpImageHolder.kt)），
   但 URL host 不属于当前 `HostConfig.hostPort`。
 - **归类理由**：消息 markdown 里嵌的是真正的外网图片（如 `https://i.imgur.com/xxx.png`），
   与 opencode/slimapi 体系无关。
@@ -798,11 +798,11 @@ val restHttp = OkHttpClient.Builder()
 
 ### D4 — `MarkdownWebPreviewPane` 本地 asset / about:blank
 
-- **调用点**：[`MarkdownWebPreviewPane.kt:224`](../app/src/main/java/cn/vectory/ocdroid/ui/files/MarkdownWebPreviewPane.kt)
+- **调用点**：[`MarkdownWebPreviewPane.kt:224`](../../app/src/main/java/cn/vectory/ocdroid/ui/files/MarkdownWebPreviewPane.kt)
   ```kotlin
   loadUrl("file:///android_asset/web_preview/preview.html")
   ```
-  + [:242](../app/src/main/java/cn/vectory/ocdroid/ui/files/MarkdownWebPreviewPane.kt)
+  + [:242](../../app/src/main/java/cn/vectory/ocdroid/ui/files/MarkdownWebPreviewPane.kt)
   `webView.loadUrl("about:blank")`（释放时清理）
 - **归类理由**：本地 asset / 占位 URL，**无 HTTP egress**。
 - **省流影响**：无。
@@ -831,7 +831,7 @@ val restHttp = OkHttpClient.Builder()
 
 **改哪里**：
 - 新建 `data/repository/http/SlimapiVersionInterceptor.kt`。
-- 在 [`OkHttpClientFactory.baseBuilder`](../app/src/main/java/cn/vectory/ocdroid/data/repository/http/OkHttpClientFactory.kt)
+- 在 [`OkHttpClientFactory.baseBuilder`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/http/OkHttpClientFactory.kt)
   `.addInterceptor(...)` 链上挂它（在 `directoryHeaderInterceptor` 之后）。
 
 **版本来源**：客户端硬编码 `2`（与 slimapi v2 `ACCEPTED_CLIENT_VERSIONS=(2,2)`
@@ -850,11 +850,11 @@ val restHttp = OkHttpClient.Builder()
 若版本不兼容 → UI 显示"客户端版本与 sidecar 不兼容"错误（不进入省流模式，
 fallback 到 legacy）。
 
-**改哪里**：[`service/streaming/ConnectionBootstrapEngine.kt`](../app/src/main/java/cn/vectory/ocdroid/service/streaming/ConnectionBootstrapEngine.kt)
+**改哪里**：[`service/streaming/ConnectionBootstrapEngine.kt`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/ConnectionBootstrapEngine.kt)
 `:134`（当前调 `repository.checkHealth()`）；新增
 `OpenCodeRepository.checkSlimapiHealth()` 走 A6 端点。
 
-**与 ServerCompatProfile 的关系**：[`ServerCompatProfile`](../app/src/main/java/cn/vectory/ocdroid/data/repository/ServerCompatProfile.kt)
+**与 ServerCompatProfile 的关系**：[`ServerCompatProfile`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/ServerCompatProfile.kt)
 当前只解析 opencode semver；需扩字段或新增 `SlimapiCompatProfile`（独立）。
 
 ### M3 — 消除 C 桶违规（**must**）
@@ -896,7 +896,7 @@ Cache-Control: no-cache
 - `type == "question.asked"` / `"permission.asked"` → 仅观察信号；应答走 catch-all。
 - 其它 → 走原 `data.payload.type` 路径。
 
-**改哪里**：[`SSEClient.kt:99-118`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)
+**改哪里**：[`SSEClient.kt:99-118`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)
 `connectOnce`；新增"省流模式标志"由 `HostConfig.hostPort` 或 base URL 派生
 （**不**新增 `slimMode` 字段——靠 host:port 识别）。
 
@@ -947,7 +947,7 @@ X-Slimapi-Version: 2
 返回的 `List<MessageWithParts>` 走原 `MessagesPage` 形态（`X-Next-Cursor` 原样
 透传）。骨架字段（`hasFull` / `omitted`）由 M9 处理。
 
-**改哪里**：[`OpenCodeRepository.kt:527`](../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt)
+**改哪里**：[`OpenCodeRepository.kt:527`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt)
 `getMessagesPaged`；按 base URL 选 endpoint。
 
 ### M9 — Part 模型扩字段 + 展开 hook（**must**）
@@ -1067,7 +1067,7 @@ B19 / B20 / B24），确保重试逻辑**绝不**自动重发 POST。当前已�
 | R6 | slimapi catch-all 透传 `/global/health`（C2/C3）功能上 work——可能误以为"已经能用" | 用户在 slimapi 模式下 Test 健康，但 slimapi 进程挂时仍报健康（M-C2/M-C3 必做） | M3 必做项 |
 | R7 | M14 circuit breaker 状态如何跨 SSE 重连持久化 | 客户端可能反复打挂掉的 sidecar | 单例 StateFlow，5min 冷却 |
 | R8 | 双 stunnel 入口（14096 + 14097）的 profile 配置 UI——用户怎么区分？ | 用户可能误选 | host profile 加 `serverType: "opencode" \| "slimapi"` 标志（仅 UI 提示，不影响 HostConfig.baseUrl 派生） |
-| R9 | slimapi `/slimapi/events` queue=256 背压——客户端慢消费被 STOP 断开后如何识别？ | 与心跳看门狗混淆 | onClosed 时检查 slimapi-specific 头（待 slimapi 暴露） |
+| R9 | slimapi `/slimapi/events` 背压（buffer 2MiB / 单帧 256KiB 溢出→STOP 断开）——客户端慢消费被 STOP 断开后如何识别？ | 与心跳看门狗混淆 | onClosed 时检查 slimapi-specific 头（待 slimapi 暴露） |
 | R10 | `OpenCodeApiV2`（B35/B36）当前 debug-only——若未来切到 v2 主路径，目录路径前缀是 `/api/`，与 catch-all 的 `/command` 后缀检测有交互（catch-all 给 `/api/...command` 也设 300s 读超时？） | 边界情况超时配置异常 | 监控；当前 v2 端点无 `/command` 路径，无影响 |
 
 ---

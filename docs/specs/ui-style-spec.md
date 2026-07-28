@@ -13,8 +13,8 @@
 | Tier | 原语 | 适用场景 | 触发坐标 | 显式 dismiss |
 |------|------|----------|----------|--------------|
 | **A** — anchored menu | M3 `DropdownMenu` | ≤6 项的单选 / 上下文动作；**必须**贴在 trigger 的坐标上（trigger-anchored） | 是（坐在 trigger 处） | scrim / 外部点击 |
-| **B** — bottom sheet | [`AppBottomSheet`](../app/src/main/java/cn/vectory/ocdroid/ui/theme/SheetRecipe.kt) | 列表 / 预览 / 只读选择 / preview，**从 trigger 打开**但**不**叠加在 trigger 上方 | 否（底部弹出） | swipe-down / scrim |
-| **C** — modal dialog | `AlertDialog` / [`AppConfirmDialog`](../app/src/main/java/cn/vectory/ocdroid/ui/theme/AppConfirmDialog.kt) / [`AppFormDialog`](../app/src/main/java/cn/vectory/ocdroid/ui/theme/AppFormDialog.kt) | 表单、阻塞确认、破坏性动作 | 否（屏幕居中） | scrim / 返回键 |
+| **B** — bottom sheet | [`AppBottomSheet`](../../app/src/main/java/cn/vectory/ocdroid/ui/theme/SheetRecipe.kt) | 列表 / 预览 / 只读选择 / preview，**从 trigger 打开**但**不**叠加在 trigger 上方 | 否（底部弹出） | swipe-down / scrim |
+| **C** — modal dialog | `AlertDialog` / [`AppConfirmDialog`](../../app/src/main/java/cn/vectory/ocdroid/ui/theme/AppConfirmDialog.kt) / [`AppFormDialog`](../../app/src/main/java/cn/vectory/ocdroid/ui/theme/AppFormDialog.kt) | 表单、阻塞确认、破坏性动作 | 否（屏幕居中） | scrim / 返回键 |
 
 ### 1.1 判别流程（按顺序问自己）
 
@@ -55,7 +55,7 @@ Q2: 是表单 / 阻塞决策 / 破坏性确认?        ── yes ──▶ Tier
 | Message revert confirm | C destructive | `AppConfirmDialog`（已使用，字符串 body） |
 | Sessions archive confirm | C destructive | `AppConfirmDialog`（已使用，字符串 body） |
 | Files disconnect-workdir confirm | C destructive | `AppConfirmDialog`（已使用，字符串 body） |
-| Settings clear-data confirm | C destructive | `AppConfirmDialog`（已使用，composable body——按段落着色：keeps=primary / clears=onSurfaceVariant / irreversible=error；见 [SettingsSections.kt](../app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsSections.kt) `DangerZoneSection`） |
+| Settings clear-data confirm | C destructive | `AppConfirmDialog`（已使用，composable body——按段落着色：keeps=primary / clears=onSurfaceVariant / irreversible=error；见 [SettingsSections.kt](../../app/src/main/java/cn/vectory/ocdroid/ui/settings/SettingsSections.kt) `DangerZoneSection`） |
 | Host delete confirm | C destructive | `AppConfirmDialog`（已使用，字符串 body） |
 | Settings model-management dialog | **C form** | `AppFormDialog`（已使用；title 钉顶 + content 单独滚动 + Done 按钮钉底） |
 | Host profile editor dialog (mTLS / Advanced) | **C form** | `AppFormDialog`（已使用；title 钉顶 + content 单独滚动 + Test/Delete/Cancel/Save 按钮行钉底） |
@@ -71,9 +71,9 @@ Q2: 是表单 / 阻塞决策 / 破坏性确认?        ── yes ──▶ Tier
 | 用途 | 原语 | 关键约定 |
 |------|------|----------|
 | **行（row）primitive** | M3 `ListItem` | 一律用 `ListItem`，不要手写 `Row` + 自定义 padding |
-| **单选 selected-state** | [`PickerTrailingCheck`](../app/src/main/java/cn/vectory/ocdroid/ui/theme/PickerTrailingCheck.kt) | 选中 = `Icons.Filled.Check` + `Dimens.iconSm`(18dp) + `colorScheme.primary`；未选中 = 同尺寸 `Spacer`。**无 per-item 选中底色** |
-| **section header** | [`AppSectionHeader`](../app/src/main/java/cn/vectory/ocdroid/ui/theme/AppSectionHeader.kt) | `titleSmall`(14sp) + `onSurfaceVariant` + `padding(h=16dp, v=8dp)`，可选 `trailing` 槽 |
-| **间距 token** | [`Dimens`](../app/src/main/java/cn/vectory/ocdroid/ui/theme/Dimens.kt) | **禁止**散落 `4.dp` / `8.dp` / `16.dp` 字面量；用 `Dimens.spacing1` / `spacing2` / `spacing4` … |
+| **单选 selected-state** | [`PickerTrailingCheck`](../../app/src/main/java/cn/vectory/ocdroid/ui/theme/PickerTrailingCheck.kt) | 选中 = `Icons.Filled.Check` + `Dimens.iconSm`(18dp) + `colorScheme.primary`；未选中 = 同尺寸 `Spacer`。**无 per-item 选中底色** |
+| **section header** | [`AppSectionHeader`](../../app/src/main/java/cn/vectory/ocdroid/ui/theme/AppSectionHeader.kt) | `titleSmall`(14sp) + `onSurfaceVariant` + `padding(h=16dp, v=8dp)`，可选 `trailing` 槽 |
+| **间距 token** | [`Dimens`](../../app/src/main/java/cn/vectory/ocdroid/ui/theme/Dimens.kt) | **禁止**散落 `4.dp` / `8.dp` / `16.dp` 字面量；用 `Dimens.spacing1` / `spacing2` / `spacing4` … |
 | **图标尺寸 token** | `Dimens.iconXs` / `iconSm` / `iconStd` / `iconLg` / `iconXl` | 14 / 18 / 24 / 28 / 32dp。`DropdownMenu` 的 leading icon = `Dimens.iconSm`(18dp) |
 | **sheet 容器** | `AppBottomSheet` | `skipPartiallyExpanded=true` + `surfaceContainerLow` + `titleLarge`(24/8dp padding) + 可选 footer(divider+16dp) + 底部 16dp Spacer |
 | **确认 / 破坏性 dialog** | `AppConfirmDialog` | 基于 `AlertDialog`；`destructive=true` 时 confirm 按钮染 `colorScheme.error` |

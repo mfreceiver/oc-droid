@@ -7,7 +7,7 @@
 > **与服务端策展 SSE 的边界**：oc-slimapi 服务端的 `/slimapi/events` 策展行为
 > （digest debounce 250ms、`lastError` 三态 wire、`event:resync`
 > 信号、queue=256 背压）由
-> [`oc-slimapi/docs/specs/v2-contract.md`](../../oc-slimapi/docs/specs/v2-contract.md) §3 权威定义；
+> [`oc-slimapi/docs/specs/v2-contract.md`](../../../oc-slimapi/docs/specs/v2-contract.md) §3 权威定义；
 > 本文件**不复述其内容**，只在差异点交叉引用。
 
 ---
@@ -25,16 +25,16 @@
 
 | 文件 | 职责 |
 |---|---|
-| [`data/api/SSEClient.kt`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) | OkHttp `EventSource` 封装、退避、心跳看门狗、frame→`SSEEvent` 解码 |
-| [`data/api/SseLogFilter.kt`](../app/src/main/java/cn/vectory/ocdroid/data/api/SseLogFilter.kt) | 噪音 event-type 名单（仅日志） |
-| [`data/model/SSE.kt`](../app/src/main/java/cn/vectory/ocdroid/data/model/SSE.kt) | `SSEEvent` / `SSEPayload` wire 形状 |
-| [`service/streaming/ServiceSseConnectionOwner.kt`](../app/src/main/java/cn/vectory/ocdroid/service/streaming/ServiceSseConnectionOwner.kt) | Service-lifetime 唯一 collector、transport-readiness、服务级重试预算 |
-| [`service/streaming/SseRecoveryPolicy.kt`](../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseRecoveryPolicy.kt) | 服务级重试时间表（30s / 2m / 5m + ±20% 抖动） |
-| [`service/bridge/SseEventBridge.kt`](../app/src/main/java/cn/vectory/ocdroid/service/bridge/SseEventBridge.kt) | control vs delta 双通道、溢出标记 dirty |
-| [`data/repository/OpenCodeRepository.kt`](../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt) `connectSSE` | base URL + Basic Auth + directory 注入入口 |
-| [`data/repository/http/OkHttpClientFactory.kt`](../app/src/main/java/cn/vectory/ocdroid/data/repository/http/OkHttpClientFactory.kt) `sseClient` | SSE 专用 OkHttp（read timeout = 0） |
-| [`data/repository/http/DirectoryHeaderInterceptor.kt`](../app/src/main/java/cn/vectory/ocdroid/data/repository/http/DirectoryHeaderInterceptor.kt) | `X-Opencode-Directory` 注入 + `?directory` query 镜像 |
-| [`data/repository/HostConfig.kt`](../app/src/main/java/cn/vectory/ocdroid/data/repository/HostConfig.kt) | 当前所选 server 的 base URL / 凭据 / hostPort |
+| [`data/api/SSEClient.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) | OkHttp `EventSource` 封装、退避、心跳看门狗、frame→`SSEEvent` 解码 |
+| [`data/api/SseLogFilter.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SseLogFilter.kt) | 噪音 event-type 名单（仅日志） |
+| [`data/model/SSE.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/model/SSE.kt) | `SSEEvent` / `SSEPayload` wire 形状 |
+| [`service/streaming/ServiceSseConnectionOwner.kt`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/ServiceSseConnectionOwner.kt) | Service-lifetime 唯一 collector、transport-readiness、服务级重试预算 |
+| [`service/streaming/SseRecoveryPolicy.kt`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseRecoveryPolicy.kt) | 服务级重试时间表（30s / 2m / 5m + ±20% 抖动） |
+| [`service/bridge/SseEventBridge.kt`](../../app/src/main/java/cn/vectory/ocdroid/service/bridge/SseEventBridge.kt) | control vs delta 双通道、溢出标记 dirty |
+| [`data/repository/OpenCodeRepository.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt) `connectSSE` | base URL + Basic Auth + directory 注入入口 |
+| [`data/repository/http/OkHttpClientFactory.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/http/OkHttpClientFactory.kt) `sseClient` | SSE 专用 OkHttp（read timeout = 0） |
+| [`data/repository/http/DirectoryHeaderInterceptor.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/http/DirectoryHeaderInterceptor.kt) | `X-Opencode-Directory` 注入 + `?directory` query 镜像 |
+| [`data/repository/HostConfig.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/HostConfig.kt) | 当前所选 server 的 base URL / 凭据 / hostPort |
 
 ---
 
@@ -43,7 +43,7 @@
 ### 2.1 base URL 派生
 
 `OpenCodeRepository.connectSSE(directory)` 读 `HostConfig.baseUrl` /
-`username` / `password`，转发给 `SSEClient.connect(...)`（[`OpenCodeRepository.kt:890`](../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt)）。
+`username` / `password`，转发给 `SSEClient.connect(...)`（[`OpenCodeRepository.kt:890`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt)）。
 
 - **legacy 模式**：`baseUrl = http://localhost:4096`（或用户配置的 opencode
   直连/stunnel 14096 入口）。
@@ -59,7 +59,7 @@
 
 | 端点 | 来源 | 模式相关性 |
 |---|---|---|
-| `GET {baseUrl}/global/event` | 硬编码于 [`SSEClient.kt:102`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) + 216 | **legacy 默认**；opencode 全局事件流（per-process，跨所有 session/workdir）。客户端订阅后**自己**做 session/workdir 过滤。 |
+| `GET {baseUrl}/global/event` | 硬编码于 [`SSEClient.kt:102`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) + 216 | **legacy 默认**；opencode 全局事件流（per-process，跨所有 session/workdir）。客户端订阅后**自己**做 session/workdir 过滤。 |
 | `GET {baseUrl}/event?directory=<dir>` | opencode 也支持 | 与 `/global/event` 等价的 directory-scoped 入口；当前客户端**不使用**（统一打 `/global/event` + header 过滤）。 |
 | `GET {baseUrl}/slimapi/events` | slimapi 策展流（v2-contract §3） | **省流专属**；实例级全实例上游（GlobalBus），每事件自带 `directory`。无 query 参数——`directory`/`sessionId`/`stream` 全部移除；全实例全目录聚合。 |
 
@@ -71,35 +71,35 @@
 每个 SSE 请求都带：
 
 - `X-Opencode-Directory: <abs-workdir>`（若 `directory != null`，由
-  [`SSEClient.kt:114`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) 显式注入）。
+  [`SSEClient.kt:114`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) 显式注入）。
 - `?directory=<abs-workdir>` query 镜像（由
-  [`DirectoryHeaderInterceptor.intercept`](../app/src/main/java/cn/vectory/ocdroid/data/repository/http/DirectoryHeaderInterceptor.kt)
+  [`DirectoryHeaderInterceptor.intercept`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/http/DirectoryHeaderInterceptor.kt)
   在 GET/HEAD 上自动追加，以便反向代理剥自定义头时仍能正确路由）。
 
 `directory == null` 时**不注入** header——上层 `ServiceSseConnectionOwner` 会
-把 `identity.normalizedWorkdir.ifBlank { null }` 传入（[`ServiceSseConnectionOwner.kt:362`](../app/src/main/java/cn/vectory/ocdroid/service/streaming/ServiceSseConnectionOwner.kt)），
+把 `identity.normalizedWorkdir.ifBlank { null }` 传入（[`ServiceSseConnectionOwner.kt:362`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/ServiceSseConnectionOwner.kt)），
 故空 workdir 退化为 unscoped（让服务端用 process.cwd()）。
 
 ### 2.4 SSE 请求头清单
 
 | 头 | 值 | 注入点 | 模式相关性 |
 |---|---|---|---|
-| `Accept` | `text/event-stream` | [`SSEClient.kt:103`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) | 【模式无关】 |
-| `Cache-Control` | `no-cache` | [`SSEClient.kt:104`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) | 【模式无关】 |
-| `Authorization` | `Basic <base64(user:pass)>` | [`SSEClient.kt:106-110`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)（仅当 username+password 都非空） | 【模式无关】；省流模式下 slimapi sidecar 不做应用层鉴权（外层 stunnel mTLS 已完成），但携带无害 |
-| `X-Opencode-Directory` | abs workdir | [`SSEClient.kt:114-116`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) | 【模式无关】；省流模式下 slimapi catch-all 会读它转发给 opencode |
-| `X-Slimapi-Version` | `2` | [`SlimapiVersionInterceptor`](../app/src/main/java/cn/vectory/ocdroid/data/repository/http/SlimapiVersionInterceptor.kt)（按 `/slimapi/` 前缀注入） | **【省流专属 must】**；slimapi 要求每个 `/slimapi/**` 请求（含 SSE）必带此头，否则 `400 {"code":"version_required"}`（v2-contract §1）；版本门闩 `accepted:[2,2]` |
+| `Accept` | `text/event-stream` | [`SSEClient.kt:103`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) | 【模式无关】 |
+| `Cache-Control` | `no-cache` | [`SSEClient.kt:104`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) | 【模式无关】 |
+| `Authorization` | `Basic <base64(user:pass)>` | [`SSEClient.kt:106-110`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)（仅当 username+password 都非空） | 【模式无关】；省流模式下 slimapi sidecar 不做应用层鉴权（外层 stunnel mTLS 已完成），但携带无害 |
+| `X-Opencode-Directory` | abs workdir | [`SSEClient.kt:114-116`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) | 【模式无关】；省流模式下 slimapi catch-all 会读它转发给 opencode |
+| `X-Slimapi-Version` | `2` | [`SlimapiVersionInterceptor`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/http/SlimapiVersionInterceptor.kt)（按 `/slimapi/` 前缀注入） | **【省流专属 must】**；slimapi 要求每个 `/slimapi/**` 请求（含 SSE）必带此头，否则 `400 {"code":"version_required"}`（v2-contract §1）；版本门闩 `accepted:[2,2]` |
 
 ### 2.5 OkHttp 客户端
 
-`OkHttpClientFactory.sseClient(hostPort)`（[`OkHttpClientFactory.kt:130`](../app/src/main/java/cn/vectory/ocdroid/data/repository/http/OkHttpClientFactory.kt)）：
+`OkHttpClientFactory.sseClient(hostPort)`（[`OkHttpClientFactory.kt:130`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/http/OkHttpClientFactory.kt)）：
 
 - base chain（SSL via TOFU/mTLS + 缓存 + 鉴权 + directory + cache-control + 流量计数 + 日志 gate）。
 - `readTimeout(0)` —— SSE 长连接无读超时（关键：REST 30s 不能用于 SSE）。
 - `connectTimeout(10s)`。
 - **不**挂 `ResponseSizeGuardInterceptor`（SSE 是流，不是一次性 body）。
 
-host 切换时 `OpenCodeRepository.rebuildClients()`（[`OpenCodeRepository.kt:202`](../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt)）
+host 切换时 `OpenCodeRepository.rebuildClients()`（[`OpenCodeRepository.kt:202`](../../app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt)）
 整体重建包括 `sseHttp` + `sseClient`。
 
 ---
@@ -108,10 +108,10 @@ host 切换时 `OpenCodeRepository.rebuildClients()`（[`OpenCodeRepository.kt:2
 
 ### 3.1 OkHttp EventSource 回调
 
-`SSEClient.connectOnce`（[`SSEClient.kt:99`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）
+`SSEClient.connectOnce`（[`SSEClient.kt:99`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）
 创建 `EventSourceListener`：
 
-- `onOpen` → 仅记日志（[`SSEClient.kt:135`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）。
+- `onOpen` → 仅记日志（[`SSEClient.kt:135`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）。
 - `onEvent(id, type, data)` → 见 §3.2。
 - `onClosed` → `close(Exception("SSE connection closed by server"))`（带 double-close CAS 守卫）。
 - `onFailure(t, response)` → `close(t ?: Exception("SSE connection failed"))`。
@@ -131,10 +131,10 @@ opencode 在 `/global/event` 上发出的 `data:` 载荷是 **wrapped** 形状�
 ```
 
 `SSEClient` 用一个 lenient `Json { ignoreUnknownKeys = true; isLenient = true;
-coerceInputValues = true }`（[`SSEClient.kt:56-60`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）
-直接 `decodeFromString<SSEEvent>(data)`（[`:159`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）。
+coerceInputValues = true }`（[`SSEClient.kt:56-60`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）
+直接 `decodeFromString<SSEEvent>(data)`（[`:159`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）。
 
-`SSEEvent` 模型（[`data/model/SSE.kt`](../app/src/main/java/cn/vectory/ocdroid/data/model/SSE.kt)）：
+`SSEEvent` 模型（[`data/model/SSE.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/model/SSE.kt)）：
 
 ```kotlin
 data class SSEEvent(val directory: String? = null, val payload: SSEPayload)
@@ -152,9 +152,9 @@ data class SSEPayload(
 
 ### 3.3 特殊 data 值
 
-- 空白 / `[DONE]` → 直接丢弃，不尝试解码（[`SSEClient.kt:157`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）。
+- 空白 / `[DONE]` → 直接丢弃，不尝试解码（[`SSEClient.kt:157`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）。
 - 解码抛异常 → 记录 `DebugLog.w("SSEClient", "Skipping malformed SSE event: ...")`
-  并**跳过该帧**（不污染流，不重连）。见 [`SSEClient.kt:185-189`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)。
+  并**跳过该帧**（不污染流，不重连）。见 [`SSEClient.kt:185-189`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)。
 
 ### 3.4 省流模式下的帧类型（v2-contract §3）
 
@@ -179,19 +179,19 @@ slimapi `/slimapi/events` 输出 wrapped `SSEEvent{directory,payload}` 形状—
 
 `payload.type` 拿到后：
 
-1. **日志节流**（仅日志）：若 `type ∈ NOISY_SSE_LOG_EVENTS`（[`SseLogFilter.kt`](../app/src/main/java/cn/vectory/ocdroid/data/api/SseLogFilter.kt)）
+1. **日志节流**（仅日志）：若 `type ∈ NOISY_SSE_LOG_EVENTS`（[`SseLogFilter.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SseLogFilter.kt)）
    则不写 DebugLog.d。当前名单：
    - `message.part.delta`、`message.part.updated`（per-token 流式，每秒数十到数百次）
    - `server.heartbeat`、`server.connected`
    - `plugin.added`、`catalog.updated`、`integration.updated`（server-internal 突发）
 2. **正常日志**：`DebugLog.d("SSE", "event type=$type session=${sessionID ?: "-"}")`。
 3. **发送下游**：`trySend(Result.success(event))`（带 double-check 关闭守卫，
-   [`SSEClient.kt:183-184`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）。
+   [`SSEClient.kt:183-184`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）。
 
 **事件分派本身不在 `SSEClient` 做**——它只发 `Result<SSEEvent>` 到 Flow；
-具体 event-type 的处理在 [`SseEventBridge`](../app/src/main/java/cn/vectory/ocdroid/service/bridge/SseEventBridge.kt)
-（control vs delta 双通道，§4）+ [`SessionSyncCoordinator`](../app/src/main/java/cn/vectory/ocdroid/ui/controller/)
-（业务 fold）+ [`SseNotificationBridge`](../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseNotificationBridge.kt)
+具体 event-type 的处理在 [`SseEventBridge`](../../app/src/main/java/cn/vectory/ocdroid/service/bridge/SseEventBridge.kt)
+（control vs delta 双通道，§4）+ [`SessionSyncCoordinator`](../../app/src/main/java/cn/vectory/ocdroid/ui/controller/)
+（业务 fold）+ [`SseNotificationBridge`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseNotificationBridge.kt)
 （系统通知）。
 
 ---
@@ -200,7 +200,7 @@ slimapi `/slimapi/events` 输出 wrapped `SSEEvent{directory,payload}` 形状—
 
 ### 4.1 双通道分流（control vs delta）
 
-[`SseEventBridge.isControlEvent`](../app/src/main/java/cn/vectory/ocdroid/service/bridge/SseEventBridge.kt)
+[`SseEventBridge.isControlEvent`](../../app/src/main/java/cn/vectory/ocdroid/service/bridge/SseEventBridge.kt)
 （第 226 行）把帧分到两条 `Channel`：
 
 | 通道 | 容量 | event-type 谓词 | 用途 |
@@ -219,21 +219,21 @@ slimapi `/slimapi/events` 输出 wrapped `SSEEvent{directory,payload}` 形状—
 
 | event-type | 客户端行为 | 主要代码 |
 |---|---|---|
-| ✅ `server.connected` | 服务端连接确认；触发 `ForegroundCatchUpController` 评估 gap catch-up（15s–5min 内不抑制，让 connected 驱动）。`connectedOnce` 翻 true；后续 connected 帧（重连后）触发 reconciliation。**sidecar 重启后重连收 server.connected → 应视为 cold-start**。 | [`ForegroundCatchUpController.kt:191`](../app/src/main/java/cn/vectory/ocdroid/ui/controller/ForegroundCatchUpController.kt)、[`SseSyncState.kt:97`](../app/src/main/java/cn/vectory/ocdroid/ui/controller/SseSyncState.kt) |
-| ✅ `server.heartbeat` | 仅 reset 心跳看门狗（§5.3）；不分派下游（其实会被发送，但无 reducer 消费）。 | [`SSEClient.kt:155`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) |
-| ✅ `session.status` | busy/idle 状态；驱动 L1→L2 FGS 升级、未读 soak、`resetLimit`、`session.busy` poller；通知桥按 idle+root+未读发通知。 | [`SseNotificationBridge.kt:270`](../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseNotificationBridge.kt)、[`MessageActions.kt:122`](../app/src/main/java/cn/vectory/ocdroid/ui/MessageActions.kt) |
-| ✅ `session.created` / `session.updated` | session 列表 upsert / invalidateTree（跨客户端归档/创建同步）；触发 SessionListActions 重排。 | [`AppAction.kt:69`](../app/src/main/java/cn/vectory/ocdroid/ui/AppAction.kt)、[`AppStateSlices.kt:522`](../app/src/main/java/cn/vectory/ocdroid/ui/AppStateSlices.kt) |
-| ✅ `message.appended` / `message.updated`（insert 分支） | 新消息追加到 in-memory sessionWindowCache（按 messageId 去重 replace，非 append）；驱动未读计数。 | [`SessionSwitcher.kt:264`](../app/src/main/java/cn/vectory/ocdroid/ui/controller/SessionSwitcher.kt) `appendMessageIfCached`、[`ControllerEffect.kt:100`](../app/src/main/java/cn/vectory/ocdroid/ui/controller/ControllerEffect.kt) |
-| ✅ `message.updated`（existing 分支） | 同 ID 字段更新（如 cost/tokens）。Server 1.17.11+ 行为；客户端按 messageId 替换。 | [`MessageActions.kt:251`](../app/src/main/java/cn/vectory/ocdroid/ui/MessageActions.kt) |
-| ✅ `message.part.delta` / `message.part.updated` | per-token 流式增量；合并到当前 streaming 消息的 part。高频事件，仅日志节流。 | [`SessionSyncCoordinator`](../app/src/main/java/cn/vectory/ocdroid/ui/controller/) fold、[`SseLogFilter.kt`](../app/src/main/java/cn/vectory/ocdroid/data/api/SseLogFilter.kt) |
-| ✅ `message.part.removed` | part 删除（revert 后）。 | [`SessionSyncCoordinator`](../app/src/main/java/cn/vectory/ocdroid/ui/controller/) |
-| ✅ `question.asked` / `question.v2.asked` | 系统通知（dedup key `q:${question.id}`）；UI 也直接渲染 QuestionCardView。 | [`SseNotificationBridge.kt:217`](../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseNotificationBridge.kt)、[`AppLifecycleMonitor.handlePendingQuestion`](../app/src/main/java/cn/vectory/ocdroid/di/AppLifecycleMonitor.kt) |
-| ✅ `permission.*` | 不发系统通知（由 30s poller 兜底，避免双发）；UI 渲染 PermissionCardView。 | [`SseNotificationBridge.kt:219-221`](../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseNotificationBridge.kt) |
-| ✅ `tool.*` / `patch.*` / `step-start` / `step-finish` | 折叠到 part 增量，触发渲染。 | [`SessionSyncCoordinator`](../app/src/main/java/cn/vectory/ocdroid/ui/controller/) |
-| ✅ `plugin.added` / `catalog.updated` / `integration.updated` | 仅日志节流，无业务 reducer。 | [`SseLogFilter.kt`](../app/src/main/java/cn/vectory/ocdroid/data/api/SseLogFilter.kt) |
+| ✅ `server.connected` | 服务端连接确认；触发 `ForegroundCatchUpController` 评估 gap catch-up（15s–5min 内不抑制，让 connected 驱动）。`connectedOnce` 翻 true；后续 connected 帧（重连后）触发 reconciliation。**sidecar 重启后重连收 server.connected → 应视为 cold-start**。 | [`ForegroundCatchUpController.kt:191`](../../app/src/main/java/cn/vectory/ocdroid/ui/controller/ForegroundCatchUpController.kt)、[`SseSyncState.kt:97`](../../app/src/main/java/cn/vectory/ocdroid/ui/controller/SseSyncState.kt) |
+| ✅ `server.heartbeat` | 仅 reset 心跳看门狗（§5.3）；不分派下游（其实会被发送，但无 reducer 消费）。 | [`SSEClient.kt:155`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) |
+| ✅ `session.status` | busy/idle 状态；驱动 L1→L2 FGS 升级、未读 soak、`resetLimit`、`session.busy` poller；通知桥按 idle+root+未读发通知。 | [`SseNotificationBridge.kt:270`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseNotificationBridge.kt)、[`MessageActions.kt:122`](../../app/src/main/java/cn/vectory/ocdroid/ui/MessageActions.kt) |
+| ✅ `session.created` / `session.updated` | session 列表 upsert / invalidateTree（跨客户端归档/创建同步）；触发 SessionListActions 重排。 | [`AppAction.kt:69`](../../app/src/main/java/cn/vectory/ocdroid/ui/AppAction.kt)、[`AppStateSlices.kt:522`](../../app/src/main/java/cn/vectory/ocdroid/ui/AppStateSlices.kt) |
+| ✅ `message.appended` / `message.updated`（insert 分支） | 新消息追加到 in-memory sessionWindowCache（按 messageId 去重 replace，非 append）；驱动未读计数。 | [`SessionSwitcher.kt:264`](../../app/src/main/java/cn/vectory/ocdroid/ui/controller/SessionSwitcher.kt) `appendMessageIfCached`、[`ControllerEffect.kt:100`](../../app/src/main/java/cn/vectory/ocdroid/ui/controller/ControllerEffect.kt) |
+| ✅ `message.updated`（existing 分支） | 同 ID 字段更新（如 cost/tokens）。Server 1.17.11+ 行为；客户端按 messageId 替换。 | [`MessageActions.kt:251`](../../app/src/main/java/cn/vectory/ocdroid/ui/MessageActions.kt) |
+| ✅ `message.part.delta` / `message.part.updated` | per-token 流式增量；合并到当前 streaming 消息的 part。高频事件，仅日志节流。 | [`SessionSyncCoordinator`](../../app/src/main/java/cn/vectory/ocdroid/ui/controller/) fold、[`SseLogFilter.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SseLogFilter.kt) |
+| ✅ `message.part.removed` | part 删除（revert 后）。 | [`SessionSyncCoordinator`](../../app/src/main/java/cn/vectory/ocdroid/ui/controller/) |
+| ✅ `question.asked` / `question.v2.asked` | 系统通知（dedup key `q:${question.id}`）；UI 也直接渲染 QuestionCardView。 | [`SseNotificationBridge.kt:217`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseNotificationBridge.kt)、[`AppLifecycleMonitor.handlePendingQuestion`](../../app/src/main/java/cn/vectory/ocdroid/di/AppLifecycleMonitor.kt) |
+| ✅ `permission.*` | 不发系统通知（由 30s poller 兜底，避免双发）；UI 渲染 PermissionCardView。 | [`SseNotificationBridge.kt:219-221`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseNotificationBridge.kt) |
+| ✅ `tool.*` / `patch.*` / `step-start` / `step-finish` | 折叠到 part 增量，触发渲染。 | [`SessionSyncCoordinator`](../../app/src/main/java/cn/vectory/ocdroid/ui/controller/) |
+| ✅ `plugin.added` / `catalog.updated` / `integration.updated` | 仅日志节流，无业务 reducer。 | [`SseLogFilter.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SseLogFilter.kt) |
 | ○ `session.error`（无 sid 直推） | **未处理**（省流模式 G1-B）。应在无 sid 时展示全局 toast/notification。 | — |
 | ○ `event: resync`（SSE event 字段，非 payload.type） | **未处理**（迁移目标，§5.5） | — |
-| ○ `event:resync` 之外的 server-defined event names | 不依赖 SSE `event:` 字段做分派（OkHttp `onEvent(type, data)` 收到的 `type` 参数**被丢弃**——客户端只按 `data.payload.type` 走）。`resync` 是当前唯一需要按 SSE event 字段分派的例外。 | [`SSEClient.kt:139-144`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) |
+| ○ `event:resync` 之外的 server-defined event names | 不依赖 SSE `event:` 字段做分派（OkHttp `onEvent(type, data)` 收到的 `type` 参数**被丢弃**——客户端只按 `data.payload.type` 走）。`resync` 是当前唯一需要按 SSE event 字段分派的例外。 | [`SSEClient.kt:139-144`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) |
 
 ---
 
@@ -243,18 +243,18 @@ slimapi `/slimapi/events` 输出 wrapped `SSEEvent{directory,payload}` 形状—
 
 | 层 | 范围 | 触发 | 实现 |
 |---|---|---|---|
-| **L1 — SSEClient 内部**（transport-level） | 单次连接的 retryWhen | flow 异常完成 / onFailure | [`SSEClient.kt:73-92`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) |
-| **L2 — Service 级别**（service-level outage） | 跨 L1 预算耗尽后的额外预算 | L1 用完 10 次仍未拿到任何有效帧 | [`ServiceSseConnectionOwner.launchSseCollector`](../app/src/main/java/cn/vectory/ocdroid/service/streaming/ServiceSseConnectionOwner.kt)（第 357 行）+ [`SseRecoveryPolicy`](../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseRecoveryPolicy.kt) |
+| **L1 — SSEClient 内部**（transport-level） | 单次连接的 retryWhen | flow 异常完成 / onFailure | [`SSEClient.kt:73-92`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) |
+| **L2 — Service 级别**（service-level outage） | 跨 L1 预算耗尽后的额外预算 | L1 用完 10 次仍未拿到任何有效帧 | [`ServiceSseConnectionOwner.launchSseCollector`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/ServiceSseConnectionOwner.kt)（第 357 行）+ [`SseRecoveryPolicy`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseRecoveryPolicy.kt) |
 
 ### 5.2 L1 参数
 
 | 参数 | 值 | 出处 |
 |---|---|---|
-| 初始退避 | `1000ms` | `INITIAL_RETRY_DELAY_MS`（[`SSEClient.kt:38`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)） |
-| 退避上限 | `30000ms` | `MAX_RETRY_DELAY_MS`（[`:39`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)） |
-| 倍率 | `2.0`（指数） | `RETRY_MULTIPLIER`（[`:40`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)） |
-| 抖动 | `±30%`（`1.0 + (Random.nextDouble() * 0.6 - 0.3)`） | [`SSEClient.kt:87`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) |
-| 最大尝试次数 | `10`（用完后抛 `SSEConnectionExhausted`） | `MAX_RETRY_ATTEMPTS`（[`:43`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)） |
+| 初始退避 | `1000ms` | `INITIAL_RETRY_DELAY_MS`（[`SSEClient.kt:38`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)） |
+| 退避上限 | `30000ms` | `MAX_RETRY_DELAY_MS`（[`:39`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)） |
+| 倍率 | `2.0`（指数） | `RETRY_MULTIPLIER`（[`:40`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)） |
+| 抖动 | `±30%`（`1.0 + (Random.nextDouble() * 0.6 - 0.3)`） | [`SSEClient.kt:87`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) |
+| 最大尝试次数 | `10`（用完后抛 `SSEConnectionExhausted`） | `MAX_RETRY_ATTEMPTS`（[`:43`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)） |
 
 退避序列（无抖动近似）：1s → 2s → 4s → 8s → 16s → 30s → 30s → 30s → 30s → 30s → exhaust。
 
@@ -264,10 +264,10 @@ slimapi `/slimapi/events` 输出 wrapped `SSEEvent{directory,payload}` 形状—
 
 ### 5.3 心跳看门狗（half-open 检测）
 
-服务端每 ~10s 发一帧 `server.heartbeat` 作为 data 事件（[`SSEClient.kt:45-52`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）。
-`onEvent` 在**任意**帧（含 heartbeat）上 reset `lastEventAt`（[`:155`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）。
+服务端每 ~10s 发一帧 `server.heartbeat` 作为 data 事件（[`SSEClient.kt:45-52`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）。
+`onEvent` 在**任意**帧（含 heartbeat）上 reset `lastEventAt`（[`:155`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）。
 
-看门狗协程（[`:229-244`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）：
+看门狗协程（[`:229-244`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）：
 
 - 每 `HEARTBEAT_CHECK_INTERVAL_MS = 5000ms` 检查一次。
 - `eventCount == 0`（首帧未到达）→ 跳过（cold-start grace）。
@@ -315,7 +315,7 @@ slimapi `/slimapi/events` 输出 wrapped `SSEEvent{directory,payload}` 形状—
 
 ### 6.1 单一所有者
 
-`ServiceSseConnectionOwner`（[`service/streaming/ServiceSseConnectionOwner.kt`](../app/src/main/java/cn/vectory/ocdroid/service/streaming/ServiceSseConnectionOwner.kt)）
+`ServiceSseConnectionOwner`（[`service/streaming/ServiceSseConnectionOwner.kt`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/ServiceSseConnectionOwner.kt)）
 是**进程内唯一**的活动 SSE collector 所有者。它运行在前台服务
 （`SessionStreamingService`）的 `scope` 上，把帧 publish 到进程级 `SseEventStream`
 （共享 SharedFlow），由 `SseEventBridge` 订阅并分流。
@@ -335,14 +335,14 @@ slimapi `/slimapi/events` 输出 wrapped `SSEEvent{directory,payload}` 形状—
 ### 6.3 前台 / 后台
 
 SSE collector 由前台服务持有。后台时（服务被 stopForeground 降级或 stop）：
-- `disconnectAndJoin(markGap = true)`（[`ServiceSseConnectionOwner.kt:622`](../app/src/main/java/cn/vectory/ocdroid/service/streaming/ServiceSseConnectionOwner.kt)）
+- `disconnectAndJoin(markGap = true)`（[`ServiceSseConnectionOwner.kt:622`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/ServiceSseConnectionOwner.kt)）
   → cancel collector + 发 gap-dirty 信号一次（per-generation idempotent）。
 - 重启服务后由 `ConnectionBootstrapEngine` → `connect(...)` 重新激活。
 
 ### 6.4 取消 / supersession
 
 - **更新的 connect 抢占旧 connect**：`setupConnectLocked` 先 `markClosing(priorGen)`
-  再 cancel `sseJob`（[`ServiceSseConnectionOwner.kt:283-285`](../app/src/main/java/cn/vectory/ocdroid/service/streaming/ServiceSseConnectionOwner.kt)）。
+  再 cancel `sseJob`（[`ServiceSseConnectionOwner.kt:283-285`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/ServiceSseConnectionOwner.kt)）。
 - **`disconnect()`**：同上，`markClosing` → cancel → bump generation（`:593-620`）。
 - **`cancelForShutdown()`**：同步兜底，Service 销毁时（`:625-638`）。
 - **closing 标记的作用**：让 collector 的 post-flow-break 出口识别「这是
@@ -380,7 +380,7 @@ session-level 过滤由下游 reducer（按 `payload.properties.sessionID`）做
 - TCP RST / TLS handshake 失败 → `onFailure(t, response)` → CAS 关闭 → L1 退避。
 - 半开连接（NAT 静默超时） → 心跳看门狗（§5.3）30s 内无帧 → 强制 cancel →
   L1 退避。
-- 双重 close 防护：`closed: AtomicBoolean` CAS（[`SSEClient.kt:132`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)），
+- 双重 close 防护：`closed: AtomicBoolean` CAS（[`SSEClient.kt:132`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)），
   防止 `onClosed` 与 `onFailure` 都触发时 `close()` 抛
   `IllegalStateException`/`NoSuchElementException`。
 
@@ -388,8 +388,8 @@ session-level 过滤由下游 reducer（按 `payload.properties.sessionID`）做
 
 - JSON decode 抛 → 跳该帧（§3.3），**不**重连、**不**记入错误。
 - 残余 in-flight 帧（cancel 后 OkHttp pipeline 仍在投递）：`onEvent` 入口
-  先查 `closed.get()` → 早退（[`SSEClient.kt:152`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)），
-  decode 后再 double-check（[`:183`](../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）。
+  先查 `closed.get()` → 早退（[`SSEClient.kt:152`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)），
+  decode 后再 double-check（[`:183`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt)）。
   避免 `trySend` 到已关闭 channel 抛异常，烧 retryWhen 预算。
 
 ### 7.4 terminal exhaustion 上报
