@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
+import android.os.SystemClock
 import cn.vectory.ocdroid.util.DebugLog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
@@ -312,6 +313,9 @@ class ChatViewModel @Inject constructor(
          */
         const val WATCHDOG_MS: Long = 180_000L
 
+        /** §P0-F: abort 看门狗超时——server 未在该窗口内回送 idle/terminal → REST reconcile 兜底。 */
+        internal const val ABORT_WATCHDOG_TIMEOUT_MS = 10_000L
+
         private const val TAG = "ChatViewModel"
     }
 
@@ -408,19 +412,83 @@ class ChatViewModel @Inject constructor(
      */
     fun abortSession(sessionId: String? = null) {
         val sid = sessionId ?: core.store.chatFlow.value.currentSessionId ?: return
+        // §P0-F/R6: idempotent guard — no double abort while one is in flight
+        // (UI also disables via isAborting, but this is the authoritative guard).
+        if (sid in core.sessionListFlow.value.abortPendingSessionIds) {
+            DebugLog.i("Abort", "abortSession ignored — already pending sid=$sid")
+            return
+        }
+        // §P0-F: mark abort in flight (client-only flag; R6 "stopping" UI source).
+        core.store.mutateSessionList { s ->
+            s.copy(abortPendingSessionIds = s.abortPendingSessionIds + (sid to SystemClock.elapsedRealtime()))
+        }
         // §R18 Phase 3 Wave 2 + Gate-3 fix (maxer): abort is a SERVER-STATE
         // mutation (POST /session/{id}/abort), not an ephemeral UI action. It
-        // MUST outlive the VM — if the user backgrounds the app / navigates
-        // away while the abort request is in flight, viewModelScope.cancel()
-        // would cancel the HTTP call, the server never receives the abort, and
-        // keeps streaming. Use appScope so the request completes regardless of
-        // VM lifecycle. (Closure captures only core.repository + core.effectBus,
-        // no VM self-ref → no P1-7 leak.)
+        // MUST outlive the VM — appScope so the request completes regardless of
+        // VM lifecycle. (Closure captures only core, no VM self-ref → no leak.)
         core.appScope.launch {
             core.repository.abortSession(sid)
                 .onFailure { error ->
-                    core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_abort_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
+                    core.effectBus.tryEmitUiEvent(
+                        UiEvent.Error(R.string.error_abort_session_failed, listOf(errorMessageOrFallback(error, "unknown error")))
+                    )
+                    clearAbortPending(sid)
                 }
+            // §P0-F/R5 watchdog: if server never echoed a terminal status within
+            // the timeout (SSE 断流 / abort POST 完成但 idle 帧丢失), REST reconcile
+            // to recover. Self-cancelling: if applySessionStatus already cleared
+            // the flag, reconcileStaleAbort is a no-op.
+            delay(ABORT_WATCHDOG_TIMEOUT_MS)
+            reconcileStaleAbort(sid)
+        }
+    }
+
+    /** §P0-F: clear the abort-pending flag for [sid] (idempotent). */
+    private fun clearAbortPending(sid: String) {
+        core.store.mutateSessionList { s ->
+            if (sid in s.abortPendingSessionIds) s.copy(abortPendingSessionIds = s.abortPendingSessionIds - sid)
+            else s
+        }
+    }
+
+    /**
+     * §P0-F watchdog body (testable — no internal delay). If [sid] is still
+     * abort-pending, REST-reconcile its status:
+     *  - server says non-running (idle/terminal) → clear pending + R5 兜底 clear
+     *    a stuck sendingSessionIds + apply the authoritative status.
+     *  - server still busy/retry → keep pending (idempotent guard blocks a
+     *    second abort) and surface a recovery hint (有限重试入口，不永久禁 stop：
+     *    用户下次可再点 stop，但当前窗口内禁二次 abort).
+     *  - fetch failed → leave pending (next status poll / SSE will resolve).
+     */
+    internal suspend fun reconcileStaleAbort(sid: String) {
+        if (sid !in core.sessionListFlow.value.abortPendingSessionIds) return
+        // Distinguish fetch-failure (null) from successful fetch with absent/null
+        // status (the server returned a map lacking the sid — session unknown →
+        // treat as settled).
+        val fetchResult = core.repository.getSessionStatus()
+        val fetchFailed = fetchResult.isFailure
+        val serverStatus = fetchResult.getOrNull()?.get(sid)
+        val settled = if (fetchFailed) {
+            false
+        } else {
+            serverStatus?.let { !it.isBusy && !it.isRetry } ?: true
+        }
+        if (settled) {
+            clearAbortPending(sid)
+            // §R5 兜底: clear a sendingSessionIds entry that the POST onComplete
+            // never cleared (network drop mid-POST).
+            core.writeComposer { c -> c.copy(sendingSessionIds = c.sendingSessionIds - sid) }
+            serverStatus?.let { st ->
+                core.store.mutateSessionList { s ->
+                    s.copy(
+                        sessionStatuses = s.sessionStatuses + (sid to st),
+                        abortPendingSessionIds = s.abortPendingSessionIds - sid,
+                    )
+                }
+            }
+        } else {
+            core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_abort_pending_stuck))
         }
     }
 

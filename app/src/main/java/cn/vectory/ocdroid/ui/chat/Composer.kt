@@ -112,6 +112,8 @@ fun Composer(
     composerVM: ComposerViewModel,
     orchestratorVM: OrchestratorViewModel,
     isBusy: Boolean,
+    /** §P0-F: abort POST 当前在途（abortPendingSessionIds 含本会话）→ 显「停止中」禁二次 abort。 */
+    isAborting: Boolean,
     questionPending: Boolean,
     onAddImages: () -> Unit,
     // §B2 rev-gpt MAJOR 2: the abort target is caller-supplied so the
@@ -163,10 +165,18 @@ fun Composer(
 
     val canSend = (text.isNotBlank() || imageAttachments.isNotEmpty()) && !questionPending
     val canStop = isBusy && !canSend
-    val sendIcon = if (canStop) Icons.Default.Stop else Icons.AutoMirrored.Filled.Send
-    val sendContentDescription =
-        if (canStop) stringResource(R.string.chat_interrupt_agent)
-        else stringResource(R.string.chat_send)
+    // §P0-F/R6: abort 在途时按钮整体禁用（既禁二次 abort，也避免 abort 窗口内误发新消息）。
+    val stopping = isAborting
+    val sendIcon = when {
+        stopping -> Icons.Default.Stop
+        canStop -> Icons.Default.Stop
+        else -> Icons.AutoMirrored.Filled.Send
+    }
+    val sendContentDescription = when {
+        stopping -> stringResource(R.string.chat_aborting)
+        canStop -> stringResource(R.string.chat_interrupt_agent)
+        else -> stringResource(R.string.chat_send)
+    }
 
     // §1B: state lives in the composer (the pickers are opened from the
     // chips rendered here). `rememberSaveable` keeps the sheet state across
@@ -323,7 +333,9 @@ fun Composer(
                 }
                 IconButton(
                     onClick = {
-                        if (canStop) {
+                        if (stopping) {
+                            // no-op: abort 在途，禁二次 abort
+                        } else if (canStop) {
                             showStopConfirm = true
                         } else {
                             handleComposerSend(
@@ -336,7 +348,7 @@ fun Composer(
                             )
                         }
                     },
-                    enabled = (canStop || canSend) && !questionPending,
+                    enabled = !stopping && (canStop || canSend) && !questionPending,
                     modifier = Modifier.size(48.dp),
                 ) {
                     Icon(
@@ -344,7 +356,7 @@ fun Composer(
                         contentDescription = sendContentDescription,
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                             .copy(
-                                alpha = if ((canStop || canSend) && !questionPending) 1f else 0.5f,
+                                alpha = if (!stopping && (canStop || canSend) && !questionPending) 1f else 0.5f,
                             ),
                     )
                 }

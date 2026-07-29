@@ -523,6 +523,8 @@
          told to retry. -->
     <string name="info_compact_timeout_retry">Compaction timed out with no response; please retry.</string>
     <string name="error_edit_message_failed">Failed to edit message: %1$s</string>
+    <string name="chat_aborting">Stopping…</string>
+    <string name="error_abort_pending_stuck">Agent is still running after stop. You can retry in a moment.</string>
     <string name="error_abort_session_failed">Failed to abort session: %1$s</string>
     <string name="success_refreshed">Refreshed</string>
     <string name="info_refresh_in_progress">A refresh is already in progress; please try again shortly.</string>

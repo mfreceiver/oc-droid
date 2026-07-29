@@ -865,6 +865,21 @@ data class SessionListState(
      * current-clear decisions that must not invent sessions.first().
      */
     val hasCompletedInitialLoad: Boolean = false,
+    /**
+     * §P0-F (R5/R6): sessions with an in-flight abort POST (client-only flag,
+     * NOT server status). Key = sessionId, value = monotonic startedAt
+     * ([android.os.SystemClock.elapsedRealtime]) at dispatch time, used by the
+     * abort watchdog to detect a stalled abort (server never echoed a terminal
+     * status within [ChatViewModel.ABORT_WATCHDOG_TIMEOUT_MS]) and trigger a
+     * REST reconcile + clear.
+     *
+     * Lifecycle: set by [ChatViewModel.abortSession] at dispatch; cleared by
+     * [applySessionStatus] when the server delivers a non-running status (idle
+     * / terminal), by [ChatViewModel.abortSession] onFailure, and by the
+     * watchdog on timeout. Distinct from [ComposerState.sendingSessionIds]
+     * (the POST-send short-bridge, R5).
+     */
+    val abortPendingSessionIds: Map<String, Long> = emptyMap(),
 )
 
 /**

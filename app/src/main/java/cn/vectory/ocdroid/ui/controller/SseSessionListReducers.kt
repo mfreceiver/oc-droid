@@ -293,8 +293,21 @@ internal fun SessionListState.applyArchiveEviction(
 internal fun SessionListState.applySessionStatus(
     sessionId: String,
     status: SessionStatus
-): Pair<SessionListState, List<SseSideEffect>> =
-    copy(sessionStatuses = sessionStatuses + (sessionId to status)) to emptyList()
+): Pair<SessionListState, List<SseSideEffect>> {
+    // §P0-F/R6: server confirmed a non-running status for this session →
+    // release any in-flight abort-pending flag (abort acknowledged; the
+    // "stopping" UI must release). busy/retry keep the flag (abort may
+    // still be in flight).
+    val nextAbortPending = if (!status.isBusy && !status.isRetry && sessionId in abortPendingSessionIds) {
+        abortPendingSessionIds - sessionId
+    } else {
+        abortPendingSessionIds
+    }
+    return copy(
+        sessionStatuses = sessionStatuses + (sessionId to status),
+        abortPendingSessionIds = nextAbortPending,
+    ) to emptyList()
+}
 
 /**
  * question.asked → append [question] to [SessionListState.pendingQuestions]

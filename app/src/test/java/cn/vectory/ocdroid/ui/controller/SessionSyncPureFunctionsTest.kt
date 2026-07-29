@@ -1392,6 +1392,58 @@ class SessionSyncPureFunctionsTest {
         assertEquals("idle", next.sessionStatuses["s1"]?.type)
     }
 
+    // §P0-F: abortPendingSessionIds lifecycle — applySessionStatus ————
+
+    @Test
+    fun `P0-F applySessionStatus with idle clears abortPending for that session`() {
+        val state = SessionListState(
+            abortPendingSessionIds = mapOf("s1" to 123L),
+            sessionStatuses = mapOf("s1" to SessionStatus(type = "busy")),
+        )
+
+        val (next, _) = state.applySessionStatus("s1", SessionStatus(type = "idle"))
+
+        assertFalse("s1" in next.abortPendingSessionIds)
+        assertTrue(next.sessionStatuses["s1"]?.isIdle == true)
+    }
+
+    @Test
+    fun `P0-F applySessionStatus with busy retains abortPending`() {
+        val state = SessionListState(
+            abortPendingSessionIds = mapOf("s1" to 123L),
+            sessionStatuses = mapOf("s1" to SessionStatus(type = "busy")),
+        )
+
+        val (next, _) = state.applySessionStatus("s1", SessionStatus(type = "busy"))
+
+        assertTrue("s1" in next.abortPendingSessionIds)
+    }
+
+    @Test
+    fun `P0-F applySessionStatus with retry retains abortPending`() {
+        val state = SessionListState(
+            abortPendingSessionIds = mapOf("s1" to 123L),
+            sessionStatuses = mapOf("s1" to SessionStatus(type = "busy")),
+        )
+
+        val (next, _) = state.applySessionStatus("s1", SessionStatus(type = "retry"))
+
+        assertTrue("s1" in next.abortPendingSessionIds)
+    }
+
+    @Test
+    fun `P0-F applySessionStatus with idle does not affect abortPending for other sessions`() {
+        val state = SessionListState(
+            abortPendingSessionIds = mapOf("s2" to 456L),
+            sessionStatuses = mapOf("s2" to SessionStatus(type = "busy")),
+        )
+
+        val (next, _) = state.applySessionStatus("s1", SessionStatus(type = "idle"))
+
+        // s1 was never abort-pending → abortPendingSessionIds unchanged
+        assertEquals(mapOf("s2" to 456L), next.abortPendingSessionIds)
+    }
+
     // === applyPartCreatedPlaceholder: every partType branch ==============
 
     @Test
