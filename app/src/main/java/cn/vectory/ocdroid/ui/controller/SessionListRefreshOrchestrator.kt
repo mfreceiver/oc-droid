@@ -121,6 +121,11 @@ internal class SessionListRefreshOrchestrator(
                     val anyArchived = archivedIds.isNotEmpty()
                     if (anyArchived && onArchivedSessionsDetected != null) {
                         onArchivedSessionsDetected?.invoke(mergedSessions, newHasMore, serverIds, sweepNow)
+                        // P0-D: unconditional cold-start status reconcile — previously the
+                        // archive early-return skipped status entirely (R7). onArchivedSessionsDetected
+                        // synchronously dispatches BulkSessionsRefreshed (commits the merged tree),
+                        // so launchLoadSessionStatus reads the committed session IDs.
+                        onLoadSessionStatus()
                         cacheWriter.persistSessionCache(
                             settingsManager = settingsManager,
                             sessions = mergedSessions,
@@ -180,6 +185,11 @@ internal class SessionListRefreshOrchestrator(
                             }
                     }
                     if (staleHostAfterSuspend()) return@onSuccess
+                    // P0-D: cold-start status reconcile is UNCONDITIONAL across every decision
+                    // path (KeepCurrent / ClearChat / NoOp). The tree was committed by the
+                    // SessionsRefreshedLocal dispatch above, so launchLoadSessionStatus reads
+                    // the committed session IDs. Exactly-once per successful refresh.
+                    onLoadSessionStatus()
                     // §B4 / §10 REST refresh: no auto-select from open-tabs-list.
                     // Keep current if still live; clear residual current pointing
                     // at a missing/archived session. Never invent sessions.first()
@@ -193,7 +203,6 @@ internal class SessionListRefreshOrchestrator(
                             slices.store.dispatch(AppAction.ChatCleared)
                         }
                         is RefreshCurrentDecision.KeepCurrent -> {
-                            onLoadSessionStatus()
                             onLoadMessages(decision.sessionId)
                         }
                         is RefreshCurrentDecision.NoOp -> Unit

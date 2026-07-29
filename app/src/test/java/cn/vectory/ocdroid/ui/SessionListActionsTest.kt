@@ -8,6 +8,7 @@ import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionCacheEntry
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -586,7 +587,7 @@ class SessionListActionsTest {
         // caller's dispatch atomically clears chat — loading messages for the
         // just-archived id would be wasteful + racy vs the reducer's clear).
         assertEquals("onLoadMessages skipped (archived current → eviction path)", 0, msgLoads)
-        assertEquals("onLoadSessionStatus skipped (archived current → eviction path)", 0, statusLoads)
+        assertEquals("P0-D: status reconcile now runs unconditionally even in archive path", 1, statusLoads)
     }
 
     @Test
@@ -1833,5 +1834,128 @@ class SessionListActionsTest {
         advanceUntilIdle()
 
         assertTrue(slices.settings.value.agents.isEmpty())
+    }
+
+    // ── P0-D: unconditional status reconcile on every successful refresh ──────
+
+    @Test
+    fun `launchLoadSessions archive path commits merged tree before status reads it`() = runTest {
+        // P0-D read-after-commit (ogpt block-1): the archive early-return path
+        // must trigger status AFTER the merged tree is committed. The store
+        // starts EMPTY, so the live "s2" session can only be visible to the
+        // status load if the archive callback dispatched BulkSessionsRefreshed
+        // (the production synchronous-commit contract) BEFORE onLoadSessionStatus
+        // ran. currentSessionId="s1" (a server-archived session) is the realistic
+        // "current got archived" cold-start case and forces the archive branch.
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+        val archived = Session(id = "s1", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        val live = Session(id = "s2", directory = "/x")
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(archived, live))
+
+        var statusLoads = 0
+        var mergedIdsFromCallback: Set<String>? = null
+        var committedIdsAtStatusLoad: Set<String>? = null
+
+        launchLoadSessions(
+            scope, repository, slices, settingsManager,
+            onSelectSession = {},
+            onLoadSessionStatus = {
+                statusLoads += 1
+                // Capture EXACTLY what the status load reads: the committed tree
+                // (mirrors launchLoadSessionStatusSlim's authoritative-id source).
+                val sl = slices.sessionList.value
+                committedIdsAtStatusLoad =
+                    allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions).keys
+            },
+            onLoadMessages = {},
+            emit = emit,
+            onArchivedSessionsDetected = { mergedSessions, hasMoreSessions, confirmedServerIds, sweepNow ->
+                // Mirror the PRODUCTION synchronous-commit contract:
+                // AppCoreOrchestration.dispatchBulkArchivedSessions dispatches a
+                // single BulkSessionsRefreshed that atomically writes the merged
+                // session list BEFORE returning — so the tree is committed when
+                // the subsequent onLoadSessionStatus() reads it (P0-D, v3 B7/M4).
+                mergedIdsFromCallback = mergedSessions.map { it.id }.toSet()
+                slices.store.dispatch(
+                    AppAction.BulkSessionsRefreshed(
+                        sessions = mergedSessions,
+                        hasMoreSessions = hasMoreSessions,
+                        confirmedServerIds = confirmedServerIds,
+                        sweepNow = sweepNow,
+                    )
+                )
+            }
+        )
+        advanceUntilIdle()
+
+        assertEquals("P0-D: status reconcile fires exactly once in archive path", 1, statusLoads)
+        assertNotNull("archive callback committed the merged tree", mergedIdsFromCallback)
+        assertEquals(
+            "P0-D read-after-commit: status load observed the committed merged tree, not the stale pre-refresh tree",
+            mergedIdsFromCallback,
+            committedIdsAtStatusLoad,
+        )
+        assertTrue(
+            "committed tree carries the live session (only present post-commit)",
+            "s2" in (committedIdsAtStatusLoad ?: emptySet()),
+        )
+    }
+
+    @Test
+    fun `launchLoadSessions ClearChat path triggers status exactly once`() = runTest {
+        // ClearChat: currentSessionId points at an archived session, but
+        // onArchivedSessionsDetected is null so archive early-return is skipped.
+        val archived = Session(id = "archived", directory = "/x", time = Session.TimeInfo(archived = 1L))
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(archived))
+        store.mutateChat { it.copy(currentSessionId = "archived") }
+        var statusLoads = 0
+
+        launchLoadSessions(
+            scope, repository, slices, settingsManager,
+            onSelectSession = {},
+            onLoadSessionStatus = { statusLoads += 1 },
+            onLoadMessages = {},
+            emit = emit)
+        advanceUntilIdle()
+
+        assertEquals("P0-D: status reconcile fires exactly once in ClearChat path", 1, statusLoads)
+    }
+
+    @Test
+    fun `launchLoadSessions NoOp path triggers status exactly once`() = runTest {
+        // NoOp: null currentSessionId + non-empty refreshed list, no draft.
+        val sessions = listOf(Session(id = "s1", directory = "/x"))
+        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+        var statusLoads = 0
+
+        launchLoadSessions(
+            scope, repository, slices, settingsManager,
+            onSelectSession = {},
+            onLoadSessionStatus = { statusLoads += 1 },
+            onLoadMessages = {},
+            emit = emit)
+        advanceUntilIdle()
+
+        assertEquals("P0-D: status reconcile fires exactly once in NoOp path", 1, statusLoads)
+    }
+
+    @Test
+    fun `launchLoadSessions KeepCurrent path triggers status exactly once`() = runTest {
+        val sessions = listOf(Session(id = "s1", directory = "/x"))
+        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+        var statusLoads = 0
+        var loadedSessionId: String? = null
+
+        launchLoadSessions(
+            scope, repository, slices, settingsManager,
+            onSelectSession = {},
+            onLoadSessionStatus = { statusLoads += 1 },
+            onLoadMessages = { sid -> loadedSessionId = sid },
+            emit = emit)
+        advanceUntilIdle()
+
+        assertEquals("P0-D: status reconcile fires exactly once in KeepCurrent path", 1, statusLoads)
+        assertEquals("onLoadMessages still session-specific inside KeepCurrent", "s1", loadedSessionId)
     }
 }
