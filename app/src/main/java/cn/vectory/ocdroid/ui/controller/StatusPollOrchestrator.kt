@@ -310,6 +310,14 @@ internal object StatusPollOrchestrator {
                 val directories = authoritative.values
                     .mapNotNull { it.directory.takeIf { d -> d.isNotBlank() } }
                     .toSet()
+                // P0-D Unknown semantics: when no directories are known yet,
+                // complete(true) fires with empty result → tree sessions get NO
+                // sessionStatuses entry. Downstream readers project
+                // sessionStatuses[sid] == null as "Unknown" (conservative —
+                // NOT idle). The slim digest `status` relay + later foreground
+                // sweeps fill entries once sessions/directories arrive.
+                // Verified: UnreadSoak's subtree.all { sessionStatuses[it]?.isIdle == true }
+                // is false for absent entries; busy/retry checks are inert for absent.
                 if (directories.isEmpty()) {
                     complete(true)
                     return@launch
