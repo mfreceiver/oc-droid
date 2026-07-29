@@ -72,27 +72,16 @@ internal fun reduceSessionDeletedLocal(state: StoreState, action: AppAction.Sess
     )
 }
 
-internal fun reduceSessionStatusPatched(state: StoreState, action: AppAction.SessionStatusPatched): StoreState {
-    // §P0-E(c): two-phase timing marker — detect busy/retry→idle transition and
-    // mark pendingErrorCheck so the next message load can reconcile durable errors.
-    val prior = state.sessionList.sessionStatuses[action.sessionId]
-    val wasBusyOrRetry = prior?.isBusy == true || prior?.isRetry == true
-    val nowIdle = action.status.isIdle
-    val markErrorCheck = wasBusyOrRetry && nowIdle && action.sessionId == state.chat.currentSessionId
-    return state.copy(
-        sessionList = state.sessionList.copy(
-            sessions = bumpSessionUpdated(
-                state.sessionList.sessions,
-                action.sessionId,
-                action.updatedTimestamp,
-            ),
-            sessionStatuses = state.sessionList.sessionStatuses + (action.sessionId to action.status),
+internal fun reduceSessionStatusPatched(state: StoreState, action: AppAction.SessionStatusPatched): StoreState = state.copy(
+    sessionList = state.sessionList.copy(
+        sessions = bumpSessionUpdated(
+            state.sessionList.sessions,
+            action.sessionId,
+            action.updatedTimestamp,
         ),
-        chat = if (markErrorCheck) state.chat.copy(
-            pendingErrorCheck = state.chat.pendingErrorCheck + action.sessionId,
-        ) else state.chat,
-    )
-}
+        sessionStatuses = state.sessionList.sessionStatuses + (action.sessionId to action.status),
+    ),
+)
 
 internal fun reduceSessionsRefreshedLocal(state: StoreState, action: AppAction.SessionsRefreshedLocal): StoreState = state.copy(
     sessionList = state.sessionList.copy(

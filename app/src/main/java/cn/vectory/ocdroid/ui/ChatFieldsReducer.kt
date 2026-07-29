@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui
 
-import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.ui.controller.applyMessageUpdated
 import cn.vectory.ocdroid.ui.controller.mergeSlimMessages
 
@@ -47,36 +46,17 @@ internal fun reduceExpandedPartsCleared(state: StoreState, action: AppAction.Exp
 
 internal fun reduceMessageUpdatedApplied(state: StoreState, action: AppAction.MessageUpdatedApplied): StoreState {
     if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
-    val base = state.copy(chat = state.chat.applyMessageUpdated(action.message).first)
+    return state.copy(chat = state.chat.applyMessageUpdated(action.message).first)
         .withRouteContentSynced(
             expectedRouteInstance = action.expectedRouteInstance,
             expectedSessionId = action.sessionId ?: state.chat.currentSessionId,
         )
-    // §P0-E(b)/(c): drain pending error reattach + clear pendingErrorCheck
-    // when the updated message is the last assistant and now has an error.
-    val (newChat, errs) = base.chat.drainPendingChatErrors()
-    return if (errs.isEmpty()) base.copy(chat = newChat)
-    else base.copy(
-        chat = newChat,
-        sessionList = base.sessionList.copy(
-            sessionErrorsById = base.sessionList.sessionErrorsById + errs,
-        ),
-    )
 }
 
 internal fun reduceSlimMessagesMerged(state: StoreState, action: AppAction.SlimMessagesMerged): StoreState {
     if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
-    val base = state.copy(chat = state.chat.mergeSlimMessages(action.items, action.authoritative))
+    return state.copy(chat = state.chat.mergeSlimMessages(action.items, action.authoritative))
         .withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
-    // §P0-E(b): drain pending error reattach after messages merged.
-    val (newChat, errs) = base.chat.drainPendingChatErrors()
-    return if (errs.isEmpty()) base.copy(chat = newChat)
-    else base.copy(
-        chat = newChat,
-        sessionList = base.sessionList.copy(
-            sessionErrorsById = base.sessionList.sessionErrorsById + errs,
-        ),
-    )
 }
 
 internal fun reduceMessagesMerged(state: StoreState, action: AppAction.MessagesMerged): StoreState {
@@ -97,7 +77,7 @@ internal fun reduceMessagesMerged(state: StoreState, action: AppAction.MessagesM
     } else {
         action.streamingPartTexts
     }
-    val base = state.copy(
+    return state.copy(
         chat = state.chat.copy(
             messages = action.messages.chronological(),
             partsByMessage = action.partsByMessage,
@@ -108,15 +88,6 @@ internal fun reduceMessagesMerged(state: StoreState, action: AppAction.MessagesM
             hasMoreMessages = action.hasMoreMessages,
             currentModel = action.currentModel,
             streamOwned = newStreamOwned,
-        ),
-    )
-    // §P0-E(b): drain pending error reattach after messages loaded.
-    val (newChat, errs) = base.chat.drainPendingChatErrors()
-    return if (errs.isEmpty()) base.copy(chat = newChat)
-    else base.copy(
-        chat = newChat,
-        sessionList = base.sessionList.copy(
-            sessionErrorsById = base.sessionList.sessionErrorsById + errs,
         ),
     )
 }
@@ -165,7 +136,7 @@ internal fun reduceChatWindowHydrated(state: StoreState, action: AppAction.ChatW
     } else {
         state.chat.content
     }
-    val base = state.copy(
+    return state.copy(
         chat = state.chat.copy(
             messages = hydratedMessages,
             partsByMessage = action.partsByMessage,
@@ -174,15 +145,6 @@ internal fun reduceChatWindowHydrated(state: StoreState, action: AppAction.ChatW
             content = routeContent,
         ),
     ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
-    // §P0-E(b): drain pending error reattach after chat window hydrated.
-    val (newChat, errs) = base.chat.drainPendingChatErrors()
-    return if (errs.isEmpty()) base.copy(chat = newChat)
-    else base.copy(
-        chat = newChat,
-        sessionList = base.sessionList.copy(
-            sessionErrorsById = base.sessionList.sessionErrorsById + errs,
-        ),
-    )
 }
 
 internal fun reduceSessionSelected(state: StoreState, action: AppAction.SessionSelected): StoreState = state.copy(
@@ -271,30 +233,17 @@ internal fun reduceChatCleared(state: StoreState, action: AppAction.ChatCleared)
 
 internal fun reduceLastAssistantErrorAttached(state: StoreState, action: AppAction.LastAssistantErrorAttached): StoreState {
     val sid = action.sessionId
-    // Legacy path: sessionId==null with token==0 means the old byte-for-byte
-    // behaviour (direct attach to last assistant or no-op, no queue).
-    if (sid == null && action.expectedRouteInstance == 0L) {
-        val last = state.chat.messages.lastOrNull { it.isAssistant }
-        return if (last == null || last.error != null) {
-            state
-        } else {
-            state.copy(
-                chat = state.chat.copy(
-                    messages = state.chat.messages.map { m ->
-                        if (m.id == last.id) m.copy(error = action.error) else m
-                    },
-                ),
-            ).withRouteContentSynced(action.expectedRouteInstance, null)
-        }
-    }
-    // sessionId is required for the queue path (cannot queue without a key).
-    if (sid == null) return state
-
-    val routeAccepts = state.acceptsRouteUpdate(action.expectedRouteInstance, sid)
-    if (routeAccepts) {
+    // §P0-E(b) NARROWED: happy-path direct attach ONLY. The R10 drain/consumer
+    // that would re-attempt attaching via the pending queue is DEFERRED to a
+    // post-P0-A task — safe attach requires the GET/controller + authority
+    // status writer to locate the errored assistant (B2: session.error carries
+    // no messageId; attaching to an arbitrary last assistant is forbidden).
+    // Until then a non-attachable payload is RECORDED into pendingErrorReattach
+    // (producer scaffolding) but NEVER attached to a message.
+    if (state.acceptsRouteUpdate(action.expectedRouteInstance, sid)) {
         val last = state.chat.messages.lastOrNull { it.isAssistant }
         if (last != null && last.error == null) {
-            // Happy path: attach directly (byte-for-byte legacy behaviour).
+            // Happy path: attach to the exact last assistant (byte-for-byte legacy).
             return state.copy(
                 chat = state.chat.copy(
                     messages = state.chat.messages.map { m ->
@@ -303,9 +252,10 @@ internal fun reduceLastAssistantErrorAttached(state: StoreState, action: AppActi
                 ),
             ).withRouteContentSynced(action.expectedRouteInstance, sid)
         }
-        // route matches but last==null OR last already has error → queue for drain.
+        // route matches but last==null OR last already has error → fall through to record.
     }
-    // Route doesn't match OR attach not possible now → queue (R10 fix). Bounded LRU.
+    // Record producer scaffolding (needs a session key). Legacy sid==null → drop.
+    if (sid == null) return state
     val queued = PendingChatError(
         error = action.error,
         routeInstance = action.expectedRouteInstance,
@@ -317,74 +267,12 @@ internal fun reduceLastAssistantErrorAttached(state: StoreState, action: AppActi
         val oldest = updated.entries.firstOrNull()?.key
         if (oldest != null) updated - oldest else updated
     } else updated
-    return state.copy(
-        chat = state.chat.copy(
-            pendingErrorReattach = bounded,
-            pendingErrorCheck = state.chat.pendingErrorCheck + sid,
-        ),
-    )
+    return state.copy(chat = state.chat.copy(pendingErrorReattach = bounded))
 }
-
-/**
- * §P0-E(b): pure drain of [ChatState.pendingErrorReattach] for the current
- * session. Called from message-load reducers (MessagesMerged / CatchUpMessagesMerged
- * / SlimMessagesMerged / MessageUpdatedApplied / ChatWindowHydrated) and route
- * return, AFTER messages have been updated. Re-attempts the attach; if the last
- * assistant already has an error, demotes the queued payload to a session-level
- * [SlimSessionLastError] banner (B2/M5: don't overwrite / mis-attach). Clears
- * pendingErrorCheck once the last assistant resolves with an error.
- *
- * Returns the (chat, sessionErrorsDelta) pair: the new ChatState and a session→
- * banner map to merge into sessionList.sessionErrorsById (pure; the caller folds
- * it into the same StoreState copy).
- */
-internal fun ChatState.drainPendingChatErrors(): Pair<ChatState, Map<String, SlimSessionLastError>> {
-    val sid = currentSessionId ?: return this to emptyMap()
-    val pending = pendingErrorReattach[sid] ?: return this to emptyMap()
-    val last = messages.lastOrNull { it.isAssistant }
-    return when {
-        last == null -> this to emptyMap()  // still no assistant; keep queued
-        last.error == null -> {
-            // B2/M5 guard: pending.messageAssistantId, when non-null, must
-            // still be the current last assistant — else demote to avoid stale attach.
-            val safeAttach = pending.messageAssistantId == null || pending.messageAssistantId == last.id
-            if (safeAttach) {
-                copy(
-                    messages = messages.map { m -> if (m.id == last.id) m.copy(error = pending.error) else m },
-                    pendingErrorReattach = pendingErrorReattach - sid,
-                    pendingErrorCheck = pendingErrorCheck - sid,
-                ) to emptyMap()
-            } else {
-                // Different assistant now → demote to session-level banner, don't attach.
-                val banner = pending.toBanner()
-                copy(
-                    pendingErrorReattach = pendingErrorReattach - sid,
-                    pendingErrorCheck = pendingErrorCheck - sid,
-                ) to mapOf(sid to banner)
-            }
-        }
-        else -> {
-            // Last assistant already has an error → demote queued to session banner.
-            val banner = pending.toBanner()
-            copy(
-                pendingErrorReattach = pendingErrorReattach - sid,
-                pendingErrorCheck = pendingErrorCheck - sid,
-            ) to mapOf(sid to banner)
-        }
-    }
-}
-
-/** Build a durable banner value from a queued payload. */
-internal fun PendingChatError.toBanner(): SlimSessionLastError =
-    SlimSessionLastError(
-        name = error.name ?: "Unknown",
-        message = error.message,
-        at = null,
-    )
 
 internal fun reduceCatchUpMessagesMerged(state: StoreState, action: AppAction.CatchUpMessagesMerged): StoreState {
     if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
-    val base = state.copy(
+    return state.copy(
         chat = state.chat.copy(
             // CatchUpActions:147-154 4-field merge (not MessagesMerged's 8).
             messages = action.messages.chronological(),
@@ -393,15 +281,6 @@ internal fun reduceCatchUpMessagesMerged(state: StoreState, action: AppAction.Ca
             staleNotice = false,
         ),
     ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
-    // §P0-E(b): drain pending error reattach after catch-up messages merged.
-    val (newChat, errs) = base.chat.drainPendingChatErrors()
-    return if (errs.isEmpty()) base.copy(chat = newChat)
-    else base.copy(
-        chat = newChat,
-        sessionList = base.sessionList.copy(
-            sessionErrorsById = base.sessionList.sessionErrorsById + errs,
-        ),
-    )
 }
 
 // ── T1b writeChat-bypass reduce ────────────────────────────────────────

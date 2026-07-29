@@ -98,7 +98,13 @@ internal fun reduceSessionArchived(state: StoreState, action: AppAction.SessionA
             activeSessionIds = newSessionList.activeSessionIds - subtree,
             sessionErrorsById = cleanedSessionErrors,
         ),
-        chat = newChatCleaned,
+        chat = newChatCleaned.copy(
+            // §P0-E scaffolding hygiene: clear pending-error maps for the archived
+            // subtree (mirrors the sessionErrorsById cleanup above). Wiring deferred
+            // to post-P0-A, but the maps must not retain entries for archived sessions.
+            pendingErrorReattach = newChatCleaned.pendingErrorReattach.filterKeys { it !in subtree },
+            pendingErrorCheck = newChatCleaned.pendingErrorCheck - subtree,
+        ),
         unread = newUnread,
     )
 }
