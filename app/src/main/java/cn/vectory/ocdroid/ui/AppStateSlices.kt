@@ -498,6 +498,23 @@ internal fun ChatState.hasActiveTokenStreamOwner(): Boolean =
     streamOwned.values.any { it == StreamOwnedState.STREAMING }
 
 /**
+ * §P0-E(b): queued durable error awaiting re-attach. messageAssistantId is the
+ * last-assistant id captured at queue time when available (null when no assistant
+ * existed yet). Used to avoid attaching a stale error to a newer assistant (B2/M5).
+ */
+data class PendingChatError(
+    val error: Message.MessageError,
+    val routeInstance: Long,
+    val messageAssistantId: String?,
+)
+
+/**
+ * §P0-E(b): maximum size of [ChatState.pendingErrorReattach]. LRU eviction
+ * by insertion order (LinkedHashMap iteration order = insertion order).
+ */
+internal const val PENDING_ERROR_REATTACH_MAX = 32
+
+/**
  * §R-17 batch2: chat-domain state slice (RFC §2.2). Authoritative storage via
  * _chatFlow.update. The highest-frequency domain (SSE streaming deltas mutate
  * streamingPartTexts/messages many times per second). §R-17 batch2: error/success
@@ -703,6 +720,16 @@ data class ChatState(
       * `model = pendingModel ?: inferCurrentModel(msgs, visibleAgents) ?: null`.
       */
      val pendingModel: Message.ModelInfo? = null,
+     /** §P0-E(b): session-level queue for LastAssistantErrorAttached payloads that
+      *  arrived while route didn't match or no assistant existed yet (R10 silent-drop
+      *  fix). Keyed by sessionId. Bounded to PENDING_ERROR_REATTACH_MAX (LRU by
+      *  insertion order). Payload-complete (no messageId assumed — B2). Drained purely
+      *  on route return / message load (see drainPendingChatErrors). */
+     val pendingErrorReattach: Map<String, PendingChatError> = emptyMap(),
+     /** §P0-E(c): sessions whose last chat round ended busy/retry→idle while we expect
+      *  a durable error (two-phase timing). Marker for error reconciliation; cleared
+      *  once the last assistant gains an error or the session's messages resolve. */
+     val pendingErrorCheck: Set<String> = emptySet(),
  )
 
  /**

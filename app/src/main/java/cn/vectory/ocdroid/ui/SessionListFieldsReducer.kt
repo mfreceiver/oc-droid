@@ -40,6 +40,14 @@ internal fun reduceSessionArchivedLocal(state: StoreState, action: AppAction.Ses
             },
             pendingQuestions = action.pendingQuestions,
             activeSessionIds = state.sessionList.activeSessionIds - action.activeSessionIdsToRemove,
+            // §P0-E(a) R9 fix: archive must also clear the archived session's
+            // error banner (mirroring reduceSessionDeletedLocal's cleanup).
+            sessionErrorsById = state.sessionList.sessionErrorsById.filterKeys { it != id },
+        ),
+        // §P0-E(b)/(c): clean pending maps for the archived session (cross-slice cleanup).
+        chat = state.chat.copy(
+            pendingErrorReattach = state.chat.pendingErrorReattach.filterKeys { it != id },
+            pendingErrorCheck = state.chat.pendingErrorCheck - id,
         ),
     )
 }
@@ -56,19 +64,35 @@ internal fun reduceSessionDeletedLocal(state: StoreState, action: AppAction.Sess
             activeSessionIds = state.sessionList.activeSessionIds - ids,
             sessionErrorsById = state.sessionList.sessionErrorsById.filterKeys { it !in ids },
         ),
+        // §P0-E(b)/(c): clean pending maps for deleted sessions (cross-slice cleanup).
+        chat = state.chat.copy(
+            pendingErrorReattach = state.chat.pendingErrorReattach.filterKeys { it !in ids },
+            pendingErrorCheck = state.chat.pendingErrorCheck - ids,
+        ),
     )
 }
 
-internal fun reduceSessionStatusPatched(state: StoreState, action: AppAction.SessionStatusPatched): StoreState = state.copy(
-    sessionList = state.sessionList.copy(
-        sessions = bumpSessionUpdated(
-            state.sessionList.sessions,
-            action.sessionId,
-            action.updatedTimestamp,
+internal fun reduceSessionStatusPatched(state: StoreState, action: AppAction.SessionStatusPatched): StoreState {
+    // §P0-E(c): two-phase timing marker — detect busy/retry→idle transition and
+    // mark pendingErrorCheck so the next message load can reconcile durable errors.
+    val prior = state.sessionList.sessionStatuses[action.sessionId]
+    val wasBusyOrRetry = prior?.isBusy == true || prior?.isRetry == true
+    val nowIdle = action.status.isIdle
+    val markErrorCheck = wasBusyOrRetry && nowIdle && action.sessionId == state.chat.currentSessionId
+    return state.copy(
+        sessionList = state.sessionList.copy(
+            sessions = bumpSessionUpdated(
+                state.sessionList.sessions,
+                action.sessionId,
+                action.updatedTimestamp,
+            ),
+            sessionStatuses = state.sessionList.sessionStatuses + (action.sessionId to action.status),
         ),
-        sessionStatuses = state.sessionList.sessionStatuses + (action.sessionId to action.status),
-    ),
-)
+        chat = if (markErrorCheck) state.chat.copy(
+            pendingErrorCheck = state.chat.pendingErrorCheck + action.sessionId,
+        ) else state.chat,
+    )
+}
 
 internal fun reduceSessionsRefreshedLocal(state: StoreState, action: AppAction.SessionsRefreshedLocal): StoreState = state.copy(
     sessionList = state.sessionList.copy(
