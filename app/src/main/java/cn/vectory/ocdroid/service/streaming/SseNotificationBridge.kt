@@ -4,6 +4,7 @@ import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.di.NotificationDedup
 import cn.vectory.ocdroid.di.SessionNotifier
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
+import cn.vectory.ocdroid.service.lifecycle.SseLifecyclePolicy
 import cn.vectory.ocdroid.ui.controller.IdleUnreadAlert
 import cn.vectory.ocdroid.ui.parseQuestionAskedEvent
 import cn.vectory.ocdroid.ui.parseSessionStatusEvent
@@ -213,6 +214,9 @@ internal class SseNotificationBridge internal constructor(
         // dedup mutation so a foreground transition mid-event does not
         // leave a stale claim.
         if (isInForeground()) return
+        // L4 §5.4: background receive-only — ZERO SSE notifications.
+        // Bridge all modes except FOREGROUND (P2: user decision — no
+        // background SSE q/p/idle notifications).
         when (event.payload.type) {
             "question.asked" -> handleQuestionAsked(event)
             "session.status" -> handleSessionStatus(event)

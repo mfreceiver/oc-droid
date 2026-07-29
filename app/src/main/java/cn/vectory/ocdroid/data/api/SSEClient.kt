@@ -35,8 +35,46 @@ class SSEConnectionExhausted : Exception(
     "SSE 长时间无法连接，消息可能不是最新"
 )
 
-class SSEClient(
-    private val okHttpClient: OkHttpClient
+/**
+ * M1B seam: injectable monotonic clock + watchdog config for deterministic
+ * testing. Production uses the defaults (monotonic [System.nanoTime], 30s
+ * timeout, 5s check interval). Tests provide fake/virtual clock instances
+ * via [SSEClient.watchdogConfig].
+ *
+ * @property clock monotonic clock source (default: [System.nanoTime]).
+ *   The returned values must be monotonically non-decreasing; the watchdog
+ *   uses differences for elapsed time, immune to wall-clock jumps.
+ * @property timeoutNanos heartbeat inactivity threshold in nanoseconds
+ *   (default: 30s = [HEARTBEAT_TIMEOUT_MS] converted to nanos).
+ * @property checkIntervalMs watchdog sleep interval in milliseconds
+ *   (default: [HEARTBEAT_CHECK_INTERVAL_MS]).
+ */
+internal data class WatchdogConfig(
+    val clock: () -> Long = { System.nanoTime() },
+    val timeoutNanos: Long = 30_000L * 1_000_000L,
+    val checkIntervalMs: Long = 5_000L,
+    internal val waitForCheck: suspend (Long) -> Unit = { delay(it) },
+)
+
+class SSEClient internal constructor(
+    private val okHttpClient: OkHttpClient,
+    /**
+     * L4 §3.1: gate for SSE reconnect. Called before each retry attempt in
+     * [connect]'s `retryWhen`. When false, the retry is SKIPPED and the flow
+     * completes with [SSEConnectionExhausted]. Set externally by the service
+     * layer ([ServiceSseConnectionOwner]) to suppress reconnects during
+     * background grace. The default `{ true }` preserves existing behavior.
+     */
+    @Volatile
+    var reconnectAllowed: () -> Boolean = { true },
+    /**
+     * M1B seam: injectable clock + config for the heartbeat watchdog. Pass a
+     * custom [WatchdogConfig] in tests to replace [System.nanoTime] with a
+     * deterministic fake clock and shorten timeouts/check intervals. Default
+     * uses production constants (30s timeout, 5s check, System.nanoTime).
+     */
+    internal val watchdogConfig: WatchdogConfig = WatchdogConfig(),
+    internal val eventSourceFactory: EventSource.Factory = EventSources.createFactory(okHttpClient),
 ) {
     companion object {
         private const val INITIAL_RETRY_DELAY_MS = 1000L
@@ -63,8 +101,13 @@ class SSEClient(
         // NAT timeouts, silent socket death). 30s = 3× heartbeat: tolerates
         // missing 2 frames before declaring the link dead. cancel() triggers
         // onFailure -> close -> the existing retryWhen backoff reconnects.
+        //
+        // M1B: deadline tracking uses System.nanoTime() (monotonic clock) so
+        // wall-clock jumps never affect the watchdog. HEARTBEAT_TIMEOUT_NANOS
+        // is the same interval expressed in nanoseconds.
         private const val HEARTBEAT_TIMEOUT_MS = 30_000L
         private const val HEARTBEAT_CHECK_INTERVAL_MS = 5_000L
+        private val HEARTBEAT_TIMEOUT_NANOS = HEARTBEAT_TIMEOUT_MS * 1_000_000L
 
         // Reuse a single Json instance instead of allocating one per event.
         private val json = kotlinx.serialization.json.Json {
@@ -104,6 +147,11 @@ class SSEClient(
         slimMode: Boolean = false
     ): Flow<Result<SSEEvent>> = connectOnce(baseUrl, username, password, directory, slimMode)
         .retryWhen { _, attempt ->
+            // L4 §3.1: reconnect gate — uses instance property [reconnectAllowed].
+            if (!this@SSEClient.reconnectAllowed()) {
+                DebugLog.w("SSE", "reconnect gate refused (attempt #${attempt + 1}) — suppressing retry")
+                throw SSEConnectionExhausted()
+            }
             if (attempt >= MAX_RETRY_ATTEMPTS) {
                 // §15.3: budget exhausted — give up and let the custom
                 // exception propagate to the collector's catch handler so
@@ -121,6 +169,16 @@ class SSEClient(
             val delayMs = (baseDelay * jitterFactor).toLong().coerceAtLeast(1L)
             DebugLog.i("SSE", "reconnect attempt #${attempt + 1} in ${delayMs}ms")
             delay(delayMs)
+            // L4 §3.1: TOCTOU fix — re-check reconnect gate AFTER the retry
+            // delay. The app may have gone background during the wait. If
+            // denied, abort this reconnect (no connect attempt, no tight loop).
+            if (!this@SSEClient.reconnectAllowed()) {
+                DebugLog.w(
+                    "SSE",
+                    "reconnect gate refused after delay (attempt #${attempt + 1}) — suppressing retry",
+                )
+                throw SSEConnectionExhausted()
+            }
             true
         }
 
@@ -180,9 +238,10 @@ class SSEClient(
         // §Phase1A: heartbeat bookkeeping shared between the onEvent callback
         // (OkHttp EventSource thread) and the watchdog coroutine (flow scope).
         // Atomic so visibility/atomicity is guaranteed without @Volatile (which
-        // cannot be applied to local captures). lastEventAt seeds to now so the
-        // very first check window isn't already "expired".
-        val lastEventAt = AtomicLong(System.currentTimeMillis())
+        // cannot be applied to local captures). lastEventAt seeds to nanoTime
+        // (monotonic — immune to wall-clock jumps) so the very first check
+        // window isn't already "expired".
+        val lastEventAt = AtomicLong(watchdogConfig.clock())
         val eventCount = AtomicInteger(0)
         // §P2-8: idempotent close guard. onClosed and onFailure can both fire
         // after the heartbeat watchdog cancels the eventSource (cancel triggers
@@ -211,8 +270,8 @@ class SSEClient(
                 // retryWhen budget on every reconnect-after-backlog. Early-out.
                 if (closed.get()) return
                 // Any frame (including `server.heartbeat`) proves the link is
-                // alive — reset the watchdog clock and count it.
-                lastEventAt.set(System.currentTimeMillis())
+                // alive — reset the watchdog deadline (monotonic) and count it.
+                lastEventAt.set(watchdogConfig.clock())
                 eventCount.incrementAndGet()
                 if (data.isNotBlank() && data != "[DONE]") {
                     try {
@@ -287,11 +346,10 @@ class SSEClient(
             "${uri.scheme}://${uri.host}${if (uri.port != -1) ":${uri.port}" else ""}$eventsPath"
         }.getOrNull() ?: "<redacted>$eventsPath"
         DebugLog.i("SSE", "connecting to $sanitizedLogUrl${if (slimMode) " (slim)" else ""}")
-        val eventSource = EventSources.createFactory(okHttpClient)
-            .newEventSource(request, listener)
+        val eventSource = eventSourceFactory.newEventSource(request, listener)
 
         // §Phase1A: half-open watchdog. Periodically checks elapsed time since
-        // the last received frame; if it exceeds HEARTBEAT_TIMEOUT_MS, cancel
+        // the last received frame; if it exceeds HEARTBEAT_TIMEOUT_NANOS, cancel
         // the eventSource (OkHttp triggers onFailure -> close -> retryWhen).
         // Cold-start guard: while eventCount == 0 we are still waiting for the
         // first frame (server.connected / heartbeat) — don't time out, the
@@ -300,10 +358,13 @@ class SSEClient(
         val watchdog = launch {
             try {
                 while (isActive) {
-                    delay(HEARTBEAT_CHECK_INTERVAL_MS)
+                    watchdogConfig.waitForCheck(watchdogConfig.checkIntervalMs)
                     if (eventCount.get() == 0) continue
-                    val elapsed = System.currentTimeMillis() - lastEventAt.get()
-                    if (elapsed >= HEARTBEAT_TIMEOUT_MS) {
+                    // M1B: monotonic elapsed — compares nanoseconds elapsed
+                    // against HEARTBEAT_TIMEOUT_NANOS. Wall-clock jumps (NTP
+                    // adjustments, user time changes) cannot affect this check.
+                    val elapsed = watchdogConfig.clock() - lastEventAt.get()
+                    if (elapsed >= watchdogConfig.timeoutNanos) {
                         DebugLog.w("SSE", "heartbeat watchdog timeout — forcing reconnect")
                         eventSource.cancel()
                         break

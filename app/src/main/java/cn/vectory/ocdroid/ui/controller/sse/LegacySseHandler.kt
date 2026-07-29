@@ -112,6 +112,10 @@ class LegacySseHandler(private val host: SseDispatchHost) : SseEventHandler {
                         )
                     }
                 }
+                // L3 (blocker #1): real deletion/archive → close skeleton session
+                // (detach state + cancel jobs). Route switch is handled separately
+                // by the init-block route observer (retain dirty, cancel timer only).
+                host.closeSkeletonSession(updated.id)
                 host.effects.tryEmitEffect(
                     ControllerEffect.EvictSession(host.serverGroupFp(), updated.id)
                 )

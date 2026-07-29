@@ -66,6 +66,9 @@ class OkHttpClientFactoryMutationTest {
             sslConfigFactory,
             DirectoryHeaderInterceptor(),
             SlimapiVersionInterceptor(hostConfig),
+            // §B: identity interceptor — device id absent (no X-Client-Id);
+            // default HostConfig has slim=false so it's a no-op here anyway.
+            ClientIdentityInterceptor(hostConfig),
             SlimapiDebugInterceptor(),
             AuthInterceptor(hostConfig),
             CacheControlInterceptor(hostConfig, cachePathSanitizer),

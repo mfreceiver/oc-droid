@@ -115,4 +115,12 @@ interface SseDispatchHost {
      * update.
      */
     fun markLocallyInjected(sessionId: String, messageId: String)
+
+    /**
+     * L3 (blocker #1): closes a session in the skeleton reload scheduler —
+     * detaches state, cancels + joins in-flight, and cleans up per-generation
+     * resources. Fire-and-forget (launched on [scope]). Called from SSE event
+     * handlers when a session is confirmed deleted or archived (not route switch).
+     */
+    fun closeSkeletonSession(sessionId: String)
 }

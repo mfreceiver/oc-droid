@@ -3,8 +3,10 @@ package cn.vectory.ocdroid.service.streaming
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.service.StreamingOwnershipGate
 import cn.vectory.ocdroid.service.lifecycle.Layer
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
+import cn.vectory.ocdroid.service.streaming.SseTransportRuntimeStore
 import cn.vectory.ocdroid.service.notify.NotificationSpec
 import cn.vectory.ocdroid.service.notify.NotificationStrings
 import cn.vectory.ocdroid.service.status.GlobalBusyState
@@ -269,7 +271,7 @@ class SessionStreamingControllerBootstrapTest {
         productionRetryPolicy: Boolean = false,
     ): Fixture {
         val aggregator = RecordingStatusInput()
-        val coordinator = StreamingLifecycleCoordinator(aggregator, scope)
+        val coordinator = StreamingLifecycleCoordinator(aggregator, scope, SseTransportRuntimeStore(), ownershipGate = StreamingOwnershipGate(), identityStore = ConnectionIdentityStore())
         val store = ConnectionIdentityStore()
         val shell = RecordingShell()
         val snapshotProvider = SessionSnapshotProvider { cn.vectory.ocdroid.service.status.StatusSnapshot.Empty }
@@ -417,6 +419,9 @@ class SessionStreamingControllerBootstrapTest {
 
         override suspend fun disconnectSse() {
             recorded += "disconnectSse"
+        }
+        override suspend fun enterNoSourceTerminal() {
+            recorded += "enterNoSourceTerminal"
         }
     }
 }

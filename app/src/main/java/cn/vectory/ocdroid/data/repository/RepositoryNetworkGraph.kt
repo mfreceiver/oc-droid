@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.data.repository
 import cn.vectory.ocdroid.data.repository.http.AuthInterceptor
 import cn.vectory.ocdroid.data.repository.http.CacheControlInterceptor
 import cn.vectory.ocdroid.data.repository.http.CachePathSanitizer
+import cn.vectory.ocdroid.data.repository.http.ClientIdentityInterceptor
 import cn.vectory.ocdroid.data.repository.http.DirectoryHeaderInterceptor
 import cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory
 import cn.vectory.ocdroid.data.repository.http.ResponseSizeGuardInterceptor
@@ -56,6 +57,15 @@ internal class RepositoryNetworkGraph(
     tofuStore: TofuPinStore,
     @Suppress("UNUSED_PARAMETER")
     serverCompatProfile: ServerCompatProfile,
+    /**
+     * §B (slimapi-v2-adapt-traffic-plan §B): lazy device-id provider backing
+     * [ClientIdentityInterceptor]. Resolves from the Hilt field-injected
+     * [cn.vectory.ocdroid.data.repository.http.ClientIdStore] at request time
+     * (the graph is constructed as a field initializer before Hilt field
+     * injection, so the provider MUST be lazy). Mirrors
+     * [OpenCodeRepository.identityStoreOrFallback].
+     */
+    private val clientIdProvider: () -> String?,
 ) {
     /** Per-host mutable compatibility mirror; clients capture snapshots. */
     val hostConfig: HostConfig = HostConfig()
@@ -73,6 +83,14 @@ internal class RepositoryNetworkGraph(
      * Slimapi version-header injector for the default compatibility factory.
      */
     val slimapiVersionInterceptor: SlimapiVersionInterceptor = SlimapiVersionInterceptor(defaultSnapshot)
+
+    /**
+     * §B: additive client-identity header injector (X-Client-Name /
+     * -Version / -Id) for the default compatibility factory. Same double-
+     * gate (slimHost + /slimapi/ prefix) as [slimapiVersionInterceptor].
+     */
+    val clientIdentityInterceptor: ClientIdentityInterceptor =
+        ClientIdentityInterceptor(defaultSnapshot, clientIdProvider)
 
     /** DEBUG-only slimapi traffic instrumentation (no-op in release). */
     val slimapiDebugInterceptor: SlimapiDebugInterceptor = SlimapiDebugInterceptor()
@@ -107,6 +125,7 @@ internal class RepositoryNetworkGraph(
         sslConfigFactory,
         directoryHeaderInterceptor,
         slimapiVersionInterceptor,
+        clientIdentityInterceptor,
         slimapiDebugInterceptor,
         authInterceptor,
         cacheControlInterceptor,

@@ -2,8 +2,10 @@ package cn.vectory.ocdroid.service.streaming
 
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.service.StreamingOwnershipGate
 import cn.vectory.ocdroid.service.lifecycle.Layer
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
+import cn.vectory.ocdroid.service.streaming.SseTransportRuntimeStore
 import cn.vectory.ocdroid.service.notify.NotificationStrings
 import cn.vectory.ocdroid.service.status.GlobalBusyState
 import cn.vectory.ocdroid.service.status.SessionBusyStatus
@@ -156,7 +158,7 @@ class SessionStreamingControllerPollerTest {
 
     private fun newFixture(scope: kotlinx.coroutines.CoroutineScope): Fixture {
         val input = RecordingStatusInput()
-        val coordinator = StreamingLifecycleCoordinator(input, scope)
+        val coordinator = StreamingLifecycleCoordinator(input, scope, SseTransportRuntimeStore(), ownershipGate = StreamingOwnershipGate(), identityStore = ConnectionIdentityStore())
         val store = ConnectionIdentityStore()
         val shell = RecordingShell()
         val snapshotProvider = SessionSnapshotProvider { StatusSnapshot.Empty }
@@ -275,6 +277,9 @@ class SessionStreamingControllerPollerTest {
         }
         override suspend fun disconnectSse() {
             recorded += "disconnectSse"
+        }
+        override suspend fun enterNoSourceTerminal() {
+            recorded += "enterNoSourceTerminal"
         }
     }
 }

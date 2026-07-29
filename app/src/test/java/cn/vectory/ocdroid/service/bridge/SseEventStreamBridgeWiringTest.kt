@@ -111,6 +111,12 @@ class SseEventStreamBridgeWiringTest {
         // Service injects in production. D2: the owner now needs the status
         // aggregator + input + snapshot provider + recovery policy for the
         // acknowledgeable-readiness contract.
+        // L4 §3 (M1A): runtimeStore + dropHandler are REQUIRED (no production
+        // defaults). This bridge-wiring test does not exercise transport-drop
+        // recovery, so a real store + a handler that mirrors the production
+        // publish ordering suffice (no no-op handler — the owner constructor
+        // forbids it by design).
+        val runtimeStore = cn.vectory.ocdroid.service.streaming.SseTransportRuntimeStore()
         sseOwner = ServiceSseConnectionOwner(
             scope = kotlinx.coroutines.CoroutineScope(
                 SupervisorJob() + Dispatchers.Unconfined
@@ -122,6 +128,15 @@ class SseEventStreamBridgeWiringTest {
             sharedStateStore = store,
             sharedEffectBus = effects,
             recoveryPolicy = cn.vectory.ocdroid.service.streaming.SseRecoveryPolicy(),
+            runtimeStore = runtimeStore,
+            dropHandler = object : cn.vectory.ocdroid.service.streaming.UnexpectedTransportDropHandler {
+                override fun onUnexpectedDrop(
+                    attempt: cn.vectory.ocdroid.service.streaming.TransportAttemptToken,
+                    reason: cn.vectory.ocdroid.service.streaming.TransportDropReason,
+                ) {
+                    runtimeStore.publishDropped(attempt, reason)
+                }
+            },
             onTerminalExhaustion = {},
         )
         sessionSyncCoordinator = SessionSyncCoordinator(

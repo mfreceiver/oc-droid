@@ -20,6 +20,10 @@ import cn.vectory.ocdroid.service.identity.ConnectionIdentity
  * event belongs to a stale host / pre-reconfigure collector and must be dropped by every
  * consumer **before** any side effect (state mutation, notification, fold).
  *
+ * L4 fence: lifecycled frame freshness is checked via [SseLifecyclePolicy.frameStillCurrent]
+ * at consumption time using a separately acquired [SseFrameFence], NOT by a field on this
+ * data class. See `StampedSseEvent` for the wrapper type when fence+event must travel together.
+ *
  * This type is a pure data carrier (Phase 0 shared contract); it performs no validation itself.
  *
  * @property identity The connection identity (epoch + group/workdir/endpoint fingerprints) the

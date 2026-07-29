@@ -17,9 +17,11 @@ import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SettingsState
 import cn.vectory.ocdroid.ui.SharedEffectBus
+import cn.vectory.ocdroid.ui.SkeletonReloadCoordinator
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.TrafficState
 import cn.vectory.ocdroid.ui.UiEvent
+import cn.vectory.ocdroid.ui.beginReconfigureBarrier
 import cn.vectory.ocdroid.ui.UnreadState
 import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
 import cn.vectory.ocdroid.ui.settings.resolveMtlsDegradationMessage
@@ -86,6 +88,13 @@ class HostProfileController(
      */
     internal val identityStore: ConnectionIdentityStore? = null,
     private val effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver? = null,
+    /**
+     * L3 (blocker #6): skeleton reload scheduler. Used by the reconfigure
+     * barrier ([beginReconfigureBarrier]) to atomically bump the identity
+     * generation AND detach stale scheduler states. Null in test/legacy
+     * constructions.
+     */
+    private val skeletonReloadCoordinator: SkeletonReloadCoordinator? = null,
 ) {
     // ── §P9 ProfileMutationEngine (extracted) ──────────────────────────────
 
@@ -431,10 +440,13 @@ class HostProfileController(
      * trusted endpoints — replaces the legacy `allowInsecureConnections` flag.
      */
     fun configureServer(url: String, username: String? = null, password: String? = null): Job? {
-        // lite-v2: manual URL entry from the login form does runtime configure
-        // (the user expects immediate connection). The restart-required model
-        // applies only to saved-profile edits (saveHostProfile), not to the
-        // initial manual connection attempt.
+        // L3 (barrier + readiness): reconfigure barrier BEFORE repository configure.
+        // nudgeCurrentSession() is NOT called here — identity is still null after
+        // beginReconfigure. The real nudge happens when identityStore.bindIfCurrent
+        // succeeds (bootstrap health check) and when bundle is published.
+        if (identityStore != null && skeletonReloadCoordinator != null) {
+            beginReconfigureBarrier(identityStore!!, skeletonReloadCoordinator!!)
+        }
         configureServerRaw(url, username, password)
         return null
     }
@@ -517,6 +529,12 @@ class HostProfileController(
      * host switch by the caller (see resetLocalDataAndResync).
      */
     internal fun configureRepositoryForProfile(profile: HostProfile) {
+        // L3 (barrier + readiness): reconfigure barrier BEFORE repository configure.
+        // No nudge here — identity is null after barrier; real nudge is on
+        // identityStore.bindIfCurrent success (bootstrap health check) + bundle publish.
+        if (identityStore != null && skeletonReloadCoordinator != null) {
+            beginReconfigureBarrier(identityStore!!, skeletonReloadCoordinator!!)
+        }
         configureRepositoryForProfileRaw(profile)
     }
 
@@ -625,7 +643,21 @@ class HostProfileController(
         // full-data reset tears down SSE + all in-memory caches; the epoch
         // bump ensures any in-flight collector / fetch from the pre-reset
         // state is dropped.
-        identityStore?.beginReconfigure()
+        // L3 (blocker #4/6): atomic reconfigure barrier — bumps identity
+        // generation AND detaches stale scheduler states synchronously, BEFORE
+        // any reset/reconfigure. Structural invariant: no bare beginReconfigure()
+        // call exists outside this barrier. Production wiring ensures both
+        // identityStore and skeletonReloadCoordinator are non-null.
+        if (identityStore != null && skeletonReloadCoordinator != null) {
+            beginReconfigureBarrier(identityStore!!, skeletonReloadCoordinator!!)
+        } else {
+            // Legacy/test fallback (no scheduler or no identity store).
+            @Suppress("DEPRECATION")
+            identityStore?.beginReconfigure()
+            skeletonReloadCoordinator?.detachGeneration(
+                identityStore?.currentEpoch() ?: 0L
+            )
+        }
         // C-D3 rev-3 same-host reset: rotate the slim-local marker before the
         // local purge / slice reset (no-op compat shim — see OpenCodeRepository).
         repository.resetSlimForLocalWipe()

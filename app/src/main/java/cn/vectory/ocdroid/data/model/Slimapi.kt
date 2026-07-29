@@ -71,10 +71,15 @@ data class SlimapiPermissionEntry(
  *    (`info.time.archived`); null = no change. >0 means archived (hidden
  *    from the session list).
  *  - [deleted]: emitted on `session.deleted`; null = no change.
- *  - [updatedAt]: epoch-ms of the latest message update — the
- *    `/slimapi/messages/{sid}/since/{ts}` anchor (§5 A2=A).
+ *  - [updatedAt]: epoch-ms of the latest message update. **v2 semantics**:
+ *    sidecar wall-clock (was upstream `info.time`). Historically the
+ *    `/slimapi/messages/{sid}/since/{ts}` anchor (§5 A2=A), but that endpoint
+ *    is removed; `updatedAt` is now retained only as a marker-bookkeeping
+ *    tuple分量 (paired with [messageId]) — **not** used for suppression
+ *    (see docs/specs/slimapi-v2-adapt-traffic-plan.md §C2). Not monotonic
+ *    across sidecar restart / NTP; treat as best-effort only.
  *  - [messageId]: the messageID of the latest update (paired with
- *    updatedAt for boundary dedup).
+ *    updatedAt for marker bookkeeping).
  *  - [status]: "idle" / "busy" (session.status).
  *
  * All fields nullable + defaulted so kotlinx.serialization decodes partial

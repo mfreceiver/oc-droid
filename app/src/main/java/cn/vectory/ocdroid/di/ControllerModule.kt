@@ -9,6 +9,7 @@ import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.ConnectionPhase
+import cn.vectory.ocdroid.ui.routeChatSessionId
 import cn.vectory.ocdroid.ui.controller.ComposerController
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.ForegroundCatchUpController
@@ -190,6 +191,7 @@ object ControllerModule {
         @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
         effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver,
+        skeletonReloadCoordinator: cn.vectory.ocdroid.ui.SkeletonReloadCoordinator,
     ): HostProfileController = HostProfileController(
         scope = appScope,
         slices = store.slices,
@@ -201,6 +203,7 @@ object ControllerModule {
         currentServerGroupFp = currentServerGroupFp,
         identityStore = identityStore,
         effectiveConnectionConfigResolver = effectiveConnectionConfigResolver,
+        skeletonReloadCoordinator = skeletonReloadCoordinator,
     )
 
     @Provides
@@ -281,6 +284,8 @@ object ControllerModule {
     fun provideTokenStreamCoordinator(
         @UiApplicationScope appScope: CoroutineScope,
         store: SharedStateStore,
+        // L4 Phase-1 foreground truth source.
+        appLifecycleMonitor: AppLifecycleMonitor,
         // §tokenstream-mtls-fix: was `clientFactory: OkHttpClientFactory` — the Hilt
         // singleton whose own SslConfigFactory never received configureClientCert, so
         // its sslConfigFor() fell back to SystemDefault → "Trust anchor not found"
@@ -302,6 +307,9 @@ object ControllerModule {
         synchronized(repository) {
             repository.onBundlePublished = { generation, endpointFp ->
                 store.dispatch(AppAction.BundlePublished(generation, endpointFp))
+                // L3 (round-4 blocker #1): bundle stamp just became available
+                // (or changed) → nudge retained dirty state.
+                skeletonReloadCoordinator.nudgeCurrentSession()
             }
             // The repository creates its initial generation-0 bundle before
             // this callback can be installed. Publish that baseline now so
@@ -348,6 +356,23 @@ object ControllerModule {
             streamConnectionProvider = streamConnectionProvider,
             bundleCommitLock = repository,
             currentBundleProvider = { repository.currentClientBundle() },
+            // L4 Phase-1 (lane 1): wire the foreground/route gate with real
+            // predicates — NOT the permissive defaults.
+            // foregroundSignal: AppLifecycleMonitor.isInForeground is the
+            // authoritative, lifecycle-safe foreground truth (StateFlow).
+            foregroundSignal = appLifecycleMonitor.isInForeground,
+            // navFlow: the authoritative route truth for the route observer
+            // (deriving visibleChatSessionId from navState.lastRoute, NOT from
+            // the loaded-data pointer slices.chat.currentSessionId).
+            navFlow = store.navFlow,
+            // appInForeground snapshot: read the live value for synchronous
+            // gate checks (open(), scheduleReconnect, etc.).
+            appInForeground = { appLifecycleMonitor.isInForeground.value },
+            // visibleChatSessionId: the currently visible chat session id from
+            // the route (navFlow.lastRoute). Null when not on a chat route → gate
+            // rejects. This is the AUTHORITATIVE route truth — NOT the data pointer
+            // from slices.chat.currentSessionId (which persists after leaving Chat).
+            visibleChatSessionId = { routeChatSessionId(store.navFlow.value.lastRoute) },
             // lite-v2-dev (plan §4.2): TriggerSinceFetch → skeleton reload
             // （终态文本 / resync 收敛统一走权威窗口，不再走 reconcileSession）。
             triggerSinceFetch = { sid, _ ->
@@ -429,32 +454,65 @@ object ControllerModule {
      * 进 chat slice（见 [SkeletonReloadCoordinator]）。
      *
      * # 取代旧的全量 reconcile 路径
-     *
-     * 旧的 /full reconcile 单条路径已全量退役（plan §4.1）。
-     * 该协调器不再依赖 SlimCommitToken / watermark / reconfigure 协议——skeleton
-     * 端点每次 re-GET upstream opencode，不读 sidecar 内存（read-after-event 见
-     * plan §4.3.2）。
-     *
-     * # 注入依赖
-     *
-     *  - [UiApplicationScope] appScope：reload / watchdog / debounce 协程的宿主。
-     *  - repository：`getSlimapiMessagesSkeleton` fetch 原语（plan §4.3.7）。
-     *  - store.slices：chat slice 读写 + sessionLock。
-     *  - currentServerGroupFp：ReloadIdentity launch 时捕获（防 cross-group 误写）。
-     */
+      *
+      * 旧的 /full reconcile 单条路径已全量退役（plan §4.1）。
+      * 该协调器不再依赖 SlimCommitToken / watermark / reconfigure 协议——skeleton
+      * 端点每次 re-GET upstream opencode，不读 sidecar 内存（read-after-event 见
+      * plan §4.3.2）。
+      *
+      * L3 (slimapi-v2 §C1): the coordinator is now a unified throttled scheduler
+      * (the watchdog/epoch mechanism is gone). Injected signals:
+      *
+      * # 注入依赖
+      *
+      *  - [UiApplicationScope] appScope：reload / trailing-timer / debounce 协程的宿主。
+      *  - repository：`getSlimapiMessagesSkeleton` fetch 原语（plan §4.3.7）+ bundle stamp。
+      *  - store.slices：chat slice 读写 + sessionLock。
+      *  - appLifecycleMonitor.isInForeground：pre-HTTP foreground gate。
+      *  - identityStore：transport generation + identity (host CAS, ABA fence)。
+      */
     @Provides
     @Singleton
     fun provideSkeletonReloadCoordinator(
         @UiApplicationScope appScope: CoroutineScope,
         store: SharedStateStore,
         repository: OpenCodeRepository,
-        @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
-    ): SkeletonReloadCoordinator = SkeletonReloadCoordinator(
-        scope = appScope,
-        repository = repository,
-        slices = store.slices,
-        currentServerGroupFp = currentServerGroupFp,
-    )
+        appLifecycleMonitor: AppLifecycleMonitor,
+        identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
+    ): SkeletonReloadCoordinator {
+        val coordinator = SkeletonReloadCoordinator(
+            scope = appScope,
+            repository = repository,
+            slices = store.slices,
+            // L3 (slimapi-v2 §C1): pre-HTTP guard signals.
+            foreground = appLifecycleMonitor.isInForeground,
+            currentTransport = {
+                val epoch = identityStore.currentEpoch()
+                val identity = identityStore.currentIdentity.value
+                val valid = if (identity != null) identity.epoch == epoch else null
+                cn.vectory.ocdroid.ui.TransportSnapshot(
+                    generation = epoch,
+                    identity = if (valid == true) identity else null,
+                )
+            },
+            currentBundleStamp = {
+                repository.currentClientBundle()?.let {
+                    cn.vectory.ocdroid.ui.BundleStamp(it.generation, it.endpointFp)
+                }
+            },
+        )
+        // L3 (round-4 blocker #1): readiness nudge — identity transitions from
+        // null to non-null after a successful bootstrap bind. Watch for the
+        // transition and nudge retained dirty state.
+        appScope.launch {
+            identityStore.currentIdentity.collect { identity ->
+                if (identity != null) {
+                    coordinator.nudgeCurrentSession()
+                }
+            }
+        }
+        return coordinator
+    }
 }
 
 // ── lite-v2-dev production hook factory (plan §4.2) ───────────────────────

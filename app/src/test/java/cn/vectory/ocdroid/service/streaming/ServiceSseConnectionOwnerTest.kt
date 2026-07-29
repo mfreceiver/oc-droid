@@ -76,6 +76,18 @@ class ServiceSseConnectionOwnerTest {
     private lateinit var streamFrames: MutableList<SSEEvent>
     private var disconnectRequests: Int = 0
     private lateinit var policy: TestRecoveryPolicy
+    private lateinit var runtimeStore: SseTransportRuntimeStore
+    private val dropCalls: MutableList<DropCall> = mutableListOf()
+    private val recordingHandler = object : UnexpectedTransportDropHandler {
+        override fun onUnexpectedDrop(attempt: TransportAttemptToken, reason: TransportDropReason) {
+            dropCalls += DropCall(attempt, reason)
+            // Mirror the production handler ([cn.vectory.ocdroid.service.SseShutdownSeal]):
+            // it publishes the drop (the owner never calls publishDropped
+            // directly). The owner test has no ownership gate to release, so
+            // only the publish is mirrored here.
+            runtimeStore.publishDropped(attempt, reason)
+        }
+    }
     private lateinit var owner: ServiceSseConnectionOwner
 
     @Before
@@ -99,6 +111,8 @@ class ServiceSseConnectionOwnerTest {
         streamFrames = mutableListOf()
         disconnectRequests = 0
         policy = TestRecoveryPolicy()
+        runtimeStore = SseTransportRuntimeStore()
+        dropCalls.clear()
         owner = ServiceSseConnectionOwner(
             scope = scope,
             repository = repository,
@@ -108,6 +122,8 @@ class ServiceSseConnectionOwnerTest {
             sharedStateStore = store,
             sharedEffectBus = effects,
             recoveryPolicy = policy,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
             jitterSource = { 0.0f },
             onTerminalExhaustion = { disconnectRequests++ },
         )
@@ -600,6 +616,8 @@ class ServiceSseConnectionOwnerTest {
             sharedEffectBus = effects,
             recoveryPolicy = policy,
             transportTimeoutMs = 5_000L,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
             jitterSource = { 0.0f },
             onTerminalExhaustion = { disconnectRequests++ },
         )
@@ -705,9 +723,11 @@ class ServiceSseConnectionOwnerTest {
 
     // (17) Post-Ready recovery exhausts: initial Ready then 3 service
     //      attempts fail → one gap + four total flow instances (initial +
-    //      3 recovery) + terminal callback once + shared state Disconnected.
+    //      3 recovery) + terminal callback once + SSE transport projection
+    //      false (REST/server state MUST stay unchanged — I8: SSE-only loss
+    //      cannot alone write server-unreachable REST state).
     @Test
-    fun `D5 1b - post-Ready outage exhausts - one gap + four flows + terminal callback + Disconnected`() = runTest {
+    fun `D5 1b - post-Ready outage exhausts - one gap + four flows + terminal callback + SSE-only REST unchanged`() = runTest {
         val identity = bindIdentity("/proj")
         aggregator.nextState = GlobalBusyState.Busy
         // Flow 1: emit one frame (Ready), then throw (post-Ready outage).
@@ -754,15 +774,19 @@ class ServiceSseConnectionOwnerTest {
             1,
             disconnectRequests,
         )
-        // Shared state written to Disconnected.
-        assertEquals(
-            "shared state Disconnected after terminal exhaustion",
+        // L4 §3/§8 (M1A / I8): SSE-only retry exhaustion MUST NOT write
+        // REST/server Disconnected state — the REST connection is a SEPARATE
+        // axis (a dropped SSE does not prove the server is unreachable). The
+        // shared connection state stays at its initial value; only the SSE
+        // transport projection (sseConnected) flips false.
+        assertNotEquals(
+            "SSE exhaustion does NOT write REST Disconnected (I8)",
             ConnectionPhase.Disconnected,
             store.connectionFlow.value.connectionPhase,
         )
         assertFalse(
-            "isConnected=false after terminal exhaustion",
-            store.connectionFlow.value.isConnected,
+            "isSseConnected=false after terminal exhaustion (SSE transport projection)",
+            store.sseConnectedFlow.value,
         )
         // Gap count is STILL one (idempotent for the same outage — no
         // duplicate gaps across the 3 recovery failures).
@@ -773,6 +797,958 @@ class ServiceSseConnectionOwnerTest {
         )
         // Four total flow instances: initial + 3 recovery.
         verify(exactly = 4) { repository.connectSSE(any()) }
+    }
+
+    // ── L4 §3 (M1A): runtime transport-truth integration ──────────────────
+
+    /** Records each unexpected-drop routing for assertion. */
+    private data class DropCall(val attempt: TransportAttemptToken, val reason: TransportDropReason)
+
+    private fun runtimeState(): SseTransportState = runtimeStore.state.value
+
+    // (M1A-2 / first-frame Live) accepted connect begins a runtime attempt;
+    // the first valid frame marks Live; readiness completes Ready.
+    @Test
+    fun `M1A - accepted connect begins Connecting and first frame marks Live`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        stubFeed(feed)
+
+        // Default runtime state is Stopped.
+        assertEquals(
+            "runtime starts Stopped",
+            SseTransportState.Stopped,
+            runtimeState(),
+        )
+
+        launchConnect(identity)
+        runPending()
+
+        // beginAttempt ran on the accepted connect → Connecting.
+        assertTrue(
+            "accepted connect transitions runtime to Connecting",
+            runtimeState() is SseTransportState.Connecting,
+        )
+        val connectingAttempt =
+            (runtimeState() as SseTransportState.Connecting).attempt
+        assertEquals(
+            "Connecting attempt carries the connect identity",
+            identity,
+            connectingAttempt.identity,
+        )
+
+        // First valid frame → markLive → Live (recoveryTicket null — no prior drop).
+        feed.tryEmit(Result.success(sseEvent("first")))
+        runPending()
+
+        val live = runtimeState()
+        assertTrue("first frame marks runtime Live", live is SseTransportState.Live)
+        assertEquals(
+            "Live attempt is the same token (no re-allocation)",
+            connectingAttempt.attemptId,
+            (live as SseTransportState.Live).attempt.attemptId,
+        )
+    }
+
+    // (M1A-2) beginAttempt rejection does NOT create an active collector: a
+    // foreign identity owning a non-Stopped runtime blocks the connect.
+    @Test
+    fun `M1A - beginAttempt rejection does not start a collector`() = runTest {
+        // Pre-populate the runtime with a FOREIGN identity in Connecting (as
+        // another owner/process would). Identity A is bound first, then B
+        // becomes current — A is now stale but still owns the runtime.
+        val identityA = identityStore.bind("fp-a", "/a", "ep")
+        val identityB = identityStore.bind("fp-b", "/b", "ep") // B is now current
+        // Foreign attempt occupying the runtime (never released).
+        runtimeStore.beginAttempt(identityA)
+        assertEquals("foreign identity owns Connecting", identityA,
+            (runtimeState() as SseTransportState.Connecting).attempt.identity)
+
+        stubFeed(MutableSharedFlow(extraBufferCapacity = 8))
+
+        var result: SourceActivation? = null
+        scope.launch { result = owner.connect(identityB) }
+        runPending()
+
+        // beginAttempt(identityB) is rejected (Connecting owned by A) → no
+        // collector launched, connect returns a rejection.
+        verify(exactly = 0) { repository.connectSSE(any()) }
+        assertEquals(
+            "rejected connect returns TransportTimeout (no collector started)",
+            SourceActivation.Rejected.TransportTimeout,
+            result,
+        )
+        // The runtime is untouched (still the foreign Connecting — no revive).
+        assertEquals(
+            "runtime unchanged after rejected beginAttempt",
+            identityA,
+            (runtimeState() as SseTransportState.Connecting).attempt.identity,
+        )
+    }
+
+    // (M1A-C1) background reconnect refusal after a Live transport routes the
+    // drop through the handler EXACTLY ONCE with BACKGROUND_RECONNECT_REFUSED.
+    @Test
+    fun `M1A-C1 - background reconnect refusal routes exactly one BACKGROUND_RECONNECT_REFUSED drop`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+        val gate = MutableStateFlow(true)
+        val outageGate = CompletableDeferred<Unit>()
+        every { repository.connectSSE(any()) } returns
+            flow<Result<SSEEvent>> {
+                emit(Result.success(sseEvent("first"))) // → Live
+                outageGate.await()
+                throw IOException("post-ready outage")
+            }
+        // Reconnect gate driven by the test (flipped to false to simulate bg).
+        val gatedOwner = ServiceSseConnectionOwner(
+            scope = scope,
+            repository = repository,
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            sseEventStream = stream,
+            sharedStateStore = store,
+            sharedEffectBus = effects,
+            recoveryPolicy = policy,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
+            reconnectAllowed = { gate.value },
+            jitterSource = { 0.0f },
+            onTerminalExhaustion = { disconnectRequests++ },
+        )
+
+        scope.launch { gatedOwner.connect(identity) }
+        runPending() // first frame → Live
+        assertTrue("Live before refusal", runtimeState() is SseTransportState.Live)
+        val liveAttemptId =
+            (runtimeState() as SseTransportState.Live).attempt.attemptId
+
+        // Flip the gate closed (background) THEN release the outage so the
+        // collector breaks into the retry section and sees the closed gate.
+        gate.value = false
+        outageGate.complete(Unit)
+        runPending()
+
+        assertEquals(
+            "exactly one drop routed through the handler",
+            1,
+            dropCalls.size,
+        )
+        assertEquals(
+            "drop reason is BACKGROUND_RECONNECT_REFUSED",
+            TransportDropReason.BACKGROUND_RECONNECT_REFUSED,
+            dropCalls.single().reason,
+        )
+        assertEquals(
+            "the dropped attempt is the (pre-refusal) Live attempt",
+            liveAttemptId,
+            dropCalls.single().attempt.attemptId,
+        )
+        assertTrue(
+            "runtime ended Dropped after the handler routed the drop",
+            runtimeState() is SseTransportState.Dropped,
+        )
+    }
+
+    // (M1A-C2) foreground internal retry does NOT publish Dropped: a post-Live
+    // outage that the gate still ALLOWS retries through WITHOUT a drop.
+    @Test
+    fun `M1A-C2 - foreground internal retry does not publish Dropped`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+        val recoveredFeed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        every { repository.connectSSE(any()) } returnsMany listOf(
+            flow<Result<SSEEvent>> {
+                emit(Result.success(sseEvent("first"))) // → Live
+                throw IOException("post-ready outage")
+            },
+            recoveredFeed.asSharedFlow(),
+        )
+
+        launchConnect(identity)
+        runPending() // first frame → Live; flow throws → markRetrying
+
+        assertTrue(
+            "runtime Retrying during the inter-retry gap (no Dropped)",
+            runtimeState() is SseTransportState.Retrying,
+        )
+        assertEquals(
+            "NO drop routed while the gate is open (foreground retry)",
+            0,
+            dropCalls.size,
+        )
+
+        // Advance to retry #1 — the second flow activates.
+        advanceOwnerTimeBy(policy.delayForAttempt(1))
+        runPending()
+
+        // Recovered frame → markLive again (Retrying → Live), no drop.
+        recoveredFeed.tryEmit(Result.success(sseEvent("recovered")))
+        runPending()
+
+        assertTrue("recovered frame re-marks Live", runtimeState() is SseTransportState.Live)
+        assertEquals(
+            "still no drop after a foreground retry + recovery",
+            0,
+            dropCalls.size,
+        )
+    }
+
+    // (M1A-C3) exception AND unexpected normal completion share ONE drop path
+    // (RETRY_EXHAUSTED) — no double-publish.
+    @Test
+    fun `M1A-C3 - exception exhaustion routes exactly one RETRY_EXHAUSTED drop`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+        every { repository.connectSSE(any()) } returnsMany listOf(
+            flow<Result<SSEEvent>> {
+                emit(Result.success(sseEvent("first"))) // → Live
+                throw IOException("post-ready outage")
+            },
+            flow<Result<SSEEvent>> { throw IOException("recovery-1 fail") },
+            flow<Result<SSEEvent>> { throw IOException("recovery-2 fail") },
+            flow<Result<SSEEvent>> { throw IOException("recovery-3 fail") },
+        )
+
+        launchConnect(identity)
+        runPending()
+
+        advanceOwnerTimeBy(policy.delayForAttempt(1))
+        runPending()
+        advanceOwnerTimeBy(policy.delayForAttempt(2))
+        runPending()
+        advanceOwnerTimeBy(policy.delayForAttempt(3))
+        runPending()
+
+        assertEquals(
+            "exactly one drop routed after exhaustion",
+            1,
+            dropCalls.size,
+        )
+        assertEquals(
+            "drop reason is RETRY_EXHAUSTED",
+            TransportDropReason.RETRY_EXHAUSTED,
+            dropCalls.single().reason,
+        )
+        assertTrue(
+            "runtime ended Dropped after exhaustion",
+            runtimeState() is SseTransportState.Dropped,
+        )
+    }
+
+    @Test
+    fun `stale exhaustion rejected by fenced handler cannot tear down newer generation`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+        every { repository.connectSSE(any()) } returnsMany listOf(
+            flow<Result<SSEEvent>> {
+                emit(Result.success(sseEvent("first")))
+                throw IOException("post-ready outage")
+            },
+            flow<Result<SSEEvent>> { throw IOException("retry-1") },
+            flow<Result<SSEEvent>> { throw IOException("retry-2") },
+            flow<Result<SSEEvent>> { throw IOException("retry-3") },
+        )
+
+        var newerOwnerIntact = false
+        var newerAttempt: TransportAttemptToken? = null
+        var terminalCallbacks = 0
+        val interleavingHandler = object : FencedUnexpectedTransportDropHandler {
+            override fun onUnexpectedDrop(
+                attempt: TransportAttemptToken,
+                reason: TransportDropReason,
+            ) = Unit
+
+            override fun onUnexpectedDropIfCurrent(
+                attempt: TransportAttemptToken,
+                reason: TransportDropReason,
+            ): Boolean {
+                // The owner's outer canonical check has already passed. The
+                // superseding generation wins immediately before the fenced
+                // handler's canonical check, which must reject this drop.
+                assertTrue("old attempt is still canonical at handler entry", runtimeStore.currentAttempt(identity)?.attemptId == attempt.attemptId)
+                assertTrue("supersede old runtime attempt", runtimeStore.markStopped(attempt))
+                newerAttempt = runtimeStore.beginAttempt(identity)
+                assertNotNull("new generation begins", newerAttempt)
+                assertTrue("new generation becomes Live", runtimeStore.markLive(newerAttempt!!))
+                newerOwnerIntact = true
+                return false
+            }
+        }
+
+        var activation: SourceActivation? = null
+        val fencedOwner = ServiceSseConnectionOwner(
+            scope = scope,
+            repository = repository,
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            sseEventStream = stream,
+            sharedStateStore = store,
+            sharedEffectBus = effects,
+            recoveryPolicy = policy,
+            runtimeStore = runtimeStore,
+            dropHandler = interleavingHandler,
+            jitterSource = { 0.0f },
+            onTerminalExhaustion = { terminalCallbacks++ },
+        )
+
+        scope.launch { activation = fencedOwner.connect(identity) }
+        runPending()
+        assertEquals("first frame completes readiness", SourceActivation.Ready, activation)
+
+        advanceOwnerTimeBy(policy.delayForAttempt(1))
+        advanceOwnerTimeBy(policy.delayForAttempt(2))
+        advanceOwnerTimeBy(policy.delayForAttempt(3))
+
+        assertTrue("newer owner remains intact", newerOwnerIntact)
+        assertEquals("stale exhaustion does not invoke terminal callback", 0, terminalCallbacks)
+        assertEquals("readiness is not rewritten as Exhausted", SourceActivation.Ready, activation)
+        assertTrue("newer runtime remains Live", runtimeState() is SseTransportState.Live)
+        assertEquals(
+            "newer runtime attempt remains canonical",
+            newerAttempt,
+            (runtimeState() as SseTransportState.Live).attempt,
+        )
+    }
+
+    @Test
+    fun `collection failure terminalized after validation has no stale error or gap`() = runTest {
+        val identity = bindIdentity("/proj")
+        every { repository.connectSSE(any()) } returns flow {
+            emit(Result.success(sseEvent("first")))
+            throw IOException("stale failure")
+        }
+
+        var terminalized = false
+        val fencedOwner = ServiceSseConnectionOwner(
+            scope = scope,
+            repository = repository,
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            sseEventStream = stream,
+            sharedStateStore = store,
+            sharedEffectBus = effects,
+            recoveryPolicy = policy,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
+            jitterSource = { 0.0f },
+            onTerminalExhaustion = { disconnectRequests++ },
+            beforeMarkRetrying = {
+                if (!terminalized) {
+                    terminalized = true
+                    runtimeStore.markStopped(runtimeStore.currentAttempt(identity)!!)
+                }
+            },
+        )
+
+        scope.launch { fencedOwner.connect(identity) }
+        runPending()
+
+        assertEquals("terminalization happened in the callback interleaving", true, terminalized)
+        assertEquals("no stale UI error", 0, recordedEvents.filterIsInstance<UiEvent.Error>().size)
+        assertEquals("no stale gap", 0, collectedEffects.filterIsInstance<ControllerEffect.CancelSse>().size)
+        assertEquals("no stale drop", 0, dropCalls.size)
+        assertEquals("terminal state is preserved", SseTransportState.Stopped, runtimeState())
+    }
+
+    // (M1A-C3 companion) unexpected NORMAL completion (no thrown exception)
+    // shares the same single drop path — an infinite SSE completing normally
+    // is a failure, routed exactly once.
+    @Test
+    fun `M1A-C3 - unexpected normal completion shares the one drop path`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+        // Flow 1: emit a frame (Live) then COMPLETE NORMALLY (no throw).
+        // Flows 2-4: complete normally too → exhaustion.
+        every { repository.connectSSE(any()) } returnsMany listOf(
+            flow<Result<SSEEvent>> {
+                emit(Result.success(sseEvent("first")))
+                // normal completion — treated as a collection failure
+            },
+            flow<Result<SSEEvent>> { /* completes normally */ },
+            flow<Result<SSEEvent>> { /* completes normally */ },
+            flow<Result<SSEEvent>> { /* completes normally */ },
+        )
+
+        launchConnect(identity)
+        runPending()
+
+        advanceOwnerTimeBy(policy.delayForAttempt(1))
+        runPending()
+        advanceOwnerTimeBy(policy.delayForAttempt(2))
+        runPending()
+        advanceOwnerTimeBy(policy.delayForAttempt(3))
+        runPending()
+
+        assertEquals(
+            "normal-completion exhaustion routes exactly one drop",
+            1,
+            dropCalls.size,
+        )
+        assertEquals(
+            "drop reason is RETRY_EXHAUSTED (shared with exception path)",
+            TransportDropReason.RETRY_EXHAUSTED,
+            dropCalls.single().reason,
+        )
+    }
+
+    // (M1A-C4 / M1A-7) a STALE transport generation cannot mark Live: a
+    // superseding connect terminalizes the prior attempt (Stopped) and a late
+    // prior-generation frame is rejected (no markLive resurrection).
+    @Test
+    fun `M1A-C4 - stale generation cannot mark Live and stale token is rejected`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+
+        // Gen 1: connect + frame → Live(T1).
+        val feed1 = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        every { repository.connectSSE(any()) } returns feed1.asSharedFlow()
+        launchConnect(identity)
+        runPending()
+        feed1.tryEmit(Result.success(sseEvent("first")))
+        runPending()
+        val t1 = (runtimeState() as SseTransportState.Live).attempt
+        assertTrue("gen 1 Live", t1.identity == identity)
+
+        // Gen 2: a fresh connect supersedes gen 1. setupConnectLocked markStops
+        // T1 (intentional supersession) → Stopped → beginAttempt(T2) → Connecting.
+        val feed2 = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        every { repository.connectSSE(any()) } returns feed2.asSharedFlow()
+        launchConnect(identity)
+        runPending()
+
+        val afterSupersede = runtimeState()
+        assertTrue(
+            "gen 2 supersession left runtime Connecting (gen 2 attempt)",
+            afterSupersede is SseTransportState.Connecting,
+        )
+        val t2 = (afterSupersede as SseTransportState.Connecting).attempt
+        assertNotEquals(
+            "gen 2 allocated a fresh attempt token (T2 != T1)",
+            t1.attemptId,
+            t2.attemptId,
+        )
+
+        // A LATE gen-1 frame: the stale collector's markLive(T1) is rejected by
+        // the per-generation guard (isCurrentTransport) → runtime stays
+        // Connecting(T2), never resurrects Live(T1).
+        feed1.tryEmit(Result.success(sseEvent("stale-late")))
+        runPending()
+        assertTrue(
+            "stale gen-1 frame did NOT resurrect Live (generation guard)",
+            runtimeState() is SseTransportState.Connecting,
+        )
+
+        // The runtime itself also rejects a stale token directly (belt +
+        // suspenders): markLive(T1) on the Connecting(T2) state returns false.
+        assertFalse(
+            "runtime rejects stale token markLive (canonical validation)",
+            runtimeStore.markLive(t1),
+        )
+        // And markStopped(T1) is rejected (T2 is canonical).
+        assertFalse(
+            "runtime rejects stale token markStopped",
+            runtimeStore.markStopped(t1),
+        )
+    }
+
+    // (M1A-6) intentional disconnect / cancelForShutdown mark Stopped, never
+    // route a Dropped drop.
+    @Test
+    fun `M1A-6 - intentional disconnect marks Stopped and never drops`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        stubFeed(feed)
+
+        launchConnect(identity)
+        runPending()
+        feed.tryEmit(Result.success(sseEvent("first")))
+        runPending()
+        assertTrue("Live before disconnect", runtimeState() is SseTransportState.Live)
+
+        scope.launch { owner.disconnect(markGap = true) }
+        runPending()
+
+        assertEquals(
+            "intentional disconnect transitions runtime to Stopped",
+            SseTransportState.Stopped,
+            runtimeState(),
+        )
+        assertEquals(
+            "intentional disconnect NEVER routes a drop",
+            0,
+            dropCalls.size,
+        )
+    }
+
+    @Test
+    fun `M1A-6 - cancelForShutdown marks Stopped and never drops`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        stubFeed(feed)
+
+        launchConnect(identity)
+        runPending()
+        feed.tryEmit(Result.success(sseEvent("first")))
+        runPending()
+        assertTrue("Live before shutdown", runtimeState() is SseTransportState.Live)
+
+        owner.cancelForShutdown()
+
+        assertEquals(
+            "cancelForShutdown transitions runtime to Stopped",
+            SseTransportState.Stopped,
+            runtimeState(),
+        )
+        assertEquals(
+            "cancelForShutdown NEVER routes a drop",
+            0,
+            dropCalls.size,
+        )
+    }
+
+    // ── Wave-1 REWORK (M1A) — REST/SSE separation + recovery ticket ───────
+
+    /**
+     * Captures the REST/server connection phase BEFORE an SSE-only failure, so
+     * a test can assert it is UNCHANGED (I8: SSE-only loss cannot alone write
+     * server-unreachable REST state).
+     */
+    private fun restPhaseBefore(): ConnectionPhase = store.connectionFlow.value.connectionPhase
+
+    // (R-I8-a) SSE-only background reconnect refusal MUST NOT write REST/server
+    // Disconnected state. Only the SSE transport projection (sseConnected) +
+    // gap/drop demand may update. The REST phase stays at its pre-failure value.
+    @Test
+    fun `R-I8 - background reconnect refusal does NOT write REST Disconnected`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+        val gate = MutableStateFlow(true)
+        val outageGate = CompletableDeferred<Unit>()
+        every { repository.connectSSE(any()) } returns
+            flow<Result<SSEEvent>> {
+                emit(Result.success(sseEvent("first"))) // → Live
+                outageGate.await()
+                throw IOException("post-ready outage")
+            }
+        val gatedOwner = ServiceSseConnectionOwner(
+            scope = scope,
+            repository = repository,
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            sseEventStream = stream,
+            sharedStateStore = store,
+            sharedEffectBus = effects,
+            recoveryPolicy = policy,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
+            reconnectAllowed = { gate.value },
+            jitterSource = { 0.0f },
+            onTerminalExhaustion = { disconnectRequests++ },
+        )
+
+        scope.launch { gatedOwner.connect(identity) }
+        runPending() // first frame → Live
+        assertTrue("Live before refusal", runtimeState() is SseTransportState.Live)
+
+        // Pre-seed a NON-Disconnected REST phase (simulating the REST axis
+        // being connected — I8: SSE and REST are separate axes). The SSE-only
+        // refusal MUST NOT overwrite it.
+        store.mutateConnection {
+            it.copy(isConnected = true, isConnecting = false, connectionPhase = ConnectionPhase.Connected)
+        }
+        val restPhaseBefore = restPhaseBefore()
+        assertEquals("REST axis pre-seeded Connected", ConnectionPhase.Connected, restPhaseBefore)
+
+        // Flip the gate closed (background) then release the outage → refusal.
+        gate.value = false
+        outageGate.complete(Unit)
+        runPending()
+
+        // The drop was routed (M1A-C1) + runtime ended Dropped.
+        assertEquals("exactly one drop routed", 1, dropCalls.size)
+        assertEquals(
+            TransportDropReason.BACKGROUND_RECONNECT_REFUSED,
+            dropCalls.single().reason,
+        )
+        assertTrue("runtime ended Dropped", runtimeState() is SseTransportState.Dropped)
+        // THE I8 ASSERTION: the REST/server phase is UNCHANGED — the SSE-only
+        // refusal wrote ONLY the SSE transport projection (sseConnected=false),
+        // NOT REST Disconnected.
+        assertEquals(
+            "SSE-only background refusal MUST NOT write REST Disconnected (I8)",
+            restPhaseBefore,
+            store.connectionFlow.value.connectionPhase,
+        )
+        assertTrue(
+            "REST axis stays Connected (independent of SSE transport loss)",
+            store.connectionFlow.value.isConnected,
+        )
+        assertFalse(
+            "SSE transport projection DID flip false (sseConnected)",
+            store.sseConnectedFlow.value,
+        )
+    }
+
+    // (R-I8-b) SSE-only transport timeout (no frame) MUST NOT write REST/server
+    // Disconnected state. The transport never proved Live; the rollback writes
+    // only the SSE projection + runtime; REST is untouched.
+    @Test
+    fun `R-I8 - transport timeout does NOT write REST Disconnected`() = runTest {
+        val identity = bindIdentity("/proj")
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        stubFeed(feed)
+        val timeoutOwner = ServiceSseConnectionOwner(
+            scope = scope,
+            repository = repository,
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            sseEventStream = stream,
+            sharedStateStore = store,
+            sharedEffectBus = effects,
+            recoveryPolicy = policy,
+            transportTimeoutMs = 5_000L,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
+            jitterSource = { 0.0f },
+            onTerminalExhaustion = { disconnectRequests++ },
+        )
+        // Pre-seed the REST axis Connected (separate from SSE).
+        store.mutateConnection {
+            it.copy(isConnected = true, isConnecting = false, connectionPhase = ConnectionPhase.Connected)
+        }
+        val restPhaseBefore = restPhaseBefore()
+
+        var result: SourceActivation? = null
+        scope.launch { result = timeoutOwner.connect(identity) }
+        scope.testScheduler.runCurrent()
+
+        scope.testScheduler.advanceTimeBy(5_000L)
+        scope.testScheduler.runCurrent()
+
+        assertEquals(
+            "transport timeout completed readiness with TransportTimeout",
+            SourceActivation.Rejected.TransportTimeout,
+            result,
+        )
+        // THE I8 ASSERTION: REST phase unchanged.
+        assertEquals(
+            "transport timeout MUST NOT write REST Disconnected (I8)",
+            restPhaseBefore,
+            store.connectionFlow.value.connectionPhase,
+        )
+        assertTrue("REST axis stays Connected", store.connectionFlow.value.isConnected)
+        // No drop routed (transport never proved Live — rollback, not a drop).
+        assertEquals("no drop routed for a never-Live timeout", 0, dropCalls.size)
+    }
+
+    // (R-I4) Recovery ticket preservation at the OWNER level: a transport
+    // that was Dropped(ticket) → a recovery connect (beginAttempt captures the
+    // ticket) → transport timeout (refusal) → runtime ends Dropped(SAME ticket).
+    // The original drop demand survives the failed recovery attempt (I4).
+    @Test
+    fun `R-I4 - recovery attempt timeout preserves the original Dropped ticket`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+
+        // Step 1: establish a Dropped(ticket=K) for this identity via a Live
+        // transport that then exhausts its retry budget (RETRY_EXHAUSTED drop).
+        val outageGate = CompletableDeferred<Unit>()
+        every { repository.connectSSE(any()) } returnsMany listOf(
+            flow<Result<SSEEvent>> {
+                emit(Result.success(sseEvent("first"))) // → Live
+                outageGate.await()
+                throw IOException("post-ready outage")
+            },
+            flow<Result<SSEEvent>> { throw IOException("recovery-1 fail") },
+            flow<Result<SSEEvent>> { throw IOException("recovery-2 fail") },
+            flow<Result<SSEEvent>> { throw IOException("recovery-3 fail") },
+        )
+        launchConnect(identity)
+        runPending()
+        outageGate.complete(Unit)
+        runPending()
+        advanceOwnerTimeBy(policy.delayForAttempt(1))
+        runPending()
+        advanceOwnerTimeBy(policy.delayForAttempt(2))
+        runPending()
+        advanceOwnerTimeBy(policy.delayForAttempt(3))
+        runPending()
+
+        // Now runtime is Dropped(ticket=K). Capture the original ticket.
+        val originalDrop = runtimeStore.currentDropTicket(identity)
+            ?: error("expected a Dropped ticket after exhaustion")
+        val originalDropId = originalDrop.dropId
+        assertEquals(
+            "drop reason is RETRY_EXHAUSTED",
+            TransportDropReason.RETRY_EXHAUSTED,
+            originalDrop.reason,
+        )
+
+        // Step 2: a RECOVERY connect begins (the supervisor would issue this).
+        // The owner's beginAttempt captures the SAME ticket as recoveryTicket.
+        // Use a quiet feed + a tight timeout so the recovery attempt TIMES OUT
+        // without proving Live (a refusal-equivalent).
+        val quietFeed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        every { repository.connectSSE(any()) } returns quietFeed.asSharedFlow()
+        val recoveryOwner = ServiceSseConnectionOwner(
+            scope = scope,
+            repository = repository,
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            sseEventStream = stream,
+            sharedStateStore = store,
+            sharedEffectBus = effects,
+            recoveryPolicy = policy,
+            transportTimeoutMs = 5_000L,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
+            jitterSource = { 0.0f },
+            onTerminalExhaustion = { disconnectRequests++ },
+        )
+        var recoveryResult: SourceActivation? = null
+        scope.launch { recoveryResult = recoveryOwner.connect(identity) }
+        scope.testScheduler.runCurrent()
+
+        // The recovery attempt is Connecting with the captured ticket.
+        val connectingState = runtimeState()
+        assertTrue("recovery attempt is Connecting", connectingState is SseTransportState.Connecting)
+        val recoveryAttempt = (connectingState as SseTransportState.Connecting).attempt
+        assertEquals(
+            "recovery attempt captured the SAME drop ticket (I4)",
+            originalDropId,
+            recoveryAttempt.recoveryTicket?.dropId,
+        )
+
+        // Step 3: timeout the recovery attempt (refusal).
+        scope.testScheduler.advanceTimeBy(5_000L)
+        scope.testScheduler.runCurrent()
+
+        assertEquals(
+            "recovery attempt timed out (TransportTimeout)",
+            SourceActivation.Rejected.TransportTimeout,
+            recoveryResult,
+        )
+
+        // THE I4 ASSERTION: the runtime ended Dropped with the SAME ticket —
+        // demand preserved, no new drop ID, no cleared demand.
+        val stateAfter = runtimeState()
+        assertTrue(
+            "runtime ended Dropped after recovery timeout (ticket preserved)",
+            stateAfter is SseTransportState.Dropped,
+        )
+        val restoredTicket = (stateAfter as SseTransportState.Dropped).ticket
+        assertEquals(
+            "SAME dropId restored (no new demand generated)",
+            originalDropId,
+            restoredTicket.dropId,
+        )
+        assertEquals(
+            "SAME identity restored",
+            originalDrop.identity,
+            restoredTicket.identity,
+        )
+        assertEquals(
+            "SAME reason restored",
+            originalDrop.reason,
+            restoredTicket.reason,
+        )
+    }
+
+    // (R-stale-suppress) A STALE transport generation cannot publish frame side
+    // effects: a superseding connect terminalizes the prior attempt, then a
+    // LATE prior-generation frame's markLive is rejected → NO event reaches the
+    // stream, NO Ready completes for the stale generation, and the stale token
+    // does not resurrect Live (fix #4: every runtime mutation result is
+    // authoritative).
+    @Test
+    fun `R-stale - stale-generation frame is fully suppressed (no event, no Ready, no Live resurrection)`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+
+        // Gen 1: connect + frame → Live(T1).
+        val feed1 = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        every { repository.connectSSE(any()) } returns feed1.asSharedFlow()
+        launchConnect(identity)
+        runPending()
+        feed1.tryEmit(Result.success(sseEvent("first-gen1")))
+        runPending()
+        val t1 = (runtimeState() as SseTransportState.Live).attempt
+        val framesBeforeSupersede = collectedFrames().size
+
+        // Gen 2: a fresh connect supersedes gen 1 (rollbackAttempt(T1) →
+        // Stopped, then beginAttempt(T2) → Connecting).
+        val feed2 = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        every { repository.connectSSE(any()) } returns feed2.asSharedFlow()
+        launchConnect(identity)
+        runPending()
+        val t2 = (runtimeState() as SseTransportState.Connecting).attempt
+        assertNotEquals("gen 2 fresh attempt", t1.attemptId, t2.attemptId)
+
+        // A LATE gen-1 frame arrives on the stale collector. markLive(T1) is
+        // rejected (T2 is canonical) → ALL frame side effects suppressed.
+        feed1.tryEmit(Result.success(sseEvent("stale-late-frame")))
+        runPending()
+
+        // No new frame reached the stream (the stale frame was suppressed).
+        assertEquals(
+            "stale-generation frame did NOT reach the stream (suppressed)",
+            framesBeforeSupersede,
+            collectedFrames().size,
+        )
+        assertTrue(
+            "stale frame did NOT resurrect Live (runtime-token guard authoritative)",
+            runtimeState() is SseTransportState.Connecting,
+        )
+        // The runtime itself rejects the stale token directly.
+        assertFalse("runtime rejects stale markLive(T1)", runtimeStore.markLive(t1))
+    }
+
+    // ── Wave-1 REWORK (rev-ogpt blocker) — canonical-token gating on the
+    //    collection-failure + exhaustion callback paths ────────────────────
+    //
+    // These tests invoke the REAL onCollectionException / exhaustion callback
+    // path via a throwing flow (NOT a cancelled SharedFlow), with the runtime
+    // token terminalized WITHIN THE SAME generation (direct runtime mutation
+    // that does NOT bump the owner's transportGenerationCounter, so the
+    // generation guard does NOT catch it — only the canonical-token validation
+    // can). A stale callback MUST produce no side effects and no duplicate drop.
+
+    // (R-stale-cb-A) A collection failure that fires AFTER the runtime token
+    // was terminalized (same generation) MUST suppress ALL error/gap/drop side
+    // effects — the canonical-token validation distinguishes this stale callback
+    // from a legitimate current Connecting/Live/Retrying failure.
+    @Test
+    fun `R-stale-cb - same-gen terminalized collection failure suppresses error gap and drop`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+        val throwGate = CompletableDeferred<Unit>()
+        every { repository.connectSSE(any()) } returnsMany listOf(
+            // Flow 1: suspend on the gate so the test can terminalize the token
+            // BEFORE the failure fires, then THROW — invoking the REAL
+            // onCollectionException callback path (not a cancelled SharedFlow).
+            flow<Result<SSEEvent>> {
+                throwGate.await()
+                throw IOException("post-terminalization failure")
+            },
+            // Flow 2: pending forever — keeps the collector from looping into a
+            // second failure so the test asserts EXACTLY flow 1's stale path.
+            flow<Result<SSEEvent>> { kotlinx.coroutines.delay(Long.MAX_VALUE) },
+        )
+
+        launchConnect(identity)
+        runPending() // collector subscribed, suspended on throwGate; runtime Connecting
+
+        // Terminalize the canonical attempt WITHIN THE SAME generation (direct
+        // runtime mutation — does NOT bump the owner's transportGenerationCounter,
+        // so the generation guard does NOT catch it; only the canonical-token
+        // validation can).
+        val attempt = (runtimeState() as SseTransportState.Connecting).attempt
+        assertTrue("terminalize the canonical attempt (same generation)", runtimeStore.markStopped(attempt))
+        assertEquals("runtime is Stopped (token terminalized)", SseTransportState.Stopped, runtimeState())
+
+        // Release the gate → flow 1 THROWS → onCollectionException runs with the
+        // now-stale token. The canonical check MUST suppress ALL side effects.
+        throwGate.complete(Unit)
+        runPending()
+
+        // THE ASSERTIONS: no UI error, no gap, no drop, no terminal callback.
+        assertTrue(
+            "stale-token collection failure emitted NO SSE error",
+            recordedEvents.filterIsInstance<UiEvent.Error>().none { it.resId == R.string.error_sse_failed },
+        )
+        assertEquals(
+            "stale-token collection failure emitted NO gap (CancelSse)",
+            0,
+            collectedEffects.filterIsInstance<ControllerEffect.CancelSse>().size,
+        )
+        assertEquals("stale-token collection failure routed NO drop", 0, dropCalls.size)
+        assertEquals("stale-token collection failure invoked NO terminal callback", 0, disconnectRequests)
+        // The runtime is STILL Stopped (the test's terminalization) — the stale
+        // callback did NOT resurrect or transition it.
+        assertEquals("runtime unchanged (still Stopped)", SseTransportState.Stopped, runtimeState())
+    }
+
+    // (R-stale-cb-B) A retry-budget EXHAUSTION that fires AFTER the runtime
+    // token was terminalized (same generation) MUST suppress the drop + the
+    // terminal callback — no duplicate drop, no side effects. Flow 1's
+    // LEGITIMATE failure (canonical Connecting) still emits its gap, proving
+    // the gating distinguishes legitimate from stale.
+    @Test
+    fun `R-stale-cb - same-gen terminalized exhaustion suppresses drop and terminal callback`() = runTest {
+        val identity = bindIdentity("/proj")
+        aggregator.nextState = GlobalBusyState.Busy
+        // A 1-attempt policy: flow 1 fails → retry → flow 2 fails → exhaustion.
+        // (Keeps the exhaustion trigger to a single retry so the terminalization
+        // point is unambiguous and the test stays deterministic.)
+        val stalePolicy = object : SseRecoveryPolicy() {
+            override val attempts: Int = 1
+            override fun baseDelayMs(attempt: Int): Long = 1L
+        }
+        val staleOwner = ServiceSseConnectionOwner(
+            scope = scope,
+            repository = repository,
+            identityStore = identityStore,
+            bootstrapCoordinator = bootstrapCoordinator,
+            sseEventStream = stream,
+            sharedStateStore = store,
+            sharedEffectBus = effects,
+            recoveryPolicy = stalePolicy,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
+            jitterSource = { 0.0f },
+            onTerminalExhaustion = { disconnectRequests++ },
+        )
+        every { repository.connectSSE(any()) } returnsMany listOf(
+            flow<Result<SSEEvent>> { throw IOException("flow-1 fail") },
+            flow<Result<SSEEvent>> { throw IOException("flow-2 fail (exhaustion)") },
+        )
+
+        scope.launch { staleOwner.connect(identity) }
+        runPending() // flow 1 throws → onCollectionException (canonical Connecting) → gap/UI
+
+        // Flow 1's LEGITIMATE failure (canonical) emitted exactly one gap — the
+        // canonical-token validation passed because the attempt was still
+        // canonical. retriesUsed is now 1; the next failure hits exhaustion.
+        assertEquals(
+            "legitimate flow-1 failure emitted exactly one gap (canonical passed)",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.CancelSse>().size,
+        )
+        assertEquals(
+            "legitimate flow-1 failure emitted exactly one SSE error",
+            1,
+            recordedEvents.filterIsInstance<UiEvent.Error>().count { it.resId == R.string.error_sse_failed },
+        )
+        val attempt = (runtimeState() as SseTransportState.Connecting).attempt
+
+        // Terminalize the canonical attempt WITHIN THE SAME generation BEFORE
+        // the exhaustion-triggering failure fires.
+        assertTrue("terminalize before exhaustion (same generation)", runtimeStore.markStopped(attempt))
+        assertEquals(SseTransportState.Stopped, runtimeState())
+
+        // Advance to flow 2 → it throws → onCollectionException (stale,
+        // suppressed) → exhaustion check → canonical-token validation FAILS →
+        // drop + terminal callback suppressed.
+        advanceOwnerTimeBy(stalePolicy.delayMs(1))
+        runPending()
+
+        // THE ASSERTIONS: the exhaustion drop was NOT routed + the terminal
+        // callback was NOT invoked (stale token — no duplicate drop).
+        assertEquals("stale exhaustion routed NO drop", 0, dropCalls.size)
+        assertEquals("stale exhaustion invoked NO terminal callback", 0, disconnectRequests)
+        // No NEW gap was emitted by the stale flow-2 failure (still 1, from the
+        // legitimate flow-1 failure).
+        assertEquals(
+            "stale flow-2 failure emitted NO new gap (still 1 from flow 1)",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.CancelSse>().size,
+        )
+        // The runtime is STILL Stopped — no resurrection, no Dropped.
+        assertEquals("runtime unchanged (still Stopped)", SseTransportState.Stopped, runtimeState())
     }
 
     /**

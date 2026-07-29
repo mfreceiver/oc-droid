@@ -77,8 +77,16 @@ class ServiceSseConnectionOwnerResyncTest {
     private lateinit var effects: SharedEffectBus
     private lateinit var aggregator: FakeAggregator
     private lateinit var policy: TestRecoveryPolicy
+    private lateinit var runtimeStore: SseTransportRuntimeStore
     private lateinit var owner: ServiceSseConnectionOwner
     private val resyncInvocations = AtomicInteger(0)
+    private val recordingHandler = object : UnexpectedTransportDropHandler {
+        override fun onUnexpectedDrop(attempt: TransportAttemptToken, reason: TransportDropReason) {
+            // Mirror the production handler: publish the drop (the owner never
+            // calls publishDropped directly).
+            runtimeStore.publishDropped(attempt, reason)
+        }
+    }
 
     @Before
     fun setUp() {
@@ -97,6 +105,7 @@ class ServiceSseConnectionOwnerResyncTest {
         effects = SharedEffectBus()
         aggregator = FakeAggregator()
         policy = TestRecoveryPolicy()
+        runtimeStore = SseTransportRuntimeStore()
         resyncInvocations.set(0)
         // T10: DebugLog is a process-singleton ring buffer; clear between
         // tests so reason-log assertions only see THIS test's emissions.
@@ -111,6 +120,8 @@ class ServiceSseConnectionOwnerResyncTest {
             sharedStateStore = store,
             sharedEffectBus = effects,
             recoveryPolicy = policy,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
             jitterSource = { 0.0f },
             onTerminalExhaustion = {},
             onResync = {
@@ -343,6 +354,8 @@ class ServiceSseConnectionOwnerResyncTest {
             sharedStateStore = store,
             sharedEffectBus = effects,
             recoveryPolicy = policy,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
             jitterSource = { 0.0f },
             onTerminalExhaustion = {},
             onResync = {
@@ -435,6 +448,8 @@ class ServiceSseConnectionOwnerResyncTest {
             sharedStateStore = store,
             sharedEffectBus = effects,
             recoveryPolicy = policy,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
             jitterSource = { 0.0f },
             onTerminalExhaustion = {},
             onResync = {
@@ -519,6 +534,8 @@ class ServiceSseConnectionOwnerResyncTest {
             sharedStateStore = store,
             sharedEffectBus = effects,
             recoveryPolicy = policy,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
             jitterSource = { 0.0f },
             onTerminalExhaustion = {},
             onResync = { error("cold-start refetch blew up") },
@@ -569,6 +586,8 @@ class ServiceSseConnectionOwnerResyncTest {
             sharedStateStore = store,
             sharedEffectBus = effects,
             recoveryPolicy = policy,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
             onTerminalExhaustion = {},
         )
         // Smoke: default construction does not throw; production wiring

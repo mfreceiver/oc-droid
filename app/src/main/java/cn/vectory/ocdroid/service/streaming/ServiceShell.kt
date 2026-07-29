@@ -149,4 +149,16 @@ interface ServiceShell {
      * `emitGapOnce` path that the terminal-collection-exception branch uses.
      */
     suspend fun disconnectSse()
+
+    /**
+     * L4 §4.4: Enter no-source terminal. Stops SSE, FGS, ALM background
+     * polling, and ProcessStatusPoller, then calls stopSelf.
+     * Policy is already NO_SOURCE_TERMINAL before this is called —
+     * any frame/effect that arrives during execution is fenced by the
+     * policy generation.
+     *
+     * Each stop is individually try/caught — a failure in one does NOT
+     * skip the others.
+     */
+    suspend fun enterNoSourceTerminal()
 }

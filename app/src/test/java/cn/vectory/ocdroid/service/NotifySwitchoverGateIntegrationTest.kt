@@ -9,6 +9,7 @@ import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.lifecycle.Layer
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
+import cn.vectory.ocdroid.service.streaming.SseTransportRuntimeStore
 import cn.vectory.ocdroid.service.notify.NotificationStrings
 import cn.vectory.ocdroid.service.streaming.BootstrapResult
 import cn.vectory.ocdroid.service.streaming.BootstrapRunner
@@ -44,6 +45,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -280,6 +282,19 @@ class NotifySwitchoverGateIntegrationTest {
             val effects = SharedEffectBus()
             val gate = StreamingOwnershipGate()
             val policy = TestRecoveryPolicy()
+            // L4 §3 (M1A): runtimeStore + dropHandler are REQUIRED (no
+            // production defaults). The shared transport-truth store (real
+            // @Singleton semantics in-test) + a recording handler that mirrors
+            // the production [SseShutdownSeal] publish ordering.
+            val runtimeStore = SseTransportRuntimeStore()
+            val recordingHandler = object : cn.vectory.ocdroid.service.streaming.UnexpectedTransportDropHandler {
+                override fun onUnexpectedDrop(
+                    attempt: cn.vectory.ocdroid.service.streaming.TransportAttemptToken,
+                    reason: cn.vectory.ocdroid.service.streaming.TransportDropReason,
+                ) {
+                    runtimeStore.publishDropped(attempt, reason)
+                }
+            }
             // The repository delivers flows in sequence (each connectSSE call
             // pulls the next flow). Flow 1 emits one frame then throws; flows
             // 2..(1+policy.attempts) throw immediately → terminal exhaustion.
@@ -312,6 +327,8 @@ class NotifySwitchoverGateIntegrationTest {
                 sharedStateStore = store,
                 sharedEffectBus = effects,
                 recoveryPolicy = policy,
+                runtimeStore = runtimeStore,
+                dropHandler = recordingHandler,
                 jitterSource = { 0.0f },
                 onTerminalExhaustion = { disconnectRequests++ },
             )
@@ -351,12 +368,22 @@ class NotifySwitchoverGateIntegrationTest {
                 "terminal exhaustion callback fired",
                 disconnectRequests > 0,
             )
-            // The shared connection state settled Disconnected (the owner
-            // writes this on terminal exhaustion).
-            assertEquals(
-                "Disconnected after terminal exhaustion",
+            // L4 §3/§8 (M1A / I8): the SSE owner NO LONGER writes REST/server
+            // Disconnected on SSE-only retry exhaustion — the REST connection is
+            // a SEPARATE axis (a dropped SSE does not prove the server is
+            // unreachable). The shared state stays at its initial phase; only
+            // the SSE transport projection (sseConnected) flips false. The
+            // terminal REST Disconnected verdict belongs to the coordinator/
+            // ownership teardown (simulated via disconnectAndRelease below),
+            // not to the SSE collector.
+            assertNotEquals(
+                "SSE exhaustion did NOT write REST Disconnected (I8 — SSE/REST are separate axes)",
                 ConnectionPhase.Disconnected,
                 store.connectionFlow.value.connectionPhase,
+            )
+            assertFalse(
+                "SSE transport projection is false after exhaustion",
+                store.sseConnectedFlow.value,
             )
 
             // The coordinator's Disconnect teardown would call
@@ -370,9 +397,10 @@ class NotifySwitchoverGateIntegrationTest {
             // The launcher's terminal deferred was already completed with Ready
             // BEFORE the outage (the original bootstrap succeeded). The release
             // path does NOT retroactively change a settled Ready — the launcher
-            // already proceeded to Connected. The post-Ready outage surfaces
-            // via the sharedStateStore Disconnected write above, NOT by
-            // un-Readying the original result.
+            // already proceeded to Connected. The post-Ready SSE outage
+            // surfaces via the SSE transport projection (sseConnected=false
+            // above) + the runtime Dropped state, NOT by un-Readying the
+            // original result or writing REST Disconnected (I8).
             assertEquals(
                 "terminal deferred retains original Ready (launcher already proceeded)",
                 OwnershipStartResult.Ready(bound),
@@ -492,8 +520,8 @@ class NotifySwitchoverGateIntegrationTest {
         // Superseded (no commit, no markReady).
         val aggregator = FakeStatusAggregator()
         val gate = StreamingOwnershipGate()
-        val coordinator = StreamingLifecycleCoordinator(aggregator, backgroundScope, gate)
         val store = ConnectionIdentityStore()
+        val coordinator = StreamingLifecycleCoordinator(aggregator, backgroundScope, SseTransportRuntimeStore(), gate, identityStore = store)
         val ssePause = CompletableDeferred<SourceActivation>()
         val shell = PausingRecordingShell(ssePause)
         val bootstrapRunner = ScriptedBootstrapRunner()
@@ -552,8 +580,8 @@ class NotifySwitchoverGateIntegrationTest {
     ): ControllerFixture {
         val aggregator = FakeStatusAggregator()
         val gate = StreamingOwnershipGate()
-        val coordinator = StreamingLifecycleCoordinator(aggregator, scope, gate)
         val store = ConnectionIdentityStore()
+        val coordinator = StreamingLifecycleCoordinator(aggregator, scope, SseTransportRuntimeStore(), gate, identityStore = store)
         val shell = RecordingShell()
         val snapshotProvider = SessionSnapshotProvider { StatusSnapshot.Empty }
         val bootstrapRunner = ScriptedBootstrapRunner()
@@ -668,6 +696,7 @@ class NotifySwitchoverGateIntegrationTest {
             return nextSseActivation
         }
         override suspend fun disconnectSse() { recorded += "disconnectSse" }
+        override suspend fun enterNoSourceTerminal() { recorded += "enterNoSourceTerminal" }
     }
 
     /** Shell that forwards SSE side-effects to a real [ServiceSseConnectionOwner]. */
@@ -693,6 +722,9 @@ class NotifySwitchoverGateIntegrationTest {
         override suspend fun disconnectSse() {
             recorded += "disconnectSse"
             owner.disconnect(markGap = true)
+        }
+        override suspend fun enterNoSourceTerminal() {
+            recorded += "enterNoSourceTerminal"
         }
     }
 
@@ -727,6 +759,7 @@ class NotifySwitchoverGateIntegrationTest {
             return ssePause.await()
         }
         override suspend fun disconnectSse() { recorded += "disconnectSse" }
+        override suspend fun enterNoSourceTerminal() { recorded += "enterNoSourceTerminal" }
     }
 
     private class TestRecoveryPolicy : SseRecoveryPolicy() {

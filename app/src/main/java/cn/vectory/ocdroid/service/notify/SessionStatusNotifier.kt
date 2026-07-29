@@ -119,6 +119,28 @@ object SessionStatusNotifier {
                 degraded = false,
                 silent = silent,
             )
+            is Layer.BackgroundGrace -> NotificationSpec(
+                title = strings.appName,
+                content = strings.idleMonitoring,
+                priority = NotificationSpec.PRIORITY_LOW,
+                ongoing = true, // FGS grace period; FGS shell kept
+                showChronometer = false,
+                chronometerBaseMs = null,
+                showCloseAction = true, // §16-U1 close Action
+                degraded = false,
+                silent = silent,
+            )
+            is Layer.NoSourceTerminal -> NotificationSpec(
+                title = strings.appName,
+                content = strings.idleMonitoring,
+                priority = NotificationSpec.PRIORITY_LOW,
+                ongoing = false, // no source — no FGS
+                showChronometer = false,
+                chronometerBaseMs = null,
+                showCloseAction = false,
+                degraded = false,
+                silent = silent,
+            )
         }
     }
 

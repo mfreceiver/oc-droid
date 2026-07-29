@@ -962,6 +962,12 @@ class SessionSyncCoordinator(
         skeletonReloadCoordinator?.markLocallyInjected(sessionId, messageId)
     }
 
+    override fun closeSkeletonSession(sessionId: String) {
+        skeletonReloadCoordinator?.let { skel ->
+            scope.launch { skel.onSessionClosed(sessionId) }
+        }
+    }
+
     override fun handleSessionDigest(event: SSEEvent) {
         // lite-v2-dev (plan §4.2/§4.5): digest → skeleton reload 直连。
         // SlimSessionReconciler / SlimDigestDecision / reconcile command 链路退役。
@@ -1018,7 +1024,13 @@ class SessionSyncCoordinator(
         // deleted / archived → 驱逐 session（与 session.updated archived +
         // applySlimStatusFanOutSummary 的 EvictSession 路径一致）
         // §critical-eviction-delivery: 关键驱逐不可丢弃 — 走可靠发送路径。
+        // L3 (blocker #5): real deletion → onSessionClosed (detach state + cancel
+        // jobs). Route switch still only cancels timer / retains dirty (handled
+        // by the route-switch observer in SkeletonReloadCoordinator.init).
         if (deleted == true || (archived != null && archived > 0L)) {
+            skeletonReloadCoordinator?.let { skel ->
+                scope.launch { skel.onSessionClosed(sid) }
+            }
             emitCriticalEffect(scope, ControllerEffect.EvictSession(currentServerGroupFp(), sid))
             return
         }
@@ -1034,8 +1046,26 @@ class SessionSyncCoordinator(
             emitCriticalEffect(scope, ControllerEffect.RefreshSessions)
         }
 
-        // 触发 skeleton reload（权威窗口 diff）
-        skeletonReloadCoordinator?.onDigestChange(sid)
+        // L3 (slimapi-v2 §C2/E): content-bearing digest → extract (updatedAt,
+        // messageID) tuple and funnel through the unified scheduler. A digest
+        // with NEITHER field is status/control-only → NO message reload (the
+        // status projection above already consumed the control plane). Per C2,
+        // tuple equality is NEVER used to suppress; every content-bearing
+        // digest submits (the scheduler is the sole rate control).
+        val contentBearing = props?.containsKey("updatedAt") == true ||
+            props?.containsKey("messageID") == true
+        if (contentBearing) {
+            val tuple = cn.vectory.ocdroid.ui.Tuple(
+                updatedAt = (props?.get("updatedAt") as? JsonPrimitive)?.longOrNull,
+                messageId = (props?.get("messageID") as? JsonPrimitive)?.content
+                    ?.takeIf(String::isNotBlank),
+            )
+            skeletonReloadCoordinator?.submit(
+                sid, tuple, cn.vectory.ocdroid.ui.Priority.DIGEST,
+                if (tuple.isComplete) cn.vectory.ocdroid.ui.ReloadReason.DIGEST
+                else cn.vectory.ocdroid.ui.ReloadReason.DIGEST_MALFORMED,
+            )
+        }
     }
 
     // ── C2 CRITICAL (digest → R1 active sweep + reconnect R1) ──────────────
@@ -1087,10 +1117,15 @@ class SessionSyncCoordinator(
         @Suppress("UNUSED_PARAMETER") token: OpenCodeRepository.SlimCommitToken,
         @Suppress("UNUSED_PARAMETER") expectedRouteInstance: Long,
     ) {
-        // lite-v2-dev (plan §4.2/§4.5): digest → skeleton reload（权威窗口 diff）。
-        // 旧的 SlimFullReconciler.reconcileActiveSession 单条 /full 路径退役。
-        // legacy/test 构造（skeletonReloadCoordinator == null）下 no-op。
-        skeletonReloadCoordinator?.onDigestChange(sessionId)
+        // lite-v2-dev (plan §4.2/§4.5) + L3: digest full-sweep debounce →
+        // unified scheduler. Non-content-bearing reload request (an empty page
+        // here is treated as a probe, not R1 retry). legacy/test construction
+        // (skeletonReloadCoordinator == null) is a no-op.
+        skeletonReloadCoordinator?.submit(
+            sessionId, tuple = null,
+            priority = cn.vectory.ocdroid.ui.Priority.DIGEST,
+            reason = cn.vectory.ocdroid.ui.ReloadReason.REQUEST_RELOAD,
+        )
     }
 
     /**
@@ -1371,7 +1406,10 @@ class SessionSyncCoordinator(
         // T13-C3: missingSids → delete-session effect per sid. 404 and
         // fake-idle (T13-C5) both land here (folded by [foldStatusOutcomes]).
         // §critical-eviction-delivery: 关键驱逐不可丢弃 — 走可靠发送路径。
+        // L3 (blocker #1): confirmed-missing → close skeleton session
+        // (detach state + cancel jobs).
         for (sid in summary.missingSids) {
+            closeSkeletonSession(sid)
             emitCriticalEffect(scope, ControllerEffect.EvictSession(fp, sid))
         }
         // T13-C4: retryableCount > 0 → ask the poller to schedule backoff;

@@ -308,6 +308,11 @@ class SessionStreamingController(
                 pendingEnsurePollerJobs.clear()
                 shell.stopPoller()
             }
+            is LifecycleCommand.EnterNoSourceTerminal -> {
+                // L4 §4.4: composite terminal teardown. Policy is already
+                // NO_SOURCE_TERMINAL; the shell stops everything.
+                shell.enterNoSourceTerminal()
+            }
             is LifecycleCommand.EnsurePoller -> {
                 // D5 (#2): supplemental poller activation. The shell delegates
                 // to ProcessStatusPoller.ensureRunning (idempotent for same

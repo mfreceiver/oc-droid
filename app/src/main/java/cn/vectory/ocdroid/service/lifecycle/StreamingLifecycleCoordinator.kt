@@ -1,9 +1,12 @@
 package cn.vectory.ocdroid.service.lifecycle
 
+import android.os.SystemClock
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.service.StreamingOwnershipGate
 import cn.vectory.ocdroid.service.TeardownReason
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
+import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.EnterNoSourceTerminal
 import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StartForeground
 import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StopForeground
 import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.StopPoller
@@ -15,7 +18,12 @@ import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand.EnsurePoller
 import cn.vectory.ocdroid.service.status.GlobalBusyState
 import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.isKeepAlive
+import cn.vectory.ocdroid.service.streaming.ForegroundTransportStartPreparation
+import cn.vectory.ocdroid.service.streaming.ForegroundTransportStartPreparer
+import cn.vectory.ocdroid.service.streaming.ForegroundTransportStartReason
 import cn.vectory.ocdroid.service.streaming.SourceActivation
+import cn.vectory.ocdroid.service.streaming.SseTransportRuntimeStore
+import cn.vectory.ocdroid.service.streaming.SseTransportState
 import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -109,8 +117,48 @@ import javax.inject.Singleton
 class StreamingLifecycleCoordinator @Inject constructor(
     private val statusAggregator: StatusAggregator,
     @UiApplicationScope private val scope: CoroutineScope,
-    private val ownershipGate: StreamingOwnershipGate? = null,
-) {
+    /**
+     * M2 (L4 §2/§3, I1): the process-level transport-truth authority. The
+     * coordinator consumes runtime state (NOT [SseLifecyclePolicy.consumeRecoveryNeeded])
+     * to decide whether a retained SSE survived [Layer.BackgroundGrace] and to
+     * validate foreground recovery in [prepareForegroundTransportStart].
+     *
+     * Required non-null injected dependency (rev-ogpt rework): NO factory
+     * default. Hilt resolves it via the `@Singleton @Inject` constructor on
+     * [SseTransportRuntimeStore]; every direct (test) construction must supply
+     * a real store — the collateral call sites were reconciled to do so.
+     */
+    private val runtime: SseTransportRuntimeStore,
+    private val ownershipGate: StreamingOwnershipGate,
+    // L4 dependencies (nullable with defaults for DI compatibility)
+    private val lifecyclePolicy: SseLifecyclePolicy? = null,
+    /**
+     * M2 rev-ogpt fix #2: the process-wide authoritative identity authority.
+     * The coordinator consults it in [prepareForegroundTransportStartLocked]
+     * (step 2b) so a preparation whose identity a host reconfigure has
+     * superseded is rejected even when the coordinator cache has not yet
+     * re-bound.
+     *
+     * **Required non-null dependency (no nullable/default bypass):** the type
+     * is non-null so the authoritative identity gate runs UNCONDITIONALLY —
+     * there is no `null` or factory default that lets a caller skip
+     * [ConnectionIdentityStore.isCurrent]. Hilt resolves the real
+     * `@Singleton @Inject` instance in production; direct construction must
+     * pass its explicit authority.
+     */
+    private val identityStore: ConnectionIdentityStore,
+) : ForegroundTransportStartPreparer {
+    /**
+     * L4 §4.3: Monotonic clock for the background grace timer. Uses
+     * [SystemClock.elapsedRealtime] for monotonic guarantees.
+     */
+    private val monotonicNowMs: () -> Long = { SystemClock.elapsedRealtime() }
+
+    /**
+     * L4 §4.3: Background grace period before entering no-source terminal.
+     * 15 minutes (product decision P1).
+     */
+    private val backgroundGraceMs: Long = BACKGROUND_GRACE_MS
     /**
      * The layered lifecycle state (FGS spec §4.1). See [Layer] for the
      * invariant each value carries. Consumers (notification display layer,
@@ -134,6 +182,38 @@ class StreamingLifecycleCoordinator @Inject constructor(
     private var started = false
     private var inForegroundRef: StateFlow<Boolean>? = null
     private var currentIdentity: ConnectionIdentity? = null
+
+    // ── L4 state ─────────────────────────────────────────────────────────────
+
+    /**
+     * L4 §4.3: The background teardown timer job. Non-null only while the
+     * coordinator is in [Layer.BackgroundGrace] and the timer is armed.
+     * Cancelled on any foreground transition (under [mutex]).
+     */
+    private var backgroundTeardownJob: Job? = null
+
+    /**
+     * L4 §4.3: The ticket allocated when arming the background teardown timer.
+     * Used to fence the timer expiry against a stale generation.
+     */
+    private var backgroundDeadlineTicket: SseLifecyclePolicy.BackgroundDeadlineTicket? = null
+
+    // ── end L4 state ─────────────────────────────────────────────────────────
+
+    /**
+     * M2 rev-ogpt rework: the last successful foreground-preparation demand
+     * key, for [prepareForegroundTransportStart] idempotency. Repeated preparer
+     * calls for the SAME (identity, demand) must NOT advance the
+     * [SseLifecyclePolicy] foreground generation more than once; a different
+     * identity or dropId is a different demand and re-prepares. Under [mutex].
+     */
+    private var lastForegroundPreparationKey: ForegroundPreparationKey? = null
+
+    private data class ForegroundPreparationKey(
+        val identity: ConnectionIdentity,
+        /** dropId for DROPPED_TRANSPORT; null for HEALTH_CONFIRMED / no-dropId. */
+        val demand: Long?,
+    )
 
     /**
      * D5 (#2) — the real supplemental / primary process-poller runtime
@@ -353,7 +433,7 @@ class StreamingLifecycleCoordinator @Inject constructor(
             _layer.value = Layer.L3
         }
         layer.first { it == Layer.L3 }
-        ownershipGate?.disconnectAndRelease(markGap = false)
+        ownershipGate.disconnectAndRelease(markGap = false)
     }
 
     /**
@@ -380,7 +460,7 @@ class StreamingLifecycleCoordinator @Inject constructor(
             TeardownReason.Timeout, TeardownReason.UserClose, TeardownReason.Disconnect -> {
                 teardown()
                 layer.first { it == Layer.L3 }
-                ownershipGate?.disconnectAndRelease(markGap = true)
+                ownershipGate.disconnectAndRelease(markGap = true)
             }
         }
     }
@@ -442,9 +522,45 @@ class StreamingLifecycleCoordinator @Inject constructor(
         // suspension, but we keep it out of the coordinator mutex for
         // lock-ordering hygiene).
         if (post.markReadyIdentity != null) {
-            ownershipGate?.markReady(post.markReadyIdentity)
+            ownershipGate.markReady(post.markReadyIdentity)
+            // rev-ogpt fix #1 (Wave-1 M2): markReady is a NO-OP when ownership
+            // was superseded / missing (orphan guard: a late markReady after
+            // expireAttempt / a mismatching owner finds nothing to promote).
+            // It does NOT report success, so verify ownership is actually Ready
+            // for the SAME identity before clearing the recovery drop-ticket —
+            // otherwise a commit whose ownership never promoted would silently
+            // acknowledgeRecovery and drop recovery demand (the ticket would be
+            // gone, so a later outage restores a stale/empty demand instead of
+            // a fresh dropId). The required gate is the only authority allowed
+            // to confirm that ownership actually reached Ready.
+            if (ownershipGate.readyIdentity() == post.markReadyIdentity) {
+                // M2 rev-ogpt rework (L4 §3, I5): clear a recovery drop-ticket
+                // STRICTLY after the ownership Ready commit, and ONLY while the
+                // runtime is Live for this identity. acknowledgeRecovery is a
+                // no-op when the Live attempt carries no recoveryTicket (a
+                // normal non-recovery bootstrap) and is rejected when the
+                // runtime is not Live — so a later outage allocates a fresh
+                // dropId instead of restoring the cleared one.
+                acknowledgeRecoveryIfLive(post.markReadyIdentity)
+            }
         }
         return post.result
+    }
+
+    /**
+     * M2 rev-ogpt rework (L4 §3, I5): clears the recovery drop-ticket for
+     * [identity] iff the runtime is currently [SseTransportState.Live] for
+     * that identity. Called strictly AFTER [StreamingOwnershipGate.markReady]
+     * in [onActivationAck] Phase 2 so the observable order is
+     * `runtime Live → coordinator commit → ownership Ready → ticket cleared`.
+     * Safe to call unconditionally: [SseTransportRuntimeStore.acknowledgeRecovery]
+     * is a no-op when the canonical Live attempt has no recoveryTicket.
+     */
+    private fun acknowledgeRecoveryIfLive(identity: ConnectionIdentity) {
+        val liveState = runtime.state.value
+        if (liveState is SseTransportState.Live && liveState.attempt.identity == identity) {
+            runtime.acknowledgeRecovery(liveState.attempt)
+        }
     }
 
     /**
@@ -476,6 +592,161 @@ class StreamingLifecycleCoordinator @Inject constructor(
         }
         return if (activation is SourceActivation.Ready) ActivationCommitResult.PollerCommitted
         else ActivationCommitResult.RetainedOldSource
+    }
+
+    // ── M2: ForegroundTransportStartPreparer ──────────────────────────────────
+
+    /**
+     * M2 (L4 §4.2): prepares a legal foreground bootstrap state for the
+     * [cn.vectory.ocdroid.service.streaming.SseReconnectSupervisor] before it
+     * calls the launcher.
+     *
+     * The supervisor is the SINGLE foreground reconnect decision maker (I3).
+     * This method does NOT emit [LifecycleCommand.StartSse] directly (M2-C2):
+     * it only validates eligibility, cancels the background grace timer / any
+     * pending handoff, advances the [SseLifecyclePolicy] foreground generation
+     * exactly once, and normalizes an eligible dead-transport layer to
+     * [Layer.L3] (the only legal bootstrap entry state). The supervisor's
+     * subsequent launcher call drives the normal §5 bootstrap, which emits
+     * [StartSse] through [onBootstrapResult].
+     *
+     * Foreground is validated against the signal bound at [start], which is
+     * [cn.vectory.ocdroid.di.AppLifecycleMonitor.isInForeground] in production
+     * (the service binds `appLifecycleMonitor.isInForeground` → `start(...)`).
+     *
+     * Identity is validated against BOTH the coordinator cache AND the
+     * authoritative [ConnectionIdentityStore] (rev-ogpt fix #2) — so a
+     * preparation whose identity a host reconfigure has superseded is rejected
+     * even if the coordinator cache has not yet re-bound.
+     *
+     * Idempotency (rev-ogpt fix #3): a successful preparation records the
+     * (identity, dropId) demand; a repeat call for the same demand returns
+     * [ForegroundTransportStartPreparation.Ready] WITHOUT re-advancing the
+     * [SseLifecyclePolicy] foreground generation (already bumped exactly once).
+     *
+     * Results:
+     *  - [ForegroundTransportStartPreparation.Ready] — the transport is
+     *    already [SseTransportState.Live] for [identity] (alive no-op, M2-C1),
+     *    OR an eligible dead transport was normalized to L3 (M2-C3). The
+     *    supervisor may proceed (subject to its own runtime-state check).
+     *  - [ForegroundTransportStartPreparation.SupersededIdentity] — [identity]
+     *    no longer matches the coordinator's current identity OR the
+     *    [ConnectionIdentityStore] current identity/generation (M2-C4).
+     *  - [ForegroundTransportStartPreparation.NotEligible] — not foreground,
+     *    an intentional-stop / terminal layer ([Layer.L2Idle] /
+     *    [Layer.NoSourceTerminal]), or a stale / missing drop ticket for
+     *    [ForegroundTransportStartReason.DROPPED_TRANSPORT] (M2-C4).
+     */
+    override suspend fun prepareForegroundTransportStart(
+        identity: ConnectionIdentity,
+        dropId: Long?,
+        reason: ForegroundTransportStartReason,
+    ): ForegroundTransportStartPreparation = mutex.withLock {
+        prepareForegroundTransportStartLocked(identity, dropId, reason)
+    }
+
+    private suspend fun prepareForegroundTransportStartLocked(
+        identity: ConnectionIdentity,
+        dropId: Long?,
+        reason: ForegroundTransportStartReason,
+    ): ForegroundTransportStartPreparation {
+        // 1. Foreground gate — the AppLifecycleMonitor-sourced signal bound at
+        //    start(). Not foreground → nothing to prepare (supervisor must not
+        //    recover while background; background delivery is best-effort).
+        if (inForegroundRef?.value != true) {
+            DebugLog.i(TAG, "prepareForegroundTransportStart: not foreground → NotEligible")
+            return ForegroundTransportStartPreparation.NotEligible
+        }
+
+        // 2. Identity gate — reject a stale / superseded identity unchanged
+        //    (M2-C4: a stale identity changes nothing).
+        if (currentIdentity != identity) {
+            DebugLog.i(TAG, "prepareForegroundTransportStart: superseded identity → SupersededIdentity")
+            return ForegroundTransportStartPreparation.SupersededIdentity
+        }
+
+        // 2b. Authoritative identity gate (rev-ogpt fix #2): the coordinator
+        //     cache may lag a host reconfigure that hasn't re-bound
+        //     currentIdentity yet. The real [ConnectionIdentityStore] is the
+        //     process-wide truth (FGS §2 epoch guard); if the preparer's
+        //     identity is no longer current there (epoch bumped / superseded),
+        //     the preparation is rejected regardless of the cache. Runs
+        //     UNCONDITIONALLY now that [identityStore] is a required non-null
+        //     dependency (no nullable bypass).
+        if (!identityStore.isCurrent(identity)) {
+            DebugLog.i(TAG, "prepareForegroundTransportStart: identityStore reports stale identity → SupersededIdentity")
+            return ForegroundTransportStartPreparation.SupersededIdentity
+        }
+
+        // 3. Alive no-op (I2 / M2-C1): a Live transport for the current
+        //    identity is already Ready — emit nothing, change nothing. A live
+        //    transport must never be treated as reconnect demand.
+        val transportLive = runtime.state.value.let {
+            it is SseTransportState.Live && it.attempt.identity == identity
+        }
+        if (transportLive) {
+            return ForegroundTransportStartPreparation.Ready
+        }
+
+        // 4. Intentional-stop / terminal layers are NOT eligible for
+        //    transport-drop recovery (I6): L2Idle intentionally stopped SSE
+        //    (groker-R1 idle teardown); NoSourceTerminal is fully terminal.
+        //    Neither may auto-revive via a DROPPED_TRANSPORT start.
+        val layer = _layer.value
+        if (layer is Layer.L2Idle || layer is Layer.NoSourceTerminal) {
+            DebugLog.i(TAG, "prepareForegroundTransportStart: intentional/terminal layer=$layer → NotEligible")
+            return ForegroundTransportStartPreparation.NotEligible
+        }
+
+        // 5. Drop-ticket validation for DROPPED_TRANSPORT. The runtime is the
+        //    only transport-truth authority (I1); a stale / missing ticket
+        //    means there is no current drop demand to recover. rev-ogpt fix
+        //    #3 (Wave-1 M2): the supervisor MUST name the EXACT current drop
+        //    demand — a non-null [dropId] that equals the runtime's current
+        //    ticket is required. An omitted ([dropId] == null) or mismatching
+        //    dropId is rejected so a stale / speculative recovery attempt
+        //    never advances the foreground generation or normalizes the layer.
+        if (reason == ForegroundTransportStartReason.DROPPED_TRANSPORT) {
+            if (dropId == null) {
+                DebugLog.i(TAG, "prepareForegroundTransportStart: omitted dropId for DROPPED_TRANSPORT → NotEligible")
+                return ForegroundTransportStartPreparation.NotEligible
+            }
+            val ticket = runtime.currentDropTicket(identity)
+            if (ticket == null || ticket.dropId != dropId) {
+                DebugLog.i(
+                    TAG,
+                    "prepareForegroundTransportStart: missing/exact-mismatch drop ticket (requested=$dropId current=${ticket?.dropId}) → NotEligible",
+                )
+                return ForegroundTransportStartPreparation.NotEligible
+            }
+        }
+
+        // 6. Eligible dead transport (BackgroundGrace / L1 / L2Active / L3):
+        //    cancel the background teardown timer + any pending handoff,
+        //    advance the policy foreground generation exactly ONCE per
+        //    (identity, demand), and normalize the layer to the approved L3
+        //    bootstrap state (M2-C3). The supervisor's launcher call then
+        //    drives the §5 bootstrap.
+        //
+        //    rev-ogpt fix #3: a repeated preparer call for the SAME
+        //    (identity, dropId) demand is idempotent — it returns Ready
+        //    WITHOUT re-bumping the foreground generation or re-normalizing
+        //    (already done on the first call). A different identity or dropId
+        //    is a different demand and re-prepares + re-bumps.
+        val demandKey = ForegroundPreparationKey(identity, dropId)
+        if (lastForegroundPreparationKey == demandKey) {
+            DebugLog.i(TAG, "prepareForegroundTransportStart: idempotent repeat for key=$demandKey → Ready (no generation bump)")
+            return ForegroundTransportStartPreparation.Ready
+        }
+        cancelBackgroundTeardownLocked()
+        cancelPendingHandoff()
+        lifecyclePolicy?.onForeground(identity)
+        if (layer != Layer.L3) {
+            DebugLog.i(TAG, "prepareForegroundTransportStart: normalizing dead-transport layer=$layer → L3")
+            _layer.value = Layer.L3
+        }
+        lastForegroundPreparationKey = demandKey
+        return ForegroundTransportStartPreparation.Ready
     }
 
     // ── Transition handlers (all under [mutex]) ─────────────────────────────
@@ -520,11 +791,31 @@ class StreamingLifecycleCoordinator @Inject constructor(
                 )
             }
             else -> {
-                // §5 step 5: background all-idle → L3 (teardown, no FGS slot).
-                // No source switch (no SSE to start; poller stays running).
-                emit(StopForeground)
-                emit(StopSelf)
-                _layer.value = Layer.L3
+                if (lifecyclePolicy != null) {
+                    // L4 §4.5: background all-idle → NoSourceTerminal directly
+                    // (NOT L3 with poller). No socket to retain, no FGS slot.
+                    lifecyclePolicy.onBackgroundReceiveOnly(identity)
+                    val fgGen = lifecyclePolicy.snapshot.value.foregroundGeneration
+                    lifecyclePolicy.tryEnterNoSourceTerminal(
+                        SseLifecyclePolicy.BackgroundDeadlineTicket(
+                            foregroundGeneration = fgGen,
+                            identity = identity,
+                            deadlineElapsedMs = monotonicNowMs(),
+                        ),
+                    )
+                    emit(StopForeground)
+                    emit(StopSelf)
+                    _layer.value = Layer.NoSourceTerminal(
+                        foregroundGeneration = fgGen,
+                        identity = identity,
+                        reason = NoSourceReason.BACKGROUND_GRACE_EXPIRED,
+                    )
+                } else {
+                    // Pre-L4: fallback to L3 teardown (no poller handoff).
+                    emit(StopForeground)
+                    emit(StopSelf)
+                    _layer.value = Layer.L3
+                }
             }
         }
     }
@@ -563,18 +854,18 @@ class StreamingLifecycleCoordinator @Inject constructor(
                 emit(StopForeground)
                 _layer.value = Layer.L1(busy = false)
             }
-        } else {
+        } else if (lifecyclePolicy != null) {
+            // L4 §4.2: background transition from L1 enters BackgroundGrace.
+            // The retained SSE socket stays open if it was open; token streams
+            // are closed immediately. The 15-min timer is armed.
             cancelDebounce()
-            if (keepAlive) {
-                // §4.2 L1-busy → L2Active: FGS already held, just layer change. SSE stays on.
-                _layer.value = Layer.L2Active
-            } else {
-                // §4.2 L1-idle → background: NO FGS promotion attempted → L3.
-                // Routes through teardownLocked() (we already hold the mutex
-                // via the observer's withLock) which performs the acknowledgeable
-                // StartPoller handoff before StopSse (§4.4 + D2 gate #4).
-                teardownLocked()
-            }
+            enterBackgroundGraceLocked(identity = currentIdentity, fgsWasHeld = current.busy)
+        } else if (current.busy) {
+            // Pre-L4: L1-busy + background → L2Active (SSE stays, FGS held).
+            _layer.value = Layer.L2Active
+        } else {
+            // Pre-L4: L1-idle + background → teardown to L3 (poller handoff).
+            teardownLocked()
         }
     }
 
@@ -607,11 +898,16 @@ class StreamingLifecycleCoordinator @Inject constructor(
                 emit(StopForeground)
                 _layer.value = Layer.L1(busy = false)
             }
+        } else if (lifecyclePolicy != null) {
+            // L4 §4.2: background transition from L2Active → BackgroundGrace.
+            // FGS stays (was held in L2Active), SSE socket retained until
+            // 15-min timer or foreground return.
+            DebugLog.i(TAG, "handleL2Active: background → BackgroundGrace (keepAlive=$keepAlive)")
+            enterBackgroundGraceLocked(identity = currentIdentity, fgsWasHeld = true)
         } else {
-            if (keepAlive) {
-                // still busy OR unknown; stay L2Active (debounce cancelled above, no-op).
-            } else {
-                // §4.4: AllIdleFresh → arm the 45s debounce.
+                // Pre-L4: stay L2Active (SSE stays on). Arm debounce if AllIdleFresh.
+            if (!keepAlive) {
+                // D4-B M3: the authoritative state is at EXACTLY this instant.
                 startIdleDebounce()
             }
         }
@@ -632,6 +928,76 @@ class StreamingLifecycleCoordinator @Inject constructor(
      * [SourceActivation.Rejected] leaves the host in L2Idle with the poller
      * still running — the source switch is NOT committed.
      */
+    /**
+     * L4 §4.2 / §7 (lane-2): The BackgroundGrace handler. Responds ONLY to
+     * foreground return (and NOT to status changes — background grace is
+     * receive-only). On foreground return, cancels the teardown timer.
+     *
+     * M2 (L4 §2.1 / I1) — foreground-resume reconnect is now driven by
+     * transport truth, NOT the rejected fix-9
+     * [SseLifecyclePolicy.consumeRecoveryNeeded] flag (global recoveryNeeded is
+     * L5-exclusive — §0.4 / §1.2). The coordinator reads the
+     * [SseTransportRuntimeStore] to decide whether the retained SSE survived
+     * grace, and it NO LONGER reconnects a dropped transport itself: the
+     * [cn.vectory.ocdroid.service.streaming.SseReconnectSupervisor] is the
+     * single foreground reconnect owner (I3) and drives recovery through
+     * [prepareForegroundTransportStart] + the launcher.
+     *
+     *  - Transport **Live** for the current identity (§4.1): direct Live → L1
+     *    path — the retained socket survived grace. No reconnect; bump the
+     *    [SseLifecyclePolicy] foreground generation and settle into L1 (busy /
+     *    idle per the current status verdict). A live transport must NOT
+     *    become reconnect demand, and the recoveryNeeded flag is NOT consumed
+     *    (it is left untouched for L5).
+     *  - Transport **not Live** (Dropped / Retrying / Connecting / Stopped):
+     *    the coordinator does NOT emit [LifecycleCommand.StartSse] directly.
+     *    The grace timer is already cancelled so the host does not tear down to
+     *    [Layer.NoSourceTerminal] mid-recovery; the layer stays
+     *    [Layer.BackgroundGrace] until [prepareForegroundTransportStart] (or a
+     *    subsequent §5 bootstrap) advances it. [Layer.L2Idle] / intentional
+     *    stops never reach this branch (they have their own handler) and must
+     *    not become reconnect demand.
+     */
+    private suspend fun handleBackgroundGrace(current: Layer.BackgroundGrace, fg: Boolean, state: GlobalBusyState) {
+        // background → no-op (stay in grace, status changes do NOT trigger
+        // L2Active/L2Idle handoff per L4 §4.2).
+        if (!fg) return
+        cancelBackgroundTeardownLocked()
+        // If a StartSse handoff from THIS transition is already in flight
+        // (a rapid re-fire on a status change while awaiting the ack), do NOT
+        // clobber it — the ack commit owns the layer transition.
+        if (pendingHandoff?.kind == HandoffKind.StartSse) return
+
+        val identity = currentIdentity ?: return
+        // I1: transport truth comes from the runtime, not the fix-9 flag.
+        val transportLive = runtime.state.value.let {
+            it is SseTransportState.Live && it.attempt.identity == identity
+        }
+        if (transportLive) {
+            // Direct Live → L1 path (§4.1): the retained socket survived grace.
+            // No reconnect; bump the policy foreground generation and settle
+            // into L1. The recoveryNeeded flag is deliberately NOT consumed.
+            DebugLog.i(TAG, "handleBackgroundGrace: foreground return + Live transport → L1 (retained)")
+            lifecyclePolicy?.onForeground(identity)
+            if (state.isKeepAlive) {
+                emit(StartForeground)
+                _layer.value = Layer.L1(busy = true)
+            } else {
+                _layer.value = Layer.L1(busy = false)
+            }
+        } else {
+            // Transport is dead / dropping during grace. The coordinator does
+            // NOT reconnect here — the SseReconnectSupervisor owns foreground
+            // recovery (I3) and calls prepareForegroundTransportStart to
+            // normalize to L3 before bootstrapping. The grace timer is already
+            // cancelled above; leave the layer in BackgroundGrace until the
+            // supervisor-driven prepare (or a subsequent bootstrap) advances
+            // it. Do NOT bump the policy foreground generation here — prepare
+            // owns that exactly once on a successful preparation.
+            DebugLog.i(TAG, "handleBackgroundGrace: transport not Live during grace — deferring recovery to supervisor")
+        }
+    }
+
     private suspend fun handleL2Idle(fg: Boolean, state: GlobalBusyState) {
         val identity = currentIdentity ?: run {
             DebugLog.w(TAG, "handleL2Idle: no identity bound — skipping transition")
@@ -736,6 +1102,7 @@ class StreamingLifecycleCoordinator @Inject constructor(
      */
     private suspend fun teardownLocked() {
         cancelDebounce()
+        cancelBackgroundTeardownLocked()
         // Cancel any pending handoff (e.g., L2Idle→L2Active in flight) —
         // its activation is no longer relevant; teardown will start its
         // own poller handoff if needed.
@@ -767,6 +1134,18 @@ class StreamingLifecycleCoordinator @Inject constructor(
                 // poller already running, SSE already off — nothing to switch.
                 // (Any pending SSE handoff was cancelled above.) Teardown synchronously.
                 emit(StopForeground)
+                emit(StopSelf)
+                _layer.value = Layer.L3
+            }
+            is Layer.BackgroundGrace -> {
+                // L4: background grace → L3 teardown (e.g., explicit user close).
+                emit(StopSse)
+                emit(StopForeground)
+                emit(StopSelf)
+                _layer.value = Layer.L3
+            }
+            is Layer.NoSourceTerminal -> {
+                // Already terminal; just emit StopSelf.
                 emit(StopSelf)
                 _layer.value = Layer.L3
             }
@@ -831,6 +1210,100 @@ class StreamingLifecycleCoordinator @Inject constructor(
     private fun cancelDebounce() {
         debounceJob?.cancel()
         debounceJob = null
+    }
+
+    // ── L4 Background grace helpers ──────────────────────────────────────────
+
+    /**
+     * L4 §4.2: Enters [Layer.BackgroundGrace] from any foreground layer.
+     * Notifies the [lifecyclePolicy], records the grace state, and arms the
+     * 15-minute teardown timer.
+     *
+     * MUST be called under [mutex].
+     */
+    private suspend fun enterBackgroundGraceLocked(
+        identity: ConnectionIdentity?,
+        fgsWasHeld: Boolean,
+    ) {
+        val id = identity
+        if (id == null) {
+            DebugLog.w(TAG, "enterBackgroundGraceLocked: no identity — falling back to L3")
+            teardownLocked()
+            return
+        }
+        lifecyclePolicy?.onBackgroundReceiveOnly(id)
+        val retained = _layer.value !is Layer.L3 // SSE socket is alive if layer is not L3
+        val fgGen = lifecyclePolicy?.snapshot?.value?.foregroundGeneration ?: 0L
+        _layer.value = Layer.BackgroundGrace(
+            foregroundGeneration = fgGen,
+            identity = id,
+            fgsWasHeld = fgsWasHeld,
+            mainSseRetained = retained,
+        )
+        armBackgroundTeardownLocked(fgGen, id)
+    }
+
+    /**
+     * L4 §4.3: Arms the 15-minute background teardown timer. Cancels any
+     * prior timer (idempotent). The timer is fenced by [foregroundGeneration]
+     * + [identity]: a stale timer cannot tear down a re-entered foreground
+     * connection.
+     *
+     * The expiry body calls [SseLifecyclePolicy.tryEnterNoSourceTerminal] under
+     * [mutex] and, if it succeeds, emits [LifecycleCommand.EnterNoSourceTerminal].
+     *
+     * MUST be called under [mutex].
+     */
+    private fun armBackgroundTeardownLocked(fgGen: Long, identity: ConnectionIdentity) {
+        backgroundTeardownJob?.cancel()
+        val deadlineMs = monotonicNowMs() + backgroundGraceMs
+        val ticket = SseLifecyclePolicy.BackgroundDeadlineTicket(
+            foregroundGeneration = fgGen,
+            identity = identity,
+            deadlineElapsedMs = deadlineMs,
+        )
+        backgroundDeadlineTicket = ticket
+        backgroundTeardownJob = scope.launch {
+            val remaining = deadlineMs - monotonicNowMs()
+            if (remaining > 0) {
+                try {
+                    delay(remaining)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    return@launch
+                }
+            }
+            mutex.withLock {
+                // Re-check: verify ticket + layer + policy still match.
+                val currentLayer = _layer.value
+                if (currentLayer !is Layer.BackgroundGrace) return@withLock
+                if (currentLayer.foregroundGeneration != fgGen) return@withLock
+                if (currentLayer.identity != identity) return@withLock
+                if (backgroundDeadlineTicket?.let { it.identity != identity || it.foregroundGeneration != fgGen } != false) return@withLock
+                val policyOk = lifecyclePolicy?.tryEnterNoSourceTerminal(ticket) ?: false
+                if (!policyOk) return@withLock
+                _layer.value = Layer.NoSourceTerminal(
+                    foregroundGeneration = fgGen,
+                    identity = identity,
+                    reason = NoSourceReason.BACKGROUND_GRACE_EXPIRED,
+                )
+                backgroundTeardownJob = null
+                backgroundDeadlineTicket = null
+                emit(EnterNoSourceTerminal(ticket))
+            }
+        }
+    }
+
+    /**
+     * L4 §4.3: Cancels the background teardown timer. Called on foreground
+     * return or when a foreground transition supersedes a pending background
+     * grace.
+     *
+     * MUST be called under [mutex].
+     */
+    private fun cancelBackgroundTeardownLocked() {
+        backgroundTeardownJob?.cancel()
+        backgroundTeardownJob = null
+        backgroundDeadlineTicket = null
     }
 
     /**
@@ -1156,6 +1629,12 @@ class StreamingLifecycleCoordinator @Inject constructor(
                             is Layer.L1 -> handleL1(current, fg, state)
                             Layer.L2Active -> handleL2Active(fg, state)
                             Layer.L2Idle -> handleL2Idle(fg, state)
+                            is Layer.BackgroundGrace -> handleBackgroundGrace(current, fg, state)
+                            is Layer.NoSourceTerminal -> {
+                                // L4 §4: no automatic recovery from NoSourceTerminal.
+                                // Foreground return causes a fresh bootstrap via
+                                // the normal legal-entry path.
+                            }
                             Layer.L3 -> {
                                 val handoff = pendingHandoff
                                 if (handoff?.decision == HandoffDecision.Bootstrap &&
@@ -1198,6 +1677,12 @@ class StreamingLifecycleCoordinator @Inject constructor(
         const val IDLE_DEBOUNCE_MS = 45_000L
 
         /**
+         * L4 §4.3: background grace period before entering no-source terminal.
+         * 15 minutes, product decision P1: "后台 15 分钟硬性关闭 SSE+FGS+轮询".
+         */
+        const val BACKGROUND_GRACE_MS = 15 * 60 * 1000L
+
+        /**
          * Command-channel capacity. Generous vs. the few commands a single
          * transition emits (≤ 4) so the serial state machine rarely
          * suspends; bounded so a stuck consumer cannot grow it without limit.
@@ -1205,5 +1690,3 @@ class StreamingLifecycleCoordinator @Inject constructor(
         private const val COMMAND_CHANNEL_CAPACITY = 64
     }
 }
-
-

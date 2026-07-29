@@ -27,6 +27,12 @@ import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
 import cn.vectory.ocdroid.service.streaming.SessionSnapshotProvider
 import cn.vectory.ocdroid.service.streaming.SessionStreamingController
 import cn.vectory.ocdroid.service.streaming.SseNotificationBridge
+import cn.vectory.ocdroid.service.streaming.SseTransportRuntimeStore
+import cn.vectory.ocdroid.service.streaming.SseTransportState
+import cn.vectory.ocdroid.service.streaming.TransportAttemptToken
+import cn.vectory.ocdroid.service.streaming.TransportDropReason
+import cn.vectory.ocdroid.service.streaming.UnexpectedTransportDropHandler
+import cn.vectory.ocdroid.service.streaming.FencedUnexpectedTransportDropHandler
 import cn.vectory.ocdroid.service.streaming.UserCloseRequestParser
 import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
@@ -116,6 +122,14 @@ class SessionStreamingService : Service() {
     // ── CP5: Hilt-injected collaborators for [SessionStreamingController] ──
 
     @Inject lateinit var coordinator: StreamingLifecycleCoordinator
+    /**
+     * L4 §2/§3 (M1A/M4): the process-level transport-truth authority. Passed
+     * to [sseOwner] (so the owner is the sole producer of transport-state
+     * transitions) AND to the [shutdownSeal] (which applies the onDestroy
+     * disposition). The single `@Singleton` instance shared with the
+     * reconnect supervisor / coordinator (I1: one transport-truth authority).
+     */
+    @Inject lateinit var runtimeStore: SseTransportRuntimeStore
     @Inject lateinit var statusAggregator: StatusAggregator
     @Inject lateinit var statusAggregatorInput: StatusAggregatorInput
     @Inject lateinit var identityStore: ConnectionIdentityStore
@@ -202,6 +216,15 @@ class SessionStreamingService : Service() {
     private var sseOwner: ServiceSseConnectionOwner? = null
 
     /**
+     * L4 §4.4 (M4): owns the runtime/ownership side-effects for transport
+     * drops (injected into [sseOwner] as its [UnexpectedTransportDropHandler])
+     * AND the onDestroy shutdown disposition. Built in [onCreate] from the
+     * shared [runtimeStore] + [ownershipGate]; a pure-JVM seam so the
+     * disposition contract is unit-testable without a real Android Service.
+     */
+    private lateinit var shutdownSeal: SseShutdownSeal
+
+    /**
      * CP9 §C15: the bootstrap restart latch. Retained as a `Job?` so a second
      * CP9 bootstrap/start intent on the same Service instance can cancel an
      * in-flight bootstrap and run a fresh one (a `stopSelf()` + a new start
@@ -248,7 +271,17 @@ class SessionStreamingService : Service() {
                 ServiceCompat.STOP_FOREGROUND_DETACH,
             )
         }
-        override fun serviceStopSelf() = this@SessionStreamingService.stopSelf()
+        override fun serviceStopSelf() {
+            // M4 (Wave-1 Rework finding #2): ALL deliberate stopSelf paths are
+            // INTENTIONAL. The controller routes every coordinator-driven L3
+            // teardown (StopSelf command, user-close, bootstrap teardown) through
+            // this single shell method, so marking here covers EVERY deliberate
+            // route — not only paths that happen to call owner StopSse first.
+            // System/process destruction (which does NOT go through here) retains
+            // the default UNEXPECTED disposition.
+            shutdownSeal.markIntentional()
+            this@SessionStreamingService.stopSelf()
+        }
         override suspend fun startPoller(
             identity: ConnectionIdentity,
             snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
@@ -290,6 +323,31 @@ class SessionStreamingService : Service() {
             // the following StopForeground / StopSelf commands execute.
             sseOwner?.disconnect(markGap = true)
         }
+        override suspend fun enterNoSourceTerminal() {
+            // L4 §4.4: composite terminal teardown. Each stop is individually
+            // try/caught so a failure in one does not skip the others.
+            // Policy is already NO_SOURCE_TERMINAL before this is called.
+            // M4: no-source terminal is an INTENTIONAL destruction — mark the
+            // disposition so onDestroy publishes Stopped (never Dropped).
+            shutdownSeal.markIntentional()
+            DebugLog.i(TAG, "enterNoSourceTerminal: stopping all sources")
+            runCatching { sseNotificationBridge?.stop() }
+                .onFailure { DebugLog.w(TAG, "enterNoSourceTerminal: sseNotificationBridge.stop failed — ${it.message}") }
+            runCatching { sseOwner?.disconnect(markGap = false) }
+                .onFailure { DebugLog.w(TAG, "enterNoSourceTerminal: sseOwner.disconnect failed — ${it.message}") }
+            runCatching { processStatusPoller.stop() }
+                .onFailure { DebugLog.w(TAG, "enterNoSourceTerminal: processStatusPoller.stop failed — ${it.message}") }
+            runCatching { appLifecycleMonitor.stopBackgroundPollingForNoSource() }
+                .onFailure { DebugLog.w(TAG, "enterNoSourceTerminal: stopBackgroundPollingForNoSource failed — ${it.message}") }
+            runCatching {
+                ServiceCompat.stopForeground(
+                    this@SessionStreamingService,
+                    ServiceCompat.STOP_FOREGROUND_DETACH,
+                )
+            }.onFailure { DebugLog.w(TAG, "enterNoSourceTerminal: stopForeground failed — ${it.message}") }
+            runCatching { this@SessionStreamingService.stopSelf() }
+                .onFailure { DebugLog.w(TAG, "enterNoSourceTerminal: stopSelf failed — ${it.message}") }
+        }
     }
 
     /**
@@ -315,6 +373,12 @@ class SessionStreamingService : Service() {
             degradedContent = getString(R.string.notify_session_degraded_content),
         )
         notificationPublisher = ForegroundNotificationPublisher(this, identityStore)
+        // L4 §4.4 (M4): build the shutdown-disposition seam from the shared
+        // runtime store + ownership gate. It doubles as the owner's
+        // UnexpectedTransportDropHandler (releases ownership then publishes
+        // the drop) and applies the onDestroy disposition (Stopped vs
+        // SERVICE_DESTROYED).
+        shutdownSeal = SseShutdownSeal(runtimeStore, ownershipGate)
         // CP9: construct the SSE collector here (one instance per Service
         // instance). The owner publishes into the process-wide
         // [sseEventStream]; the bridge (eagerly started from AppCore init)
@@ -338,6 +402,12 @@ class SessionStreamingService : Service() {
             sharedStateStore = sharedStateStore,
             sharedEffectBus = sharedEffectBus,
             recoveryPolicy = sseRecoveryPolicy,
+            // L4 §3.1: wire the foreground gate so SSE does NOT (re)connect
+            // while the app is in the background. Uses the SAME
+            // [AppLifecycleMonitor.isInForeground] singleton that lane 1
+            // wired the token-stream gate to, ensuring a consistent
+            // foreground-truth source.
+            reconnectAllowed = { appLifecycleMonitor.isInForeground.value },
             onTerminalExhaustion = { coordinator.onDisconnect() },
             // Cluster A / Phase 2 (P2.4 + P2.5): resync AND first-transport-ready
             // share the same cold-start path (v1 contract §4: resync = reuse
@@ -403,6 +473,13 @@ class SessionStreamingService : Service() {
                     isStillCurrent = isStillCurrent,
                 )
             },
+            // L4 §2/§3 (M1A/M4): the shared transport-truth authority. The
+            // owner is the sole producer of transport-state transitions.
+            runtimeStore = runtimeStore,
+            // L4 §3/§4.4 (M4): the injected drop handler. The owner routes
+            // every unexpected transport drop through this seam; it releases
+            // ownership BEFORE publishing the drop (I3).
+            dropHandler = shutdownSeal,
         )
         controller = SessionStreamingController(
             coordinator = coordinator,
@@ -535,6 +612,8 @@ class SessionStreamingService : Service() {
         val hasValidHost = effectiveConnectionConfigResolver.resolve() != null
         if (!hasValidHost) {
             DebugLog.w(TAG, "onStartCommand: no effective host → stopSelf (§5 step 1)")
+            // M4: no-host stop is intentional (no transport to recover).
+            shutdownSeal.markIntentional()
             stopSelf()
             return START_STICKY
         }
@@ -545,12 +624,23 @@ class SessionStreamingService : Service() {
                     strings,
                     // Q5: placeholder is a transient (<1s) "connecting" FGS
                     // notification. Always silent — no user value in surfacing
-                    // it, and silencing here dodges OEM-ROM heads-up banners on
+                    // it, and silencing here dodges OEM-ROM heads up banners on
                     // the cold-start promoteToForeground.
                     silent = true,
                 ),
             ),
         )
+        // Wave-1 M4 (blocker #4): re-arm the onDestroy disposition to UNEXPECTED
+        // on each newly accepted bootstrap. Reaching here means a valid host
+        // exists and this Service instance is starting a fresh bootstrap
+        // lifecycle, so any INTENTIONAL marker left by a prior stopSelf (or
+        // other intentional path) on this same instance MUST be cleared —
+        // otherwise it would poison a later UNEXPECTED destruction after a
+        // start overlap. Any intentional teardown that follows (bootstrap
+        // rollback / no-source terminal / user close) re-marks INTENTIONAL, so
+        // re-arming to the safe default here is always correct. Runs on the
+        // Main thread, serialized with onDestroy (which reads the flag).
+        shutdownSeal.rearmUnexpected()
         // §5 steps 3–6: async bootstrap. CP9 §A6: retain the bootstrap job so
         // a second CP9 bootstrap/start intent on the same Service instance
         // cancels the in-flight one and runs a fresh sequence (a stopSelf +
@@ -693,6 +783,10 @@ class SessionStreamingService : Service() {
         identity: ConnectionIdentity?,
         attemptId: Long = StreamingOwnershipGate.NO_ATTEMPT_ID,
     ) {
+        // M4: bootstrap rollback (timeout / failed) is an intentional teardown
+        // that leads to stopSelf — mark the disposition so onDestroy does not
+        // publish a spurious SERVICE_DESTROYED drop.
+        shutdownSeal.markIntentional()
         when (kind) {
             BootstrapRollbackKind.Timeout -> {
                 // D5-3 (#4 seam) — terminal abort for a launcher attempt that
@@ -807,6 +901,8 @@ class SessionStreamingService : Service() {
      */
     override fun onTimeout(startId: Int) {
         DebugLog.i(TAG, "onTimeout(startId=$startId) — §4.1 dataSync platform timeout → L3")
+        // M4: platform dataSync timeout teardown is intentional.
+        shutdownSeal.markIntentional()
         controller?.onServiceTimeout()
     }
 
@@ -900,32 +996,79 @@ class SessionStreamingService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /**
+     * Wave-1 M4 (blockers #1 + #2 + #3): the approved onDestroy order is:
+     *  1. **capture active attempt** (from runtimeStore, before any runtime
+     *     terminalization — [SseTransportRuntimeStore.currentAttempt] returns
+     *     null once Dropped/Stopped);
+     *  2. **release ownership + apply disposition** via [SseShutdownSeal] —
+     *     ownership released FIRST (I3), then INTENTIONAL → markStopped /
+     *     UNEXPECTED → publishDropped(SERVICE_DESTROYED) using the CAPTURED
+     *     attempt directly. This runs BEFORE cancelForShutdown so the captured
+     *     attempt is still canonical: an unacknowledged recovery attempt
+     *     naturally preserves its original drop ticket (I4), and no
+     *     replacement attempt / observable Connecting fallback is ever created.
+     *  3. **close/cancel the owner** ([ServiceSseConnectionOwner.cancelForShutdown])
+     *     — generation bump + closing marker + collector cancel ensure NO late
+     *     frame can mutate the runtime AFTER the disposition. Its own
+     *     markStopped is now a harmless no-op (the runtime is already terminal
+     *     from step 2). [processStatusPoller] runs on @ApplicationScope and is
+     *     NOT cancelled here — it survives this Service's death (§6 L3).
+     *  4. **cancel scope** — structural cancellation of all remaining jobs.
+     *
+     * Late-frame safety (blocker #2): the disposition (step 2) terminalizes
+     * the runtime to Dropped/Stopped, so a stale collector frame's markLive is
+     * already rejected by the runtime's canonical-attempt validation BEFORE
+     * cancelForShutdown (step 3) bumps the generation. The two are
+     * complementary backstops; ordering disposition first keeps the captured
+     * attempt usable.
+     *
+     * Idempotent: a repeated onDestroy (or a terminal path already handled by
+     * the owner) is a clean no-op — [destroyGuard] prevents double-execution;
+     * [SseShutdownSeal.applyDestructionDisposition] + [releaseNow] + the
+     * runtime's canonical-attempt validation are all individually idempotent.
+     */
+    @Volatile
+    private var destroyGuard: Boolean = false
+
     override fun onDestroy() {
-        DebugLog.i(TAG, "onDestroy: disconnecting SSE + cancelling service scope")
-        // Normal L3 teardown already used the suspend disconnect path and
-        // joined the collector before stopSelf. This synchronous fallback only
-        // invalidates/cancels a collector left by an abnormal Service destroy;
-        // it deliberately emits no false transport-outage signal.
+        if (destroyGuard) {
+            DebugLog.i(TAG, "onDestroy: already destroyed — idempotent no-op")
+            return
+        }
+        destroyGuard = true
+        DebugLog.i(TAG, "onDestroy: applying disposition + closing owner + cancelling scope")
+        // Step 1: capture the active attempt BEFORE any runtime terminalization.
+        // The runtime is the source of truth; currentAttempt returns null once
+        // the owner already handled a terminal path (Dropped/Stopped) — a null
+        // capture means "no duplicate drop" (M4-3).
+        val destroyedIdentity = acceptedOwnershipIdentity
+        val destroyedAttempt = destroyedIdentity?.let { runtimeStore.currentAttempt(it) }
+        acceptedOwnershipIdentity = null
+        // Step 2: apply the disposition FIRST, while the captured attempt is
+        // still canonical. The seal releases ownership (I3) then:
+        //  - INTENTIONAL → markStopped(capturedAttempt);
+        //  - UNEXPECTED  → publishDropped(capturedAttempt, SERVICE_DESTROYED).
+        // Using the captured attempt directly means an unacknowledged recovery
+        // attempt naturally preserves its original ticket (I4) — NO replacement
+        // attempt, NO observable Connecting fallback (blockers #1 + #2).
+        shutdownSeal.applyDestructionDisposition(destroyedIdentity, destroyedAttempt)
+        // Step 3: close/cancel the owner — generation bump + closing marker +
+        // collector cancel so no late frame can mutate the runtime post-
+        // disposition. Its own markStopped is now a harmless no-op (the runtime
+        // is already terminal from step 2). cancelForShutdown runs on the same
+        // (Main) thread as onDestroy, so no interleaving terminalization can
+        // occur between capture and disposition.
         //
         // D2 gate #4: the [processStatusPoller]'s loop runs on
         // @ApplicationScope and is NOT cancelled here — it survives this
         // Service's death (§6 L3 source contract).
-        //
-        // D4-B (runBlocking removal): ownership is released via the
-        // non-suspend [StreamingOwnershipGate.releaseNow] under a short
-        // `synchronized(lock)` section (no main-thread blocking). The prior
-        // `runBlocking { release(identity) }` could stall the main thread on
-        // a contended coroutine Mutex.
         sseOwner?.cancelForShutdown()
-        acceptedOwnershipIdentity?.let { identity ->
-            ownershipGate.releaseNow(identity)
-        }
-        acceptedOwnershipIdentity = null
+        // Step 4: clean up remaining collaborators + cancel the scope.
         // T5-C4: stop the SSE → notification bridge before the scope is
         // cancelled (the scope cancellation would also cancel the bridge's
         // collector, but explicit stop keeps the shutdown order legible:
-        // bridge first → no new temp notifications during controller
-        // teardown).
+        // bridge first → no new temp notifications during controller teardown).
         sseNotificationBridge?.stop()
         sseNotificationBridge = null
         controller?.shutdown()
@@ -968,6 +1111,164 @@ class SessionStreamingService : Service() {
          */
         const val ACTION_BOOTSTRAP = "cn.vectory.ocdroid.action.BOOTSTRAP"
 
-        // CLOSE_BACKGROUND_REQUEST_CODE and DEGRADED_CONTENT_REQUEST_CODE moved to ForegroundNotificationPublisher
+        // CLOSE_BACKGROUND_REQUEST_CODE and DEGRADED_CONTENT_CODE moved to ForegroundNotificationPublisher
+    }
+}
+
+/**
+ * L4 §4.4 (M4): pure-JVM seam that owns the runtime/ownership side-effects
+ * for transport drops and [SessionStreamingService] shutdown disposition.
+ *
+ * Extracted from the Android [Service] shell so the disposition contract is
+ * JVM-testable without a real Service instance (the Service simply delegates
+ * [SessionStreamingService.onDestroy] + the SSE owner's drop routing here).
+ *
+ * Two responsibilities:
+ *  1. **Drop routing** (implements [UnexpectedTransportDropHandler]): the SSE
+ *     owner routes every unexpected transport drop here. Releases ownership
+ *     BEFORE publishing Dropped (I3 ordering). Ownership release is idempotent
+ *     ([StreamingOwnershipGate.releaseNow] is a no-op for a non-held identity),
+ *     and the runtime rejects a stale/foreign attempt — so a double-call is a
+ *     safe no-op.
+ *  2. **Destruction disposition** ([applyDestructionDisposition]): called from
+ *     [SessionStreamingService.onDestroy]. Releases ownership, then applies the
+ *     disposition recorded by [markIntentional] / [rearmUnexpected] using the
+ *     **captured canonical attempt** directly:
+ *     - [ShutdownDisposition.INTENTIONAL] → [SseTransportRuntimeStore.markStopped]
+ *       (no auto-revive; I6);
+ *     - [ShutdownDisposition.UNEXPECTED] →
+ *       [SseTransportRuntimeStore.publishDropped] with
+ *       [TransportDropReason.SERVICE_DESTROYED] (observable by the supervisor).
+ *
+ *     The Service applies the disposition BEFORE the owner's
+ *     [ServiceSseConnectionOwner.cancelForShutdown] (whose markStopped would
+ *     otherwise make the captured attempt stale), so an unacknowledged
+ *     recovery attempt naturally preserves its original drop ticket via the
+ *     runtime's recovery-ticket restore (I4) — no replacement attempt and no
+ *     observable Connecting fallback (Wave-1 blockers #1 + #2).
+ *
+ * If the owner already handled a terminal path (runtime is Dropped/Stopped),
+ * the captured attempt is null → no duplicate drop (M4-3).
+ */
+internal class SseShutdownSeal(
+    private val runtimeStore: SseTransportRuntimeStore,
+    private val ownershipGate: StreamingOwnershipGate,
+) : FencedUnexpectedTransportDropHandler {
+
+    /**
+     * M4 §4.4: the destruction disposition. Defaults to [UNEXPECTED] (system /
+     * process destruction without an intentional stop marker). [markIntentional]
+     * flips it before any normal `stopSelf()` / no-source terminal / user-close
+     * / lifecycle-timeout / bootstrap-rollback path.
+     */
+    internal enum class ShutdownDisposition { UNEXPECTED, INTENTIONAL }
+
+    @Volatile
+    private var disposition: ShutdownDisposition = ShutdownDisposition.UNEXPECTED
+
+    /**
+     * Marks the in-progress destruction as intentional. Called before the
+     * normal `enterNoSourceTerminal` / `stopSelf` / rollback / timeout paths
+     * so [applyDestructionDisposition] publishes Stopped (never Dropped).
+     */
+    fun markIntentional() {
+        disposition = ShutdownDisposition.INTENTIONAL
+    }
+
+    /**
+     * Wave-1 M4 (blocker #4): re-arm the destruction disposition to
+     * [ShutdownDisposition.UNEXPECTED]. Called on each newly accepted
+     * start/bootstrap (see [SessionStreamingService.onStartCommand]) so a
+     * prior intentional `stopSelf` (or any other intentional path) cannot
+     * poison a later unexpected destruction after a start overlap.
+     *
+     * The disposition field is the single in-memory flag consulted by
+     * [applyDestructionDisposition]; it lives for the Service instance.
+     * Without this re-arm, an intentional mark set during a superseded
+     * lifecycle would incorrectly suppress the SERVICE_DESTROYED drop when
+     * the system later destroys the rebuilt Service unexpectedly.
+     */
+    fun rearmUnexpected() {
+        disposition = ShutdownDisposition.UNEXPECTED
+    }
+
+    /**
+     * M1A/M4: the SSE owner routes unexpected transport drops here.
+     *
+     * I3 ordering: release ownership BEFORE publishing Dropped, so consumers
+     * never observe `Dropped + Ready` for the same identity. Both operations
+     * are idempotent — a second call (e.g. the owner's exhaustion path racing
+     * onDestroy) is a safe no-op: [StreamingOwnershipGate.releaseNow] ignores
+     * a non-held identity, and [SseTransportRuntimeStore.publishDropped]
+     * returns null for a stale/already-terminal attempt.
+     */
+    override fun onUnexpectedDrop(attempt: TransportAttemptToken, reason: TransportDropReason) {
+        onUnexpectedDropIfCurrent(attempt, reason)
+    }
+
+    /**
+     * Atomic fence for the release-before-publish contract.  Owner
+     * supersession uses the same monitor, so an old exhaustion callback cannot
+     * release a newer Ready owner for the same identity.
+     */
+    override fun onUnexpectedDropIfCurrent(
+        attempt: TransportAttemptToken,
+        reason: TransportDropReason,
+    ): Boolean = synchronized(this) {
+        val current = runtimeStore.currentAttempt(attempt.identity)
+        if (current?.attemptId != attempt.attemptId) return@synchronized false
+        ownershipGate.releaseNow(attempt.identity)
+        runtimeStore.publishDropped(attempt, reason) != null
+    }
+
+    /**
+     * M4 §4.4 (Wave-1 blockers #1 + #2): applies the onDestroy disposition
+     * using the **captured canonical attempt** directly — no replacement
+     * attempt, no observable Connecting fallback.
+     *
+     * The Service captures the active attempt BEFORE any runtime
+     * terminalization and calls this BEFORE [ServiceSseConnectionOwner.cancelForShutdown]
+     * (whose own markStopped would otherwise make the captured attempt
+     * stale). With the captured attempt still canonical here:
+     *  - INTENTIONAL → [SseTransportRuntimeStore.markStopped] (idempotent);
+     *  - UNEXPECTED  → [SseTransportRuntimeStore.publishDropped] with
+     *    [TransportDropReason.SERVICE_DESTROYED].
+     *
+     * **Recovery-ticket conservation**: for an unacknowledged RECOVERY
+     * attempt (the captured attempt carries a non-null `recoveryTicket`),
+     * [publishDropped] restores the EXACT same drop ticket (I4) — same
+     * dropId + same original reason. No fresh ticket is allocated and the
+     * supervisor's tracked dropId survives the mid-recovery destruction.
+     *
+     * Ownership is released FIRST (I3: consumers never observe a terminal
+     * runtime alongside a lingering Ready owner). A null [attempt] (the
+     * owner already handled a terminal path → the runtime holds no
+     * canonical attempt) is a clean no-op: ownership is still released (if
+     * [identity] is non-null) but no drop/stopped is published — no
+     * duplicate drop (M4-3). [publishDropped] / [markStopped] are
+     * individually idempotent for a stale/foreign attempt, so a racing
+     * terminal path is also a safe no-op.
+     */
+    fun applyDestructionDisposition(
+        identity: ConnectionIdentity?,
+        attempt: TransportAttemptToken?,
+    ) = synchronized(this) {
+        val token = attempt
+        if (token != null) {
+            val current = runtimeStore.currentAttempt(token.identity)
+            if (current?.attemptId != token.attemptId) return@synchronized
+        }
+        // I3: release ownership FIRST (consumers never observe Dropped/Stopped
+        // + Ready for the same identity). releaseNow is idempotent for a
+        // non-held identity.
+        if (identity != null) ownershipGate.releaseNow(identity)
+        if (token == null) return@synchronized
+        when (disposition) {
+            ShutdownDisposition.INTENTIONAL -> runtimeStore.markStopped(token)
+            ShutdownDisposition.UNEXPECTED -> runtimeStore.publishDropped(
+                token,
+                TransportDropReason.SERVICE_DESTROYED,
+            )
+        }
     }
 }

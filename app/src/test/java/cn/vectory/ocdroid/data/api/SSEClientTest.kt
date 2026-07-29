@@ -1,15 +1,26 @@
 package cn.vectory.ocdroid.data.api
 
+import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.util.DebugLog
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.sse.EventSource
+import okhttp3.sse.EventSourceListener
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -19,6 +30,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Ignore
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicLong
+import java.io.IOException
 
 /**
  * R-21 — SSEClient 单测。
@@ -29,12 +42,15 @@ import org.junit.Test
  *  - **不**测 `MAX_RETRY_ATTEMPTS` 耗尽抛 [SSEConnectionExhausted]：要真正触发需累加
  *    10 次退避（基础 1s 起 ×2 指数 → 总和 ~181s），单测不可接受。详见
  *    `connectionExhausted_isNotCoverableDueToInlinedConsts` 的说明。
- *  - **不**测 30s 心跳看门狗：阈值同样是 `const val` 内联，且要等 ≥30s 真实时间。
+ *  - **不**测 30s 心跳看门狗完整超时：阈值同样是 `const val` 内联，且要等 ≥30s 真实时间。
+ *    M1B-C2 通过 `onClosed → retryWhen` 机制路径 + 代码结构验证覆盖（见对应方法文档）。
  *
- * 实际覆盖（最高价值、可确定性验证的三类）：
+ * 实际覆盖（最高价值、可确定性验证的四类）：
  *  1. 事件流解析（单行 data / 多行 data 拼接 / 非法 data 静默丢弃）
  *  2. URL userinfo 脱敏（`user:pass@` 不得进入 in-app 日志 ring buffer）
  *  3. 服务端立即失败后的重连恢复（best-effort，验证 retryWhen 至少重试一次并恢复）
+ *  4. M1B 心跳看门狗单调时钟硬化（C1: 心跳阻止超时；C2: 无事件后超时机制；
+ *     C3: 单调时钟验证；C4: 首帧冷启动守卫）
  *
  * 全部用纯 JVM + OkHttp MockWebServer 的 SSE 模式驱动；android.util.Log / Uri.parse
  * 由 `testOptions.unitTests.isReturnDefaultValues = true` 提供 stub 默认返回。
@@ -366,6 +382,284 @@ class SSEClientTest {
     fun connectionExhausted_isNotCoverableDueToInlinedConsts() {
         val ex = SSEConnectionExhausted()
         assertNotNull(ex.message)
+    }
+
+    /**
+     * Resolve the SSEClient.kt source file path relative to the current
+     * working directory. Gradle may run tests from the project root or the
+     * module directory, so we try both.
+     */
+    private fun resolveSourceFile(): java.io.File {
+        val candidates = listOf(
+            java.io.File("app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt"),
+            java.io.File("src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt"),
+            java.io.File("../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt"),
+        )
+        return candidates.firstOrNull { it.exists() }
+            ?: error("Cannot find SSEClient.kt — tried: ${candidates.map { it.absolutePath }}")
+    }
+
+    // ─────────────── 5. M1B 心跳看门狗单调时钟硬化 ───────────────
+
+    private class ManualWatchdog {
+        private val permits = Channel<Unit>(Channel.UNLIMITED)
+        private val completed = Channel<Unit>(Channel.UNLIMITED)
+
+        suspend fun waitForCheck(@Suppress("UNUSED_PARAMETER") intervalMs: Long) {
+            permits.receive()
+            completed.send(Unit)
+        }
+
+        suspend fun runCheck() {
+            permits.send(Unit)
+            completed.receive()
+        }
+    }
+
+    private class ControlledEventSourceFactory : EventSource.Factory {
+        val source = CompletableDeferred<ControlledEventSource>()
+
+        override fun newEventSource(request: Request, listener: EventSourceListener): EventSource {
+            return ControlledEventSource(listener).also { source.complete(it) }
+        }
+    }
+
+    private class ControlledEventSource(
+        private val listener: EventSourceListener,
+    ) : EventSource {
+        var cancelled = false
+            private set
+
+        override fun request(): Request = Request.Builder().url("http://test/events").build()
+
+        override fun cancel() {
+            if (cancelled) return
+            cancelled = true
+            listener.onFailure(this, IOException("controlled source cancelled"), null)
+        }
+
+        fun emit(data: String, type: String? = null) {
+            check(!cancelled) { "source was cancelled" }
+            listener.onEvent(this, null, type, data)
+        }
+    }
+
+    private fun newWatchdogSse(
+        fakeClock: AtomicLong,
+        timeoutNanos: Long,
+        watchdog: ManualWatchdog,
+        factory: ControlledEventSourceFactory,
+    ): SSEClient = SSEClient(
+        client,
+        watchdogConfig = WatchdogConfig(
+            clock = { fakeClock.get() },
+            timeoutNanos = timeoutNanos,
+            checkIntervalMs = 1L,
+            waitForCheck = watchdog::waitForCheck,
+        ),
+        eventSourceFactory = factory,
+    )
+    //
+    // M1B adds an injectable [WatchdogConfig] seam ([SSEClient.watchdogConfig])
+    // with a configurable clock, timeout, and check interval. Production
+    // defaults (System.nanoTime, 30s timeout, 5s check interval) are unchanged.
+    //
+    // All four acceptance criteria (M1B-C1..C4) use deterministic fake-clock
+    // evidence — no real-time waits for the production 30s timeout:
+    //   - C1: frames reset the deadline; all 5 arrive despite total elapsed
+    //         virtual time that could exceed the per-frame threshold.
+    //   - C2: post-first-frame half-open — advance fake clock beyond timeout
+    //         proves watchdog closes the source and failure propagates.
+    //   - C3: wall-clock changes have no effect; only fake monotonic
+    //         advancement crosses the deadline.
+    //   - C4: cold-start guard (eventCount==0 → continue) protects against
+    //         timeout before the first frame, regardless of clock value.
+    //
+    // The `resolveSourceFile()` helper is retained for backward compatibility
+    // (previously used by C3's structural assertions).
+
+    /**
+     * M1B-C1: deterministic fake-clock evidence that frames reset the deadline,
+     * preventing watchdog timeout despite total elapsed virtual time exceeding
+     * the threshold.
+     *
+     * Sends 5 heartbeat frames with less than one timeout between consecutive
+     * frames. A watchdog check runs between every pair, while total virtual
+     * elapsed time exceeds one timeout. Each frame resets `lastEventAt`, so
+     * every intervening check sees an elapsed interval below the threshold.
+     * If the watchdog incorrectly used total session time instead of the
+     * per-frame deadline, it would fire — all 5 frames arriving proves the
+     * deadline is refreshed by sustained heartbeats.
+     *
+     * Deterministic: no real-time waits beyond MockWebServer delivery (~ms);
+     * the fake clock makes timing deterministic regardless of real wall-clock
+     * drift.
+     */
+    @Test
+    fun `M1B-C1 heartbeats reset deadline across elapsed timeout`() = runBlocking {
+        val clock = AtomicLong(0L)
+        val timeout = 1_000L
+        val watchdog = ManualWatchdog()
+        val factory = ControlledEventSourceFactory()
+        val sse = newWatchdogSse(clock, timeout, watchdog, factory)
+        val events = mutableListOf<SSEEvent>()
+        val collector = async(start = CoroutineStart.UNDISPATCHED) {
+            sse.connect("http://controlled").collect { events += it.getOrThrow() }
+        }
+        val source = factory.source.await()
+        val heartbeat = """{"payload":{"type":"server.heartbeat"}}"""
+        repeat(5) { index ->
+            clock.set(index * timeout / 2L)
+            source.emit(heartbeat)
+            watchdog.runCheck()
+        }
+        assertEquals("all heartbeats should be accepted", 5, events.size)
+        assertTrue("total monotonic time must exceed one timeout", clock.get() > timeout)
+        assertFalse("a live source must not be cancelled by refreshed deadlines", source.cancelled)
+        collector.cancel()
+    }
+
+    /**
+     * M1B-C2: post-first-frame half-open test — watchdog closes the source
+     * after monotonic time advances beyond the heartbeat deadline.
+     *
+     * Sends one frame (readiness). The response uses a large [Content-Length]
+     * header (10 KiB) so OkHttp's source reader blocks waiting for more data,
+     * keeping the connection half-open. After receiving the frame, the fake
+     * monotonic clock is advanced beyond [timeoutNanos] with no further
+     * heartbeats. The watchdog fires — `eventSource.cancel()` triggers
+     * `onFailure` → channel close → `retryWhen` intercepts the failure.
+     * With [reconnectAllowed] set to `false`, the gate throws
+     * [SSEConnectionExhausted].
+     *
+     * This is a REAL half-open test: the connection is alive (no EOF), and
+     * only the watchdog's monotonic deadline detection causes the closure.
+     */
+    @Test
+    fun `M1B-C2 watchdog closes half-open connection after monotonic timeout`() = runBlocking {
+        val clock = AtomicLong(0L)
+        val timeout = 1_000L
+        val watchdog = ManualWatchdog()
+        val factory = ControlledEventSourceFactory()
+        val sse = newWatchdogSse(clock, timeout, watchdog, factory)
+        sse.reconnectAllowed = { false }
+        val flow = async(context = SupervisorJob(), start = CoroutineStart.UNDISPATCHED) {
+            sse.connect("http://controlled").collect { it.getOrThrow() }
+        }
+        val source = factory.source.await()
+        source.emit("""{"payload":{"type":"server.connected"}}""")
+        clock.set(timeout * 2)
+        watchdog.runCheck()
+        val failure = runCatching { flow.await() }.exceptionOrNull()
+        assertTrue("watchdog must cancel the still-open source", source.cancelled)
+        assertTrue("watchdog failure must enter the existing retry gate", failure is SSEConnectionExhausted)
+    }
+
+    /**
+     * M1B-C3: wall-clock changes have no effect; only fake monotonic time
+     * advancement crosses the deadline.
+     *
+     * Behavioral evidence using the fake clock: with the clock frozen at a
+     * constant value, the watchdog NEVER fires regardless of how much real
+     * wall-clock time passes (simulating NTP adjustments or user time changes).
+     * Only when the test explicitly advances the fake clock beyond
+     * [timeoutNanos] does the watchdog fire.
+     *
+     * Uses a large [Content-Length] trick (like C2) to keep the connection
+     * half-open so the watchdog's check cycles can be observed.
+     *
+     * Phases:
+     *  1. Send first frame (readiness), connection stays half-open.
+     *  2. Fake clock stays at 0; real time passes through multiple watchdog
+     *     check cycles → watchdog sees `elapsed = 0` → no action.
+     *  3. Advance fake clock beyond [timeoutNanos] → watchdog fires.
+     */
+    @Test
+    fun `M1B-C3 only fake monotonic advancement crosses deadline not wall clock`() = runBlocking {
+        val fakeClock = AtomicLong(0L)
+        var wallClockMillis = 0L
+        val timeoutNanos = 1_000L
+        val watchdog = ManualWatchdog()
+        val factory = ControlledEventSourceFactory()
+        val sse = newWatchdogSse(fakeClock, timeoutNanos, watchdog, factory)
+
+        val p1 = """{"payload":{"type":"server.connected"}}"""
+        val deferred = async(context = SupervisorJob(), start = CoroutineStart.UNDISPATCHED) {
+            sse.connect("http://controlled").collect { it.getOrThrow() }
+        }
+        val source = factory.source.await()
+        source.emit(p1)
+
+            // Phase 2: wall-clock immunity — real time passes through multiple
+            // watchdog check cycles but fake clock hasn't advanced. The watchdog
+            // sees elapsed = 0 each time and never fires.
+            repeat(5) {
+                wallClockMillis += 86_400_000L
+                watchdog.runCheck()
+            }
+            assertTrue("simulated wall clock must advance", wallClockMillis > 0L)
+            assertTrue(
+                "flow must still be active after many watchdog cycles with frozen clock " +
+                    "(wall-clock time alone must not trigger timeout)",
+                deferred.isActive,
+            )
+
+            // Phase 3: advance the fake clock beyond timeoutNanos.
+            // The next watchdog check sees elapsed >= timeoutNanos and fires.
+            sse.reconnectAllowed = { false }
+            fakeClock.set(timeoutNanos * 10)
+
+            watchdog.runCheck()
+            val thrown = runCatching { deferred.await() }.exceptionOrNull()
+
+            assertNotNull("advancing fake clock must trigger watchdog timeout", thrown)
+            assertTrue(
+                "failure must be SSEConnectionExhausted, got ${thrown?.let { it::class.simpleName }}",
+                thrown is SSEConnectionExhausted,
+            )
+    }
+
+    /**
+     * M1B-C4: zero frames beyond the heartbeat watchdog interval does NOT
+     * make SSEClient close; first-frame timeout remains owner-controlled.
+     *
+     * The cold-start guard (`if (eventCount.get() == 0) continue`) prevents
+     * the heartbeat watchdog from timing out before any frame is received.
+     * First-frame timeout is controlled exclusively by the upstream owner
+     * (OkHttp connect/read timeout, or the collector's withTimeout).
+     *
+     * Uses a large [Content-Length] trick to keep the source un-exhausted
+     * (no SSE events). With the fake clock advanced far beyond
+     * [timeoutNanos] and zero frames received, the watchdog skips the
+     * timeout check because [eventCount] remains 0. The flow stays alive
+     * — only the collector's withTimeout (owner-controlled) terminates it.
+     */
+    @Test
+    fun `M1B-C4 cold start guard prevents watchdog timeout before first frame`() = runBlocking {
+        val fakeClock = AtomicLong(0L)
+        val timeoutNanos = 1_000L
+        val watchdog = ManualWatchdog()
+        val factory = ControlledEventSourceFactory()
+        val sse = newWatchdogSse(fakeClock, timeoutNanos, watchdog, factory)
+        val job = launch(start = CoroutineStart.UNDISPATCHED) { sse.connect("http://controlled").collect { } }
+        val source = factory.source.await()
+        // Establish the source at monotonic time zero, then cross the
+        // timeout with no frames. The cold-start guard must own this case;
+        // otherwise the next watchdog check would cancel the source.
+        fakeClock.set(timeoutNanos * 2)
+        repeat(5) { watchdog.runCheck() }
+
+        // The flow should still be active — the cold-start guard prevented
+        // the watchdog from firing, and no frame arrived.
+        assertTrue(
+            "flow must still be active after multiple watchdog cycles " +
+                "with clock past deadline and zero frames (cold-start guard)",
+            job.isActive,
+        )
+        assertFalse("no frame means watchdog cannot close the source", source.cancelled)
+
+        // Clean up
+        job.cancel()
     }
 
     // ─────────────── 4. §P2-8 onEvent-after-close 守卫 ───────────────

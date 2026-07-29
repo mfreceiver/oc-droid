@@ -4,6 +4,7 @@ import cn.vectory.ocdroid.data.model.ResyncReason
 import cn.vectory.ocdroid.data.model.TokenStreamFrame
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.AppAction
+import cn.vectory.ocdroid.ui.NavState
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.StreamOwnedState
@@ -13,6 +14,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -80,6 +83,13 @@ class TokenStreamCoordinatorTest {
         coordinator = buildCoordinator(watchdogMs = 10_000L)
     }
 
+    // L4 §3.2: nullable so tests can simulate "not on a chat route"
+    // (visibleChatSessionId == null). Existing tests assign non-null values,
+    // and the visibleChatSessionId lambda already returns String? — so widening
+    // the type from String to String? is backward-compatible.
+    private var testVisibleSid: String? = "s1"
+    private var testInForeground: Boolean = true
+
     private fun buildCoordinator(
         watchdogMs: Long = 10_000L,
         openDebounceMs: Long = 0L,
@@ -91,6 +101,15 @@ class TokenStreamCoordinatorTest {
         retryAfter503Ms: Long = 20L,
         maxConsecutive503: Int = 3,
         sseDisabled: () -> Boolean = { false },
+        // L4 Phase-1: test fixtures for foreground/route gate.
+        appInForeground: () -> Boolean = { testInForeground },
+        visibleChatSessionId: () -> String? = { testVisibleSid },
+        // L4 Phase-1 (lane-1): inject REAL observable signals to install the
+        // foreground + route observers (default null → observers NOT installed,
+        // preserving the snapshot-only-gating behavior every existing test
+        // relies on). The snapshot lambdas above drive the open() gate itself.
+        foregroundSignal: StateFlow<Boolean>? = null,
+        navFlow: StateFlow<NavState>? = null,
     ): TokenStreamCoordinator = TokenStreamCoordinator(
         scope = scope,
         slices = slices,
@@ -98,6 +117,10 @@ class TokenStreamCoordinatorTest {
         streamConnectionProvider = streamConnectionProvider,
         bundleCommitLock = bundleRepository,
         currentBundleProvider = currentBundleProvider,
+        appInForeground = appInForeground,
+        visibleChatSessionId = visibleChatSessionId,
+        foregroundSignal = foregroundSignal,
+        navFlow = navFlow,
         triggerSinceFetch = triggerSinceFetch,
         openDebounceMs = openDebounceMs,
         watchdogPollMs = 10L,
@@ -179,6 +202,7 @@ class TokenStreamCoordinatorTest {
         assertEquals("s1", fake.lastOpenedSid)
         val aChannel = fake.currentChannel
         assertNotNull(aChannel)
+        testVisibleSid = "s2"
         coordinator.open("s2")
         runPending()
         assertEquals("s2", fake.lastOpenedSid)
@@ -293,6 +317,7 @@ class TokenStreamCoordinatorTest {
         val debounced = buildCoordinator(openDebounceMs = 50L)
         debounced.open("s1")
         // Immediately superseded before the debounce window elapses.
+        testVisibleSid = "s2"
         debounced.open("s2")
         scope.advanceTimeBy(100L)
         runPending()
@@ -795,6 +820,7 @@ class TokenStreamCoordinatorTest {
         assertEquals("stale sentinel precondition", "s1", coordinator.reconnectRequestedSnapshot())
 
         // open("s2") must clear the stale sentinel via set(null).
+        testVisibleSid = "s2"
         coordinator.open("s2")
         runPending()
         assertNull(
@@ -909,7 +935,245 @@ class TokenStreamCoordinatorTest {
         assertTrue("re-open after reset should call provider again", fifty.openCount.get() > countAfterDegrade)
     }
 
+    // ── L4 §3.2: token-stream foreground + route gate ──────────────────────
+    //
+    // The open() gate (~:665-671) rejects when !appInForeground() OR
+    // visibleChatSessionId()==null OR !=sid, recording `desired` for a later
+    // reopen. Two observers (installed only when foregroundSignal/navFlow are
+    // non-null) drive reopen semantics:
+    //   - foreground observer: background → suspendClose (records desired,
+    //     does NOT clear); foreground → reopen desired if route matches.
+    //   - route observer (navFlow path, authoritative): leaving the active
+    //     session → suspendClose; returning to the desired session (no active
+    //     stream) → reopen; a NON-matching route RE-STORES desired (keeps it).
+    // Explicit close(sid) (~:818) CLEARS desired → no auto-reopen; suspendClose
+    // (~:844) does NOT clear it.
+    //
+    // The tests inject a REAL MutableStateFlow as foregroundSignal / navFlow so
+    // the observers are actually installed, and drive transitions by mutating
+    // the flow value (+ bumpNav for StateFlow re-emission). open()'s own gate
+    // still reads the snapshot lambdas (testInForeground / testVisibleSid); for
+    // foreground-observer tests appInForeground is bound to the same flow so the
+    // gate and observer never disagree.
+
+    @Test
+    fun `L4 open gate - background open is rejected with no stream established`() {
+        testInForeground = false
+        coordinator.open("s1")
+        runPending()
+        assertNoStream(coordinator, 0)
+    }
+
+    @Test
+    fun `L4 open gate - visible sid mismatch rejects the open`() {
+        testVisibleSid = "other"
+        coordinator.open("s1")
+        runPending()
+        assertNoStream(coordinator, 0)
+    }
+
+    @Test
+    fun `L4 open gate - null visible sid (not on chat route) rejects the open`() {
+        testVisibleSid = null
+        coordinator.open("s1")
+        runPending()
+        assertNoStream(coordinator, 0)
+    }
+
+    @Test
+    fun `L4 open gate - foreground plus matching visible sid lets the open through`() {
+        // testInForeground defaults true; testVisibleSid defaults "s1".
+        coordinator.open("s1")
+        runPending()
+        assertStreamActive(coordinator, 1)
+    }
+
+    @Test
+    fun `L4 foreground observer - app to background suspends the active stream and records desired`() {
+        val fgSignal = MutableStateFlow(true)
+        val c = buildCoordinator(foregroundSignal = fgSignal, appInForeground = { fgSignal.value })
+        c.open("s1")
+        runPending()
+        assertStreamActive(c, 1)
+
+        // App → background: foreground observer suspendCloses the active stream.
+        fgSignal.value = false
+        runPending()
+
+        val job = c.currentStreamJobSnapshot()
+        assertNotNull("suspendClose keeps the (cancelled) job ref", job)
+        assertFalse("suspendClose must cancel the active stream job", job?.isActive == true)
+        assertEquals("SSE collector torn down on background", 0, fake.liveCollectors.get())
+        assertEquals("no spurious reopen while in background", 1, fake.openCount.get())
+    }
+
+    @Test
+    fun `L4 foreground observer - app to foreground reopens the desired stream when route still matches`() {
+        val fgSignal = MutableStateFlow(true)
+        val c = buildCoordinator(foregroundSignal = fgSignal, appInForeground = { fgSignal.value })
+        c.open("s1")
+        runPending()
+        fgSignal.value = false // suspend → desired = (s1)
+        runPending()
+
+        // App → foreground: desired reopens because the route still matches s1
+        // (testVisibleSid defaults "s1"). open()'s gate passes (fg=true).
+        fgSignal.value = true
+        runPending()
+
+        assertStreamActive(c, 2)
+    }
+
+    @Test
+    fun `L4 route observer - leaving the chat route suspends the active stream`() {
+        val navSignal = MutableStateFlow(NavState(navEpoch = 0))
+        val c = buildCoordinator(navFlow = navSignal)
+        c.open("s1")
+        runPending()
+        assertStreamActive(c, 1)
+
+        // Route leaves chat (visible sid → null) → suspendClose.
+        testVisibleSid = null
+        bumpNav(navSignal)
+        runPending()
+
+        val job = c.currentStreamJobSnapshot()
+        assertNotNull("suspendClose keeps the (cancelled) job ref", job)
+        assertFalse("route-leave must suspendClose the active stream", job?.isActive == true)
+        assertEquals("SSE collector torn down on route leave", 0, fake.liveCollectors.get())
+    }
+
+    @Test
+    fun `L4 route observer - returning to the desired session reopens the stream`() {
+        val navSignal = MutableStateFlow(NavState(navEpoch = 0))
+        val c = buildCoordinator(navFlow = navSignal)
+        c.open("s1")
+        runPending()
+        testVisibleSid = null // suspend → desired = (s1), no active stream
+        bumpNav(navSignal)
+        runPending()
+
+        // Route returns to the session (no active stream) → desired reopens.
+        testVisibleSid = "s1"
+        bumpNav(navSignal)
+        runPending()
+
+        assertStreamActive(c, 2)
+    }
+
+    @Test
+    fun `L4 explicit close clears desired - no auto-reopen on foreground or route return`() {
+        val fgSignal = MutableStateFlow(true)
+        val navSignal = MutableStateFlow(NavState(navEpoch = 0))
+        val c = buildCoordinator(
+            foregroundSignal = fgSignal,
+            appInForeground = { fgSignal.value },
+            navFlow = navSignal,
+        )
+        c.open("s1")
+        runPending()
+        assertStreamActive(c, 1)
+
+        // Explicit close CLEARS desired for s1 (unlike suspendClose).
+        c.close("s1")
+        runPending()
+
+        // A full foreground cycle must NOT reopen (desired was cleared).
+        fgSignal.value = false
+        runPending()
+        fgSignal.value = true
+        runPending()
+
+        // A full route cycle must NOT reopen either.
+        testVisibleSid = null
+        bumpNav(navSignal)
+        runPending()
+        testVisibleSid = "s1"
+        bumpNav(navSignal)
+        runPending()
+
+        assertEquals("explicit close clears desired — no auto-reopen", 1, fake.openCount.get())
+        val job = c.currentStreamJobSnapshot()
+        if (job != null) assertFalse("no active stream survives the cycles", job.isActive)
+    }
+
+    @Test
+    fun `L4 route observer - non-matching route keeps desired, later route-return reopens`() {
+        // This case requires the navFlow (authoritative) path: the legacy chat
+        // fallback CONSUMES desired on a non-matching route, so it cannot
+        // express "desired persists across a mismatching route".
+        val navSignal = MutableStateFlow(NavState(navEpoch = 0))
+        // Start in the background so open()'s gate DENIES and records desired
+        // WITHOUT establishing a stream (a clean "desired recorded, idle" state).
+        testInForeground = false
+        val c = buildCoordinator(navFlow = navSignal)
+        c.open("s1", "/work")
+        runPending()
+        assertNoStream(c, 0)
+
+        // Route changes to a NON-matching session while desired is recorded.
+        // The navFlow path re-stores desired (does NOT consume it).
+        testVisibleSid = "s2"
+        bumpNav(navSignal)
+        runPending()
+        assertEquals("no stream while route mismatches the desired session", 0, fake.openCount.get())
+
+        // Route returns to the desired session AND the gate now allows it.
+        testInForeground = true
+        testVisibleSid = "s1"
+        bumpNav(navSignal)
+        runPending()
+
+        // desired persisted across the non-matching route → reopened on return.
+        assertEquals("desired persisted — reopened on route return", 1, fake.openCount.get())
+        assertEquals("s1", fake.lastOpenedSid)
+        assertTrue("stream active after route-return reopen", c.currentStreamJobSnapshot()?.isActive == true)
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────
+
+    /**
+     * L4 gate assertions: asserts the coordinator currently has an ACTIVE
+     * token-stream lifecycle and that the provider has been called
+     * [expectedOpenCount] times. The shared [fake] is per-test (re-seeded in
+     * [setUp]), so the count is absolute within a single test.
+     */
+    private fun assertStreamActive(c: TokenStreamCoordinator, expectedOpenCount: Int) {
+        assertEquals(
+            "provider should have been called $expectedOpenCount time(s)",
+            expectedOpenCount,
+            fake.openCount.get(),
+        )
+        val job = c.currentStreamJobSnapshot()
+        assertNotNull("an active stream job should exist", job)
+        assertTrue("stream job should be active", job?.isActive == true)
+    }
+
+    /**
+     * L4 gate assertions: asserts NO stream was established (the gate denied
+     * the open, or a teardown left the coordinator idle) and the provider was
+     * NOT invoked beyond [expectedOpenCount].
+     */
+    private fun assertNoStream(c: TokenStreamCoordinator, expectedOpenCount: Int) {
+        assertEquals(
+            "provider should NOT have been called for a denied open",
+            expectedOpenCount,
+            fake.openCount.get(),
+        )
+        assertNull("no stream job should exist for a denied open", c.currentStreamJobSnapshot())
+    }
+
+    /**
+     * L4 route-observer driver: bumps [NavState.navEpoch] so the
+     * [MutableStateFlow] emits a structurally-distinct value (StateFlow only
+     * re-notifies collectors when the new value != the old by equality). This
+     * re-fires the route observer, which re-reads [testVisibleSid] (the
+     * `visibleChatSessionId` snapshot) for the new ROUTE truth.
+     */
+    private fun bumpNav(navSignal: MutableStateFlow<NavState>) {
+        val cur = navSignal.value
+        navSignal.value = cur.copy(navEpoch = cur.navEpoch + 1)
+    }
 
     /** Backing data for assertion on TriggerSinceFetch callback arguments. */
     private data class SinceFetchCall(val sid: String, val auth: Boolean)

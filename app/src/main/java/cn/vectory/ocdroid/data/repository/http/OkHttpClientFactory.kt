@@ -39,7 +39,7 @@ import java.util.concurrent.TimeUnit
  * The base chain (see [baseBuilder]) composes, in order:
  *  1. SSL + cache (per [hostPort]).
  *  2. R-07 log gate: `BASIC` in DEBUG builds, `NONE` in release.
- *  3. [DirectoryHeaderInterceptor] → [SlimapiVersionInterceptor] → [AuthInterceptor] → [CacheControlInterceptor].
+ *  3. [DirectoryHeaderInterceptor] → [SlimapiVersionInterceptor] → [ClientIdentityInterceptor] → [AuthInterceptor] → [CacheControlInterceptor].
  *  4. [TrafficCountingInterceptor].
  *  5. `connectTimeout(10 s)`.
  *
@@ -51,11 +51,19 @@ import java.util.concurrent.TimeUnit
  * `X-Slimapi-Version` when `HostConfig.slim == true` and the path is under
  * `/slimapi/`. SSE coverage is critical (`/slimapi/events`); a separate
  * SSE-only wiring would be a leak hazard.
+ *
+ * §B (slimapi-v2-adapt-traffic-plan §B): [ClientIdentityInterceptor] sits
+ * immediately AFTER [SlimapiVersionInterceptor] (route gate first, then
+ * additive identity), so the same `/slimapi/` + `slimHost` gating covers
+ * `X-Client-Name` / `X-Client-Version` / `X-Client-Id` on REST / SSE /
+ * mutation / command / token-stream. Identity is additive + backward-
+ * compatible (sidecar works if absent).
  */
 class OkHttpClientFactory private constructor(
     private val sslConfigFactory: SslConfigFactory,
     private val directoryHeaderInterceptor: DirectoryHeaderInterceptor,
     private val slimapiVersionInterceptor: SlimapiVersionInterceptor,
+    private val clientIdentityInterceptor: ClientIdentityInterceptor,
     private val slimapiDebugInterceptor: SlimapiDebugInterceptor,
     private val authInterceptor: AuthInterceptor,
     private val cacheControlInterceptor: CacheControlInterceptor,
@@ -70,6 +78,7 @@ class OkHttpClientFactory private constructor(
         sslConfigFactory: SslConfigFactory,
         directoryHeaderInterceptor: DirectoryHeaderInterceptor,
         slimapiVersionInterceptor: SlimapiVersionInterceptor,
+        clientIdentityInterceptor: ClientIdentityInterceptor,
         slimapiDebugInterceptor: SlimapiDebugInterceptor,
         authInterceptor: AuthInterceptor,
         cacheControlInterceptor: CacheControlInterceptor,
@@ -79,6 +88,7 @@ class OkHttpClientFactory private constructor(
         sslConfigFactory = sslConfigFactory,
         directoryHeaderInterceptor = directoryHeaderInterceptor,
         slimapiVersionInterceptor = slimapiVersionInterceptor,
+        clientIdentityInterceptor = clientIdentityInterceptor,
         slimapiDebugInterceptor = slimapiDebugInterceptor,
         authInterceptor = authInterceptor,
         cacheControlInterceptor = cacheControlInterceptor,
@@ -123,6 +133,13 @@ class OkHttpClientFactory private constructor(
             sslConfigFactory = sslConfigFactory,
             directoryHeaderInterceptor = directoryHeaderInterceptor,
             slimapiVersionInterceptor = SlimapiVersionInterceptor(snapshot),
+            // §B: rebuild with the new HostSnapshot but reuse the SAME
+            // clientIdProvider (the device id is host-independent — it is
+            // resolved lazily from the singleton ClientIdStore).
+            clientIdentityInterceptor = ClientIdentityInterceptor(
+                snapshot,
+                clientIdentityInterceptor.clientIdProvider,
+            ),
             slimapiDebugInterceptor = slimapiDebugInterceptor,
             authInterceptor = AuthInterceptor(snapshot),
             cacheControlInterceptor = CacheControlInterceptor(snapshot, sanitizer),
@@ -166,6 +183,11 @@ class OkHttpClientFactory private constructor(
             // auth 之前——版本头是路由门闩，逻辑上先于 auth/cache-control；同时
             // directory interceptor 不会触碰 /slimapi/ 路径，无顺序耦合。
             .addInterceptor(slimapiVersionInterceptor)
+            // §B (slimapi-v2-adapt-traffic-plan §B): additive 客户端身份头
+            // （X-Client-Name / -Version / -Id）。紧随 slimapiVersionInterceptor
+            // 之后——路由门闩先过，再挂 additive 身份；二者共用 /slimapi/ + slimHost
+            // 双门闩，互无顺序耦合。additive + 向后兼容（缺头 sidecar 仍工作）。
+            .addInterceptor(clientIdentityInterceptor)
             // V2 removed Opt-A capability header — no capability interceptor.
             // POST-RELEASE instrumentation (slimapi-client-v1): dedicated
             // slimapi DEBUG interceptor — logs method/encodedPath/version
@@ -407,6 +429,10 @@ class OkHttpClientFactory private constructor(
             })
             // Deliberately NOT directoryHeaderInterceptor — see kdoc above.
             .addInterceptor(slimapiVersionInterceptor)
+            // §B: identity headers (X-Client-Name / -Version / -Id) on the
+            // token stream too — the path is /slimapi/sessions/{sid}/stream,
+            // so the same /slimapi/ identity contract applies.
+            .addInterceptor(clientIdentityInterceptor)
             .addInterceptor(authInterceptor)
             .addInterceptor(trafficCountingInterceptor)
             .connectTimeout(10, TimeUnit.SECONDS)

@@ -116,6 +116,7 @@ class B2RouteWiringSequenceTest {
         override fun isFlushActiveForPart(partId: String): Boolean = false
         override fun handleSessionDigest(event: SSEEvent) {}
         override fun markLocallyInjected(sessionId: String, messageId: String) {}
+        override fun closeSkeletonSession(sessionId: String) {}
         override fun dispatchBundleBound(
             actionFactory: (cn.vectory.ocdroid.ui.BundleStamp) -> cn.vectory.ocdroid.ui.AppAction,
         ): Boolean {
@@ -156,6 +157,8 @@ class B2RouteWiringSequenceTest {
         triggerSinceFetch = { sid, auth -> sinceFetchCalls += sid to auth },
         bundleCommitLock = bundleRepository,
         currentBundleProvider = { bundleRepository.currentClientBundle() },
+        appInForeground = { true },
+        visibleChatSessionId = { "A" },
         openDebounceMs = 0L,
         watchdogPollMs = 10L,
         watchdogMs = 10_000L,

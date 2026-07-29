@@ -8,7 +8,6 @@ import cn.vectory.ocdroid.service.events.SseEventStream
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
-import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.UiEvent
@@ -24,6 +23,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+
+/** Shared monitor/fence for owner supersession and unexpected-drop routing. */
+internal interface FencedUnexpectedTransportDropHandler : UnexpectedTransportDropHandler {
+    fun onUnexpectedDropIfCurrent(
+        attempt: TransportAttemptToken,
+        reason: TransportDropReason,
+    ): Boolean
+}
 
 /**
  * CP9 (notify Phase-0 switchover): the live SSE collector that USED to live
@@ -122,6 +129,14 @@ class ServiceSseConnectionOwner(
     },
     private val onTerminalExhaustion: () -> Unit,
     /**
+     * L4 §3.1: gate for SSE reconnect. Called before each service-level retry
+     * AND passed through to [SSEClient.connect.reconnectAllowed] for the
+     * SSEClient's internal retryWhen. When false, the retry is suppressed
+     * (the socket was in background grace and reconnect must not be attempted).
+     * Default `{ true }` preserves existing behavior.
+     */
+    private val reconnectAllowed: () -> Boolean = { true },
+    /**
      * Cluster A (slim SSE): cold-start / resync path. Two SEPARATE triggers
      * (B2 fix — rev-grok 🔴2):
      *
@@ -153,6 +168,44 @@ class ServiceSseConnectionOwner(
      * q-p frame will re-drive incremental state.
      */
     private val onResync: suspend (isStillCurrent: () -> Boolean) -> Unit = { _ -> },
+    /**
+     * L4 §2 / §3 (M1A): the process-level transport-truth authority. The
+     * owner is the ONLY producer of transport state transitions: an accepted
+     * connect [SseTransportRuntimeStore.beginAttempt]s a generation-scoped
+     * attempt; the first valid frame [SseTransportRuntimeStore.markLive]s it;
+     * a post-Live collection failure [SseTransportRuntimeStore.markRetrying]s
+     * it; unexpected terminal paths route through [dropHandler]; intentional
+     * disconnect/shutdown [SseTransportRuntimeStore.markStopped]s it; a
+     * recovery-attempt timeout/refusal/supersession
+     * [SseTransportRuntimeStore.rollbackAttempt]s it (preserving the original
+     * Dropped ticket when the attempt was a recovery, I4).
+     *
+     * Stale callbacks are rejected by BOTH the per-generation guard
+     * ([isCurrentTransport]) AND the runtime's canonical-attempt validation
+     * (a stale/foreign token returns false/null from every mutation).
+     *
+     * **REQUIRED** — production passes the shared `@Singleton` instance (I1:
+     * a single transport-truth authority; no second runtime authority is
+     * permitted). There is NO default: a construction site that omits this
+     * argument does not compile, by design (the M1A/M4 compile-coupling rule).
+     */
+    private val runtimeStore: SseTransportRuntimeStore,
+    /**
+     * L4 §3 (M1A): routes every UNEXPECTED transport drop EXACTLY ONCE. The
+     * implementer releases ownership BEFORE publishing the drop (I3 ordering:
+     * ownership released → Dropped published). The owner NEVER calls
+     * [SseTransportRuntimeStore.publishDropped] directly — it routes through
+     * this handler so the observable ordering is guaranteed.
+     *
+     * **REQUIRED** — production
+     * ([cn.vectory.ocdroid.service.SessionStreamingService]) injects a real
+     * handler that releases ownership + publishes the drop. There is NO
+     * default no-op handler: a construction site that omits this argument does
+     * not compile, by design. Tests must inject a real (recording) handler
+     * that mirrors the production publish ordering.
+     */
+    private val dropHandler: UnexpectedTransportDropHandler,
+    private val beforeMarkRetrying: () -> Unit = {},
 ) {
     /**
      * The live SSE collector job, or null when no collector is running.
@@ -161,6 +214,19 @@ class ServiceSseConnectionOwner(
     private var sseJob: Job? = null
     private var transportTimeoutJob: Job? = null
     private var activeIdentity: ConnectionIdentity? = null
+
+    /**
+     * L4 §3 (M1A): the runtime attempt token for the CURRENT transport
+     * generation, or null when no collector is active / the attempt was
+     * rejected. Set in [setupConnectLocked] under [connectMutex] alongside
+     * the generation bump; read by the intentional teardown paths
+     * ([disconnect] / [cancelForShutdown]). The collector captures its OWN
+     * token at launch (passed into [launchSseCollector]) so a stale prior-
+     * generation collector never reads a newer generation's token — the
+     * runtime's canonical-attempt validation is the authoritative backstop.
+     */
+    @Volatile
+    private var activeAttempt: TransportAttemptToken? = null
 
     /**
      * D2 gate #4: the readiness deferred for the in-flight [connect]. The
@@ -395,6 +461,41 @@ class ServiceSseConnectionOwner(
             )
             return ConnectSetup.Rejected(SourceActivation.Rejected.StaleIdentity)
         }
+        // L4 §3 (M1A): terminalize the PRIOR runtime attempt so the new
+        // generation's beginAttempt is not blocked by a non-Stopped state.
+        // Supersession is an INTENTIONAL closing path (reconfigure teardown →
+        // Stopped, never Dropped; I6) for a DIFFERENT identity, but a SAME-
+        // identity supersession of a recovery attempt MUST preserve the
+        // original Dropped ticket (I4): rollbackAttempt restores Dropped(ticket)
+        // when the prior attempt carried a recoveryTicket, then beginAttempt
+        // below re-captures it. A fresh same-identity attempt rolls back to
+        // Stopped (no spurious Dropped). For a different identity, markStopped
+        // gives a clean slate (the old ticket belongs to a stale identity and
+        // must NOT block the new identity's beginAttempt).
+        val attempt = synchronized(dropHandler) {
+            activeAttempt?.let { prev ->
+                if (prev.identity == identity) {
+                    runtimeStore.rollbackAttempt(prev)
+                } else {
+                    runtimeStore.markStopped(prev)
+                }
+            }
+            runtimeStore.beginAttempt(identity)
+        }
+        // L4 §3 (M1A): begin a runtime attempt for this generation. Captures
+        // a matching Dropped ticket as recoveryTicket (recovery; §4.3); null
+        // when another identity owns a non-Stopped state (cross-identity edge
+        // — ownership normalization is the coordinator/supervisor's job). On
+        // rejection the owner does NOT create an active collector for this
+        // generation (M1A-2).
+        if (attempt == null) {
+            DebugLog.w(
+                TAG,
+                "connect: runtime beginAttempt rejected " +
+                    "(identity epoch=${identity.epoch}) — no collector started",
+            )
+            return ConnectSetup.Rejected(SourceActivation.Rejected.TransportTimeout)
+        }
         // §A3.3 — cancel + null previous collector. Cancel prior readiness
         // (the prior connect's await throws CancellationException → its
         // controller launch dies without acking).
@@ -441,9 +542,12 @@ class ServiceSseConnectionOwner(
         exhaustedReportedForGen = -1L
         // Cluster A: re-arm the per-generation resync flag.
         resyncHandledForGen = -1L
+        // L4 §3 (M1A): associate the runtime attempt token with this
+        // generation (set under connectMutex alongside the bump).
+        activeAttempt = attempt
         // §A3.5 — launch one new job + the M3 transport-readiness timeout.
-        sseJob = scope.launchSseCollector(identity, generation, readiness)
-        transportTimeoutJob = scope.launchTransportTimeout(generation, readiness)
+        sseJob = scope.launchSseCollector(identity, generation, attempt, readiness)
+        transportTimeoutJob = scope.launchTransportTimeout(generation, attempt, readiness)
         return ConnectSetup.Started(readiness)
     }
 
@@ -456,6 +560,7 @@ class ServiceSseConnectionOwner(
      */
     private fun CoroutineScope.launchTransportTimeout(
         generation: Long,
+        attempt: TransportAttemptToken,
         readiness: CompletableDeferred<SourceActivation>,
     ): Job = launch {
         try {
@@ -475,6 +580,14 @@ class ServiceSseConnectionOwner(
             transportTimeoutJob = null
             sseJob?.cancel()
             sseJob = null
+            // L4 §3/§4.3 (M1A): transport timeout = the attempt failed without
+            // proving Live. A RECOVERY attempt (carried a recoveryTicket)
+            // MUST preserve the original Dropped ticket — rollbackAttempt
+            // restores Dropped(ticket) so demand survives (I4); a fresh
+            // attempt rolls back to Stopped (I6, never a spurious Dropped).
+            synchronized(dropHandler) {
+                runtimeStore.rollbackAttempt(attempt)
+            }
             readiness.complete(SourceActivation.Rejected.TransportTimeout)
         }
     }
@@ -505,6 +618,7 @@ class ServiceSseConnectionOwner(
     private fun CoroutineScope.launchSseCollector(
         identity: ConnectionIdentity,
         generation: Long,
+        attempt: TransportAttemptToken,
         readiness: CompletableDeferred<SourceActivation>,
     ): Job = launch {
         val workdirArg: String? = identity.normalizedWorkdir.ifBlank { null }
@@ -513,11 +627,47 @@ class ServiceSseConnectionOwner(
         var retriesUsed = 0
         while (true) {
             if (!isCurrentTransport(identity, generation)) return@launch
+            // L4 §3.1: check reconnect gate immediately before establishing a
+            // new SSE connection (TOCTOU fix). Catches the window between the
+            // pre-delay check and the actual connection attempt, including the
+            // very first iteration. A denial here means the app went background.
+            if (!reconnectAllowed()) {
+                DebugLog.i(TAG, "SSE reconnect gate refused before connect (gen=$generation)")
+                if (!readiness.isCompleted) {
+                    // Pre-readiness (first iteration): the transport never
+                    // proved Live — a connect-time refusal, not a drop.
+                    // Complete as rejected so the caller's `connect().await()`
+                    // does not hang. A RECOVERY attempt (carried a
+                    // recoveryTicket) MUST preserve the original Dropped
+                    // ticket — rollbackAttempt restores Dropped(ticket) so
+                    // demand survives (I4); a fresh attempt rolls back to
+                    // Stopped (I6, never a spurious Dropped). This writes
+                    // ONLY the SSE transport projection (sseConnected=false),
+                    // NOT REST/server Disconnected state (I8: SSE-only loss
+                    // cannot alone write server-unreachable REST state).
+                    setSseConnected(false, generation)
+                    markClosing(generation)
+                    synchronized(dropHandler) {
+                        runtimeStore.rollbackAttempt(attempt)
+                    }
+                    readiness.complete(SourceActivation.Rejected.TransportTimeout)
+                } else {
+                    // Post-readiness (retry iteration): the transport WAS Live
+                    // — a genuine post-Live background drop. Route EXACTLY
+                    // ONCE through the drop handler (M1A-5).
+                    handleBackgroundReconnectRefusal(identity, generation, attempt)
+                }
+                return@launch
+            }
             // 1. Collect one flow instance. Try/catch routes BOTH thrown
             //    exceptions AND unexpected normal completion (an SSE flow
             //    should be infinite — a normal completion is a failure).
             var failure: Throwable? = null
             try {
+                // L4 §3.1: set reconnect gate on the SSEClient BEFORE starting
+                // the collection cycle. Not passed through [connectSSE] (which is
+                // widely mocked) to avoid cascading test breakage.
+                repository.setSseReconnectAllowed(reconnectAllowed)
                 repository.connectSSE(workdirArg).collect { result ->
                     // §A3.7 — re-check identity BEFORE every side effect.
                     if (!isCurrentTransport(identity, generation)) {
@@ -533,7 +683,7 @@ class ServiceSseConnectionOwner(
                         // transport readiness + gap reset (new outage can
                         // begin). D4-B M3: NO status refresh — readiness
                         // completes on transport proof alone.
-                        onSuccessfulFrame(identity, generation, event, readiness)
+                        onSuccessfulFrame(identity, generation, attempt, event, readiness)
                         retriesUsed = 0
                     }.onFailure { error ->
                         // §A3.9 — event-level failure.
@@ -574,7 +724,7 @@ class ServiceSseConnectionOwner(
             }
             val failureThrowable = failure
                 ?: java.io.IOException("SSE flow completed without an explicit error")
-            onCollectionException(identity, generation, failureThrowable)
+            onCollectionException(identity, generation, attempt, failureThrowable)
             // 3. After handling the failure: if budget exhausted, exit.
             //    D5 (#1): a post-Ready terminal exhaustion MUST run the
             //    Disconnected write + onTerminalExhaustion() + lifecycle
@@ -587,45 +737,93 @@ class ServiceSseConnectionOwner(
                 if (isCurrentTransport(identity, generation) &&
                     exhaustedReportedForGen != generation
                 ) {
+                    // L4 §3 (M1A / fix #4): FINAL canonical-token validation
+                    // BEFORE the drop. If this attempt is no longer canonical
+                    // (a concurrent path terminalized it within the same
+                    // generation), this is a STALE exhaustion callback — it
+                    // MUST produce NO side effects and NO duplicate drop: no
+                    // sseConnected write, no dropHandler invocation, no
+                    // readiness completion, no terminal callback. The
+                    // [exhaustedReportedForGen] guard already ensures
+                    // exactly-once per generation for a LEGITIMATE exhaustion;
+                    // this canonical check closes the same-generation
+                    // stale-token window (a stale token is not reported, so the
+                    // flag is intentionally left unset).
+                    val exhaustionCanonical = runtimeStore.currentAttempt(identity)
+                    if (exhaustionCanonical == null ||
+                        exhaustionCanonical.attemptId != attempt.attemptId
+                    ) {
+                        DebugLog.i(
+                            TAG,
+                            "exhaustion: stale token (gen=$generation) — drop/terminal callback suppressed (no duplicate drop)",
+                        )
+                        return@launch
+                    }
                     exhaustedReportedForGen = generation
                     // §breathing-indicator: terminal exhaustion = the transport
                     // is permanently down for this generation. Drop the SSE-up
                     // flag (a new connect / reconfigure re-arms it).
                     setSseConnected(false, generation)
-                    // Write the shared connection state to disconnected/degraded.
-                    // §red-dot-trace: escalate the silent retry-budget exhaustion
-                    // to WARN/ERROR so the red indicator is traceable. The
-                    // per-retry attempts above only log at INFO (line ~615),
-                    // which is why the red dot appeared with "no exception" in
-                    // the debug log. .e when a real exception is present, else .w.
+                    // L4 §3/§8 (M1A / I8): SSE-only retry exhaustion MUST NOT
+                    // write REST/server Disconnected state — the REST
+                    // connection is a SEPARATE axis (a dropped SSE does not
+                    // prove the server is unreachable). Only the SSE transport
+                    // projection (sseConnected=false above) + the gap/drop
+                    // demand below may update. The REST Connected/Disconnected
+                    // verdict belongs to the coordinator/ownership commit, not
+                    // to the SSE collector.
+                    // §red-dot-trace: escalate the silent retry-budget
+                    // exhaustion to WARN/ERROR so the red indicator is
+                    // traceable. The per-retry attempts above only log at INFO
+                    // (line ~615), which is why the red dot appeared with "no
+                    // exception" in the debug log. .e when a real exception is
+                    // present, else .w.
                     if (failure != null) {
                         DebugLog.e(
                             TAG,
-                            "SSE retry budget exhausted retriesUsed=$retriesUsed attempts=${recoveryPolicy.attempts} (gen=$generation, epoch=${identity.epoch}) -> Disconnected",
+                            "SSE retry budget exhausted retriesUsed=$retriesUsed attempts=${recoveryPolicy.attempts} (gen=$generation, epoch=${identity.epoch}) -> SSE transport down (REST unchanged)",
                             failure,
                         )
                     } else {
                         DebugLog.w(
                             TAG,
-                            "SSE retry budget exhausted retriesUsed=$retriesUsed attempts=${recoveryPolicy.attempts} (gen=$generation, epoch=${identity.epoch}) -> Disconnected (flow completed without error)",
+                            "SSE retry budget exhausted retriesUsed=$retriesUsed attempts=${recoveryPolicy.attempts} (gen=$generation, epoch=${identity.epoch}) -> SSE transport down (flow completed without error, REST unchanged)",
                         )
                     }
-                    sharedStateStore.mutateConnection {
-                        it.copy(
-                            isConnected = false,
-                            isConnecting = false,
-                            connectionPhase = ConnectionPhase.Disconnected,
-                        )
+                    // L4 §3/§5 (M1A): retry budget exhausted = unexpected
+                    // terminal drop. Route EXACTLY ONCE through [dropHandler]
+                    // with RETRY_EXHAUSTED. (markRetrying was already applied
+                    // by [onCollectionException] for the post-Live case; for a
+                    // never-Live Connecting attempt publishDropped still
+                    // applies — the runtime accepts it from any canonical
+                    // attempt.) Normal completion and exception share this one
+                    // path — no double-publish (M1A-C3).
+                    if (!routeUnexpectedDrop(attempt, TransportDropReason.RETRY_EXHAUSTED)) {
+                        // The outer canonical check can race a generation
+                        // supersession before the fenced handler acquires its
+                        // monitor. A rejected route means this callback no
+                        // longer owns terminal side effects: do not rewrite
+                        // readiness or invoke the disconnect callback.
+                        return@launch
                     }
-                    // May harmlessly return false if readiness was already
-                    // completed with Ready at the first frame — that MUST
-                    // NOT gate the Disconnected write / callback below.
+                    // May harmlessly return false because readiness was
+                    // already completed with Ready at the first frame; the
+                    // fenced drop route, not this completion, owns terminal
+                    // exactly-once semantics.
                     readiness.complete(SourceActivation.Rejected.Exhausted)
                     onTerminalExhaustion()
                 }
                 return@launch
             }
-            // 4. Retry: delay per policy (with jitter) + loop.
+            // 4. L4 §3.1: check the reconnect gate BEFORE each service-level retry.
+            //    If gate is closed (background grace, socket dropped), skip retry
+            //    and exit to trigger recovery-needed accounting.
+            if (!reconnectAllowed()) {
+                DebugLog.i(TAG, "SSE reconnect gate refused at service-level retry (gen=$generation)")
+                handleBackgroundReconnectRefusal(identity, generation, attempt)
+                return@launch
+            }
+            // Retry: delay per policy (with jitter) + loop.
             retriesUsed++
             val jitter = jitterSource()
             val delayMs = recoveryPolicy.delayMs(retriesUsed, jitter)
@@ -634,6 +832,18 @@ class ServiceSseConnectionOwner(
                 delay(delayMs)
             } catch (e: CancellationException) {
                 throw e
+            }
+            // L4 §3.1: TOCTOU fix — re-check reconnect gate AFTER the retry
+            // delay completed. The delay started while in foreground; the app
+            // may have gone background during the wait. If denied, abort the
+            // reconnect cleanly (no exception, no tight loop).
+            if (!reconnectAllowed()) {
+                DebugLog.i(
+                    TAG,
+                    "SSE reconnect gate refused after retry delay (gen=$generation)",
+                )
+                handleBackgroundReconnectRefusal(identity, generation, attempt)
+                return@launch
             }
         }
     }
@@ -668,10 +878,25 @@ class ServiceSseConnectionOwner(
     private suspend fun onSuccessfulFrame(
         identity: ConnectionIdentity,
         generation: Long,
+        attempt: TransportAttemptToken,
         event: cn.vectory.ocdroid.data.model.SSEEvent,
         readiness: CompletableDeferred<SourceActivation>,
     ) {
         if (!isCurrentTransport(identity, generation)) return
+        // L4 §3 (M1A): the runtime is the AUTHORITATIVE transport-truth. A
+        // stale/foreign token is rejected by markLive (canonical-attempt
+        // validation). When markLive returns false the attempt is no longer
+        // canonical — EVERY frame side effect MUST be suppressed: no event
+        // publish, no sseConnected, no resync, no Ready completion, no gap
+        // reset (fix #4). The per-generation guard above is the cheap early-
+        // return; this is the authoritative runtime-token backstop.
+        if (!runtimeStore.markLive(attempt)) {
+            DebugLog.i(
+                TAG,
+                "markLive rejected stale token (gen=$generation) — frame side effects suppressed",
+            )
+            return
+        }
         // §breathing-indicator: a valid current-identity frame proves transport
         // delivery → SSE is connected. Set on EVERY such frame (first-frame
         // readiness AND a post-Ready recovered frame after a retry gap) so the
@@ -761,18 +986,61 @@ class ServiceSseConnectionOwner(
      * UI event + the IDEMPOTENT gap-dirty signal (once per outage per
      * generation). The retry / exhaustion decision is made by the caller
      * ([launchSseCollector]'s loop).
+     *
+     * L4 §3 (M1A / fix #4): a CANONICAL-TOKEN validation gates ALL subsequent
+     * error/gap/drop side effects. The runtime is the AUTHORITATIVE
+     * transport-truth: if THIS attempt is no longer the runtime's canonical
+     * attempt (a concurrent path terminalized it within the same generation —
+     * e.g. [SseTransportRuntimeStore.publishDropped] / [markStopped] / a
+     * superseding [beginAttempt]), this is a STALE callback and MUST produce
+     * NO side effects (no UI error, no gap, no drop). This distinguishes a
+     * legitimate current Connecting/Live/Retrying failure (canonical matches
+     * → emit gap/UI) from a stale token (canonical null or differs → suppress)
+     * — a distinction [markRetrying]'s boolean alone CANNOT make, since it
+     * returns false for both "stale token" and "never-Live Connecting".
      */
     private suspend fun onCollectionException(
         identity: ConnectionIdentity,
         generation: Long,
+        attempt: TransportAttemptToken,
         error: Throwable,
     ) {
         Log_e(TAG, "SSE collection failed (gen=$generation)", error)
-        // Only surface the failure if THIS collector's identity is still
-        // current — a stale collector (the reconfigure cancelled us
-        // mid-flight) emits NEITHER errors NOR a disconnect transition.
+        // Generation guard: a stale collector (reconfigure/disconnect/supersession
+        // bumped the generation) emits NEITHER errors NOR a disconnect transition.
         if (!isCurrentTransport(identity, generation)) {
             return
+        }
+        // Canonical-token validation (fix #4): if THIS attempt is no longer the
+        // runtime's canonical attempt for this identity, the token was
+        // terminalized by a concurrent path within the same generation. Suppress
+        // ALL error/gap/drop side effects — no UI error, no gap, no drop, no
+        // duplicate. (currentAttempt returns null for Stopped/Dropped and a
+        // foreign/different attemptId for a superseded runtime.)
+        val canonical = runtimeStore.currentAttempt(identity)
+        if (canonical == null || canonical.attemptId != attempt.attemptId) {
+            DebugLog.i(
+                TAG,
+                "onCollectionException: stale token (gen=$generation) — error/gap/drop side effects suppressed",
+            )
+            return
+        }
+        beforeMarkRetrying()
+        // markRetrying: Live → Retrying (idempotent no-op for an already-Retrying
+        // or a never-Live Connecting attempt — both are legitimate current
+        // failures that passed the canonical check above). Uses the canonical
+        // attempt, so a token that went stale between the check and this call
+        // cannot resurrect state.
+        val transitionedToRetrying = synchronized(dropHandler) {
+            runtimeStore.markRetrying(attempt)
+        }
+        if (!transitionedToRetrying) {
+            val stillCanonical = runtimeStore.currentAttempt(identity)
+            val stillConnecting = runtimeStore.state.value is SseTransportState.Connecting
+            if (stillCanonical?.attemptId != attempt.attemptId || !stillConnecting) {
+                DebugLog.i(TAG, "onCollectionException: markRetrying fence rejected stale token")
+                return
+            }
         }
         // §breathing-indicator: a collection-level failure is a transport gap
         // (the stream broke). Drop the SSE-up flag so the breathing stops
@@ -808,6 +1076,74 @@ class ServiceSseConnectionOwner(
         if (gapEmittedForGen == generation) return
         gapEmittedForGen = generation
         sharedEffectBus.emitEffect(ControllerEffect.CancelSse)
+    }
+
+    /**
+     * L4 §3/§7 (M1A): post-Live background reconnect refusal. The collector
+     * broke while the app was in background (the reconnect gate is closed — a
+     * reconnect is NOT attempted in background per the receive-only decision).
+     * Replaces the retired `markRecoveryNeededAndExit` (which stamped the
+     * forbidden [SseLifecyclePolicy] TRANSPORT_LOST flag).
+     *
+     * M1A-5: the owner NO LONGER touches [SseLifecyclePolicy]. Instead it:
+     *  1. writes the SSE transport projection (sseConnected=false — the SSE
+     *     stream is down); it MUST NOT write REST/server Disconnected state
+     *     (I8: SSE-only loss cannot alone write server-unreachable state);
+     *  2. emits the idempotent gap-dirty signal (delta-buffer clear — unchanged);
+     *  3. transitions the runtime Live → Retrying (authoritative — a stale
+     *     token rejects, suppressing the drop);
+     *  4. routes the drop EXACTLY ONCE through [dropHandler] with
+     *     [TransportDropReason.BACKGROUND_RECONNECT_REFUSED].
+     *
+     * The drop handler (production: [cn.vectory.ocdroid.service.SessionStreamingService])
+     * releases ownership BEFORE publishing Dropped (I3). The owner never
+     * calls [SseTransportRuntimeStore.publishDropped] directly.
+     */
+    private suspend fun handleBackgroundReconnectRefusal(
+        identity: ConnectionIdentity,
+        generation: Long,
+        attempt: TransportAttemptToken,
+    ) {
+        if (!isCurrentTransport(identity, generation)) return
+        // L4 §3/§8 (M1A / I8): write ONLY the SSE transport projection. The
+        // REST/server connection is a SEPARATE axis — an SSE-only background
+        // refusal MUST NOT write Disconnected (only committed ownership / CC
+        // may publish terminal REST state).
+        setSseConnected(false, generation)
+        // The gap-dirty signal (downstream delta-buffer clear) is preserved.
+        emitGapOnce(identity, generation)
+        // L4 §3 (M1A / fix #4): the runtime is AUTHORITATIVE transport-truth.
+        // By the time this refusal path runs, [onCollectionException] has
+        // ALREADY transitioned the attempt Live → Retrying (the flow broke
+        // before the gate was checked). A redundant markRetrying would return
+        // false (Retrying is not Live) and incorrectly look like a stale-token
+        // rejection. Instead, query the canonical attempt: if THIS attempt is
+        // still canonical (Connecting/Live/Retrying for its identity), the drop
+        // is routed; if a newer attempt superseded it (stale token), the drop is
+        // suppressed (no double-drop, no drop after supersession). The handler's
+        // own publishDropped is the linearizable authoritative backstop.
+        val canonical = runtimeStore.currentAttempt(attempt.identity)
+        if (canonical?.attemptId != attempt.attemptId) {
+            DebugLog.i(
+                TAG,
+                "background refusal: attempt no longer canonical (gen=$generation) — drop suppressed",
+            )
+            return
+        }
+        routeUnexpectedDrop(attempt, TransportDropReason.BACKGROUND_RECONNECT_REFUSED)
+        DebugLog.i(TAG, "SSE reconnect gate closed — routed background drop (gen=$generation)")
+    }
+
+    private fun routeUnexpectedDrop(
+        attempt: TransportAttemptToken,
+        reason: TransportDropReason,
+    ): Boolean = when (val handler = dropHandler) {
+        is FencedUnexpectedTransportDropHandler ->
+            handler.onUnexpectedDropIfCurrent(attempt, reason)
+        else -> {
+            handler.onUnexpectedDrop(attempt, reason)
+            true
+        }
     }
 
     /**
@@ -1019,6 +1355,12 @@ class ServiceSseConnectionOwner(
                 emitGapOnce(identity = identity, generation = generation)
             }
             transportGenerationCounter += 1
+            // L4 §3 (M1A): intentional disconnect → markStopped (never Dropped).
+            // Idempotent: a no-op if the attempt already dropped (no revive; I6).
+            synchronized(dropHandler) {
+                activeAttempt?.let { runtimeStore.markStopped(it) }
+            }
+            activeAttempt = null
             activeIdentity = null
             job
         }
@@ -1041,6 +1383,12 @@ class ServiceSseConnectionOwner(
         // @Singleton) and the UI observes the drop process-lifetime.
         setSseConnected(false, shuttingDownGen + 1)
         transportGenerationCounter = shuttingDownGen + 1
+        // L4 §3 (M1A): intentional shutdown → markStopped (never Dropped).
+        // Idempotent: a no-op if the attempt already dropped (no revive; I6).
+        synchronized(dropHandler) {
+            activeAttempt?.let { runtimeStore.markStopped(it) }
+        }
+        activeAttempt = null
         sseJob?.cancel()
         sseJob = null
         transportTimeoutJob?.cancel()

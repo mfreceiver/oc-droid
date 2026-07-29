@@ -17,6 +17,7 @@ import cn.vectory.ocdroid.data.repository.http.TofuFailureReason
 import cn.vectory.ocdroid.data.repository.http.TofuPinStore
 import cn.vectory.ocdroid.data.repository.http.TofuValidation
 import cn.vectory.ocdroid.data.repository.http.InMemoryTofuPinStore
+import cn.vectory.ocdroid.data.repository.http.applyClientIdentityHeaders
 import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
 import cn.vectory.ocdroid.data.repository.http.buildTofuPinnedConfig
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
@@ -132,6 +133,13 @@ class OpenCodeRepository @Inject constructor(
         trafficLogger,
         tofuStore,
         serverCompatProfile,
+        // §B (slimapi-v2-adapt-traffic-plan §B): lazy device-id provider for
+        // ClientIdentityInterceptor. Resolves from the Hilt field-injected
+        // ClientIdStore (below) at request time — the graph is built during
+        // this field initializer, BEFORE Hilt field injection populates
+        // [clientIdStore], so the provider MUST defer the read (mirrors the
+        // identityStoreOrFallback lazy pattern).
+        clientIdProvider = { clientIdStoreOrFallback().getDeviceId() },
     )
 
     /** The sole volatile publication point for all network clients and APIs. */
@@ -147,7 +155,7 @@ class OpenCodeRepository @Inject constructor(
     internal var onBundlePublished: ((Long, String) -> Unit)? = null
 
     private val api: OpenCodeApi get() = requireClientBundle().restApi
-    private val sseClient: SSEClient get() = requireClientBundle().sseClient
+    internal val sseClient: SSEClient get() = requireClientBundle().sseClient
     private val commandApi: OpenCodeApi get() = requireClientBundle().commandApi
     private val mutationApi: OpenCodeApi get() = requireClientBundle().mutationApi
     private val apiV2: OpenCodeApiV2 get() = requireClientBundle().apiV2
@@ -232,6 +240,27 @@ class OpenCodeRepository @Inject constructor(
 
     private fun identityStoreOrFallback(): ConnectionIdentityStore =
         if (::identityStore.isInitialized) identityStore else fallbackIdentityStore
+
+    /**
+     * §B (slimapi-v2-adapt-traffic-plan §B): the device-id store backing
+     * `X-Client-Id`. Injected by Hilt (field injection) — same pattern as
+     * [identityStore]. Bound to the ESP-backed
+     * [cn.vectory.ocdroid.data.repository.http.EspClientIdStore] in
+     * production; [fallbackClientIdStore] (in-memory) is used in plain
+     * unit-test constructions that bypass Hilt, so `X-Client-Id` is still
+     * resolvable (with a fresh per-instance UUID) in tests.
+     *
+     * Read lazily (via [clientIdStoreOrFallback]) by [networkGraph]'s
+     * `clientIdProvider` lambda + by the health/cert probe sites — the graph
+     * is built before Hilt populates this field, so the read MUST be lazy.
+     */
+    @Inject lateinit var clientIdStore: cn.vectory.ocdroid.data.repository.http.ClientIdStore
+
+    private val fallbackClientIdStore: cn.vectory.ocdroid.data.repository.http.ClientIdStore =
+        cn.vectory.ocdroid.data.repository.http.InMemoryClientIdStore()
+
+    private fun clientIdStoreOrFallback(): cn.vectory.ocdroid.data.repository.http.ClientIdStore =
+        if (::clientIdStore.isInitialized) clientIdStore else fallbackClientIdStore
 
     /**
      * Opaque capability for one configured slim-state incarnation (C-D3).
@@ -721,7 +750,10 @@ class OpenCodeRepository @Inject constructor(
             if (currentClientBundle()?.hostSnapshot?.hostPort == hostPort) {
                 rebuildClients()
             }
-        }
+        },
+        // §B: lazy device-id provider for captureServerCert's slim branch
+        // (it adds identity headers manually, same as the version header).
+        clientIdProvider = { clientIdStoreOrFallback().getDeviceId() },
     )
 
     // ── lite-v2-dev (plan §4.1): ExpandBatchEngine + SlimSyncEngine + ────────
@@ -899,6 +931,11 @@ class OpenCodeRepository @Inject constructor(
             .url(normalizedUrl)
             .header(HttpHeaders.SKIP_DIR_HEADER, "1")
             .header(SlimapiContract.X_SLIMAPI_VERSION, SlimapiContract.SLIMAPI_CLIENT_VERSION.toString())
+        // §B (slimapi-v2-adapt-traffic-plan §B): additive identity headers
+        // on this one-shot /slimapi/health probe — it bypasses baseBuilder
+        // (no ClientIdentityInterceptor), so inject via the shared helper
+        // (same pattern as the manually-added version header above).
+        applyClientIdentityHeaders(requestBuilder, clientIdStoreOrFallback().getDeviceId())
         if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
             val credential = "$username:$password"
             val encoded = Base64.getEncoder().encodeToString(credential.toByteArray())
@@ -1044,6 +1081,10 @@ class OpenCodeRepository @Inject constructor(
                     SlimapiContract.X_SLIMAPI_VERSION,
                     SlimapiContract.SLIMAPI_CLIENT_VERSION.toString()
                 )
+                // §B: additive identity headers on the one-shot /slimapi/health
+                // probe (bypasses baseBuilder → no ClientIdentityInterceptor).
+                // Gated on `slim` so legacy /global/health never leaks identity.
+                applyClientIdentityHeaders(requestBuilder, clientIdStoreOrFallback().getDeviceId())
             }
             if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
                 val credential = "$username:$password"
@@ -1842,16 +1883,28 @@ class OpenCodeRepository @Inject constructor(
      * `/global/event?directory=` behaviour byte-for-byte. The [directory]
      * argument is IGNORED in slim mode (the sidecar is instance-level).
      */
-    fun connectSSE(directory: String?): Flow<Result<SSEEvent>> =
-        requireClientBundle().let { bundle ->
-            bundle.sseClient.connect(
-            baseUrl = bundle.hostSnapshot.baseUrl,
-            username = bundle.hostSnapshot.username,
-            password = bundle.hostSnapshot.password,
-            directory = directory,
-            slimMode = bundle.hostSnapshot.slimHost,
-            )
-        }
+     fun connectSSE(
+         directory: String?,
+     ): Flow<Result<SSEEvent>> =
+         requireClientBundle().let { bundle ->
+             bundle.sseClient.connect(
+             baseUrl = bundle.hostSnapshot.baseUrl,
+             username = bundle.hostSnapshot.username,
+             password = bundle.hostSnapshot.password,
+             directory = directory,
+             slimMode = bundle.hostSnapshot.slimHost,
+             )
+         }
+
+     /**
+      * L4 §3.1: Set the reconnect gate on the underlying [SSEClient]. Called by
+      * [ServiceSseConnectionOwner] before starting an SSE collection cycle so
+      * the SSEClient's internal retry respects the background grace policy.
+      * This avoids adding a parameter to [connectSSE] (which is widely mocked).
+      */
+     internal fun setSseReconnectAllowed(allowed: () -> Boolean) {
+         this.sseClient.reconnectAllowed = allowed
+     }
 
     // ---- Traffic debug ----
 

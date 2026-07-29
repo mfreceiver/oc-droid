@@ -55,6 +55,34 @@ object SlimapiContract {
      */
     const val LEGACY_HEALTH_PATH = "/global/health"
 
+    // ── §B (slimapi-v2-adapt-traffic-plan §B): additive client-identity headers ──
+    //
+    // 3 OPTIONAL headers on /slimapi/** requests (additive, backward-
+    // compatible: sidecar works if these are absent). Injected by
+    // [ClientIdentityInterceptor] (on the shared OkHttp base chain + token
+    // stream) AND by the one-shot health/ready/cert probes (via the shared
+    // `applyClientIdentityHeaders` helper) — same contract, two paths.
+
+    /** HTTP 头名：客户端名（固定 "ocdroid"，见 [CLIENT_NAME]）。 */
+    const val X_CLIENT_NAME = "X-Client-Name"
+
+    /** HTTP 头名：客户端版本（git 派生 BuildConfig.VERSION_NAME）。 */
+    const val X_CLIENT_VERSION = "X-Client-Version"
+
+    /** HTTP 头名：设备标识（UUIDv4，首次启动生成并持久化）。 */
+    const val X_CLIENT_ID = "X-Client-Id"
+
+    /** X-Client-Name 的固定值（本 app 的标识）。 */
+    const val CLIENT_NAME = "ocdroid"
+
+    /**
+     * §B3 sanitize gate：任一 identity 头值的 UTF-8 字节上限。超出 →
+     * 省略该头（与 sidecar 的 per-header 容忍一致）。128 字节远超
+     * UUID（36）/ git tag-hash（~30）/ "ocdroid"（7）的实际长度，
+     * 纯属防御性上界。
+     */
+    const val CLIENT_IDENTITY_HEADER_MAX_BYTES = 128
+
     // V1 Opt-A capability constants X_SLIMAPI_CAPABILITIES and
     // MID_PARTIAL_ENVELOPE_CAPABILITY were removed in V2 (spec §1:34).
     // V2 ignores the capabilities header entirely.

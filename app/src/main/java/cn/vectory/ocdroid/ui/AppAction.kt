@@ -783,6 +783,15 @@ sealed interface AppAction {
         val hasMoreMessages: Boolean = false,
         val currentModel: Message.ModelInfo? = null,
         val authoritative: Boolean = false,
+        /**
+         * L3 (slimapi-v2 §D): optional host/endpoint CAS stamp captured at
+         * reload-launch time. When non-null, [acceptsBundle] rejects the
+         * dispatch if the live bundle generation/endpoint no longer matches
+         * (host switch mid-flight). Null preserves legacy behavior (the
+         * pre-L3 call sites that do not capture a stamp are accepted
+         * unconditionally — backward compatible).
+         */
+        val bundleStamp: BundleStamp? = null,
     ) : AppAction
 
     /** §P11: published when ClientBundle changes — StoreState stamp update (atomic CAS). */
@@ -875,6 +884,14 @@ internal fun reduce(
 }
 
 private fun AppAction.acceptsBundle(state: StoreState): Boolean {
+    // L3 (slimapi-v2 §D): ChatContentLoaded carries an OPTIONAL bundle stamp.
+    // null = legacy caller → accept unconditionally (backward compat); non-null
+    // → require the live bundle generation/endpoint to match (host CAS).
+    if (this is AppAction.ChatContentLoaded) {
+        val expected = bundleStamp ?: return true
+        return state.liveBundleGeneration == expected.generation &&
+            state.liveEndpointFp == expected.endpointFp
+    }
     val expected = when (this) {
         is AppAction.PartPlaceholderEnsured -> bundleStamp
         is AppAction.CoalesceFlushedForPart -> bundleStamp

@@ -75,7 +75,21 @@ class ServiceSseConnectionOwnerSseConnectedTest {
     private lateinit var effects: SharedEffectBus
     private lateinit var aggregator: FakeAggregator
     private lateinit var policy: TestRecoveryPolicy
+    private lateinit var runtimeStore: SseTransportRuntimeStore
     private lateinit var owner: ServiceSseConnectionOwner
+    private val dropCalls: MutableList<DropCall> = mutableListOf()
+    private val recordingHandler = object : UnexpectedTransportDropHandler {
+        override fun onUnexpectedDrop(attempt: TransportAttemptToken, reason: TransportDropReason) {
+            dropCalls += DropCall(attempt, reason)
+            // Mirror the production handler ([cn.vectory.ocdroid.service.SseShutdownSeal]):
+            // it publishes the drop (the owner never calls publishDropped
+            // directly). The owner test has no ownership gate to release, so
+            // only the publish is mirrored here.
+            runtimeStore.publishDropped(attempt, reason)
+        }
+    }
+
+    private data class DropCall(val attempt: TransportAttemptToken, val reason: TransportDropReason)
 
     @Before
     fun setUp() {
@@ -94,6 +108,8 @@ class ServiceSseConnectionOwnerSseConnectedTest {
         effects = SharedEffectBus()
         aggregator = FakeAggregator()
         policy = TestRecoveryPolicy()
+        runtimeStore = SseTransportRuntimeStore()
+        dropCalls.clear()
         owner = ServiceSseConnectionOwner(
             scope = scope,
             repository = repository,
@@ -103,6 +119,8 @@ class ServiceSseConnectionOwnerSseConnectedTest {
             sharedStateStore = store,
             sharedEffectBus = effects,
             recoveryPolicy = policy,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
             jitterSource = { 0.0f },
             onTerminalExhaustion = {},
         )
@@ -156,6 +174,44 @@ class ServiceSseConnectionOwnerSseConnectedTest {
         assertTrue(
             "first valid current-identity frame MUST set isSseConnected=true",
             sseConnected(),
+        )
+    }
+
+    // ── L4 §3 (M1A): runtime transport-truth projection ───────────────────
+
+    // The owner is the sole producer of runtime transport state. Its markLive
+    // / markStopped must drive the process-level sseConnected projection
+    // (only Live maps to true) — independent of the SharedStateStore flag
+    // exercised by the rest of this suite.
+    @Test
+    fun `M1A - runtime sseConnectedFlow mirrors Live on first frame and Stopped on teardown`() = runTest {
+        val identity = bindIdentity()
+        aggregator.nextState = GlobalBusyState.Busy
+        val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
+        stubFeed(feed)
+
+        assertFalse("runtime projection false before any frame", runtimeStore.sseConnectedFlow.value)
+
+        scope.launch { owner.connect(identity) }
+        runPending()
+        assertFalse(
+            "runtime projection false while Connecting (no frame yet)",
+            runtimeStore.sseConnectedFlow.value,
+        )
+
+        feed.tryEmit(Result.success(sseEvent("server.connected")))
+        runPending()
+        assertTrue(
+            "runtime sseConnectedFlow true once the owner marks Live (first frame)",
+            runtimeStore.sseConnectedFlow.value,
+        )
+
+        // Intentional teardown → markStopped → Stopped → projection false.
+        scope.launch { owner.disconnect(markGap = true) }
+        runPending()
+        assertFalse(
+            "runtime sseConnectedFlow false after markStopped teardown",
+            runtimeStore.sseConnectedFlow.value,
         )
     }
 
@@ -479,7 +535,9 @@ class ServiceSseConnectionOwnerSseConnectedTest {
         owner.cancelForShutdown()
         assertFalse("owner A shutdown dropped the flag", sseConnected())
 
-        // Owner B (new service instance) — constructed against the SAME store.
+        // Owner B (new service instance) — constructed against the SAME store
+        // AND the same runtime store (M1A: the @Singleton runtime survives
+        // recreation too).
         val ownerB = ServiceSseConnectionOwner(
             scope = scope,
             repository = repository,
@@ -489,6 +547,8 @@ class ServiceSseConnectionOwnerSseConnectedTest {
             sharedStateStore = store,
             sharedEffectBus = effects,
             recoveryPolicy = policy,
+            runtimeStore = runtimeStore,
+            dropHandler = recordingHandler,
             jitterSource = { 0.0f },
             onTerminalExhaustion = {},
         )

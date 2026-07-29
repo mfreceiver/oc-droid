@@ -370,7 +370,6 @@ class SlimV2WireRegressionTest {
             scope = scope,
             repository = repo,
             slices = store.slices,
-            currentServerGroupFp = { "" },
         )
         val productionHooks = tokenStreamProductionHooks(
             store = store,
@@ -449,7 +448,6 @@ class SlimV2WireRegressionTest {
             scope = scope,
             repository = repo,
             slices = store.slices,
-            currentServerGroupFp = { "" },
         )
         val productionHooks = tokenStreamProductionHooks(
             store = store,
@@ -505,7 +503,6 @@ class SlimV2WireRegressionTest {
             scope = scope,
             repository = repo,
             slices = store.slices,
-            currentServerGroupFp = { "" },
         )
         val productionHooks = tokenStreamProductionHooks(
             store = store,

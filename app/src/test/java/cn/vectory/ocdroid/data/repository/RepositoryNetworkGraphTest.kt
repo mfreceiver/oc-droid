@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.data.repository
 import cn.vectory.ocdroid.data.repository.http.AuthInterceptor
 import cn.vectory.ocdroid.data.repository.http.CacheControlInterceptor
 import cn.vectory.ocdroid.data.repository.http.CachePathSanitizer
+import cn.vectory.ocdroid.data.repository.http.ClientIdentityInterceptor
 import cn.vectory.ocdroid.data.repository.http.DirectoryHeaderInterceptor
 import cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory
 import cn.vectory.ocdroid.data.repository.http.ResponseSizeGuardInterceptor
@@ -11,6 +12,7 @@ import cn.vectory.ocdroid.data.repository.http.SlimapiVersionInterceptor
 import cn.vectory.ocdroid.data.repository.http.SslConfigFactory
 import cn.vectory.ocdroid.data.repository.http.TrafficCountingInterceptor
 import cn.vectory.ocdroid.di.AppModule
+import cn.vectory.ocdroid.di.ClientIdModule
 import cn.vectory.ocdroid.di.ControllerModule
 import cn.vectory.ocdroid.di.TofuModule
 import cn.vectory.ocdroid.util.TrafficLogger
@@ -45,6 +47,7 @@ class RepositoryNetworkGraphTest {
         OkHttpClientFactory::class.java,
         DirectoryHeaderInterceptor::class.java,
         SlimapiVersionInterceptor::class.java,
+        ClientIdentityInterceptor::class.java,
         SlimapiDebugInterceptor::class.java,
         AuthInterceptor::class.java,
         CacheControlInterceptor::class.java,
@@ -55,6 +58,7 @@ class RepositoryNetworkGraphTest {
 
     private val applicationModules = listOf(
         AppModule::class.java,
+        ClientIdModule::class.java,
         ControllerModule::class.java,
         TofuModule::class.java,
     )

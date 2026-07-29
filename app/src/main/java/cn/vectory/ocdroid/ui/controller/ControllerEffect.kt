@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui.controller
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
+import cn.vectory.ocdroid.service.lifecycle.SseLifecyclePolicy.SseRestFence
 
 /**
  * R-17 batch3: cross-domain controller→VM signals. Replaces the 6 callback
@@ -233,4 +234,42 @@ sealed class ControllerEffect {
      * [cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.resetBackoff].
      */
     data object ResetPollerBackoff : ControllerEffect()
+
+    // ── L4 §5.2 — SSE-origin REST operations (receive-only R2 fence) ────
+
+    /**
+     * L4 §5.2: A REST operation that originated from an SSE frame (as opposed
+     * to a user-initiated action). Carries a [SseRestFence] that must be
+     * validated before execution. The handler ([AppCore.dispatchEffect])
+     * checks [SseLifecyclePolicy.restEffectAllowed]; if denied, the operation
+     * is silently dropped and its session is marked dirty.
+     */
+    data class ExecuteSseRest(
+        val operation: SseRestOperation,
+        val fence: SseRestFence,
+    ) : ControllerEffect()
+
+    /**
+     * L4 §5.2: The set of SSE-origin REST operations that go through the R2
+     * fence. Each corresponds to a handler-level bypass path that must be
+     * gated in receive-only mode.
+     */
+    sealed interface SseRestOperation {
+        /** server.connected → reconcile + reload. */
+        data object ServerConnected : SseRestOperation
+        /** Full session-list refresh (archive/restore). */
+        data object RefreshSessions : SseRestOperation
+        /** Fetch pending permissions after permission.* event. */
+        data object LoadPendingPermissions : SseRestOperation
+        /** Refresh session status list. */
+        data object LoadSessionStatus : SseRestOperation
+        /** Reload messages for a session (message.created event). */
+        data class ReloadMessages(
+            val sessionId: String,
+            val resetLimit: Boolean,
+            val expectedRouteInstance: Long,
+        ) : SseRestOperation
+        /** Catch-up after disconnect (gap recovery). */
+        data class CatchUpAfterDisconnect(val sessionId: String) : SseRestOperation
+    }
 }

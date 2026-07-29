@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.service.lifecycle
 
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
+import cn.vectory.ocdroid.service.lifecycle.SseLifecyclePolicy.BackgroundDeadlineTicket
 import cn.vectory.ocdroid.service.streaming.SourceActivation
 
 /**
@@ -36,7 +37,46 @@ sealed interface Layer {
      * background. No automatic recovery (§4.1).
      */
     data object L3 : Layer
+
+    /**
+     * L4 §4: Background grace period. App is in background, the main SSE
+     * socket may be retained (but NOT reconnected if dropped). No token
+     * streams. A 15-minute timer is armed; on expiry the coordinator enters
+     * [NoSourceTerminal].
+     *
+     * @param foregroundGeneration the generation at which background was entered
+     *   (used to fence the terminal timer — an older gen's timer cannot teardown
+     *   a re-entered foreground connection).
+     * @param identity the identity that was active when background was entered.
+     * @param fgsWasHeld true if the FGS was held at the transition.
+     * @param mainSseRetained true if the main SSE socket was retained (not
+     *   disconnected on background entry).
+     */
+    data class BackgroundGrace(
+        val foregroundGeneration: Long,
+        val identity: ConnectionIdentity,
+        val fgsWasHeld: Boolean,
+        val mainSseRetained: Boolean,
+    ) : Layer
+
+    /**
+     * L4 §4: Terminal no-source state. No FGS, no SSE, no poller, no ALM
+     * background polling. Entered ONLY after the 15-minute background grace
+     * expires (or a platform dataSync timeout during grace).
+     * This is NOT [L3] — L3 retains the poller; NoSourceTerminal stops
+     * everything. No automatic recovery (§4.1).
+     */
+    data class NoSourceTerminal(
+        val foregroundGeneration: Long,
+        val identity: ConnectionIdentity?,
+        val reason: NoSourceReason,
+    ) : Layer
 }
+
+/**
+ * L4 §4: The reason why [Layer.NoSourceTerminal] was entered.
+ */
+enum class NoSourceReason { BACKGROUND_GRACE_EXPIRED, BACKGROUND_PLATFORM_TIMEOUT }
 
 /**
  * Commands the service observes (§4.4). Emitted in the order each transition
@@ -101,6 +141,17 @@ sealed interface LifecycleCommand {
      * repeated definitive verdicts).
      */
     data object StopPoller : LifecycleCommand
+
+    /**
+     * L4 §4.4: Enter no-source terminal. The service executes this by
+     * stopping SSE, FGS, ALM pollJob, and ProcessStatusPoller, then
+     * calling stopSelf. The policy is already NO_SOURCE_TERMINAL before
+     * this command is emitted — any frame/effect that arrives during
+     * execution is fenced by the generation.
+     */
+    data class EnterNoSourceTerminal(
+        val ticket: BackgroundDeadlineTicket,
+    ) : LifecycleCommand
 
     /**
      * D5 (#2) — ensure a SUPPLEMENTAL process poller is running for

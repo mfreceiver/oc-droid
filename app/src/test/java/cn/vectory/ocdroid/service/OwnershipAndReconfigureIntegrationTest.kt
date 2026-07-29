@@ -5,6 +5,7 @@ import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.lifecycle.Layer
 import cn.vectory.ocdroid.service.lifecycle.LifecycleCommand
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
+import cn.vectory.ocdroid.service.streaming.SseTransportRuntimeStore
 import cn.vectory.ocdroid.service.streaming.SourceActivation
 import cn.vectory.ocdroid.service.status.GlobalBusyState
 import cn.vectory.ocdroid.service.status.SessionBusyStatus
@@ -126,7 +127,7 @@ class OwnershipAndReconfigureIntegrationTest {
     @Test
     fun `B1 - BootstrapFailure teardown forces StopSse + StopForeground + StopSelf even from L3`() = runTest {
         val status = RecordingStatusAggregator()
-        val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
+        val coordinator = StreamingLifecycleCoordinator(status, backgroundScope, SseTransportRuntimeStore(), ownershipGate = StreamingOwnershipGate(), identityStore = ConnectionIdentityStore())
         val inForeground = MutableStateFlow(false)
         val commands = mutableListOf<LifecycleCommand>()
         backgroundScope.launch { coordinator.commands.collect { commands += it } }
@@ -147,7 +148,7 @@ class OwnershipAndReconfigureIntegrationTest {
     @Test
     fun `cold-start-fix - BootstrapFailure teardown emits no StartPoller and allows re-arm`() = runTest {
         val status = RecordingStatusAggregator()
-        val coordinator = StreamingLifecycleCoordinator(status, backgroundScope)
+        val coordinator = StreamingLifecycleCoordinator(status, backgroundScope, SseTransportRuntimeStore(), ownershipGate = StreamingOwnershipGate(), identityStore = ConnectionIdentityStore())
         val inForeground = MutableStateFlow(false)
         val commands = mutableListOf<LifecycleCommand>()
         backgroundScope.launch { coordinator.commands.collect { commands += it } }

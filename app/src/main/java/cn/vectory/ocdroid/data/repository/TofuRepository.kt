@@ -6,6 +6,7 @@ import cn.vectory.ocdroid.data.repository.http.HttpHeaders
 import cn.vectory.ocdroid.data.repository.http.SlimapiContract
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.data.repository.http.TofuPinStore
+import cn.vectory.ocdroid.data.repository.http.applyClientIdentityHeaders
 import cn.vectory.ocdroid.data.repository.http.classifyValidation
 import cn.vectory.ocdroid.data.repository.http.spkiSha256Hex
 import kotlinx.coroutines.Dispatchers
@@ -86,6 +87,15 @@ internal class TofuRepository(
      * is atomic from the caller's view.
      */
     private val onTofuApplied: (hostPort: String) -> Unit,
+    /**
+     * §B (slimapi-v2-adapt-traffic-plan §B): lazy device-id provider for
+     * [captureServerCert]'s slim branch. The probe bypasses the shared OkHttp
+     * base chain (no [cn.vectory.ocdroid.data.repository.http.ClientIdentityInterceptor]),
+     * so identity headers are added manually — same pattern as the version
+     * header. Lazy so the provider can read a Hilt field-injected store that
+     * is populated after this class is constructed.
+     */
+    private val clientIdProvider: () -> String? = { null },
 ) {
     /**
      * §tofu R2: one-shot TLS handshake probe that RECORDS the server's leaf
@@ -159,6 +169,11 @@ internal class TofuRepository(
                 SlimapiContract.X_SLIMAPI_VERSION,
                 SlimapiContract.SLIMAPI_CLIENT_VERSION.toString()
             )
+            // §B: additive identity headers on the one-shot /slimapi/health
+            // probe — bypasses baseBuilder (no ClientIdentityInterceptor),
+            // so inject via the shared helper (same gating as version header:
+            // slim-only, so legacy /global/health never leaks identity).
+            applyClientIdentityHeaders(requestBuilder, clientIdProvider())
         }
         // Surface the leaf + classification regardless of whether the GET
         // itself succeeded — a 4xx/5xx after a completed handshake STILL

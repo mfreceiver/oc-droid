@@ -300,7 +300,6 @@ class TokenStreamProductionHooksTest {
             scope = CoroutineScope(Dispatchers.Unconfined),
             repository = repo,
             slices = store.slices,
-            currentServerGroupFp = { "" },
         )
         return tokenStreamProductionHooks(
             store = store,

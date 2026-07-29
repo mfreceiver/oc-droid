@@ -9,6 +9,7 @@ import cn.vectory.ocdroid.data.repository.TokenStreamReducer
 import cn.vectory.ocdroid.data.repository.TokenStreamReducerState
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.BundleStamp
+import cn.vectory.ocdroid.ui.NavState
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.StreamOwnedState
 import cn.vectory.ocdroid.util.DebugLog
@@ -21,6 +22,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.StateFlow
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -135,6 +137,22 @@ class TokenStreamCoordinator(
     private val scope: CoroutineScope,
     private val slices: SliceFlows,
     private val streamProvider: (sid: String, directory: String?) -> kotlinx.coroutines.flow.Flow<TokenStreamFrame>,
+    // L4 §3.2: foreground gate for token streams. Default true preserves
+    // existing behavior for callers that don't supply this.
+    private val appInForeground: () -> Boolean = { true },
+    /**
+     * L4 §3.2: observable foreground signal for active-stream lifecycle
+     * management (close on background, reopen on foreground-resume).
+     * When null (default), no foreground observer is installed — backward
+     * compatible for callers that only use snapshot-based gating.
+     */
+    private val foregroundSignal: StateFlow<Boolean>? = null,
+    // L4 §3.2 (lane-1 closure): observable nav-route flow for the route
+    // observer. Monitored for route changes that affect the active token
+    // stream. Null (test default) falls back to collecting slices.chat.
+    private val navFlow: StateFlow<NavState>? = null,
+    // L4 §3.2: visible chat session id (from route). Null when no chat is visible.
+    private val visibleChatSessionId: () -> String? = { null },
     private val triggerSinceFetch: (sessionId: String, authoritative: Boolean) -> Unit,
     /**
      * Heartbeat interval the server emits (informational; the watchdog uses
@@ -371,6 +389,139 @@ class TokenStreamCoordinator(
      */
     private val degradedSids: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
+    /**
+     * L4 §3.2 (lane-1 closure): desired token stream — set by [suspendClose]
+     * when observers (route/foreground) close a stream that SHOULD reopen
+     * when conditions return (route returns to session, app foregrounds, or
+     * gate re-allows). Also set by gate-denied reconnect retries.
+     *
+     * A SINGLE [AtomicReference] replaces the prior two (desiredSid +
+     * desiredDirectory) whose non-atomic read→clear→open compound ops had
+     * races (two observers consume one desired; new sid paired with stale/null
+     * directory; one observer's `set(null)` erasing the other's fresh desired).
+     * All consumption uses [getAndSet] (single-consumer take).
+     *
+     * Distinction: [suspendClose] sets desired and does NOT clear it.
+     * **Explicit close** ([close(sid)]) CLEARS desired for that sid so a
+     * user-closed stream is NOT auto-reopened.
+     */
+    private data class DesiredTokenStream(
+        val sid: String,
+        val directory: String?,
+    )
+    private val desired = AtomicReference<DesiredTokenStream?>(null)
+
+    /**
+     * L4 §3.2: foreground + route observer. Installs two lifecycle-scoped
+     * collectors:
+     *
+     * 1. **Route observer** (always installed): monitors [slices.chat] for
+     *    `currentSessionId` changes. When the visible route leaves the active
+     *    stream's session, the active stream is closed and recorded as desired.
+     *    When the visible route returns to the desired session, the stream is
+     *    reopened.
+     *
+     * 2. **Foreground observer** (installed only when [foregroundSignal] is
+     *    non-null): monitors the app's foreground/background state. On
+     *    background, closes the active stream (recording it as desired). On
+     *    foreground-resume, reopens the desired stream if the route matches.
+     */
+    init {
+        // Route observer: monitor route changes (via navFlow when available,
+        // falling back to slices.chat for backward-compat tests).
+        scope.launch {
+            var lastRouteSid: String? = null
+            if (navFlow != null) {
+                // L4 §3.2 (lane-1 closure): derive the visible sid from the
+                // authoritative route truth (navState.lastRoute), NOT from the
+                // loaded-data pointer (slices.chat.currentSessionId), which
+                // persists after navigating away from Chat.
+                navFlow.collect { _ ->
+                    val routeSid = visibleChatSessionId()
+                    if (routeSid != lastRouteSid) {
+                        lastRouteSid = routeSid
+                        val activeSid = currentSid.get()
+                        if (activeSid != null && (routeSid == null || routeSid != activeSid)) {
+                            // Branch A — leaving the active session: suspend-close
+                            // (records desired, does NOT clear it).
+                            DebugLog.d(TAG, "route changed: active=$activeSid visible=$routeSid — suspending")
+                            suspendClose(activeSid, currentDirectory.get())
+                        } else if (activeSid == null) {
+                            // Branch B — no active stream: maybe reopen a recorded desired.
+                            val d = desired.getAndSet(null)
+                            if (d != null) {
+                                if (routeSid == d.sid) {
+                                    DebugLog.d(TAG, "route changed: desired=${d.sid} visible=$routeSid — reopening")
+                                    open(d.sid, d.directory, source = "route-resume")
+                                } else {
+                                    // Route doesn't match yet — keep desired for later.
+                                    desired.set(d)
+                                }
+                            }
+                        }
+                        // When activeSid != null && routeSid == activeSid: do nothing.
+                    }
+                }
+            } else {
+                // Legacy fallback: collect slices.chat (tests that do not
+                // provide navFlow).
+                slices.chat.collect { chatState ->
+                    val newSid = chatState.currentSessionId
+                    if (newSid != lastRouteSid) {
+                        lastRouteSid = newSid
+                        val activeSid = currentSid.get()
+                        if (activeSid != null && (newSid == null || newSid != activeSid)) {
+                            // Branch A — leaving the active session: suspend-close
+                            // (records desired, does NOT clear it).
+                            DebugLog.d(TAG, "route changed: active=$activeSid visible=$newSid — suspending")
+                            suspendClose(activeSid, currentDirectory.get())
+                        } else if (activeSid == null && newSid != null) {
+                            // Branch B — no active stream: maybe reopen a recorded desired.
+                            val d = desired.getAndSet(null)
+                            if (d != null && newSid == d.sid) {
+                                DebugLog.d(TAG, "route changed: desired=${d.sid} visible=$newSid — reopening")
+                                open(d.sid, d.directory, source = "route-resume")
+                            }
+                            // Note: when route doesn't match, desired is consumed (no re-store).
+                            // The legacy path is test-only; navFlow is authoritative.
+                        }
+                        // When activeSid != null && newSid == activeSid: do nothing.
+                    }
+                }
+            }
+        }
+        // Foreground observer: monitor foreground/background transitions.
+        if (foregroundSignal != null) {
+            scope.launch {
+                foregroundSignal!!.collect { fg ->
+                    if (!fg) {
+                        // App went background → suspend-close active stream (records desired, no clear).
+                        val activeSid = currentSid.get()
+                        if (activeSid != null) {
+                            DebugLog.d(TAG, "app background: suspending active=$activeSid")
+                            suspendClose(activeSid, currentDirectory.get())
+                        }
+                    } else {
+                        // App returned to foreground → reopen desired if route matches.
+                        val d = desired.getAndSet(null)
+                        if (d != null) {
+                            val visSid = visibleChatSessionId()
+                            if (visSid == d.sid) {
+                                DebugLog.d(TAG, "app foreground: reopening desired=${d.sid}")
+                                open(d.sid, d.directory, source = "foreground-resume")
+                            } else {
+                                // Route no longer matches — re-set desired so a
+                                // subsequent route-change can pick it up, but DO
+                                // NOT reopen yet (the route observer will).
+                                desired.set(d)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private fun dispatchBound(boundBundle: ClientBundle, action: AppAction) {
         synchronized(bundleCommitLock) {
             if (currentBundleProvider() !== boundBundle) {
@@ -500,6 +651,22 @@ class TokenStreamCoordinator(
         // ProcessStatusPoller keeps refreshing status (it never owned a stream).
         if (sseDisabled()) {
             DebugLog.i(TAG, "open($sid): sse_disabled=true → REST-only (no token stream)")
+            return
+        }
+        // L4 §3.2: token stream gate — foreground + visibleChatSessionId matches.
+        // Record desired, then gate: only open if foreground && visible sid matches.
+        // The desired is retained so a foreground return with the same visible
+        // sid re-opens automatically.
+        //
+        // Gate semantics:
+        //   - appInForeground == false → REJECT (background, no streams).
+        //   - visibleChatSessionId == null → REJECT (no visible chat session).
+        //   - visibleChatSessionId != sid → REJECT (wrong route).
+        val visSid = visibleChatSessionId()
+        if (!appInForeground() || visSid == null || visSid != sid) {
+            DebugLog.d(TAG, "open($sid): gate denied (fg=${appInForeground()}, visible=$visSid) — recording desired only")
+            // Record desired for foreground-resume reopen.
+            desired.set(DesiredTokenStream(sid, directory))
             return
         }
         // §T1.1 Fix① + T3.2-C1 IDEMPOTENT GUARD: same (sid, directory,
@@ -644,6 +811,13 @@ class TokenStreamCoordinator(
             // would fail to clear.
             reconnectRequested.set(null)
         }
+        // L4 §3.2 (lane-1 closure): explicit close CLEARS desired so a
+        // user-closed stream is NOT auto-reopened by the foreground/route
+        // observer. Distinguishes from suspend (background/route-leave)
+        // which sets desired for auto-reopen.
+        desired.updateAndGet { current ->
+            if (current != null && current.sid == sid) null else current
+        }
         // Clear coordinator-internal state for this sid regardless of whether
         // it was the current stream (defensive: covers a stale sid whose job
         // was already cancelled by a newer open()).
@@ -655,6 +829,34 @@ class TokenStreamCoordinator(
         clearSessionRevisions(sid)
         attemptBySid.remove(sid)
         consecutive503BySid.remove(sid)
+        }
+    }
+
+    /**
+     * L4 §3.2 (lane-1 closure): suspend-close — records [sid] as the desired
+     * stream for auto-reopen when foreground/route returns, then performs
+     * teardown. Unlike [close], does NOT clear [desired] — the caller
+     * (route/foreground observer) intends to reopen when conditions return.
+     *
+     * Used ONLY by the route and foreground observers; app/user-intended
+     * closure goes through [close], which clears desired.
+     */
+    private fun suspendClose(sid: String, directory: String?) {
+        desired.set(DesiredTokenStream(sid, directory))
+        synchronized(bundleCommitLock) {
+            if (currentSid.get() == sid) {
+                cancelCurrentStream("suspendClose($sid)")
+                currentSid.set(null)
+                currentDirectory.set(null)
+                reconnectRequested.set(null)
+            }
+            // NOTE: desired is intentionally NOT cleared — the observer wants
+            // auto-reopen when conditions (route/foreground) return.
+            ownerByPartId.entries.removeIf { it.value.sid == sid }
+            reducerStateBySid.remove(sid)
+            clearSessionRevisions(sid)
+            attemptBySid.remove(sid)
+            consecutive503BySid.remove(sid)
         }
     }
 
@@ -1196,6 +1398,15 @@ class TokenStreamCoordinator(
         capturedRouteInstance: Long,
     ) {
         if (isReconnect && sid in degradedSids) return
+        // L4 §3.2: re-check the foreground/route gate before (re)connecting.
+        // The gate was checked at open() entry, but by the time a reconnect
+        // fires (after backoff delay) the app may have gone background or
+        // the route may have changed. If denied, record desired and skip.
+        if (!gateAllows(sid)) {
+            DebugLog.d(TAG, "runStream($sid) isReconnect=$isReconnect: gate denied — recording desired")
+            recordDesired(sid, directory, "runStream-gate")
+            return
+        }
         val connection = try {
             streamConnectionProvider?.invoke(sid, directory) ?: run {
                 val bundle = currentBundleProvider() ?: return
@@ -1381,6 +1592,13 @@ class TokenStreamCoordinator(
                         delay(retryAfter503Ms)
                         if (currentSid.get() != sid) return@launchStreamLifecycle
                         if (sid in degradedSids) return@launchStreamLifecycle
+                        // L4 §3.2: re-check the gate before retrying. The app
+                        // may have gone background during the Retry-After delay.
+                        if (!gateAllows(sid)) {
+                            DebugLog.d(TAG, "503-retry($sid): gate denied after delay — recording desired")
+                            recordDesired(sid, directory, "503-retry")
+                            return@launchStreamLifecycle
+                        }
                         val (epoch, gen) = beginStreamIncarnation(sid)
                         try {
                             runStream(sid, directory, epoch, gen, isReconnect = true, retryRouteInstance)
@@ -1438,6 +1656,14 @@ class TokenStreamCoordinator(
             // CancellationException and we never reach here).
             if (currentSid.get() != sid) return@launchStreamLifecycle
             if (sid in degradedSids) return@launchStreamLifecycle
+            // L4 §3.2: re-check the gate before reconnecting. If the app went
+            // background or the route changed during the backoff delay, record
+            // desired and skip the reconnect.
+            if (!gateAllows(sid)) {
+                DebugLog.d(TAG, "scheduleReconnect($sid): gate denied after backoff — recording desired")
+                recordDesired(sid, directory, "scheduleReconnect")
+                return@launchStreamLifecycle
+            }
             val (epoch, gen) = beginStreamIncarnation(sid)
             try {
                 runStream(sid, directory, epoch, gen, isReconnect = true, reconnectRouteInstance)
@@ -1550,6 +1776,25 @@ class TokenStreamCoordinator(
         // isActive read (e.g. a test or D2 lifecycle probe) observes the
         // cancelled state. The next open() overwrites this slot atomically.
         currentLifecycle.get()?.job?.cancel(CancellationException(reason))
+    }
+
+    /**
+     * L4 §3.2: returns true iff the token stream gate allows a connection for
+     * [sid] — foreground is active AND there is a visible chat session AND
+     * it matches [sid].
+     */
+    private fun gateAllows(sid: String): Boolean {
+        val visSid = visibleChatSessionId()
+        return appInForeground() && visSid != null && visSid == sid
+    }
+
+    /**
+     * L4 §3.2: records [sid] as the desired stream (for foreground-resume or
+     * route-return reopen) and logs the reason.
+     */
+    private fun recordDesired(sid: String, directory: String?, reason: String) {
+        desired.set(DesiredTokenStream(sid, directory))
+        DebugLog.d(TAG, "recordDesired($sid) reason=$reason")
     }
 
     companion object {
