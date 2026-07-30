@@ -232,21 +232,42 @@ internal fun reduceChatCleared(state: StoreState, action: AppAction.ChatCleared)
 )
 
 internal fun reduceLastAssistantErrorAttached(state: StoreState, action: AppAction.LastAssistantErrorAttached): StoreState {
-    if (!state.acceptsRouteUpdate(action.expectedRouteInstance, action.sessionId)) return state
-    // SSC:1706-1712 1:1 — attach to last assistant; no-op if absent or
-    // already has an error.
-    val last = state.chat.messages.lastOrNull { it.isAssistant }
-    return if (last == null || last.error != null) {
-        state
-    } else {
-        state.copy(
-            chat = state.chat.copy(
-                messages = state.chat.messages.map { m ->
-                    if (m.id == last.id) m.copy(error = action.error) else m
-                },
-            ),
-        ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+    val sid = action.sessionId
+    // §P0-E(b) NARROWED: happy-path direct attach ONLY. The R10 drain/consumer
+    // that would re-attempt attaching via the pending queue is DEFERRED to a
+    // post-P0-A task — safe attach requires the GET/controller + authority
+    // status writer to locate the errored assistant (B2: session.error carries
+    // no messageId; attaching to an arbitrary last assistant is forbidden).
+    // Until then a non-attachable payload is RECORDED into pendingErrorReattach
+    // (producer scaffolding) but NEVER attached to a message.
+    if (state.acceptsRouteUpdate(action.expectedRouteInstance, sid)) {
+        val last = state.chat.messages.lastOrNull { it.isAssistant }
+        if (last != null && last.error == null) {
+            // Happy path: attach to the exact last assistant (byte-for-byte legacy).
+            return state.copy(
+                chat = state.chat.copy(
+                    messages = state.chat.messages.map { m ->
+                        if (m.id == last.id) m.copy(error = action.error) else m
+                    },
+                ),
+            ).withRouteContentSynced(action.expectedRouteInstance, sid)
+        }
+        // route matches but last==null OR last already has error → fall through to record.
     }
+    // Record producer scaffolding (needs a session key). Legacy sid==null → drop.
+    if (sid == null) return state
+    val queued = PendingChatError(
+        error = action.error,
+        routeInstance = action.expectedRouteInstance,
+        messageAssistantId = state.chat.messages.lastOrNull { it.isAssistant }?.id,
+    )
+    val updated = (state.chat.pendingErrorReattach - sid) + (sid to queued)
+    val bounded = if (updated.size > PENDING_ERROR_REATTACH_MAX) {
+        // LinkedHashMap iteration order == insertion order; drop oldest entry.
+        val oldest = updated.entries.firstOrNull()?.key
+        if (oldest != null) updated - oldest else updated
+    } else updated
+    return state.copy(chat = state.chat.copy(pendingErrorReattach = bounded))
 }
 
 internal fun reduceCatchUpMessagesMerged(state: StoreState, action: AppAction.CatchUpMessagesMerged): StoreState {

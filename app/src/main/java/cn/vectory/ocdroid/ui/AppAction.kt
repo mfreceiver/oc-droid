@@ -965,6 +965,9 @@ internal fun ChatState.clearSessionData(): ChatState = copy(
     // (and CANNOT) sweep them from ChatState. The entries die with their
     // owning route entry when it pops (host-switch / leave-to-Sessions).
     pendingScrollRequest = null,
+    // §P0-E(b)/(c): clear durable-error maps on host purge / draft materialize.
+    pendingErrorReattach = emptyMap(),
+    pendingErrorCheck = emptySet(),
     // PRESERVED (chrome, NOT per-session — kept via .copy() above):
     // isCompacting, compactStartedAt, refreshNonce.
 )

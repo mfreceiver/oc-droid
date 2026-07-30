@@ -498,6 +498,29 @@ internal fun ChatState.hasActiveTokenStreamOwner(): Boolean =
     streamOwned.values.any { it == StreamOwnedState.STREAMING }
 
 /**
+ * §P0-E(b): queued durable error awaiting re-attach. messageAssistantId is the
+ * last-assistant id captured at queue time when available (null when no assistant
+ * existed yet). Used to avoid attaching a stale error to a newer assistant (B2/M5).
+ *
+ * §P0-E NARROWED: producer scaffolding only. The drain/consumer that would ATTACH
+ * this to an assistant is DEFERRED to a post-P0-A task — it needs the GET/controller
+ * wiring + the authority status writer to safely locate the errored assistant (B2:
+ * session.error carries no messageId). Do NOT attach from a pure reducer without
+ * that wiring.
+ */
+data class PendingChatError(
+    val error: Message.MessageError,
+    val routeInstance: Long,
+    val messageAssistantId: String?,
+)
+
+/**
+ * §P0-E(b): maximum size of [ChatState.pendingErrorReattach]. LRU eviction
+ * by insertion order (LinkedHashMap iteration order = insertion order).
+ */
+internal const val PENDING_ERROR_REATTACH_MAX = 32
+
+/**
  * §R-17 batch2: chat-domain state slice (RFC §2.2). Authoritative storage via
  * _chatFlow.update. The highest-frequency domain (SSE streaming deltas mutate
  * streamingPartTexts/messages many times per second). §R-17 batch2: error/success
@@ -703,6 +726,19 @@ data class ChatState(
       * `model = pendingModel ?: inferCurrentModel(msgs, visibleAgents) ?: null`.
       */
      val pendingModel: Message.ModelInfo? = null,
+     /** §P0-E(b): session-level queue for LastAssistantErrorAttached payloads that
+      *  arrived while route didn't match or no assistant existed yet (R10 silent-drop
+      *  fix). Keyed by sessionId. Bounded to PENDING_ERROR_REATTACH_MAX (LRU by
+      *  insertion order). Payload-complete (no messageId assumed — B2).
+      *
+      *  §P0-E NARROWED: producer-only scaffolding (records payloads; no consumer
+      *  yet). Wiring deferred to post-P0-A. */
+     val pendingErrorReattach: Map<String, PendingChatError> = emptyMap(),
+     /** §P0-E(c) NARROWED: INERT — no writer and no consumer. The two-phase marker
+      *  requires the real status writer (slim/legacy/REST idle transitions bypass the
+      *  reducer today) + a drain consumer, both deferred to post-P0-A. Kept as a
+      *  struct placeholder. */
+     val pendingErrorCheck: Set<String> = emptySet(),
  )
 
  /**

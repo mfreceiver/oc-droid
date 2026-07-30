@@ -98,7 +98,13 @@ internal fun reduceSessionArchived(state: StoreState, action: AppAction.SessionA
             activeSessionIds = newSessionList.activeSessionIds - subtree,
             sessionErrorsById = cleanedSessionErrors,
         ),
-        chat = newChatCleaned,
+        chat = newChatCleaned.copy(
+            // §P0-E scaffolding hygiene: clear pending-error maps for the archived
+            // subtree (mirrors the sessionErrorsById cleanup above). Wiring deferred
+            // to post-P0-A, but the maps must not retain entries for archived sessions.
+            pendingErrorReattach = newChatCleaned.pendingErrorReattach.filterKeys { it !in subtree },
+            pendingErrorCheck = newChatCleaned.pendingErrorCheck - subtree,
+        ),
         unread = newUnread,
     )
 }
@@ -346,7 +352,15 @@ internal fun reduceBulkSessionsRefreshed(state: StoreState, action: AppAction.Bu
     val newChatCleaned = newChat.cleanScrollStateForSubtree(allArchivedSubtree)
     return state.copy(
         sessionList = newSessionList.copy(pendingQuestions = cleanedQuestions),
-        chat = newChatCleaned,
+        chat = newChatCleaned.copy(
+            // §P0-E scaffolding hygiene: clear pending-error maps for the bulk-
+            // archived subtree (mirrors the local/SSE archive + delete cleanup).
+            // The reducer already computed allArchivedSubtree for the unread /
+            // pendingQuestions cleanup above — reuse it here so a REST bulk
+            // archive does not leave stale pending entries (review gap fix).
+            pendingErrorReattach = newChatCleaned.pendingErrorReattach.filterKeys { it !in allArchivedSubtree },
+            pendingErrorCheck = newChatCleaned.pendingErrorCheck - allArchivedSubtree,
+        ),
         unread = newUnread,
     )
 }
