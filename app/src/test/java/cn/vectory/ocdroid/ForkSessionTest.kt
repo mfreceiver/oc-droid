@@ -180,6 +180,12 @@ class ForkSessionTest {
             store = store,
             autoStart = false,
         )
+        // §P0-E(b)(c): real coordinator — its init subscribes to store.stateFlow.
+        val errorRecoveryCoordinator = cn.vectory.ocdroid.ui.controller.ErrorRecoveryCoordinator(
+            scope = appScope,
+            store = store,
+            repository = repository,
+        )
         return AppCore(
             store,
             repository,
@@ -204,6 +210,8 @@ class ForkSessionTest {
                 triggerSinceFetch = { _, _ -> },
             ),
             unreadSoakController,
+            // §P0-E(b)(c): durable-error GET drain coordinator.
+            errorRecoveryCoordinator,
             // §review-fix #1: fp provider (same as MainViewModelTestBase).
             { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
             appScope,
