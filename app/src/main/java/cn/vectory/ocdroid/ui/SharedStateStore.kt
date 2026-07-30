@@ -51,14 +51,42 @@ import javax.inject.Singleton
  * terminal write surface. B1 changes the storage backing, not that surface.
  */
 @Singleton
-class SharedStateStore @Inject constructor() {
+class SharedStateStore @Inject constructor(
+    /**
+     * §P0-A rev-gpt #5: the current connection identity, used to derive the
+     * REAL authority [ScopeKey] at the non-aggregator snapshot sites
+     * (StatusPollOrchestrator / BackgroundUnreadPoller / SessionTreeHydrator /
+     * SessionListActions). Previously these sites used an EMPTY ScopeKey
+     * ("","") → coverage was written under a key the aggregator never reads →
+     * globalState degraded to Unknown. */
+    private val identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
+) {
     internal var state: MutableStateFlow<StoreState> = MutableStateFlow(StoreState.initial())
         private set
+
+    /** Test-only no-arg constructor (unbound identityStore). Hilt does NOT see
+     *  this (no @Inject); it resolves the primary constructor above. */
+    internal constructor() : this(cn.vectory.ocdroid.service.identity.ConnectionIdentityStore())
 
     /** Test-only: inject a custom [MutableStateFlow] for deterministic CAS control
      *  (e.g., to simulate CAS failure / retry sequences). */
     internal constructor(testState: MutableStateFlow<StoreState>) : this() {
         state = testState
+    }
+
+    /**
+     * §P0-A rev-gpt #5: the REAL authority [ScopeKey] for the current identity
+     * (serverGroupFp + endpointFp). Used by the non-aggregator snapshot sites
+     * so coverage is written under the SAME key the aggregator reads
+     * ([StatusAggregatorImpl.currentScope] derives identically from
+     * `identityStore.currentIdentity.value`). MUST match the aggregator's
+     * derivation — no second scope source. */
+    internal fun authorityScope(): cn.vectory.ocdroid.data.state.ScopeKey {
+        val id = identityStore.currentIdentity.value
+        return cn.vectory.ocdroid.data.state.ScopeKey(
+            serverGroupFp = id?.serverGroupFp ?: "",
+            endpointFp = id?.endpointFp ?: "",
+        )
     }
 
     /**
@@ -184,7 +212,18 @@ class SharedStateStore @Inject constructor() {
      */
     internal fun mutateStateAndGet(transform: (StoreState) -> StoreState): StoreState = state.updateAndGet(transform)
     fun mutateHost(transform: (HostState) -> HostState) =
-        state.update { it.copy(host = transform(it.host)) }
+        state.update {
+            val prevHost = it.host
+            val nextHost = transform(prevHost)
+            // §P0-A rev-gpt #2: bump identityEpoch ONLY when currentHostProfileId
+            // changes (host switch). The authority reducer's opScopeValid checks
+            // this to drop stale REST responses captured before a host switch.
+            if (nextHost.currentHostProfileId != prevHost.currentHostProfileId) {
+                it.copy(host = nextHost, identityEpoch = it.identityEpoch + 1L)
+            } else {
+                it.copy(host = nextHost)
+            }
+        }
     /** §history-load-fix / §A5-3 B1: CAS write of the expansion map. */
     fun mutateExpandedParts(transform: (Map<String, Boolean>) -> Map<String, Boolean>) =
         state.update { it.copy(expandedParts = transform(it.expandedParts)) }

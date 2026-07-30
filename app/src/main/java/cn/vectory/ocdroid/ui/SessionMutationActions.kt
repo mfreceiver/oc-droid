@@ -381,19 +381,16 @@ internal fun launchSendMessage(
                 // optimisticBumpTimestamp IS the caller-captured wall-clock
                 // (System.currentTimeMillis above) — the reducer stays pure (no
                 // clock read; the value is carried in the op).
-                // scopeKey is a P0-C placeholder (ApplyEvent scope guard is lenient
-                // in P0-A — see opScopeValid); connectionMonotonicMs doubles as the
-                // tie-break clock + the optimistic bump timestamp.
+                // §P0-A rev-gpt #5: real scope (not empty placeholder) — ApplyEvent
+                // scope guard is lenient in P0-A (opScopeValid passes), but the
+                // scopeKey is carried for P0-C + consistency with other sites.
                 slices.store.dispatch(
                     AppAction.AuthorityEvent(
                         cn.vectory.ocdroid.data.state.AuthorityOp.ApplyEvent(
                             sid = sessionId,
                             status = busyStatus,
                             origin = cn.vectory.ocdroid.data.state.EntryOrigin.OPTIMISTIC,
-                            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(
-                                serverGroupFp = "",
-                                endpointFp = "",
-                            ),
+                            scopeKey = slices.store.authorityScope(),
                             connectionMonotonicMs = updatedTimestamp,
                             optimisticBumpTimestamp = updatedTimestamp,
                         ),

@@ -317,17 +317,22 @@ class StatusAggregatorImpl internal constructor(
     override suspend fun refresh(identity: ConnectionIdentity, snapshot: StatusSnapshot) {
         val requestStartMs = clock()
         val epochAtRequestStart = identityStore.currentEpoch()
+        // §P0-A rev-gpt #2 (kill TOCTOU): capture hostProfileId + identityEpoch
+        // at request START (before the fetch), NOT after — so a host switch
+        // landing mid-fetch is detected by the reducer's epoch guard inside
+        // the CAS. The dispatch-side identityStore.currentEpoch() check below
+        // additionally catches endpoint/workdir-only reconfigures.
+        val stateAtStart = store.stateFlow.value
+        val hostAtStart = stateAtStart.host.currentHostProfileId
+        val identityEpochAtStart = stateAtStart.identityEpoch
         // §3.1 merge timing (B4-b adapter-side): localBefore captures the
         // projection of entries that are NOT fresher than the REST request
         // start. Entries with `updatedMonotonic > requestStartMs` (a fresher
         // SSE observation landed before this REST started) are EXCLUDED so the
         // reducer's REST in-flight protection (mergeStatusSnapshotInFlight)
         // treats them as "changed during the round-trip" → SSE-wins overrides
-        // the stale REST snapshot. This faithfully reproduces the pre-Lane-2
-        // `requestStartMs >= prev.sourceTimeMs` merge-timing gate (the authority
-        // reducer's ApplySnapshot is pure + lenient for P0-A; the adapter
-        // supplies the merge-timing context via localBefore).
-        val authorityAtStart = store.stateFlow.value.authority
+        // the stale REST snapshot.
+        val authorityAtStart = stateAtStart.authority
         val localBefore = authorityAtStart.bySid
             .filterValues { it.updatedMonotonic <= requestStartMs }
             .mapValues { it.value.status }
@@ -340,9 +345,10 @@ class StatusAggregatorImpl internal constructor(
             endpointFp = identity.endpointFp,
         )
         val token = RequestToken(
-            hostProfileId = store.stateFlow.value.host.currentHostProfileId,
+            hostProfileId = hostAtStart,
             epoch = epochAtRequestStart,
             requestStartMs = requestStartMs,
+            identityEpoch = identityEpochAtStart,
         )
         result.fold(
             onSuccess = { fetch ->
@@ -355,10 +361,19 @@ class StatusAggregatorImpl internal constructor(
                 // ghosts from materializing a bySid entry.
                 val unmappedActiveIds = fetch.statuses.keys - snapshot.sessionsById.keys
                 val mappedStatuses = fetch.statuses.filterKeys { it in snapshot.sessionsById }
+                // §P0-A rev-gpt #6 (fail-closed for failed-dir sessions): a
+                // session in a FAILED workdir must NOT be idle-normalized (it
+                // was not authoritatively fetched). Exclude failed-dir session
+                // ids from authoritativeNodeIds so the reducer does NOT
+                // idle-fill them → they stay ABSENT (fail-closed unknown).
+                val failedDirSessionIds = snapshot.sessionsById.values
+                    .filter { it.directory.isNotBlank() && it.directory in fetch.failedWorkdirs }
+                    .map { it.id }
+                    .toSet()
                 val op = buildAuthorityApplySnapshot(
                     snapshot = mappedStatuses,
                     authoritativeSessions = snapshot.sessionsById,
-                    authoritativeNodeIds = snapshot.sessionsById.keys,
+                    authoritativeNodeIds = snapshot.sessionsById.keys - failedDirSessionIds,
                     // 方案A Issue2: exclude failed workdirs from coverage so the
                     // registered-workdir coverage predicate independently
                     // refuses AllIdleFresh on a partial slim failure.
@@ -373,7 +388,7 @@ class StatusAggregatorImpl internal constructor(
                 store.dispatch(AppAction.AuthorityEvent(op))
                 publishFromState(store.stateFlow.value)
             },
-            onFailure = { markRequestFailedInternal(identity, snapshot, requestStartMs) },
+            onFailure = { markRequestFailedInternal(identity, snapshot, requestStartMs, token) },
         )
     }
 
@@ -425,22 +440,28 @@ class StatusAggregatorImpl internal constructor(
         snapshot: StatusSnapshot,
         sourceTimeMs: Long,
     ) {
-        markRequestFailedInternal(identity, snapshot, sourceTimeMs)
+        // §P0-A rev-gpt #2: capture host/epoch at call time (the public entry
+        // is NOT suspend — no mid-call reconfigure window; the token reflects
+        // the current state at the instant of the failure call).
+        val currentState = store.stateFlow.value
+        val token = RequestToken(
+            hostProfileId = currentState.host.currentHostProfileId,
+            epoch = identityStore.currentEpoch(),
+            requestStartMs = sourceTimeMs,
+            identityEpoch = currentState.identityEpoch,
+        )
+        markRequestFailedInternal(identity, snapshot, sourceTimeMs, token)
     }
 
     private fun markRequestFailedInternal(
         identity: ConnectionIdentity,
         snapshot: StatusSnapshot,
         sourceTimeMs: Long,
+        token: RequestToken,
     ) {
         val scopeKey = ScopeKey(
             serverGroupFp = identity.serverGroupFp,
             endpointFp = identity.endpointFp,
-        )
-        val token = RequestToken(
-            hostProfileId = store.stateFlow.value.host.currentHostProfileId,
-            epoch = identityStore.currentEpoch(),
-            requestStartMs = sourceTimeMs,
         )
         val op = AuthorityOp.MarkSourceFailed(
             scopeKey = scopeKey,

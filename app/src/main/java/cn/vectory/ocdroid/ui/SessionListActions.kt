@@ -262,11 +262,12 @@ internal fun launchLoadChildSessions(
                             partialFailureWorkdirs = emptySet(),
                             unmappedActiveIds = emptySet(),
                             lastSuccessTimeMs = requestStartMs,
-                            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+                            scopeKey = slices.store.authorityScope(),
                             requestToken = cn.vectory.ocdroid.data.state.RequestToken(
                                 hostProfileId = null,
                                 epoch = epochAtStart,
                                 requestStartMs = requestStartMs,
+                                identityEpoch = slices.store.stateFlow.value.identityEpoch,
                             ),
                             localBefore = statusBefore,
                         )

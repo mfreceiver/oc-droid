@@ -124,19 +124,27 @@ sealed interface AuthorityOp {
 
 /**
  * Host + epoch captured at REST request start. The reducer's
- * [cn.vectory.ocdroid.ui.opScopeValid] host guard compares [hostProfileId]
- * against `state.host.currentHostProfileId` (defense-in-depth: the caller's
- * own single-flight guard — `statusLoadEpoch` AtomicLong / `completenessEpoch`
- * — remains authoritative for stale-request dropping).
+ * [cn.vectory.ocdroid.ui.opScopeValid] checks BOTH [hostProfileId] (vs
+ * `state.host.currentHostProfileId`) AND [identityEpoch] (vs
+ * `state.identityEpoch`) — defense-in-depth inside the CAS: the caller's own
+ * single-flight guard (`statusLoadEpoch` AtomicLong / `completenessEpoch`)
+ * remains authoritative for stale-request dropping, and the adapter's
+ * dispatch-side `identityStore.currentEpoch()` check catches
+ * endpoint/workdir-only reconfigures.
  *
  * [hostProfileId] is nullable: the host may legitimately be unset on cold
  * start; null ≡ "could not determine" → the reducer guards leniently
  * (null currentHost passes), matching the legacy `!=` null==null semantics.
+ *
+ * [identityEpoch] is [StoreState.identityEpoch] captured at request START
+ * (before the fetch) — NOT the current value (kills the TOCTOU where a host
+ * switch lands mid-fetch).
  */
 data class RequestToken(
     val hostProfileId: String?,
     val epoch: Long,
     val requestStartMs: Long,
+    val identityEpoch: Long = 0L,
 )
 
 /** §B7 REST reconcile outcome classification. */

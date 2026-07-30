@@ -199,11 +199,12 @@ class BackgroundUnreadPoller internal constructor(
                 partialFailureWorkdirs = emptySet(),
                 unmappedActiveIds = emptySet(),
                 lastSuccessTimeMs = now,
-                scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+                scopeKey = store.authorityScope(),
                 requestToken = cn.vectory.ocdroid.data.state.RequestToken(
                     hostProfileId = startHostId,
                     epoch = startEpoch,
                     requestStartMs = now,
+                    identityEpoch = store.stateFlow.value.identityEpoch,
                 ),
                 localBefore = localBefore,
             )

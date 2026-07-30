@@ -57,11 +57,29 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
     val projection = projectSessionStatuses(nextAuth)
     val newSessions = applyOptimisticBumps(state.sessionList.sessions, nextAuth.pendingBumps)
     val cleanedAuth = nextAuth.copy(pendingBumps = emptyMap())
+    // §P0-A rev-gpt rework (abort-pending single-CAS): when an ApplyEvent
+    // delivers a TERMINAL status (NOT busy AND NOT retry), release the in-flight
+    // abort-pending flag for that sid in the SAME state.copy that writes the
+    // status projection — atomically (no torn window between the status write
+    // and the abort release, which the old SseDispatchHost two-CAS path had).
+    // Only when the sid actually HAS a pending abort flag (avoids needless copy).
+    val nextAbortPending = if (op is AuthorityOp.ApplyEvent &&
+        !op.status.isBusy && !op.status.isRetry &&
+        op.sid in state.sessionList.abortPendingSessionIds
+    ) {
+        state.sessionList.abortPendingSessionIds - op.sid
+    } else {
+        state.sessionList.abortPendingSessionIds
+    }
     return state.copy(
         authority = cleanedAuth,
+        // §P0-A rev-gpt rework (prep Lane B): bump revision ONLY on a real
+        // authority transition (we already returned early on no-change above).
+        authorityRevision = state.authorityRevision + 1L,
         sessionList = state.sessionList.copy(
             sessionStatuses = projection,
             sessions = newSessions,
+            abortPendingSessionIds = nextAbortPending,
         ),
     )
 }
@@ -70,35 +88,49 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
  * Pure scope/identity guard. Derives ONLY from [state] (no injected identity
  * store, no TOCTOU — §B11).
  *
- *  - [AuthorityOp.ApplySnapshot] / [AuthorityOp.MarkSourceFailed]: host guard.
- *    The caller's own single-flight guard (statusLoadEpoch AtomicLong /
- *    completenessEpoch) remains authoritative for stale-request dropping;
- *    this is defense-in-depth inside the CAS. null current host passes
- *    leniently (matches the legacy `!=` null==null semantics).
+ *  - [AuthorityOp.ApplySnapshot] / [AuthorityOp.MarkSourceFailed]: host guard
+ *    ([token.hostProfileId] vs `state.host.currentHostProfileId`) AND epoch
+ *    guard ([token.identityEpoch] vs [StoreState.identityEpoch]). Both must pass.
+ *    The host guard closes the host-switch TOCTOU (the adapter captures
+ *    `hostProfileId` at request START, not current). The epoch guard is
+ *    defense-in-depth inside the CAS: `identityEpoch` is bumped on
+ *    `currentHostProfileId` change (via [SharedStateStore.mutateHost]), so a
+ *    stale response whose request-start epoch predates a host switch is
+ *    dropped. The adapter's dispatch-side `identityStore.currentEpoch()` check
+ *    additionally catches endpoint/workdir-only reconfigures (same hostProfileId).
+ *    null current host passes leniently (cold-start).
  *  - [AuthorityOp.ApplyEvent] / [AuthorityOp.PurgeHost] /
  *    [AuthorityOp.ApplyReconcileOutcome] / [AuthorityOp.PruneSessions]:
  *    structurally valid for P0-A (true). The event-captured-identity scope
  *    guard is P0-C's job (§2.2 line 254-256). Lenient-pass does NOT regress
  *    current behavior — no B11 guard exists today.
  */
-private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean = when (op) {
-    is AuthorityOp.ApplySnapshot,
-    is AuthorityOp.MarkSourceFailed -> {
-        val token = when (op) {
-            is AuthorityOp.ApplySnapshot -> op.requestToken
-            is AuthorityOp.MarkSourceFailed -> op.requestToken
-            else -> return true
+private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
+    return when (op) {
+        is AuthorityOp.ApplySnapshot,
+        is AuthorityOp.MarkSourceFailed -> {
+            val token = when (op) {
+                is AuthorityOp.ApplySnapshot -> op.requestToken
+                is AuthorityOp.MarkSourceFailed -> op.requestToken
+                else -> return true
+            }
+            val currentHost = state.host.currentHostProfileId
+            // Host guard: null currentHost passes leniently (cold-start); otherwise
+            // the request-start host must match the live host.
+            if (currentHost != null && currentHost != token.hostProfileId) return false
+            // §P0-A rev-gpt #2: epoch guard. identityEpoch is bumped on host-profile
+            // switch; a stale response captured before the switch has a lower epoch.
+            if (token.identityEpoch != state.identityEpoch) return false
+            true
         }
-        val currentHost = state.host.currentHostProfileId
-        currentHost == null || currentHost == token.hostProfileId
+        // §B11 TODO(P0-C): scope guard via event-captured identity (op.capturedIdentity /
+        // op.scopeKey vs a current scope derivable from state). P0-A lenient-pass preserves
+        // current behavior (no B11 guard exists today).
+        is AuthorityOp.ApplyEvent,
+        is AuthorityOp.PurgeHost,
+        is AuthorityOp.ApplyReconcileOutcome,
+        is AuthorityOp.PruneSessions -> true
     }
-    // §B11 TODO(P0-C): scope guard via event-captured identity (op.capturedIdentity /
-    // op.scopeKey vs a current scope derivable from state). P0-A lenient-pass preserves
-    // current behavior (no B11 guard exists today).
-    is AuthorityOp.ApplyEvent,
-    is AuthorityOp.PurgeHost,
-    is AuthorityOp.ApplyReconcileOutcome,
-    is AuthorityOp.PruneSessions -> true
 }
 
 // ── ApplyEvent ────────────────────────────────────────────────────────────
@@ -191,6 +223,15 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
         )
     }
 
+    // §P0-A rev-gpt #1 (no-change same-ref): if the recomputed entry equals
+    // the prior entry (data-class equality: same status, serverRound, claim,
+    // origin, freshness, updatedMonotonic, workdir) AND pendingBumps is
+    // unchanged (addPendingBump returned the same reference) → NO transition →
+    // return cur (same ref). This makes an equal-value SSE re-delivery a true
+    // CAS no-op (no emission), completing the B1 idempotency contract. (An
+    // OPTIMISTIC op always changes the claim via clientSeq++ → never no-change.)
+    if (nextEntry == prev && nextPending === cur.pendingBumps) return cur
+
     return cur.copy(
         bySid = cur.bySid + (op.sid to nextEntry),
         pendingBumps = nextPending,
@@ -278,6 +319,19 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
         lastSuccessTimeMs = op.lastSuccessTimeMs,
     ))
 
+    // §P0-A rev-gpt #1 (no-change same-ref): if the merged bySid equals the
+    // prior bySid (same keys + data-class-equal entries) AND the coverage entry
+    // for this scope is unchanged → NO transition → return cur (same ref).
+    // This makes a re-fetch that produces the identical snapshot a true CAS
+    // no-op (no emission), completing the B1 idempotency contract.
+    val priorCov = cur.coverage[op.scopeKey]
+    val coverageUnchanged = priorCov != null &&
+        priorCov.registeredWorkdirs == op.registeredWorkdirs &&
+        priorCov.coveredWorkdirs == op.coveredWorkdirs &&
+        priorCov.unmappedActiveIds == op.unmappedActiveIds &&
+        priorCov.lastSuccessTimeMs == op.lastSuccessTimeMs
+    if (nextById == cur.bySid && coverageUnchanged) return cur
+
     return cur.copy(bySid = nextById, coverage = nextCoverage)
 }
 
@@ -328,11 +382,18 @@ private fun applyPurge(cur: AuthorityState, op: AuthorityOp.PurgeHost): Authorit
  * idempotent).
  */
 private fun applyMarkFailed(cur: AuthorityState, op: AuthorityOp.MarkSourceFailed): AuthorityState {
-    // Merge timing: keep entries strictly fresher than the failure (a prior
-    // SSE Busy/Retry survives); remove entries at-or-older than the failure
-    // (absence ≡ unknown, fail-closed). Equal timestamps overwrite (matches the
-    // legacy `sourceTimeMs >= prev.sourceTimeMs` rule).
-    val survivors = cur.bySid.filterValues { it.updatedMonotonic > op.monotonic }
+    // Merge timing (scope-filtered): keep an entry if EITHER (a) it is FRESHER
+    // than the failure (updatedMonotonic > monotonic — a prior SSE Busy/Retry
+    // survives), OR (b) it is OUT OF SCOPE (its workdir is non-blank AND NOT in
+    // the failed scope's registeredWorkdirs — a different scope's entry must
+    // NOT be swept by this scope's failure). Remove only in-scope + at-or-older-
+    // than-failure entries (absence ≡ unknown, fail-closed). Entries with a
+    // null/blank workdir are conservatively treated as in-scope (single active
+    // scope in P0-A).
+    val survivors = cur.bySid.filterValues { entry ->
+        entry.updatedMonotonic > op.monotonic ||
+            (entry.workdir != null && entry.workdir.isNotBlank() && entry.workdir !in op.registeredWorkdirs)
+    }
     val nextCoverage = cur.coverage + (op.scopeKey to Coverage(
         registeredWorkdirs = op.registeredWorkdirs,
         coveredWorkdirs = emptySet(),
@@ -355,7 +416,8 @@ private fun applyMarkFailed(cur: AuthorityState, op: AuthorityOp.MarkSourceFaile
 
 // ── ApplyReconcileOutcome ──────────────────────────────────────────────────
 
-/** §B7 REST reconcile terminal outcome. Pure. (Currently unused in P0-A.) */
+/** §B7 REST reconcile terminal outcome. Pure. (Currently unused in P0-A.)
+ *  §P0-A rev-gpt #1: returns cur (same ref) when the outcome produces no change. */
 private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOutcome): AuthorityState {
     val prev = cur.bySid[op.sid]
     return when (op.outcome) {
@@ -373,7 +435,8 @@ private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOu
                 optimisticClaim = null,
                 updatedMonotonic = op.monotonic,
             )
-            cur.copy(bySid = cur.bySid + (op.sid to entry))
+            // §P0-A rev-gpt #1: no-change if the resulting entry equals prev.
+            if (entry == prev) cur else cur.copy(bySid = cur.bySid + (op.sid to entry))
         }
         ReconcileOutcome.BUSY_CONFIRMED -> {
             val entry = (prev ?: SessionEntry(
@@ -389,7 +452,7 @@ private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOu
                 serverRound = op.serverRound ?: prev?.serverRound,
                 updatedMonotonic = op.monotonic,
             )
-            cur.copy(bySid = cur.bySid + (op.sid to entry))
+            if (entry == prev) cur else cur.copy(bySid = cur.bySid + (op.sid to entry))
         }
         ReconcileOutcome.FETCH_FAILED -> {
             if (prev == null) cur else cur.copy(bySid = cur.bySid - op.sid)

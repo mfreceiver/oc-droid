@@ -58,6 +58,7 @@ class AuthorityReducerTest {
         host: String? = null,
         epoch: Long = 0L,
         requestStartMs: Long = 100L,
+        identityEpoch: Long = 0L,
     ) = AuthorityOp.ApplySnapshot(
         snapshot = snapshot,
         sidToWorkdir = sidToWorkdir,
@@ -68,7 +69,7 @@ class AuthorityReducerTest {
         partialFailureWorkdirs = partialFailureWorkdirs,
         lastSuccessTimeMs = requestStartMs,
         scopeKey = scope,
-        requestToken = RequestToken(hostProfileId = host, epoch = epoch, requestStartMs = requestStartMs),
+        requestToken = RequestToken(hostProfileId = host, epoch = epoch, requestStartMs = requestStartMs, identityEpoch = identityEpoch),
         localBefore = localBefore,
     )
 
@@ -441,6 +442,246 @@ class AuthorityReducerTest {
             ),
         ))
         assertSame("host-mismatched snapshot dropped (no-op)", before, store.stateFlow.value)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // §P0-A rev-gpt rework Lane A — NEW TESTS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ── #1: B1 no-change must return the SAME reference ──────────────────
+
+    @Test
+    fun `rev-gpt #1 - equal-value ApplyEvent re-delivery returns same state reference`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // First delivery: writes the entry.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 500L, workdir = "/w"),
+        ))
+        val afterFirst = store.stateFlow.value
+        // Re-delivery: SAME status + SAME monotonic → nextEntry == prev → no-change.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 500L, workdir = "/w"),
+        ))
+        assertSame("equal-value SSE re-delivery must be a CAS no-op (same reference)", afterFirst, store.stateFlow.value)
+    }
+
+    @Test
+    fun `rev-gpt #1 - ApplySnapshot that merges to identical bySid returns same reference`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Seed authority with one entry.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+        val before = store.stateFlow.value
+        // ApplySnapshot producing the same bySid + same coverage → no-change.
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = emptyMap(),
+                authoritativeNodeIds = setOf("s1"),
+                sidToWorkdir = mapOf("s1" to "/w"),
+                requestStartMs = 100L,
+            ),
+        ))
+        // The snapshot produces s1=idle (REST origin) — but the seed was SSE_LEGACY.
+        // So the entry differs (origin changes) → this is a CHANGE, not no-op.
+        // To truly test no-change, seed with REST origin matching the snapshot output.
+        assertNotSame("snapshot with different origin IS a change", before, store.stateFlow.value)
+
+        // Now seed EXACTLY matching what the snapshot produces, then re-apply → no-change.
+        val matched = store.stateFlow.value
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = emptyMap(),
+                authoritativeNodeIds = setOf("s1"),
+                sidToWorkdir = mapOf("s1" to "/w"),
+                requestStartMs = 100L,
+            ),
+        ))
+        assertSame("identical snapshot re-apply must be a CAS no-op (same reference)", matched, store.stateFlow.value)
+    }
+
+    // ── #2: RequestToken epoch guard ─────────────────────────────────────
+
+    @Test
+    fun `rev-gpt #2 - epoch guard drops ApplySnapshot after host switch bumps identityEpoch`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Simulate a host switch: mutateHost changes currentHostProfileId → bumps identityEpoch.
+        val epochBefore = store.stateFlow.value.identityEpoch
+        store.mutateHost { it.copy(currentHostProfileId = "new-host") }
+        val epochAfter = store.stateFlow.value.identityEpoch
+        assertTrue("identityEpoch must bump on host switch", epochAfter > epochBefore)
+
+        val before = store.stateFlow.value
+        // A stale snapshot whose request-start identityEpoch predates the switch.
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = mapOf("s1" to SessionStatus(type = "busy")),
+                authoritativeNodeIds = setOf("s1"),
+                host = "old-host-or-null",
+                identityEpoch = epochBefore, // stale (before the switch)
+            ),
+        ))
+        // The epoch guard rejects it (identityEpoch mismatch) → no-op.
+        assertSame("stale-epoch snapshot dropped (no-op)", before, store.stateFlow.value)
+        assertNull("stale snapshot must not write authority", store.stateFlow.value.authority.bySid["s1"])
+    }
+
+    @Test
+    fun `rev-gpt #2 - epoch guard passes when identityEpoch matches current state`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        val currentEpoch = store.stateFlow.value.identityEpoch
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = mapOf("s1" to SessionStatus(type = "busy")),
+                authoritativeNodeIds = setOf("s1"),
+                identityEpoch = currentEpoch, // matches → accepted
+            ),
+        ))
+        assertEquals("busy", store.stateFlow.value.authority.bySid["s1"]?.status?.type)
+    }
+
+    // ── abort-pending single-CAS ─────────────────────────────────────────
+
+    @Test
+    fun `rev-gpt abort-pending - ApplyEvent idle atomically clears status projection AND abortPending`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Seed: s1 busy + abort-pending flag set.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+        store.mutateSessionList { it.copy(abortPendingSessionIds = mapOf("s1" to 999L)) }
+        assertTrue("s1 abort-pending seeded", "s1" in store.stateFlow.value.sessionList.abortPendingSessionIds)
+
+        // SSE delivers idle → reduceAuthority releases abort-pending in the SAME state.copy.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 200L, workdir = "/w"),
+        ))
+
+        // BOTH must be updated atomically (single CAS, no torn window).
+        assertEquals("idle", store.stateFlow.value.sessionList.sessionStatuses["s1"]?.type)
+        assertFalse("abort-pending cleared atomically with status", "s1" in store.stateFlow.value.sessionList.abortPendingSessionIds)
+    }
+
+    @Test
+    fun `rev-gpt abort-pending - ApplyEvent busy retains abortPending`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        store.mutateSessionList { it.copy(abortPendingSessionIds = mapOf("s1" to 999L)) }
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+        assertTrue("busy status retains abort-pending", "s1" in store.stateFlow.value.sessionList.abortPendingSessionIds)
+    }
+
+    // ── #7: subtree prune via reduceAuthority ────────────────────────────
+
+    @Test
+    fun `rev-gpt #7 - archive prunes whole subtree from authority bySid`() {
+        val parent = Session(id = "root", directory = "/w", parentId = null)
+        val child = Session(id = "child1", directory = "/w", parentId = "root")
+        val grandchild = Session(id = "grand1", directory = "/w", parentId = "child1")
+        val store = SharedStateStore().apply {
+            mutateState {
+                it.copy(sessionList = it.sessionList.copy(
+                    sessions = listOf(parent, child, grandchild),
+                ))
+            }
+        }
+        // Seed authority with all three.
+        listOf("root", "child1", "grand1").forEach { sid ->
+            store.dispatch(AppAction.AuthorityEvent(
+                event(sid, SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+            ))
+        }
+        assertEquals(3, store.stateFlow.value.authority.bySid.size)
+
+        // Archive the root → subtree prune (root + child1 + grand1).
+        store.dispatch(AppAction.SessionArchivedLocal(
+            session = parent.copy(title = "archived"),
+            pendingQuestions = emptyList(),
+            activeSessionIdsToRemove = setOf("root", "child1", "grand1"),
+        ))
+
+        val bySid = store.stateFlow.value.authority.bySid
+        assertNull("root pruned from authority", bySid["root"])
+        assertNull("child1 pruned from authority (subtree)", bySid["child1"])
+        assertNull("grand1 pruned from authority (subtree)", bySid["grand1"])
+        // sessionStatuses must reflect the authority projection (sole writer).
+        assertTrue("sessionStatuses empty after subtree prune", store.stateFlow.value.sessionList.sessionStatuses.isEmpty())
+    }
+
+    @Test
+    fun `rev-gpt #7 - delete prunes subtree ids from authority`() {
+        val parent = Session(id = "root", directory = "/w")
+        val child = Session(id = "child1", directory = "/w", parentId = "root")
+        val store = SharedStateStore().apply {
+            mutateState {
+                it.copy(sessionList = it.sessionList.copy(sessions = listOf(parent, child)))
+            }
+        }
+        listOf("root", "child1").forEach { sid ->
+            store.dispatch(AppAction.AuthorityEvent(
+                event(sid, SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+            ))
+        }
+
+        // Delete root → subtree prune.
+        store.dispatch(AppAction.SessionDeletedLocal(removedIds = setOf("root")))
+
+        val bySid = store.stateFlow.value.authority.bySid
+        assertNull("root pruned", bySid["root"])
+        assertNull("child1 pruned (subtree of deleted root)", bySid["child1"])
+    }
+
+    // ── applyMarkFailed scope-filter ─────────────────────────────────────
+
+    @Test
+    fun `rev-gpt markFailed scope-filter - out-of-scope entry survives markFailed`() {
+        val store = storeWith(listOf(
+            Session(id = "inScope", directory = "/work-a"),
+            Session(id = "outScope", directory = "/other-dir"),
+        ))
+        // Seed both entries (both older than the failure time).
+        store.dispatch(AppAction.AuthorityEvent(
+            event("inScope", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 50L, workdir = "/work-a"),
+        ))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("outScope", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 50L, workdir = "/other-dir"),
+        ))
+
+        // MarkSourceFailed for scope with registeredWorkdirs = {"/work-a"} at t=100.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.MarkSourceFailed(
+                scopeKey = scope,
+                requestToken = RequestToken(hostProfileId = null, epoch = 0L, requestStartMs = 100L, identityEpoch = 0L),
+                monotonic = 100L,
+                registeredWorkdirs = setOf("/work-a"),
+            ),
+        ))
+
+        val bySid = store.stateFlow.value.authority.bySid
+        assertNull("in-scope entry removed (absence ≡ unknown)", bySid["inScope"])
+        assertNotNull("out-of-scope entry survives (different workdir)", bySid["outScope"])
+    }
+
+    // ── authorityRevision bump ───────────────────────────────────────────
+
+    @Test
+    fun `rev-gpt authorityRevision - bumps on real authority change, not on no-op`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        val rev0 = store.stateFlow.value.authorityRevision
+
+        // Real change: write a status.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+        val rev1 = store.stateFlow.value.authorityRevision
+        assertTrue("revision bumps on real change", rev1 > rev0)
+
+        // No-op: re-deliver the same status + monotonic.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+        assertEquals("revision unchanged on no-op", rev1, store.stateFlow.value.authorityRevision)
     }
 }
 

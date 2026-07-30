@@ -283,31 +283,12 @@ internal fun SessionListState.applyArchiveEviction(
     },
 ) to emptyList()
 
-/**
- * session.status → upsert the [sessionId] → [status] pair into
- * [SessionListState.sessionStatuses]. Pure; effects empty — the busy-current /
- * idle-current finalization side effects are computed by the dispatcher (they
- * depend on cross-slice state: chat.currentSessionId,
- * chat.streamingPartTexts).
- */
-internal fun SessionListState.applySessionStatus(
-    sessionId: String,
-    status: SessionStatus
-): Pair<SessionListState, List<SseSideEffect>> {
-    // §P0-F/R6: server confirmed a non-running status for this session →
-    // release any in-flight abort-pending flag (abort acknowledged; the
-    // "stopping" UI must release). busy/retry keep the flag (abort may
-    // still be in flight).
-    val nextAbortPending = if (!status.isBusy && !status.isRetry && sessionId in abortPendingSessionIds) {
-        abortPendingSessionIds - sessionId
-    } else {
-        abortPendingSessionIds
-    }
-    return copy(
-        sessionStatuses = sessionStatuses + (sessionId to status),
-        abortPendingSessionIds = nextAbortPending,
-    ) to emptyList()
-}
+// §P0-A rev-gpt #8: `applySessionStatus` DELETED — it was a DEAD entry (zero
+// live callers after the SSE funnel switched to `applyStatusViaAuthority`).
+// The status write + abort-pending release now happen atomically inside
+// `reduceAuthority`'s ApplyEvent branch (single CAS). The session.status SSE
+// handler uses `host.applyStatusViaAuthority(...)` which dispatches the
+// AuthorityEvent — no direct sessionStatuses mutation.
 
 /**
  * question.asked → append [question] to [SessionListState.pendingQuestions]

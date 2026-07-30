@@ -926,17 +926,13 @@ class StatusAggregatorImplTest {
                 SessionBusyStatus.Busy,
                 aggregator.statusByKey.value[key("s1", "/work-a")],
             )
-            // §P0-A Lane 2 (双投影同源): authority has no Unknown SessionStatus.
-            // s2 (failed workdir) is idle-filled by the reducer (it's a known
-            // node absent from the successful snapshot) — statusByKey shows
-            // Idle, NOT Unknown. The idle-grace GUARD is preserved via the
-            // coverage gate: coveredWorkdirs EXCLUDES /work-b (the failed dir),
-            // so allWorkdirsCovered = false → AllIdleFresh is refused. Here s1
-            // is Busy so globalState = Busy regardless; the critical
-            // counterexample (failed workdir vs Idle success) is test #5 below.
-            assertEquals(
-                "failed-workdir session idle-filled (lifecycle guarded by coverage gate)",
-                SessionBusyStatus.Idle,
+            // §P0-A rev-gpt #6 (fail-closed for failed-dir sessions): s2 (in a
+            // FAILED workdir) is now EXCLUDED from authoritativeNodeIds → the
+            // reducer does NOT idle-fill it → it stays ABSENT (fail-closed
+            // unknown). The idle-grace GUARD is preserved via the coverage gate:
+            // coveredWorkdirs EXCLUDES /work-b → allWorkdirsCovered = false.
+            assertNull(
+                "failed-workdir session is fail-closed absent (not idle-filled)",
                 aggregator.statusByKey.value[key("s2", "/work-b")],
             )
             // Busy s1 keeps the host out of idle grace.
@@ -984,15 +980,10 @@ class StatusAggregatorImplTest {
                 SessionBusyStatus.Idle,
                 aggregator.statusByKey.value[key("s1", "/work-a")],
             )
-            // §P0-A Lane 2 (双投影同源): authority has no Unknown SessionStatus.
-            // s2 (failed workdir) is idle-filled → statusByKey shows Idle (NOT
-            // Unknown). The CRITICAL idle-grace guard is preserved via the
-            // coverage gate: coveredWorkdirs EXCLUDES /work-b (the failed dir),
-            // so allWorkdirsCovered = {"/work-a"}.containsAll({"/work-a","/work-b"})
-            // = FALSE → AllIdleFresh is refused → globalState = Unknown.
-            assertEquals(
-                "failed-workdir session idle-filled (lifecycle guarded by coverage gate)",
-                SessionBusyStatus.Idle,
+            // §P0-A rev-gpt #6 (fail-closed): s2 (failed workdir) is now
+            // EXCLUDED from authoritativeNodeIds → absent (fail-closed unknown).
+            assertNull(
+                "failed-workdir session is fail-closed absent (not idle-filled)",
                 aggregator.statusByKey.value[key("s2", "/work-b")],
             )
             // CRITICAL: globalState must be Unknown (NOT AllIdleFresh) because

@@ -19,7 +19,6 @@ import cn.vectory.ocdroid.ui.controller.applyQuestionAsked
 import cn.vectory.ocdroid.ui.controller.applyQuestionResolved
 import cn.vectory.ocdroid.ui.controller.applySessionCreated
 import cn.vectory.ocdroid.ui.controller.applySessionDiff
-import cn.vectory.ocdroid.ui.controller.applySessionStatus
 import cn.vectory.ocdroid.ui.controller.applySessionUpsert
 import cn.vectory.ocdroid.ui.controller.applyTodoUpdated
 import cn.vectory.ocdroid.ui.controller.parsePermissionAskedEvent
@@ -132,27 +131,12 @@ class LegacySseHandler(private val host: SseDispatchHost) : SseEventHandler {
         DebugLog.d("Retry", "session.status raw properties=${event.payload.properties?.toString() ?: "null"}")
         val statusEvent = parseSessionStatusEvent(event)
         if (statusEvent != null) {
-            val aggregatorInput = host.statusAggregatorInput
-            if (aggregatorInput != null) {
-                val sessionsByIdNow = allSessionsById(
-                    host.slices.sessionList.value.sessions,
-                    host.slices.sessionList.value.directorySessions,
-                    host.slices.sessionList.value.childSessions,
-                )
-                val target = sessionsByIdNow[statusEvent.sessionId]
-                if (target != null) {
-                    val key = SessionStatusKey(
-                        serverGroupFp = host.serverGroupFp(),
-                        workdir = target.directory,
-                        sessionId = statusEvent.sessionId,
-                    )
-                    aggregatorInput.applySseStatus(
-                        key,
-                        statusEvent.status.toSessionBusyStatus(),
-                        sourceTimeMs = host.sseClock(),
-                    )
-                }
-            }
+            // §P0-A rev-gpt #3 (real 8→1 single dispatch): the OLD path called
+            // BOTH aggregatorInput.applySseStatus(...) AND host.applyStatusViaAuthority(...)
+            // → TWO authority ApplyEvent dispatches per SSE frame (double-write).
+            // DELETED the applySseStatus block — the aggregator now DERIVES from
+            // authority, so the single applyStatusViaAuthority dispatch is the
+            // sole authority write; the aggregator picks it up via derivation.
             // §streaming-state-sync-diag (runtime-gated, scoped+dedup)
             if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
                 val diagSid = statusEvent.sessionId

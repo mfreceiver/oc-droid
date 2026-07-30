@@ -122,6 +122,24 @@ data class StoreState(
      */
     val liveBundleGeneration: Long = 0L,
     val liveEndpointFp: String = "",
+    /**
+     * §P0-A rev-gpt rework #2: a monotone counter bumped whenever
+     * [HostState.currentHostProfileId] CHANGES (via [SharedStateStore.mutateHost]).
+     * The authority reducer's [opScopeValid] checks `token.identityEpoch ==
+     * state.identityEpoch` for ApplySnapshot / MarkSourceFailed — a stale REST
+     * response captured before a host-profile switch is DROPPED inside the CAS
+     * (defense-in-depth on top of the adapter's dispatch-side
+     * `identityStore.currentEpoch()` check). Null→id and id→null transitions
+     * both bump. This catches host-PROFILE switches; endpoint/workdir-only
+     * reconfigures (same profile) are caught by the dispatch-side epoch. */
+    val identityEpoch: Long = 0L,
+    /**
+     * §P0-A rev-gpt rework (prep for Lane B): a monotone counter bumped by
+     * [reduceAuthority] ONLY on a real authority transition (when
+     * `nextAuth !== cur`). Consumed by Lane B's aggregator for version-monotone
+     * publish. Left unchanged (no bump) on no-op / guard-rejected ops. Pure
+     * carried data — the reducer stays pure. */
+    val authorityRevision: Long = 0L,
 ) {
     companion object {
         /** Factory matching the pre-B1 per-slice `MutableStateFlow(XxxState())`

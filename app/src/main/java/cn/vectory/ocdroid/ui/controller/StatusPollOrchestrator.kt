@@ -222,11 +222,12 @@ internal object StatusPollOrchestrator {
                             partialFailureWorkdirs = emptySet(),
                             unmappedActiveIds = emptySet(),
                             lastSuccessTimeMs = requestStartMs,
-                            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+                            scopeKey = slices.store.authorityScope(),
                             requestToken = cn.vectory.ocdroid.data.state.RequestToken(
                                 hostProfileId = hostAtRequestStart,
                                 epoch = myEpoch,
                                 requestStartMs = requestStartMs,
+                                identityEpoch = slices.store.stateFlow.value.identityEpoch,
                             ),
                             localBefore = localBefore,
                         )
@@ -439,11 +440,12 @@ internal object StatusPollOrchestrator {
                         partialFailureWorkdirs = failedDirs,
                         unmappedActiveIds = emptySet(),
                         lastSuccessTimeMs = requestStartMs,
-                        scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+                        scopeKey = slices.store.authorityScope(),
                         requestToken = cn.vectory.ocdroid.data.state.RequestToken(
                             hostProfileId = hostAtRequestStart,
                             epoch = myEpoch,
                             requestStartMs = requestStartMs,
+                            identityEpoch = slices.store.stateFlow.value.identityEpoch,
                         ),
                         localBefore = localBefore,
                     )

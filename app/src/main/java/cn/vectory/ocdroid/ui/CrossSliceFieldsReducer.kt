@@ -115,6 +115,19 @@ internal fun reduceSessionArchived(state: StoreState, action: AppAction.SessionA
 }
 
 internal fun reduceHostStatePurged(state: StoreState, action: AppAction.HostStatePurged): StoreState {
+    // §P0-A rev-gpt #8 (sole writer): for cross-group purge, route the authority
+    // reset through reduceAuthority (PurgeHost) — it is the SOLE writer of
+    // sessionStatuses (the projection comes from authority). For same-group,
+    // authority + sessionStatuses are preserved (no change). baseState carries
+    // the correct authority + projection for the branch below.
+    val baseState = if (!action.preserveServerGroupData) {
+        reduceAuthority(state, cn.vectory.ocdroid.data.state.AuthorityOp.PurgeHost(
+            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey("", ""),
+            preserveServerGroup = false,
+        ))
+    } else {
+        state
+    }
     // §slice-only-preserve: ChatState carries three fields NOT mirrored
     // to AppState (isCompacting / compactStartedAt / refreshNonce — see
     // HostProfileController.kt:475-479). [clearSessionData] uses .copy()
@@ -132,11 +145,12 @@ internal fun reduceHostStatePurged(state: StoreState, action: AppAction.HostStat
         // createSessionInWorkdirForEffect — neither cleared them). This is
         // a deliberate IMPROVEMENT, not a missed regression.
         Triple(
-            state.chat.clearSessionData(),
-            state.sessionList.copy(
+            baseState.chat.clearSessionData(),
+            baseState.sessionList.copy(
                 sessions = emptyList(),
                 directorySessions = emptyMap(),
-                sessionStatuses = emptyMap(),
+                // §P0-A rev-gpt #8: sessionStatuses NOT set here — comes from
+                // baseState (reduceAuthority's projection over the purged bySid).
                 activeSessionIds = emptySet(),
                 sessionTodos = emptyMap(),
                 sessionDiffs = emptyMap(),
@@ -245,19 +259,14 @@ internal fun reduceHostStatePurged(state: StoreState, action: AppAction.HostStat
             state.unread,
         )
     }
-    return state.copy(
+    return baseState.copy(
         chat = newChat,
         sessionList = newSessionList,
         unread = newUnread,
-        // §P0-A / §4c.3: cross-group purge resets the authority slice fully (its
-        // bySid/coverage/incarnations reference the prior host's sessions; a
-        // root-id collision would otherwise let the prior host's status survive).
-        // Same-group branch (above) PRESERVES authority (server-identical data),
-        // mirroring the sessionStatuses/sessionList preservation. No-op while
-        // authority is empty; the cross-group sessionStatuses=emptyMap() write in
-        // newSessionList stays consistent with the empty projection.
-        authority = if (action.preserveServerGroupData) state.authority
-            else cn.vectory.ocdroid.data.state.AuthorityState(),
+        // §P0-A rev-gpt #8: authority is handled by baseState (reduceAuthority
+        // for cross-group, unchanged for same-group) — NOT set here. The
+        // sessionStatuses projection comes from baseState's authority (the
+        // SOLE writer is reduceAuthority).
         // Per-profile UX — ALWAYS reset regardless of group.
         composer = state.composer.copy(draftWorkdir = null),
         settings = state.settings.copy(availableCommands = emptyList()),

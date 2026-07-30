@@ -262,32 +262,10 @@ class SessionSyncPureFunctionsTest {
         assertEquals("leftover", next.streamingPartTexts["p1"])
     }
 
-    // ── session.status: applySessionStatus ─────────────────────────────────
-
-    @Test
-    fun `applySessionStatus upserts the badge entry`() {
-        val state = SessionListState(
-            sessionStatuses = mapOf("s1" to SessionStatus(type = "idle"))
-        )
-
-        val (next, _) = state.applySessionStatus("s1", SessionStatus(type = "busy"))
-
-        assertEquals(SessionStatus(type = "busy"), next.sessionStatuses["s1"])
-        assertEquals(1, next.sessionStatuses.size)
-    }
-
-    @Test
-    fun `applySessionStatus adds a new entry without disturbing others`() {
-        val state = SessionListState(
-            sessionStatuses = mapOf("s1" to SessionStatus(type = "idle"))
-        )
-
-        val (next, _) = state.applySessionStatus("s2", SessionStatus(type = "busy"))
-
-        assertEquals(2, next.sessionStatuses.size)
-        assertEquals(SessionStatus(type = "idle"), next.sessionStatuses["s1"])
-        assertEquals(SessionStatus(type = "busy"), next.sessionStatuses["s2"])
-    }
+    // ── session.status: applySessionStatus tests DELETED (§P0-A rev-gpt #8).
+    // The dead `applySessionStatus` entry was removed — SSE status writes now
+    // funnel through `applyStatusViaAuthority` → `reduceAuthority(ApplyEvent)`,
+    // which is covered by AuthorityReducerTest.
 
     // ── question.* / todo.updated ──────────────────────────────────────────
 
@@ -843,9 +821,11 @@ class SessionSyncPureFunctionsTest {
         // streamingPartTexts to decide reload — which still must contain
         // the leading-edge value).
         var chat = ChatState(currentSessionId = "s1")
-        // busy status: badge updated
-        val (sessionListBusy, _) = SessionListState()
-            .applySessionStatus("s1", SessionStatus(type = "busy"))
+        // §P0-A rev-gpt #8: applySessionStatus deleted — use direct copy for
+        // test setup (the test verifies chat overlay math, not status writes).
+        val sessionListBusy = SessionListState(
+            sessionStatuses = mapOf("s1" to SessionStatus(type = "busy"))
+        )
         assertEquals(SessionStatus(type = "busy"), sessionListBusy.sessionStatuses["s1"])
 
         // Streaming delta leading edge: overlay non-empty
@@ -856,9 +836,11 @@ class SessionSyncPureFunctionsTest {
         assertTrue(chat.streamingPartTexts.isNotEmpty())
         assertTrue(chat.streamingReasoningPart == null)
 
-        // idle status: badge updated; reload decision is based on
+        // idle status: direct copy for setup; reload decision is based on
         // streamingPartTexts being non-empty (still true here).
-        val (sessionListIdle, _) = sessionListBusy.applySessionStatus("s1", SessionStatus(type = "idle"))
+        val sessionListIdle = sessionListBusy.copy(
+            sessionStatuses = mapOf("s1" to SessionStatus(type = "idle"))
+        )
         assertEquals(SessionStatus(type = "idle"), sessionListIdle.sessionStatuses["s1"])
         assertTrue(chat.streamingPartTexts.isNotEmpty())
     }
@@ -1339,110 +1321,12 @@ class SessionSyncPureFunctionsTest {
         assertNull(next.pendingScrollRequest)
     }
 
-    // === applySessionStatus: every status type branch ====================
-
-    @Test
-    fun `applySessionStatus with idle type`() {
-        val (next, _) = SessionListState().applySessionStatus("s1", SessionStatus(type = "idle"))
-        assertEquals("idle", next.sessionStatuses["s1"]?.type)
-        assertTrue(next.sessionStatuses["s1"]?.isIdle == true)
-    }
-
-    @Test
-    fun `applySessionStatus with busy type`() {
-        val (next, _) = SessionListState().applySessionStatus("s1", SessionStatus(type = "busy"))
-        assertTrue(next.sessionStatuses["s1"]?.isBusy == true)
-    }
-
-    @Test
-    fun `applySessionStatus with retry type`() {
-        val (next, _) = SessionListState().applySessionStatus("s1", SessionStatus(type = "retry"))
-        assertTrue(next.sessionStatuses["s1"]?.isRetry == true)
-    }
-
-    @Test
-    fun `applySessionStatus with custom type is stored verbatim`() {
-        // Types beyond idle/busy/retry are stored as-is (no isXxx helper but
-        // the entry is preserved for any future UI consumer).
-        val (next, _) = SessionListState().applySessionStatus("s1", SessionStatus(type = "error"))
-        assertEquals("error", next.sessionStatuses["s1"]?.type)
-    }
-
-    @Test
-    fun `applySessionStatus preserves attempt message and next fields`() {
-        val status = SessionStatus(type = "retry", attempt = 3, message = "backoff", next = 1_700L)
-        val (next, _) = SessionListState().applySessionStatus("s1", status)
-
-        assertEquals(status, next.sessionStatuses["s1"])
-        assertEquals(3, next.sessionStatuses["s1"]?.attempt)
-        assertEquals("backoff", next.sessionStatuses["s1"]?.message)
-        assertEquals(1_700L, next.sessionStatuses["s1"]?.next)
-    }
-
-    @Test
-    fun `applySessionStatus overwriting the same id multiple times keeps only the latest`() {
-        val state = SessionListState()
-
-        val next = state
-            .applySessionStatus("s1", SessionStatus(type = "idle")).first
-            .applySessionStatus("s1", SessionStatus(type = "busy")).first
-            .applySessionStatus("s1", SessionStatus(type = "idle")).first
-
-        assertEquals(1, next.sessionStatuses.size)
-        assertEquals("idle", next.sessionStatuses["s1"]?.type)
-    }
-
-    // §P0-F: abortPendingSessionIds lifecycle — applySessionStatus ————
-
-    @Test
-    fun `P0-F applySessionStatus with idle clears abortPending for that session`() {
-        val state = SessionListState(
-            abortPendingSessionIds = mapOf("s1" to 123L),
-            sessionStatuses = mapOf("s1" to SessionStatus(type = "busy")),
-        )
-
-        val (next, _) = state.applySessionStatus("s1", SessionStatus(type = "idle"))
-
-        assertFalse("s1" in next.abortPendingSessionIds)
-        assertTrue(next.sessionStatuses["s1"]?.isIdle == true)
-    }
-
-    @Test
-    fun `P0-F applySessionStatus with busy retains abortPending`() {
-        val state = SessionListState(
-            abortPendingSessionIds = mapOf("s1" to 123L),
-            sessionStatuses = mapOf("s1" to SessionStatus(type = "busy")),
-        )
-
-        val (next, _) = state.applySessionStatus("s1", SessionStatus(type = "busy"))
-
-        assertTrue("s1" in next.abortPendingSessionIds)
-    }
-
-    @Test
-    fun `P0-F applySessionStatus with retry retains abortPending`() {
-        val state = SessionListState(
-            abortPendingSessionIds = mapOf("s1" to 123L),
-            sessionStatuses = mapOf("s1" to SessionStatus(type = "busy")),
-        )
-
-        val (next, _) = state.applySessionStatus("s1", SessionStatus(type = "retry"))
-
-        assertTrue("s1" in next.abortPendingSessionIds)
-    }
-
-    @Test
-    fun `P0-F applySessionStatus with idle does not affect abortPending for other sessions`() {
-        val state = SessionListState(
-            abortPendingSessionIds = mapOf("s2" to 456L),
-            sessionStatuses = mapOf("s2" to SessionStatus(type = "busy")),
-        )
-
-        val (next, _) = state.applySessionStatus("s1", SessionStatus(type = "idle"))
-
-        // s1 was never abort-pending → abortPendingSessionIds unchanged
-        assertEquals(mapOf("s2" to 456L), next.abortPendingSessionIds)
-    }
+    // === applySessionStatus tests DELETED (§P0-A rev-gpt #8): the dead
+    // `applySessionStatus` entry was removed — status writes + abort-pending
+    // release now happen atomically in `reduceAuthority`'s ApplyEvent branch.
+    // Covered by AuthorityReducerTest (status projection + abort-pending
+    // single-CAS). The P0-F abort-pending lifecycle (idle clears, busy/retry
+    // retains) is now verified via the authority reducer tests.
 
     // §P0-F 阻断4/R5: the actual R5 close (clearing sendingSessionIds on
     // terminal status) happens in the TWO dispatch points
@@ -2485,19 +2369,9 @@ class SessionSyncPureFunctionsTest {
         assertTrue("effects must be empty for pure-slice transform", effects.isEmpty())
     }
 
-    @Test
-    fun `p24 applySessionStatus returns empty effects list`() {
-        val state = SessionListState()
-
-        val (next, effects) = state.applySessionStatus("s1", SessionStatus(type = "busy"))
-
-        assertEquals(SessionStatus(type = "busy"), next.sessionStatuses["s1"])
-        assertTrue(
-            "applySessionStatus effects must be empty — busy/idle reload effects " +
-                "depend on chat.currentSessionId (cross-slice) and are computed by the dispatcher",
-            effects.isEmpty()
-        )
-    }
+    // §P0-A rev-gpt #8: `p24 applySessionStatus returns empty effects` DELETED
+    // — the function is removed (dead entry). SSE effects are now computed by
+    // the dispatcher after the authority dispatch.
 
     @Test
     fun `p24 applyMessageUpdated preserves found flag`() {

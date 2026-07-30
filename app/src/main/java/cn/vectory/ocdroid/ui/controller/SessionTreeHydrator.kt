@@ -150,11 +150,12 @@ internal class ForegroundSessionTreeHydrator(
                                 partialFailureWorkdirs = emptySet(),
                                 unmappedActiveIds = emptySet(),
                                 lastSuccessTimeMs = requestStartMs,
-                                scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+                                scopeKey = store.authorityScope(),
                                 requestToken = cn.vectory.ocdroid.data.state.RequestToken(
                                     hostProfileId = hostId,
                                     epoch = epochAtStart,
                                     requestStartMs = requestStartMs,
+                                    identityEpoch = store.stateFlow.value.identityEpoch,
                                 ),
                                 localBefore = statusBefore,
                             )

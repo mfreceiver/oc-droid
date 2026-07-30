@@ -303,7 +303,7 @@ class StatusPollingDowngradeRegressionTest {
         }
 
         store.mutateSessionList {
-            it.applySessionStatus(sid, SessionStatus(type = "busy")).first
+            it.copy(sessionStatuses = it.sessionStatuses + (sid to SessionStatus(type = "busy")))
         }
 
         val folded = store.sessionListFlow.value.sessionStatuses[sid]
@@ -323,10 +323,10 @@ class StatusPollingDowngradeRegressionTest {
         }
 
         store.mutateSessionList {
-            it.applySessionStatus(sid, SessionStatus(type = "busy")).first
+            it.copy(sessionStatuses = it.sessionStatuses + (sid to SessionStatus(type = "busy")))
         }
         store.mutateSessionList {
-            it.applySessionStatus(sid, SessionStatus(type = "idle")).first
+            it.copy(sessionStatuses = it.sessionStatuses + (sid to SessionStatus(type = "idle")))
         }
 
         val folded = store.sessionListFlow.value.sessionStatuses[sid]
@@ -339,20 +339,16 @@ class StatusPollingDowngradeRegressionTest {
 
     @Test
     fun `slim digest status relay is the non-REST status source - slice write surface exists`() {
-        // Sanity-lock the exact pure function the relay depends on. This is
-        // the surface T-R1's "digest status relay" maps to.
+        // §P0-A rev-gpt #8: applySessionStatus deleted — verify the status
+        // write surface directly (the relay now funnels through authority).
         val sid = "slim-session-3"
         val before = store.sessionListFlow.value.sessionStatuses
         assertTrue("no prior status for sid", sid !in before)
 
-        val (next, effects) = store.sessionListFlow.value
-            .applySessionStatus(sid, SessionStatus(type = "retry"))
+        val next = store.sessionListFlow.value
+            .copy(sessionStatuses = store.sessionListFlow.value.sessionStatuses +
+                (sid to SessionStatus(type = "retry")))
 
-        assertSame(
-            "applySessionStatus produces no side effects (pure fold, like reduce)",
-            emptyList<Any>(),
-            effects,
-        )
         assertEquals(
             "relay writes the digest status into the map",
             "retry",
