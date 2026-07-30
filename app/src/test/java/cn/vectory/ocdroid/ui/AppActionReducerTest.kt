@@ -1679,4 +1679,103 @@ class AppActionReducerTest {
         assertTrue("s3 preserved", "s3" in out.sessionList.abortPendingSessionIds)
         assertEquals(1, out.sessionList.abortPendingSessionIds.size)
     }
+
+    // ── §P0-E(b)(c): ErrorLocalizationSettled ───────────────────────────────
+
+    @Test
+    fun `reduce ErrorLocalizationSettled with valid attachToMessageId attaches error to that message`() {
+        val err = Message.MessageError(name = "rate_limit", data = null)
+        val msg1 = Message(id = "m1", role = "user")
+        val msg2 = Message(id = "m2", role = "assistant")
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                currentSessionId = "s1",
+                messages = listOf(msg1, msg2),
+                pendingErrorReattach = mapOf("s1" to PendingChatError(err, 0L, null)),
+                pendingErrorCheck = setOf("s1")))
+
+        val out = reduce(prior, AppAction.ErrorLocalizationSettled(
+            sessionId = "s1",
+            attachToMessageId = "m2",
+            error = err))
+
+        assertEquals(err, out.chat.messages.find { it.id == "m2" }?.error)
+        assertNull("m1 should not have error", out.chat.messages.find { it.id == "m1" }?.error)
+        assertFalse("pendingErrorReattach cleared", "s1" in out.chat.pendingErrorReattach)
+        assertFalse("pendingErrorCheck cleared", "s1" in out.chat.pendingErrorCheck)
+    }
+
+    @Test
+    fun `reduce ErrorLocalizationSettled with absent messageId does NOT attach`() {
+        val err = Message.MessageError(name = "rate_limit")
+        val msg = Message(id = "m1", role = "assistant")
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                messages = listOf(msg),
+                pendingErrorReattach = mapOf("s1" to PendingChatError(err, 0L, null))))
+
+        val out = reduce(prior, AppAction.ErrorLocalizationSettled(
+            sessionId = "s1",
+            attachToMessageId = "nonexistent",
+            error = err))
+
+        assertNull("m1 must not get an error (wrong id)", out.chat.messages.find { it.id == "m1" }?.error)
+        assertFalse("pendingErrorReattach cleared", "s1" in out.chat.pendingErrorReattach)
+    }
+
+    @Test
+    fun `reduce ErrorLocalizationSettled with null attachToMessageId clears markers without attaching`() {
+        val err = Message.MessageError(name = "rate_limit")
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                pendingErrorReattach = mapOf("s1" to PendingChatError(err, 0L, null)),
+                pendingErrorCheck = setOf("s1")))
+
+        val out = reduce(prior, AppAction.ErrorLocalizationSettled(
+            sessionId = "s1", attachToMessageId = null, error = null))
+
+        assertFalse("pendingErrorReattach cleared", "s1" in out.chat.pendingErrorReattach)
+        assertFalse("pendingErrorCheck cleared", "s1" in out.chat.pendingErrorCheck)
+    }
+
+    @Test
+    fun `reduce ErrorLocalizationSettled B2 safety - does NOT overwrite existing error on a message`() {
+        val existingErr = Message.MessageError(name = "upstream_error")
+        val newErr = Message.MessageError(name = "rate_limit")
+        val msg = Message(id = "m1", role = "assistant", error = existingErr)
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                messages = listOf(msg),
+                pendingErrorReattach = mapOf("s1" to PendingChatError(newErr, 0L, null))))
+
+        val out = reduce(prior, AppAction.ErrorLocalizationSettled(
+            sessionId = "s1",
+            attachToMessageId = "m1",
+            error = newErr))
+
+        // Existing error must NOT be overwritten (B2/M5 safety).
+        assertEquals("existing error preserved", existingErr, out.chat.messages.first().error)
+        assertFalse("pendingErrorReattach still cleared", "s1" in out.chat.pendingErrorReattach)
+    }
+
+    @Test
+    fun `reduce ErrorLocalizationSettled always clears both markers regardless of attach outcome`() {
+        val prior = StoreState.initial().copy(
+            chat = ChatState(
+                pendingErrorReattach = mapOf("s1" to PendingChatError(
+                    Message.MessageError(name = "e"), 0L, null),
+                    "s2" to PendingChatError(Message.MessageError(name = "e2"), 0L, null)),
+                pendingErrorCheck = setOf("s1", "s3")))
+
+        val out = reduce(prior, AppAction.ErrorLocalizationSettled(
+            sessionId = "s1",
+            attachToMessageId = null,
+            error = null))
+
+        // sid=s1 cleared; s2 and s3 preserved.
+        assertFalse("s1 cleared from pendingErrorReattach", "s1" in out.chat.pendingErrorReattach)
+        assertTrue("s2 preserved in pendingErrorReattach", "s2" in out.chat.pendingErrorReattach)
+        assertFalse("s1 cleared from pendingErrorCheck", "s1" in out.chat.pendingErrorCheck)
+        assertTrue("s3 preserved in pendingErrorCheck", "s3" in out.chat.pendingErrorCheck)
+    }
 }

@@ -576,6 +576,19 @@ sealed interface AppAction {
     ) : AppAction
 
     /**
+     * §P0-E(b)(c): the GET drain's settlement for a session's durable-error
+     * localization. [attachToMessageId]+[error] non-null → attach the durable
+     * error to that exact message (located via getMessages, B2); null → nothing
+     * to attach (session-level banner in sessionErrorsById already handles
+     * display). Always clears pendingErrorReattach[sid] + pendingErrorCheck -= sid.
+     */
+    data class ErrorLocalizationSettled(
+        val sessionId: String,
+        val attachToMessageId: String?,
+        val error: Message.MessageError?,
+    ) : AppAction
+
+    /**
      * T1b residual: CatchUpActions probe-page merge. 4-field set only
      * (messages + partsByMessage + isLoadingMessages=false + staleNotice=false).
      * Distinct from [MessagesMerged] (8 fields incl. streaming/cursor/model).
@@ -867,6 +880,7 @@ internal fun reduce(
     is AppAction.MessageRemovedConfirmed -> reduceMessageRemovedConfirmed(state, action)
     is AppAction.ChatCleared -> reduceChatCleared(state, action)
     is AppAction.LastAssistantErrorAttached -> reduceLastAssistantErrorAttached(state, action)
+    is AppAction.ErrorLocalizationSettled -> reduceErrorLocalizationSettled(state, action)
     is AppAction.CatchUpMessagesMerged -> reduceCatchUpMessagesMerged(state, action)
     is AppAction.ColdStartChatReset -> reduceColdStartChatReset(state, action)
     is AppAction.ExpandedPartsContentCommitted -> reduceExpandedPartsContentCommitted(state, action)

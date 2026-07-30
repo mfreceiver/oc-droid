@@ -94,6 +94,15 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
     val projection = projectSessionStatuses(nextAuth)
     val newSessions = applyOptimisticBumps(state.sessionList.sessions, nextAuth.pendingBumps)
     val cleanedAuth = nextAuth.copy(pendingBumps = emptyMap())
+
+    // §P0-E(c): detect busy/retry → terminal-idle transitions and flag them
+    // for the ErrorRecoveryCoordinator GET drain. Only real transitions where
+    // the sid persists in nextAuth (not pruned/removed) qualify.
+    val transitionedToIdle = cur.bySid.filter { (sid, entry) ->
+        val nextEntry = nextAuth.bySid[sid]
+        (entry.status.isBusy || entry.status.isRetry) && nextEntry != null &&
+            !nextEntry.status.isBusy && !nextEntry.status.isRetry
+    }.keys
     // §P0-A rev-gpt rework (abort-pending single-CAS): when an ApplyEvent
     // delivers a TERMINAL status (NOT busy AND NOT retry), release the in-flight
     // abort-pending flag for that sid in the SAME state.copy that writes the
@@ -115,6 +124,14 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
         sessionList = state.sessionList.withProjection(projection).copy(
             sessions = newSessions,
             abortPendingSessionIds = nextAbortPending,
+        ),
+        // §P0-E(c): mark sessions that transitioned busy/retry → terminal-idle
+        // so the ErrorRecoveryCoordinator drain can locate the error-bearing
+        // assistant via GET getMessages(sid) (B2: session.error carries no
+        // messageId). Only real transitions (not guard-rejected no-ops that
+        // returned early above) reach this copy.
+        chat = state.chat.copy(
+            pendingErrorCheck = state.chat.pendingErrorCheck + transitionedToIdle,
         ),
     )
 }

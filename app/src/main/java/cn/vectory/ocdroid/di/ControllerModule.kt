@@ -12,6 +12,7 @@ import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.routeChatSessionId
 import cn.vectory.ocdroid.ui.controller.ComposerController
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
+import cn.vectory.ocdroid.ui.controller.ErrorRecoveryCoordinator
 import cn.vectory.ocdroid.ui.controller.ForegroundCatchUpController
 import cn.vectory.ocdroid.ui.controller.ForegroundSessionTreeHydrator
 import cn.vectory.ocdroid.ui.controller.HostProfileController
@@ -471,6 +472,28 @@ object ControllerModule {
       *  - appLifecycleMonitor.isInForeground：pre-HTTP foreground gate。
       *  - identityStore：transport generation + identity (host CAS, ABA fence)。
       */
+    /**
+     * §P0-E(b)(c): provides the [ErrorRecoveryCoordinator] singleton. The
+     * coordinator subscribes to [SharedStateStore.stateFlow] in its `init`
+     * block and drains durable-error localization markers via
+     * [OpenCodeRepository.getMessages]. Constructed eagerly at app start so
+     * its collector is live — no production caller needs to invoke it.
+     *
+     * The binding just hands out the singleton; the coordinator's collector
+     * starts in the constructor's `init`.
+     */
+    @Provides
+    @Singleton
+    fun provideErrorRecoveryCoordinator(
+        @UiApplicationScope appScope: CoroutineScope,
+        store: SharedStateStore,
+        repository: OpenCodeRepository,
+    ): ErrorRecoveryCoordinator = ErrorRecoveryCoordinator(
+        scope = appScope,
+        store = store,
+        repository = repository,
+    )
+
     @Provides
     @Singleton
     fun provideSkeletonReloadCoordinator(
