@@ -18,16 +18,24 @@ const val OPTIMISTIC_CONFIRM_TIMEOUT_MS = 5_000L
 /**
  * A stale claim identified by the watchdog. Used to carry both the sid and its
  * scopeKey (so the reconcile sink does not need to re-lookup the entry).
+ *
+ * @property clientSeq §P0-B generation fence: the [OptimisticClaim.clientSeq] at detection.
  */
 data class StaleClaim(
     val sid: String,
     val scopeKey: ScopeKey,
+    val clientSeq: Long,
 )
 
 /**
  * Pure: scan [authority.bySid] for entries whose [SessionEntry.optimisticClaim]
- * is non-null AND not [OptimisticClaim.serverEchoed] AND whose age
+ * is non-null AND unconfirmed by EITHER signal (see below) AND whose age
  * (`now - claimedAtMonotonic`) STRICTLY exceeds [timeoutMs].
+ *
+ * §P0-B final-fix #1: a claim is confirmed (watchdog skips it) iff
+ * `serverEchoed || reconcileConfirmed`. serverEchoed is set by a real-time
+ * SSE echo; reconcileConfirmed is set by a delayed reconcile GET. The watchdog
+ * only re-selects claims unconfirmed by BOTH signals.
  *
  * Returns a list of [StaleClaim] tuples. Empty when no stale claims found.
  *
@@ -45,10 +53,12 @@ internal fun selectStaleClaimsForReconcile(
     val stale = mutableListOf<StaleClaim>()
     for ((sid, entry) in authority.bySid) {
         val claim = entry.optimisticClaim ?: continue
-        if (claim.serverEchoed) continue
+        // §P0-B final-fix #1: skip once confirmed by EITHER a real-time SSE echo
+        // or a delayed reconcile GET (either means the server acknowledged the claim).
+        if (claim.serverEchoed || claim.reconcileConfirmed) continue
         val age = now - claim.claimedAtMonotonic
         if (age > timeoutMs) {
-            stale.add(StaleClaim(sid, entry.scopeKey ?: continue))
+            stale.add(StaleClaim(sid = sid, scopeKey = entry.scopeKey ?: continue, clientSeq = claim.clientSeq))
         }
     }
     return stale

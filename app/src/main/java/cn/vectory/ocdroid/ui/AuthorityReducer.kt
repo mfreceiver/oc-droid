@@ -160,8 +160,11 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
  *    (cold-start / test / non-migrated site), the guard passes leniently
  *    (backward compat). The guard is PURE: it derives only from [op.carried data]
  *    and [state]; no injected identity store, no TOCTOU.
- *  - [AuthorityOp.PurgeHost] / [AuthorityOp.ApplyReconcileOutcome] /
- *    [AuthorityOp.PruneSessions]: structurally valid (true).
+ *  - [AuthorityOp.ApplyReconcileOutcome]: §P0-B scope guard (host) AND
+ *    §P0-C identity-epoch guard. The reconcile-dispatch host must match the
+ *    live host (P0-A scope guard); the dispatch-epoch must match current
+ *    [StoreState.identityEpoch] (stale-identity guard, P0-C).
+ *  - [AuthorityOp.PurgeHost] / [AuthorityOp.PruneSessions]: structurally valid (true).
  */
 private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
     return when (op) {
@@ -196,8 +199,17 @@ private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
                 true
             }
         }
+        is AuthorityOp.ApplyReconcileOutcome -> {
+            val currentHost = state.host.currentHostProfileId
+            // Host guard: null currentHost passes leniently (cold-start); otherwise
+            // the reconcile-dispatch host must match the live host.
+            if (currentHost != null && currentHost != op.hostProfileId) return false
+            // §P0-C identity-epoch guard: a reconcile whose dispatch-epoch predates
+            // an identity transition is stale → DROP.
+            if (op.identityEpochAtCapture != state.identityEpoch) return false
+            true
+        }
         is AuthorityOp.PurgeHost,
-        is AuthorityOp.ApplyReconcileOutcome,
         is AuthorityOp.PruneSessions -> true
     }
 }
@@ -243,8 +255,14 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
     // R1 根因修复：一个未确认的 optimistic claim（POST 成功后 server 还没 echo busy）
     // 绝不能被一个 stale legacy IDLE 覆盖。DROP 该 idle，标 guardedIdleDrop，arm watchdog。
     // serverEchoed==true 时，后续 IDLE 是合法 terminal（应用 + 清 claim，走原路径）。
+    //
+    // §P0-B final-fix #1: a claim is confirmed (gate RELEASED → legacy IDLE treated as
+    // legitimate terminal) when confirmed by EITHER a real-time SSE echo (serverEchoed)
+    // OR a delayed reconcile GET (reconcileConfirmed). Only a claim unconfirmed by BOTH
+    // is protected from stale legacy IDLEs.
     if (op.serverRound == null && op.status.isIdle &&
-        prev?.optimisticClaim != null && !prev.optimisticClaim.serverEchoed
+        prev?.optimisticClaim != null &&
+        !prev.optimisticClaim.serverEchoed && !prev.optimisticClaim.reconcileConfirmed
     ) {
         if (prev.optimisticClaim.guardedIdleDrop) {
             return cur  // 已标记过 → 真正 no-op（same ref）
@@ -273,6 +291,10 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
                 clientSeq = priorSeq + 1L,
                 claimedAtMonotonic = op.connectionMonotonicMs,
                 serverEchoed = echoedNow || (prev?.optimisticClaim?.serverEchoed ?: false),
+                // §P0-B final-fix #1: a NEW optimistic generation starts NOT
+                // reconcile-confirmed — never inherit reconcileConfirmed (prevents
+                // cross-generation pollution).
+                reconcileConfirmed = false,
                 guardedIdleDrop = false,
             )
         }
@@ -302,10 +324,15 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
     // ── incarnation high-water advance (B6): bump + reset that scope's rounds ──
     if (op.serverRound != null && op.serverRound.incarnation > highWater) {
         // Slim server restart (incarnation advance) invalidates prior turns:
-        // reset every entry's serverRound (single active scope in P0-A) and
-        // bump the scope's high-water before placing the new entry.
+        // reset only THIS scope's entries' serverRound (scope-filtered, not
+        // all scopes — consistent with applyMarkFailed/applyPrune/applySnapshot
+        // scope-filtering). Entries with null scopeKey are treated as in-scope.
         val resetById = cur.bySid.mapValues { (_, e) ->
-            if (e.serverRound != null) e.copy(serverRound = null) else e
+            if (e.serverRound != null && (e.scopeKey == null || e.scopeKey == op.scopeKey)) {
+                e.copy(serverRound = null)
+            } else {
+                e
+            }
         }
         return cur.copy(
             bySid = resetById + (op.sid to nextEntry),
@@ -529,21 +556,21 @@ private fun applyMarkFailed(cur: AuthorityState, op: AuthorityOp.MarkSourceFaile
 
 // ── ApplyReconcileOutcome ──────────────────────────────────────────────────
 
-/** §B7 REST reconcile terminal outcome. Pure. (Currently unused in P0-A.)
- *  §P0-A rev-gpt #1: returns cur (same ref) when the outcome produces no change. */
+/** §B7 REST reconcile terminal outcome. Pure.
+ *  §P0-A rev-gpt #1: returns cur (same ref) when the outcome produces no change.
+ *  §P0-B (FIX #2): generation fence at top drops stale-generation outcomes (ABA). */
 private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOutcome): AuthorityState {
     val prev = cur.bySid[op.sid]
+    // §P0-B generation fence (ABA): the reconcile was triggered for a specific stale
+    // claim generation. If the current claim is gone (cleared by a terminal SSE) or
+    // advanced (a newer optimistic POST superseded it), DROP — never let a stale
+    // outcome revive/overwrite a newer claim.
+    val claim = prev?.optimisticClaim
+    if (claim == null || claim.clientSeq != op.claimClientSeq) return cur
+    // After the fence, prev is guaranteed non-null with a matching claim.
     return when (op.outcome) {
         ReconcileOutcome.IDLE_CONFIRMED -> {
-            val entry = (prev ?: SessionEntry(
-                status = cn.vectory.ocdroid.data.model.SessionStatus(type = "idle"),
-                serverRound = null,
-                optimisticClaim = null,
-                origin = EntryOrigin.REST,
-                freshness = Freshness.Fresh,
-                updatedMonotonic = op.monotonic,
-                workdir = null,
-            )).copy(
+            val entry = prev.copy(
                 status = cn.vectory.ocdroid.data.model.SessionStatus(type = "idle"),
                 optimisticClaim = null,
                 updatedMonotonic = op.monotonic,
@@ -552,17 +579,15 @@ private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOu
             if (entry == prev) cur else cur.copy(bySid = cur.bySid + (op.sid to entry))
         }
         ReconcileOutcome.BUSY_CONFIRMED -> {
-            val entry = (prev ?: SessionEntry(
+            // §P0-B final-fix #1: mark the claim confirmed by the DELAYED reconcile
+            // GET. Use the dedicated reconcileConfirmed flag (NOT serverEchoed) so
+            // the OPTIMISTIC branch's serverEchoed-inheritance does NOT leak this
+            // across generations — a new optimistic POST starts with
+            // reconcileConfirmed=false, keeping the watchdog armed for the new claim.
+            val entry = prev.copy(
                 status = cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"),
-                serverRound = op.serverRound,
-                optimisticClaim = null,
-                origin = EntryOrigin.REST,
-                freshness = Freshness.Fresh,
-                updatedMonotonic = op.monotonic,
-                workdir = null,
-            )).copy(
-                status = cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"),
-                serverRound = op.serverRound ?: prev?.serverRound,
+                serverRound = op.serverRound ?: prev.serverRound,
+                optimisticClaim = prev.optimisticClaim.copy(reconcileConfirmed = true),
                 updatedMonotonic = op.monotonic,
             )
             if (entry == prev) cur else cur.copy(bySid = cur.bySid + (op.sid to entry))
