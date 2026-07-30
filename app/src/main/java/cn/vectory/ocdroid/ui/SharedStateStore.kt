@@ -131,6 +131,33 @@ class SharedStateStore @Inject constructor(
     }
 
     /**
+     * §P0-C (B11): the current [ConnectionIdentity] or null (cold start / test
+     * without identity store). Delegates to [identityStore.currentIdentity.value].
+     */
+    internal fun currentIdentity(): cn.vectory.ocdroid.service.identity.ConnectionIdentity? =
+        identityStore.currentIdentity.value
+
+    /**
+     * §P0-C (B11): snapshot of [StoreState.identityEpoch] captured NOW (before
+     * any suspend). The reducer's [opScopeValid] compares this captured epoch
+     * against the live [StoreState.identityEpoch] at CAS time to detect stale
+     * ops. Read from [state.value.identityEpoch] (the store's mirror) so the
+     * reducer's guard matches — NOT from [identityStore.currentEpoch] directly,
+     * because the store may legitimately lag or lead due to [SharedStateStore]
+     * own epoch management (init collection bumps state.identityEpoch).
+     */
+    internal fun captureIdentityEpoch(): Long = state.value.identityEpoch
+
+    /**
+     * §P0-C (B11): whether [id] is the current identity per the identity store.
+     * Used by the optimistic send [onSuccess] guard (deliverable 2) to drop
+     * stale optimistic writes after a host switch. Delegates to
+     * [ConnectionIdentityStore.isCurrent].
+     */
+    internal fun isCurrentIdentity(id: cn.vectory.ocdroid.service.identity.ConnectionIdentity): Boolean =
+        identityStore.isCurrent(id)
+
+    /**
      * §P0-A rev-gpt #5: the REAL authority [ScopeKey] for the current identity
      * (serverGroupFp + endpointFp). Used by the non-aggregator snapshot sites
      * so coverage is written under the SAME key the aggregator reads

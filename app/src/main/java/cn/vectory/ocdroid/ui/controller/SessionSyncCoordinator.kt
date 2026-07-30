@@ -231,6 +231,16 @@ class SessionSyncCoordinator(
         SseEventRouter(shared, legacy, slim)
     }
     /**
+     * §P0-C (B11): the [ConnectionIdentity] of the SSE event currently being
+     * processed (set in [handleEvent] before dispatching to the raw event handler,
+     * cleared after). null when not processing an identified event.
+     */
+    private var currentProcessingIdentity: cn.vectory.ocdroid.service.identity.ConnectionIdentity? = null
+
+    override fun currentEventIdentity(): cn.vectory.ocdroid.service.identity.ConnectionIdentity? =
+        currentProcessingIdentity
+
+    /**
      * §R-17 batch5: the ONLY coalesce state retained on the coordinator. The
      * Job references are bound to [scope] (a Job is neither serializable nor
      * a value type, so it cannot live in [ChatState]). The observable mirror
@@ -619,7 +629,16 @@ class SessionSyncCoordinator(
             )
             return
         }
-        handleEvent(identified.event)
+        // §P0-C (B11): thread the captured identity into the handlers before
+        // dispatching the raw event, so [applyStatusViaAuthority] can derive
+        // scopeKey + capturedIdentity from the event's captured identity rather
+        // than the current host. Clear after the handler returns (finally).
+        currentProcessingIdentity = if (store != null) identified.identity else null
+        try {
+            handleEvent(identified.event)
+        } finally {
+            currentProcessingIdentity = null
+        }
     }
 
     /**

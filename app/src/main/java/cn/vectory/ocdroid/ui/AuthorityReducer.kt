@@ -120,11 +120,17 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
  *    dropped. The adapter's dispatch-side `identityStore.currentEpoch()` check
  *    additionally catches endpoint/workdir-only reconfigures (same hostProfileId).
  *    null current host passes leniently (cold-start).
- *  - [AuthorityOp.ApplyEvent] / [AuthorityOp.PurgeHost] /
- *    [AuthorityOp.ApplyReconcileOutcome] / [AuthorityOp.PruneSessions]:
- *    structurally valid for P0-A (true). The event-captured-identity scope
- *    guard is P0-C's job (§2.2 line 254-256). Lenient-pass does NOT regress
- *    current behavior — no B11 guard exists today.
+ *  - [AuthorityOp.ApplyEvent]: §B11 (P0-C) identity-epoch guard. When
+ *    [op.capturedIdentity] is non-null, the reducer CHECKS
+ *    `op.identityEpochAtCapture == state.identityEpoch` — a stale
+ *    event/optimistic frame whose capture-epoch predates an identity transition
+ *    is DROPPED (returns false). This is defense-in-depth inside the CAS on top
+ *    of the dispatch-site [isCurrent] check. When [op.capturedIdentity] is null
+ *    (cold-start / test / non-migrated site), the guard passes leniently
+ *    (backward compat). The guard is PURE: it derives only from [op.carried data]
+ *    and [state]; no injected identity store, no TOCTOU.
+ *  - [AuthorityOp.PurgeHost] / [AuthorityOp.ApplyReconcileOutcome] /
+ *    [AuthorityOp.PruneSessions]: structurally valid (true).
  */
 private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
     return when (op) {
@@ -144,10 +150,21 @@ private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
             if (token.identityEpoch != state.identityEpoch) return false
             true
         }
-        // §B11 TODO(P0-C): scope guard via event-captured identity (op.capturedIdentity /
-        // op.scopeKey vs a current scope derivable from state). P0-A lenient-pass preserves
-        // current behavior (no B11 guard exists today).
-        is AuthorityOp.ApplyEvent,
+        // §B11 (P0-C): identity-epoch guard for event-captured (non-null identity)
+        // ApplyEvents. Pure: the epoch comparison uses ONLY op-carried data + state.
+        is AuthorityOp.ApplyEvent -> {
+            // When capturedIdentity is null (cold-start / non-migrated site), pass
+            // leniently — no B11 guard exists for those paths.
+            if (op.capturedIdentity != null) {
+                // identityEpochAtCapture must match state.identityEpoch. If the
+                // identity advanced between capture and this CAS, the op is stale.
+                // This is defense-in-depth: the dispatch site already does an
+                // isCurrent check, but the reducer guards against TOCTOU races.
+                op.identityEpochAtCapture == state.identityEpoch
+            } else {
+                true
+            }
+        }
         is AuthorityOp.PurgeHost,
         is AuthorityOp.ApplyReconcileOutcome,
         is AuthorityOp.PruneSessions -> true

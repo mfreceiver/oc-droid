@@ -36,6 +36,14 @@ sealed interface AuthorityOp {
         val origin: EntryOrigin,
         val serverRound: ServerRound? = null,
         val capturedIdentity: ConnectionIdentity? = null,
+        /** §B11 (P0-C): [StoreState.identityEpoch] captured at dispatch time
+         *  (before any suspend / synchronous dispatch call). The reducer's
+         *  [opScopeValid] compares this against [StoreState.identityEpoch] — if
+         *  the identity advanced between capture and CAS, the op is DROPPED
+         *  (defense-in-depth inside the pure reducer, beyond the dispatch-site
+         *  [isCurrent] check). Default 0L for backward-compat with sites not
+         *  yet migrated (they pass capturedIdentity=null → lenient-pass). */
+        val identityEpochAtCapture: Long = 0L,
         val scopeKey: ScopeKey,
         val connectionMonotonicMs: Long,
         val workdir: String? = null,
