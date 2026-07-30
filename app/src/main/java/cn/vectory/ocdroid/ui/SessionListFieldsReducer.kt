@@ -43,6 +43,9 @@ internal fun reduceSessionArchivedLocal(state: StoreState, action: AppAction.Ses
             // §P0-E(a) R9 fix: archive must also clear the archived session's
             // error banner (mirroring reduceSessionDeletedLocal's cleanup).
             sessionErrorsById = state.sessionList.sessionErrorsById.filterKeys { it != id },
+            // §P0-F 阻断2: 对齐 caller 携带的 subtree（activeSessionIdsToRemove =
+            // subtree when archiving）；SSE SessionArchived / SessionDeletedLocal 同模式。
+            abortPendingSessionIds = state.sessionList.abortPendingSessionIds.filterKeys { it !in action.activeSessionIdsToRemove },
         ),
         // §P0-E(b)/(c): clean pending maps for the archived session (cross-slice cleanup).
         chat = state.chat.copy(
@@ -63,6 +66,8 @@ internal fun reduceSessionDeletedLocal(state: StoreState, action: AppAction.Sess
             pendingQuestions = state.sessionList.pendingQuestions.filter { it.sessionId !in ids },
             activeSessionIds = state.sessionList.activeSessionIds - ids,
             sessionErrorsById = state.sessionList.sessionErrorsById.filterKeys { it !in ids },
+            // §P0-F 阻断5: local delete must drop abort-pending for removed sessions.
+            abortPendingSessionIds = state.sessionList.abortPendingSessionIds.filterKeys { it !in ids },
         ),
         // §P0-E(b)/(c): clean pending maps for deleted sessions (cross-slice cleanup).
         chat = state.chat.copy(

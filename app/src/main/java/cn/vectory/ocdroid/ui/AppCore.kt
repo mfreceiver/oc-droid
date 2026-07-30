@@ -742,38 +742,43 @@ class AppCore @Inject constructor(
             //  - session.deleted digest (SessionSyncCoordinator ~:1409)
             //  - /since 404 MarkDeleted (SessionSyncCoordinator ~:1974)
             // The EvictSession effect is the single funnel for session-gone-
-            // upstream eviction; hooking here avoids coupling SSC to the TSC
-            // (which would create a DI cycle: TSC.triggerSinceFetch calls
-            // SSC.reconcileSession, so SSC cannot inject TSC).
-            tokenStreamCoordinator.close(effect.sessionId)
-            // §Stage-D2 (gate r1 S1): if the evicted session was the CURRENT
-            // chat, clear the token-stream overlay from ChatState too. close()
-            // clears coordinator-internal maps but NOT ChatState's
-            // streamingPartTexts/streamOwned — without this, a deleted/
-            // archived current session can leave a sticky overlay until
-            // SessionSelected wipes it on the next switch.
-            if (store.chatFlow.value.currentSessionId == effect.sessionId) {
-                val ownedKeys = store.chatFlow.value.streamOwned.keys
-                if (ownedKeys.isNotEmpty()) {
-                    // §B4 route-aware clear: pass the live route token + session
-                    // so the reducer clears BOTH the flat mirror and the route
-                    // content slot (the evicted session is gone — no stale
-                    // overlay should survive in either projection).
-                    tokenStreamCoordinator.dispatchTokenStreamClear(
-                        partIds = ownedKeys,
-                        expectedRouteInstance = store.stateFlow.value.chatRouteInstance,
-                        sessionId = effect.sessionId,
-                    )
+            // upstream eviction; hooking here avoids coupling SSC to the TSC.
+            //
+            // §P0-F 阻断1 (round 4): ALL side-effects that mutate the CURRENT
+            // host's bare-sid state MUST be fp-guarded — a late old-group
+            // effect must NOT close the new group's tokenStream, clear its
+            // overlay, or release its abort-pending lock for the same sid
+            // (cross-host pollution via same-sid UUID collision across server
+            // groups). The cache eviction below stays keyed by effect.serverGroupFp
+            // (old group's LRU is cleared by its own fp — safe).
+            // §known-gap: full identity (BundleStamp/connection epoch) deferred to P0-A.
+            if (effect.serverGroupFp == currentServerGroupFp()) {
+                tokenStreamCoordinator.close(effect.sessionId)
+                // §Stage-D2 (gate r1 S1): if the evicted session was the CURRENT
+                // chat, clear the token-stream overlay from ChatState too. close()
+                // clears coordinator-internal maps but NOT ChatState's
+                // streamingPartTexts/streamOwned — without this, a deleted/
+                // archived current session can leave a sticky overlay until
+                // SessionSelected wipes it on the next switch.
+                if (store.chatFlow.value.currentSessionId == effect.sessionId) {
+                    val ownedKeys = store.chatFlow.value.streamOwned.keys
+                    if (ownedKeys.isNotEmpty()) {
+                        tokenStreamCoordinator.dispatchTokenStreamClear(
+                            partIds = ownedKeys,
+                            expectedRouteInstance = store.stateFlow.value.chatRouteInstance,
+                            sessionId = effect.sessionId,
+                        )
+                    }
+                }
+                // §P0-F 阻断4 (round 3): release any in-flight abort-pending flag.
+                store.mutateSessionList { s ->
+                    if (effect.sessionId in s.abortPendingSessionIds)
+                        s.copy(abortPendingSessionIds = s.abortPendingSessionIds - effect.sessionId)
+                    else s
                 }
             }
-            // R-20 Phase 1 (plan §3 矩阵 "用户归档 / 删除 / SSE 归档" 行):
-            // synchronous memory clear. Memory first so an immediate switchTo
-            // does not re-hydrate the just-evicted window from the LRU.
-            // remove-message-persistence Task 6: the prior async
-            // `cacheRepository.evictSession` fire-and-forget persistent evict
-            // was deleted together with the CacheRepository surface — the
-            // process-in LRU is the sole cache layer now.
-            //
+            // R-20 Phase 1: synchronous memory clear keyed by effect fp (old
+            // group's LRU cleared by its own fp — safe regardless of current host).
             sessionSwitcher.evictSession(effect.serverGroupFp, effect.sessionId)
             true
         }

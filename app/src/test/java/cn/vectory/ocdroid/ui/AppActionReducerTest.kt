@@ -593,6 +593,34 @@ class AppActionReducerTest {
             out.sessionList.completenessEpoch)
     }
 
+    @Test
+    fun `P0-F reduce HostStatePurged cross-group clears abortPendingSessionIds`() {
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                abortPendingSessionIds = mapOf("s1" to 100L, "s2" to 200L),
+            ),
+        )
+
+        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+
+        assertTrue("abortPendingSessionIds cleared cross-group",
+            out.sessionList.abortPendingSessionIds.isEmpty())
+    }
+
+    @Test
+    fun `P0-F reduce HostStatePurged same-group preserves abortPendingSessionIds`() {
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                abortPendingSessionIds = mapOf("s1" to 100L),
+            ),
+        )
+
+        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
+
+        // Same-group switch: sessions are still valid → pending survives
+        assertEquals(mapOf("s1" to 100L), out.sessionList.abortPendingSessionIds)
+    }
+
     // ── HostStatePurged (same-group = preserve server data) ────────────────
 
     @Test
@@ -1573,5 +1601,69 @@ class AppActionReducerTest {
             "only the unrelated entry remains",
             1,
             out.sessionList.sessionErrorsById.size)
+    }
+
+    @Test
+    fun `P0-F reduceSessionArchived clears abortPending for archived subtree`() {
+        val archivedRoot = Session(id = "root", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                sessions = listOf(
+                    Session(id = "root", directory = "/p"),
+                    Session(id = "child", directory = "/p", parentId = "root"),
+                    Session(id = "unrelated", directory = "/p")),
+                abortPendingSessionIds = mapOf(
+                    "root" to 100L,
+                    "child" to 200L,
+                    "unrelated" to 300L)))
+
+        val out = reduce(prior, AppAction.SessionArchived(archivedRoot))
+
+        assertFalse("archived root cleared",
+            out.sessionList.abortPendingSessionIds.containsKey("root"))
+        assertFalse("archived child (subtree) cleared",
+            out.sessionList.abortPendingSessionIds.containsKey("child"))
+        assertTrue("unrelated session preserved",
+            out.sessionList.abortPendingSessionIds.containsKey("unrelated"))
+        assertEquals(1, out.sessionList.abortPendingSessionIds.size)
+    }
+
+    @Test
+    fun `P0-F reduceSessionArchivedLocal clears abortPending for archived subtree`() {
+        // activeSessionIdsToRemove carries the FULL subtree (parent + descendants)
+        // — reducer must clear abortPending for ALL of them, not just the root.
+        val archivedParent = Session(id = "parent", directory = "/p", time = Session.TimeInfo(archived = 1L))
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                sessions = listOf(
+                    Session(id = "parent", directory = "/p"),
+                    Session(id = "child", directory = "/p", parentId = "parent"),
+                    Session(id = "unrelated", directory = "/p")),
+                abortPendingSessionIds = mapOf(
+                    "parent" to 100L,
+                    "child" to 200L,
+                    "unrelated" to 300L)))
+
+        val subtree = setOf("parent", "child")
+        val out = reduce(prior, AppAction.SessionArchivedLocal(archivedParent, activeSessionIdsToRemove = subtree, pendingQuestions = emptyList()))
+
+        assertFalse("parent cleared", "parent" in out.sessionList.abortPendingSessionIds)
+        assertFalse("child (descendant in subtree) cleared", "child" in out.sessionList.abortPendingSessionIds)
+        assertTrue("unrelated preserved", "unrelated" in out.sessionList.abortPendingSessionIds)
+        assertEquals(1, out.sessionList.abortPendingSessionIds.size)
+    }
+
+    @Test
+    fun `P0-F reduceSessionDeletedLocal clears abortPending for removed sessions`() {
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                abortPendingSessionIds = mapOf("s1" to 100L, "s2" to 200L, "s3" to 300L)))
+
+        val out = reduce(prior, AppAction.SessionDeletedLocal(removedIds = setOf("s1", "s2")))
+
+        assertFalse("s1 cleared", "s1" in out.sessionList.abortPendingSessionIds)
+        assertFalse("s2 cleared", "s2" in out.sessionList.abortPendingSessionIds)
+        assertTrue("s3 preserved", "s3" in out.sessionList.abortPendingSessionIds)
+        assertEquals(1, out.sessionList.abortPendingSessionIds.size)
     }
 }

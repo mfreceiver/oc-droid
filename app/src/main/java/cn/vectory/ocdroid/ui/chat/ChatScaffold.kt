@@ -1198,6 +1198,7 @@ fun ChatScaffold(
                     composerVM = composerVM,
                     orchestratorVM = orchestratorVM,
                     isBusy = currentSessionIsRunning || chat.isCompacting,
+                    isAborting = chromeSessionId != null && chromeSessionId in sessionList.abortPendingSessionIds,
                     questionPending = pendingQuestion != null,
                     onAddImages = onAddImages,
                     onAbort = { chatVM.abortSession(chromeSessionId) },

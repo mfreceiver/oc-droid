@@ -92,11 +92,16 @@ internal fun reduceSessionArchived(state: StoreState, action: AppAction.SessionA
     // — descendants that did NOT get their own session.updated still get
     // pruned here). T12's set/remove producer logic is unchanged.
     val cleanedSessionErrors = state.sessionList.sessionErrorsById.filterKeys { it !in subtree }
+    // §P0-F 阻断5: archive subtree must drop in-flight abort-pending flags —
+    // archived sessions cannot be aborted and a stale "stopping" flag would
+    // block the user's next abort on a same-id re-created session.
+    val cleanedAbortPending = state.sessionList.abortPendingSessionIds.filterKeys { it !in subtree }
     return state.copy(
         sessionList = newSessionList.copy(
             pendingQuestions = cleanedQuestions,
             activeSessionIds = newSessionList.activeSessionIds - subtree,
             sessionErrorsById = cleanedSessionErrors,
+            abortPendingSessionIds = cleanedAbortPending,
         ),
         chat = newChatCleaned.copy(
             // §P0-E scaffolding hygiene: clear pending-error maps for the archived
@@ -163,6 +168,10 @@ internal fun reduceHostStatePurged(state: StoreState, action: AppAction.HostStat
                 // above (T12's set/remove logic is unchanged — this is a
                 // lifecycle cleanup, not a producer-path change).
                 sessionErrorsById = emptyMap(),
+                // §P0-F 阻断6: cross-group purge must drop in-flight abort-pending
+                // flags — they reference the prior host's sessions; a root-id
+                // collision would let a stale "stopping" lock / watchdog survive.
+                abortPendingSessionIds = emptyMap(),
                 // I-2 v2 §3.3: cross-group purge MUST reset the
                 // aggregation signals — they reference the prior host's
                 // aggregation state and a stale "FAILED" would otherwise

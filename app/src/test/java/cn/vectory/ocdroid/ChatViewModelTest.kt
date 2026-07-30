@@ -18,6 +18,7 @@ import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.data.repository.MessagesPage
 import cn.vectory.ocdroid.ui.AppCore
 import cn.vectory.ocdroid.ui.ChatViewModel
+
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
@@ -39,6 +40,8 @@ import io.mockk.just
 import io.mockk.mockk
 import io.mockk.runs
 import io.mockk.verify
+import java.io.IOException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -919,6 +922,320 @@ class ChatViewModelTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.abortSession("session-1") }
+    }
+
+    // §P0-F: abortPending flag + watchdog ——————————————————————————————
+
+    @Test
+    fun `P0-F abortSession sets abortPendingSessionIds for the target sid`() = runTest {
+        coEvery { repository.abortSession(any()) } returns Result.success(Unit)
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+
+        chatVM.abortSession("s1")
+        // The abortPendingSessionIds is set synchronously (before launch)
+        assertTrue("s1" in core.sessionListFlow.value.abortPendingSessionIds)
+    }
+
+    @Test
+    fun `P0-F abortSession is idempotent when abort is already pending`() = runTest {
+        coEvery { repository.abortSession(any()) } returns Result.success(Unit)
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+
+        // Pre-set abortPending for "s1"
+        core.store.mutateSessionList { s ->
+            s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
+        }
+
+        chatVM.abortSession("s1")
+        advanceUntilIdle()
+
+        // Still exactly one entry (idempotent guard prevented re-mark)
+        assertEquals(1, core.sessionListFlow.value.abortPendingSessionIds.size)
+        assertEquals("s1", core.sessionListFlow.value.abortPendingSessionIds.keys.first())
+        coVerify(exactly = 0) { repository.abortSession("s1") }
+    }
+
+    @Test
+    fun `P0-F abortSession onFailure clears abortPending`() = runTest {
+        coEvery { repository.abortSession(any()) } returns Result.failure(IOException("abort failed"))
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+
+        chatVM.abortSession("s1")
+        advanceUntilIdle()
+
+        assertFalse("s1" in core.sessionListFlow.value.abortPendingSessionIds)
+    }
+
+    // ── reconcileStaleAbort: 3-param (sid, token, fp) ───────────────────────
+
+    @Test
+    fun `P0-F reconcileStaleAbort clears abortPending but NOT sendingSessionIds (conservative, P0-A)`() = runTest {
+        coEvery { repository.getSessionStatus() } returns Result.success(
+            mapOf("s1" to SessionStatus(type = "idle"))
+        )
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+        val fp = core.currentServerGroupFp()
+
+        // Pre-set abort-pending + a stuck sendingSessionIds entry
+        core.store.mutateSessionList { s ->
+            s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
+        }
+        core.writeComposer { it.copy(sendingSessionIds = it.sendingSessionIds + "s1") }
+        assertTrue("s1" in core.composerFlow.value.sendingSessionIds)
+
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        advanceUntilIdle()
+
+        // §收窄: 只清 abort-pending；sendingSessionIds 留待 R5 generation/ownership
+        assertFalse("s1" in core.sessionListFlow.value.abortPendingSessionIds)
+        assertTrue("sendingSessionIds NOT cleared by reconcile (P0-A)",
+            "s1" in core.composerFlow.value.sendingSessionIds)
+        // reconcile 不再 applySessionStatus → sessionStatuses unchanged
+        assertNull(core.sessionListFlow.value.sessionStatuses["s1"])
+    }
+
+    @Test
+    fun `P0-F reconcileStaleAbort clears abortPending when server says busy`() = runTest {
+        coEvery { repository.getSessionStatus() } returns Result.success(
+            mapOf("s1" to SessionStatus(type = "busy"))
+        )
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+        val fp = core.currentServerGroupFp()
+
+        core.store.mutateSessionList { s ->
+            s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
+        }
+
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        advanceUntilIdle()
+
+        // §P0-F 阻断3: busy must NOT retain pending — release lock so user can retry
+        assertFalse("s1" in core.sessionListFlow.value.abortPendingSessionIds)
+    }
+
+    @Test
+    fun `P0-F reconcileStaleAbort is no-op when sid not abort-pending`() = runTest {
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+        val fp = core.currentServerGroupFp()
+
+        // No pre-set abortPending for "s1"
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        advanceUntilIdle()
+
+        assertFalse("s1" in core.sessionListFlow.value.abortPendingSessionIds)
+        // repository.getSessionStatus should NOT be called (early return)
+        coVerify(exactly = 0) { repository.getSessionStatus() }
+    }
+
+    @Test
+    fun `P0-F reconcileStaleAbort clears abortPending on fetch failure`() = runTest {
+        coEvery { repository.getSessionStatus() } returns Result.failure(IOException("network error"))
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+        val fp = core.currentServerGroupFp()
+
+        core.store.mutateSessionList { s ->
+            s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
+        }
+
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        advanceUntilIdle()
+
+        // §P0-F 阻断3: fetch failure must NOT retain pending — release lock
+        assertFalse("s1" in core.sessionListFlow.value.abortPendingSessionIds)
+    }
+
+    @Test
+    fun `P0-F reconcileStaleAbort clears when server returns empty map (sid not present)`() = runTest {
+        coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+        val fp = core.currentServerGroupFp()
+
+        core.store.mutateSessionList { s ->
+            s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
+        }
+
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        advanceUntilIdle()
+
+        // sid absent from map → settled=true → clear pending
+        assertFalse("s1" in core.sessionListFlow.value.abortPendingSessionIds)
+    }
+
+    // ── P0-F 阻断2: ABA token ─────────────────────────────────────────────
+
+    @Test
+    fun `P0-F ABA token rejects stale reconcileStaleAbort`() = runTest {
+        // Pre-set abortPending with a NEWER token than expectedToken
+        coEvery { repository.getSessionStatus() } returns Result.success(
+            mapOf("s1" to SessionStatus(type = "idle"))
+        )
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+        val fp = core.currentServerGroupFp()
+
+        // Store expects token 200, but we pass expectedToken=100 (stale)
+        core.store.mutateSessionList { s ->
+            s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 200L))
+        }
+
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        advanceUntilIdle()
+
+        // Token mismatch → no-op: getSessionStatus NOT called, pending still has token 200
+        assertTrue(core.sessionListFlow.value.abortPendingSessionIds["s1"] == 200L)
+        coVerify(exactly = 0) { repository.getSessionStatus() }
+    }
+
+    // ── P0-F 阻断2: 二次校验回归（token changed during suspend）────────────
+
+    @Test
+    fun `P0-F reconcile 二次校验 drops when token changed during suspend`() = runTest {
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+        val fp = core.currentServerGroupFp()
+
+        // Pre-set abortPending with tokenA
+        core.store.mutateSessionList { s ->
+            s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
+        }
+
+        // Mock getSessionStatus to mutate token DURING the suspend (simulating a
+        // new abort racing in while the fetch is in flight).
+        coEvery { repository.getSessionStatus() } coAnswers {
+            core.store.mutateSessionList { s ->
+                s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 200L))
+            }
+            Result.success(mapOf("s1" to SessionStatus(type = "idle")))
+        }
+
+        // Call with expectedToken=100L (stale — token is now 200L after the mock mutated it)
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        advanceUntilIdle()
+
+        // #2 secondary check should detect token changed → no-op
+        // pending still contains token 200 (the new abort's token), not cleared
+        assertEquals(200L, core.sessionListFlow.value.abortPendingSessionIds["s1"])
+        coVerify(exactly = 1) { repository.getSessionStatus() }
+    }
+
+    // ── P0-F 阻断7: identity fence ────────────────────────────────────────
+
+    @Test
+    fun `P0-F identity fence prevents reconcile on host switch`() = runTest {
+        coEvery { repository.getSessionStatus() } returns Result.success(
+            mapOf("s1" to SessionStatus(type = "idle"))
+        )
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+
+        core.store.mutateSessionList { s ->
+            s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
+        }
+
+        // Pass an expectedFp that differs from the current host's fp
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = "different-host")
+        advanceUntilIdle()
+
+        // Host switched → fence triggers: clear pending, NO getSessionStatus
+        assertFalse("s1" in core.sessionListFlow.value.abortPendingSessionIds)
+        coVerify(exactly = 0) { repository.getSessionStatus() }
+    }
+
+    // ── P0-F 阻断1: watchdog parallel to POST ─────────────────────────────
+
+    @Test
+    fun `P0-F watchdog fires even when POST hangs (parallel launch)`() = runTest {
+        // Mock abortSession to NEVER return (simulates hung POST)
+        coEvery { repository.abortSession(any()) } coAnswers {
+            kotlinx.coroutines.CompletableDeferred<Unit>().await()
+            Result.success(Unit)  // unreachable
+        }
+        coEvery { repository.getSessionStatus() } returns Result.success(
+            mapOf("s1" to SessionStatus(type = "idle"))
+        )
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+
+        chatVM.abortSession("s1")
+        assertTrue("s1" in core.sessionListFlow.value.abortPendingSessionIds)
+
+        // Advance past watchdog timeout — watchdog launch is parallel, not dependent on POST
+        advanceTimeBy(ChatViewModel.ABORT_WATCHDOG_TIMEOUT_MS)
+        advanceUntilIdle()
+
+        // Watchdog must have fired despite hung POST
+        assertFalse("s1" in core.sessionListFlow.value.abortPendingSessionIds)
+        coVerify(exactly = 1) { repository.abortSession("s1") }
+        coVerify(exactly = 1) { repository.getSessionStatus() }
+    }
+
+    @Test
+    fun `P0-F abortSession watchdog timeout triggers reconcileStaleAbort`() = runTest {
+        coEvery { repository.abortSession(any()) } returns Result.success(Unit)
+        coEvery { repository.getSessionStatus() } returns Result.success(
+            mapOf("s1" to SessionStatus(type = "idle"))
+        )
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+
+        chatVM.abortSession("s1")
+        // Flag set synchronously
+        assertTrue("s1" in core.sessionListFlow.value.abortPendingSessionIds)
+
+        // Advance past the watchdog delay
+        advanceTimeBy(ChatViewModel.ABORT_WATCHDOG_TIMEOUT_MS)
+        advanceUntilIdle()
+
+        // Watchdog triggered → reconcileStaleAbort ran → server says idle → cleared
+        assertFalse("s1" in core.sessionListFlow.value.abortPendingSessionIds)
+        coVerify(exactly = 1) { repository.abortSession("s1") }
+        coVerify(exactly = 1) { repository.getSessionStatus() }
+    }
+
+    @Test
+    fun `P0-F abortSession watchdog does not reconcile when SSE already cleared flag`() = runTest {
+        coEvery { repository.abortSession(any()) } returns Result.success(Unit)
+        // getSessionStatus should NOT be called since flag was cleared
+        coEvery { repository.getSessionStatus() } returns Result.success(
+            mapOf("s1" to SessionStatus(type = "idle"))
+        )
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+
+        chatVM.abortSession("s1")
+
+        // Simulate SSE clearing the flag before watchdog fires
+        core.store.mutateSessionList { s ->
+            s.copy(abortPendingSessionIds = s.abortPendingSessionIds - "s1")
+        }
+
+        advanceTimeBy(ChatViewModel.ABORT_WATCHDOG_TIMEOUT_MS)
+        advanceUntilIdle()
+
+        // Watchdog ran → reconcileStaleAbort detected flag is gone → no-op
+        coVerify(exactly = 0) { repository.getSessionStatus() }
     }
 
     @Test
