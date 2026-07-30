@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.data.repository
 
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.MessageWithParts
+import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.SlimSessionsPage
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.TrafficLogger
@@ -1054,5 +1055,35 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         assertEquals(listOf("m3"), page2.items.map { it.info.id })
         assertEquals(null, page2.nextCursor)
     }
-// ── §11.1 fix-9 P0-4: dirty re-evaluation after commit ───────────────
+    // ── §11.1 fix-9 P0-4: dirty re-evaluation after commit ───────────────
+
+    // ── §slim-storm P1: getSlimapiSessionStatusOutcome delegate semantics ──
+
+    @Test
+    fun `§slim-storm P1 absent entry returns Success with idle type (NOT SessionMissing)`() = runBlocking {
+        // The bulk /session/status sparse map OMITS idle entries. The delegate
+        // must treat absent ≡ idle, NOT missing — misclassifying as SessionMissing
+        // was the /session/status storm root cause.
+        server.enqueue(jsonResponse("""{"other-sid": {"type": "busy"}}"""))
+
+        val outcome = repository.getSlimapiSessionStatusOutcome("my-sid")
+
+        assertTrue("absent entry → Success (not SessionMissing)", outcome is StatusOutcome.Success)
+        val success = outcome as StatusOutcome.Success
+        assertEquals("my-sid", success.sessionId)
+        assertEquals("idle", success.status.type)
+    }
+
+    @Test
+    fun `§slim-storm P1 present entry returns Success with its status unchanged`() = runBlocking {
+        server.enqueue(jsonResponse("""{"my-sid": {"type": "busy", "attempt": 3}}"""))
+
+        val outcome = repository.getSlimapiSessionStatusOutcome("my-sid")
+
+        assertTrue("present entry → Success", outcome is StatusOutcome.Success)
+        val success = outcome as StatusOutcome.Success
+        assertEquals("my-sid", success.sessionId)
+        assertEquals("busy", success.status.type)
+        assertEquals(3, success.status.attempt)
+    }
 }

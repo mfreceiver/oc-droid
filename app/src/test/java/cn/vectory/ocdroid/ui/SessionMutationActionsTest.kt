@@ -8,8 +8,10 @@ import cn.vectory.ocdroid.data.model.QuestionInfo
 import cn.vectory.ocdroid.data.model.QuestionOption
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.ui.controller.subtreeIds
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -1103,5 +1105,65 @@ class SessionMutationActionsTest {
             "only the unrelated entry remains",
             1,
             slices.sessionList.value.sessionErrorsById.size)
+    }
+
+    // ── §slim-storm P2: reduceSessionDeletedLocal purges childSessions + completeRootIds ──
+
+    @Test
+    fun `§slim-storm P2 reduceSessionDeletedLocal purges childSessions and completeRootIds`() = runTest {
+        // Build a StoreState with a root session + child in all three session
+        // containers, completeness proof, and status entries for both.
+        val root = Session(id = "root-1", directory = "/x")
+        val child = Session(id = "child-1", directory = "/x", parentId = "root-1")
+        val other = Session(id = "other", directory = "/y")
+        val sl = SessionListState(
+            sessions = listOf(root, child, other),
+            directorySessions = mapOf("/x" to listOf(root, child), "/y" to listOf(other)),
+            childSessions = mapOf("root-1" to listOf(child)),
+            completeRootIds = setOf("root-1", "other"),
+        ).withProjection(
+            mapOf("root-1" to SessionStatus("idle"), "child-1" to SessionStatus("idle"), "other" to SessionStatus("busy"))
+        )
+        val state = StoreState(
+            sessionList = sl,
+            // minimal non-null defaults for other fields
+            connection = ConnectionState(),
+            traffic = TrafficState(),
+            composer = ComposerState(),
+            file = FileState(),
+            settings = SettingsState(),
+            chat = ChatState(),
+            unread = UnreadState(),
+            host = HostState(),
+            authority = cn.vectory.ocdroid.data.state.AuthorityState(),
+            expandedParts = emptyMap(),
+            nav = NavState(),
+        )
+
+        val subtree = subtreeIds("root-1", state.sessionList.sessions, state.sessionList.directorySessions, state.sessionList.childSessions)
+        val result = reduceSessionDeletedLocal(state, AppAction.SessionDeletedLocal(subtree))
+
+        // Root + child removed from sessions
+        assertFalse("root removed from sessions", result.sessionList.sessions.any { it.id == "root-1" })
+        assertFalse("child removed from sessions", result.sessionList.sessions.any { it.id == "child-1" })
+        assertTrue("other preserved in sessions", result.sessionList.sessions.any { it.id == "other" })
+        // Root key removed from directorySessions; /x became empty (both items removed) → purged
+        assertFalse("root-1 key NOT a directory key (directorySessions keys are workdirs)",
+            result.sessionList.directorySessions.containsKey("root-1"))
+        // /x had only root+child, both removed → /x key removed (filterValues { it.isNotEmpty() })
+        assertFalse("/x purged from directorySessions (both items removed, list became empty)",
+            result.sessionList.directorySessions.containsKey("/x"))
+        // /y preserved
+        assertEquals("other preserved in /y", 1, result.sessionList.directorySessions["/y"]?.size)
+        // Root key removed from childSessions
+        assertFalse("root-1 key removed from childSessions", result.sessionList.childSessions.containsKey("root-1"))
+        // completeRootIds: root-1 removed, other preserved
+        assertFalse("root-1 removed from completeRootIds", result.sessionList.completeRootIds.contains("root-1"))
+        assertTrue("other preserved in completeRootIds", result.sessionList.completeRootIds.contains("other"))
+        // sessionStatuses purge (the storm self-heal) is covered AUTHORITATIVELY by
+        // AuthorityReducerTest `SessionDeletedLocal reducer prunes authority and
+        // recomputes the projection` (line ~309): it dispatches the same action in a
+        // consistent state (authority.bySid populated) and asserts the projection is
+        // pruned. Here we exercise the direct copy() fields THIS change added.
     }
 }

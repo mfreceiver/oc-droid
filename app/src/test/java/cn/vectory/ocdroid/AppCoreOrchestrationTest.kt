@@ -18,6 +18,7 @@ import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
+import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.catchUpAfterDisconnectOrForeground
@@ -1911,5 +1912,46 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         // (b) The composer STILL holds the user's newer text (compare-and-clear
         // preserved it — NOT wiped by the unconditional clear).
         assertEquals("/compact extra then B", core.composerFlow.value.inputText)
+    }
+
+    // ── §slim-storm P2: EvictSession handler self-heal ─────────────────────────
+
+    @Test
+    fun `§slim-storm P2 EvictSession with matching fp dispatches SessionDeletedLocal and removes session from list`() = runTest {
+        val sid = "evict-me"
+        coEvery { repository.getSession(any()) } returns Result.success(Session(id = sid, directory = "/x"))
+
+        val core = wire()
+        core.writeSessionList {
+            it.copy(sessions = listOf(Session(id = sid, directory = "/x")))
+        }
+
+        val currentFp = core.currentServerGroupFp()
+        core.effectBus.emitEffect(ControllerEffect.EvictSession(serverGroupFp = currentFp, sessionId = sid))
+        advanceUntilIdle()
+
+        assertFalse(
+            "EvictSession with matching fp removes session from list",
+            core.store.sessionListFlow.value.sessions.any { it.id == sid },
+        )
+    }
+
+    @Test
+    fun `§slim-storm P2 EvictSession with stale fp leaves session in list unchanged`() = runTest {
+        val sid = "stay-put"
+        coEvery { repository.getSession(any()) } returns Result.success(Session(id = sid, directory = "/x"))
+
+        val core = wire()
+        core.writeSessionList {
+            it.copy(sessions = listOf(Session(id = sid, directory = "/x")))
+        }
+
+        core.effectBus.emitEffect(ControllerEffect.EvictSession(serverGroupFp = "stale-fp", sessionId = sid))
+        advanceUntilIdle()
+
+        assertTrue(
+            "stale-fp EvictSession must NOT remove session from current host's list",
+            core.store.sessionListFlow.value.sessions.any { it.id == sid },
+        )
     }
 }
