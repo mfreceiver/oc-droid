@@ -85,6 +85,10 @@ docs/ios_markdown_preview_fixtures/
 .slim/worktrees/
 .slim/worktrees.json
 # END oh-my-opencode-slim worktrees
+
+# Local agent worktrees (e.g. P0-A impl-A at .worktrees/impl-A).
+# Untracked worktree dirs must not pollute release.sh clean-tree gate (git status --porcelain).
+.worktrees/
 opencode-src/
 
 # transient local media (flicker-debug video/frames, etc.)
