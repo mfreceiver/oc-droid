@@ -370,32 +370,35 @@ class StatusAggregatorImplTest {
         coEvery { repo.getSessionStatus() } returns Result.success(
             mapOf("s1" to SessionStatus(type = "busy"))
         )
-        val aggregator = newAggregator(repo, clock = { 100L })
+        val identityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") }
+        val aggregator = newAggregator(repo, identityStore = identityStore, clock = { 100L })
 
         // First identity observes s1 busy.
         aggregator.refresh(identity(groupFp = fp), snapshot(mapOf("s1" to session("s1", "/work"))))
         assertTrue(aggregator.globalBusy.value)
 
-        // Host switch: refresh under a new serverGroupFp with no active sessions. globalBusy
-        // must scope to the new identity and ignore the stale entry from the old group.
+        // Host switch: rebind identityStore AND refresh under a new serverGroupFp with
+        // no active sessions. In production, a host switch always rebinds the identityStore
+        // BEFORE the next refresh. With r2 scope-aware MERGE (applySnapshot preserves
+        // out-of-scope entries by scopeKey), the old host-group-A Busy entry survives
+        // in authority.bySid but is correctly EXCLUDED by the scopeKey filter in
+        // authorityToAggregate (currentScope = host-group-B). Thus globalBusy scopes
+        // to the new identity → false.
+        identityStore.bind("host-group-B", "/work", "endpoint-A")
         coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
         aggregator.refresh(identity(groupFp = "host-group-B"), snapshot(mapOf("s1" to session("s1", "/work"))))
         assertFalse(aggregator.globalBusy.value)
 
-        // §P0-A Lane 2 (双投影同源): authority is single-scope (bySid keyed by
-        // sid, whole-graph-replaced on each ApplySnapshot). The second refresh
-        // (host-group-B) REPLACED bySid — the stale host-group-A Busy entry is
-        // GONE from authority. The replacement entry (s1=Idle) is stamped with
-        // scopeKey=host-group-B, so the r2 #4 scopeKey filter in
-        // authorityToAggregate excludes it from the current scope (host-group-A).
-        // Thus statusByKey is EMPTY for the current scope — correct isolation:
-        // a different serverGroupFp's entries must not pollute the current
-        // lifecycle projection. The LIFECYCLE assertion (globalBusy scopes to
-        // the current identity → false) is preserved.
+        // §P0-A r2 #4 (scopeKey filter): the old host-group-A entry is excluded by
+        // scopeKey != currentScope (host-group-B). The second refresh's snapshot also
+        // produced no in-scope entry (s1 already exists with a different scopeKey and
+        // is preserved, not overwritten). Thus statusByKey is EMPTY for the current
+        // scope — correct isolation: a different serverGroupFp's entries must not
+        // pollute the current lifecycle projection.
         val statuses = aggregator.statusByKey.value
         assertEquals(
-            "r2 #4 scopeKey filter: no entries remain in the current scope (host-group-A);" +
-                " host-group-B entry excluded",
+            "r2 #4 scopeKey filter: no entries remain in the current scope (host-group-B);" +
+                " host-group-A entry excluded by scopeKey",
             0,
             statuses.size,
         )

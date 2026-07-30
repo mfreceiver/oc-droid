@@ -6,9 +6,11 @@ import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.state.AuthorityOp
 import cn.vectory.ocdroid.data.state.AuthorityState
 import cn.vectory.ocdroid.data.state.EntryOrigin
+import cn.vectory.ocdroid.data.state.Freshness
 import cn.vectory.ocdroid.data.state.RequestToken
 import cn.vectory.ocdroid.data.state.ScopeKey
 import cn.vectory.ocdroid.data.state.ServerRound
+import cn.vectory.ocdroid.data.state.SessionEntry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotSame
@@ -30,6 +32,10 @@ import org.junit.Test
 class AuthorityReducerTest {
 
     private val scope = ScopeKey(serverGroupFp = "grp", endpointFp = "ep")
+
+    companion object {
+        private const val PROFILE_ID = "auth_test_profile"
+    }
 
     private fun event(
         sid: String,
@@ -56,7 +62,7 @@ class AuthorityReducerTest {
         localBefore: Map<String, SessionStatus> = emptyMap(),
         sidToWorkdir: Map<String, String> = emptyMap(),
         partialFailureWorkdirs: Set<String> = emptySet(),
-        host: String? = null,
+        host: String? = PROFILE_ID,
         requestStartMs: Long = 100L,
         identityEpoch: Long = 0L,
     ) = AuthorityOp.ApplySnapshot(
@@ -75,7 +81,19 @@ class AuthorityReducerTest {
 
     private fun storeWith(sessions: List<Session> = emptyList()): SharedStateStore =
         SharedStateStore().apply {
-            mutateState { it.copy(sessionList = it.sessionList.copy(sessions = sessions)) }
+            mutateState { it.copy(
+                sessionList = it.sessionList.copy(sessions = sessions),
+                host = HostState(
+                    currentHostProfileId = PROFILE_ID,
+                    hostProfiles = listOf(HostProfile(
+                        id = PROFILE_ID,
+                        name = "Test",
+                        serverUrl = "https://test.example.com",
+                        serverGroupFp = scope.serverGroupFp,
+                    )),
+                ),
+                liveEndpointFp = scope.endpointFp,
+            )}
         }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -302,12 +320,9 @@ class AuthorityReducerTest {
     fun `SessionArchivedLocal reducer prunes the archived id from authority`() {
         val archived = Session(id = "A", directory = "/x",
             time = Session.TimeInfo(updated = 0L, archived = 1L))
-        val store = SharedStateStore().apply {
-            mutateState {
-                it.copy(sessionList = it.sessionList.copy(sessions = listOf(
-                    Session(id = "A", directory = "/x"), Session(id = "B", directory = "/x"))))
-            }
-        }
+        val store = storeWith(listOf(
+            Session(id = "A", directory = "/x"), Session(id = "B", directory = "/x"),
+        ))
         store.dispatch(AppAction.AuthorityEvent(event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY)))
         store.dispatch(AppAction.SessionArchivedLocal(
             session = archived,
@@ -579,13 +594,7 @@ class AuthorityReducerTest {
         val parent = Session(id = "root", directory = "/w", parentId = null)
         val child = Session(id = "child1", directory = "/w", parentId = "root")
         val grandchild = Session(id = "grand1", directory = "/w", parentId = "child1")
-        val store = SharedStateStore().apply {
-            mutateState {
-                it.copy(sessionList = it.sessionList.copy(
-                    sessions = listOf(parent, child, grandchild),
-                ))
-            }
-        }
+        val store = storeWith(listOf(parent, child, grandchild))
         // Seed authority with all three.
         listOf("root", "child1", "grand1").forEach { sid ->
             store.dispatch(AppAction.AuthorityEvent(
@@ -613,11 +622,7 @@ class AuthorityReducerTest {
     fun `rev-gpt #7 - delete prunes subtree ids from authority`() {
         val parent = Session(id = "root", directory = "/w")
         val child = Session(id = "child1", directory = "/w", parentId = "root")
-        val store = SharedStateStore().apply {
-            mutateState {
-                it.copy(sessionList = it.sessionList.copy(sessions = listOf(parent, child)))
-            }
-        }
+        val store = storeWith(listOf(parent, child))
         listOf("root", "child1").forEach { sid ->
             store.dispatch(AppAction.AuthorityEvent(
                 event(sid, SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
@@ -655,7 +660,7 @@ class AuthorityReducerTest {
         store.dispatch(AppAction.AuthorityEvent(
             AuthorityOp.MarkSourceFailed(
                 scopeKey = scope,
-                requestToken = RequestToken(hostProfileId = null, requestStartMs = 100L, identityEpoch = 0L),
+                requestToken = RequestToken(hostProfileId = PROFILE_ID, requestStartMs = 100L, identityEpoch = 0L),
                 monotonic = 100L,
                 registeredWorkdirs = setOf("/work-a"),
             ),
@@ -897,7 +902,7 @@ class AuthorityReducerTest {
         store.dispatch(AppAction.AuthorityEvent(
             AuthorityOp.MarkSourceFailed(
                 scopeKey = scope,
-                requestToken = RequestToken(hostProfileId = null, requestStartMs = 100L, identityEpoch = 0L),
+                requestToken = RequestToken(hostProfileId = PROFILE_ID, requestStartMs = 100L, identityEpoch = 0L),
                 monotonic = 100L,
                 registeredWorkdirs = setOf("/shared-dir"),
             ),
@@ -997,6 +1002,163 @@ class AuthorityReducerTest {
         store.mutateHost { it.copy(hostProfiles = listOf(HostProfile(name = "k3", serverUrl = "http://x"))) }
         val rev2 = store.stateFlow.value.authorityRevision
         assertTrue("authorityRevision bumps on non-profile host change", rev2 > rev1)
+    }
+
+    // ── §P0-A FIX: PruneSessions scope-key filtering ──────────────────────
+
+    @Test
+    fun `rev-gpt PruneSessions scope-filter - out-of-scope entry survives prune`() {
+        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val store = storeWith(listOf(
+            Session(id = "inScope", directory = "/w"),
+            Session(id = "outScope", directory = "/w"),
+        ))
+        // Seed inScope under the default test scope.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("inScope", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 50L, workdir = "/w"),
+        ))
+        // Seed outScope under a DIFFERENT scope via direct authority manipulation.
+        store.mutateState { s ->
+            val cur = s.authority
+            s.copy(authority = cur.copy(
+                bySid = cur.bySid + ("outScope" to cur.bySid["inScope"]!!.copy(scopeKey = diffScope))
+            ))
+        }
+        assertEquals("outScope has different scopeKey",
+            diffScope, store.stateFlow.value.authority.bySid["outScope"]?.scopeKey)
+
+        // Prune inScope under the default test scope.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.PruneSessions(sids = setOf("inScope"), scopeKey = scope),
+        ))
+
+        val bySid = store.stateFlow.value.authority.bySid
+        assertNull("in-scope entry pruned (scope matches)", bySid["inScope"])
+        assertNotNull("out-of-scope entry survives (different scopeKey)", bySid["outScope"])
+        assertEquals("out-of-scope scopeKey preserved", diffScope, bySid["outScope"]?.scopeKey)
+    }
+
+    @Test
+    fun `rev-gpt PruneSessions scope-filter - retain out-of-scope even when sid is in prune set`() {
+        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val store = storeWith(listOf(
+            Session(id = "sharedSid", directory = "/w"),
+        ))
+        // Seed an entry under the default scope with sid "sharedSid".
+        store.dispatch(AppAction.AuthorityEvent(
+            event("sharedSid", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 50L, workdir = "/w"),
+        ))
+        // Also seed the same sid under a DIFFERENT scope (simulates sid collision
+        // across scopes — unlikely but defensive).
+        store.mutateState { s ->
+            val cur = s.authority
+            s.copy(authority = cur.copy(
+                bySid = cur.bySid + ("sharedSid" to cur.bySid["sharedSid"]!!.copy(scopeKey = diffScope))
+            ))
+        }
+        assertEquals("two entries map size still 1 (same sid, overwritten by mutateState)",
+            1, store.stateFlow.value.authority.bySid.size)
+        // The last write wins — scopeKey is diffScope.
+
+        // Prune "sharedSid" under the default scope.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.PruneSessions(sids = setOf("sharedSid"), scopeKey = scope),
+        ))
+
+        val bySid = store.stateFlow.value.authority.bySid
+        // Since the only entry has scopeKey=diffScope (not matching prune scope),
+        // it must be retained.
+        assertNotNull("sid with out-of-scope scopeKey survives prune even though sid is in set",
+            bySid["sharedSid"])
+        assertEquals("retained entry's scopeKey unchanged", diffScope, bySid["sharedSid"]?.scopeKey)
+    }
+
+    // ── §P0-A FIX: ApplySnapshot preserves out-of-scope entries ────────────
+
+    @Test
+    fun `rev-gpt ApplySnapshot preserves out-of-scope entries`() {
+        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val store = storeWith(listOf(
+            Session(id = "inScope", directory = "/w"),
+            Session(id = "outScope", directory = "/other"),
+        ))
+        // Seed outScope under a DIFFERENT scope.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("outScope", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 50L, workdir = "/other"),
+        ))
+        store.mutateState { s ->
+            val cur = s.authority
+            s.copy(authority = cur.copy(
+                bySid = cur.bySid.mapValues { (sid, entry) ->
+                    if (sid == "outScope") entry.copy(scopeKey = diffScope) else entry
+                }
+            ))
+        }
+        assertEquals("outScope has different scopeKey",
+            diffScope, store.stateFlow.value.authority.bySid["outScope"]?.scopeKey)
+
+        // ApplySnapshot for the default scope (inScope only).
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = mapOf("inScope" to SessionStatus(type = "idle")),
+                authoritativeNodeIds = setOf("inScope"),
+            ),
+        ))
+
+        val bySid = store.stateFlow.value.authority.bySid
+        assertEquals("inScope written by snapshot",
+            SessionStatus(type = "idle"), bySid["inScope"]?.status)
+        assertNotNull("out-of-scope entry survives snapshot", bySid["outScope"])
+        assertEquals("out-of-scope scopeKey preserved", diffScope, bySid["outScope"]?.scopeKey)
+        assertEquals("out-of-scope status preserved",
+            SessionStatus(type = "busy"), bySid["outScope"]?.status)
+    }
+
+    @Test
+    fun `rev-gpt ApplySnapshot no-change short-circuit works with out-of-scope entries`() {
+        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val store = storeWith(listOf(
+            Session(id = "s1", directory = "/w"),
+        ))
+        // Seed inScope entry matching what snapshot will produce (REST idle).
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = emptyMap(),
+                authoritativeNodeIds = setOf("s1"),
+                sidToWorkdir = mapOf("s1" to "/w"),
+                requestStartMs = 100L,
+            ),
+        ))
+        // Add an out-of-scope entry.
+        store.mutateState { s ->
+            val cur = s.authority
+            s.copy(authority = cur.copy(
+                bySid = cur.bySid + ("outScope" to SessionEntry(
+                    status = SessionStatus(type = "busy"),
+                    serverRound = null,
+                    optimisticClaim = null,
+                    origin = EntryOrigin.SSE_LEGACY,
+                    freshness = Freshness.Fresh,
+                    updatedMonotonic = 50L,
+                    workdir = "/other",
+                    scopeKey = diffScope,
+                ))
+            ))
+        }
+
+        val before = store.stateFlow.value
+        // Re-apply the same snapshot → no-change (in-scope entry unchanged,
+        // out-of-scope entry preserved by reference).
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = emptyMap(),
+                authoritativeNodeIds = setOf("s1"),
+                sidToWorkdir = mapOf("s1" to "/w"),
+                requestStartMs = 100L,
+            ),
+        ))
+        assertSame("re-applied snapshot with out-of-scope entries must be CAS no-op",
+            before, store.stateFlow.value)
     }
 }
 

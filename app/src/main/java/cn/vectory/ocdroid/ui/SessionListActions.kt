@@ -234,6 +234,9 @@ internal fun launchLoadChildSessions(
             // drops the result (fail-closed) so a stale snapshot can never
             // re-certify a root whose tree was invalidated.
             val epochAtStart = before.completenessEpoch
+            // §toctou-identity: capture the current host identity BEFORE any
+            // suspend so the post-fetch guard can detect a host switch mid-flight.
+            val hostProfileIdAtStart = slices.host.value.currentHostProfileId
             val hydration = loadCompleteSessionTrees(repository, listOf(root))
             if (rootId in hydration.completeRootIds) {
                 val statusBefore = slices.sessionList.value.sessionStatuses
@@ -250,7 +253,9 @@ internal fun launchLoadChildSessions(
                     // drop the stale result. The root stays incomplete so the
                     // next tick re-hydrates against the fresh tree.
                     val it = snapshot.sessionList
-                    if (it.completenessEpoch != epochAtStart) return@mutateState snapshot
+                    if (it.completenessEpoch != epochAtStart ||
+                        slices.host.value.currentHostProfileId != hostProfileIdAtStart
+                    ) return@mutateState snapshot
                     val nextChildren = it.childSessions + hydration.childrenByParent
                     val authoritative = allSessionsById(it.sessions, it.directorySessions, nextChildren)
                     // §P0-A: status via PURE reduceAuthority (authority + projection

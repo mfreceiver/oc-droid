@@ -525,10 +525,8 @@ class AppActionReducerTest {
             sessionList = SessionListState(
                 sessions = listOf(Session(id = "s1", directory = "/p")),
                 directorySessions = mapOf("/p" to listOf(Session(id = "s1", directory = "/p"))),
-                // §P0-A rev-gpt #8: sessionStatuses is a PROJECTION of authority.
-                // Set authority.bySid so the prior state is consistent — the
-                // cross-group purge clears authority → projection recomputes to empty.
-                sessionStatuses = mapOf("s1" to cn.vectory.ocdroid.data.model.SessionStatus("idle")),
+                // §P0-A rev-gpt #8: sessionStatuses is a PROJECTION of authority
+                // (class-body var with private set). Set via withProjection.
                 sessionTodos = mapOf("s1" to listOf(TodoItem(content = "t", status = "pending", priority = "normal", id = "t1"))),
                 sessionDiffs = mapOf("s1" to emptyList()),
                 // §fix-leak-window (fix B): pending permission/question requests
@@ -539,7 +537,7 @@ class AppActionReducerTest {
                 pendingQuestions = listOf(
                     QuestionRequest(
                         id = "q1", sessionId = "s1",
-                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b"))))))),
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b"))))))).withProjection(mapOf("s1" to cn.vectory.ocdroid.data.model.SessionStatus("idle"))),
             unread = UnreadState(
                 unreadSessions = setOf("s1"),
                 lastViewedTime = mapOf("s1" to 1L)),
@@ -646,11 +644,10 @@ class AppActionReducerTest {
             sessionList = SessionListState(
                 sessions = listOf(session),
                 directorySessions = mapOf("/p" to listOf(session)),
-                sessionStatuses = mapOf("s1" to cn.vectory.ocdroid.data.model.SessionStatus("idle")),
                 sessionTodos = mapOf("s1" to listOf(TodoItem(content = "t", status = "pending", priority = "normal", id = "t1"))),
                 sessionDiffs = mapOf("s1" to emptyList()),
                 pendingCreateIds = setOf("s1"),
-                pendingCreatedAt = mapOf("s1" to 123L)),
+                pendingCreatedAt = mapOf("s1" to 123L)).withProjection(mapOf("s1" to cn.vectory.ocdroid.data.model.SessionStatus("idle"))),
             unread = UnreadState(
                 unreadSessions = setOf("s1"),
                 lastViewedTime = mapOf("s1" to 1L)))

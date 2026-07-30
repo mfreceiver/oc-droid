@@ -79,15 +79,35 @@ class SharedStateStore @Inject constructor(
         // identity store's epoch bumps on every beginReconfigure; we mirror it in
         // StoreState.identityEpoch so the reducer's opScopeValid catches ALL
         // identity changes (not just host-profile switches via mutateHost).
-        // We skip null identity (initial cold state / beginReconfigure's clearing)
-        // — only a successfully bound identity triggers the bump. Each unique
-        // identityStore epoch bumps identityEpoch + authorityRevision exactly once.
+        // Bump on EVERY transition: non-null→null (beginReconfigure's clearing)
+        // AND null→non-null (new bind) AND non-null→non-null different identity.
+        // The null-phase bump closes the window where stale in-flight requests
+        // from the prior identity could pass the reducer's epoch guard while
+        // currentIdentity is null. Cold-start initial null does NOT bump
+        // (lastObservedIdentityEpoch starts at -1). Each unique identityStore
+        // epoch bumps identityEpoch + authorityRevision exactly once.
         scope?.launch {
             identityStore.currentIdentity.collect { id ->
                 if (id != null) {
                     val newEpoch = id.epoch
                     if (newEpoch > lastObservedIdentityEpoch) {
                         lastObservedIdentityEpoch = newEpoch
+                        state.update { s ->
+                            s.copy(
+                                identityEpoch = s.identityEpoch + 1L,
+                                authorityRevision = s.authorityRevision + 1L,
+                            )
+                        }
+                    }
+                } else {
+                    // §P0-A null-phase epoch bump: when identity transitions TO
+                    // null (beginReconfigure), bump identityEpoch + authorityRevision
+                    // so stale in-flight requests from the prior identity cannot pass
+                    // the reducer's epoch guard during the null window. Only bump if
+                    // we had a previous non-null identity (lastObservedIdentityEpoch
+                    // >= 0). Reset to -1 so repeated null emissions don't re-bump.
+                    if (lastObservedIdentityEpoch >= 0L) {
+                        lastObservedIdentityEpoch = -1L
                         state.update { s ->
                             s.copy(
                                 identityEpoch = s.identityEpoch + 1L,

@@ -741,24 +741,24 @@ data class ChatState(
      val pendingErrorCheck: Set<String> = emptySet(),
  )
 
- /**
-  * §R-17 M4: session-list-domain state slice (RFC §2.3). Authoritative storage
-  * lives in [MainViewModel._sessionListFlow]. Low-frequency (loadSessions /
-  * loadMore / SSE session.created/updated); isolating it stops SSE chat deltas
-  * from recomposing SessionsScreen.
-  *
-  * §P0-A rev-gpt #8 B10 (non-data-class encapsulation): converted from a
-  * `data class` to a regular `class` with a manual `copy(...)` that EXCLUDES
-  * [sessionStatuses] — the ONLY way to set sessionStatuses is the `internal`
-  * [withProjection] method (called exclusively by [reduceAuthority]). This
-  * compile-enforces the "sessionStatuses sole writer = reduceAuthority"
-  * invariant: `.copy(sessionStatuses = …)` FAILS TO COMPILE (no such param).
-  * Manual `equals` / `hashCode` / `toString` over ALL fields preserve
-  * `StoreState` value equality (StoreState is a data class containing this).
-  */
+  /**
+   * §R-17 M4: session-list-domain state slice (RFC §2.3). Authoritative storage
+   * lives in [MainViewModel._sessionListFlow]. Low-frequency (loadSessions /
+   * loadMore / SSE session.created/updated); isolating it stops SSE chat deltas
+   * from recomposing SessionsScreen.
+   *
+   * §P0-A rev-gpt #8 B10 (non-data-class encapsulation): converted from a
+   * `data class` to a regular `class`. [sessionStatuses] is a class-body `var`
+   * with `private set` — NOT a constructor parameter — so the ONLY way to set
+   * it is the `internal` [withProjection] method (called exclusively by
+   * [reduceAuthority]). This compile-enforces the "sessionStatuses sole writer
+   * = reduceAuthority" invariant: `SessionListState(sessionStatuses = …)` and
+   * `.copy(sessionStatuses = …)` BOTH FAIL TO COMPILE. Manual `equals` /
+   * `hashCode` / `toString` over ALL fields preserve `StoreState` value
+   * equality (StoreState is a data class containing this).
+   */
 class SessionListState internal constructor(
     val sessions: List<Session> = emptyList(),
-    val sessionStatuses: Map<String, SessionStatus> = emptyMap(),
     /**
      * Process-wide sessions whose server drain fiber is currently running.
      * Maintained by the status poller. Fetch failures retain the last snapshot
@@ -927,6 +927,17 @@ class SessionListState internal constructor(
     val abortPendingSessionIds: Map<String, Long> = emptyMap(),
 ) {
     /**
+     * §P0-A rev-gpt #8 B10 factory gate (revised): [sessionStatuses] is a
+     * class-body `var` with `private set` — it is NOT a constructor parameter,
+     * so a `SessionListState(sessionStatuses = …)` call FAILS TO COMPILE.
+     * The ONLY way to set it is the `internal` [withProjection] method
+     * (called exclusively by [reduceAuthority]). Same-module code CANNOT
+     * bypass the sole-writer gate by passing it to the constructor.
+     */
+    var sessionStatuses: Map<String, SessionStatus> = emptyMap()
+        private set
+
+    /**
      * §P0-A rev-gpt #8 B10: manual `copy` that accepts EVERY field EXCEPT
      * [sessionStatuses]. A `.copy(sessionStatuses = …)` call FAILS TO COMPILE
      * (no such param) — that IS the sole-writer gate. Use [withProjection] to
@@ -957,7 +968,6 @@ class SessionListState internal constructor(
         abortPendingSessionIds: Map<String, Long> = this.abortPendingSessionIds,
     ): SessionListState = SessionListState(
         sessions = sessions,
-        sessionStatuses = this.sessionStatuses,
         activeSessionIds = activeSessionIds,
         expandedSessionIds = expandedSessionIds,
         loadedSessionLimit = loadedSessionLimit,
@@ -979,7 +989,9 @@ class SessionListState internal constructor(
         pendingCreatedAt = pendingCreatedAt,
         hasCompletedInitialLoad = hasCompletedInitialLoad,
         abortPendingSessionIds = abortPendingSessionIds,
-    )
+    ).also { copy ->
+        copy.sessionStatuses = this.sessionStatuses
+    }
 
     /**
      * §P0-A rev-gpt #8 B10: the SOLE way to set [sessionStatuses]. `internal`
@@ -989,7 +1001,6 @@ class SessionListState internal constructor(
     internal fun withProjection(sessionStatuses: Map<String, SessionStatus>): SessionListState =
         SessionListState(
             sessions = this.sessions,
-            sessionStatuses = sessionStatuses,
             activeSessionIds = this.activeSessionIds,
             expandedSessionIds = this.expandedSessionIds,
             loadedSessionLimit = this.loadedSessionLimit,
@@ -1011,7 +1022,9 @@ class SessionListState internal constructor(
             pendingCreatedAt = this.pendingCreatedAt,
             hasCompletedInitialLoad = this.hasCompletedInitialLoad,
             abortPendingSessionIds = this.abortPendingSessionIds,
-        )
+        ).also { result ->
+            result.sessionStatuses = sessionStatuses
+        }
 
     /**
      * §P0-A rev-gpt #8 B10: manual `equals` over ALL fields (including
@@ -1097,15 +1110,13 @@ class SessionListState internal constructor(
          *  constructor with all defaults). Matches the pre-B10 `SessionListState()` usage. */
         operator fun invoke(): SessionListState = SessionListState()
 
-        /** §P0-A rev-gpt #8 B10 r2 (sole-writer gate): public factory for
-         *  named-arg construction. DELIBERATELY EXCLUDES [sessionStatuses] —
-         *  there is NO parameter for it, so a `SessionListState(sessionStatuses
-         *  = …)` call FAILS TO COMPILE (the gate). The ONLY way to set a
-         *  non-empty sessionStatuses is the `internal` [withProjection]
-         *  (called exclusively by [reduceAuthority]); this factory always
-         *  seeds the constructor default `sessionStatuses = emptyMap()`.
-         *  Delegates via named args (positional would collide with the
-         *  constructor's sessionStatuses slot). */
+        /** §P0-A rev-gpt #8 B10 r2 (sole-writer gate, revised): public
+         *  factory for named-arg construction. [sessionStatuses] is NOT a
+         *  constructor parameter (it is a class-body `var` with `private set`),
+         *  so a `SessionListState(sessionStatuses = …)` call FAILS TO COMPILE
+         *  (the gate). The ONLY way to set a non-empty sessionStatuses is the
+         *  `internal` [withProjection] (called exclusively by [reduceAuthority]);
+         *  this factory always seeds `sessionStatuses = emptyMap()`. */
         operator fun invoke(
             sessions: List<Session> = emptyList(),
             activeSessionIds: Set<String> = emptySet(),

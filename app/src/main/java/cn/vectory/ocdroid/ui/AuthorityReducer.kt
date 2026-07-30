@@ -315,8 +315,25 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
     val merged = mergeStatusSnapshotInFlight(op.localBefore, currentProjection, restSnapshot)
 
     val nextById = LinkedHashMap<String, SessionEntry>()
+    // §P0-A FIX: MERGE instead of full replacement — preserve out-of-scope entries
+    // (entry.scopeKey != op.scopeKey). The snapshot is authoritative only within its
+    // own scope. Entries with null scopeKey (pre-field migration) are treated as
+    // in-scope (consistent with applyMarkFailed).
+    for ((sid, entry) in cur.bySid) {
+        if (entry.scopeKey != null && entry.scopeKey != op.scopeKey) {
+            nextById[sid] = entry
+        }
+    }
+    // Then overlay the merged snapshot (current-scope entries). Out-of-scope
+    // entries (scopeKey != op.scopeKey) are ALREADY preserved in the first loop
+    // above — they must NOT be overwritten by the snapshot-scoped merge values
+    // (the merge carries their currentProjection status from the SSE-wins
+    // protection, but the entry itself belongs to a different scope).
     for ((id, status) in merged) {
         val priorEntry = cur.bySid[id]
+        if (priorEntry != null && priorEntry.scopeKey != null && priorEntry.scopeKey != op.scopeKey) {
+            continue
+        }
         nextById[id] = if (id in failedSids && priorEntry != null) {
             // Failed-dir: keep prior entry (claim/round/workdir), update status only.
             // Stamp the real scopeKey from the op for applyMarkFailed filtering.
@@ -487,10 +504,19 @@ private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOu
 
 // ── PruneSessions ──────────────────────────────────────────────────────────
 
-/** §B5: drop [AuthorityOp.PruneSessions.sids] from bySid. Pure. */
+/**
+ * §B5: drop [AuthorityOp.PruneSessions.sids] from bySid for matching scope only. Pure.
+ *
+ * §P0-A FIX: only removes entries whose [SessionEntry.scopeKey] matches the op's
+ * scope ([op.scopeKey]) or is null (pre-field migration, backward-compat). Out-of-
+ * scope entries (different [scopeKey]) are retained — consistent with
+ * [applyMarkFailed]'s scope filtering.
+ */
 private fun applyPrune(cur: AuthorityState, op: AuthorityOp.PruneSessions): AuthorityState {
     if (op.sids.isEmpty()) return cur
-    val nextById = cur.bySid.filterKeys { it !in op.sids }
+    val nextById = cur.bySid.filterNot { (sid, entry) ->
+        sid in op.sids && (entry.scopeKey == null || entry.scopeKey == op.scopeKey)
+    }
     return if (nextById.size == cur.bySid.size) cur else cur.copy(bySid = nextById)
 }
 

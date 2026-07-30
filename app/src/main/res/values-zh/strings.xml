@@ -151,6 +151,7 @@
     <string name="chat_add_commands">命令</string>
     <string name="chat_add_commands_desc">插入斜杠命令</string>
     <string name="chat_remove_file_ref">移除文件引用</string>
+    <string name="chat_aborting">停止中…</string>
     <string name="chat_action_overflow">会话操作</string>
     <!-- §1C-FIX-⑧: ChatPermissionCard 中文化 + scheme E.4 元数据
          （host / workdir / session / tool / target），让用户知道
@@ -487,6 +488,7 @@
          已清除标志并提示用户重试。 -->
     <string name="info_compact_timeout_retry">压缩超时未响应，请重试。</string>
     <string name="error_edit_message_failed">编辑消息失败：%1$s</string>
+    <string name="error_abort_pending_stuck">停止后 agent 仍在运行，请稍后重试。</string>
     <string name="error_abort_session_failed">中止会话失败：%1$s</string>
     <string name="success_refreshed">已刷新</string>
     <string name="info_refresh_in_progress">正在刷新，请稍候重试。</string>

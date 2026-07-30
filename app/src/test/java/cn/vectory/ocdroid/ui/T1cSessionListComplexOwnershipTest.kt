@@ -764,7 +764,7 @@ class T1cSessionListComplexOwnershipTest {
             childSessions = mapOf("s1" to listOf(Session(id = "c-old", directory = "/a", parentId = "s1"))),
             completeRootIds = setOf("s0"),
             completenessEpoch = epochAtStart, // MATCHES → apply
-            sessionStatuses = mapOf("s0" to SessionStatus(type = "idle")))
+            ).withProjection(mapOf("s0" to SessionStatus(type = "idle")))
         val oldStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
         val newStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
 
@@ -808,7 +808,7 @@ class T1cSessionListComplexOwnershipTest {
             childSessions = emptyMap(),
             completeRootIds = setOf("s0"),
             completenessEpoch = 99L, // MISMATCH → no-op
-            sessionStatuses = mapOf("s0" to SessionStatus(type = "idle")))
+            ).withProjection(mapOf("s0" to SessionStatus(type = "idle")))
         val store = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
         val before = store.stateFlow.value
 

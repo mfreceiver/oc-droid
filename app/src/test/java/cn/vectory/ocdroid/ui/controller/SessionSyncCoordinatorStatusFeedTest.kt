@@ -164,7 +164,6 @@ class SessionSyncCoordinatorStatusFeedTest {
         slices.mutateSessionList {
             SessionListState(
                 sessions = emptyList(),
-                sessionStatuses = emptyMap(),
                 expandedSessionIds = emptySet(),
                 loadedSessionLimit = 0,
                 hasMoreSessions = false,
