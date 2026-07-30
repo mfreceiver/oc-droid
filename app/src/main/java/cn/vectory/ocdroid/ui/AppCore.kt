@@ -19,6 +19,7 @@ import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.ForegroundCatchUpController
 import cn.vectory.ocdroid.ui.controller.HostProfileController
+import cn.vectory.ocdroid.ui.controller.subtreeIds
 import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -780,6 +781,28 @@ class AppCore @Inject constructor(
             // R-20 Phase 1: synchronous memory clear keyed by effect fp (old
             // group's LRU cleared by its own fp — safe regardless of current host).
             sessionSwitcher.evictSession(effect.serverGroupFp, effect.sessionId)
+            // §slim-storm P2 (Bug B self-heal): the cache/token cleanup above does NOT
+            // remove the session from sessionList, so the snapshot the status poller
+            // iterates never shrank → infinite re-eviction loop. Dispatch a subtree-
+            // scoped SessionDeletedLocal so the snapshot (sessions + childSessions +
+            // sessionStatuses, etc.) actually contracts. The reducer now also purges
+            // sessionStatuses — the field the poller fans out over — so a mis-emitted
+            // EvictSession self-heals instead of churning forever.
+            //
+            // fp gate: sessionList is the CURRENT host's view (reloaded on host switch);
+            // a cross-group EvictSession (stale fp) must NOT mutate it. Cache/token
+            // cleanup above is fp-scoped via the CacheWindowKey and stays unconditional.
+            // Mirrors the VerifyAndHydrate fp gate (AppCore :611).
+            if (effect.serverGroupFp == currentServerGroupFp()) {
+                val sl = store.stateFlow.value.sessionList
+                val removedIds = subtreeIds(
+                    effect.sessionId,
+                    sl.sessions,
+                    sl.directorySessions,
+                    sl.childSessions,
+                )
+                store.dispatch(AppAction.SessionDeletedLocal(removedIds))
+            }
             true
         }
         is ControllerEffect.EvictGroup -> {

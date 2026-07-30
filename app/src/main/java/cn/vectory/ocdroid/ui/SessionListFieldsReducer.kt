@@ -114,7 +114,20 @@ internal fun reduceSessionDeletedLocal(state: StoreState, action: AppAction.Sess
             directorySessions = state.sessionList.directorySessions
                 .mapValues { (_, list) -> list.filter { it.id !in ids } }
                 .filterValues { it.isNotEmpty() },
+            // §slim-storm P2: purge the child-tree map + completeness so an EvictSession
+            // (or any subtree delete) actually shrinks the snapshot the status poller
+            // iterates — without this the storm never self-terminates. Mirrors the
+            // directorySessions treatment (drop removed parents as keys, drop removed
+            // children, drop now-empty lists).
+            childSessions = state.sessionList.childSessions
+                .filterKeys { it !in ids }
+                .mapValues { (_, list) -> list.filter { it.id !in ids } }
+                .filterValues { it.isNotEmpty() },
+            completeRootIds = state.sessionList.completeRootIds - ids,
             // sessionStatuses NOT set here — comes from withAuth (reduceAuthority).
+            // §slim-storm P2: withAuth runs reduceAuthority which prunes authority.bySid
+            // via AuthorityOp.PruneSessions(allSubtreeIds, ...), so sessionStatuses is
+            // already correctly purged for all subtree ids. No explicit filter needed.
             pendingQuestions = state.sessionList.pendingQuestions.filter { it.sessionId !in ids },
             activeSessionIds = state.sessionList.activeSessionIds - ids,
             sessionErrorsById = state.sessionList.sessionErrorsById.filterKeys { it !in ids },

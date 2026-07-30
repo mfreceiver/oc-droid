@@ -1217,6 +1217,9 @@ class OpenCodeRepository @Inject constructor(
     suspend fun getSlimapiSessionsStatus(directory: String): Result<Map<String, SessionStatus>> =
         runSuspendCatching {
             // lite-v2-dev: /slimapi/sessions/status removed; delegate to standard API.
+            // §slim-storm P1: returns the sparse map verbatim — callers consume the map
+            // as-is (no per-item missing reclassification), so absent entries are correctly
+            // treated as idle downstream. This method does NOT suffer Bug A.
             api.getSessionStatus()
         }
 
@@ -1522,12 +1525,13 @@ class OpenCodeRepository @Inject constructor(
         return try {
             val all = api.getSessionStatus()
             val status = all[sessionId]
-            if (status != null) {
-                StatusOutcome.Success(sessionId, status)
-            } else {
-                // Session not in the status map → treat as missing.
-                StatusOutcome.SessionMissing(sessionId)
-            }
+            // lite-v2-dev delegate: the bulk /session/status sparse map OMITS idle
+            // entries (absent ≡ idle, NOT missing) — confirmed by
+            // normalizeAuthoritativeStatusSnapshot in SessionTree.kt which already
+            // promotes omitted authoritative ids to explicit idle. Misclassifying
+            // absent as SessionMissing was the /session/status storm root cause
+            // (every idle session looked evictable → fan-out churned forever).
+            StatusOutcome.Success(sessionId, status ?: SessionStatus(type = "idle"))
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: java.io.IOException) {
