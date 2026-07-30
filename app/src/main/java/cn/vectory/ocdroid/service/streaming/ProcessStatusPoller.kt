@@ -8,6 +8,9 @@ import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.service.status.StatusFanOutSummary
 import cn.vectory.ocdroid.service.status.StatusSnapshot
+import cn.vectory.ocdroid.ui.selectStaleClaimsForReconcile
+import cn.vectory.ocdroid.ui.StaleClaim
+import cn.vectory.ocdroid.data.state.AuthorityState
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.exponentialBackoffMs
 import kotlinx.coroutines.CancellationException
@@ -116,6 +119,30 @@ class ProcessStatusPoller internal constructor(
     private val slimFanOutSummarySink:
         (StatusFanOutSummary) -> Unit =
         {},
+
+    /**
+     * §P0-B ITEM 4: the current authority state snapshot, read at each tick.
+     * Production wiring provides `{ store.state.value.authority }` (see
+     * [StreamingModule]). Default `{ AuthorityState() }` keeps existing
+     * direct tests compiling + behaving identically (no watchdog path
+     * engaged when authority is empty).
+     */
+    private val authorityState: () -> AuthorityState =
+        { AuthorityState() },
+
+    /**
+     * §P0-B ITEM 4: sink for reconciling stale optimistic claims detected
+     * by the watchdog. Production routes through
+     * [cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator.reconcileStaleOptimisticClaims].
+     * Default `{ _, _ -> }` preserves existing direct tests.
+     *
+     * The sink receives the [ConnectionIdentity] that was current at the
+     * start of the tick AND the list of [StaleClaim]s detected. The
+     * implementation is responsible for per-sid identity re-checks.
+     */
+    private val staleClaimReconcileSink:
+        suspend (ConnectionIdentity, List<StaleClaim>) -> Unit =
+        { _, _ -> },
 ) {
 
     /**
@@ -245,6 +272,8 @@ class ProcessStatusPoller internal constructor(
         // sees the post-fan-out summary effects (EvictSession for stale
         // sids + backoff/reset) before the coordinator commits.
         runSlimFanOut(identity, snapshot)
+        // §P0-B ITEM 4: watchdog step — reconcile stale optimistic claims.
+        runWatchdog(identity)
         if (synchronized(stateLock) { generation != myGeneration }) {
             return@withLock SourceActivation.Rejected.Superseded
         }
@@ -270,6 +299,8 @@ class ProcessStatusPoller internal constructor(
                 val nextSnapshot = snapshotProvider.current()
                 runRefresh(identity, nextSnapshot)
                 runSlimFanOut(identity, nextSnapshot)
+                // §P0-B ITEM 4: each tick reconciles stale optimistic claims.
+                runWatchdog(identity)
             }
         }
         val accepted = synchronized(stateLock) {
@@ -522,6 +553,34 @@ class ProcessStatusPoller internal constructor(
             if (!identityStore.isCurrent(identity)) return@withLock
 
             slimFanOutSummarySink(summary)
+        }
+    }
+
+    /**
+     * §P0-B ITEM 4: watchdog step — scan the current authority state for
+     * stale unconfirmed optimistic claims and invoke the reconcile sink for
+     * any found. Runs inside the same identity-guarded tick as
+     * [runSlimFanOut]: identity is re-checked before sinking.
+     *
+     * Uses the same runSuspendCatching belt-and-suspenders pattern as
+     * [runRefresh] / [runSlimFanOut] — a non-CE throwable is swallowed +
+     * logged so it cannot kill the poller loop.
+     */
+    private suspend fun runWatchdog(identity: ConnectionIdentity) {
+        try {
+            val stale = selectStaleClaimsForReconcile(
+                authorityState(), clock(),
+            )
+            if (stale.isNotEmpty()) {
+                // Identity re-check before sinking (a host switch during
+                // the tick invalidates every reconcile outcome).
+                if (!identityStore.isCurrent(identity)) return
+                staleClaimReconcileSink(identity, stale)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            DebugLog.w(TAG, "watchdog stale-claim reconcile failed: ${e.message}")
         }
     }
 

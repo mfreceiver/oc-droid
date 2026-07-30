@@ -1016,10 +1016,21 @@ class SessionSyncCoordinator(
         // sessionStatuses is the authority projection. Mirrors session.status
         // (LegacySseHandler) via the shared SSE authority funnel.
         if (status != null) {
+            // §P0-B ITEM 3: forward-compat slim serverRound parsing — extract
+            // (turnIncarnation, turn) from props if present; null when absent
+            // (current behavior, falls through Tier-2 confirmation gate).
+            val inc = (props?.get("turnIncarnation") as? JsonPrimitive)?.longOrNull
+            val turn = (props?.get("turn") as? JsonPrimitive)?.longOrNull
+            val round = if (inc != null && turn != null) {
+                cn.vectory.ocdroid.data.state.ServerRound(inc, turn)
+            } else {
+                null
+            }
             applyStatusViaAuthority(
                 sid = sid,
                 status = SessionStatus(type = status),
                 origin = cn.vectory.ocdroid.data.state.EntryOrigin.SSE_SLIM,
+                serverRound = round,
             )
             // §P0-F 阻断6: R5 sendingSessionIds 清理需 generation/ownership，待 P0-A；
             // 此处不无条件清（误清新 send 风险）。
@@ -1436,6 +1447,88 @@ class SessionSyncCoordinator(
      *   layer / future fan-out scheduler) constructs this via
      *   [cn.vectory.ocdroid.service.status.SlimStatusFanOut.checkSlimSessionsStatuses].
      */
+    /**
+     * §P0-B ITEM 4: exposes the current authority state for the watchdog
+     * (used by [StreamingModule] to wire `authorityState`).
+     */
+    internal fun currentAuthority(): cn.vectory.ocdroid.data.state.AuthorityState =
+        slices.store.stateFlow.value.authority
+
+    /**
+     * §P0-B ITEM 4: reconcile stale optimistic claims detected by the
+     * watchdog. For each stale (unconfirmed, timed-out) claim, queries the
+     * repository for the session's current status and dispatches an
+     * [cn.vectory.ocdroid.data.state.AuthorityOp.ApplyReconcileOutcome]
+     * to clear / maintain the entry.
+     *
+     * Each sid is independently identity-checked (stale identity → skip).
+     * Network errors are caught per-sid (FETCH_FAILED removes the entry).
+     *
+     * @param identity the [ConnectionIdentity] that was current at the tick.
+     * @param claims the stale claims detected by [OptimisticClaimWatchdog.selectStaleClaimsForReconcile].
+     */
+    suspend fun reconcileStaleOptimisticClaims(
+        identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
+        claims: List<cn.vectory.ocdroid.ui.StaleClaim>,
+    ) {
+        if (claims.isEmpty()) return
+        // Re-check identity. If the identity changed between tick and this
+        // invocation, skip the entire batch (stale outcomes).
+        val idStore = identityStore ?: return
+        if (!idStore.isCurrent(identity)) return
+
+        for (claim in claims) {
+            // Per-sid identity re-check inside the loop (defense-in-depth).
+            if (!idStore.isCurrent(identity)) break
+            val outcome = reconcileSingleStaleClaim(claim, idStore, identity)
+            slices.store.dispatch(
+                cn.vectory.ocdroid.ui.AppAction.AuthorityEvent(
+                    cn.vectory.ocdroid.data.state.AuthorityOp.ApplyReconcileOutcome(
+                        sid = claim.sid,
+                        scopeKey = claim.scopeKey,
+                        outcome = outcome,
+                        serverRound = null,
+                        monotonic = clock(),
+                    ),
+                ),
+            )
+        }
+    }
+
+    /** §P0-B ITEM 4: reconcile a single stale claim — fetch status + map to [ReconcileOutcome]. */
+    private suspend fun reconcileSingleStaleClaim(
+        claim: cn.vectory.ocdroid.ui.StaleClaim,
+        idStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
+        identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
+    ): cn.vectory.ocdroid.data.state.ReconcileOutcome {
+        val repo = repository ?: return cn.vectory.ocdroid.data.state.ReconcileOutcome.FETCH_FAILED
+        if (!idStore.isCurrent(identity)) return cn.vectory.ocdroid.data.state.ReconcileOutcome.FETCH_FAILED
+        return try {
+            val fetched = repo.getSlimapiSessionStatusOutcome(claim.sid)
+            if (!idStore.isCurrent(identity)) return cn.vectory.ocdroid.data.state.ReconcileOutcome.FETCH_FAILED
+            when (fetched) {
+                is cn.vectory.ocdroid.data.repository.StatusOutcome.Success -> {
+                    if (fetched.status.isIdle) cn.vectory.ocdroid.data.state.ReconcileOutcome.IDLE_CONFIRMED
+                    else cn.vectory.ocdroid.data.state.ReconcileOutcome.BUSY_CONFIRMED
+                }
+                is cn.vectory.ocdroid.data.repository.StatusOutcome.SessionMissing -> {
+                    cn.vectory.ocdroid.data.state.ReconcileOutcome.IDLE_CONFIRMED // session gone → idle
+                }
+                is cn.vectory.ocdroid.data.repository.StatusOutcome.Retry -> {
+                    cn.vectory.ocdroid.data.state.ReconcileOutcome.FETCH_FAILED
+                }
+                is cn.vectory.ocdroid.data.repository.StatusOutcome.DirectoryError,
+                is cn.vectory.ocdroid.data.repository.StatusOutcome.UpstreamWarn -> {
+                    cn.vectory.ocdroid.data.state.ReconcileOutcome.FETCH_FAILED
+                }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            cn.vectory.ocdroid.data.state.ReconcileOutcome.FETCH_FAILED
+        }
+    }
+
     fun applySlimStatusFanOutSummary(summary: cn.vectory.ocdroid.service.status.StatusFanOutSummary) {
         val fp = currentServerGroupFp()
         // T13-C3: missingSids → delete-session effect per sid. 404 and

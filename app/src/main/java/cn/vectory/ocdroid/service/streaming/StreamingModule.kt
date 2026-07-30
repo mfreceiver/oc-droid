@@ -6,6 +6,7 @@ import cn.vectory.ocdroid.service.StreamingServiceLauncher
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
+import cn.vectory.ocdroid.data.state.AuthorityState
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -157,6 +158,15 @@ object ProcessStatusPollerModule {
             // state + single-flight retry.
             slimFanOutSummarySink = { summary ->
                 sessionSyncCoordinator.applySlimStatusFanOutSummary(summary)
+            },
+
+            // §P0-B ITEM 4: wire the watchdog's authority state reader and
+            // reconcile sink. authorityState reads the live store at each
+            // tick; staleClaimReconcileSink routes to the coordinator which
+            // queries the repository per-sid and dispatches ApplyReconcileOutcome.
+            authorityState = { sessionSyncCoordinator.currentAuthority() },
+            staleClaimReconcileSink = { identity, claims ->
+                sessionSyncCoordinator.reconcileStaleOptimisticClaims(identity, claims)
             },
         )
     }

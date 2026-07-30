@@ -59,18 +59,32 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
     // abortPendingSessionIds[sid] — the server confirmed a non-running status,
     // so the in-flight abort flag must clear regardless of whether the authority
     // entry itself changed.
-    val abortRelease = op is AuthorityOp.ApplyEvent &&
-        !op.status.isBusy && !op.status.isRetry &&
-        op.sid in state.sessionList.abortPendingSessionIds
+    //
+    // §P0-B ITEM 1 (confirmation gate interaction): 检查 RESULTING entry 的状态
+    // 而非 op.status。当 confirmation gate DROP 了一个 idle（未确认的 optimistic
+    // claim 保护），结果 entry 仍是 busy → abort-pending 不释放。这防止 gate 保护
+    // 期间 abortPending 被错误清除。
+    //
+    // 注意：op.sid 仅在 op is ApplyEvent 时可用。提取到 abortEventSid 变量中
+    // （在 abortRelease 为 true 时保证非 null），避免在 if 块外引用未 smart-cast 的 op.sid。
+    val abortEventSid = (op as? AuthorityOp.ApplyEvent)?.sid
+    val abortRelease = if (abortEventSid != null) {
+        val resultingEntry = nextAuth.bySid[abortEventSid]
+        val resultingTerminal = resultingEntry == null ||
+            (!resultingEntry.status.isBusy && !resultingEntry.status.isRetry)
+        resultingTerminal && abortEventSid in state.sessionList.abortPendingSessionIds
+    } else {
+        false
+    }
     if (nextAuth === cur) {
         // Authority unchanged. If this is a terminal ApplyEvent that needs to
         // release abort-pending, do so as a REAL transition (bump revision so
         // the aggregator re-derives). Otherwise true no-op (same ref).
-        return if (abortRelease) {
+        return if (abortRelease && abortEventSid != null) {
             state.copy(
                 authorityRevision = state.authorityRevision + 1L,
                 sessionList = state.sessionList.copy(
-                    abortPendingSessionIds = state.sessionList.abortPendingSessionIds - op.sid,
+                    abortPendingSessionIds = state.sessionList.abortPendingSessionIds - abortEventSid,
                 ),
             )
         } else {
@@ -85,8 +99,8 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
     // abort-pending flag for that sid in the SAME state.copy that writes the
     // status projection — atomically (no torn window between the status write
     // and the abort release, which the old SseDispatchHost two-CAS path had).
-    val nextAbortPending = if (abortRelease) {
-        state.sessionList.abortPendingSessionIds - op.sid
+    val nextAbortPending = if (abortRelease && abortEventSid != null) {
+        state.sessionList.abortPendingSessionIds - abortEventSid
     } else {
         state.sessionList.abortPendingSessionIds
     }
@@ -208,6 +222,22 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
         }
     }
 
+    // ── §3.1 Tier-2 confirmation gate (legacy, no causal serverRound) ──
+    // R1 根因修复：一个未确认的 optimistic claim（POST 成功后 server 还没 echo busy）
+    // 绝不能被一个 stale legacy IDLE 覆盖。DROP 该 idle，标 guardedIdleDrop，arm watchdog。
+    // serverEchoed==true 时，后续 IDLE 是合法 terminal（应用 + 清 claim，走原路径）。
+    if (op.serverRound == null && op.status.isIdle &&
+        prev?.optimisticClaim != null && !prev.optimisticClaim.serverEchoed
+    ) {
+        if (prev.optimisticClaim.guardedIdleDrop) {
+            return cur  // 已标记过 → 真正 no-op（same ref）
+        }
+        val guarded = prev.copy(
+            optimisticClaim = prev.optimisticClaim.copy(guardedIdleDrop = true),
+        )
+        return cur.copy(bySid = cur.bySid + (op.sid to guarded))
+    }
+
     // ── next entry fields ──
     val keepRound: ServerRound? = if (op.origin == EntryOrigin.OPTIMISTIC) {
         prev?.serverRound
@@ -217,10 +247,15 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
     val nextOptimisticClaim: OptimisticClaim? = when {
         op.origin == EntryOrigin.OPTIMISTIC -> {
             val priorSeq = prev?.optimisticClaim?.clientSeq ?: 0L
+            // §P0-B ITEM 2: cross-channel reorder — when prev is already SSE
+            // busy/retry, the server has confirmed the busy state → immediate echo.
+            val echoedNow = prev != null &&
+                (prev.status.isBusy || prev.status.isRetry) &&
+                (prev.origin == EntryOrigin.SSE_LEGACY || prev.origin == EntryOrigin.SSE_SLIM)
             OptimisticClaim(
                 clientSeq = priorSeq + 1L,
                 claimedAtMonotonic = op.connectionMonotonicMs,
-                serverEchoed = prev?.optimisticClaim?.serverEchoed ?: false,
+                serverEchoed = echoedNow || (prev?.optimisticClaim?.serverEchoed ?: false),
                 guardedIdleDrop = false,
             )
         }
