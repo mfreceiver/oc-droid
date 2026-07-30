@@ -137,8 +137,8 @@ object ProcessStatusPollerModule {
                 // tick (StatusAggregatorImpl.refresh → getSlimapiSessionsStatus). Short-
                 // circuit the per-session sweep until the per-session endpoint is
                 // independently available again. Status data flow is fully covered by bulk
-                // runRefresh; stale cleanup is driven independently by /since 404
-                // MarkDeleted + session.deleted SSE.
+                // runRefresh; stale cleanup is driven independently by the session.deleted
+                // digest SSE event (→ EvictSession via handleSessionDigest).
                 if (!serverCompatProfile.slimPerSessionStatusEndpointAvailable) return@runner null
 
                 val sessionIds = snapshot.sessionsById.keys
