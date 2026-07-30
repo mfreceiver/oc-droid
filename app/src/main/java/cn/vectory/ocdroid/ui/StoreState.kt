@@ -35,6 +35,16 @@ data class StoreState(
     val sessionList: SessionListState = SessionListState(),
     val unread: UnreadState = UnreadState(),
     val host: HostState = HostState(),
+    /**
+     * §P0-A (B1 option 1): the SINGLE authoritative source of truth for session
+     * execution status. `sessionList.sessionStatuses` is now a PROJECTION of
+     * this slice, computed by the PURE [reduceAuthority] in the SAME `state.copy`
+     * (single CAS). Every status write funnels through
+     * `dispatch(AppAction.AuthorityEvent(AuthorityOp))`.
+     *
+     * Defaults to empty — mirrors the legacy `sessionStatuses = emptyMap()`
+     * initial value (no status known on cold start). */
+    val authority: cn.vectory.ocdroid.data.state.AuthorityState = cn.vectory.ocdroid.data.state.AuthorityState(),
     /** §A5-3 B1: collapsible-card expansion map (formerly its own
      *  `MutableStateFlow<Map<String, Boolean>>`). */
     val expandedParts: Map<String, Boolean> = emptyMap(),
@@ -112,6 +122,24 @@ data class StoreState(
      */
     val liveBundleGeneration: Long = 0L,
     val liveEndpointFp: String = "",
+    /**
+     * §P0-A rev-gpt rework #2: a monotone counter bumped whenever
+     * [HostState.currentHostProfileId] CHANGES (via [SharedStateStore.mutateHost]).
+     * The authority reducer's [opScopeValid] checks `token.identityEpoch ==
+     * state.identityEpoch` for ApplySnapshot / MarkSourceFailed — a stale REST
+     * response captured before a host-profile switch is DROPPED inside the CAS
+     * (defense-in-depth on top of the adapter's dispatch-side
+     * `identityStore.currentEpoch()` check). Null→id and id→null transitions
+     * both bump. This catches host-PROFILE switches; endpoint/workdir-only
+     * reconfigures (same profile) are caught by the dispatch-side epoch. */
+    val identityEpoch: Long = 0L,
+    /**
+     * §P0-A rev-gpt rework (prep for Lane B): a monotone counter bumped by
+     * [reduceAuthority] ONLY on a real authority transition (when
+     * `nextAuth !== cur`). Consumed by Lane B's aggregator for version-monotone
+     * publish. Left unchanged (no bump) on no-op / guard-rejected ops. Pure
+     * carried data — the reducer stays pure. */
+    val authorityRevision: Long = 0L,
 ) {
     companion object {
         /** Factory matching the pre-B1 per-slice `MutableStateFlow(XxxState())`

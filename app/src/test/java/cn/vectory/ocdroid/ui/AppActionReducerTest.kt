@@ -525,7 +525,8 @@ class AppActionReducerTest {
             sessionList = SessionListState(
                 sessions = listOf(Session(id = "s1", directory = "/p")),
                 directorySessions = mapOf("/p" to listOf(Session(id = "s1", directory = "/p"))),
-                sessionStatuses = mapOf("s1" to cn.vectory.ocdroid.data.model.SessionStatus("idle")),
+                // §P0-A rev-gpt #8: sessionStatuses is a PROJECTION of authority
+                // (class-body var with private set). Set via withProjection.
                 sessionTodos = mapOf("s1" to listOf(TodoItem(content = "t", status = "pending", priority = "normal", id = "t1"))),
                 sessionDiffs = mapOf("s1" to emptyList()),
                 // §fix-leak-window (fix B): pending permission/question requests
@@ -536,10 +537,23 @@ class AppActionReducerTest {
                 pendingQuestions = listOf(
                     QuestionRequest(
                         id = "q1", sessionId = "s1",
-                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b"))))))),
+                        questions = listOf(QuestionInfo("q?", "h", listOf(QuestionOption("a", "b"))))))).withProjection(mapOf("s1" to cn.vectory.ocdroid.data.model.SessionStatus("idle"))),
             unread = UnreadState(
                 unreadSessions = setOf("s1"),
                 lastViewedTime = mapOf("s1" to 1L)),
+            // §P0-A rev-gpt #8: authority.bySid seeded so the cross-group purge
+            // (reduceAuthority(PurgeHost)) clears it → projection recomputes to empty.
+            authority = cn.vectory.ocdroid.data.state.AuthorityState(
+                bySid = mapOf("s1" to cn.vectory.ocdroid.data.state.SessionEntry(
+                    status = cn.vectory.ocdroid.data.model.SessionStatus("idle"),
+                    serverRound = null,
+                    optimisticClaim = null,
+                    origin = cn.vectory.ocdroid.data.state.EntryOrigin.REST,
+                    freshness = cn.vectory.ocdroid.data.state.Freshness.Fresh,
+                    updatedMonotonic = 0L,
+                    workdir = "/p",
+                )),
+            ),
             composer = ComposerState(draftWorkdir = "/old/proj"),
             settings = SettingsState(availableCommands = listOf(CommandInfo("cmd"))),
             connection = ConnectionState(serverVersion = "1.2.3"))
@@ -630,11 +644,10 @@ class AppActionReducerTest {
             sessionList = SessionListState(
                 sessions = listOf(session),
                 directorySessions = mapOf("/p" to listOf(session)),
-                sessionStatuses = mapOf("s1" to cn.vectory.ocdroid.data.model.SessionStatus("idle")),
                 sessionTodos = mapOf("s1" to listOf(TodoItem(content = "t", status = "pending", priority = "normal", id = "t1"))),
                 sessionDiffs = mapOf("s1" to emptyList()),
                 pendingCreateIds = setOf("s1"),
-                pendingCreatedAt = mapOf("s1" to 123L)),
+                pendingCreatedAt = mapOf("s1" to 123L)).withProjection(mapOf("s1" to cn.vectory.ocdroid.data.model.SessionStatus("idle"))),
             unread = UnreadState(
                 unreadSessions = setOf("s1"),
                 lastViewedTime = mapOf("s1" to 1L)))

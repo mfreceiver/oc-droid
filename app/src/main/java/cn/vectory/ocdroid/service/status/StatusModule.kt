@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.service.status
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.ui.SharedStateStore
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -20,31 +21,25 @@ import javax.inject.Singleton
  * `@Inject constructor`) so the [StatusAggregatorImpl] clock default-param
  * (`{ System.currentTimeMillis() }`) is honored at the construction site —
  * matching the other controllers' pattern (ForegroundCatchUpController /
- * SessionSwitcher / ConnectionCoordinator / SessionSyncCoordinator all take
- * a default-param clock and are wired via `@Provides` in [ControllerModule]).
+ * SessionSwitcher / ConnectionCoordinator / SessionSyncCoordinator all take a
+ * default-param clock and are wired via `@Provides` in [ControllerModule]).
+ *
+ * **§P0-A Lane 2**: the aggregator no longer depends on [OpenCodeRepository]
+ * — the REST/slim network fetch was extracted to [StatusFetchService] (provided
+ * below), and the aggregator's READ side derives from [SharedStateStore].
+ * `store` (the same `@Singleton` every ViewModel / controller injects) is the
+ * single authority source the aggregator derives its lifecycle projection from
+ * (双投影同源). The mutation API (`refresh` / `applySseStatus` /
+ * `markRequestFailed`) dispatches [cn.vectory.ocdroid.data.state.AuthorityOp]s
+ * into `store`'s single CAS — no second writable source.
  *
  * **D1 (gate #1)**: also injects the [UiApplicationScope] (Main.immediate)
  * [CoroutineScope] so [StatusAggregatorImpl] can schedule its passive-TTL
- * wake-up on the same scope the lifecycle coordinator uses — keeping the
- * freshness recompute + the serial state machine on the same dispatcher so
- * observers see a consistent verdict.
- *
- * This lets `StreamingLifecycleCoordinator` consume the read-only [StatusAggregator]
- * while `SessionSyncCoordinator` (and future bootstrap / AppCore feed sites) consume
- * [StatusAggregatorInput], without either depending on the concrete impl — and both
- * see the same in-memory singleton (so SSE updates from SSC are immediately visible
- * to the lifecycle coordinator's `globalState` observer).
+ * wake-up + its `store.stateFlow` collect on the same scope.
  *
  * Installed in [SingletonComponent] because the authoritative busy source must outlive any
  * Activity / ViewModel — it is consumed by the FGS lifecycle coordinator (Lane C) and the
  * notification display layer (Phase 1), both of which run process-wide.
- *
- * **Why both `@Provides` (concrete-method) and `@Binds` (abstract) in one Module**:
- * `@Provides` constructs the singleton impl (with the clock default filled); the two
- * `@Binds` re-expose it under each interface type so any consumer depending on either
- * interface gets the same backing instance. Kotlin allows `@Provides`-annotored functions
- * inside a `companion object` of an abstract `@Module` class (Dagger-Kotlin standard
- * pattern).
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -63,14 +58,25 @@ abstract class StatusModule {
         @Provides
         @Singleton
         fun provideStatusAggregatorImpl(
-            repository: OpenCodeRepository,
             identityStore: ConnectionIdentityStore,
+            store: SharedStateStore,
+            statusFetchService: StatusFetchService,
             @UiApplicationScope scope: CoroutineScope,
         ): StatusAggregatorImpl = StatusAggregatorImpl(
-            repository = repository,
             identityStore = identityStore,
+            store = store,
+            statusFetchService = statusFetchService,
             scope = scope,
             clock = { System.currentTimeMillis() },
         )
+
+        /** §P0-A Lane 2 (B4-c): [StatusFetchService] is `@Inject constructor`-able
+         *  but provided here explicitly to keep the status DI surface in one
+         *  module (and to mirror the [provideStatusAggregatorImpl] seam). */
+        @Provides
+        @Singleton
+        fun provideStatusFetchService(
+            repository: OpenCodeRepository,
+        ): StatusFetchService = StatusFetchService(repository)
     }
 }

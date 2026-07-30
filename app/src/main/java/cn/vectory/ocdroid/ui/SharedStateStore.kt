@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.updateAndGet
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -51,14 +52,97 @@ import javax.inject.Singleton
  * terminal write surface. B1 changes the storage backing, not that surface.
  */
 @Singleton
-class SharedStateStore @Inject constructor() {
+class SharedStateStore @Inject constructor(
+    /**
+     * §P0-A rev-gpt #5: the current connection identity, used to derive the
+     * REAL authority [ScopeKey] at the non-aggregator snapshot sites
+     * (StatusPollOrchestrator / BackgroundUnreadPoller / SessionTreeHydrator /
+     * SessionListActions). Previously these sites used an EMPTY ScopeKey
+     * ("","") → coverage was written under a key the aggregator never reads →
+     * globalState degraded to Unknown. */
+    private val identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
+    @cn.vectory.ocdroid.di.UiApplicationScope
+    private val scope: kotlinx.coroutines.CoroutineScope? = null,
+) {
     internal var state: MutableStateFlow<StoreState> = MutableStateFlow(StoreState.initial())
         private set
+
+    /** Track the last identityStore epoch that triggered a store identityEpoch bump.
+     *  One bump per unique identityStore epoch value avoids double-bumps when
+     *  mutateHost and identityStore bind both fire for the same reconfigure cycle.
+     *  Written only from the init collection (serial on [scope]). */
+    private var lastObservedIdentityEpoch: Long = -1L
+
+    init {
+        // §P0-A r2 #3b: observe identityStore identity changes for endpoint/workdir-
+        // only reconfigures (same hostProfileId, different endpoint/workdir). The
+        // identity store's epoch bumps on every beginReconfigure; we mirror it in
+        // StoreState.identityEpoch so the reducer's opScopeValid catches ALL
+        // identity changes (not just host-profile switches via mutateHost).
+        // Bump on EVERY transition: non-null→null (beginReconfigure's clearing)
+        // AND null→non-null (new bind) AND non-null→non-null different identity.
+        // The null-phase bump closes the window where stale in-flight requests
+        // from the prior identity could pass the reducer's epoch guard while
+        // currentIdentity is null. Cold-start initial null does NOT bump
+        // (lastObservedIdentityEpoch starts at -1). Each unique identityStore
+        // epoch bumps identityEpoch + authorityRevision exactly once.
+        scope?.launch {
+            identityStore.currentIdentity.collect { id ->
+                if (id != null) {
+                    val newEpoch = id.epoch
+                    if (newEpoch > lastObservedIdentityEpoch) {
+                        lastObservedIdentityEpoch = newEpoch
+                        state.update { s ->
+                            s.copy(
+                                identityEpoch = s.identityEpoch + 1L,
+                                authorityRevision = s.authorityRevision + 1L,
+                            )
+                        }
+                    }
+                } else {
+                    // §P0-A null-phase epoch bump: when identity transitions TO
+                    // null (beginReconfigure), bump identityEpoch + authorityRevision
+                    // so stale in-flight requests from the prior identity cannot pass
+                    // the reducer's epoch guard during the null window. Only bump if
+                    // we had a previous non-null identity (lastObservedIdentityEpoch
+                    // >= 0). Reset to -1 so repeated null emissions don't re-bump.
+                    if (lastObservedIdentityEpoch >= 0L) {
+                        lastObservedIdentityEpoch = -1L
+                        state.update { s ->
+                            s.copy(
+                                identityEpoch = s.identityEpoch + 1L,
+                                authorityRevision = s.authorityRevision + 1L,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** Test-only no-arg constructor (unbound identityStore). Hilt does NOT see
+     *  this (no @Inject); it resolves the primary constructor above. */
+    internal constructor() : this(cn.vectory.ocdroid.service.identity.ConnectionIdentityStore())
 
     /** Test-only: inject a custom [MutableStateFlow] for deterministic CAS control
      *  (e.g., to simulate CAS failure / retry sequences). */
     internal constructor(testState: MutableStateFlow<StoreState>) : this() {
         state = testState
+    }
+
+    /**
+     * §P0-A rev-gpt #5: the REAL authority [ScopeKey] for the current identity
+     * (serverGroupFp + endpointFp). Used by the non-aggregator snapshot sites
+     * so coverage is written under the SAME key the aggregator reads
+     * ([StatusAggregatorImpl.currentScope] derives identically from
+     * `identityStore.currentIdentity.value`). MUST match the aggregator's
+     * derivation — no second scope source. */
+    internal fun authorityScope(): cn.vectory.ocdroid.data.state.ScopeKey {
+        val id = identityStore.currentIdentity.value
+        return cn.vectory.ocdroid.data.state.ScopeKey(
+            serverGroupFp = id?.serverGroupFp ?: "",
+            endpointFp = id?.endpointFp ?: "",
+        )
     }
 
     /**
@@ -184,7 +268,28 @@ class SharedStateStore @Inject constructor() {
      */
     internal fun mutateStateAndGet(transform: (StoreState) -> StoreState): StoreState = state.updateAndGet(transform)
     fun mutateHost(transform: (HostState) -> HostState) =
-        state.update { it.copy(host = transform(it.host)) }
+        state.update {
+            val prevHost = it.host
+            val nextHost = transform(prevHost)
+            // §P0-A rev-gpt r2 #3b/#7: bump identityEpoch + authorityRevision
+            // on ANY HostState change (not just currentHostProfileId) — a
+            // same-profile reconfigure that updates hostProfiles or other
+            // identity-defining fields must still invalidate in-flight REST
+            // requests (the reducer's identityEpoch guard drops stale tokens).
+            // authorityRevision bumps alongside so the aggregator's
+            // distinctUntilChanged{authorityRevision} re-derives on scope change.
+            // The adapter's dispatch-side identityStore.currentEpoch() check
+            // catches endpoint/workdir-only reconfigures that don't touch HostState.
+            if (nextHost != prevHost) {
+                it.copy(
+                    host = nextHost,
+                    identityEpoch = it.identityEpoch + 1L,
+                    authorityRevision = it.authorityRevision + 1L,
+                )
+            } else {
+                it.copy(host = nextHost)
+            }
+        }
     /** §history-load-fix / §A5-3 B1: CAS write of the expansion map. */
     fun mutateExpandedParts(transform: (Map<String, Boolean>) -> Map<String, Boolean>) =
         state.update { it.copy(expandedParts = transform(it.expandedParts)) }

@@ -80,6 +80,22 @@ class SessionListActionsTest {
         }
     }
 
+    /** §P0-A test helper: seed a prior session status through the authority
+     *  reducer (the SOLE writer now), populating authority.bySid exactly as
+     *  production would after an SSE/REST status event. */
+    private fun seedAuthorityEvent(
+        sid: String,
+        status: cn.vectory.ocdroid.data.model.SessionStatus,
+    ): AppAction = AppAction.AuthorityEvent(
+        cn.vectory.ocdroid.data.state.AuthorityOp.ApplyEvent(
+            sid = sid,
+            status = status,
+            origin = cn.vectory.ocdroid.data.state.EntryOrigin.SSE_LEGACY,
+            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+            connectionMonotonicMs = 0L,
+        ),
+    )
+
     @After
     fun tearDown() {
         unmockkAll()
@@ -984,7 +1000,7 @@ class SessionListActionsTest {
     @Test
     fun `launchLoadSessionStatus completion is true after equal map merge`() = runTest {
         val statuses = mapOf("s1" to cn.vectory.ocdroid.data.model.SessionStatus("idle"))
-        store.mutateSessionList { it.copy(sessions = listOf(Session(id = "s1", directory = "/x")), sessionStatuses = statuses) }
+        store.mutateSessionList { it.copy(sessions = listOf(Session(id = "s1", directory = "/x"))).withProjection(statuses) }
         coEvery { repository.getSessionStatus() } returns Result.success(statuses)
         val completions = mutableListOf<Boolean>()
 
@@ -1055,7 +1071,7 @@ class SessionListActionsTest {
                 sessions = listOf(
                     Session(id = "stale-idle", directory = "/x"),
                     Session(id = "keep", directory = "/x")),
-                sessionStatuses = mutableMapOf(
+                ).withProjection(mutableMapOf(
                 "stale-idle" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"),
                 "keep" to cn.vectory.ocdroid.data.model.SessionStatus(type = "retry")
                 ))
@@ -1081,7 +1097,7 @@ class SessionListActionsTest {
         slices.mutateSessionList {
             it.copy(
                 sessions = listOf(Session(id = "known", directory = "/x")),
-                sessionStatuses = mapOf("outside" to cn.vectory.ocdroid.data.model.SessionStatus("busy")))
+                ).withProjection(mapOf("outside" to cn.vectory.ocdroid.data.model.SessionStatus("busy")))
         }
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
 
@@ -1096,16 +1112,16 @@ class SessionListActionsTest {
     fun `preserves SSE status updated during in-flight REST over stale snapshot`() = runTest {
         // §sse-rest-race: REST 在途时 SSE 已把 X 推到 idle; REST 返回的旧快照仍 X=busy.
         // 守卫应保留 SSE 的 idle, 不被旧 REST busy 覆盖 (gpter🟠/groker🟠/opuser🟠).
+        // §P0-A: status is now the authority projection. Seed X=busy via authority
+        // and simulate the in-flight SSE X=idle via authority (ApplyEvent) so
+        // authority.bySid reflects the change the reducer's in-flight merge sees.
         slices.mutateSessionList {
-            it.copy(sessionStatuses = mutableMapOf(
-                "X" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")
-            ))
+            it.copy(sessions = listOf(Session(id = "X", directory = "/x")))
         }
+        store.dispatch(seedAuthorityEvent("X", cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")))
         coEvery { repository.getSessionStatus() } coAnswers {
-            // 模拟 REST 在途期间 SSE 写入 X=idle
-            slices.mutateSessionList {
-                it.copy(sessionStatuses = it.sessionStatuses + ("X" to cn.vectory.ocdroid.data.model.SessionStatus(type = "idle")))
-            }
+            // 模拟 REST 在途期间 SSE 写入 X=idle (now via the authority funnel).
+            store.dispatch(seedAuthorityEvent("X", cn.vectory.ocdroid.data.model.SessionStatus(type = "idle")))
             Result.success(mapOf("X" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")))
         }
 
@@ -1176,7 +1192,7 @@ class SessionListActionsTest {
         store.mutateSessionList {
             it.copy(
                 sessions = listOf(Session(id = "A", directory = "/x")),
-                sessionStatuses = mapOf("A" to busy))
+                ).withProjection(mapOf("A" to busy))
         }
         store.mutateChat { it.copy(currentSessionId = "other") }
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
@@ -1198,7 +1214,7 @@ class SessionListActionsTest {
         // §task4-first-load: 首次加载 localBefore 全空 → completedRoots 自然空 → 不批量标.
         val sessions = (1..5).map { Session(id = "s$it", directory = "/x") }
         store.mutateSessionList {
-            it.copy(sessions = sessions, sessionStatuses = emptyMap())
+            it.copy(sessions = sessions).withProjection(emptyMap())
         }
         store.mutateChat { it.copy(currentSessionId = "s1") }
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
@@ -1219,13 +1235,13 @@ class SessionListActionsTest {
         store.mutateSessionList {
             it.copy(
                 sessions = listOf(Session(id = "X", directory = "/x")),
-                sessionStatuses = emptyMap())
+                ).withProjection(emptyMap())
         }
         store.mutateChat { it.copy(currentSessionId = "other") }
         coEvery { repository.getSessionStatus() } coAnswers {
             slices.mutateSessionList {
-                it.copy(
-                    sessionStatuses = it.sessionStatuses +
+                it.withProjection(
+                    it.sessionStatuses +
                         ("X" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"))
                 )
             }
@@ -1253,7 +1269,7 @@ class SessionListActionsTest {
                     Session(id = "root", directory = "/x"),
                     Session(id = "child", directory = "/x", parentId = "root"),
                     Session(id = "cur", directory = "/x")),
-                sessionStatuses = mapOf(
+                ).withProjection(mapOf(
                     "root" to busy,
                     "child" to busy,
                     "cur" to busy))

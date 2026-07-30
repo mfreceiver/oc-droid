@@ -154,7 +154,7 @@ class AutoExpandOmittedPartsTest {
             )
         }
         store.mutateSessionList {
-            it.copy(sessionStatuses = mapOf("s1" to SessionStatus(type = "busy")))
+            it.withProjection(mapOf("s1" to SessionStatus(type = "busy")))
         }
 
         launchAutoExpandOmittedParts(this, repo, store, "s1", { "fp" })
@@ -193,7 +193,7 @@ class AutoExpandOmittedPartsTest {
         // The session goes BUSY mid-flight (the entry guard passed because it
         // was idle at load time; the tool turn started during the network call).
         store.mutateSessionList {
-            it.copy(sessionStatuses = mapOf("s1" to SessionStatus(type = "busy")))
+            it.withProjection(mapOf("s1" to SessionStatus(type = "busy")))
         }
         gate.complete(
             ExpandOutcome.Ok(

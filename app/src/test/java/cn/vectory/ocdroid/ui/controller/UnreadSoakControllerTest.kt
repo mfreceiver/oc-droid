@@ -96,7 +96,7 @@ class UnreadSoakControllerTest {
     }
 
     private fun seedStatuses(vararg entries: Pair<String, SessionStatus>) {
-        store.mutateSessionList { it.copy(sessionStatuses = entries.toMap()) }
+        store.mutateSessionList { it.withProjection(entries.toMap()) }
     }
 
     private fun seedCurrent(sessionId: String?) {

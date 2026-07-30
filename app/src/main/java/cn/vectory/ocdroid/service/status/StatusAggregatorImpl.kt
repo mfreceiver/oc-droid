@@ -1,10 +1,16 @@
 package cn.vectory.ocdroid.service.status
 
-import cn.vectory.ocdroid.data.model.SessionStatus
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.state.AuthorityOp
+import cn.vectory.ocdroid.data.state.EntryOrigin
+import cn.vectory.ocdroid.data.state.RequestToken
+import cn.vectory.ocdroid.data.state.ScopeKey
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.ui.AppAction
+import cn.vectory.ocdroid.ui.SharedStateStore
+import cn.vectory.ocdroid.ui.StoreState
+import cn.vectory.ocdroid.ui.buildAuthorityApplySnapshot
 import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -13,102 +19,99 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Singleton
 
 /**
  * Authoritative global busy-source implementation (FGS spec §3 / §3.1, dev-design P0.4).
  *
- * Implements BOTH [StatusAggregator] (read-only outputs, consumed by the
- * lifecycle coordinator + Phase-1 notification display) and [StatusAggregatorInput]
- * (the feed surface consumed by SSC / the bootstrap coordinator / AppCore).
+ * # §P0-A Lane 2 — DERIVED over authority (双投影同源 / R3 真根治)
  *
- * Constructed via `StatusModule.provideStatusAggregatorImpl` (NOT `@Inject
- * constructor`) so the [clock] default param (`{ System.currentTimeMillis() }`)
- * is honored at the construction site — matching the other controllers' pattern
- * (ForegroundCatchUpController / SessionSwitcher / ConnectionCoordinator /
- * SessionSyncCoordinator all take a default-param clock and are wired via
- * `@Provides`). Both [StatusAggregator] and [StatusAggregatorInput] are bound
- * to the SAME `@Singleton` instance via the two `@Binds` in `StatusModule`.
+ * Pre-Lane-2 this class held its OWN writable `Aggregate` (a second source of
+ * truth alongside [StoreState.authority]) and its `refresh` / `applySseStatus` /
+ * `markRequestFailed` mutation API mutated that private map directly. That was
+ * the R3 dual-source: the UI `sessionStatuses` projection (driven by authority)
+ * and the lifecycle `globalState` / `statusByKey` projection (driven by this
+ * class's own `Aggregate`) could drift apart.
  *
- * Holds the single source of truth for per-session busy status, keyed by the
- * composite [SessionStatusKey] = `(serverGroupFp, workdir, sessionId)`.
+ * Lane 2 collapses them into ONE source. The READ side (`globalState` /
+ * `globalBusy` / `statusByKey` / `stateAtNow`) is now a PURE DERIVATION over
+ * `store.state.authority` (the SAME slice the UI's `sessionStatuses` projects
+ * from) via [authorityToAggregate]. The mutation API (`refresh` /
+ * `applySseStatus` / `markRequestFailed`) is preserved VERBATIM in signature
+ * (the 6 call sites + ~13 test files are unchanged) but each method is now a
+ * THIN ADAPTER that dispatches an [AuthorityOp] into the store's single CAS and
+ * then SYNCHRONOUSLY re-derives + publishes so the B4-b synchronous read
+ * (`SessionStreamingController` reads `globalState.value` immediately after
+ * `refresh` returns) still sees the fresh verdict.
  *
- * **Authoritativeness rules enforced here** (FGS spec §3 / §3.1 / §2):
- *  - busy is **global**, keyed by [SessionStatusKey] so two sessions with the same id on
- *    different hosts / workdirs cannot collide;
- *  - the Phase-0 main path consumes the host-level `getSessionStatus()` once and bins each
- *    returned `sessionId` to its workdir via `sessionsById[sessionId].directory`;
- *  - **D1 (gate #5) unmapped-active→Busy**: a `sessionId` returned by
- *    `/session/status` that is NOT in `sessionsById` is **positively known
- *    active** → contributes [GlobalBusyState.Busy]. Pre-D1 the aggregator
- *    skipped it, so `AllIdleFresh` could pass while a returned busy session
- *    was silently dropped. Tracked in [coverage]'s `unmappedActiveIds`.
- *  - **D1 (gate #5) registered-workdir coverage**: `AllIdleFresh` is legal
- *    ONLY when every workdir in the snapshot's `registeredWorkdirs` is
- *    covered by a fresh successful observation (FGS spec §3 «只有所有已登记
- *    workdir 都取得新鲜+成功 idle 才进停流宽限期»). A registered workdir with
- *    no live session is represented by the coverage marker — it does NOT
- *    disappear from the all-idle predicate when its sessions archive.
- *  - a failed status fetch labels every known session [SessionBusyStatus.Unknown], and the
- *    merge-timing rule (below) ensures a prior fresher `Busy`/`Retry` SSE status is **not**
- *    clobbered by the failure snapshot — `Unknown` thus never wrongly clears [globalBusy]
- *    and never enters the idle grace window;
- *  - a REST response **must not** overwrite an SSE status whose source time is later than
- *    the REST request-start (merge timing, FGS spec §3.1);
- *  - **CP4 REST epoch guard** (FGS spec §2 + §3.1): `refresh` captures
- *    `epochAtRequestStart = identityStore.currentEpoch()` BEFORE the REST call. When
- *    committing the response, the entry is DROPPED if the current epoch differs — a stale
- *    old-epoch REST response cannot mutate current state;
- *  - **CP4 status TTL** (FGS spec §3, ≈30s): an entry is "fresh" only within [STATUS_TTL_MS]
- *    of its source time. [globalState] = [GlobalBusyState.AllIdleFresh] requires EVERY
- *    tracked session under the current identity to be `Idle` AND fresh. Stale `Idle`
- *    entries fall back to [GlobalBusyState.Unknown] (do NOT enter idle grace on stale/unknown);
- *    stale `Busy`/`Retry` entries stay [GlobalBusyState.Busy] (conservative — never silently
- *    drop keep-alive on a possibly-still-busy session).
+ * ## How the derivation works
  *
- * **D1 (gate #1) passive TTL**: the previous design only re-ran [recompute]
- * on map mutation, so an `AllIdleFresh` could freeze past `STATUS_TTL_MS`
- * without any write — the §4.4 idle debounce would then read a stale
- * `AllIdleFresh` from [globalState] and stop SSE on stale idle data (§3
- * violation «请求失败/过期 → 全局 Unknown, 不得进 idle 宽限期»). The fix is a
- * single [freshnessJob] that reschedules itself on every committed update to
- * the **earliest current-identity deadline that can alter the projection**
- * (each fresh-Idle entry's `sourceTimeMs + STATUS_TTL_MS + 1`, plus the
- * coverage marker's own TTL). At the deadline the job calls [recompute]
- * WITHOUT requiring a map mutation. Observers that need the verdict at an
- * exact instant (the §4.4 debounce expiry) read [stateAtNow] which performs
- * the same TTL math against the live atomic state + the aggregator's clock.
+ *  - A coroutine launched in `init` `collect`s `store.stateFlow`; on every
+ *    emission [publishFromState] re-derives the [Aggregate] via
+ *    [authorityToAggregate] and feeds it into the UNCHANGED
+ *    [publishLocked] / [project] / [rescheduleFreshnessLocked] pipeline.
+ *  - The adapters dispatch an [AppAction.AuthorityEvent] (which lands in the
+ *    store's single CAS) and THEN call [publishFromState]`(
+ *    store.stateFlow.value)` directly — NOT via the collect — so the B4-b
+ *    synchronous read sees the fresh verdict before the collect coroutine even
+ *    observes the emission. The collect handles SSE / other-driven authority
+ *    changes that do not pass through this adapter.
  *
- * **Thread-safety (D4-A M7)**: entries, coverage and current group live in one
- * immutable [Aggregate] held by one [AtomicReference]. Every CAS winner passes
- * that exact committed value to projection, flow publication and TTL scheduling;
- * transforms are pure and perform no retryable side effects.
+ * ## Semantics preserved EXACTLY (the金钟 gate)
  *
- * **One clock domain**: the injected [clock] is the SOLE source of "now" for both REST
- * request-start (in [refresh]) and any internally-derived freshness check. SSE arrival
- * time is supplied by the caller via [StatusAggregatorInput.applySseStatus]'s
- * `sourceTimeMs`; in production both call sites read the same wall clock
- * (`System.currentTimeMillis()`).
+ * [project] is UNCHANGED — it encodes the SAME freshness boundary, unmapped-
+ * active rule, and registered-workdir coverage predicate. The ONLY change is
+ * the data source (authority → Aggregate instead of mutation → Aggregate). The
+ * [GlobalBusyState] / TTL / freshness / coverage verdicts are byte-for-byte
+ * identical for every case the FGS lifecycle coordinator depends on.
+ *
+ * **`Unknown` after failure**: authority has no `Unknown` [SessionStatus]
+ * (the transport model is `idle`/`busy`/`retry` only). A REST failure dispatches
+ * [AuthorityOp.MarkSourceFailed], whose reducer merge-times the `bySid` (keeps
+ * fresher SSE `Busy`/`Retry`, removes older → absence ≡ unknown) AND sets
+ * `coverage.lastSuccessTimeMs = -1`. The derived [project] then returns
+ * [GlobalBusyState.Unknown] via the cold-start / stale-success coverage gate —
+ * matching the old markFailed → Unknown lifecycle verdict (the coverage gate,
+ * not Unknown status entries, is the authority).
+ *
+ * ## Authoritativeness rules (FGS spec §3 / §3.1 / §2) — preserved
+ *
+ * See [StatusAggregator] / [StatusAggregatorInput] kdocs for the full contract.
+ * The rules below are unchanged from pre-Lane-2; only the data flow changed.
+ *
+ * **One clock domain**: the injected [clock] is the SOLE source of "now" for
+ * the freshness verdict. SSE arrival time is supplied by the caller via
+ * [StatusAggregatorInput.applySseStatus]'s `sourceTimeMs`.
  */
 @Singleton
 class StatusAggregatorImpl internal constructor(
-    private val repository: OpenCodeRepository,
     private val identityStore: ConnectionIdentityStore,
+    private val store: SharedStateStore,
+    private val statusFetchService: StatusFetchService,
     @UiApplicationScope private val scope: CoroutineScope,
     private val clock: () -> Long,
 ) : StatusAggregator, StatusAggregatorInput {
 
+    // NOTE: the `init` collect is declared AFTER all mutable properties below
+    // (Kotlin initializes properties + init blocks strictly top-to-bottom; the
+    // collect on Dispatchers.Unconfined runs eagerly during construction, so it
+    // MUST run after [aggregate] / [commitPublishLock] / [_globalState] etc.
+    // are initialized — otherwise they are null when publishFromState runs).
+
     /**
-     * Internal per-key entry. Carries the [status] label, the [sourceTimeMs] used for merge
-     * timing + the TTL freshness check (FGS spec §3.1 / §3 «status TTL»), and a [fresh]
-     * flag distinguishing entries that came from a successful REST snapshot this cycle
-     * (fresh = true) from SSE-driven or failure entries (fresh = false). The freshness
-     * flag is informational; the authoritative freshness verdict used by [globalState] is
-     * the TTL check `now - sourceTimeMs <= [STATUS_TTL_MS]` (a REST entry can age out and
-     * flip the global verdict without any new write).
+     * Internal per-key entry. Carries the [status] label, the [sourceTimeMs]
+     * used for merge timing + the TTL freshness check (FGS spec §3.1 / §3
+     * «status TTL»), and a [fresh] flag distinguishing REST-snapshot entries
+     * (fresh = true) from SSE/optimistic/failure entries (fresh = false). The
+     * freshness flag is informational; the authoritative freshness verdict used
+     * by [globalState] is the TTL check `now - sourceTimeMs <= STATUS_TTL_MS`.
+     *
+     * §P0-A Lane 2: `Entry` is now DERIVED from a [SessionEntry] via
+     * [authorityToAggregate] (it is no longer mutated by the input API).
      */
     private data class Entry(
         val status: SessionBusyStatus,
@@ -117,39 +120,13 @@ class StatusAggregatorImpl internal constructor(
     )
 
     /**
-     * T-R1 (slimapi R1) 方案A Issue2: internal carrier for a status-fetch
-     * result shared by the slim + legacy branches of [refresh]. Carries the
-     * merged status map PLUS the set of workdirs whose per-directory slim fetch
-     * FAILED (always empty for legacy, which issues a single host-global call).
-     *
-     * The failed-workdir set lets the success fold mark sessions in failed
-     * workdirs [SessionBusyStatus.Unknown] (NOT Idle) on partial failure,
-     * preventing a false [GlobalBusyState.AllIdleFresh]. Legacy wraps its
-     * single call in `StatusFetch(it, emptySet())` so its fold is
-     * byte-for-byte unchanged.
-     */
-    private data class StatusFetch(
-        val statuses: Map<String, SessionStatus>,
-        val failedWorkdirs: Set<String>,
-    )
-
-    /**
      * D1 (gate #5): coverage metadata held alongside the per-key state map.
+     * See the pre-Lane-2 kdoc (unchanged): registeredWorkdirs / coveredWorkdirs
+     * / unmappedActiveIds / lastSuccessTimeMs.
      *
-     *  - [registeredWorkdirs] — the required set from [StatusSnapshot].
-     *  - [coveredWorkdirs] — the host-global response coverage marker. On
-     *    success this is exactly registeredWorkdirs, including directories
-     *    with zero sessions; on failure it is empty.
-     *  - [unmappedActiveIds] — session ids returned by `/session/status`
-     *    that were NOT in `sessionsById`. The aggregator classifies each as
-     *    [GlobalBusyState.Busy] (positively known active — do NOT skip, do
-     *    NOT fabricate a composite key with an invented workdir).
-     *  - [lastSuccessTimeMs] — wall-clock of the most recent successful
-     *    snapshot commit (REST `Result.success`), used both as the coverage
-     *    marker's own TTL anchor (`AllIdleFresh` requires this within TTL)
-     *    and as the deadline-source for the passive TTL wake-up. `-1` if no
-     *    successful snapshot has ever landed — `AllIdleFresh` is then
-     *    refused (cold-start guard).
+     * §P0-A Lane 2: DERIVED from [AuthorityState.coverage]`[currentScope]` via
+     * [authorityToAggregate]; defaults to [Coverage.Empty] when the current
+     * scope has no coverage entry (cold-start).
      */
     private data class Coverage(
         val registeredWorkdirs: Set<String>,
@@ -177,26 +154,20 @@ class StatusAggregatorImpl internal constructor(
         }
     }
 
-    /** M7: entries, coverage and projection identity commit in one CAS. */
+    /**
+     * §P0-A Lane 2: the DERIVED view of the committed authority state. Held in
+     * an [AtomicReference] so the lock-free [stateAtNow] read + the
+     * [freshnessJob] TTL wake-up observe ONE immutable snapshot (D4-A M7).
+     * Updated ONLY by [publishFromState] (inside [commitPublishLock]); never
+     * mutated by the input API directly.
+     */
     private val aggregate = AtomicReference(Aggregate.Empty)
 
     /**
-     * D5 (#5): the publication lock. The atomic [aggregate] swap alone is
-     * insufficient for R5 — concurrent updaters can interleave the write of
-     * the aggregate with the derivation + publication of [_statusByKey] /
-     * [_globalBusy] / [_globalState] / [freshnessJob] reschedule, so a
-     * derived StateFlow could momentarily publish a verdict computed from
-     * an OLDER aggregate while a newer one is already installed (or vice
-     * versa, an early reader could pair a new map with a stale verdict).
-     *
-     * The transform itself MUST stay pure + memory-only (no network work);
-     * REST/SSE side-effects happen BEFORE [update] is called. Inside the
-     * single critical section: write aggregate → derive map/busy/verdict →
-     * publish `_statusByKey` → `_globalBusy` → `_globalState` → cancel /
-     * reschedule [freshnessJob]. [stateAtNow] intentionally stays lock-free
-     * (it computes from one immutable [Aggregate] snapshot via
-     * [AtomicReference.get]); the publication lock only serializes
-     * mutations + derived StateFlow writes, not lock-free reads.
+     * D5 (#5): the publication lock. Serializes the derive → write [aggregate]
+     * → publish derived [StateFlow]s → reschedule [freshnessJob] sequence so a
+     * derived StateFlow cannot momentarily publish a verdict computed from an
+     * OLDER authority snapshot while a newer one is already installed (R5).
      */
     private val commitPublishLock = Any()
 
@@ -210,308 +181,365 @@ class StatusAggregatorImpl internal constructor(
 
     /**
      * D1 (gate #1): passive-TTL wake-up job. Cancelled + rescheduled on every
-     * committed [update] to the **earliest current-identity deadline that can
-     * alter the projection**. Null when the current state has no Idle deadline
-     * (e.g. all `Busy` / `Retry`, or empty state). Runs on the injected
-     * [UiApplicationScope] (Main.immediate) so the recompute observes the same
-     * memory visibility as the serial state-machine mutations.
+     * committed [publishFromState] to the earliest current-identity deadline
+     * that can alter the projection. See [rescheduleFreshnessLocked].
      */
     private var freshnessJob: Job? = null
+
+    /**
+     * §P0-A rev-gpt #4 (version-monotone publish): the highest
+     * [StoreState.authorityRevision] that has been published to the derived
+     * StateFlows. Guarded inside [commitPublishLock]: a stale collect emission
+     * (queued before a newer synchronous adapter publish acquired the lock) is
+     * DROPPED — `state.authorityRevision < lastPublishedRevision` → return.
+     * Uses STRICTLY-LESS (`<`) so a SAME-revision TTL re-publish (from
+     * [freshnessJob]) is NOT skipped (it re-evaluates the verdict with the live
+     * clock at the same authority version — legitimate). Initialized to -1 so
+     * the first publish (revision 0) always proceeds.
+     */
+    @Volatile
+    private var lastPublishedRevision: Long = -1L
+
+    init {
+        // §P0-A rev-gpt #4 (incremental derivation): collect ONLY when
+        // authorityRevision changes (distinctUntilChanged) — chat/composer/
+        // settings/other StoreState mutations do NOT trigger a full re-
+        // derivation. The `store.stateFlow.value` is read at collect time
+        // (post-change state). Declared AFTER all mutable properties above
+        // (Kotlin initializes top-to-bottom; the collect on Dispatchers.Unconfined
+        // runs eagerly during construction so [aggregate] / [commitPublishLock] /
+        // [_globalState] etc. MUST be initialized first). Handles SSE / other-
+        // driven authority changes (SseDispatchHost applies SSE status via
+        // dispatch directly, NOT through this adapter). The adapter methods ALSO
+        // call publishFromState synchronously after their own dispatch so the
+        // B4-b synchronous read sees the fresh verdict before this collect
+        // observes the emission.
+        scope.launch {
+            store.stateFlow
+                .map { it.authorityRevision }
+                .distinctUntilChanged()
+                .collect {
+                    publishFromState(store.stateFlow.value)
+                }
+        }
+    }
+
+    // ── §P0-A Lane 2: authority → Aggregate derivation ──────────────────────
+
+    /**
+     * §P0-A Lane 2: the current connection scope, derived from the bound
+     * [identityStore] identity (NOT from the per-call `identity` param — the
+     * bound identity is the single source of truth for "current scope", and in
+     * production the per-call identity always matches it). Used both as the
+     * composite-key [serverGroupFp] for derived entries and as the
+     * [AuthorityState.coverage] lookup key.
+     */
+    private fun currentScope(): ScopeKey {
+        val id = identityStore.currentIdentity.value
+        return ScopeKey(
+            serverGroupFp = id?.serverGroupFp ?: "",
+            endpointFp = id?.endpointFp ?: "",
+        )
+    }
+
+    /**
+     * §P0-A Lane 2: PURE-ISH mapping from the committed [StoreState] to the
+     * aggregator's internal [Aggregate] shape (the SAME shape the pre-Lane-2
+     * mutation API produced). The derivation:
+     *
+     *  - `currentGroupFp` = the bound identity's `serverGroupFp` (scopes the
+     *    composite keys + the lifecycle projection).
+     *  - `entries`: each `(sid, SessionEntry)` in `state.authority.bySid` →
+     *    `SessionStatusKey(currentGroupFp, workdir ?: "", sid)` →
+     *    `Entry(status.toSessionBusyStatus(), sourceTimeMs = updatedMonotonic,
+     *    fresh = (origin == REST))`. The `origin == REST` ⇒ fresh rule matches
+     *    the pre-Lane-2 success-fold `fresh = true` for REST entries (within
+     *    TTL); SSE / optimistic / failure entries are `fresh = false`.
+     *  - `coverage`: `state.authority.coverage[currentScope]` mapped to the
+     *    aggregator's [Coverage], defaulting to [Coverage.Empty] (cold-start
+     *    guard → lastSuccessTimeMs = -1 → [project] returns [GlobalBusyState.Unknown]).
+     *
+     * Not referentially-pure (reads [identityStore]) — but deterministic given
+     * `(state, boundIdentity)`, and the bound identity is process-stable across
+     * a CAS retry. This is the derivation, NOT a mutation — the purity of the
+     * authority REDUCER ([reduceAuthority]) is untouched.
+     */
+    private fun authorityToAggregate(state: StoreState): Aggregate {
+        val authority = state.authority
+        val scope = currentScope()
+        val currentFp = scope.serverGroupFp
+        val entries = HashMap<SessionStatusKey, Entry>(authority.bySid.size)
+        for ((sid, e) in authority.bySid) {
+            // §P0-A r2 #4: scope-check by entry.scopeKey. An entry whose scopeKey
+            // is non-null AND does NOT match the current scope is SKIPPED — it
+            // belongs to a different server group/endpoint and must not contribute
+            // to the current aggregation. Entries with null scopeKey (pre-r2
+            // migration) are conservatively included (single-scope P0-A).
+            if (e.scopeKey != null && e.scopeKey != scope) continue
+            // §P0-A r2 #4: use the REAL workdir from the matched scope's
+            // coverage (not e.workdir which may be null for entries from
+            // different origins). For aggregator's purpose, both are equivalent
+            // in single-scope P0-A; use e.workdir for backward compatibility.
+            val key = SessionStatusKey(currentFp, e.workdir ?: "", sid)
+            entries[key] = Entry(
+                status = e.status.toSessionBusyStatus(),
+                sourceTimeMs = e.updatedMonotonic,
+                fresh = e.origin == EntryOrigin.REST,
+            )
+        }
+        val authCov = authority.coverage[scope]
+        val coverage = if (authCov != null) {
+            Coverage(
+                registeredWorkdirs = authCov.registeredWorkdirs,
+                coveredWorkdirs = authCov.coveredWorkdirs,
+                unmappedActiveIds = authCov.unmappedActiveIds,
+                lastSuccessTimeMs = authCov.lastSuccessTimeMs,
+            )
+        } else {
+            Coverage.Empty
+        }
+        return Aggregate(entries = entries, coverage = coverage, currentGroupFp = currentFp)
+    }
+
+    /**
+     * §P0-A Lane 2: re-derive the [Aggregate] from [state], install it in the
+     * [AtomicReference], and feed it into the UNCHANGED [publishLocked] /
+     * [rescheduleFreshnessLocked] pipeline. Called by BOTH the `init` collect
+     * (async authority changes) AND each adapter method (synchronous B4-b read)
+     * AND the [freshnessJob] TTL wake-up. MUST be called inside
+     * [commitPublishLock] (it is — this method acquires it).
+     *
+     * §P0-A rev-gpt #4 (version-monotone): inside the lock, DROPS a stale
+     * emission whose [StoreState.authorityRevision] predicates
+     * [lastPublishedRevision]. Uses STRICTLY-LESS (`<`) so a SAME-revision TTL
+     * re-publish from the freshnessJob is NOT skipped. On a real publish,
+     * stamps [lastPublishedRevision] = the current revision. This closes the
+     * race where a stale collect emission (queued before a newer synchronous
+     * adapter publish) acquires the lock later and overwrites the newer verdict.
+     */
+    private fun publishFromState(state: StoreState) {
+        synchronized(commitPublishLock) {
+            // §P0-A rev-gpt #4: version-monotone guard. A stale snapshot whose
+            // authorityRevision is STRICTLY-LESS than what was already published
+            // is dropped (a newer publish already landed). Same revision is NOT
+            // dropped (freshnessJob TTL re-eval at the same authority version).
+            if (state.authorityRevision < lastPublishedRevision) return
+            lastPublishedRevision = state.authorityRevision
+            val agg = authorityToAggregate(state)
+            aggregate.set(agg)
+            publishLocked(agg, clock())
+        }
+    }
 
     // ── StatusAggregator.stateAtNow (D1 gate #1) ───────────────────────────
 
     /**
      * D1 (gate #1): time-correct projection at the instant of the call. Reads
-     * the live atomic [aggregate] and recomputes the verdict with
-     * the aggregator's own [clock]. Used by the §4.4 idle-debounce expiry so
-     * a debounce that fires at exactly `sourceTime + TTL + ε` does not read
-     * a stale `AllIdleFresh` from the cached [globalState].
+     * the live DERIVED [aggregate] (now from authority) and recomputes the
+     * verdict with the aggregator's own [clock]. UNCHANGED logic — only the
+     * source of [aggregate] changed (derived, not mutated).
      */
     override fun stateAtNow(): GlobalBusyState =
         project(aggregate.get(), clock())
 
-    // ── StatusAggregatorInput ──────────────────────────────────────────────
+    // ── StatusAggregatorInput → authority-dispatch adapters ─────────────────
 
     /**
-     * REST-driven refresh of the global busy source (FGS spec §3 «Phase 0 主路径»,
-     * §3.1 merge timing, §2 epoch guard).
+     * REST-driven refresh — now a THIN ADAPTER (FGS spec §3 «Phase 0 主路径»,
+     * §3.1 merge timing, §2 epoch guard). Same signature as pre-Lane-2 (call
+     * sites unchanged).
      *
-     * **Epoch guard (FGS spec §2 + §3.1, CP4)**: captures
-     * `epochAtRequestStart = identityStore.currentEpoch()` BEFORE the REST call.
-     * When committing the response (success OR failure), if the current epoch differs
-     * from `epochAtRequestStart`, the response is dropped silently — a reconfigure
-     * invalidated the in-flight request, and a stale old-epoch response MUST NOT mutate
-     * current state.
-     *
-     * **D1 (gate #5)**: on success, a `sessionId` returned by `/session/status`
-     * that is NOT in [StatusSnapshot.sessionsById] is recorded in
-     * [Coverage.unmappedActiveIds] and forces [GlobalBusyState.Busy] (do NOT
-     * skip, do NOT invent a workdir). Pre-D1 these were silently dropped.
-     *
-     * **D1 (gate #5)**: [StatusSnapshot.registeredWorkdirs] replaces
-     * `sessionsById.values.map(directory)` as the all-idle coverage predicate.
-     * A registered workdir with no live session is still required to be
-     * covered (by the empty-snapshot coverage marker), so its sessions being
-     * archived cannot silently flip the host to `AllIdleFresh`.
+     *  1. Capture `requestStartMs` + `epochAtRequestStart` BEFORE the fetch.
+     *  2. [StatusFetchService] fetches the REST/slim merged status map (the
+     *     network work extracted out of this class).
+     *  3. CP4 §2 epoch guard: drop if a reconfigure invalidated this request.
+     *  4. On success → [buildAuthorityApplySnapshot] + `dispatch(
+     *     AuthorityEvent(ApplySnapshot))` (the pure authority reducer does the
+     *     binning / merge-timing / coverage / in-flight protection). On failure
+     *     → `dispatch(AuthorityEvent(MarkSourceFailed))`.
+     *  5. SYNCHRONOUS [publishFromState] so the B4-b synchronous read at
+     *     `SessionStreamingController:183` (`globalState.value` immediately
+     *     after `refresh` returns) sees the fresh verdict.
      */
     override suspend fun refresh(identity: ConnectionIdentity, snapshot: StatusSnapshot) {
         val requestStartMs = clock()
         val epochAtRequestStart = identityStore.currentEpoch()
-        // T-R1 (slimapi R1) #3 disconnect fallback: in slim mode route the bulk
-        // status fetch through the sidecar's `GET /slimapi/sessions/status`
-        // (one call per registered workdir — the sidecar requires a single
-        // directory per call) instead of the legacy `GET /session/status`.
-        // Same Map<String, SessionStatus> shape, so the merge/projection below
-        // is unchanged. This is the L2Idle/L3 degraded fallback: on slim SSE
-        // loss, ProcessStatusPoller (≤30s) drives this refresh using SLIM
-        // endpoints, NOT legacy. Legacy mode (usesSlimStatusFanOut == false) is
-        // byte-for-byte unchanged.
-        val result: Result<StatusFetch> = if (repository.usesSlimStatusFanOut) {
-            withContext(Dispatchers.IO) {
-                val merged = mutableMapOf<String, SessionStatus>()
-                val succeeded = mutableSetOf<String>()
-                val failed = mutableSetOf<String>()
-                for (dir in snapshot.registeredWorkdirs) {
-                    repository.getSlimapiSessionsStatus(dir)
-                        .onSuccess { merged.putAll(it); succeeded.add(dir) }
-                        .onFailure { failed.add(dir) }
-                }
-                when {
-                    // No registered workdirs (cold-start): treat as success-empty
-                    // (the coverage marker's cold-start guard handles projection).
-                    snapshot.registeredWorkdirs.isEmpty() ->
-                        Result.success(StatusFetch(merged, failed))
-                    // All per-directory calls failed → surface as failure so the
-                    // projection marks every known session Unknown (NOT Idle),
-                    // matching the legacy failure semantics.
-                    succeeded.isEmpty() -> Result.failure(
-                        java.io.IOException("slim bulk status failed for all registered workdirs")
-                    )
-                    // Partial/full success → fold the merged map + carry the
-                    // failed-workdir set so the fold marks their sessions Unknown.
-                    else -> Result.success(StatusFetch(merged, failed))
-                }
-            }
-        } else {
-            // Legacy: single host-global call. failedWorkdirs is always empty,
-            // so the fold below is byte-for-byte identical to the pre-T-R1 path.
-            withContext(Dispatchers.IO) {
-                repository.getSessionStatus().map { StatusFetch(it, emptySet()) }
-            }
-        }
-        // CP4 §2 epoch guard: drop the response if a reconfigure invalidated this request
-        // mid-flight. The check happens AFTER the suspend (the only place an epoch bump
-        // could have happened) and BEFORE any state mutation.
+        // §P0-A rev-gpt #2 (kill TOCTOU): capture hostProfileId + identityEpoch
+        // at request START (before the fetch), NOT after — so a host switch
+        // landing mid-fetch is detected by the reducer's epoch guard inside
+        // the CAS. The dispatch-side identityStore.currentEpoch() check below
+        // additionally catches endpoint/workdir-only reconfigures.
+        val stateAtStart = store.stateFlow.value
+        val hostAtStart = stateAtStart.host.currentHostProfileId
+        val identityEpochAtStart = stateAtStart.identityEpoch
+        // §3.1 merge timing (B4-b adapter-side): localBefore captures the
+        // projection of entries that are NOT fresher than the REST request
+        // start. Entries with `updatedMonotonic > requestStartMs` (a fresher
+        // SSE observation landed before this REST started) are EXCLUDED so the
+        // reducer's REST in-flight protection (mergeStatusSnapshotInFlight)
+        // treats them as "changed during the round-trip" → SSE-wins overrides
+        // the stale REST snapshot.
+        val authorityAtStart = stateAtStart.authority
+        val localBefore = authorityAtStart.bySid
+            .filterValues { it.updatedMonotonic <= requestStartMs }
+            .mapValues { it.value.status }
+        val result = statusFetchService.fetch(snapshot)
+        // CP4 §2 epoch guard: drop the response if a reconfigure invalidated
+        // this request mid-flight (checked AFTER the suspend, BEFORE dispatch).
         if (identityStore.currentEpoch() != epochAtRequestStart) return
+        val scopeKey = ScopeKey(
+            serverGroupFp = identity.serverGroupFp,
+            endpointFp = identity.endpointFp,
+        )
+        val token = RequestToken(
+            hostProfileId = hostAtStart,
+            requestStartMs = requestStartMs,
+            identityEpoch = identityEpochAtStart,
+        )
         result.fold(
             onSuccess = { fetch ->
-                update { current ->
-                    val next = current.entries.toMutableMap()
-                    val activeKeys = HashSet<SessionStatusKey>()
-                    val unmapped = HashSet<String>()
-                    for ((sessionId, serverStatus) in fetch.statuses) {
-                        val session = snapshot.sessionsById[sessionId]
-                        if (session == null) {
-                            // D1 gate #5: positively known active — server returned
-                            // it but we have no workdir mapping. Track the id and
-                            // let the projection surface it as Busy.
-                            unmapped.add(sessionId)
-                            continue
-                        }
-                        val key = SessionStatusKey(identity.serverGroupFp, session.directory, sessionId)
-                        activeKeys.add(key)
-                        val prev = next[key]
-                        if (prev == null || requestStartMs >= prev.sourceTimeMs) {
-                            next[key] = Entry(serverStatus.toSessionBusyStatus(), requestStartMs, fresh = true)
-                        }
-                    }
-                    for ((sessionId, session) in snapshot.sessionsById) {
-                        val key = SessionStatusKey(identity.serverGroupFp, session.directory, sessionId)
-                        if (key in activeKeys) continue
-                        val prev = next[key]
-                        if (prev == null || requestStartMs >= prev.sourceTimeMs) {
-                            // T-R1 方案A Issue2: a known-but-absent session in a
-                            // FAILED workdir is NOT authoritatively idle — mark it
-                            // Unknown (fresh=false) so the projection refuses
-                            // AllIdleFresh on a partial slim failure. Successful
-                            // workdirs (and all of legacy, where failedWorkdirs is
-                            // always empty) fold Idle as before.
-                            val failedDir = session.directory in fetch.failedWorkdirs
-                            next[key] = Entry(
-                                status = if (failedDir) SessionBusyStatus.Unknown else SessionBusyStatus.Idle,
-                                sourceTimeMs = requestStartMs,
-                                fresh = !failedDir,
-                            )
-                        }
-                    }
-                    current.copy(
-                        entries = next.toMap(),
-                        coverage = Coverage(
-                            registeredWorkdirs = snapshot.registeredWorkdirs,
-                            // 方案A Issue2: exclude failed workdirs from coverage so
-                            // the registered-workdir coverage predicate (project
-                            // :544) independently refuses AllIdleFresh when any
-                            // registered workdir was not successfully fetched.
-                            coveredWorkdirs = snapshot.registeredWorkdirs - fetch.failedWorkdirs,
-                            unmappedActiveIds = unmapped,
-                            lastSuccessTimeMs = requestStartMs,
-                        ),
-                        currentGroupFp = identity.serverGroupFp,
-                    )
-                }
+                // D1 gate #5: ids returned by /session/status that are NOT in
+                // sessionsById are positively known active → forces Busy. They
+                // are tracked in [unmappedActiveIds] (coverage) and do NOT enter
+                // bySid (no workdir mapping → no composite key). The reducer's
+                // `normalizeAuthoritativeStatusSnapshot` keeps any id present in
+                // the snapshot, so we filter to MAPPED sids only to prevent
+                // ghosts from materializing a bySid entry.
+                val unmappedActiveIds = fetch.statuses.keys - snapshot.sessionsById.keys
+                val mappedStatuses = fetch.statuses.filterKeys { it in snapshot.sessionsById }
+                // §P0-A rev-gpt #6 (fail-closed for failed-dir sessions): a
+                // session in a FAILED workdir must NOT be idle-normalized (it
+                // was not authoritatively fetched). Exclude failed-dir session
+                // ids from authoritativeNodeIds so the reducer does NOT
+                // idle-fill them → they stay ABSENT (fail-closed unknown).
+                val failedDirSessionIds = snapshot.sessionsById.values
+                    .filter { it.directory.isNotBlank() && it.directory in fetch.failedWorkdirs }
+                    .map { it.id }
+                    .toSet()
+                val op = buildAuthorityApplySnapshot(
+                    snapshot = mappedStatuses,
+                    authoritativeSessions = snapshot.sessionsById,
+                    authoritativeNodeIds = snapshot.sessionsById.keys - failedDirSessionIds,
+                    // 方案A Issue2: exclude failed workdirs from coverage so the
+                    // registered-workdir coverage predicate independently
+                    // refuses AllIdleFresh on a partial slim failure.
+                    coveredWorkdirs = snapshot.registeredWorkdirs - fetch.failedWorkdirs,
+                    partialFailureWorkdirs = fetch.failedWorkdirs,
+                    unmappedActiveIds = unmappedActiveIds,
+                    lastSuccessTimeMs = requestStartMs,
+                    scopeKey = scopeKey,
+                    requestToken = token,
+                    localBefore = localBefore,
+                )
+                store.dispatch(AppAction.AuthorityEvent(op))
+                publishFromState(store.stateFlow.value)
             },
-            onFailure = { markRequestFailedInternal(identity, snapshot, requestStartMs) },
+            onFailure = { markRequestFailedInternal(identity, snapshot, requestStartMs, token) },
         )
     }
 
     /**
-     * Apply a single SSE-driven status update (FGS spec §3.1 merge timing).
+     * Apply a single SSE-driven status update — now a THIN ADAPTER (FGS spec
+     * §3.1 merge timing). Same signature as pre-Lane-2 (call sites unchanged).
      *
-     * Overwrites the entry for [key] iff [sourceTimeMs] `>=` the existing entry's
-     * `sourceTimeMs` (equal timestamps also overwrite, so a same-instant SSE frame replaces
-     * a prior REST snapshot of the same instant). A strictly older SSE frame is dropped
-     * (defensive against out-of-order SSE replay during reconnect).
+     * §3.1 merge timing (adapter-side): a strictly-OLDER SSE frame
+     * (`sourceTimeMs < ` the current authority entry's `updatedMonotonic`) is
+     * DROPPED — defensive against out-of-order SSE replay during reconnect
+     * (the pre-Lane-2 aggregator did the same `sourceTimeMs >= prev.sourceTimeMs`
+     * gate). Equal timestamps overwrite (matches the legacy `>=` rule). The
+     * authority reducer's [ApplyEvent] is pure + lenient for P0-A (no causal
+     * fence for legacy SSE without serverRound); the adapter supplies the
+     * source-time merge-timing gate.
      *
-     * Not a `suspend` function: SSE status frames are control-class events delivered on the
-     * bridge's single-consumer channel, and the update is a single CAS step.
-     *
-     * @param key Composite key — `serverGroupFp` must match the current connection or the
-     *  caller's identity check has failed upstream; this class does not second-guess it.
-     *  The key's `serverGroupFp` also updates [currentGroupFp] so [globalState] reflects the
-     *  most recently active identity (the bridge guarantees only current-identity frames
-     *  reach this method).
-     * @param status The SSE-observed status (typically `Busy` / `Retry` / `Idle`).
-     * @param sourceTimeMs Monotonic arrival time of the SSE event; the merge-timing arbiter.
+     * Then dispatches [AuthorityOp.ApplyEvent] + synchronous [publishFromState]
+     * for any sync reader. [SessionBusyStatus]→[SessionStatus] reverse mapping
+     * via [toSessionStatus] (Busy/Retry/Idle only — SSE never emits Unknown).
      */
     override fun applySseStatus(key: SessionStatusKey, status: SessionBusyStatus, sourceTimeMs: Long) {
-        update { current ->
-            val prev = current.entries[key]
-            if (prev == null || sourceTimeMs >= prev.sourceTimeMs) {
-                current.copy(
-                    entries = current.entries + (key to Entry(status, sourceTimeMs, fresh = false)),
-                    currentGroupFp = key.serverGroupFp,
-                )
-            } else {
-                current
-            }
-        }
+        // §3.1 merge timing: drop a strictly-older SSE frame (out-of-order replay).
+        val current = store.stateFlow.value.authority.bySid[key.sessionId]
+        if (current != null && sourceTimeMs < current.updatedMonotonic) return
+        val op = AuthorityOp.ApplyEvent(
+            sid = key.sessionId,
+            status = status.toSessionStatus(),
+            origin = EntryOrigin.SSE_LEGACY,
+            scopeKey = currentScope(),
+            connectionMonotonicMs = sourceTimeMs,
+            workdir = key.workdir,
+        )
+        store.dispatch(AppAction.AuthorityEvent(op))
+        publishFromState(store.stateFlow.value)
     }
 
     /**
-     * Explicit failure entry (FGS spec §3 «请求失败 → 全局 Unknown»). See
-     * [StatusAggregatorInput.markRequestFailed] for the contract.
+     * Explicit failure entry — now a THIN ADAPTER (FGS spec §3 «请求失败 → 全局
+     * Unknown»). Same signature as pre-Lane-2 (call sites unchanged).
+     *
+     * Dispatches [AuthorityOp.MarkSourceFailed] (the reducer merge-times bySid
+     * — keeps fresher SSE Busy/Retry, removes older → absence ≡ unknown — and
+     * sets coverage.lastSuccessTimeMs = -1 so the derived [project] returns
+     * [GlobalBusyState.Unknown] via the cold-start / stale-success coverage
+     * gate). Then synchronous [publishFromState].
      */
     override fun markRequestFailed(
         identity: ConnectionIdentity,
         snapshot: StatusSnapshot,
         sourceTimeMs: Long,
     ) {
-        markRequestFailedInternal(identity, snapshot, sourceTimeMs)
+        // §P0-A rev-gpt #2: capture host/epoch at call time (the public entry
+        // is NOT suspend — no mid-call reconfigure window; the token reflects
+        // the current state at the instant of the failure call).
+        val currentState = store.stateFlow.value
+        val token = RequestToken(
+            hostProfileId = currentState.host.currentHostProfileId,
+            requestStartMs = sourceTimeMs,
+            identityEpoch = currentState.identityEpoch,
+        )
+        markRequestFailedInternal(identity, snapshot, sourceTimeMs, token)
     }
 
     private fun markRequestFailedInternal(
         identity: ConnectionIdentity,
         snapshot: StatusSnapshot,
         sourceTimeMs: Long,
+        token: RequestToken,
     ) {
-        update { current ->
-            val next = current.entries.toMutableMap()
-            for ((sessionId, session) in snapshot.sessionsById) {
-                val key = SessionStatusKey(identity.serverGroupFp, session.directory, sessionId)
-                val prev = next[key]
-                if (prev == null || sourceTimeMs >= prev.sourceTimeMs) {
-                    next[key] = Entry(SessionBusyStatus.Unknown, sourceTimeMs, fresh = false)
-                }
-            }
-            // Preserve coverage so the all-idle predicate still gates on the
-            // registered workdir set; clear unmapped-active (we did not get
-            // a server snapshot this cycle) and refuse AllIdleFresh by
-            // marking lastSuccessTimeMs as -1 if the prior marker is now
-            // stale. The simplest correct move: keep the registered workdirs,
-            // drop unmappedActiveIds (no snapshot), and reset
-            // lastSuccessTimeMs to -1 so the cold-start / stale guard fires.
-            current.copy(
-                entries = next.toMap(),
-                coverage = current.coverage.copy(
-                    registeredWorkdirs = snapshot.registeredWorkdirs,
-                    coveredWorkdirs = emptySet(),
-                    unmappedActiveIds = emptySet(),
-                    lastSuccessTimeMs = -1L,
-                ),
-                currentGroupFp = identity.serverGroupFp,
-            )
-        }
+        val scopeKey = ScopeKey(
+            serverGroupFp = identity.serverGroupFp,
+            endpointFp = identity.endpointFp,
+        )
+        val op = AuthorityOp.MarkSourceFailed(
+            scopeKey = scopeKey,
+            requestToken = token,
+            monotonic = sourceTimeMs,
+            registeredWorkdirs = snapshot.registeredWorkdirs,
+        )
+        store.dispatch(AppAction.AuthorityEvent(op))
+        publishFromState(store.stateFlow.value)
     }
 
-    // ── Internal: serialized commit + projection publication ───────────────
-
-    /**
-     * D5 (#5) — serialized commit + publication. Replaces the prior CAS loop
-     * (D4-A M7): the atomic swap alone did not serialize the derived
-     * StateFlow publication, so two concurrent updaters could interleave a
-     * new aggregate write with the publication of a verdict computed from
-     * the older one (R5 violation).
-     *
-     * Contract:
-     *  - [transform] is PURE + memory-only — it is invoked INSIDE the
-     *    critical section, so it MUST NOT perform network/REST work or any
-     *    retryable side-effect (all REST/SSE work happens BEFORE [update]
-     *    is called).
-     *  - Inside the single critical section: write aggregate → derive
-     *    map/busy/verdict → publish `_statusByKey` → `_globalBusy` →
-     *    `_globalState` → cancel/reschedule [freshnessJob].
-     *
-     * D1 (gate #1): after every committed swap, [publishLocked] arms the
-     * single passive-TTL wake-up for the earliest deadline that can flip the
-     * projection (each Idle entry's `sourceTimeMs + STATUS_TTL_MS + 1`, plus
-     * the coverage marker's TTL).
-     *
-     * **Always recomputes**: the pre-D1 `next === current` short-circuit
-     * broke the empty-snapshot path — `emptyMap().toMutableMap().toMap()`
-     * returns the emptyMap singleton, so a successful REST refresh that
-     * produced zero map writes (but DID update [coverage]) would skip
-     * recompute and the projection never saw the new coverage marker. The
-     * recompute is idempotent (a no-op if neither map nor coverage changed),
-     * so unconditionally running it on every commit is cheap and the
-     * coverage atomic guarantees the projection sees the latest coverage
-     * value committed alongside the state map.
-     */
-    private inline fun update(transform: (Aggregate) -> Aggregate) {
-        synchronized(commitPublishLock) {
-            val current = aggregate.get()
-            val next = transform(current)
-            aggregate.set(next)
-            publishLocked(next, clock())
-        }
-    }
+    // ── Internal: projection publication (UNCHANGED logic) ──────────────────
 
     /**
      * D5 (#5) — derives + publishes the three projected [StateFlow]s for the
-     * committed [Aggregate]. **MUST be called holding [commitPublishLock]**;
-     * callers outside [update] MUST acquire the lock first (the
-     * [freshnessJob] wake-up does so before recomputing the TTL-adjusted
-     * verdict from the live aggregate).
+     * committed [Aggregate]. **MUST be called holding [commitPublishLock]**.
      *
-     * Publication order: `_statusByKey` → `_globalBusy` → `_globalState`
-     * (so verdict observers cannot pair a new state with the previous
-     * commit's status map), then [rescheduleFreshnessLocked].
+     * UNCHANGED from pre-Lane-2: publication order `_statusByKey` →
+     * `_globalBusy` → `_globalState` (so verdict observers cannot pair a new
+     * state with the previous commit's status map), then
+     * [rescheduleFreshnessLocked]. The ONLY change is that [committed] is now
+     * DERIVED from authority (via [authorityToAggregate]) instead of mutated.
      */
     private fun publishLocked(committed: Aggregate, now: Long) {
         val map = committed.entries
         val cov = committed.coverage
         val verdict = project(committed, now)
-        // globalBusy: any Busy||Retry under the current identity OR any
-        // unmapped-active id (D1 gate #5). Kept for back-compat with non-
-        // lifecycle consumers.
         val fp = committed.currentGroupFp
         val scoped = map.filterKeys { it.serverGroupFp == fp }
         val anyBusy = scoped.any { entry ->
             entry.value.status == SessionBusyStatus.Busy ||
                 entry.value.status == SessionBusyStatus.Retry
         } || cov.unmappedActiveIds.isNotEmpty()
-        // Publish the key projection before the verdict derived from the same
-        // committed Aggregate, so verdict observers cannot pair a new state
-        // with the previous commit's status map.
         _statusByKey.value = map.mapValues { it.value.status }
         _globalBusy.value = anyBusy
         _globalState.value = verdict
@@ -519,30 +547,11 @@ class StatusAggregatorImpl internal constructor(
     }
 
     /**
-     * D1 (gate #1): the pure projection used by BOTH the [globalState]
-     * recompute (via [recompute]) and the time-correct [stateAtNow] read.
-     * Encodes the freshness boundary, the unmapped-active rule, and the
-     * registered-workdir coverage predicate.
-     *
-     * **Freshness boundary** (FGS spec §3): `now - sourceTimeMs <=
-     * STATUS_TTL_MS` is fresh. Stale `Idle` → contributes `Unknown`; stale
-     * `Busy` / `Retry` stays `Busy` (conservative — never silently drop
-     * keep-alive on a possibly-still-busy session).
-     *
-     * **Unmapped-active** (D1 gate #5): any entry in
-     * [Coverage.unmappedActiveIds] forces `Busy` (positively known active —
-     * the server returned the id under a busy/retry status but the snapshot
-     * had no workdir mapping for it).
-     *
-     * **Registered-workdir coverage** (D1 gate #5): `AllIdleFresh` is legal
-     * ONLY when (a) [Coverage.lastSuccessTimeMs] is within TTL (cold-start /
-     * stale-success guard), (b) `unmappedActiveIds` is empty, (c) every
-     * workdir in [Coverage.registeredWorkdirs] is covered by a fresh-Idle
-     * entry in [map] under the current identity's `serverGroupFp`, (d) every
-     * known tracked session under that fp is mapped (no `Unknown`), and (e)
-     * every tracked status is fresh `Idle`. A successful empty host snapshot
-     * with zero registered workdirs is `AllIdleFresh` (backed by the fresh
-     * coverage marker — NOT vacuous uninitialized state).
+     * D1 (gate #1): the pure projection used by BOTH the [globalState] recompute
+     * and the time-correct [stateAtNow] read. UNCHANGED from pre-Lane-2 —
+     * encodes the freshness boundary, the unmapped-active rule, and the
+     * registered-workdir coverage predicate. See the pre-Lane-2 kdoc for the
+     * full case-by-case rules (all preserved EXACTLY).
      */
     private fun project(committed: Aggregate, now: Long): GlobalBusyState {
         val map = committed.entries
@@ -568,49 +577,29 @@ class StatusAggregatorImpl internal constructor(
         if (scoped.values.any { now - it.sourceTimeMs > STATUS_TTL_MS }) return GlobalBusyState.Unknown
 
         // Empty state with no fresh coverage marker → Unknown (cold-start guard).
-        // A successful empty host snapshot writes lastSuccessTimeMs = requestStartMs
-        // (within TTL on the same cycle), so this guard refuses ONLY the never-
-        // refreshed-yet cold-start case.
         val freshSuccess =
             cov.lastSuccessTimeMs >= 0L && now - cov.lastSuccessTimeMs <= STATUS_TTL_MS
         if (!freshSuccess) return GlobalBusyState.Unknown
 
-        // gate #5: registered-workdir coverage predicate. Every workdir in
-        // the snapshot's registeredWorkdirs must be covered by at least one
-        // fresh entry in the current projection. A registered workdir with
-        // no live session falls out here (its directory is in
-        // registeredWorkdirs but no entry in `scoped` has that workdir) → Unknown.
+        // gate #5: registered-workdir coverage predicate.
         val allWorkdirsCovered = cov.coveredWorkdirs.containsAll(cov.registeredWorkdirs)
         if (!allWorkdirsCovered) return GlobalBusyState.Unknown
 
-        // gate #5 (e/f) already enforced above: every entry fresh Idle, no
-        // Unknown, no Busy. We are authoritative all-idle.
         return GlobalBusyState.AllIdleFresh
     }
 
     /**
-     * D1 (gate #1) + D5 (#5): schedule a single [freshnessJob] for the
-     * earliest current-identity deadline that can alter the projection.
-     * Busy/Retry entries need no wake-up (they stay conservatively busy);
-     * Idle entries flip to Unknown at `sourceTimeMs + STATUS_TTL_MS + 1`.
-     * The successful-snapshot coverage marker
-     * (`coverage.lastSuccessTimeMs`) is itself a deadline source: when it
-     * ages out the empty-state guard can flip the verdict.
+     * D1 (gate #1) + D5 (#5): schedule a single [freshnessJob] for the earliest
+     * current-identity deadline that can alter the projection. UNCHANGED logic
+     * from pre-Lane-2 (Busy/Retry need no wake-up; Idle entries flip to Unknown
+     * at `sourceTimeMs + STATUS_TTL_MS + 1`; the coverage marker's own TTL is a
+     * deadline source).
      *
-     * Only **strictly future** deadlines are scheduled — past deadlines
-     * were already consumed by the [publishLocked] that called this method
-     * (the projection saw `now > deadline` and applied the stale/Unknown
-     * verdict synchronously). Scheduling a 0-delay launch on an
-     * Unconfined-style scope would otherwise infinite-loop on the same
-     * stale deadline.
-     *
-     * D5 (#5): **MUST be called holding [commitPublishLock]** (the prior
-     * `@Synchronized` monitor is replaced by the publication lock so the
-     * freshness reschedule stays serialized with derived StateFlow
-     * publication — a stale `freshnessJob` could otherwise race a new
-     * publication). The wake-up coroutine itself ACQUIRES
-     * [commitPublishLock] before recomputing + republishing so it observes
-     * the same memory visibility as the serial state-machine mutations.
+     * §P0-A Lane 2: the wake-up coroutine now calls [publishFromState] (re-
+     * derive from the LIVE authority + clock) instead of republishing a cached
+     * aggregate — so a TTL expiry re-derives the freshest authority snapshot
+     * (which may have changed since the aggregate was cached) AND applies the
+     * live clock. MUST be called holding [commitPublishLock].
      */
     private fun rescheduleFreshnessLocked(committed: Aggregate, now: Long) {
         freshnessJob?.cancel()
@@ -622,8 +611,6 @@ class StatusAggregatorImpl internal constructor(
             .values
             .map { it.sourceTimeMs + STATUS_TTL_MS + 1 }
             .filter { it > now }
-        // Also consider the coverage marker's own TTL — when lastSuccessTimeMs
-        // ages out, the empty-state / cold-start guard can flip the verdict.
         val coverageDeadline = if (cov.lastSuccessTimeMs >= 0L) {
             cov.lastSuccessTimeMs + STATUS_TTL_MS + 1
         } else {
@@ -638,16 +625,14 @@ class StatusAggregatorImpl internal constructor(
                 throw e
             }
             try {
-                // D5 (#5): acquire commitPublishLock so the TTL-adjusted
-                // recompute + republish observe the same memory visibility
-                // as serial state-machine mutations. Without the lock a
-                // concurrent update could install a newer aggregate + we'd
-                // publish a verdict computed from the older one (R5).
-                synchronized(commitPublishLock) {
-                    val live = aggregate.get()
-                    val liveNow = clock()
-                    publishLocked(live, liveNow)
-                }
+                // §P0-A Lane 2: re-derive from the LIVE authority + clock (NOT a
+                // cached aggregate republish) so the TTL-adjusted verdict reflects
+                // any authority change since the aggregate was cached. publishFromState
+                // acquires [commitPublishLock] internally (D5 #5 — same memory
+                // visibility as serial state-machine mutations). publishLocked →
+                // rescheduleFreshnessLocked re-arms the next deadline cooperively
+                // (the current coroutine is already past its suspension point).
+                publishFromState(store.stateFlow.value)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -660,15 +645,10 @@ class StatusAggregatorImpl internal constructor(
         private const val TAG = "StatusAggregatorImpl"
 
         /**
-         * FGS spec §3 «status TTL»: an entry is "fresh" only within ≈30s of its source
-         * time. Used ONLY for the [globalState] idle-grace verdict — stale `Busy`/`Retry`
-         * entries stay `Busy` (conservative), stale `Idle` entries fall back to `Unknown`
-         * (do not enter idle grace on stale data).
-         *
-         * **D1 (gate #1)**: the boundary is `now - sourceTimeMs <= STATUS_TTL_MS` (fresh),
-         * flipping to stale at `STATUS_TTL_MS + 1`. The passive [freshnessJob] targets
-         * `sourceTimeMs + STATUS_TTL_MS + 1` so a fresh-Idle entry autonomously expires
-         * to `Unknown` even without any subsequent map mutation.
+         * FGS spec §3 «status TTL»: an entry is "fresh" only within ≈30s of its
+         * source time. UNCHANGED. See the pre-Lane-2 kdoc for the boundary
+         * semantics (`now - sourceTimeMs <= STATUS_TTL_MS` fresh; the passive
+         * [freshnessJob] targets `sourceTimeMs + STATUS_TTL_MS + 1`).
          */
         const val STATUS_TTL_MS = 30_000L
     }

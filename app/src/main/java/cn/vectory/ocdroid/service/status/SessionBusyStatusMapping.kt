@@ -22,3 +22,25 @@ fun SessionStatus.toSessionBusyStatus(): SessionBusyStatus = when {
     isIdle -> SessionBusyStatus.Idle
     else -> SessionBusyStatus.Busy
 }
+
+/**
+ * §P0-A Lane 2: the REVERSE mapping — [SessionBusyStatus] → transport
+ * [SessionStatus], used by the aggregator's `applySseStatus` adapter to funnel
+ * an SSE-driven [SessionBusyStatus] back through the authority reducer (which
+ * consumes [SessionStatus], the same model the UI projection + every other
+ * writer uses — single truth, single shape).
+ *
+ * `Unknown` / `Fresh` have NO transport representation (`SessionStatus.type`
+ * is `idle`/`busy`/`retry` only). [StatusAggregatorInput.applySseStatus] is
+ * contracted to be called ONLY with `Busy`/`Retry`/`Idle` (SSE never emits
+ * Unknown); the reverse mapper [error]s on the unmappable values so a future
+ * caller cannot silently fabricate an authority entry from a non-transport
+ * status.
+ */
+fun SessionBusyStatus.toSessionStatus(): SessionStatus = when (this) {
+    SessionBusyStatus.Busy -> SessionStatus(type = "busy")
+    SessionBusyStatus.Retry -> SessionStatus(type = "retry")
+    SessionBusyStatus.Idle -> SessionStatus(type = "idle")
+    SessionBusyStatus.Unknown,
+    SessionBusyStatus.Fresh -> error("SessionBusyStatus.$this has no transport SessionStatus representation")
+}

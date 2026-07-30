@@ -25,6 +25,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -91,9 +92,12 @@ class SessionSyncCoordinatorStatusFeedTest {
 
     private fun seedSessions(sessions: List<Session>) {
         slices.mutateSessionList {
+            // §P0-A rev-gpt #8 B10 r2: sessionStatuses is no longer a public
+            // factory param (sole-writer gate). emptyMap() was the default, so
+            // the line is simply removed; seed non-empty statuses via
+            // withProjection when needed.
             SessionListState(
                 sessions = sessions,
-                sessionStatuses = emptyMap(),
                 expandedSessionIds = emptySet(),
                 loadedSessionLimit = 0,
                 hasMoreSessions = false,
@@ -116,11 +120,14 @@ class SessionSyncCoordinatorStatusFeedTest {
             put("status", buildJsonObject { put("type", JsonPrimitive("busy")) })
         })
 
-        assertEquals(1, aggregatorInput.applyCalls.size)
-        val call = aggregatorInput.applyCalls.single()
-        assertEquals(SessionStatusKey(serverGroupFp, "/work-a", "s1"), call.key)
-        assertEquals(SessionBusyStatus.Busy, call.status)
-        assertEquals(1_000L, call.sourceTimeMs)
+        // §P0-A rev-gpt #3: LSH no longer calls applySseStatus directly — the
+        // status flows through authority (applyStatusViaAuthority → dispatch).
+        // Verify the authority entry has the resolved workdir + status + clock.
+        val entry = slices.store.stateFlow.value.authority.bySid["s1"]
+        assertNotNull("authority entry must be written for the SSE status", entry)
+        assertEquals("/work-a", entry!!.workdir)
+        assertEquals("busy", entry.status.type)
+        assertEquals(1_000L, entry.updatedMonotonic)
     }
 
     @Test
@@ -132,8 +139,8 @@ class SessionSyncCoordinatorStatusFeedTest {
             put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
         })
 
-        val call = aggregatorInput.applyCalls.single()
-        assertEquals(SessionBusyStatus.Idle, call.status)
+        val entry = slices.store.stateFlow.value.authority.bySid["s1"]
+        assertEquals("idle", entry?.status?.type)
     }
 
     @Test
@@ -145,8 +152,8 @@ class SessionSyncCoordinatorStatusFeedTest {
             put("status", buildJsonObject { put("type", JsonPrimitive("retry")) })
         })
 
-        val call = aggregatorInput.applyCalls.single()
-        assertEquals(SessionBusyStatus.Retry, call.status)
+        val entry = slices.store.stateFlow.value.authority.bySid["s1"]
+        assertEquals("retry", entry?.status?.type)
     }
 
     @Test
@@ -157,7 +164,6 @@ class SessionSyncCoordinatorStatusFeedTest {
         slices.mutateSessionList {
             SessionListState(
                 sessions = emptyList(),
-                sessionStatuses = emptyMap(),
                 expandedSessionIds = emptySet(),
                 loadedSessionLimit = 0,
                 hasMoreSessions = false,
@@ -176,8 +182,9 @@ class SessionSyncCoordinatorStatusFeedTest {
             put("status", buildJsonObject { put("type", JsonPrimitive("busy")) })
         })
 
-        val call = aggregatorInput.applyCalls.single()
-        assertEquals(SessionStatusKey(serverGroupFp, "/work-x", "dir-1"), call.key)
+        val entry = slices.store.stateFlow.value.authority.bySid["dir-1"]
+        assertNotNull("directory-resident session must reach authority", entry)
+        assertEquals("/work-x", entry!!.workdir)
     }
 
     @Test
@@ -209,7 +216,12 @@ class SessionSyncCoordinatorStatusFeedTest {
             put("status", buildJsonObject { put("type", JsonPrimitive("idle")) })
         })
 
-        assertEquals(listOf(5_000L, 6_000L), aggregatorInput.applyCalls.map { it.sourceTimeMs })
+        // §P0-A rev-gpt #3: LSH no longer calls applySseStatus — verify the
+        // authority entry reflects the LATEST SSE event (idle at 6_000L).
+        val entry = slices.store.stateFlow.value.authority.bySid["s1"]
+        assertNotNull("authority entry written", entry)
+        assertEquals("idle", entry!!.status.type)
+        assertEquals(6_000L, entry.updatedMonotonic)
     }
 
     @Test

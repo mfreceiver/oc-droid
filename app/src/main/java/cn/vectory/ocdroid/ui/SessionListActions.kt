@@ -13,7 +13,6 @@ import cn.vectory.ocdroid.ui.controller.applyAggregationOutcome
 import cn.vectory.ocdroid.ui.controller.aggregationSignal
 import cn.vectory.ocdroid.ui.controller.applySessionDiffIfAbsent
 import cn.vectory.ocdroid.ui.controller.allSessionsById
-import cn.vectory.ocdroid.ui.controller.normalizeAuthoritativeStatusSnapshot
 import cn.vectory.ocdroid.ui.controller.StatusPollOrchestrator
 import cn.vectory.ocdroid.ui.controller.loadCompleteSessionTrees
 import cn.vectory.ocdroid.ui.controller.rootIdOf
@@ -235,25 +234,59 @@ internal fun launchLoadChildSessions(
             // drops the result (fail-closed) so a stale snapshot can never
             // re-certify a root whose tree was invalidated.
             val epochAtStart = before.completenessEpoch
+            // §toctou-identity: capture the current host identity BEFORE any
+            // suspend so the post-fetch guard can detect a host switch mid-flight.
+            val hostProfileIdAtStart = slices.host.value.currentHostProfileId
+            // §toctou-identity: capture identityEpoch BEFORE any suspend so a
+            // mid-flight identity switch invalidates the stale response.
+            val identityEpochAtStart = slices.store.stateFlow.value.identityEpoch
             val hydration = loadCompleteSessionTrees(repository, listOf(root))
             if (rootId in hydration.completeRootIds) {
                 val statusBefore = slices.sessionList.value.sessionStatuses
+                // §P0-A: requestStartMs captured at the caller (carried into the
+                // authority op — the reducer stays pure).
+                val requestStartMs = System.currentTimeMillis()
                 val statusSnapshot = repository.getSessionStatus().getOrNull()
-                slices.mutateSessionList {
+                slices.store.mutateState { snapshot ->
                     // §gpter-blocker: the tree was invalidated mid-flight —
                     // drop the stale result. The root stays incomplete so the
                     // next tick re-hydrates against the fresh tree.
-                    if (it.completenessEpoch != epochAtStart) return@mutateSessionList it
+                    val it = snapshot.sessionList
+                    if (it.completenessEpoch != epochAtStart ||
+                        slices.host.value.currentHostProfileId != hostProfileIdAtStart
+                    ) return@mutateState snapshot
                     val nextChildren = it.childSessions + hydration.childrenByParent
-                    val nextStatuses = if (statusSnapshot != null) {
-                        val authoritativeIds = allSessionsById(it.sessions, it.directorySessions, nextChildren).keys
-                        val normalizedStatuses = normalizeAuthoritativeStatusSnapshot(statusSnapshot, authoritativeIds)
-                        mergeStatusSnapshot(statusBefore, it.sessionStatuses, normalizedStatuses)
-                    } else it.sessionStatuses
-                    it.copy(
-                        childSessions = nextChildren,
-                        completeRootIds = it.completeRootIds + rootId,
-                        sessionStatuses = nextStatuses,
+                    val authoritative = allSessionsById(it.sessions, it.directorySessions, nextChildren)
+                    // §P0-A: status via PURE reduceAuthority (authority + projection
+                    // in this same CAS). reduceAuthority owns normalize + the REST
+                    // in-flight merge (op.localBefore=statusBefore).
+                    val withStatus = if (statusSnapshot != null) {
+                        val op = buildAuthorityApplySnapshot(
+                            snapshot = statusSnapshot,
+                            authoritativeSessions = authoritative,
+                            authoritativeNodeIds = authoritative.keys,
+                            coveredWorkdirs = authoritative.values.asSequence()
+                                .map { dir -> dir.directory }.filter { dir -> dir.isNotBlank() }.toSet(),
+                            partialFailureWorkdirs = emptySet(),
+                            unmappedActiveIds = emptySet(),
+                            lastSuccessTimeMs = requestStartMs,
+                            scopeKey = slices.store.authorityScope(),
+                            requestToken = cn.vectory.ocdroid.data.state.RequestToken(
+                                hostProfileId = hostProfileIdAtStart,
+                                requestStartMs = requestStartMs,
+                                identityEpoch = identityEpochAtStart,
+                            ),
+                            localBefore = statusBefore,
+                        )
+                        reduceAuthority(snapshot, op)
+                    } else {
+                        snapshot
+                    }
+                    withStatus.copy(
+                        sessionList = withStatus.sessionList.copy(
+                            childSessions = nextChildren,
+                            completeRootIds = it.completeRootIds + rootId,
+                        ),
                     )
                 }
             } else {

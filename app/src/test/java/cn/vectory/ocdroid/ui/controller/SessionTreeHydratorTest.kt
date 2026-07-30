@@ -76,7 +76,7 @@ class SessionTreeHydratorTest {
         val root = session("A")
         val child = session("C", "A")
         store.mutateSessionList {
-            it.copy(sessions = listOf(root), sessionStatuses = mapOf("A" to SessionStatus("idle")))
+            it.copy(sessions = listOf(root)).withProjection(mapOf("A" to SessionStatus("idle")))
         }
         coEvery { repository.getChildren("A") } returns Result.success(listOf(child))
         coEvery { repository.getChildren("C") } returns Result.success(emptyList())
@@ -99,7 +99,7 @@ class SessionTreeHydratorTest {
         val root = session("A")
         val child = session("C", "A")
         store.mutateSessionList {
-            it.copy(sessions = listOf(root), sessionStatuses = mapOf("A" to SessionStatus("idle")))
+            it.copy(sessions = listOf(root)).withProjection(mapOf("A" to SessionStatus("idle")))
         }
         val gate = CompletableDeferred<Unit>()
         coEvery { repository.getChildren("A") } coAnswers {
@@ -154,7 +154,7 @@ class SessionTreeHydratorTest {
         val root = session("A")
         val child = session("C", "A")
         store.mutateSessionList {
-            it.copy(sessions = listOf(root), sessionStatuses = mapOf("A" to SessionStatus("idle")))
+            it.copy(sessions = listOf(root)).withProjection(mapOf("A" to SessionStatus("idle")))
         }
         coEvery { repository.getChildren("A") } returns Result.success(listOf(child))
         coEvery { repository.getChildren("C") } returns Result.success(emptyList())
@@ -184,7 +184,7 @@ class SessionTreeHydratorTest {
         val root = session("A")
         val child = session("C", "A")
         store.mutateSessionList {
-            it.copy(sessions = listOf(root), sessionStatuses = mapOf("A" to SessionStatus("idle")))
+            it.copy(sessions = listOf(root)).withProjection(mapOf("A" to SessionStatus("idle")))
         }
         coEvery { repository.getChildren("A") } returns Result.success(listOf(child))
         coEvery { repository.getChildren("C") } returns Result.success(emptyList())

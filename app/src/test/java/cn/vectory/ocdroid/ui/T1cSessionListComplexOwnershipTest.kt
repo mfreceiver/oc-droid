@@ -12,6 +12,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -363,67 +364,82 @@ class T1cSessionListComplexOwnershipTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // I. SessionStatusPatched — optimistic busy on send (SessionMutationActions:452)
-    //
-    // Production copy() writes 2 fields: sessions (bumpSessionUpdated) +
-    // sessionStatuses (sessionId → busy). Both derive from (sessionId,
-    // updatedTimestamp, status).
+    // I. Optimistic busy on send — now funnels through the authority reducer
+    // (P0-A B1). SessionMutationActions dispatches
+    // `AuthorityEvent(ApplyEvent(OPTIMISTIC, optimisticBumpTimestamp=ts))`.
+    // The reducer writes the bySid entry + an optimisticClaim, records the bump
+    // in pendingBumps, and in the SAME CAS applies bumpSessionUpdated(sessions)
+    // + recomputes the sessionStatuses projection. Observable result (sessions
+    // bumped + sessionStatuses[sid]=busy) MUST equal the legacy mutateSessionList.
     // ═══════════════════════════════════════════════════════════════════════
 
-    /**
-     * Expected action shape:
-     *
-     * ```kotlin
-     * // launchSendMessage onSuccess optimistic busy write. Carries the
-     * // caller-captured [updatedTimestamp] (System.currentTimeMillis() at
-     * // call site) and the [status] to set (busy). The reducer delegates
-     * // sessions to the existing pure fn bumpSessionUpdated.
-     * data class SessionStatusPatched(
-     *     val sessionId: String,
-     *     val updatedTimestamp: Long,
-     *     val status: SessionStatus,
-     * ) : AppAction
-     * // reduce:
-     * //   state.copy(sessionList = state.sessionList.copy(
-     * //     sessions = bumpSessionUpdated(state.sessionList.sessions, action.sessionId, action.updatedTimestamp),
-     * //     sessionStatuses = state.sessionList.sessionStatuses + (action.sessionId to action.status),
-     * //   ))
-     * ```
-     */
+    private fun optimisticAuthorityEvent(sid: String, ts: Long, status: SessionStatus) =
+        AppAction.AuthorityEvent(
+            cn.vectory.ocdroid.data.state.AuthorityOp.ApplyEvent(
+                sid = sid,
+                status = status,
+                origin = cn.vectory.ocdroid.data.state.EntryOrigin.OPTIMISTIC,
+                scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+                connectionMonotonicMs = ts,
+                optimisticBumpTimestamp = ts,
+            ),
+        )
+
     @Test
-    fun `dispatch SessionStatusPatched equals legacy optimistic-busy mutateSessionList`() {
+    fun `optimistic authority event equals legacy optimistic-busy mutateSessionList`() {
         val sid = "s1"
         val ts = 12345L
         val status = SessionStatus(type = "busy")
-        val priorList = SessionListState(
-            sessions = listOf(Session(id = "s1", directory = "/a"), Session(id = "s2", directory = "/b")),
-            sessionStatuses = mapOf("s2" to SessionStatus(type = "idle")))
-        val oldStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
-        val newStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
+        val priorSessions = listOf(Session(id = "s1", directory = "/a"), Session(id = "s2", directory = "/b"))
+        val oldStore = SharedStateStore().apply { mutateState { it.copy(sessionList = SessionListState(sessions = priorSessions)) } }
+        val newStore = SharedStateStore().apply { mutateState { it.copy(sessionList = SessionListState(sessions = priorSessions)) } }
 
-        // OLD path: replicate SessionMutationActions:441-452 verbatim (fixed ts for determinism).
+        // Seed a pre-existing idle status for s2. §P0-A: status is now the
+        // authority projection, so newStore seeds via authority; oldStore seeds
+        // via the legacy direct sessionStatuses write (the reference path).
+        oldStore.mutateSessionList { sl -> sl.withProjection(mapOf("s2" to SessionStatus(type = "idle"))) }
+        newStore.dispatch(cn.vectory.ocdroid.ui.AppAction.AuthorityEvent(
+            cn.vectory.ocdroid.data.state.AuthorityOp.ApplyEvent(
+                sid = "s2",
+                status = SessionStatus(type = "idle"),
+                origin = cn.vectory.ocdroid.data.state.EntryOrigin.SSE_LEGACY,
+                scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+                connectionMonotonicMs = 0L,
+            ),
+        ))
+
+        // OLD path: replicate the pre-authority optimistic-busy mutateSessionList verbatim.
         val currentSessions = oldStore.stateFlow.value.sessionList.sessions
         val currentStatuses = oldStore.stateFlow.value.sessionList.sessionStatuses
         val newSessions = bumpSessionUpdated(currentSessions, sid, ts)
         val newStatuses = currentStatuses + (sid to status)
-        oldStore.mutateSessionList { sl -> sl.copy(sessions = newSessions, sessionStatuses = newStatuses) }
+        oldStore.mutateSessionList { sl -> sl.copy(sessions = newSessions).withProjection(newStatuses) }
 
-        // NEW path.
-        newStore.dispatch(AppAction.SessionStatusPatched(sid, ts, status))
+        // NEW path: authority reducer.
+        newStore.dispatch(optimisticAuthorityEvent(sid, ts, status))
 
+        val oldSl = oldStore.stateFlow.value.sessionList
+        val newSl = newStore.stateFlow.value.sessionList
         assertEquals(
-            "SessionStatusPatched MUST equal legacy optimistic-busy mutateSessionList (sessions + sessionStatuses)",
-            oldStore.stateFlow.value,
-            newStore.stateFlow.value)
-        val out = newStore.stateFlow.value.sessionList
-        assertEquals("sessionStatuses: busy set for sid", status, out.sessionStatuses[sid])
-        assertEquals("sessionStatuses: pre-existing idle survived", SessionStatus(type = "idle"), out.sessionStatuses["s2"])
-        assertEquals("sessions: s1 bumped (not prepend-replaced, same position)", 2, out.sessions.size)
-        assertEquals("sessions: s1 still at its original index (map-replace, not upsert)", "s1", out.sessions.first().id)
+            "optimistic authority MUST equal legacy optimistic-busy (sessions + sessionStatuses)",
+            oldSl.sessions, newSl.sessions)
+        assertEquals("sessionStatuses parity", oldSl.sessionStatuses, newSl.sessionStatuses)
+        assertEquals("sessionStatuses: busy set for sid", status, newSl.sessionStatuses[sid])
+        assertEquals("sessionStatuses: pre-existing idle survived", SessionStatus(type = "idle"), newSl.sessionStatuses["s2"])
+        assertEquals("sessions: s1 bumped (map-replace, same position)", 2, newSl.sessions.size)
+        assertEquals("sessions: s1 still at its original index", "s1", newSl.sessions.first().id)
+        // authority slice now owns the status.
+        val entry = newStore.stateFlow.value.authority.bySid[sid]
+        assertNotNull("authority.bySid populated for optimistic sid", entry)
+        assertEquals("authority origin OPTIMISTIC",
+            cn.vectory.ocdroid.data.state.EntryOrigin.OPTIMISTIC, entry?.origin)
+        assertNotNull("authority optimisticClaim set", entry?.optimisticClaim)
+        // pendingBumps consumed in the same CAS.
+        assertTrue("pendingBumps consumed", newStore.stateFlow.value.authority.pendingBumps.isEmpty())
     }
 
     @Test
-    fun `SessionStatusPatched is scoped to sessions and sessionStatuses - open-tabs-list and activeSessionIds untouched`() {
+    fun `optimistic authority event is scoped to sessions and sessionStatuses - activeSessionIds untouched`() {
         val prior = StoreState.initial().copy(
             sessionList = SessionListState(
                 sessions = listOf(Session(id = "s1", directory = "/a")),
@@ -431,7 +447,7 @@ class T1cSessionListComplexOwnershipTest {
                 pendingCreateIds = setOf("s1")))
         val store = SharedStateStore().apply { mutateState { prior } }
 
-        store.dispatch(AppAction.SessionStatusPatched("s1", 99L, SessionStatus(type = "busy")))
+        store.dispatch(optimisticAuthorityEvent("s1", 99L, SessionStatus(type = "busy")))
 
         val out = store.stateFlow.value.sessionList
         assertEquals("sessionStatuses patched", SessionStatus(type = "busy"), out.sessionStatuses["s1"])
@@ -696,30 +712,47 @@ class T1cSessionListComplexOwnershipTest {
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
-     * Expected action shape:
+     * Expected action shape (P0-A: status now flows through the authority
+     * reducer — the action carries an [cn.vectory.ocdroid.data.state.AuthorityOp]
+     * instead of a pre-merged sessionStatuses map):
      *
      * ```kotlin
-     * // SessionTreeHydrator.request commit. Carries the epoch captured BEFORE
-     * // hydration started (call-site前置); the reducer compare-and-bails if the
-     * // live epoch differs (fail-closed against a structural invalidation that
-     * // straddled the in-flight REST call). The validRoots filtering (directory
-     * // match + host-identity check) stays at the call site — the action
-     * // carries only the VALIDATED deltas.
      * data class SessionTreeHydrated(
      *     val epochAtStart: Long,
      *     val childSessionsDelta: Map<String, List<Session>>,
      *     val completeRootIdsDelta: Set<String>,
-     *     val sessionStatuses: Map<String, SessionStatus>,
+     *     val statusOp: cn.vectory.ocdroid.data.state.AuthorityOp?,
      * ) : AppAction
      * // reduce:
      * //   if (state.sessionList.completenessEpoch != action.epochAtStart) state  // stale → no-op
-     * //   else state.copy(sessionList = state.sessionList.copy(
-     * //     childSessions = state.sessionList.childSessions + action.childSessionsDelta,
-     * //     completeRootIds = state.sessionList.completeRootIds + action.completeRootIdsDelta,
-     * //     sessionStatuses = action.sessionStatuses,
-     * //   ))
+     * //   else {
+     * //     val withStatus = if (action.statusOp != null) reduceAuthority(state, action.statusOp) else state
+     * //     withStatus.copy(sessionList = withStatus.sessionList.copy(
+     * //       childSessions = … + action.childSessionsDelta,
+     * //       completeRootIds = … + action.completeRootIdsDelta,
+     * //     ))
+     * //   }
      * ```
      */
+    private fun snapshotOp(
+        statuses: Map<String, SessionStatus>,
+        authoritativeNodeIds: Set<String> = statuses.keys,
+        localBefore: Map<String, SessionStatus> = emptyMap(),
+    ): cn.vectory.ocdroid.data.state.AuthorityOp.ApplySnapshot =
+        cn.vectory.ocdroid.data.state.AuthorityOp.ApplySnapshot(
+            snapshot = statuses,
+            sidToWorkdir = emptyMap(),
+            authoritativeNodeIds = authoritativeNodeIds,
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 0L,
+            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+            requestToken = cn.vectory.ocdroid.data.state.RequestToken(hostProfileId = null, requestStartMs = 0L),
+            localBefore = localBefore,
+        )
+
     @Test
     fun `dispatch SessionTreeHydrated with matching epoch applies childSessions plus completeRootIds plus sessionStatuses`() {
         val epochAtStart = 5L
@@ -731,41 +764,40 @@ class T1cSessionListComplexOwnershipTest {
             childSessions = mapOf("s1" to listOf(Session(id = "c-old", directory = "/a", parentId = "s1"))),
             completeRootIds = setOf("s0"),
             completenessEpoch = epochAtStart, // MATCHES → apply
-            sessionStatuses = mapOf("s0" to SessionStatus(type = "idle")))
+            ).withProjection(mapOf("s0" to SessionStatus(type = "idle")))
         val oldStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
         val newStore = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
 
-        // OLD path: replicate SessionTreeHydrator:107-135 (epoch match → apply).
+        // OLD path: replicate the pre-authority hydrate commit (epoch match → apply).
         oldStore.mutateSessionList { current ->
             if (current.completenessEpoch != epochAtStart) return@mutateSessionList current
             current.copy(
                 childSessions = current.childSessions + childDelta,
                 completeRootIds = current.completeRootIds + rootDelta,
-                sessionStatuses = nextStatuses)
+                ).withProjection(nextStatuses)
         }
 
-        // NEW path.
+        // NEW path: status via the authority op (projection reproduces nextStatuses).
         newStore.dispatch(
             AppAction.SessionTreeHydrated(
                 epochAtStart = epochAtStart,
                 childSessionsDelta = childDelta,
                 completeRootIdsDelta = rootDelta,
-                sessionStatuses = nextStatuses)
+                statusOp = snapshotOp(nextStatuses))
         )
 
-        assertEquals(
-            "SessionTreeHydrated (epoch match) MUST equal legacy hydrate commit",
-            oldStore.stateFlow.value,
-            newStore.stateFlow.value)
-        val out = newStore.stateFlow.value.sessionList
+        val oldSl = oldStore.stateFlow.value.sessionList
+        val newSl = newStore.stateFlow.value.sessionList
+        assertEquals("childSessions parity", oldSl.childSessions, newSl.childSessions)
+        assertEquals("completeRootIds parity", oldSl.completeRootIds, newSl.completeRootIds)
+        assertEquals("sessionStatuses: projection reproduces nextStatuses", nextStatuses, newSl.sessionStatuses)
         // Map `+` replaces the value for key "s1" wholesale (legacy + reduce both
         // use map merge, not list concat). Delta for s1 is [c1] → c-old is gone.
         assertEquals(
             "childSessions: delta replaces key s1 (map +, not list concat)",
             listOf(Session(id = "c1", directory = "/a", parentId = "s1")),
-            out.childSessions["s1"])
-        assertEquals("completeRootIds: delta added", setOf("s0", "s1"), out.completeRootIds)
-        assertEquals("sessionStatuses: replaced with nextStatuses", nextStatuses, out.sessionStatuses)
+            newSl.childSessions["s1"])
+        assertEquals("completeRootIds: delta added", setOf("s0", "s1"), newSl.completeRootIds)
     }
 
     @Test
@@ -776,7 +808,7 @@ class T1cSessionListComplexOwnershipTest {
             childSessions = emptyMap(),
             completeRootIds = setOf("s0"),
             completenessEpoch = 99L, // MISMATCH → no-op
-            sessionStatuses = mapOf("s0" to SessionStatus(type = "idle")))
+            ).withProjection(mapOf("s0" to SessionStatus(type = "idle")))
         val store = SharedStateStore().apply { mutateState { it.copy(sessionList = priorList) } }
         val before = store.stateFlow.value
 
@@ -785,7 +817,7 @@ class T1cSessionListComplexOwnershipTest {
                 epochAtStart = epochAtStart,
                 childSessionsDelta = mapOf("s1" to listOf(Session(id = "c1", directory = "/a", parentId = "s1"))),
                 completeRootIdsDelta = setOf("s1"),
-                sessionStatuses = mapOf("s1" to SessionStatus(type = "idle")))
+                statusOp = snapshotOp(mapOf("s1" to SessionStatus(type = "idle"))))
         )
 
         assertEquals(
@@ -807,7 +839,7 @@ class T1cSessionListComplexOwnershipTest {
                 epochAtStart = 5L,
                 childSessionsDelta = mapOf("s1" to listOf(Session(id = "c1", directory = "/a", parentId = "s1"))),
                 completeRootIdsDelta = setOf("s1"),
-                sessionStatuses = mapOf("s1" to SessionStatus(type = "idle")))
+                statusOp = snapshotOp(mapOf("s1" to SessionStatus(type = "idle"))))
         )
 
         val out = store.stateFlow.value.sessionList

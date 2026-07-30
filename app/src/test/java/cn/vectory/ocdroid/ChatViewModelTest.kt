@@ -360,7 +360,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         advanceUntilIdle()
         core.writeComposer { it.copy(inputText = "queue this next") }
         core.writeSessionList {
-            it.copy(sessionStatuses = it.sessionStatuses + ("session-1" to SessionStatus(type = "busy")))
+            it.withProjection(it.sessionStatuses + ("session-1" to SessionStatus(type = "busy")))
         }
 
         chatVM.sendMessage()
@@ -870,7 +870,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
             )
         }
         core.writeSessionList {
-            it.copy(sessionStatuses = mapOf("session-1" to SessionStatus(type = "busy")))
+            it.withProjection(mapOf("session-1" to SessionStatus(type = "busy")))
         }
 
         chatVM.loadMessages("session-1", resetLimit = true)

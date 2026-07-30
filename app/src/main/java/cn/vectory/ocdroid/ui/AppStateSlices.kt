@@ -741,15 +741,24 @@ data class ChatState(
      val pendingErrorCheck: Set<String> = emptySet(),
  )
 
- /**
-  * §R-17 M4: session-list-domain state slice (RFC §2.3). Authoritative storage
- * lives in [MainViewModel._sessionListFlow]. Low-frequency (loadSessions /
- * loadMore / SSE session.created/updated); isolating it stops SSE chat deltas
- * from recomposing SessionsScreen.
- */
-data class SessionListState(
+  /**
+   * §R-17 M4: session-list-domain state slice (RFC §2.3). Authoritative storage
+   * lives in [MainViewModel._sessionListFlow]. Low-frequency (loadSessions /
+   * loadMore / SSE session.created/updated); isolating it stops SSE chat deltas
+   * from recomposing SessionsScreen.
+   *
+   * §P0-A rev-gpt #8 B10 (non-data-class encapsulation): converted from a
+   * `data class` to a regular `class`. [sessionStatuses] is a class-body `var`
+   * with `private set` — NOT a constructor parameter — so the ONLY way to set
+   * it is the `internal` [withProjection] method (called exclusively by
+   * [reduceAuthority]). This compile-enforces the "sessionStatuses sole writer
+   * = reduceAuthority" invariant: `SessionListState(sessionStatuses = …)` and
+   * `.copy(sessionStatuses = …)` BOTH FAIL TO COMPILE. Manual `equals` /
+   * `hashCode` / `toString` over ALL fields preserve `StoreState` value
+   * equality (StoreState is a data class containing this).
+   */
+class SessionListState internal constructor(
     val sessions: List<Session> = emptyList(),
-    val sessionStatuses: Map<String, SessionStatus> = emptyMap(),
     /**
      * Process-wide sessions whose server drain fiber is currently running.
      * Maintained by the status poller. Fetch failures retain the last snapshot
@@ -916,7 +925,247 @@ data class SessionListState(
      * (the POST-send short-bridge, R5).
      */
     val abortPendingSessionIds: Map<String, Long> = emptyMap(),
-)
+) {
+    /**
+     * §P0-A rev-gpt #8 B10 factory gate (revised): [sessionStatuses] is a
+     * class-body `var` with `private set` — it is NOT a constructor parameter,
+     * so a `SessionListState(sessionStatuses = …)` call FAILS TO COMPILE.
+     * The ONLY way to set it is the `internal` [withProjection] method
+     * (called exclusively by [reduceAuthority]). Same-module code CANNOT
+     * bypass the sole-writer gate by passing it to the constructor.
+     */
+    var sessionStatuses: Map<String, SessionStatus> = emptyMap()
+        private set
+
+    /**
+     * §P0-A rev-gpt #8 B10: manual `copy` that accepts EVERY field EXCEPT
+     * [sessionStatuses]. A `.copy(sessionStatuses = …)` call FAILS TO COMPILE
+     * (no such param) — that IS the sole-writer gate. Use [withProjection] to
+     * set sessionStatuses (called exclusively by [reduceAuthority]).
+     */
+    fun copy(
+        sessions: List<Session> = this.sessions,
+        activeSessionIds: Set<String> = this.activeSessionIds,
+        expandedSessionIds: Set<String> = this.expandedSessionIds,
+        loadedSessionLimit: Int = this.loadedSessionLimit,
+        hasMoreSessions: Boolean = this.hasMoreSessions,
+        isLoadingMoreSessions: Boolean = this.isLoadingMoreSessions,
+        isRefreshingSessions: Boolean = this.isRefreshingSessions,
+        pendingPermissions: List<PermissionRequest> = this.pendingPermissions,
+        pendingQuestions: List<QuestionRequest> = this.pendingQuestions,
+        childSessions: Map<String, List<Session>> = this.childSessions,
+        completeRootIds: Set<String> = this.completeRootIds,
+        completenessEpoch: Long = this.completenessEpoch,
+        directorySessions: Map<String, List<Session>> = this.directorySessions,
+        sessionTodos: Map<String, List<TodoItem>> = this.sessionTodos,
+        sessionDiffs: Map<String, List<cn.vectory.ocdroid.data.model.FileDiff>> = this.sessionDiffs,
+        sessionErrorsById: Map<String, SlimSessionLastError> = this.sessionErrorsById,
+        questionAggregationSignal: SlimAggregationSignal = this.questionAggregationSignal,
+        permissionAggregationSignal: SlimAggregationSignal = this.permissionAggregationSignal,
+        pendingCreateIds: Set<String> = this.pendingCreateIds,
+        pendingCreatedAt: Map<String, Long> = this.pendingCreatedAt,
+        hasCompletedInitialLoad: Boolean = this.hasCompletedInitialLoad,
+        abortPendingSessionIds: Map<String, Long> = this.abortPendingSessionIds,
+    ): SessionListState = SessionListState(
+        sessions = sessions,
+        activeSessionIds = activeSessionIds,
+        expandedSessionIds = expandedSessionIds,
+        loadedSessionLimit = loadedSessionLimit,
+        hasMoreSessions = hasMoreSessions,
+        isLoadingMoreSessions = isLoadingMoreSessions,
+        isRefreshingSessions = isRefreshingSessions,
+        pendingPermissions = pendingPermissions,
+        pendingQuestions = pendingQuestions,
+        childSessions = childSessions,
+        completeRootIds = completeRootIds,
+        completenessEpoch = completenessEpoch,
+        directorySessions = directorySessions,
+        sessionTodos = sessionTodos,
+        sessionDiffs = sessionDiffs,
+        sessionErrorsById = sessionErrorsById,
+        questionAggregationSignal = questionAggregationSignal,
+        permissionAggregationSignal = permissionAggregationSignal,
+        pendingCreateIds = pendingCreateIds,
+        pendingCreatedAt = pendingCreatedAt,
+        hasCompletedInitialLoad = hasCompletedInitialLoad,
+        abortPendingSessionIds = abortPendingSessionIds,
+    ).also { copy ->
+        copy.sessionStatuses = this.sessionStatuses
+    }
+
+    /**
+     * §P0-A rev-gpt #8 B10: the SOLE way to set [sessionStatuses]. `internal`
+     * — called exclusively by [reduceAuthority] (the sole writer of the
+     * authority projection). Returns a copy with just sessionStatuses changed.
+     */
+    internal fun withProjection(sessionStatuses: Map<String, SessionStatus>): SessionListState =
+        SessionListState(
+            sessions = this.sessions,
+            activeSessionIds = this.activeSessionIds,
+            expandedSessionIds = this.expandedSessionIds,
+            loadedSessionLimit = this.loadedSessionLimit,
+            hasMoreSessions = this.hasMoreSessions,
+            isLoadingMoreSessions = this.isLoadingMoreSessions,
+            isRefreshingSessions = this.isRefreshingSessions,
+            pendingPermissions = this.pendingPermissions,
+            pendingQuestions = this.pendingQuestions,
+            childSessions = this.childSessions,
+            completeRootIds = this.completeRootIds,
+            completenessEpoch = this.completenessEpoch,
+            directorySessions = this.directorySessions,
+            sessionTodos = this.sessionTodos,
+            sessionDiffs = this.sessionDiffs,
+            sessionErrorsById = this.sessionErrorsById,
+            questionAggregationSignal = this.questionAggregationSignal,
+            permissionAggregationSignal = this.permissionAggregationSignal,
+            pendingCreateIds = this.pendingCreateIds,
+            pendingCreatedAt = this.pendingCreatedAt,
+            hasCompletedInitialLoad = this.hasCompletedInitialLoad,
+            abortPendingSessionIds = this.abortPendingSessionIds,
+        ).also { result ->
+            result.sessionStatuses = sessionStatuses
+        }
+
+    /**
+     * §P0-A rev-gpt #8 B10: manual `equals` over ALL fields (including
+     * [sessionStatuses]). Required because losing data-class `equals` would
+     * break [StoreState] value equality (StoreState is a data class containing
+     * this field) → breaks assertEquals in tests + StateFlow.distinctUntilChanged.
+     */
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is SessionListState) return false
+        return sessions == other.sessions &&
+            sessionStatuses == other.sessionStatuses &&
+            activeSessionIds == other.activeSessionIds &&
+            expandedSessionIds == other.expandedSessionIds &&
+            loadedSessionLimit == other.loadedSessionLimit &&
+            hasMoreSessions == other.hasMoreSessions &&
+            isLoadingMoreSessions == other.isLoadingMoreSessions &&
+            isRefreshingSessions == other.isRefreshingSessions &&
+            pendingPermissions == other.pendingPermissions &&
+            pendingQuestions == other.pendingQuestions &&
+            childSessions == other.childSessions &&
+            completeRootIds == other.completeRootIds &&
+            completenessEpoch == other.completenessEpoch &&
+            directorySessions == other.directorySessions &&
+            sessionTodos == other.sessionTodos &&
+            sessionDiffs == other.sessionDiffs &&
+            sessionErrorsById == other.sessionErrorsById &&
+            questionAggregationSignal == other.questionAggregationSignal &&
+            permissionAggregationSignal == other.permissionAggregationSignal &&
+            pendingCreateIds == other.pendingCreateIds &&
+            pendingCreatedAt == other.pendingCreatedAt &&
+            hasCompletedInitialLoad == other.hasCompletedInitialLoad &&
+            abortPendingSessionIds == other.abortPendingSessionIds
+    }
+
+    /** §P0-A rev-gpt #8 B10: manual `hashCode` over ALL fields (mirrors [equals]). */
+    override fun hashCode(): Int {
+        var result = sessions.hashCode()
+        result = 31 * result + sessionStatuses.hashCode()
+        result = 31 * result + activeSessionIds.hashCode()
+        result = 31 * result + expandedSessionIds.hashCode()
+        result = 31 * result + loadedSessionLimit
+        result = 31 * result + hasMoreSessions.hashCode()
+        result = 31 * result + isLoadingMoreSessions.hashCode()
+        result = 31 * result + isRefreshingSessions.hashCode()
+        result = 31 * result + pendingPermissions.hashCode()
+        result = 31 * result + pendingQuestions.hashCode()
+        result = 31 * result + childSessions.hashCode()
+        result = 31 * result + completeRootIds.hashCode()
+        result = 31 * result + completenessEpoch.hashCode()
+        result = 31 * result + directorySessions.hashCode()
+        result = 31 * result + sessionTodos.hashCode()
+        result = 31 * result + sessionDiffs.hashCode()
+        result = 31 * result + sessionErrorsById.hashCode()
+        result = 31 * result + questionAggregationSignal.hashCode()
+        result = 31 * result + permissionAggregationSignal.hashCode()
+        result = 31 * result + pendingCreateIds.hashCode()
+        result = 31 * result + pendingCreatedAt.hashCode()
+        result = 31 * result + hasCompletedInitialLoad.hashCode()
+        result = 31 * result + abortPendingSessionIds.hashCode()
+        return result
+    }
+
+    /** §P0-A rev-gpt #8 B10: manual `toString` (matches prior data-class behavior). */
+    override fun toString(): String =
+        "SessionListState(sessions=$sessions, sessionStatuses=$sessionStatuses, " +
+            "activeSessionIds=$activeSessionIds, expandedSessionIds=$expandedSessionIds, " +
+            "loadedSessionLimit=$loadedSessionLimit, hasMoreSessions=$hasMoreSessions, " +
+            "isLoadingMoreSessions=$isLoadingMoreSessions, isRefreshingSessions=$isRefreshingSessions, " +
+            "pendingPermissions=$pendingPermissions, pendingQuestions=$pendingQuestions, " +
+            "childSessions=$childSessions, completeRootIds=$completeRootIds, " +
+            "completenessEpoch=$completenessEpoch, directorySessions=$directorySessions, " +
+            "sessionTodos=$sessionTodos, sessionDiffs=$sessionDiffs, " +
+            "sessionErrorsById=$sessionErrorsById, " +
+            "questionAggregationSignal=$questionAggregationSignal, " +
+            "permissionAggregationSignal=$permissionAggregationSignal, " +
+            "pendingCreateIds=$pendingCreateIds, pendingCreatedAt=$pendingCreatedAt, " +
+            "hasCompletedInitialLoad=$hasCompletedInitialLoad, " +
+            "abortPendingSessionIds=$abortPendingSessionIds)"
+
+    companion object {
+        /** §P0-A rev-gpt #8 B10: public no-arg factory (delegates to the internal
+         *  constructor with all defaults). Matches the pre-B10 `SessionListState()` usage. */
+        operator fun invoke(): SessionListState = SessionListState()
+
+        /** §P0-A rev-gpt #8 B10 r2 (sole-writer gate, revised): public
+         *  factory for named-arg construction. [sessionStatuses] is NOT a
+         *  constructor parameter (it is a class-body `var` with `private set`),
+         *  so a `SessionListState(sessionStatuses = …)` call FAILS TO COMPILE
+         *  (the gate). The ONLY way to set a non-empty sessionStatuses is the
+         *  `internal` [withProjection] (called exclusively by [reduceAuthority]);
+         *  this factory always seeds `sessionStatuses = emptyMap()`. */
+        operator fun invoke(
+            sessions: List<Session> = emptyList(),
+            activeSessionIds: Set<String> = emptySet(),
+            expandedSessionIds: Set<String> = emptySet(),
+            loadedSessionLimit: Int = cn.vectory.ocdroid.ui.MainViewModelTimings.sessionPageSize,
+            hasMoreSessions: Boolean = true,
+            isLoadingMoreSessions: Boolean = false,
+            isRefreshingSessions: Boolean = false,
+            pendingPermissions: List<PermissionRequest> = emptyList(),
+            pendingQuestions: List<QuestionRequest> = emptyList(),
+            childSessions: Map<String, List<Session>> = emptyMap(),
+            completeRootIds: Set<String> = emptySet(),
+            completenessEpoch: Long = 0L,
+            directorySessions: Map<String, List<Session>> = emptyMap(),
+            sessionTodos: Map<String, List<TodoItem>> = emptyMap(),
+            sessionDiffs: Map<String, List<cn.vectory.ocdroid.data.model.FileDiff>> = emptyMap(),
+            sessionErrorsById: Map<String, SlimSessionLastError> = emptyMap(),
+            questionAggregationSignal: SlimAggregationSignal = SlimAggregationSignal(),
+            permissionAggregationSignal: SlimAggregationSignal = SlimAggregationSignal(),
+            pendingCreateIds: Set<String> = emptySet(),
+            pendingCreatedAt: Map<String, Long> = emptyMap(),
+            hasCompletedInitialLoad: Boolean = false,
+            abortPendingSessionIds: Map<String, Long> = emptyMap(),
+        ): SessionListState = SessionListState(
+            sessions = sessions,
+            activeSessionIds = activeSessionIds,
+            expandedSessionIds = expandedSessionIds,
+            loadedSessionLimit = loadedSessionLimit,
+            hasMoreSessions = hasMoreSessions,
+            isLoadingMoreSessions = isLoadingMoreSessions,
+            isRefreshingSessions = isRefreshingSessions,
+            pendingPermissions = pendingPermissions,
+            pendingQuestions = pendingQuestions,
+            childSessions = childSessions,
+            completeRootIds = completeRootIds,
+            completenessEpoch = completenessEpoch,
+            directorySessions = directorySessions,
+            sessionTodos = sessionTodos,
+            sessionDiffs = sessionDiffs,
+            sessionErrorsById = sessionErrorsById,
+            questionAggregationSignal = questionAggregationSignal,
+            permissionAggregationSignal = permissionAggregationSignal,
+            pendingCreateIds = pendingCreateIds,
+            pendingCreatedAt = pendingCreatedAt,
+            hasCompletedInitialLoad = hasCompletedInitialLoad,
+            abortPendingSessionIds = abortPendingSessionIds,
+        )
+    }
+}
 
 /**
  * §R-17 M4: unread-domain state slice (RFC §2.7). Authoritative storage lives

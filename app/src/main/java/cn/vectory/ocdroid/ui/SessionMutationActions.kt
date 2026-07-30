@@ -373,9 +373,28 @@ internal fun launchSendMessage(
                         "optimistic-onSuccess busy write sid=$sessionId",
                     )
                 }
-                // T1c: SessionStatusPatched owns sessions (bump) + sessionStatuses.
+                // §P0-A (B1): optimistic busy now funnels through the authority
+                // reducer — ApplyEvent(OPTIMISTIC) sets the bySid entry + an
+                // optimisticClaim and records the bump timestamp in pendingBumps,
+                // which the reducer applies to sessions (bumpSessionUpdated) and
+                // the sessionStatuses projection in the SAME single CAS. The
+                // optimisticBumpTimestamp IS the caller-captured wall-clock
+                // (System.currentTimeMillis above) — the reducer stays pure (no
+                // clock read; the value is carried in the op).
+                // §P0-A rev-gpt #5: real scope (not empty placeholder) — ApplyEvent
+                // scope guard is lenient in P0-A (opScopeValid passes), but the
+                // scopeKey is carried for P0-C + consistency with other sites.
                 slices.store.dispatch(
-                    AppAction.SessionStatusPatched(sessionId, updatedTimestamp, busyStatus)
+                    AppAction.AuthorityEvent(
+                        cn.vectory.ocdroid.data.state.AuthorityOp.ApplyEvent(
+                            sid = sessionId,
+                            status = busyStatus,
+                            origin = cn.vectory.ocdroid.data.state.EntryOrigin.OPTIMISTIC,
+                            scopeKey = slices.store.authorityScope(),
+                            connectionMonotonicMs = updatedTimestamp,
+                            optimisticBumpTimestamp = updatedTimestamp,
+                        ),
+                    ),
                 )
                 onSuccess?.invoke()
                 // §streaming-send-ux-fix: the post-send full-list refresh was

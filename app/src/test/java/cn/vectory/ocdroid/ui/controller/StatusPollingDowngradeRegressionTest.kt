@@ -104,6 +104,22 @@ class StatusPollingDowngradeRegressionTest {
         unmockkAll()
     }
 
+    /** §P0-A test helper: seed a prior session status through the authority
+     *  reducer (the SOLE writer now), so authority.bySid is populated exactly
+     *  as production would after an SSE/REST status event. */
+    private fun seedStatusAuthorityEvent(
+        sid: String,
+        status: SessionStatus,
+    ): cn.vectory.ocdroid.ui.AppAction = cn.vectory.ocdroid.ui.AppAction.AuthorityEvent(
+        cn.vectory.ocdroid.data.state.AuthorityOp.ApplyEvent(
+            sid = sid,
+            status = status,
+            origin = cn.vectory.ocdroid.data.state.EntryOrigin.SSE_LEGACY,
+            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+            connectionMonotonicMs = 0L,
+        ),
+    )
+
     private fun slimRepository(): OpenCodeRepository = mockk(relaxed = true) {
         every { usesSlimStatusFanOut } returns true
         // Defensive stubs for ALL three status endpoints. The @Ignore sweep
@@ -287,7 +303,7 @@ class StatusPollingDowngradeRegressionTest {
         }
 
         store.mutateSessionList {
-            it.applySessionStatus(sid, SessionStatus(type = "busy")).first
+            it.withProjection(it.sessionStatuses + (sid to SessionStatus(type = "busy")))
         }
 
         val folded = store.sessionListFlow.value.sessionStatuses[sid]
@@ -307,10 +323,10 @@ class StatusPollingDowngradeRegressionTest {
         }
 
         store.mutateSessionList {
-            it.applySessionStatus(sid, SessionStatus(type = "busy")).first
+            it.withProjection(it.sessionStatuses + (sid to SessionStatus(type = "busy")))
         }
         store.mutateSessionList {
-            it.applySessionStatus(sid, SessionStatus(type = "idle")).first
+            it.withProjection(it.sessionStatuses + (sid to SessionStatus(type = "idle")))
         }
 
         val folded = store.sessionListFlow.value.sessionStatuses[sid]
@@ -323,20 +339,16 @@ class StatusPollingDowngradeRegressionTest {
 
     @Test
     fun `slim digest status relay is the non-REST status source - slice write surface exists`() {
-        // Sanity-lock the exact pure function the relay depends on. This is
-        // the surface T-R1's "digest status relay" maps to.
+        // §P0-A rev-gpt #8: applySessionStatus deleted — verify the status
+        // write surface directly (the relay now funnels through authority).
         val sid = "slim-session-3"
         val before = store.sessionListFlow.value.sessionStatuses
         assertTrue("no prior status for sid", sid !in before)
 
-        val (next, effects) = store.sessionListFlow.value
-            .applySessionStatus(sid, SessionStatus(type = "retry"))
+        val next = store.sessionListFlow.value
+            .withProjection(store.sessionListFlow.value.sessionStatuses +
+                (sid to SessionStatus(type = "retry")))
 
-        assertSame(
-            "applySessionStatus produces no side effects (pure fold, like reduce)",
-            emptyList<Any>(),
-            effects,
-        )
         assertEquals(
             "relay writes the digest status into the map",
             "retry",
@@ -809,9 +821,9 @@ class StatusPollingDowngradeRegressionTest {
             session("s-b", "/work-b"),
         )
         // Prior state: s-b is BUSY (upstream mid-task). s-a is unknown.
-        store.mutateSessionList {
-            it.copy(sessionStatuses = mapOf("s-b" to SessionStatus(type = "busy")))
-        }
+        // §P0-A: status is now the authority projection — seed via authority so
+        // the failed-dir preservation (which reads authority.bySid) sees it.
+        store.dispatch(seedStatusAuthorityEvent("s-b", SessionStatus(type = "busy")))
         // /work-a fetch succeeds; /work-b fetch FAILS (transport error).
         coEvery { repository.getSlimapiSessionsStatus("/work-a") } returns
             Result.success(mapOf("s-a" to SessionStatus(type = "idle")))
@@ -854,9 +866,8 @@ class StatusPollingDowngradeRegressionTest {
             session("s-a", "/work-a"),
             session("s-b", "/work-b"),
         )
-        store.mutateSessionList {
-            it.copy(sessionStatuses = mapOf("s-b" to SessionStatus(type = "retry")))
-        }
+        // §P0-A: status is now the authority projection — seed via authority.
+        store.dispatch(seedStatusAuthorityEvent("s-b", SessionStatus(type = "retry")))
         coEvery { repository.getSlimapiSessionsStatus("/work-a") } returns
             Result.success(mapOf("s-a" to SessionStatus(type = "idle")))
         coEvery { repository.getSlimapiSessionsStatus("/work-b") } returns
@@ -890,7 +901,7 @@ class StatusPollingDowngradeRegressionTest {
             session("s-b", "/work-b"),
         )
         store.mutateSessionList {
-            it.copy(sessionStatuses = mapOf(
+            it.withProjection(mapOf(
                 "s-a" to SessionStatus(type = "busy"),
                 "s-b" to SessionStatus(type = "retry"),
             ))
@@ -989,7 +1000,7 @@ class StatusPollingDowngradeRegressionTest {
         // has a prior entry — the failed directory's sessions are
         // entirely unseen.
         store.mutateSessionList {
-            it.copy(sessionStatuses = mapOf("s-a" to SessionStatus(type = "busy")))
+            it.withProjection(mapOf("s-a" to SessionStatus(type = "busy")))
         }
         // /work-a succeeds (s-a returned as idle upstream); /work-b
         // FAILS (transport error — s-b-1 / s-b-2 statuses are unknown).

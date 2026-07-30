@@ -1,5 +1,9 @@
 package cn.vectory.ocdroid.ui
 
+import cn.vectory.ocdroid.data.state.AuthorityOp
+import cn.vectory.ocdroid.data.state.ScopeKey
+import cn.vectory.ocdroid.ui.controller.subtreeIds
+
 /**
  * Wave 2 lane L2: session-list-domain [reduce] branch bodies extracted as
  * pure helper functions. Covers T1c sessionList-only branches (sessions /
@@ -7,6 +11,10 @@ package cn.vectory.ocdroid.ui
  * [StoreState] — zero-import dispatch from [reduce].
  *
  * §B4: open-tabs-list / OpenTabsChanged(removed) removed (list-detail D9).
+ * §P0-A rev-gpt #8: archive/delete/purge route authority + sessionStatuses
+ * through [reduceAuthority] (the SOLE writer of sessionStatuses). These
+ * reducers layer their OTHER sessionList fields on top WITHOUT touching
+ * sessionStatuses directly.
  */
 
 // ── T1c sessionList ownership reduce ───────────────────────────────────
@@ -27,8 +35,31 @@ internal fun reduceSessionCreatedLocal(state: StoreState, action: AppAction.Sess
 
 internal fun reduceSessionArchivedLocal(state: StoreState, action: AppAction.SessionArchivedLocal): StoreState {
     val id = action.session.id
-    return state.copy(
-        sessionList = state.sessionList.copy(
+    // §P0-A rev-gpt #7 (subtree prune): archive can be a subtree operation —
+    // prune the WHOLE subtree (root + all descendants) from authority.bySid,
+    // not just the root id. Aligns with impl-E/F subtree cleanup.
+    val subtree = subtreeIds(
+        id,
+        state.sessionList.sessions,
+        state.sessionList.directorySessions,
+        state.sessionList.childSessions,
+    )
+    // §P0-A rev-gpt #8 (sole writer): route the authority prune through
+    // reduceAuthority — it is the SOLE writer of sessionStatuses (the
+    // projection comes from authority, not a direct write). Layer the other
+    // sessionList fields on top WITHOUT touching sessionStatuses.
+    // §P0-A r2: derive the real authority scope from StoreState (host profile
+    // serverGroupFp + liveEndpointFp), not empty ScopeKey("","") — the prune
+    // boundary must reflect the active connection identity.
+    val withAuth = reduceAuthority(
+        state,
+        AuthorityOp.PruneSessions(
+            subtree,
+            state.resolveScopeKey(),
+        ),
+    )
+    return withAuth.copy(
+        sessionList = withAuth.sessionList.copy(
             sessions = state.sessionList.sessions.map {
                 if (it.id == id) action.session else it
             },
@@ -38,16 +69,12 @@ internal fun reduceSessionArchivedLocal(state: StoreState, action: AppAction.Ses
             childSessions = state.sessionList.childSessions.mapValues { (_, list) ->
                 list.map { if (it.id == id) action.session else it }
             },
+            // sessionStatuses NOT set here — comes from withAuth (reduceAuthority).
             pendingQuestions = action.pendingQuestions,
             activeSessionIds = state.sessionList.activeSessionIds - action.activeSessionIdsToRemove,
-            // §P0-E(a) R9 fix: archive must also clear the archived session's
-            // error banner (mirroring reduceSessionDeletedLocal's cleanup).
             sessionErrorsById = state.sessionList.sessionErrorsById.filterKeys { it != id },
-            // §P0-F 阻断2: 对齐 caller 携带的 subtree（activeSessionIdsToRemove =
-            // subtree when archiving）；SSE SessionArchived / SessionDeletedLocal 同模式。
-            abortPendingSessionIds = state.sessionList.abortPendingSessionIds.filterKeys { it !in action.activeSessionIdsToRemove },
+            abortPendingSessionIds = withAuth.sessionList.abortPendingSessionIds.filterKeys { it !in action.activeSessionIdsToRemove },
         ),
-        // §P0-E(b)/(c): clean pending maps for the archived session (cross-slice cleanup).
         chat = state.chat.copy(
             pendingErrorReattach = state.chat.pendingErrorReattach.filterKeys { it != id },
             pendingErrorCheck = state.chat.pendingErrorCheck - id,
@@ -57,36 +84,48 @@ internal fun reduceSessionArchivedLocal(state: StoreState, action: AppAction.Ses
 
 internal fun reduceSessionDeletedLocal(state: StoreState, action: AppAction.SessionDeletedLocal): StoreState {
     val ids = action.removedIds
-    return state.copy(
-        sessionList = state.sessionList.copy(
+    // §P0-A rev-gpt #7 (subtree prune): delete can remove subtrees — for each
+    // removed id, compute its subtree and union all subtree ids. This catches
+    // descendants that might still have authority entries even if the parent
+    // was the only id in removedIds.
+    val allSubtreeIds = ids.flatMap { rootId ->
+        subtreeIds(
+            rootId,
+            state.sessionList.sessions,
+            state.sessionList.directorySessions,
+            state.sessionList.childSessions,
+        )
+    }.toSet()
+    // §P0-A rev-gpt #8 (sole writer): route through reduceAuthority — it prunes
+    // authority.bySid + recomputes sessionStatuses (the SOLE writer).
+    // §P0-A r2: derive the real authority scope from StoreState (host profile
+    // serverGroupFp + liveEndpointFp), not empty ScopeKey("","") — the prune
+    // boundary must reflect the active connection identity.
+    val withAuth = reduceAuthority(
+        state,
+        AuthorityOp.PruneSessions(
+            allSubtreeIds,
+            state.resolveScopeKey(),
+        ),
+    )
+    return withAuth.copy(
+        sessionList = withAuth.sessionList.copy(
             sessions = state.sessionList.sessions.filter { it.id !in ids },
             directorySessions = state.sessionList.directorySessions
                 .mapValues { (_, list) -> list.filter { it.id !in ids } }
                 .filterValues { it.isNotEmpty() },
+            // sessionStatuses NOT set here — comes from withAuth (reduceAuthority).
             pendingQuestions = state.sessionList.pendingQuestions.filter { it.sessionId !in ids },
             activeSessionIds = state.sessionList.activeSessionIds - ids,
             sessionErrorsById = state.sessionList.sessionErrorsById.filterKeys { it !in ids },
-            // §P0-F 阻断5: local delete must drop abort-pending for removed sessions.
-            abortPendingSessionIds = state.sessionList.abortPendingSessionIds.filterKeys { it !in ids },
+            abortPendingSessionIds = withAuth.sessionList.abortPendingSessionIds.filterKeys { it !in ids },
         ),
-        // §P0-E(b)/(c): clean pending maps for deleted sessions (cross-slice cleanup).
         chat = state.chat.copy(
             pendingErrorReattach = state.chat.pendingErrorReattach.filterKeys { it !in ids },
             pendingErrorCheck = state.chat.pendingErrorCheck - ids,
         ),
     )
 }
-
-internal fun reduceSessionStatusPatched(state: StoreState, action: AppAction.SessionStatusPatched): StoreState = state.copy(
-    sessionList = state.sessionList.copy(
-        sessions = bumpSessionUpdated(
-            state.sessionList.sessions,
-            action.sessionId,
-            action.updatedTimestamp,
-        ),
-        sessionStatuses = state.sessionList.sessionStatuses + (action.sessionId to action.status),
-    ),
-)
 
 internal fun reduceSessionsRefreshedLocal(state: StoreState, action: AppAction.SessionsRefreshedLocal): StoreState = state.copy(
     sessionList = state.sessionList.copy(
@@ -119,11 +158,18 @@ internal fun reduceSessionTreeHydrated(state: StoreState, action: AppAction.Sess
     return if (state.sessionList.completenessEpoch != action.epochAtStart) {
         state // stale hydration → full no-op
     } else {
-        state.copy(
-            sessionList = state.sessionList.copy(
-                childSessions = state.sessionList.childSessions + action.childSessionsDelta,
-                completeRootIds = state.sessionList.completeRootIds + action.completeRootIdsDelta,
-                sessionStatuses = action.sessionStatuses,
+        // §4a.2: apply the authority op (status) via the PURE reducer in the SAME
+        // state.copy as the tree delta (single CAS, M6/B1 atomic). reduceAuthority
+        // is pure → idempotent under CAS retry. null op → status untouched.
+        val withStatus = if (action.statusOp != null) {
+            reduceAuthority(state, action.statusOp)
+        } else {
+            state
+        }
+        withStatus.copy(
+            sessionList = withStatus.sessionList.copy(
+                childSessions = withStatus.sessionList.childSessions + action.childSessionsDelta,
+                completeRootIds = withStatus.sessionList.completeRootIds + action.completeRootIdsDelta,
             ),
         )
     }

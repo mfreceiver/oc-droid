@@ -124,3 +124,59 @@ interface SseDispatchHost {
      */
     fun closeSkeletonSession(sessionId: String)
 }
+
+/**
+ * §P0-A (B1): the shared funnel for SSE-driven single-status writes
+ * (slim `session.digest` status relay + legacy `session.status`). Replaces the
+ * former `mutateSessionList { it.applySessionStatus(sid, status).first }`:
+ *
+ *  - the STATUS write funnels through the authority reducer
+ *    (`dispatch(AuthorityEvent(ApplyEvent(origin)))`) so authority.bySid is the
+ *    single source of truth and `sessionStatuses` is its projection;
+ *  - §P0-A rev-gpt rework (abort-pending single-CAS): the `abortPendingSessionIds`
+ *    release for a TERMINAL status (NOT busy AND NOT retry) now happens INSIDE
+ *    `reduceAuthority`'s ApplyEvent branch (same state.copy that writes the
+ *    status projection) — atomically. The old separate `mutateSessionList` CAS
+ *    (② block) is DELETED: one SSE status frame = ONE CAS that atomically
+ *    updates status + projection + abort-pending release (no torn window).
+ *
+ * [origin] is [cn.vectory.ocdroid.data.state.EntryOrigin.SSE_SLIM] for the
+ * digest relay and [cn.vectory.ocdroid.data.state.EntryOrigin.SSE_LEGACY] for
+ * the legacy session.status event. The reducer's ApplyEvent fence is lenient
+ * for P0-A (no B11 identity guard yet); connectionMonotonicMs = the host's
+ * SSE clock (TTL/tie-break, non-causal).
+ */
+internal fun SseDispatchHost.applyStatusViaAuthority(
+    sid: String,
+    status: cn.vectory.ocdroid.data.model.SessionStatus,
+    origin: cn.vectory.ocdroid.data.state.EntryOrigin,
+) {
+    // §P0-A rev-gpt #3: resolve the session's workdir from the merged session
+    // tree (sessions + directorySessions + childSessions) so the authority
+    // entry carries the correct workdir for the composite key + coverage. The
+    // old LSH code did this lookup before calling applySseStatus; now it's
+    // consolidated here (single dispatch point).
+    val workdir = cn.vectory.ocdroid.ui.controller.allSessionsById(
+        slices.sessionList.value.sessions,
+        slices.sessionList.value.directorySessions,
+        slices.sessionList.value.childSessions,
+    )[sid]?.directory
+    // §P0-A rev-gpt rework: SINGLE dispatch — the authority reducer's ApplyEvent
+    // branch releases abortPendingSessionIds for terminal statuses in the SAME
+    // state.copy (atomic). No separate mutateSessionList CAS needed.
+    slices.store.dispatch(
+        cn.vectory.ocdroid.ui.AppAction.AuthorityEvent(
+            cn.vectory.ocdroid.data.state.AuthorityOp.ApplyEvent(
+                sid = sid,
+                status = status,
+                origin = origin,
+                scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(
+                    serverGroupFp = serverGroupFp(),
+                    endpointFp = "", // P0-C placeholder (lenient ApplyEvent guard).
+                ),
+                connectionMonotonicMs = sseClock(),
+                workdir = workdir,
+            ),
+        ),
+    )
+}
