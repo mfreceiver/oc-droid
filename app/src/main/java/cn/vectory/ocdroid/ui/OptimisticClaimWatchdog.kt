@@ -18,10 +18,13 @@ const val OPTIMISTIC_CONFIRM_TIMEOUT_MS = 5_000L
 /**
  * A stale claim identified by the watchdog. Used to carry both the sid and its
  * scopeKey (so the reconcile sink does not need to re-lookup the entry).
+ *
+ * @property clientSeq §P0-B generation fence: the [OptimisticClaim.clientSeq] at detection.
  */
 data class StaleClaim(
     val sid: String,
     val scopeKey: ScopeKey,
+    val clientSeq: Long,
 )
 
 /**
@@ -48,7 +51,7 @@ internal fun selectStaleClaimsForReconcile(
         if (claim.serverEchoed) continue
         val age = now - claim.claimedAtMonotonic
         if (age > timeoutMs) {
-            stale.add(StaleClaim(sid, entry.scopeKey ?: continue))
+            stale.add(StaleClaim(sid = sid, scopeKey = entry.scopeKey ?: continue, clientSeq = claim.clientSeq))
         }
     }
     return stale

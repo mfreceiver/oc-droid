@@ -1477,6 +1477,12 @@ class SessionSyncCoordinator(
         val idStore = identityStore ?: return
         if (!idStore.isCurrent(identity)) return
 
+        // §P0-A scope guard + §P0-C identity-epoch guard: capture host + epoch
+        // ONCE from the store's stateFlow (matching the reducer's state space)
+        // so every ApplyReconcileOutcome in this batch carries the same guard values.
+        val capturedHost = slices.store.stateFlow.value.host.currentHostProfileId
+        val capturedEpoch = slices.store.stateFlow.value.identityEpoch
+
         for (claim in claims) {
             // Per-sid identity re-check inside the loop (defense-in-depth).
             if (!idStore.isCurrent(identity)) break
@@ -1489,6 +1495,9 @@ class SessionSyncCoordinator(
                         outcome = outcome,
                         serverRound = null,
                         monotonic = clock(),
+                        claimClientSeq = claim.clientSeq,
+                        hostProfileId = capturedHost,
+                        identityEpochAtCapture = capturedEpoch,
                     ),
                 ),
             )
