@@ -234,7 +234,16 @@ class SessionSyncCoordinator(
      * §P0-C (B11): the [ConnectionIdentity] of the SSE event currently being
      * processed (set in [handleEvent] before dispatching to the raw event handler,
      * cleared after). null when not processing an identified event.
+     *
+     * §rev-glm nit #1: `@Volatile` for forward-safety only (mirrors the documented
+     * convention of the sibling imperative fields — [sseSyncState] etc.). All
+     * reads/writes are confined to the coordinator's single-threaded Main.immediate
+     * scope today (handleEvent → router → handlers run synchronously, no suspension);
+     * the annotation guards visibility if a future change introduces a dispatcher
+     * hop anywhere in the chain. Object-reference writes are atomic on the JVM, so
+     * there is no tearing risk — only visibility.
      */
+    @Volatile
     private var currentProcessingIdentity: cn.vectory.ocdroid.service.identity.ConnectionIdentity? = null
 
     override fun currentEventIdentity(): cn.vectory.ocdroid.service.identity.ConnectionIdentity? =

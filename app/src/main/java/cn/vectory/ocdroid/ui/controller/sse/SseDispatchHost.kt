@@ -154,8 +154,11 @@ interface SseDispatchHost {
  *
  * [origin] is [cn.vectory.ocdroid.data.state.EntryOrigin.SSE_SLIM] for the
  * digest relay and [cn.vectory.ocdroid.data.state.EntryOrigin.SSE_LEGACY] for
- * the legacy session.status event. The reducer's ApplyEvent fence is lenient
- * for P0-A (no B11 identity guard yet); connectionMonotonicMs = the host's
+ * the legacy session.status event. §P0-C (B11): the reducer's ApplyEvent fence
+ * now gates on [AuthorityOp.ApplyEvent.identityEpochAtCapture] vs
+ * [cn.vectory.ocdroid.ui.StoreState.identityEpoch] when [capturedIdentity] is
+ * non-null (this extension derives scopeKey + capturedIdentity from the event's
+ * captured identity, not the current host); connectionMonotonicMs = the host's
  * SSE clock (TTL/tie-break, non-causal).
  */
 internal fun SseDispatchHost.applyStatusViaAuthority(
