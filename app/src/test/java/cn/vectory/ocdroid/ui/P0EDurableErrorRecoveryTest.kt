@@ -290,6 +290,56 @@ class P0EDurableErrorRecoveryTest {
     }
 
     @Test
+    fun `bulk archive clears pendingErrorReattach and pendingErrorCheck for the archived subtree`() {
+        // reduceBulkSessionsRefreshed reuses allArchivedSubtree to clear the
+        // pending maps. Seed a parent(archived)+child subtree + an unrelated
+        // session, mirroring the SSE-subtree test above.
+        val parentSid = "parent"
+        val childSid = "child"
+        val parentSes = Session(id = parentSid, directory = "/parent",
+            time = Session.TimeInfo(archived = 1_000))  // archived
+        val childSes = Session(id = childSid, directory = "/child", parentId = parentSid)
+        val otherSes = Session(id = sid2, directory = "/other")
+        val chat = ChatState(
+            currentSessionId = sid,  // unrelated current session
+            pendingErrorReattach = mapOf(
+                parentSid to PendingChatError(sampleError, 1L, null),
+                childSid to PendingChatError(sampleError, 1L, null),
+                sid2 to PendingChatError(sampleError, 1L, null), // not in subtree
+            ),
+            pendingErrorCheck = setOf(parentSid, childSid, sid2),
+        )
+        val prior = StoreState.initial().copy(
+            chat = chat,
+            sessionList = SessionListState(
+                sessions = listOf(parentSes, childSes, otherSes),
+                childSessions = mapOf(parentSid to listOf(childSes)),
+            ),
+        )
+        // Direct reduce() call: BulkSessionsRefreshed with parent archived.
+        val out = reduce(prior, AppAction.BulkSessionsRefreshed(
+            sessions = listOf(parentSes, childSes, otherSes),
+            hasMoreSessions = false,
+            confirmedServerIds = setOf(parentSid, childSid, sid2),
+            sweepNow = 0L,
+        ))
+
+        val outChat = out.chat
+        assertFalse("parent sid cleared from pendingErrorReattach",
+            outChat.pendingErrorReattach.containsKey(parentSid))
+        assertFalse("child sid cleared from pendingErrorReattach (subtree)",
+            outChat.pendingErrorReattach.containsKey(childSid))
+        assertTrue("non-archived sid2 preserved in pendingErrorReattach",
+            outChat.pendingErrorReattach.containsKey(sid2))
+        assertFalse("parent sid cleared from pendingErrorCheck",
+            outChat.pendingErrorCheck.contains(parentSid))
+        assertFalse("child sid cleared from pendingErrorCheck (subtree)",
+            outChat.pendingErrorCheck.contains(childSid))
+        assertTrue("non-archived sid2 preserved in pendingErrorCheck",
+            outChat.pendingErrorCheck.contains(sid2))
+    }
+
+    @Test
     fun `HostStatePurged clears pendingErrorReattach and pendingErrorCheck via clearSessionData`() {
         val chat = ChatState(
             currentSessionId = sid,
