@@ -102,4 +102,19 @@ class ServerCompatProfileTest {
         repeat(5) { p.update("1.17.13") }
         assertEquals(1, p.major); assertEquals(17, p.minor); assertEquals(13, p.patch)
     }
+
+    // ── P0 (B-slim-storm-fix): per-session status endpoint flag ───────────
+
+    @Test
+    fun `slimPerSessionStatusEndpointAvailable defaults to false (storm-stopping default)`() {
+        assertFalse(ServerCompatProfile().slimPerSessionStatusEndpointAvailable)
+    }
+
+    @Test
+    fun `slimPerSessionStatusEndpointAvailable internal setter can flip to true (future-probe readiness)`() {
+        val p = ServerCompatProfile()
+        // Test visibility: internal setter is accessible from the same module.
+        p.slimPerSessionStatusEndpointAvailable = true
+        assertTrue(p.slimPerSessionStatusEndpointAvailable)
+    }
 }

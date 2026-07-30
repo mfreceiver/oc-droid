@@ -98,6 +98,8 @@ object ProcessStatusPollerModule {
         identityStore: ConnectionIdentityStore,
         statusAggregator: StatusAggregator,
         repository: cn.vectory.ocdroid.data.repository.OpenCodeRepository,
+        serverCompatProfile:
+            cn.vectory.ocdroid.data.repository.ServerCompatProfile,
         sessionSyncCoordinator:
             cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator,
     ): ProcessStatusPoller {
@@ -126,6 +128,18 @@ object ProcessStatusPollerModule {
             slimFanOutRunner = runner@{ identity, snapshot ->
                 if (!identityStore.isCurrent(identity)) return@runner null
                 if (!repository.usesSlimStatusFanOut) return@runner null
+
+                // P0 (B-slim-storm-fix): per-session fan-out is redundant in lite-v2-dev
+                // (getSlimapiSessionStatusOutcome delegates to the bulk endpoint) AND its
+                // 404 detection is defeated under delegation (a missing item — really idle —
+                // is misjudged SessionMissing → EvictSession storm that never contracts the
+                // snapshot). The bulk runRefresh above already issues one full query per
+                // tick (StatusAggregatorImpl.refresh → getSlimapiSessionsStatus). Short-
+                // circuit the per-session sweep until the per-session endpoint is
+                // independently available again. Status data flow is fully covered by bulk
+                // runRefresh; stale cleanup is driven independently by /since 404
+                // MarkDeleted + session.deleted SSE.
+                if (!serverCompatProfile.slimPerSessionStatusEndpointAvailable) return@runner null
 
                 val sessionIds = snapshot.sessionsById.keys
 
