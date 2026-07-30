@@ -205,6 +205,12 @@ abstract class MainViewModelTestBase {
             store = store,
             autoStart = false,
         )
+        // §P0-E(b)(c): real coordinator — its init subscribes to store.stateFlow.
+        val errorRecoveryCoordinator = cn.vectory.ocdroid.ui.controller.ErrorRecoveryCoordinator(
+            scope = appScope,
+            store = store,
+            repository = repository,
+        )
         val composerController = cn.vectory.ocdroid.ui.controller.ComposerController(
             store = store,
             settingsManager = settingsManager,
@@ -287,6 +293,8 @@ abstract class MainViewModelTestBase {
                 currentBundleProvider = { repository.currentClientBundle() },
             ),
             unreadSoakController,
+            // §P0-E(b)(c): durable-error GET drain coordinator.
+            errorRecoveryCoordinator,
             // §review-fix #1: same fp provider every controller uses.
             fpProvider,
             appScope,

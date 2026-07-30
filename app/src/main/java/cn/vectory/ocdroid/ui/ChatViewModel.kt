@@ -425,10 +425,12 @@ class ChatViewModel @Inject constructor(
         // STILL the current entry at fire time → rejects a stale watchdog after an
         // ABA (cleared-then-re-added) re-abort (prevents clobbering a newer abort).
         val token = abortTokenSeq.incrementAndGet()
-        // §P0-F 阻断7: capture host identity at dispatch — the watchdog's REST
-        // reconcile must NOT run against a different host's repository for the
-        // same sid after a host switch (cross-host pollution).
-        val fp = core.currentServerGroupFp()
+        // §P0-F 阻断7: capture connection-bundle identity at dispatch — the
+        // watchdog's REST reconcile must NOT run against a different host OR a
+        // same-group endpoint/bundle reconfigure for the same sid (cross-host /
+        // cross-endpoint pollution). BundleStamp (generation + endpointFp) is
+        // strictly stronger than serverGroupFp (P0-A made it available on StoreState).
+        val bundle = captureAbortBundle()
         core.store.mutateSessionList { s ->
             s.copy(abortPendingSessionIds = s.abortPendingSessionIds + (sid to token))
         }
@@ -451,7 +453,7 @@ class ChatViewModel @Inject constructor(
         }
         core.appScope.launch {
             delay(ABORT_WATCHDOG_TIMEOUT_MS)
-            reconcileStaleAbort(sid, token, fp)
+            reconcileStaleAbort(sid, token, bundle)
         }
     }
 
@@ -464,13 +466,22 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    /** §P0-F: capture the live connection-bundle identity (generation + endpointFp)
+     *  for the abort watchdog's identity fence. Strictly stronger than serverGroupFp
+     *  alone — catches same-group endpoint/bundle reconfigure that leaves the group
+     *  fingerprint unchanged. P0-A exposes [StoreState.liveBundleGeneration] /
+     *  [StoreState.liveEndpointFp] on the store. */
+    internal fun captureAbortBundle(): BundleStamp =
+        core.store.stateFlow.value.let { BundleStamp(it.liveBundleGeneration, it.liveEndpointFp) }
+
     /**
      * §P0-F watchdog body (testable — no internal delay). Guards:
      *  - #1 ABA token: act only if THIS abort (token) is still current.
      *  - #2 二次校验（严重，rev-gpt）：suspend 返回后、任何 mutation 前，重验 token +
      *    identity。fetch 期间可能落入新 abort/send 或 host 切换——suspend 前的守卫不够。
-     *  - #3 identity fence（有限：仅 serverGroupFp——same-group profile/endpoint/
-     *    bundle/reconfigure 下 fp 不变；完整 BundleStamp/connection-epoch fence 待 P0-A）。
+     *  - #3 identity fence（BundleStamp = liveBundleGeneration + liveEndpointFp，
+     *    P0-A）：catches cross-host switch AND same-group endpoint/bundle reconfigure
+     *    (strictly stronger than the prior serverGroupFp-only fence).
      * Recovery（§P0-F 收窄保守）：
      *  - 只释放 abort-pending 锁。
      *  - 不在此 writeComposer{-sid}（长 suspend 间隙会误清新 send 的 POST 桥），
@@ -478,12 +489,12 @@ class ChatViewModel @Inject constructor(
      *    通道到达；R5 generation/ownership + status-apply gate 待 P0-A。
      *  - server 仍 busy / fetch 失败 → 发恢复提示；锁已释放，用户可重试（不永久锁）。
      */
-    internal suspend fun reconcileStaleAbort(sid: String, expectedToken: Long, expectedFp: String) {
+    internal suspend fun reconcileStaleAbort(sid: String, expectedToken: Long, expectedBundle: BundleStamp) {
         // §#2 初始守卫（suspend 前）。
         if (core.sessionListFlow.value.abortPendingSessionIds[sid] != expectedToken) return
-        // §#3 identity fence（有限：仅 serverGroupFp——same-group profile/endpoint/
-        // bundle/reconfigure 下 fp 不变；完整 BundleStamp/connection-epoch fence 待 P0-A）。
-        if (core.currentServerGroupFp() != expectedFp) {
+        // §#3 identity fence（BundleStamp = liveBundleGeneration + liveEndpointFp，P0-A）：
+        // catches cross-host switch AND same-group endpoint/bundle reconfigure.
+        if (captureAbortBundle() != expectedBundle) {
             clearAbortPendingIfToken(sid, expectedToken)
             return
         }
@@ -491,7 +502,7 @@ class ChatViewModel @Inject constructor(
         // §#2 二次校验（严重，rev-gpt）：suspend 返回后、任何 mutation 前，重验 token +
         // identity。fetch 期间可能落入新 abort/send 或 host 切换——suspend 前的守卫不够。
         if (core.sessionListFlow.value.abortPendingSessionIds[sid] != expectedToken) return
-        if (core.currentServerGroupFp() != expectedFp) {
+        if (captureAbortBundle() != expectedBundle) {
             clearAbortPendingIfToken(sid, expectedToken)
             return
         }

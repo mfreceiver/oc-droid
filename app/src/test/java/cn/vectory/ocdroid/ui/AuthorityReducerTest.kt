@@ -1526,6 +1526,96 @@ class AuthorityReducerTest {
         assertEquals("out-of-scope status preserved (latest, not overwritten)",
             SessionStatus(type = "idle"), bySid["outSid"]?.status)
     }
+
+    // ── §P0-E(c): pendingErrorCheck marking on busy/retry → terminal-idle ──
+
+    @Test
+    fun `P0-E pendingErrorCheck - busy to idle transition adds sid to pendingErrorCheck`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+        assertEquals("busy seeded", "busy", store.stateFlow.value.authority.bySid["s1"]?.status?.type)
+        assertTrue("pendingErrorCheck initially empty",
+            store.stateFlow.value.chat.pendingErrorCheck.isEmpty())
+
+        // Idle transition → sid added to pendingErrorCheck.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 200L, workdir = "/w"),
+        ))
+        assertTrue("s1 added to pendingErrorCheck",
+            "s1" in store.stateFlow.value.chat.pendingErrorCheck)
+    }
+
+    @Test
+    fun `P0-E pendingErrorCheck - retry to idle transition adds sid to pendingErrorCheck`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "retry"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+        assertTrue("pendingErrorCheck empty before transition",
+            store.stateFlow.value.chat.pendingErrorCheck.isEmpty())
+
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 200L, workdir = "/w"),
+        ))
+        assertTrue("s1 added to pendingErrorCheck after retry→idle",
+            "s1" in store.stateFlow.value.chat.pendingErrorCheck)
+    }
+
+    @Test
+    fun `P0-E pendingErrorCheck - idle to idle transition does NOT add sid`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+        assertTrue("pendingErrorCheck empty after first idle",
+            store.stateFlow.value.chat.pendingErrorCheck.isEmpty())
+
+        // Another idle → no addition.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 200L, workdir = "/w"),
+        ))
+        assertTrue("pendingErrorCheck still empty after second idle",
+            store.stateFlow.value.chat.pendingErrorCheck.isEmpty())
+    }
+
+    @Test
+    fun `P0-E pendingErrorCheck - busy to pruned does NOT add sid (sid absent in nextAuth)`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+        // Prune s1 → removed from authority, NOT added to pendingErrorCheck.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.PruneSessions(sids = setOf("s1"), scopeKey = scope),
+        ))
+        assertNull("s1 pruned from authority",
+            store.stateFlow.value.authority.bySid["s1"])
+        assertTrue("pendingErrorCheck empty (pruned is not a terminal-idle transition)",
+            store.stateFlow.value.chat.pendingErrorCheck.isEmpty())
+    }
+
+    @Test
+    fun `P0-E pendingErrorCheck - guard-rejected op does NOT add sid to pendingErrorCheck`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Seed busy via OPTIMISTIC origin.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L, workdir = "/w"),
+        ))
+        val before = store.stateFlow.value
+        assertTrue("pendingErrorCheck initially empty",
+            before.chat.pendingErrorCheck.isEmpty())
+
+        // A stale legacy idle WITHOUT server echo → guard rejects (confirmation gate).
+        // The op is rejected by the guard, so the early return path (same-ref) fires
+        // and pendingErrorCheck MUST NOT be modified.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 50L, workdir = "/w"),
+        ))
+        assertTrue("pendingErrorCheck still empty after guarded idle drop",
+            store.stateFlow.value.chat.pendingErrorCheck.isEmpty())
+    }
 }
 
 /** Local assertNotNull to avoid an extra import line churn. */

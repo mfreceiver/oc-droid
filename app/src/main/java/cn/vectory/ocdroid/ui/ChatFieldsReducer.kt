@@ -233,13 +233,11 @@ internal fun reduceChatCleared(state: StoreState, action: AppAction.ChatCleared)
 
 internal fun reduceLastAssistantErrorAttached(state: StoreState, action: AppAction.LastAssistantErrorAttached): StoreState {
     val sid = action.sessionId
-    // §P0-E(b) NARROWED: happy-path direct attach ONLY. The R10 drain/consumer
-    // that would re-attempt attaching via the pending queue is DEFERRED to a
-    // post-P0-A task — safe attach requires the GET/controller + authority
-    // status writer to locate the errored assistant (B2: session.error carries
-    // no messageId; attaching to an arbitrary last assistant is forbidden).
-    // Until then a non-attachable payload is RECORDED into pendingErrorReattach
-    // (producer scaffolding) but NEVER attached to a message.
+    // §P0-E(b) PRODUCER HALF: happy-path direct attach when route matches +
+    // last assistant exists + no error yet. Otherwise records the payload into
+    // pendingErrorReattach for the ErrorRecoveryCoordinator drain (which
+    // re-attempts via GET getMessages(sid) + the pendingErrorCheck fallback
+    // when the session transitions busy/retry → idle).
     if (state.acceptsRouteUpdate(action.expectedRouteInstance, sid)) {
         val last = state.chat.messages.lastOrNull { it.isAssistant }
         if (last != null && last.error == null) {
@@ -406,6 +404,41 @@ internal fun reduceMessageRemovedConfirmed(
     return state.copy(
         chat = state.chat.evictMessageAndPartOverlay(msgId, partIds),
     ).withRouteContentSynced(action.expectedRouteInstance, action.sessionId)
+}
+
+// ── §P0-E(b)(c): ErrorLocalizationSettled reducer ─────────────────────
+
+internal fun reduceErrorLocalizationSettled(
+    state: StoreState,
+    action: AppAction.ErrorLocalizationSettled,
+): StoreState {
+    val sid = action.sessionId
+    // Always clear markers regardless of attach outcome.
+    val nextChat = state.chat.copy(
+        pendingErrorReattach = state.chat.pendingErrorReattach - sid,
+        pendingErrorCheck = state.chat.pendingErrorCheck - sid,
+    )
+    if (action.attachToMessageId == null || action.error == null) {
+        // Nothing to attach (banner already handles display via sessionErrorsById).
+        return state.copy(chat = nextChat)
+    }
+    // B2/M5 safety: only attach to the EXACT server-identified message,
+    // only if it has no error yet (never overwrite an existing error).
+    val matched = state.chat.messages.indexOfFirst { it.id == action.attachToMessageId }
+    if (matched < 0) {
+        // Message absent from loaded list → no attach (session-level banner
+        // handles display). Guards against stale GET results / nav flips.
+        return state.copy(chat = nextChat)
+    }
+    val existing = state.chat.messages[matched]
+    if (existing.error != null) {
+        // Already has an error — never overwrite (B2/M5 safety).
+        return state.copy(chat = nextChat)
+    }
+    val updatedMessages = state.chat.messages.toMutableList().apply {
+        set(matched, existing.copy(error = action.error))
+    }
+    return state.copy(chat = nextChat.copy(messages = updatedMessages))
 }
 
 /**

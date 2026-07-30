@@ -17,6 +17,7 @@ import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.data.repository.MessagesPage
 import cn.vectory.ocdroid.ui.AppCore
+import cn.vectory.ocdroid.ui.BundleStamp
 import cn.vectory.ocdroid.ui.ChatViewModel
 
 import cn.vectory.ocdroid.ui.ComposerViewModel
@@ -972,7 +973,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         assertFalse("s1" in core.sessionListFlow.value.abortPendingSessionIds)
     }
 
-    // ── reconcileStaleAbort: 3-param (sid, token, fp) ───────────────────────
+    // ── reconcileStaleAbort: 3-param (sid, token, bundle) ──────────────────
 
     @Test
     fun `P0-F reconcileStaleAbort clears abortPending but NOT sendingSessionIds (conservative, P0-A)`() = runTest {
@@ -982,7 +983,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
 
         val core = createCore()
         val chatVM = ChatViewModel(core)
-        val fp = core.currentServerGroupFp()
+        val bundle = chatVM.captureAbortBundle()
 
         // Pre-set abort-pending + a stuck sendingSessionIds entry
         core.store.mutateSessionList { s ->
@@ -991,7 +992,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         core.writeComposer { it.copy(sendingSessionIds = it.sendingSessionIds + "s1") }
         assertTrue("s1" in core.composerFlow.value.sendingSessionIds)
 
-        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedBundle = bundle)
         advanceUntilIdle()
 
         // §收窄: 只清 abort-pending；sendingSessionIds 留待 R5 generation/ownership
@@ -1010,13 +1011,13 @@ class ChatViewModelTest : MainViewModelTestBase() {
 
         val core = createCore()
         val chatVM = ChatViewModel(core)
-        val fp = core.currentServerGroupFp()
+        val bundle = chatVM.captureAbortBundle()
 
         core.store.mutateSessionList { s ->
             s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
         }
 
-        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedBundle = bundle)
         advanceUntilIdle()
 
         // §P0-F 阻断3: busy must NOT retain pending — release lock so user can retry
@@ -1029,10 +1030,10 @@ class ChatViewModelTest : MainViewModelTestBase() {
 
         val core = createCore()
         val chatVM = ChatViewModel(core)
-        val fp = core.currentServerGroupFp()
+        val bundle = chatVM.captureAbortBundle()
 
         // No pre-set abortPending for "s1"
-        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedBundle = bundle)
         advanceUntilIdle()
 
         assertFalse("s1" in core.sessionListFlow.value.abortPendingSessionIds)
@@ -1046,13 +1047,13 @@ class ChatViewModelTest : MainViewModelTestBase() {
 
         val core = createCore()
         val chatVM = ChatViewModel(core)
-        val fp = core.currentServerGroupFp()
+        val bundle = chatVM.captureAbortBundle()
 
         core.store.mutateSessionList { s ->
             s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
         }
 
-        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedBundle = bundle)
         advanceUntilIdle()
 
         // §P0-F 阻断3: fetch failure must NOT retain pending — release lock
@@ -1065,13 +1066,13 @@ class ChatViewModelTest : MainViewModelTestBase() {
 
         val core = createCore()
         val chatVM = ChatViewModel(core)
-        val fp = core.currentServerGroupFp()
+        val bundle = chatVM.captureAbortBundle()
 
         core.store.mutateSessionList { s ->
             s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
         }
 
-        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedBundle = bundle)
         advanceUntilIdle()
 
         // sid absent from map → settled=true → clear pending
@@ -1089,14 +1090,14 @@ class ChatViewModelTest : MainViewModelTestBase() {
 
         val core = createCore()
         val chatVM = ChatViewModel(core)
-        val fp = core.currentServerGroupFp()
+        val bundle = chatVM.captureAbortBundle()
 
         // Store expects token 200, but we pass expectedToken=100 (stale)
         core.store.mutateSessionList { s ->
             s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 200L))
         }
 
-        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedBundle = bundle)
         advanceUntilIdle()
 
         // Token mismatch → no-op: getSessionStatus NOT called, pending still has token 200
@@ -1110,7 +1111,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
     fun `P0-F reconcile 二次校验 drops when token changed during suspend`() = runTest {
         val core = createCore()
         val chatVM = ChatViewModel(core)
-        val fp = core.currentServerGroupFp()
+        val bundle = chatVM.captureAbortBundle()
 
         // Pre-set abortPending with tokenA
         core.store.mutateSessionList { s ->
@@ -1127,7 +1128,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         }
 
         // Call with expectedToken=100L (stale — token is now 200L after the mock mutated it)
-        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedBundle = bundle)
         advanceUntilIdle()
 
         // #2 secondary check should detect token changed → no-op
@@ -1151,8 +1152,8 @@ class ChatViewModelTest : MainViewModelTestBase() {
             s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
         }
 
-        // Pass an expectedFp that differs from the current host's fp
-        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = "different-host")
+        // Pass an expectedBundle that differs from the live connection bundle
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedBundle = BundleStamp(0L, "different-host"))
         advanceUntilIdle()
 
         // Host switched → fence triggers: clear pending, NO getSessionStatus

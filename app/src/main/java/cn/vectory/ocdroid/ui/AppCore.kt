@@ -17,6 +17,7 @@ import cn.vectory.ocdroid.ui.controller.CachedSessionWindow
 import cn.vectory.ocdroid.ui.controller.ComposerController
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
+import cn.vectory.ocdroid.ui.controller.ErrorRecoveryCoordinator
 import cn.vectory.ocdroid.ui.controller.ForegroundCatchUpController
 import cn.vectory.ocdroid.ui.controller.HostProfileController
 import cn.vectory.ocdroid.ui.controller.subtreeIds
@@ -132,6 +133,15 @@ class AppCore @Inject constructor(
      * and self-starts/stops the sweep. AppCore never calls into it directly.
      */
     internal val unreadSoakController: cn.vectory.ocdroid.ui.controller.UnreadSoakController,
+    /**
+     * §P0-E(b)(c): the GET drain/consumer for durable error localization.
+     * Injected here purely so Hilt constructs the @Singleton early — its init
+     * block subscribes to [cn.vectory.ocdroid.ui.SharedStateStore.stateFlow]
+     * and drains pendingErrorReattach / pendingErrorCheck markers via
+     * [cn.vectory.ocdroid.data.repository.OpenCodeRepository.getMessages].
+     * AppCore never calls into it directly.
+     */
+    internal val errorRecoveryCoordinator: ErrorRecoveryCoordinator,
     /**
      * R-20 Phase 1 (review-fix #1): provider for the current host's
      * serverGroupFp. Injected via the SAME `@Named("currentServerGroupFp")`
