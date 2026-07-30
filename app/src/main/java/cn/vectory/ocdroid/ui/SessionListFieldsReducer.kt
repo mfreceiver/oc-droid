@@ -40,8 +40,9 @@ internal fun reduceSessionArchivedLocal(state: StoreState, action: AppAction.Ses
             },
             pendingQuestions = action.pendingQuestions,
             activeSessionIds = state.sessionList.activeSessionIds - action.activeSessionIdsToRemove,
-            // §P0-F 阻断5: local archive must drop abort-pending for this session.
-            abortPendingSessionIds = state.sessionList.abortPendingSessionIds - id,
+            // §P0-F 阻断2: 对齐 caller 携带的 subtree（activeSessionIdsToRemove =
+            // subtree when archiving）；SSE SessionArchived / SessionDeletedLocal 同模式。
+            abortPendingSessionIds = state.sessionList.abortPendingSessionIds.filterKeys { it !in action.activeSessionIdsToRemove },
         ),
     )
 }

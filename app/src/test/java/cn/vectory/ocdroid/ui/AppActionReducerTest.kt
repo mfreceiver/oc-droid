@@ -1629,19 +1629,27 @@ class AppActionReducerTest {
     }
 
     @Test
-    fun `P0-F reduceSessionArchivedLocal clears abortPending for archived session`() {
-        val archivedSession = Session(id = "s1", directory = "/p", time = Session.TimeInfo(archived = 1L))
+    fun `P0-F reduceSessionArchivedLocal clears abortPending for archived subtree`() {
+        // activeSessionIdsToRemove carries the FULL subtree (parent + descendants)
+        // — reducer must clear abortPending for ALL of them, not just the root.
+        val archivedParent = Session(id = "parent", directory = "/p", time = Session.TimeInfo(archived = 1L))
         val prior = StoreState.initial().copy(
             sessionList = SessionListState(
-                sessions = listOf(Session(id = "s1", directory = "/p")),
-                abortPendingSessionIds = mapOf("s1" to 100L, "s2" to 200L)))
+                sessions = listOf(
+                    Session(id = "parent", directory = "/p"),
+                    Session(id = "child", directory = "/p", parentId = "parent"),
+                    Session(id = "unrelated", directory = "/p")),
+                abortPendingSessionIds = mapOf(
+                    "parent" to 100L,
+                    "child" to 200L,
+                    "unrelated" to 300L)))
 
-        val out = reduce(prior, AppAction.SessionArchivedLocal(archivedSession, activeSessionIdsToRemove = setOf("s1"), pendingQuestions = emptyList()))
+        val subtree = setOf("parent", "child")
+        val out = reduce(prior, AppAction.SessionArchivedLocal(archivedParent, activeSessionIdsToRemove = subtree, pendingQuestions = emptyList()))
 
-        assertFalse("archived session cleared",
-            "s1" in out.sessionList.abortPendingSessionIds)
-        assertTrue("unrelated session preserved",
-            "s2" in out.sessionList.abortPendingSessionIds)
+        assertFalse("parent cleared", "parent" in out.sessionList.abortPendingSessionIds)
+        assertFalse("child (descendant in subtree) cleared", "child" in out.sessionList.abortPendingSessionIds)
+        assertTrue("unrelated preserved", "unrelated" in out.sessionList.abortPendingSessionIds)
         assertEquals(1, out.sessionList.abortPendingSessionIds.size)
     }
 

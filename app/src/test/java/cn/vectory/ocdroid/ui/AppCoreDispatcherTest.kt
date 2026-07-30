@@ -954,4 +954,51 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             hit!!.messages.map { it.id },
         )
     }
+
+    // ── P0-F EvictSession fp guard ─────────────────────────────────────────
+
+    @Test
+    fun `P0-F EvictSession with mismatched fp does NOT clear abortPending`() = runTest {
+        val core = newCore()
+
+        // Pre-set abort-pending for "s1"
+        core.store.mutateSessionList { s ->
+            s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
+        }
+
+        // Capture current fp
+        val currentFp = core.currentServerGroupFp()
+        // Use a DIFFERENT fp in the effect
+        val oldFp = currentFp + "-old"
+
+        val handled = core.dispatchHostEffect(
+            ControllerEffect.EvictSession(serverGroupFp = oldFp, sessionId = "s1")
+        )
+        advanceUntilIdle()
+
+        assertTrue("dispatchHostEffect must claim EvictSession", handled)
+        // abortPending for "s1" must NOT be cleared — mismatched fp means old group
+        assertEquals("old-group EvictSession must NOT clear new group's abortPending",
+            100L, core.sessionListFlow.value.abortPendingSessionIds["s1"])
+    }
+
+    @Test
+    fun `P0-F EvictSession with matching fp DOES clear abortPending`() = runTest {
+        val core = newCore()
+
+        core.store.mutateSessionList { s ->
+            s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
+        }
+
+        val currentFp = core.currentServerGroupFp()
+
+        val handled = core.dispatchHostEffect(
+            ControllerEffect.EvictSession(serverGroupFp = currentFp, sessionId = "s1")
+        )
+        advanceUntilIdle()
+
+        assertTrue("dispatchHostEffect must claim EvictSession", handled)
+        assertFalse("matching-fp EvictSession must clear abortPending",
+            "s1" in core.sessionListFlow.value.abortPendingSessionIds)
+    }
 }
