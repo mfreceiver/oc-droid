@@ -167,6 +167,31 @@ class ServerCompatProfile @Inject constructor() {
     @Volatile var slimapiAcceptedMax: Int? = null
         internal set
 
+    /**
+     * P0 (B-slim-storm-fix): 是否独立提供 per-session `/slimapi/sessions/{sid}/status`
+     * 端点。
+     *
+     * lite-v2-dev 让 `OpenCodeRepository.getSlimapiSessionStatusOutcome` per-session
+     * delegate 到批量端点（`api.getSessionStatus()`），per-session 端点不再独立存在。
+     * 此时 `ProcessStatusPoller` 的 slim per-session fan-out 产生 **N 倍重复全量查询**
+     * （每个 sid 一次），且 404 检测在 delegate 下失效（缺项被误判为 SessionMissing →
+     * `EvictSession` 风暴，而 EvictSession 不收缩 sessionList → snapshot 不收缩 → ∞ 循环）。
+     *
+     * 默认 `false`（= per-session 不可用 / delegated to bulk）。
+     * [StreamingModule] 的 slimFanOutRunner 据此短路 fan-out：status 数据流由 bulk
+     * runRefresh（`StatusAggregatorImpl.refresh` → `getSlimapiSessionsStatus`）完整覆盖，
+     * stale session 清理由 `session.deleted` digest SSE 事件独立驱动
+     * （→ [SessionSyncCoordinator.handleSessionDigest] → `EvictSession`），
+     * 不依赖 per-session fan-out（注：`/since` 404 的 `MarkDeleted` reconcile 路径在
+     * lite-v2-dev 已 retired，非活路径，故不计入）。**fail-safe**：false = 不 fan-out = 风暴停止。
+     *
+     * 将来 per-session 端点恢复独立实现时：在 `/slimapi/health` 探测期对此标志置 `true`
+     * （对已知 sid 探 `/slimapi/sessions/{sid}/status`，404/`thin_route_not_found`→false，
+     * 正常 status→true），并恢复 [StreamingModule] 的真实 fan-out。
+     */
+    @Volatile var slimPerSessionStatusEndpointAvailable: Boolean = false
+        internal set
+
     /** 落库 [SlimapiHealthPayload] 的版本契约业务字段。 */
     fun updateSlimapi(payload: SlimapiHealthPayload) {
         slimapiServerApiVersion = payload.serverApiVersion
