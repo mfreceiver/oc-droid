@@ -1177,6 +1177,50 @@ class AuthorityReducerTest {
         assertSame("re-applied snapshot with out-of-scope entries must be CAS no-op",
             before, store.stateFlow.value)
     }
+
+    @Test
+    fun `r4 scope-guard - in-flight merge does not migrate out-of-scope entry to current scope`() {
+        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val store = storeWith(listOf(Session(id = "inScope", directory = "/w")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("inScope", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, workdir = "/w"),
+        ))
+        // Add out-of-scope entry (busy) via direct state manipulation.
+        store.mutateState { s ->
+            s.copy(authority = s.authority.copy(
+                bySid = s.authority.bySid + ("outSid" to SessionEntry(
+                    status = SessionStatus(type = "busy"),
+                    serverRound = null, optimisticClaim = null,
+                    origin = EntryOrigin.SSE_LEGACY, freshness = Freshness.Fresh,
+                    updatedMonotonic = 50L, workdir = "/other", scopeKey = diffScope,
+                ))
+            ))
+        }
+        // Capture localBefore INCLUDING the out-of-scope entry's OLD status (busy).
+        val localBefore = store.stateFlow.value.authority.bySid.mapValues { it.value.status }
+        // Simulate: out-of-scope entry changes during request (busy → idle).
+        store.mutateState { s ->
+            val out = s.authority.bySid["outSid"]!!
+            s.copy(authority = s.authority.copy(
+                bySid = s.authority.bySid + ("outSid" to out.copy(status = SessionStatus(type = "idle")))
+            ))
+        }
+        // Apply REST snapshot. localBefore has OLD out-of-scope status.
+        // currentProjection (scope-filtered) EXCLUDES outSid → merge does NOT pull it in.
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = mapOf("inScope" to SessionStatus(type = "idle")),
+                authoritativeNodeIds = setOf("inScope"),
+                sidToWorkdir = mapOf("inScope" to "/w"),
+                localBefore = localBefore,
+            ),
+        ))
+        val bySid = store.stateFlow.value.authority.bySid
+        assertEquals("out-of-scope entry NOT migrated to current scope",
+            diffScope, bySid["outSid"]?.scopeKey)
+        assertEquals("out-of-scope status preserved (latest, not overwritten)",
+            SessionStatus(type = "idle"), bySid["outSid"]?.status)
+    }
 }
 
 /** Local assertNotNull to avoid an extra import line churn. */

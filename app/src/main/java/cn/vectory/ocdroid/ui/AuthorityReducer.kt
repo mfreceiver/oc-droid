@@ -292,7 +292,14 @@ private fun addPendingBump(
  */
 private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): AuthorityState {
     val normalized = normalizeAuthoritativeStatusSnapshot(op.snapshot, op.authoritativeNodeIds)
-    val currentProjection = projectSessionStatuses(cur)
+    // §scope-guard: only in-scope entries participate in the in-flight merge.
+    // Out-of-scope entries that changed during the request must NOT be pulled
+    // into merged — the overlay would re-stamp them with op.scopeKey, migrating
+    // them to the current scope (cross-scope corruption).
+    val currentProjection = projectSessionStatuses(cur).filterKeys { sid ->
+        val entry = cur.bySid[sid]
+        entry == null || entry.scopeKey == null || entry.scopeKey == op.scopeKey
+    }
 
     // slim failed-dir preservation: prior status for failed-dir sids overrides
     // the (idle-filled) normalized value, exactly mirroring the legacy
