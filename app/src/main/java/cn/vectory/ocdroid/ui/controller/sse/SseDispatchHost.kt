@@ -165,6 +165,7 @@ internal fun SseDispatchHost.applyStatusViaAuthority(
     sid: String,
     status: cn.vectory.ocdroid.data.model.SessionStatus,
     origin: cn.vectory.ocdroid.data.state.EntryOrigin,
+    serverRound: cn.vectory.ocdroid.data.state.ServerRound? = null,
 ) {
     // §P0-A rev-gpt #3: resolve the session's workdir from the merged session
     // tree (sessions + directorySessions + childSessions) so the authority
@@ -212,6 +213,7 @@ internal fun SseDispatchHost.applyStatusViaAuthority(
                 sid = sid,
                 status = status,
                 origin = origin,
+                serverRound = serverRound,
                 capturedIdentity = capturedIdentity,
                 identityEpochAtCapture = identityEpochAtCapture,
                 scopeKey = scopeKey,

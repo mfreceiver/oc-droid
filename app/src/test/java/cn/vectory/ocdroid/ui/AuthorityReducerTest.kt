@@ -203,7 +203,13 @@ class AuthorityReducerTest {
         val store = storeWith(listOf(Session(id = "A", directory = "/x")))
         store.dispatch(AppAction.AuthorityEvent(event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 1L)))
         store.dispatch(AppAction.AuthorityEvent(event("A", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 2L)))
-        assertNull("terminal idle clears the claim", store.stateFlow.value.authority.bySid["A"]?.optimisticClaim)
+        // §P0-B ITEM 1 (confirmation gate): unconfirmed optimistic claim blocks
+        // the stale legacy idle → status stays busy, claim guardedIdleDrop=true.
+        assertNotNull("gate dropped idle — claim NOT cleared",
+            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim)
+        assertEquals("status stays busy (idle dropped)",
+            SessionStatus(type = "busy"),
+            store.stateFlow.value.authority.bySid["A"]?.status)
     }
 
     @Test
@@ -1176,6 +1182,171 @@ class AuthorityReducerTest {
         ))
         assertSame("re-applied snapshot with out-of-scope entries must be CAS no-op",
             before, store.stateFlow.value)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // §P0-B ITEM 1 — Tier-2 confirmation gate
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `P0-B confirmation gate DROPs idle when claim unconfirmed`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // 1. OPTIMISTIC busy (claim not echoed)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        val afterOpt = store.stateFlow.value.authority.bySid["s1"]!!
+        assertNotNull("optimistic claim present", afterOpt.optimisticClaim)
+        assertFalse("claim not echoed", afterOpt.optimisticClaim!!.serverEchoed)
+
+        // 2. SSE_LEGACY idle with no serverRound → gate DROPs it
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
+        ))
+        val afterIdle = store.stateFlow.value.authority.bySid["s1"]!!
+        assertEquals("status stays busy (idle dropped)", SessionStatus(type = "busy"), afterIdle.status)
+        assertNotNull("claim still present", afterIdle.optimisticClaim)
+        assertTrue("guardedIdleDrop set to true", afterIdle.optimisticClaim!!.guardedIdleDrop)
+    }
+
+    @Test
+    fun `P0-B echoed idle clears claim normally`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // 1. OPTIMISTIC busy
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        // 2. SSE_LEGACY busy → echo-confirm
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
+        ))
+        assertTrue("claim echoed", store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim?.serverEchoed == true)
+
+        // 3. SSE_LEGACY idle (echoed claim) → clears claim, status becomes idle
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 300L),
+        ))
+        val entry = store.stateFlow.value.authority.bySid["s1"]!!
+        assertEquals("status idle", SessionStatus(type = "idle"), entry.status)
+        assertNull("claim cleared", entry.optimisticClaim)
+    }
+
+    @Test
+    fun `P0-B gate does not block slim serverRound idle (Tier-1 fence)`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // 1. OPTIMISTIC busy (no serverRound, claim unechoed)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        // 2. SSE_SLIM idle WITH serverRound → Tier-1 lex guard lets it through
+        //    (gate only fires when op.serverRound == null)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(1L, 5L), monotonic = 200L),
+        ))
+        val entry = store.stateFlow.value.authority.bySid["s1"]!!
+        assertEquals("slim serverRound idle accepted", SessionStatus(type = "idle"), entry.status)
+        assertNull("claim cleared by slim idle", entry.optimisticClaim)
+    }
+
+    // ── ITEM 2: OPTIMISTIC immediate echo ──
+
+    @Test
+    fun `P0-B OPTIMISTIC immediate echo when prev is SSE busy`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // 1. SSE_LEGACY busy first
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L),
+        ))
+        // 2. OPTIMISTIC (cross-channel reorder: HTTP success after SSE busy)
+        //    → claim must have serverEchoed=true
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 200L),
+        ))
+        val claim = store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim
+        assertNotNull("optimistic claim present", claim)
+        assertTrue("immediate echo on SSE prev", claim!!.serverEchoed)
+    }
+
+    // ── ITEM 1: abortRelease interaction ──
+
+    @Test
+    fun `P0-B abortRelease NOT released when gate drops idle`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Set abort-pending BEFORE any status events (OPTIMISTIC where prev=null
+        // → claim unechoed, no SSE prev → ITEM 2 immediate-echo does NOT fire).
+        store.mutateSessionList { it.copy(abortPendingSessionIds = mapOf("s1" to 999L)) }
+        assertTrue("abort-pending seeded", "s1" in store.stateFlow.value.sessionList.abortPendingSessionIds)
+
+        // OPTIMISTIC busy (first event, no prev → claim unechoed)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L, workdir = "/w"),
+        ))
+        assertFalse("claim not echoed (no SSE prev)",
+            store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim?.serverEchoed == true)
+
+        // SSE_LEGACY idle → gate DROPs it (claim unechoed) → abortPending STILL contains s1
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
+        ))
+        assertTrue("abortPending NOT released after gate-drop",
+            "s1" in store.stateFlow.value.sessionList.abortPendingSessionIds)
+        assertEquals("status still busy", SessionStatus(type = "busy"),
+            store.stateFlow.value.sessionList.sessionStatuses["s1"])
+    }
+
+    @Test
+    fun `P0-B abortRelease released on normal applied idle`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Set abort-pending first
+        store.mutateSessionList { it.copy(abortPendingSessionIds = mapOf("s1" to 999L)) }
+        assertTrue("abort-pending seeded", "s1" in store.stateFlow.value.sessionList.abortPendingSessionIds)
+
+        // OPTIMISTIC busy (claim unechoed)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L, workdir = "/w"),
+        ))
+        // SSE_LEGACY busy → echo-confirm
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
+        ))
+        assertTrue("claim echoed",
+            store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim?.serverEchoed == true)
+
+        // SSE_LEGACY idle (echoed claim → normal apply) → releases abortPending
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 300L),
+        ))
+        assertFalse("abortPending released on normal idle",
+            "s1" in store.stateFlow.value.sessionList.abortPendingSessionIds)
+        assertEquals("status idle", SessionStatus(type = "idle"),
+            store.stateFlow.value.sessionList.sessionStatuses["s1"])
+    }
+
+    // ── ApplyReconcileOutcome IDLE_CONFIRMED path ──
+
+    @Test
+    fun `P0-B ApplyReconcileOutcome IDLE_CONFIRMED clears claim and sets idle`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Seed busy with claim
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        assertNotNull("claim present", store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim)
+
+        // ApplyReconcileOutcome IDLE_CONFIRMED
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.ApplyReconcileOutcome(
+                sid = "s1",
+                scopeKey = scope,
+                outcome = cn.vectory.ocdroid.data.state.ReconcileOutcome.IDLE_CONFIRMED,
+                serverRound = null,
+                monotonic = 500L,
+            ),
+        ))
+        val entry = store.stateFlow.value.authority.bySid["s1"]!!
+        assertEquals("status idle after reconcile", SessionStatus(type = "idle"), entry.status)
+        assertNull("claim cleared by reconcile", entry.optimisticClaim)
     }
 
     // ═══════════════════════════════════════════════════════════════════════
