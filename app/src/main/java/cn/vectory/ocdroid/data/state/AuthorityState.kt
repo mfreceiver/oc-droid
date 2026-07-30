@@ -67,6 +67,11 @@ data class SessionEntry(
     val updatedMonotonic: Long,
     /** §B3 workdir attribution (filled/updated by ApplySnapshot.sidToWorkdir). */
     val workdir: String?,
+    /** §P0-A rev-gpt r2 #6: the scope this entry was written under (ApplyEvent/
+     *  ApplySnapshot stamp it from op.scopeKey). Used by applyMarkFailed to
+     *  filter survivors by REAL scope (not workdir approximation). Null on
+     *  entries created before the field was added (backward-compat). */
+    val scopeKey: ScopeKey? = null,
 )
 
 /**

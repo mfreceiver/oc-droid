@@ -92,21 +92,40 @@ internal fun reduceSessionArchived(state: StoreState, action: AppAction.SessionA
     // — descendants that did NOT get their own session.updated still get
     // pruned here). T12's set/remove producer logic is unchanged.
     val cleanedSessionErrors = state.sessionList.sessionErrorsById.filterKeys { it !in subtree }
-    // §P0-F 阻断5: archive subtree must drop in-flight abort-pending flags —
-    // archived sessions cannot be aborted and a stale "stopping" flag would
-    // block the user's next abort on a same-id re-created session.
-    val cleanedAbortPending = state.sessionList.abortPendingSessionIds.filterKeys { it !in subtree }
-    return state.copy(
-        sessionList = newSessionList.copy(
+    // §P0-A rev-gpt #7 (SSE archive subtree-prune gap): route the authority
+    // prune through reduceAuthority — the SOLE writer of sessionStatuses (the
+    // projection comes from authority, not a direct write). Pre-fix the SSE
+    // archive removed the session from the list via applyArchiveEviction but
+    // left its entry in authority.bySid → the archived session stayed Busy in
+    // the aggregator's derived view forever. Prune the WHOLE subtree from
+    // authority in the SAME state.copy (single CAS), then layer the non-
+    // authority sessionList fields on top WITHOUT touching sessionStatuses.
+    // Mirrors reduceSessionArchivedLocal's subtree-prune pattern exactly.
+    // §P0-A r2: derive the real authority scope from StoreState (host profile
+    // serverGroupFp + liveEndpointFp), not empty ScopeKey("","") — the prune
+    // boundary must reflect the active connection identity.
+    val withAuth = reduceAuthority(
+        state,
+        cn.vectory.ocdroid.data.state.AuthorityOp.PruneSessions(
+            subtree,
+            state.resolveScopeKey(),
+        ),
+    )
+    return withAuth.copy(
+        sessionList = withAuth.sessionList.copy(
+            sessions = newSessionList.sessions,
+            directorySessions = newSessionList.directorySessions,
             pendingQuestions = cleanedQuestions,
-            activeSessionIds = newSessionList.activeSessionIds - subtree,
+            activeSessionIds = withAuth.sessionList.activeSessionIds - subtree,
             sessionErrorsById = cleanedSessionErrors,
-            abortPendingSessionIds = cleanedAbortPending,
+            abortPendingSessionIds = withAuth.sessionList.abortPendingSessionIds.filterKeys { it !in subtree },
         ),
         chat = newChatCleaned.copy(
             // §P0-E scaffolding hygiene: clear pending-error maps for the archived
-            // subtree (mirrors the sessionErrorsById cleanup above). Wiring deferred
-            // to post-P0-A, but the maps must not retain entries for archived sessions.
+            // subtree (mirrors the local/SSE archive + delete cleanup). The
+            // reducer already computed subtree for the unread / pendingQuestions
+            // cleanup above — reuse it here so the archive does not leave stale
+            // pending entries (review gap fix).
             pendingErrorReattach = newChatCleaned.pendingErrorReattach.filterKeys { it !in subtree },
             pendingErrorCheck = newChatCleaned.pendingErrorCheck - subtree,
         ),
@@ -377,8 +396,40 @@ internal fun reduceBulkSessionsRefreshed(state: StoreState, action: AppAction.Bu
     // (target in subtree) without touching chat content. The checkpoint
     // map is gone (B5 §11).
     val newChatCleaned = newChat.cleanScrollStateForSubtree(allArchivedSubtree)
-    return state.copy(
-        sessionList = newSessionList.copy(pendingQuestions = cleanedQuestions),
+    // §P0-A rev-gpt #7 (bulk-refresh archive subtree-prune gap): route the
+    // authority prune through reduceAuthority — the SOLE writer of
+    // sessionStatuses (the projection comes from authority, not a direct
+    // write). Pre-fix the bulk refresh wrote the merged list + pruned
+    // unread/questions for the archived subtree but left the archived ids'
+    // entries in authority.bySid → archived sessions stayed Busy in the
+    // aggregator's derived view. Prune the WHOLE archived subtree union from
+    // authority in the SAME state.copy (single CAS), then layer the non-
+    // authority sessionList fields on top WITHOUT touching sessionStatuses.
+    // Mirrors reduceSessionArchivedLocal's subtree-prune pattern exactly.
+    // §P0-A r2: derive the real authority scope from StoreState (host profile
+    // serverGroupFp + liveEndpointFp), not empty ScopeKey("","") — the prune
+    // boundary must reflect the active connection identity.
+    val withAuth = reduceAuthority(
+        state,
+        cn.vectory.ocdroid.data.state.AuthorityOp.PruneSessions(
+            allArchivedSubtree,
+            state.resolveScopeKey(),
+        ),
+    )
+    return withAuth.copy(
+        sessionList = withAuth.sessionList.copy(
+            sessions = newSessionList.sessions,
+            hasMoreSessions = newSessionList.hasMoreSessions,
+            isLoadingMoreSessions = newSessionList.isLoadingMoreSessions,
+            isRefreshingSessions = newSessionList.isRefreshingSessions,
+            pendingCreateIds = newSessionList.pendingCreateIds,
+            pendingCreatedAt = newSessionList.pendingCreatedAt,
+            completeRootIds = newSessionList.completeRootIds,
+            completenessEpoch = newSessionList.completenessEpoch,
+            activeSessionIds = newSessionList.activeSessionIds,
+            hasCompletedInitialLoad = newSessionList.hasCompletedInitialLoad,
+            pendingQuestions = cleanedQuestions,
+        ),
         chat = newChatCleaned.copy(
             // §P0-E scaffolding hygiene: clear pending-error maps for the bulk-
             // archived subtree (mirrors the local/SSE archive + delete cleanup).
@@ -590,12 +641,30 @@ internal fun ChatState.clearLoadedChatPayload(): ChatState = copy(
 )
 
 /**
- * Mirrors the live flat chat projection into the route-owned slot.  The flat
- * fields remain the legacy reducer surface, but once a route content slot is
- * active every transcript mutation must update both projections atomically.
- * The slot is never created or re-attributed here: its existing owner and
- * route token must still match the live incarnation.
+ * §P0-A r2: derive the REAL authority [ScopeKey] from [StoreState] alone
+ * (pure — no identityStore dependency). Combines the current host profile's
+ * [serverGroupFp] (normalized per [HostProfile.ensureServerGroupFp]) with
+ * the live [endpointFp] maintained by [BundlePublished]. Mirrors the
+ * derivation in [SharedStateStore.authorityScope] and
+ * [StatusAggregatorImpl.currentScope] so prune operations
+ * ([PruneSessions]) carry a scope that correctly represents the active
+ * connection identity.
+ *
+ * When no host is active (cold start / no profile), both fields default
+ * to "" — matching the identity fallback in the authoritative sites.
  */
+internal fun StoreState.resolveScopeKey(): cn.vectory.ocdroid.data.state.ScopeKey {
+    val currentProfile = host.hostProfiles.firstOrNull { it.id == host.currentHostProfileId }
+    val serverGroupFp = if (currentProfile != null) {
+        // Normalize blank to the profile id (mirrors HostProfile.ensureServerGroupFp()).
+        if (currentProfile.serverGroupFp.isBlank()) currentProfile.id else currentProfile.serverGroupFp
+    } else ""
+    return cn.vectory.ocdroid.data.state.ScopeKey(
+        serverGroupFp = serverGroupFp,
+        endpointFp = liveEndpointFp,
+    )
+}
+
 internal fun ChatState.syncLoadedContentFromFlat(
     routeInstance: Long,
     expectedRouteInstance: Long = 0L,

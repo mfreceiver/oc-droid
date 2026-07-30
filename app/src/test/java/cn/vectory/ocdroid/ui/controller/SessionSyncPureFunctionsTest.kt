@@ -823,8 +823,10 @@ class SessionSyncPureFunctionsTest {
         var chat = ChatState(currentSessionId = "s1")
         // §P0-A rev-gpt #8: applySessionStatus deleted — use direct copy for
         // test setup (the test verifies chat overlay math, not status writes).
-        val sessionListBusy = SessionListState(
-            sessionStatuses = mapOf("s1" to SessionStatus(type = "busy"))
+        // §P0-A rev-gpt #8 B10 r2: sessionStatuses is no longer a public factory
+        // param (sole-writer gate) — seed via withProjection.
+        val sessionListBusy = SessionListState().withProjection(
+            mapOf("s1" to SessionStatus(type = "busy"))
         )
         assertEquals(SessionStatus(type = "busy"), sessionListBusy.sessionStatuses["s1"])
 

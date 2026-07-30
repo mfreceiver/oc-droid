@@ -241,6 +241,10 @@ internal fun launchLoadChildSessions(
                 // authority op — the reducer stays pure).
                 val requestStartMs = System.currentTimeMillis()
                 val statusSnapshot = repository.getSessionStatus().getOrNull()
+                // §P0-A r2 #2: capture identityEpoch BEFORE entering the CAS
+                // lambda — a read inside the CAS retry loop could observe
+                // a concurrent bump (TOCTOU), so pre-capture here.
+                val identityEpochAtStart = slices.store.stateFlow.value.identityEpoch
                 slices.store.mutateState { snapshot ->
                     // §gpter-blocker: the tree was invalidated mid-flight —
                     // drop the stale result. The root stays incomplete so the
@@ -265,9 +269,8 @@ internal fun launchLoadChildSessions(
                             scopeKey = slices.store.authorityScope(),
                             requestToken = cn.vectory.ocdroid.data.state.RequestToken(
                                 hostProfileId = null,
-                                epoch = epochAtStart,
                                 requestStartMs = requestStartMs,
-                                identityEpoch = slices.store.stateFlow.value.identityEpoch,
+                                identityEpoch = identityEpochAtStart,
                             ),
                             localBefore = statusBefore,
                         )

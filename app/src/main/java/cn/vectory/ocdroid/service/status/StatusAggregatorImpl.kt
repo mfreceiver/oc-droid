@@ -270,6 +270,16 @@ class StatusAggregatorImpl internal constructor(
         val currentFp = scope.serverGroupFp
         val entries = HashMap<SessionStatusKey, Entry>(authority.bySid.size)
         for ((sid, e) in authority.bySid) {
+            // §P0-A r2 #4: scope-check by entry.scopeKey. An entry whose scopeKey
+            // is non-null AND does NOT match the current scope is SKIPPED — it
+            // belongs to a different server group/endpoint and must not contribute
+            // to the current aggregation. Entries with null scopeKey (pre-r2
+            // migration) are conservatively included (single-scope P0-A).
+            if (e.scopeKey != null && e.scopeKey != scope) continue
+            // §P0-A r2 #4: use the REAL workdir from the matched scope's
+            // coverage (not e.workdir which may be null for entries from
+            // different origins). For aggregator's purpose, both are equivalent
+            // in single-scope P0-A; use e.workdir for backward compatibility.
             val key = SessionStatusKey(currentFp, e.workdir ?: "", sid)
             entries[key] = Entry(
                 status = e.status.toSessionBusyStatus(),
@@ -383,7 +393,6 @@ class StatusAggregatorImpl internal constructor(
         )
         val token = RequestToken(
             hostProfileId = hostAtStart,
-            epoch = epochAtRequestStart,
             requestStartMs = requestStartMs,
             identityEpoch = identityEpochAtStart,
         )
@@ -483,7 +492,6 @@ class StatusAggregatorImpl internal constructor(
         val currentState = store.stateFlow.value
         val token = RequestToken(
             hostProfileId = currentState.host.currentHostProfileId,
-            epoch = identityStore.currentEpoch(),
             requestStartMs = sourceTimeMs,
             identityEpoch = currentState.identityEpoch,
         )

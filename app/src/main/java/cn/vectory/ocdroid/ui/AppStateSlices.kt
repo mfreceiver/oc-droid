@@ -1097,11 +1097,17 @@ class SessionListState internal constructor(
          *  constructor with all defaults). Matches the pre-B10 `SessionListState()` usage. */
         operator fun invoke(): SessionListState = SessionListState()
 
-        /** §P0-A rev-gpt #8 B10: public factory for named-arg construction
-         *  (delegates to the internal constructor). */
+        /** §P0-A rev-gpt #8 B10 r2 (sole-writer gate): public factory for
+         *  named-arg construction. DELIBERATELY EXCLUDES [sessionStatuses] —
+         *  there is NO parameter for it, so a `SessionListState(sessionStatuses
+         *  = …)` call FAILS TO COMPILE (the gate). The ONLY way to set a
+         *  non-empty sessionStatuses is the `internal` [withProjection]
+         *  (called exclusively by [reduceAuthority]); this factory always
+         *  seeds the constructor default `sessionStatuses = emptyMap()`.
+         *  Delegates via named args (positional would collide with the
+         *  constructor's sessionStatuses slot). */
         operator fun invoke(
             sessions: List<Session> = emptyList(),
-            sessionStatuses: Map<String, SessionStatus> = emptyMap(),
             activeSessionIds: Set<String> = emptySet(),
             expandedSessionIds: Set<String> = emptySet(),
             loadedSessionLimit: Int = cn.vectory.ocdroid.ui.MainViewModelTimings.sessionPageSize,
@@ -1124,15 +1130,28 @@ class SessionListState internal constructor(
             hasCompletedInitialLoad: Boolean = false,
             abortPendingSessionIds: Map<String, Long> = emptyMap(),
         ): SessionListState = SessionListState(
-            sessions, sessionStatuses, activeSessionIds, expandedSessionIds,
-            loadedSessionLimit, hasMoreSessions, isLoadingMoreSessions,
-            isRefreshingSessions, pendingPermissions, pendingQuestions,
-            childSessions, completeRootIds, completenessEpoch,
-            directorySessions, sessionTodos, sessionDiffs,
-            sessionErrorsById, questionAggregationSignal,
-            permissionAggregationSignal, pendingCreateIds,
-            pendingCreatedAt, hasCompletedInitialLoad,
-            abortPendingSessionIds,
+            sessions = sessions,
+            activeSessionIds = activeSessionIds,
+            expandedSessionIds = expandedSessionIds,
+            loadedSessionLimit = loadedSessionLimit,
+            hasMoreSessions = hasMoreSessions,
+            isLoadingMoreSessions = isLoadingMoreSessions,
+            isRefreshingSessions = isRefreshingSessions,
+            pendingPermissions = pendingPermissions,
+            pendingQuestions = pendingQuestions,
+            childSessions = childSessions,
+            completeRootIds = completeRootIds,
+            completenessEpoch = completenessEpoch,
+            directorySessions = directorySessions,
+            sessionTodos = sessionTodos,
+            sessionDiffs = sessionDiffs,
+            sessionErrorsById = sessionErrorsById,
+            questionAggregationSignal = questionAggregationSignal,
+            permissionAggregationSignal = permissionAggregationSignal,
+            pendingCreateIds = pendingCreateIds,
+            pendingCreatedAt = pendingCreatedAt,
+            hasCompletedInitialLoad = hasCompletedInitialLoad,
+            abortPendingSessionIds = abortPendingSessionIds,
         )
     }
 }

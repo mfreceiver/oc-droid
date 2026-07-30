@@ -187,6 +187,11 @@ internal object StatusPollOrchestrator {
                 val activeResult = repository.getActiveSessionIds()
                 val statuses = statusResult.getOrNull()
                 var applied = false
+                // §P0-A r2 #2: capture identityEpoch BEFORE entering the CAS
+                // lambda — a read inside the CAS retry loop could observe
+                // a concurrent bump (TOCTOU), so pre-capture the request-start
+                // value here (after the epoch/host guard but before CAS).
+                val identityEpochAtStart = slices.store.stateFlow.value.identityEpoch
                 slices.store.mutateState { snapshot ->
                     // StateFlow.update may retry this transform after a CAS
                     // collision. Report the result of the final attempt only.
@@ -225,9 +230,8 @@ internal object StatusPollOrchestrator {
                             scopeKey = slices.store.authorityScope(),
                             requestToken = cn.vectory.ocdroid.data.state.RequestToken(
                                 hostProfileId = hostAtRequestStart,
-                                epoch = myEpoch,
                                 requestStartMs = requestStartMs,
-                                identityEpoch = slices.store.stateFlow.value.identityEpoch,
+                                identityEpoch = identityEpochAtStart,
                             ),
                             localBefore = localBefore,
                         )
@@ -400,6 +404,10 @@ internal object StatusPollOrchestrator {
                     return@launch
                 }
                 var applied = false
+                // §P0-A r2 #2: capture identityEpoch BEFORE entering the CAS
+                // lambda — a read inside the CAS retry loop could observe
+                // a concurrent bump (TOCTOU), so pre-capture here.
+                val identityEpochAtStart = slices.store.stateFlow.value.identityEpoch
                 slices.store.mutateState { snapshot ->
                     applied = false
                     val current = snapshot.sessionList
@@ -443,9 +451,8 @@ internal object StatusPollOrchestrator {
                         scopeKey = slices.store.authorityScope(),
                         requestToken = cn.vectory.ocdroid.data.state.RequestToken(
                             hostProfileId = hostAtRequestStart,
-                            epoch = myEpoch,
                             requestStartMs = requestStartMs,
-                            identityEpoch = slices.store.stateFlow.value.identityEpoch,
+                            identityEpoch = identityEpochAtStart,
                         ),
                         localBefore = localBefore,
                     )

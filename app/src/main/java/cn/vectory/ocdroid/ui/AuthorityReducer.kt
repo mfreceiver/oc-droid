@@ -53,7 +53,30 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
         is AuthorityOp.ApplyReconcileOutcome -> applyReconcile(cur, op)
         is AuthorityOp.PruneSessions -> applyPrune(cur, op)
     }
-    if (nextAuth === cur) return state
+    // §P0-A rev-gpt r2 #5: compute the abort-pending release INDEPENDENT of the
+    // same-ref short-circuit. An equal-value terminal-idle ApplyEvent (re-
+    // delivered idle frame) hits nextAuth === cur BUT must STILL release
+    // abortPendingSessionIds[sid] — the server confirmed a non-running status,
+    // so the in-flight abort flag must clear regardless of whether the authority
+    // entry itself changed.
+    val abortRelease = op is AuthorityOp.ApplyEvent &&
+        !op.status.isBusy && !op.status.isRetry &&
+        op.sid in state.sessionList.abortPendingSessionIds
+    if (nextAuth === cur) {
+        // Authority unchanged. If this is a terminal ApplyEvent that needs to
+        // release abort-pending, do so as a REAL transition (bump revision so
+        // the aggregator re-derives). Otherwise true no-op (same ref).
+        return if (abortRelease) {
+            state.copy(
+                authorityRevision = state.authorityRevision + 1L,
+                sessionList = state.sessionList.copy(
+                    abortPendingSessionIds = state.sessionList.abortPendingSessionIds - op.sid,
+                ),
+            )
+        } else {
+            state
+        }
+    }
     val projection = projectSessionStatuses(nextAuth)
     val newSessions = applyOptimisticBumps(state.sessionList.sessions, nextAuth.pendingBumps)
     val cleanedAuth = nextAuth.copy(pendingBumps = emptyMap())
@@ -62,11 +85,7 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
     // abort-pending flag for that sid in the SAME state.copy that writes the
     // status projection — atomically (no torn window between the status write
     // and the abort release, which the old SseDispatchHost two-CAS path had).
-    // Only when the sid actually HAS a pending abort flag (avoids needless copy).
-    val nextAbortPending = if (op is AuthorityOp.ApplyEvent &&
-        !op.status.isBusy && !op.status.isRetry &&
-        op.sid in state.sessionList.abortPendingSessionIds
-    ) {
+    val nextAbortPending = if (abortRelease) {
         state.sessionList.abortPendingSessionIds - op.sid
     } else {
         state.sessionList.abortPendingSessionIds
@@ -206,6 +225,7 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
         freshness = Freshness.Fresh,
         updatedMonotonic = op.connectionMonotonicMs,
         workdir = op.workdir ?: prev?.workdir,
+        scopeKey = op.scopeKey,
     )
 
     val nextPending = addPendingBump(cur.pendingBumps, op)
@@ -299,7 +319,8 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
         val priorEntry = cur.bySid[id]
         nextById[id] = if (id in failedSids && priorEntry != null) {
             // Failed-dir: keep prior entry (claim/round/workdir), update status only.
-            priorEntry.copy(status = status)
+            // Stamp the real scopeKey from the op for applyMarkFailed filtering.
+            priorEntry.copy(status = status, scopeKey = op.scopeKey)
         } else {
             // REST authoritative for this scope: clear claim + serverRound (§3.1:320).
             SessionEntry(
@@ -310,6 +331,7 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
                 freshness = Freshness.Fresh,
                 updatedMonotonic = op.requestToken.requestStartMs,
                 workdir = op.sidToWorkdir[id],
+                scopeKey = op.scopeKey,
             )
         }
     }
@@ -384,17 +406,18 @@ private fun applyPurge(cur: AuthorityState, op: AuthorityOp.PurgeHost): Authorit
  * idempotent).
  */
 private fun applyMarkFailed(cur: AuthorityState, op: AuthorityOp.MarkSourceFailed): AuthorityState {
-    // Merge timing (scope-filtered): keep an entry if EITHER (a) it is FRESHER
-    // than the failure (updatedMonotonic > monotonic — a prior SSE Busy/Retry
-    // survives), OR (b) it is OUT OF SCOPE (its workdir is non-blank AND NOT in
-    // the failed scope's registeredWorkdirs — a different scope's entry must
-    // NOT be swept by this scope's failure). Remove only in-scope + at-or-older-
-    // than-failure entries (absence ≡ unknown, fail-closed). Entries with a
-    // null/blank workdir are conservatively treated as in-scope (single active
-    // scope in P0-A).
+    // §P0-A r2 #4: scope-filtering by [scopeKey] (not workdir approximation).
+    // Keep an entry if EITHER (a) it is FRESHER than the failure
+    // (updatedMonotonic > monotonic — a prior SSE Busy/Retry survives), OR
+    // (b) it is OUT OF SCOPE (entry.scopeKey != null AND entry.scopeKey !=
+    // op.scopeKey — a different scope's entry must NOT be swept by this
+    // scope's failure, even if it happens to share a workdir). Remove only
+    // in-scope + at-or-older-than-failure entries (absence ≡ unknown,
+    // fail-closed). Entries with null scopeKey (pre-field migration) are
+    // conservatively treated as in-scope.
     val survivors = cur.bySid.filterValues { entry ->
         entry.updatedMonotonic > op.monotonic ||
-            (entry.workdir != null && entry.workdir.isNotBlank() && entry.workdir !in op.registeredWorkdirs)
+            (entry.scopeKey != null && entry.scopeKey != op.scopeKey)
     }
     val nextCoverage = cur.coverage + (op.scopeKey to Coverage(
         registeredWorkdirs = op.registeredWorkdirs,

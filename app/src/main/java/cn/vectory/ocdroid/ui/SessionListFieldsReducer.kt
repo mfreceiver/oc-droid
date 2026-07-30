@@ -48,7 +48,16 @@ internal fun reduceSessionArchivedLocal(state: StoreState, action: AppAction.Ses
     // reduceAuthority — it is the SOLE writer of sessionStatuses (the
     // projection comes from authority, not a direct write). Layer the other
     // sessionList fields on top WITHOUT touching sessionStatuses.
-    val withAuth = reduceAuthority(state, AuthorityOp.PruneSessions(subtree, ScopeKey("", "")))
+    // §P0-A r2: derive the real authority scope from StoreState (host profile
+    // serverGroupFp + liveEndpointFp), not empty ScopeKey("","") — the prune
+    // boundary must reflect the active connection identity.
+    val withAuth = reduceAuthority(
+        state,
+        AuthorityOp.PruneSessions(
+            subtree,
+            state.resolveScopeKey(),
+        ),
+    )
     return withAuth.copy(
         sessionList = withAuth.sessionList.copy(
             sessions = state.sessionList.sessions.map {
@@ -89,7 +98,16 @@ internal fun reduceSessionDeletedLocal(state: StoreState, action: AppAction.Sess
     }.toSet()
     // §P0-A rev-gpt #8 (sole writer): route through reduceAuthority — it prunes
     // authority.bySid + recomputes sessionStatuses (the SOLE writer).
-    val withAuth = reduceAuthority(state, AuthorityOp.PruneSessions(allSubtreeIds, ScopeKey("", "")))
+    // §P0-A r2: derive the real authority scope from StoreState (host profile
+    // serverGroupFp + liveEndpointFp), not empty ScopeKey("","") — the prune
+    // boundary must reflect the active connection identity.
+    val withAuth = reduceAuthority(
+        state,
+        AuthorityOp.PruneSessions(
+            allSubtreeIds,
+            state.resolveScopeKey(),
+        ),
+    )
     return withAuth.copy(
         sessionList = withAuth.sessionList.copy(
             sessions = state.sessionList.sessions.filter { it.id !in ids },

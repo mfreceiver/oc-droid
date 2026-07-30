@@ -749,7 +749,7 @@ class T1cSessionListComplexOwnershipTest {
             partialFailureWorkdirs = emptySet(),
             lastSuccessTimeMs = 0L,
             scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
-            requestToken = cn.vectory.ocdroid.data.state.RequestToken(hostProfileId = null, epoch = 0L, requestStartMs = 0L),
+            requestToken = cn.vectory.ocdroid.data.state.RequestToken(hostProfileId = null, requestStartMs = 0L),
             localBefore = localBefore,
         )
 

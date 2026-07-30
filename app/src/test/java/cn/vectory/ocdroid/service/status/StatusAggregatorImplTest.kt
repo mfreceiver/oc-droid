@@ -385,20 +385,20 @@ class StatusAggregatorImplTest {
         // §P0-A Lane 2 (双投影同源): authority is single-scope (bySid keyed by
         // sid, whole-graph-replaced on each ApplySnapshot). The second refresh
         // (host-group-B) REPLACED bySid — the stale host-group-A Busy entry is
-        // GONE from authority (and thus from the derived statusByKey). This
-        // matches the UI projection (sessionStatuses shows only the current
-        // scope). The PRE-Lane-2 aggregator retained cross-group entries in its
-        // OWN map (multi-scope, composite-keyed); that retention is no longer
-        // representable under single-source authority. The LIFECYCLE assertion
-        // (globalBusy scopes to the current identity → false) is preserved.
+        // GONE from authority. The replacement entry (s1=Idle) is stamped with
+        // scopeKey=host-group-B, so the r2 #4 scopeKey filter in
+        // authorityToAggregate excludes it from the current scope (host-group-A).
+        // Thus statusByKey is EMPTY for the current scope — correct isolation:
+        // a different serverGroupFp's entries must not pollute the current
+        // lifecycle projection. The LIFECYCLE assertion (globalBusy scopes to
+        // the current identity → false) is preserved.
         val statuses = aggregator.statusByKey.value
         assertEquals(
-            "single-scope: only the current scope's entry is present (stale group-A replaced)",
-            1,
+            "r2 #4 scopeKey filter: no entries remain in the current scope (host-group-A);" +
+                " host-group-B entry excluded",
+            0,
             statuses.size,
         )
-        // The remaining entry is the current scope's (host-group-A store-fp) s1=Idle.
-        assertEquals(SessionBusyStatus.Idle, statuses[key("s1", "/work")])
     }
 
     // ── (5) CP4 tri-state globalState ──────────────────────────────────────────────────

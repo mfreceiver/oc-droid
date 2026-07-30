@@ -92,9 +92,12 @@ class SessionSyncCoordinatorStatusFeedTest {
 
     private fun seedSessions(sessions: List<Session>) {
         slices.mutateSessionList {
+            // §P0-A rev-gpt #8 B10 r2: sessionStatuses is no longer a public
+            // factory param (sole-writer gate). emptyMap() was the default, so
+            // the line is simply removed; seed non-empty statuses via
+            // withProjection when needed.
             SessionListState(
                 sessions = sessions,
-                sessionStatuses = emptyMap(),
                 expandedSessionIds = emptySet(),
                 loadedSessionLimit = 0,
                 hasMoreSessions = false,

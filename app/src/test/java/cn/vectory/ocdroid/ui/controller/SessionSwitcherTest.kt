@@ -180,9 +180,10 @@ class SessionSwitcherTest {
             )
         }
         slices.mutateSessionList {
+            // §P0-A rev-gpt #8 B10 r2: sessionStatuses is no longer a public
+            // factory param (sole-writer gate) — seed via withProjection.
             SessionListState(
                 sessions = s.sessions,
-                sessionStatuses = s.sessionStatuses,
                 expandedSessionIds = s.expandedSessionIds,
                 loadedSessionLimit = s.loadedSessionLimit,
                 hasMoreSessions = s.hasMoreSessions,
@@ -193,7 +194,7 @@ class SessionSwitcherTest {
                 childSessions = s.childSessions,
                 directorySessions = s.directorySessions,
                 sessionTodos = s.sessionTodos
-            )
+            ).withProjection(s.sessionStatuses)
         }
         slices.mutateUnread {
             UnreadState(

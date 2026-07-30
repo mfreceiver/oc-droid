@@ -126,6 +126,10 @@ class BackgroundUnreadPoller internal constructor(
         // protection inside the commit CAS (an SSE status that landed during the
         // REST round-trip must not be clobbered by this background snapshot).
         val localBefore = store.sessionListFlow.value.sessionStatuses
+        // §P0-A r2 #2: capture the identity epoch BEFORE the mutateState CAS
+        // lambda — a read inside the CAS retry loop could observe a concurrent
+        // bump (TOCTOU), so pre-capture the request-start value here.
+        val identityEpochAtStart = store.stateFlow.value.identityEpoch
         fun identityValid(): Boolean = isBackground() &&
             lifecycleGeneration() == startGeneration &&
             store.hostFlow.value.currentHostProfileId == startHostId &&
@@ -202,9 +206,8 @@ class BackgroundUnreadPoller internal constructor(
                 scopeKey = store.authorityScope(),
                 requestToken = cn.vectory.ocdroid.data.state.RequestToken(
                     hostProfileId = startHostId,
-                    epoch = startEpoch,
                     requestStartMs = now,
-                    identityEpoch = store.stateFlow.value.identityEpoch,
+                    identityEpoch = identityEpochAtStart,
                 ),
                 localBefore = localBefore,
             )
@@ -226,8 +229,13 @@ class BackgroundUnreadPoller internal constructor(
             val archivedTreeIds = roots.filter { it.isArchived }
                 .flatMap { treeIds(it.id, sessionsById) }
                 .toSet()
+            // §P0-A r2 #1: preserve authorityRevision from reduceAuthority's
+            // return value so the aggregator's distinctUntilChanged{authorityRevision}
+            // detects the transition and re-derives. The provisional copy MUST NOT
+            // drop the revision that reduceAuthority bumped.
             val provisional = snapshot.copy(
                 authority = withStatus.authority,
+                authorityRevision = withStatus.authorityRevision,
                 sessionList = nextSessionList,
                 unread = snapshot.unread.removeSessions(archivedTreeIds),
             )

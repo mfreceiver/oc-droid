@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui
 
+import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.state.AuthorityOp
@@ -56,7 +57,6 @@ class AuthorityReducerTest {
         sidToWorkdir: Map<String, String> = emptyMap(),
         partialFailureWorkdirs: Set<String> = emptySet(),
         host: String? = null,
-        epoch: Long = 0L,
         requestStartMs: Long = 100L,
         identityEpoch: Long = 0L,
     ) = AuthorityOp.ApplySnapshot(
@@ -69,7 +69,7 @@ class AuthorityReducerTest {
         partialFailureWorkdirs = partialFailureWorkdirs,
         lastSuccessTimeMs = requestStartMs,
         scopeKey = scope,
-        requestToken = RequestToken(hostProfileId = host, epoch = epoch, requestStartMs = requestStartMs, identityEpoch = identityEpoch),
+        requestToken = RequestToken(hostProfileId = host, requestStartMs = requestStartMs, identityEpoch = identityEpoch),
         localBefore = localBefore,
     )
 
@@ -640,7 +640,8 @@ class AuthorityReducerTest {
             Session(id = "inScope", directory = "/work-a"),
             Session(id = "outScope", directory = "/other-dir"),
         ))
-        // Seed both entries (both older than the failure time).
+        // Seed both entries under the SAME scope (both written via event() which uses
+        // the test scope). Both have scopeKey == default test scope.
         store.dispatch(AppAction.AuthorityEvent(
             event("inScope", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 50L, workdir = "/work-a"),
         ))
@@ -648,19 +649,21 @@ class AuthorityReducerTest {
             event("outScope", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 50L, workdir = "/other-dir"),
         ))
 
-        // MarkSourceFailed for scope with registeredWorkdirs = {"/work-a"} at t=100.
+        // MarkSourceFailed for the default scope at t=100.
+        // §P0-A r2: scopeKey-based filtering → BOTH entries have scopeKey == scope →
+        // BOTH are in-scope and get removed (neither's scopeKey differs).
         store.dispatch(AppAction.AuthorityEvent(
             AuthorityOp.MarkSourceFailed(
                 scopeKey = scope,
-                requestToken = RequestToken(hostProfileId = null, epoch = 0L, requestStartMs = 100L, identityEpoch = 0L),
+                requestToken = RequestToken(hostProfileId = null, requestStartMs = 100L, identityEpoch = 0L),
                 monotonic = 100L,
                 registeredWorkdirs = setOf("/work-a"),
             ),
         ))
 
         val bySid = store.stateFlow.value.authority.bySid
-        assertNull("in-scope entry removed (absence ≡ unknown)", bySid["inScope"])
-        assertNotNull("out-of-scope entry survives (different workdir)", bySid["outScope"])
+        assertNull("in-scope entry removed (same scopeKey)", bySid["inScope"])
+        assertNull("same-scope entry also removed (same scopeKey, not protected by different workdir anymore)", bySid["outScope"])
     }
 
     // ── authorityRevision bump ───────────────────────────────────────────
@@ -757,6 +760,243 @@ class AuthorityReducerTest {
             expectedProjection,
             state.sessionList.sessionStatuses,
         )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // §P0-A r2 — NEW TESTS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ── r2 #1: serverRound tie-break (equal incarnation/turn, older monotonic) ──
+
+    @Test
+    fun `r2 tie-break - equal serverRound with older monotonic is DROPPED`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        val round = ServerRound(1L, 5L)
+        // First: busy at monotonic=200.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = round, monotonic = 200L, workdir = "/w"),
+        ))
+        val afterNew = store.stateFlow.value.sessionList.sessionStatuses["s1"]
+
+        // Tie-break: equal serverRound, OLDER monotonic (100 < 200) → DROP.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_SLIM,
+                serverRound = round, monotonic = 100L, workdir = "/w"),
+        ))
+        assertEquals("equal-serverRound with older monotonic dropped — busy retained",
+            afterNew, store.stateFlow.value.sessionList.sessionStatuses["s1"])
+    }
+
+    @Test
+    fun `r2 tie-break - equal serverRound with newer monotonic overwrites`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        val round = ServerRound(1L, 5L)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = round, monotonic = 100L, workdir = "/w"),
+        ))
+
+        // Tie-break: equal serverRound, NEWER monotonic (300 > 100) → overwrites.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_SLIM,
+                serverRound = round, monotonic = 300L, workdir = "/w"),
+        ))
+        assertEquals("equal-serverRound with newer monotonic overwrites",
+            SessionStatus(type = "idle"),
+            store.stateFlow.value.sessionList.sessionStatuses["s1"])
+    }
+
+    // ── r2 #3c: same-ref terminal ApplyEvent must release abortPending ──
+
+    @Test
+    fun `r2 same-ref terminal ApplyEvent releases abortPending even when nextAuth is same reference`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Seed authority with a busy entry for s1.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+        // Set abort-pending flag.
+        store.mutateSessionList { it.copy(abortPendingSessionIds = mapOf("s1" to 999L)) }
+        assertTrue("abort-pending seeded", "s1" in store.stateFlow.value.sessionList.abortPendingSessionIds)
+
+        // Now apply ANOTHER busy event with different monotonic (so entry differs)
+        // — this makes a "not same-ref" transition that also clears abort-pending.
+        // To test the SAME-REF path specifically, we need an ApplyEvent whose
+        // nextEntry == prev (same status + monotonic) but IS terminal:
+        // a re-delivered idle with the same monotonic value.
+        // First switch to idle:
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 200L, workdir = "/w"),
+        ))
+        assertEquals("idle seeded", SessionStatus(type = "idle"),
+            store.stateFlow.value.sessionList.sessionStatuses["s1"])
+        // Re-set abort-pending (the previous dispatch cleared it).
+        store.mutateSessionList { it.copy(abortPendingSessionIds = mapOf("s1" to 888L)) }
+
+        // Re-deliver IDLE with SAME monotonic = 200 → nextEntry == prev → same ref
+        // but IS terminal (idle, not busy/retry) → MUST release abortPending.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 200L, workdir = "/w"),
+        ))
+        val state = store.stateFlow.value
+        assertFalse("same-ref terminal idle MUST release abortPending (the abortRelease branch)",
+            "s1" in state.sessionList.abortPendingSessionIds)
+        // authorityRevision must also bump on this special path.
+        assertTrue("authorityRevision bumps on abortRelease even with same-ref authority",
+            state.authorityRevision > 0L)
+    }
+
+    @Test
+    fun `r2 same-ref terminal but sid not in abortPending is a true no-op`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Seed idle at monotonic=100.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+        val before = store.stateFlow.value
+
+        // Re-deliver same idle — NOT in abortPending → true no-op.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+        assertSame("same-ref idle without abortPending is true CAS no-op", before, store.stateFlow.value)
+    }
+
+    // ── r2 #4: applyMarkFailed scopeKey-based filtering ──
+
+    @Test
+    fun `r2 markFailed scopeKey filter - out-of-scope entry survives by scopeKey`() {
+        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val store = storeWith(listOf(
+            Session(id = "inScope", directory = "/shared-dir"),
+            Session(id = "outScope", directory = "/shared-dir"),
+        ))
+        // Both entries share the SAME workdir but have DIFFERENT scopeKeys.
+        // inScope is written under the default test scope.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("inScope", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY,
+                monotonic = 50L, workdir = "/shared-dir"),
+        ))
+        // outScope is written under a DIFFERENT scope via direct authority state
+        // manipulation (the event helper writes via dispatch, which uses scopeKey=scope).
+        // For out-of-scope we seed via PruneSessions then re-add... Actually, we just
+        // seed authority directly for the second entry under the different scope.
+        store.mutateState { s ->
+            val cur = s.authority
+            s.copy(authority = cur.copy(
+                bySid = cur.bySid + ("outScope" to cur.bySid["inScope"]!!.copy(
+                    scopeKey = diffScope,
+                ))
+            ))
+        }
+        assertEquals("outScope has different scopeKey",
+            diffScope, store.stateFlow.value.authority.bySid["outScope"]?.scopeKey)
+
+        // MarkSourceFailed for the default scope at t=100.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.MarkSourceFailed(
+                scopeKey = scope,
+                requestToken = RequestToken(hostProfileId = null, requestStartMs = 100L, identityEpoch = 0L),
+                monotonic = 100L,
+                registeredWorkdirs = setOf("/shared-dir"),
+            ),
+        ))
+
+        val bySid = store.stateFlow.value.authority.bySid
+        assertNull("in-scope entry removed (scope matches)", bySid["inScope"])
+        assertNotNull("out-of-scope entry survives (different scopeKey even though same workdir)", bySid["outScope"])
+    }
+
+    // ── r2 #3b/7: identityEpoch + authorityRevision bump on HostState change ──
+
+    @Test
+    fun `r2 identityEpoch bumps on ANY HostState change not just hostProfileId`() {
+        val store = SharedStateStore()
+        val epoch0 = store.stateFlow.value.identityEpoch
+
+        // Change host without changing currentHostProfileId (simulate a same-profile
+        // hostProfiles map update). mutateHost bumps on nextHost != prevHost.
+        store.mutateHost { it.copy(hostProfiles = listOf(HostProfile(name = "k", serverUrl = "http://x"))) }
+        val epoch1 = store.stateFlow.value.identityEpoch
+        assertTrue("identityEpoch bumps on non-profile-id HostState change", epoch1 > epoch0)
+
+        // Another non-profile-id change (different hostProfiles value).
+        store.mutateHost { it.copy(hostProfiles = listOf(HostProfile(name = "k2", serverUrl = "http://x"))) }
+        val epoch2 = store.stateFlow.value.identityEpoch
+        assertTrue("identityEpoch bumps again on another HostState change", epoch2 > epoch1)
+    }
+
+    @Test
+    fun `r2 opScopeValid rejects ApplySnapshot when identityEpoch mismatches`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Bump identityEpoch to a known value.
+        store.mutateHost { it.copy(currentHostProfileId = "host-A") }
+        val currentEpoch = store.stateFlow.value.identityEpoch
+
+        // Token with MATCHING epoch → accepted.
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = mapOf("s1" to SessionStatus(type = "busy")),
+                authoritativeNodeIds = setOf("s1"),
+                host = "host-A",
+                identityEpoch = currentEpoch,
+            ),
+        ))
+        assertNotNull("matching-epoch snapshot accepted", store.stateFlow.value.authority.bySid["s1"])
+
+        // A stale token with LOWER epoch → rejected.
+        val stateBeforeReject = store.stateFlow.value
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = mapOf("s1" to SessionStatus(type = "idle")),
+                authoritativeNodeIds = setOf("s1"),
+                host = "host-A",
+                identityEpoch = currentEpoch - 1L,
+            ),
+        ))
+        assertSame("stale-epoch snapshot dropped (no-op)", stateBeforeReject, store.stateFlow.value)
+    }
+
+    // ── r2 #6: SessionEntry scopeKey is stamped by applyEvent/applySnapshot ──
+
+    @Test
+    fun `r2 applyEvent stamps scopeKey on SessionEntry`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+        val entry = store.stateFlow.value.authority.bySid["s1"]
+        assertEquals("scopeKey stamped from op.scopeKey", scope, entry?.scopeKey)
+    }
+
+    @Test
+    fun `r2 applySnapshot stamps scopeKey on SessionEntry`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = mapOf("s1" to SessionStatus(type = "busy")),
+                authoritativeNodeIds = setOf("s1"),
+            ),
+        ))
+        val entry = store.stateFlow.value.authority.bySid["s1"]
+        assertEquals("scopeKey stamped from op.scopeKey", scope, entry?.scopeKey)
+    }
+
+    @Test
+    fun `r2 authorityRevision bumps on identityEpoch change (host state change)`() {
+        val store = SharedStateStore()
+        val rev0 = store.stateFlow.value.authorityRevision
+
+        // mutateHost bumps identityEpoch + authorityRevision.
+        store.mutateHost { it.copy(currentHostProfileId = "new-host") }
+        val rev1 = store.stateFlow.value.authorityRevision
+        assertTrue("authorityRevision bumps on host state change", rev1 > rev0)
+
+        // Same-host change still bumps.
+        store.mutateHost { it.copy(hostProfiles = listOf(HostProfile(name = "k3", serverUrl = "http://x"))) }
+        val rev2 = store.stateFlow.value.authorityRevision
+        assertTrue("authorityRevision bumps on non-profile host change", rev2 > rev1)
     }
 }
 

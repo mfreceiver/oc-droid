@@ -99,6 +99,12 @@ internal class ForegroundSessionTreeHydrator(
         // drops the result (fail-closed) so a stale snapshot can never
         // re-certify a root whose tree was invalidated.
         val epochAtStart = snapshot.completenessEpoch
+        // §P0-A r2 #2: capture the identity epoch BEFORE any suspend — the
+        // RequestToken must reflect the value at request start (before
+        // loadCompleteSessionTrees / getSessionStatus network round-trips),
+        // not after the coroutine body where a concurrent identity reconfigure
+        // could have bumped it.
+        val identityEpochAtStart = store.stateFlow.value.identityEpoch
         scope.launch {
             try {
                 val result = loadCompleteSessionTrees(repository, roots)
@@ -153,9 +159,8 @@ internal class ForegroundSessionTreeHydrator(
                                 scopeKey = store.authorityScope(),
                                 requestToken = cn.vectory.ocdroid.data.state.RequestToken(
                                     hostProfileId = hostId,
-                                    epoch = epochAtStart,
                                     requestStartMs = requestStartMs,
-                                    identityEpoch = store.stateFlow.value.identityEpoch,
+                                    identityEpoch = identityEpochAtStart,
                                 ),
                                 localBefore = statusBefore,
                             )
