@@ -117,6 +117,7 @@ class B2RouteWiringSequenceTest {
         override fun handleSessionDigest(event: SSEEvent) {}
         override fun markLocallyInjected(sessionId: String, messageId: String) {}
         override fun closeSkeletonSession(sessionId: String) {}
+        override fun currentEventIdentity(): cn.vectory.ocdroid.service.identity.ConnectionIdentity? = null
         override fun dispatchBundleBound(
             actionFactory: (cn.vectory.ocdroid.ui.BundleStamp) -> cn.vectory.ocdroid.ui.AppAction,
         ): Boolean {

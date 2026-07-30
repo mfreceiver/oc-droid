@@ -1178,6 +1178,140 @@ class AuthorityReducerTest {
             before, store.stateFlow.value)
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // §P0-C (B11) — identity-epoch guard
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private val capturedIdentity = cn.vectory.ocdroid.service.identity.ConnectionIdentity(
+        epoch = 5L,
+        serverGroupFp = "grp",
+        normalizedWorkdir = "/w",
+        endpointFp = "ep",
+    )
+
+    private fun eventWithIdentity(
+        sid: String,
+        status: SessionStatus,
+        origin: EntryOrigin,
+        capturedIdentity: cn.vectory.ocdroid.service.identity.ConnectionIdentity? = this.capturedIdentity,
+        identityEpochAtCapture: Long = 5L,
+        monotonic: Long = 100L,
+    ) = AuthorityOp.ApplyEvent(
+        sid = sid,
+        status = status,
+        origin = origin,
+        capturedIdentity = capturedIdentity,
+        identityEpochAtCapture = identityEpochAtCapture,
+        scopeKey = scope,
+        connectionMonotonicMs = monotonic,
+    )
+
+    @Test
+    fun `P0-C stale optimistic ApplyEvent is DROPPED when identityEpoch advanced`() {
+        val state = StoreState.initial().copy(identityEpoch = 6L)
+        val result = reduceAuthority(state, eventWithIdentity(
+            sid = "s1",
+            status = SessionStatus(type = "busy"),
+            origin = EntryOrigin.OPTIMISTIC,
+            identityEpochAtCapture = 5L, // stale — predates state.identityEpoch=6
+        ))
+        assertSame("stale optimistic op returns the original state (DROP)",
+            state, result)
+        assertNull("stale optimistic op must not write bySid",
+            result.authority.bySid["s1"])
+    }
+
+    @Test
+    fun `P0-C fresh optimistic ApplyEvent is ACCEPTED when identityEpoch matches`() {
+        val state = StoreState.initial().copy(identityEpoch = 5L)
+        val result = reduceAuthority(state, eventWithIdentity(
+            sid = "s1",
+            status = SessionStatus(type = "busy"),
+            origin = EntryOrigin.OPTIMISTIC,
+            identityEpochAtCapture = 5L, // matches state.identityEpoch
+        ))
+        val entry = result.authority.bySid["s1"]
+        assertNotNull("fresh optimistic op must write bySid", entry)
+        assertEquals("origin is OPTIMISTIC", EntryOrigin.OPTIMISTIC, entry?.origin)
+        assertNotNull("optimisticClaim stamped", entry?.optimisticClaim)
+    }
+
+    @Test
+    fun `P0-C stale SSE ApplyEvent is DROPPED when identityEpoch advanced`() {
+        val state = StoreState.initial().copy(identityEpoch = 4L)
+        val result = reduceAuthority(state, eventWithIdentity(
+            sid = "s1",
+            status = SessionStatus(type = "busy"),
+            origin = EntryOrigin.SSE_LEGACY,
+            identityEpochAtCapture = 3L, // stale — predates state.identityEpoch=4
+        ))
+        assertSame("stale SSE op returns the original state (DROP)",
+            state, result)
+        assertNull("stale SSE op must not write bySid",
+            result.authority.bySid["s1"])
+    }
+
+    @Test
+    fun `P0-C null-identity ApplyEvent is accepted regardless of identityEpoch (cold-start backward compat)`() {
+        val state = StoreState.initial().copy(identityEpoch = 42L)
+        // capturedIdentity=null, identityEpochAtCapture=0L (default) — lenient pass.
+        val op = AuthorityOp.ApplyEvent(
+            sid = "s1",
+            status = SessionStatus(type = "busy"),
+            origin = EntryOrigin.SSE_LEGACY,
+            capturedIdentity = null,
+            identityEpochAtCapture = 0L,
+            scopeKey = scope,
+            connectionMonotonicMs = 100L,
+        )
+        val result = reduceAuthority(state, op)
+        val entry = result.authority.bySid["s1"]
+        assertNotNull("null-identity ApplyEvent must be accepted (backward compat)", entry)
+        assertEquals("busy", entry?.status?.type)
+    }
+
+    @Test
+    fun `P0-C CAS-retry idempotency - feeding the same ApplyEvent twice yields the same state`() {
+        val state = StoreState.initial().copy(identityEpoch = 5L)
+        val op = eventWithIdentity(
+            sid = "s1",
+            status = SessionStatus(type = "busy"),
+            origin = EntryOrigin.OPTIMISTIC,
+            identityEpochAtCapture = 5L,
+        )
+        val r1 = reduceAuthority(state, op)
+        val r2 = reduceAuthority(state, op)
+        assertEquals("same (state, op) must yield equal output (CAS-retry idempotent)",
+            r1, r2)
+        assertEquals("bySid must have exactly one entry",
+            1, r2.authority.bySid.size)
+    }
+
+    @Test
+    fun `P0-C cross-host scope attribution - scopeKey on entry equals captured identity scope not current host`() {
+        // The scopeKey on the SessionEntry must be derived from the CAPTURED identity,
+        // not from the current host. We test this by creating an ApplyEvent whose
+        // scopeKey differs from the test scope (simulating a different captured
+        // identity's scope). The reducer stamps op.scopeKey on the entry.
+        val altScope = ScopeKey(serverGroupFp = "alt-grp", endpointFp = "alt-ep")
+        val state = StoreState.initial().copy(identityEpoch = 5L)
+        val op = AuthorityOp.ApplyEvent(
+            sid = "s1",
+            status = SessionStatus(type = "busy"),
+            origin = EntryOrigin.SSE_LEGACY,
+            capturedIdentity = capturedIdentity,
+            identityEpochAtCapture = 5L,
+            scopeKey = altScope, // derived from captured identity, NOT current host
+            connectionMonotonicMs = 100L,
+        )
+        val result = reduceAuthority(state, op)
+        val entry = result.authority.bySid["s1"]
+        assertEquals("scopeKey on SessionEntry equals the op's scopeKey (= captured identity's scope)",
+            altScope, entry?.scopeKey)
+        assertEquals("alt-grp", entry?.scopeKey?.serverGroupFp)
+        assertEquals("alt-ep", entry?.scopeKey?.endpointFp)
+    }
+
     @Test
     fun `r4 scope-guard - in-flight merge does not migrate out-of-scope entry to current scope`() {
         val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")

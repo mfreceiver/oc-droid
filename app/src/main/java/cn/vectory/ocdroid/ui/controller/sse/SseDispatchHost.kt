@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui.controller.sse
 
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
@@ -123,6 +124,17 @@ interface SseDispatchHost {
      * handlers when a session is confirmed deleted or archived (not route switch).
      */
     fun closeSkeletonSession(sessionId: String)
+
+    /**
+     * §P0-C (B11): returns the [ConnectionIdentity] of the SSE event currently
+     * being processed, or null when no identified event is being processed
+     * (test / legacy path that drives handlers directly without identity).
+     * Set by the [SessionSyncCoordinator] before calling [handleEvent] on an
+     * [IdentifiedSseEvent], and cleared after. Used by [applyStatusViaAuthority]
+     * to derive scopeKey + capturedIdentity from the event's captured identity
+     * rather than the current host.
+     */
+    fun currentEventIdentity(): cn.vectory.ocdroid.service.identity.ConnectionIdentity?
 }
 
 /**
@@ -142,8 +154,11 @@ interface SseDispatchHost {
  *
  * [origin] is [cn.vectory.ocdroid.data.state.EntryOrigin.SSE_SLIM] for the
  * digest relay and [cn.vectory.ocdroid.data.state.EntryOrigin.SSE_LEGACY] for
- * the legacy session.status event. The reducer's ApplyEvent fence is lenient
- * for P0-A (no B11 identity guard yet); connectionMonotonicMs = the host's
+ * the legacy session.status event. §P0-C (B11): the reducer's ApplyEvent fence
+ * now gates on [AuthorityOp.ApplyEvent.identityEpochAtCapture] vs
+ * [cn.vectory.ocdroid.ui.StoreState.identityEpoch] when [capturedIdentity] is
+ * non-null (this extension derives scopeKey + capturedIdentity from the event's
+ * captured identity, not the current host); connectionMonotonicMs = the host's
  * SSE clock (TTL/tie-break, non-causal).
  */
 internal fun SseDispatchHost.applyStatusViaAuthority(
@@ -161,6 +176,33 @@ internal fun SseDispatchHost.applyStatusViaAuthority(
         slices.sessionList.value.directorySessions,
         slices.sessionList.value.childSessions,
     )[sid]?.directory
+    // §P0-C (B11): derive scopeKey + capturedIdentity + identityEpochAtCapture
+    // from the event's CAPTURED identity (set by SessionSyncCoordinator when
+    // processing an IdentifiedSseEvent), NOT from the current host. This closes
+    // the TOCTOU window where a host switch between the isCurrent check and the
+    // dispatch would attribute the frame to the wrong scope. When no event
+    // identity is available (test/legacy path), fall back to current behavior
+    // (serverGroupFp from the current host, no captured identity, epoch 0L).
+    val eventIdentity = currentEventIdentity()
+    val (scopeKey, capturedIdentity, identityEpochAtCapture) = if (eventIdentity != null) {
+        Triple(
+            cn.vectory.ocdroid.data.state.ScopeKey(
+                serverGroupFp = eventIdentity.serverGroupFp,
+                endpointFp = eventIdentity.endpointFp,
+            ),
+            eventIdentity,
+            slices.store.captureIdentityEpoch(),
+        )
+    } else {
+        Triple(
+            cn.vectory.ocdroid.data.state.ScopeKey(
+                serverGroupFp = serverGroupFp(),
+                endpointFp = "",
+            ),
+            null,
+            0L,
+        )
+    }
     // §P0-A rev-gpt rework: SINGLE dispatch — the authority reducer's ApplyEvent
     // branch releases abortPendingSessionIds for terminal statuses in the SAME
     // state.copy (atomic). No separate mutateSessionList CAS needed.
@@ -170,10 +212,9 @@ internal fun SseDispatchHost.applyStatusViaAuthority(
                 sid = sid,
                 status = status,
                 origin = origin,
-                scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(
-                    serverGroupFp = serverGroupFp(),
-                    endpointFp = "", // P0-C placeholder (lenient ApplyEvent guard).
-                ),
+                capturedIdentity = capturedIdentity,
+                identityEpochAtCapture = identityEpochAtCapture,
+                scopeKey = scopeKey,
                 connectionMonotonicMs = sseClock(),
                 workdir = workdir,
             ),

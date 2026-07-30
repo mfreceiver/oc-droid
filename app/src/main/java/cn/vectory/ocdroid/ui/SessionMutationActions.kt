@@ -324,6 +324,13 @@ internal fun launchSendMessage(
     emit: EventEmitter = EventEmitter { }
 ) {
 
+    // §P0-C (B11): capture identity + epoch at function ENTRY, BEFORE the
+    // suspend call (repository.sendMessage). The capture at entry ensures
+    // we snapshot the identity under which the send was DECIDED, not after
+    // a potential reconfigure during the POST round-trip.
+    val identityAtDispatch = slices.store.currentIdentity()
+    val identityEpochAtDispatch = slices.store.captureIdentityEpoch()
+
     scope.launch {
         // §streaming-state-sync-diag: send timing — POST prompt_async start.
         cn.vectory.ocdroid.util.DebugLog.i(
@@ -357,6 +364,19 @@ internal fun launchSendMessage(
                     // equivalent). Just bail out of onSuccess.
                     return@onSuccess
                 }
+                // §P0-C (B11): isCurrent guard — if the host switched during the
+                // POST round-trip, the identity captured at function entry no longer
+                // matches. DROP the stale optimistic write: a later new-host POST
+                // will stamp its own ApplyEvent under the new identity. Do NOT
+                // clobber the new host's state with a stale optimistic BUSY.
+                if (identityAtDispatch != null && !slices.store.isCurrentIdentity(identityAtDispatch)) {
+                    DebugLog.i(
+                        "Sync",
+                        "launchSendMessage: host switched during POST sid=$sessionId — " +
+                            "dropping stale optimistic (identity epoch no longer current)",
+                    )
+                    return@onSuccess
+                }
                 // §append-safe (glmer MAJOR-1): inputText is cleared
                 // synchronously at dispatch time, so do NOT touch it here —
                 // wiping now would destroy a follow-up the user typed during
@@ -381,16 +401,30 @@ internal fun launchSendMessage(
                 // optimisticBumpTimestamp IS the caller-captured wall-clock
                 // (System.currentTimeMillis above) — the reducer stays pure (no
                 // clock read; the value is carried in the op).
-                // §P0-A rev-gpt #5: real scope (not empty placeholder) — ApplyEvent
-                // scope guard is lenient in P0-A (opScopeValid passes), but the
-                // scopeKey is carried for P0-C + consistency with other sites.
+                // §P0-C (B11): the ApplyEvent carries the CAPTURED identity +
+                // epoch (not the current host's). The scopeKey is derived from
+                // the captured identity's serverGroupFp + endpointFp, NOT from
+                // authorityScope() (which reads the CURRENT host). When the
+                // captured identity is null (cold start / no identity store),
+                // fall back to current behavior (authorityScope(), null identity,
+                // epoch 0L — lenient, backward compat).
+                val scopeKey = if (identityAtDispatch != null) {
+                    cn.vectory.ocdroid.data.state.ScopeKey(
+                        serverGroupFp = identityAtDispatch.serverGroupFp,
+                        endpointFp = identityAtDispatch.endpointFp,
+                    )
+                } else {
+                    slices.store.authorityScope()
+                }
                 slices.store.dispatch(
                     AppAction.AuthorityEvent(
                         cn.vectory.ocdroid.data.state.AuthorityOp.ApplyEvent(
                             sid = sessionId,
                             status = busyStatus,
                             origin = cn.vectory.ocdroid.data.state.EntryOrigin.OPTIMISTIC,
-                            scopeKey = slices.store.authorityScope(),
+                            capturedIdentity = identityAtDispatch,
+                            identityEpochAtCapture = identityEpochAtDispatch,
+                            scopeKey = scopeKey,
                             connectionMonotonicMs = updatedTimestamp,
                             optimisticBumpTimestamp = updatedTimestamp,
                         ),

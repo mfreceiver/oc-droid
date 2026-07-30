@@ -231,6 +231,25 @@ class SessionSyncCoordinator(
         SseEventRouter(shared, legacy, slim)
     }
     /**
+     * §P0-C (B11): the [ConnectionIdentity] of the SSE event currently being
+     * processed (set in [handleEvent] before dispatching to the raw event handler,
+     * cleared after). null when not processing an identified event.
+     *
+     * §rev-glm nit #1: `@Volatile` for forward-safety only (mirrors the documented
+     * convention of the sibling imperative fields — [sseSyncState] etc.). All
+     * reads/writes are confined to the coordinator's single-threaded Main.immediate
+     * scope today (handleEvent → router → handlers run synchronously, no suspension);
+     * the annotation guards visibility if a future change introduces a dispatcher
+     * hop anywhere in the chain. Object-reference writes are atomic on the JVM, so
+     * there is no tearing risk — only visibility.
+     */
+    @Volatile
+    private var currentProcessingIdentity: cn.vectory.ocdroid.service.identity.ConnectionIdentity? = null
+
+    override fun currentEventIdentity(): cn.vectory.ocdroid.service.identity.ConnectionIdentity? =
+        currentProcessingIdentity
+
+    /**
      * §R-17 batch5: the ONLY coalesce state retained on the coordinator. The
      * Job references are bound to [scope] (a Job is neither serializable nor
      * a value type, so it cannot live in [ChatState]). The observable mirror
@@ -619,7 +638,16 @@ class SessionSyncCoordinator(
             )
             return
         }
-        handleEvent(identified.event)
+        // §P0-C (B11): thread the captured identity into the handlers before
+        // dispatching the raw event, so [applyStatusViaAuthority] can derive
+        // scopeKey + capturedIdentity from the event's captured identity rather
+        // than the current host. Clear after the handler returns (finally).
+        currentProcessingIdentity = if (store != null) identified.identity else null
+        try {
+            handleEvent(identified.event)
+        } finally {
+            currentProcessingIdentity = null
+        }
     }
 
     /**
