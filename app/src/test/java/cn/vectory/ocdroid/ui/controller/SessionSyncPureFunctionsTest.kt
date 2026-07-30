@@ -838,8 +838,8 @@ class SessionSyncPureFunctionsTest {
 
         // idle status: direct copy for setup; reload decision is based on
         // streamingPartTexts being non-empty (still true here).
-        val sessionListIdle = sessionListBusy.copy(
-            sessionStatuses = mapOf("s1" to SessionStatus(type = "idle"))
+        val sessionListIdle = sessionListBusy.withProjection(
+            mapOf("s1" to SessionStatus(type = "idle"))
         )
         assertEquals(SessionStatus(type = "idle"), sessionListIdle.sessionStatuses["s1"])
         assertTrue(chat.streamingPartTexts.isNotEmpty())

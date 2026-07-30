@@ -19,6 +19,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Singleton
@@ -184,20 +186,41 @@ class StatusAggregatorImpl internal constructor(
      */
     private var freshnessJob: Job? = null
 
+    /**
+     * §P0-A rev-gpt #4 (version-monotone publish): the highest
+     * [StoreState.authorityRevision] that has been published to the derived
+     * StateFlows. Guarded inside [commitPublishLock]: a stale collect emission
+     * (queued before a newer synchronous adapter publish acquired the lock) is
+     * DROPPED — `state.authorityRevision < lastPublishedRevision` → return.
+     * Uses STRICTLY-LESS (`<`) so a SAME-revision TTL re-publish (from
+     * [freshnessJob]) is NOT skipped (it re-evaluates the verdict with the live
+     * clock at the same authority version — legitimate). Initialized to -1 so
+     * the first publish (revision 0) always proceeds.
+     */
+    @Volatile
+    private var lastPublishedRevision: Long = -1L
+
     init {
-        // §P0-A Lane 2: derive + publish on every authority emission. Declared
-        // AFTER all mutable properties above (Kotlin initializes top-to-bottom;
-        // the collect on Dispatchers.Unconfined runs eagerly during construction
-        // so [aggregate] / [commitPublishLock] / [_globalState] etc. MUST be
-        // initialized first). Handles SSE / other-driven authority changes
-        // (SseDispatchHost applies SSE status via dispatch directly, NOT through
-        // this adapter). The adapter methods ALSO call publishFromState
-        // synchronously after their own dispatch so the B4-b synchronous read
-        // sees the fresh verdict before this collect observes the emission.
+        // §P0-A rev-gpt #4 (incremental derivation): collect ONLY when
+        // authorityRevision changes (distinctUntilChanged) — chat/composer/
+        // settings/other StoreState mutations do NOT trigger a full re-
+        // derivation. The `store.stateFlow.value` is read at collect time
+        // (post-change state). Declared AFTER all mutable properties above
+        // (Kotlin initializes top-to-bottom; the collect on Dispatchers.Unconfined
+        // runs eagerly during construction so [aggregate] / [commitPublishLock] /
+        // [_globalState] etc. MUST be initialized first). Handles SSE / other-
+        // driven authority changes (SseDispatchHost applies SSE status via
+        // dispatch directly, NOT through this adapter). The adapter methods ALSO
+        // call publishFromState synchronously after their own dispatch so the
+        // B4-b synchronous read sees the fresh verdict before this collect
+        // observes the emission.
         scope.launch {
-            store.stateFlow.collect { state ->
-                publishFromState(state)
-            }
+            store.stateFlow
+                .map { it.authorityRevision }
+                .distinctUntilChanged()
+                .collect {
+                    publishFromState(store.stateFlow.value)
+                }
         }
     }
 
@@ -272,12 +295,26 @@ class StatusAggregatorImpl internal constructor(
      * §P0-A Lane 2: re-derive the [Aggregate] from [state], install it in the
      * [AtomicReference], and feed it into the UNCHANGED [publishLocked] /
      * [rescheduleFreshnessLocked] pipeline. Called by BOTH the `init` collect
-     * (async authority changes) AND each adapter method (synchronous B4-b read).
-     * MUST be called inside [commitPublishLock] (it is — this method acquires
-     * it).
+     * (async authority changes) AND each adapter method (synchronous B4-b read)
+     * AND the [freshnessJob] TTL wake-up. MUST be called inside
+     * [commitPublishLock] (it is — this method acquires it).
+     *
+     * §P0-A rev-gpt #4 (version-monotone): inside the lock, DROPS a stale
+     * emission whose [StoreState.authorityRevision] predicates
+     * [lastPublishedRevision]. Uses STRICTLY-LESS (`<`) so a SAME-revision TTL
+     * re-publish from the freshnessJob is NOT skipped. On a real publish,
+     * stamps [lastPublishedRevision] = the current revision. This closes the
+     * race where a stale collect emission (queued before a newer synchronous
+     * adapter publish) acquires the lock later and overwrites the newer verdict.
      */
     private fun publishFromState(state: StoreState) {
         synchronized(commitPublishLock) {
+            // §P0-A rev-gpt #4: version-monotone guard. A stale snapshot whose
+            // authorityRevision is STRICTLY-LESS than what was already published
+            // is dropped (a newer publish already landed). Same revision is NOT
+            // dropped (freshnessJob TTL re-eval at the same authority version).
+            if (state.authorityRevision < lastPublishedRevision) return
+            lastPublishedRevision = state.authorityRevision
             val agg = authorityToAggregate(state)
             aggregate.set(agg)
             publishLocked(agg, clock())

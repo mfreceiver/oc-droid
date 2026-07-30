@@ -397,7 +397,7 @@ class T1cSessionListComplexOwnershipTest {
         // Seed a pre-existing idle status for s2. §P0-A: status is now the
         // authority projection, so newStore seeds via authority; oldStore seeds
         // via the legacy direct sessionStatuses write (the reference path).
-        oldStore.mutateSessionList { sl -> sl.copy(sessionStatuses = mapOf("s2" to SessionStatus(type = "idle"))) }
+        oldStore.mutateSessionList { sl -> sl.withProjection(mapOf("s2" to SessionStatus(type = "idle"))) }
         newStore.dispatch(cn.vectory.ocdroid.ui.AppAction.AuthorityEvent(
             cn.vectory.ocdroid.data.state.AuthorityOp.ApplyEvent(
                 sid = "s2",
@@ -413,7 +413,7 @@ class T1cSessionListComplexOwnershipTest {
         val currentStatuses = oldStore.stateFlow.value.sessionList.sessionStatuses
         val newSessions = bumpSessionUpdated(currentSessions, sid, ts)
         val newStatuses = currentStatuses + (sid to status)
-        oldStore.mutateSessionList { sl -> sl.copy(sessions = newSessions, sessionStatuses = newStatuses) }
+        oldStore.mutateSessionList { sl -> sl.copy(sessions = newSessions).withProjection(newStatuses) }
 
         // NEW path: authority reducer.
         newStore.dispatch(optimisticAuthorityEvent(sid, ts, status))
@@ -774,7 +774,7 @@ class T1cSessionListComplexOwnershipTest {
             current.copy(
                 childSessions = current.childSessions + childDelta,
                 completeRootIds = current.completeRootIds + rootDelta,
-                sessionStatuses = nextStatuses)
+                ).withProjection(nextStatuses)
         }
 
         // NEW path: status via the authority op (projection reproduces nextStatuses).

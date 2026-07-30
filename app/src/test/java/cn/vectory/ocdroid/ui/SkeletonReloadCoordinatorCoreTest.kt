@@ -127,7 +127,7 @@ class SkeletonReloadCoordinatorCoreTest {
      *  busy rate cap (1 reload / 2s) — required for the T-C1-d throttle tests. */
     private fun seedBusy(store: SharedStateStore, sessionId: String = "s") {
         store.mutateSessionList {
-            it.copy(sessionStatuses = mapOf(sessionId to SessionStatus(type = "busy")))
+            it.withProjection(mapOf(sessionId to SessionStatus(type = "busy")))
         }
     }
 
@@ -230,7 +230,7 @@ class SkeletonReloadCoordinatorCoreTest {
             }
             // Seed busy status so streamingFinalized=false → authoritative=false.
             realStore.mutateSessionList {
-                it.copy(sessionStatuses = mapOf(
+                it.withProjection(mapOf(
                     "s" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"),
                 ))
             }

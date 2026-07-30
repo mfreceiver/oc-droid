@@ -1000,7 +1000,7 @@ class SessionListActionsTest {
     @Test
     fun `launchLoadSessionStatus completion is true after equal map merge`() = runTest {
         val statuses = mapOf("s1" to cn.vectory.ocdroid.data.model.SessionStatus("idle"))
-        store.mutateSessionList { it.copy(sessions = listOf(Session(id = "s1", directory = "/x")), sessionStatuses = statuses) }
+        store.mutateSessionList { it.copy(sessions = listOf(Session(id = "s1", directory = "/x"))).withProjection(statuses) }
         coEvery { repository.getSessionStatus() } returns Result.success(statuses)
         val completions = mutableListOf<Boolean>()
 
@@ -1071,7 +1071,7 @@ class SessionListActionsTest {
                 sessions = listOf(
                     Session(id = "stale-idle", directory = "/x"),
                     Session(id = "keep", directory = "/x")),
-                sessionStatuses = mutableMapOf(
+                ).withProjection(mutableMapOf(
                 "stale-idle" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"),
                 "keep" to cn.vectory.ocdroid.data.model.SessionStatus(type = "retry")
                 ))
@@ -1097,7 +1097,7 @@ class SessionListActionsTest {
         slices.mutateSessionList {
             it.copy(
                 sessions = listOf(Session(id = "known", directory = "/x")),
-                sessionStatuses = mapOf("outside" to cn.vectory.ocdroid.data.model.SessionStatus("busy")))
+                ).withProjection(mapOf("outside" to cn.vectory.ocdroid.data.model.SessionStatus("busy")))
         }
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
 
@@ -1192,7 +1192,7 @@ class SessionListActionsTest {
         store.mutateSessionList {
             it.copy(
                 sessions = listOf(Session(id = "A", directory = "/x")),
-                sessionStatuses = mapOf("A" to busy))
+                ).withProjection(mapOf("A" to busy))
         }
         store.mutateChat { it.copy(currentSessionId = "other") }
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
@@ -1214,7 +1214,7 @@ class SessionListActionsTest {
         // §task4-first-load: 首次加载 localBefore 全空 → completedRoots 自然空 → 不批量标.
         val sessions = (1..5).map { Session(id = "s$it", directory = "/x") }
         store.mutateSessionList {
-            it.copy(sessions = sessions, sessionStatuses = emptyMap())
+            it.copy(sessions = sessions).withProjection(emptyMap())
         }
         store.mutateChat { it.copy(currentSessionId = "s1") }
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
@@ -1235,13 +1235,13 @@ class SessionListActionsTest {
         store.mutateSessionList {
             it.copy(
                 sessions = listOf(Session(id = "X", directory = "/x")),
-                sessionStatuses = emptyMap())
+                ).withProjection(emptyMap())
         }
         store.mutateChat { it.copy(currentSessionId = "other") }
         coEvery { repository.getSessionStatus() } coAnswers {
             slices.mutateSessionList {
-                it.copy(
-                    sessionStatuses = it.sessionStatuses +
+                it.withProjection(
+                    it.sessionStatuses +
                         ("X" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"))
                 )
             }
@@ -1269,7 +1269,7 @@ class SessionListActionsTest {
                     Session(id = "root", directory = "/x"),
                     Session(id = "child", directory = "/x", parentId = "root"),
                     Session(id = "cur", directory = "/x")),
-                sessionStatuses = mapOf(
+                ).withProjection(mapOf(
                     "root" to busy,
                     "child" to busy,
                     "cur" to busy))

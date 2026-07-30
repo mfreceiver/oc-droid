@@ -1015,4 +1015,24 @@ class StatusAggregatorImplTest {
 
         coVerify(exactly = 0) { repo.getSlimapiSessionsStatus(any()) }
     }
+
+    // ── §P0-A rev-gpt #4: version-monotone publish + incremental derivation ──
+
+    @Test
+    fun `rev-gpt #4 - two rapid dispatches produce the final verdict (monotone no-regression)`() = runTest {
+        // Dispatch two SSE events rapidly: the version-monotone guard ensures
+        // the second (higher authorityRevision) is NOT overwritten by a stale
+        // collect emission from the first.
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+        val aggregator = newAggregator(repo, clock = { 100L })
+
+        // First: REST idle (AllIdleFresh after coverage marker writes).
+        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+        assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
+
+        // Second: SSE busy (must flip to Busy — the higher-revision publish wins).
+        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Busy, sourceTimeMs = 200L)
+        assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
+    }
 }

@@ -76,8 +76,10 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
         // §P0-A rev-gpt rework (prep Lane B): bump revision ONLY on a real
         // authority transition (we already returned early on no-change above).
         authorityRevision = state.authorityRevision + 1L,
-        sessionList = state.sessionList.copy(
-            sessionStatuses = projection,
+        // §P0-A rev-gpt #8 B10: sessionStatuses is set via [withProjection] (the
+        // SOLE writer gate — the public `copy` excludes sessionStatuses). The
+        // other sessionList fields (sessions, abortPending) go through `copy`.
+        sessionList = state.sessionList.withProjection(projection).copy(
             sessions = newSessions,
             abortPendingSessionIds = nextAbortPending,
         ),

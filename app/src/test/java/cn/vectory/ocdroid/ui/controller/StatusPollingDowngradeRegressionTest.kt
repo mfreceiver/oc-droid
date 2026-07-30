@@ -303,7 +303,7 @@ class StatusPollingDowngradeRegressionTest {
         }
 
         store.mutateSessionList {
-            it.copy(sessionStatuses = it.sessionStatuses + (sid to SessionStatus(type = "busy")))
+            it.withProjection(it.sessionStatuses + (sid to SessionStatus(type = "busy")))
         }
 
         val folded = store.sessionListFlow.value.sessionStatuses[sid]
@@ -323,10 +323,10 @@ class StatusPollingDowngradeRegressionTest {
         }
 
         store.mutateSessionList {
-            it.copy(sessionStatuses = it.sessionStatuses + (sid to SessionStatus(type = "busy")))
+            it.withProjection(it.sessionStatuses + (sid to SessionStatus(type = "busy")))
         }
         store.mutateSessionList {
-            it.copy(sessionStatuses = it.sessionStatuses + (sid to SessionStatus(type = "idle")))
+            it.withProjection(it.sessionStatuses + (sid to SessionStatus(type = "idle")))
         }
 
         val folded = store.sessionListFlow.value.sessionStatuses[sid]
@@ -346,7 +346,7 @@ class StatusPollingDowngradeRegressionTest {
         assertTrue("no prior status for sid", sid !in before)
 
         val next = store.sessionListFlow.value
-            .copy(sessionStatuses = store.sessionListFlow.value.sessionStatuses +
+            .withProjection(store.sessionListFlow.value.sessionStatuses +
                 (sid to SessionStatus(type = "retry")))
 
         assertEquals(
@@ -901,7 +901,7 @@ class StatusPollingDowngradeRegressionTest {
             session("s-b", "/work-b"),
         )
         store.mutateSessionList {
-            it.copy(sessionStatuses = mapOf(
+            it.withProjection(mapOf(
                 "s-a" to SessionStatus(type = "busy"),
                 "s-b" to SessionStatus(type = "retry"),
             ))
@@ -1000,7 +1000,7 @@ class StatusPollingDowngradeRegressionTest {
         // has a prior entry — the failed directory's sessions are
         // entirely unseen.
         store.mutateSessionList {
-            it.copy(sessionStatuses = mapOf("s-a" to SessionStatus(type = "busy")))
+            it.withProjection(mapOf("s-a" to SessionStatus(type = "busy")))
         }
         // /work-a succeeds (s-a returned as idle upstream); /work-b
         // FAILS (transport error — s-b-1 / s-b-2 statuses are unknown).

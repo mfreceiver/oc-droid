@@ -32,7 +32,7 @@ class RevertConversationTest : MainViewModelTestBase() {
     fun `busy session blocks revert before destructive server call`() = runTest {
         val core = createCore()
         seedRevertableMessage(core)
-        core.writeSessionList { it.copy(sessionStatuses = mapOf("s1" to SessionStatus(type = "busy"))) }
+        core.writeSessionList { it.withProjection(mapOf("s1" to SessionStatus(type = "busy"))) }
 
         val outcome = RevertConversation(core).execute("s1", "m1") { error("reload must not run") }
 
@@ -44,7 +44,7 @@ class RevertConversationTest : MainViewModelTestBase() {
     fun `retry session blocks revert before destructive server call`() = runTest {
         val core = createCore()
         seedRevertableMessage(core)
-        core.writeSessionList { it.copy(sessionStatuses = mapOf("s1" to SessionStatus(type = "retry"))) }
+        core.writeSessionList { it.withProjection(mapOf("s1" to SessionStatus(type = "retry"))) }
 
         val outcome = RevertConversation(core).execute("s1", "m1") { error("reload must not run") }
 

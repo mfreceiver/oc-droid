@@ -683,6 +683,81 @@ class AuthorityReducerTest {
         ))
         assertEquals("revision unchanged on no-op", rev1, store.stateFlow.value.authorityRevision)
     }
+
+    // ── B10: SessionListState non-data-class encapsulation ───────────────
+
+    @Test
+    fun `rev-gpt B10 - withProjection sets sessionStatuses and preserves other fields`() {
+        val original = SessionListState(
+            sessions = listOf(Session(id = "s1", directory = "/w")),
+            activeSessionIds = setOf("s1"),
+            childSessions = mapOf("/w" to listOf(Session(id = "s1", directory = "/w"))),
+        )
+        val projection = mapOf("s1" to SessionStatus(type = "busy"))
+        val updated = original.withProjection(projection)
+
+        assertEquals(projection, updated.sessionStatuses)
+        assertEquals(original.sessions, updated.sessions)
+        assertEquals(original.activeSessionIds, updated.activeSessionIds)
+        assertEquals(original.childSessions, updated.childSessions)
+    }
+
+    @Test
+    fun `rev-gpt B10 - manual copy preserves all fields including sessionStatuses`() {
+        val original = SessionListState(
+            sessions = listOf(Session(id = "s1", directory = "/w")),
+            activeSessionIds = setOf("s1"),
+        ).withProjection(mapOf("s1" to SessionStatus(type = "busy")))
+
+        // copy() with only sessions changed → sessionStatuses PRESERVED.
+        val updated = original.copy(sessions = emptyList())
+        assertEquals(emptyList<Session>(), updated.sessions)
+        assertEquals(original.sessionStatuses, updated.sessionStatuses)
+        assertEquals(original.activeSessionIds, updated.activeSessionIds)
+    }
+
+    @Test
+    fun `rev-gpt B10 - value equality holds for SessionListState - StoreState equality gate`() {
+        // If manual equals/hashCode were wrong, StoreState.equals would break
+        // (StoreState is a data class containing sessionList: SessionListState).
+        // This test verifies two structurally-equal SessionListStates are equal.
+        val a = SessionListState(
+            sessions = listOf(Session(id = "s1", directory = "/w")),
+            activeSessionIds = setOf("s1"),
+        ).withProjection(mapOf("s1" to SessionStatus(type = "busy")))
+        val b = SessionListState(
+            sessions = listOf(Session(id = "s1", directory = "/w")),
+            activeSessionIds = setOf("s1"),
+        ).withProjection(mapOf("s1" to SessionStatus(type = "busy")))
+
+        assertEquals("structurally-equal SessionListStates must be equal", a, b)
+        assertEquals("hashCode must match for equal states", a.hashCode(), b.hashCode())
+
+        // A different sessionStatuses must NOT be equal.
+        val c = a.withProjection(mapOf("s1" to SessionStatus(type = "idle")))
+        assertNotSame("different sessionStatuses → not equal", a, c)
+        assertTrue("different sessionStatuses → not equals", a != c)
+    }
+
+    @Test
+    fun `rev-gpt B10 - reduceAuthority is the sole writer of sessionStatuses via withProjection`() {
+        // After an authority dispatch, sessionStatuses MUST equal the authority
+        // projection (reduceAuthority writes it via withProjection). This
+        // indirectly verifies the sole-writer gate: sessionStatuses is NOT set
+        // by any other path.
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+
+        val state = store.stateFlow.value
+        val expectedProjection = state.authority.bySid.mapValues { it.value.status }
+        assertEquals(
+            "sessionStatuses must equal the authority projection (sole writer = reduceAuthority)",
+            expectedProjection,
+            state.sessionList.sessionStatuses,
+        )
+    }
 }
 
 /** Local assertNotNull to avoid an extra import line churn. */

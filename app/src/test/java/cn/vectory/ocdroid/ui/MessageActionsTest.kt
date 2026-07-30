@@ -212,7 +212,7 @@ class MessageActionsTest {
             )
         }
         store.mutateSessionList {
-            it.copy(sessionStatuses = mapOf("s1" to SessionStatus(type = "busy")))
+            it.withProjection(mapOf("s1" to SessionStatus(type = "busy")))
         }
 
         launchLoadMessages(scope, repository, slices, "s1", resetLimit = true, emit = emit)
