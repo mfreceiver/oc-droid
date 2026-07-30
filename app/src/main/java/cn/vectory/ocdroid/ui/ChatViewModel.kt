@@ -5,8 +5,6 @@ import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
-import cn.vectory.ocdroid.ui.controller.applySessionStatus
-import android.os.SystemClock
 import cn.vectory.ocdroid.util.DebugLog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
@@ -317,6 +315,10 @@ class ChatViewModel @Inject constructor(
         /** §P0-F: abort 看门狗超时——server 未在该窗口内回送 idle/terminal → REST reconcile 兜底。 */
         internal const val ABORT_WATCHDOG_TIMEOUT_MS = 10_000L
 
+        /** §P0-F 阻断1: process-unique monotonic abort token. 严格递增保证唯一，
+         *  闭合 ABA（elapsedRealtime 毫秒在快速重试/长间隔下可能碰撞）。 */
+        private val abortTokenSeq = java.util.concurrent.atomic.AtomicLong(0L)
+
         private const val TAG = "ChatViewModel"
     }
 
@@ -419,10 +421,10 @@ class ChatViewModel @Inject constructor(
             DebugLog.i("Abort", "abortSession ignored — already pending sid=$sid")
             return
         }
-        // §P0-F 阻断2: abort token = monotonic startedAt. Watchdog verifies it is
+        // §P0-F 阻断1/2: abort token = AtomicLong 唯一序号. Watchdog verifies it is
         // STILL the current entry at fire time → rejects a stale watchdog after an
         // ABA (cleared-then-re-added) re-abort (prevents clobbering a newer abort).
-        val token = SystemClock.elapsedRealtime()
+        val token = abortTokenSeq.incrementAndGet()
         // §P0-F 阻断7: capture host identity at dispatch — the watchdog's REST
         // reconcile must NOT run against a different host's repository for the
         // same sid after a host switch (cross-host pollution).
@@ -464,41 +466,48 @@ class ChatViewModel @Inject constructor(
 
     /**
      * §P0-F watchdog body (testable — no internal delay). Guards:
-     *  - 阻断2 ABA token: act only if THIS abort (token) is still current.
-     *  - 阻断7 identity fence: if host switched since dispatch, do NOT REST-
-     *    reconcile against the new host for this sid — just release the lock.
-     * Recovery (§P0-F 阻断3, plan L514/518 「不永久禁 stop」):
-     *  - server non-running (idle/terminal) → clear pending + R5 兜底 clear
-     *    sendingSessionIds + apply authoritative status.
-     *  - server busy/retry OR fetch failed → clear pending (release lock, allow
-     *    re-abort) + surface a recovery hint. NEVER retain pending indefinitely.
+     *  - #1 ABA token: act only if THIS abort (token) is still current.
+     *  - #2 二次校验（严重，rev-gpt）：suspend 返回后、任何 mutation 前，重验 token +
+     *    identity。fetch 期间可能落入新 abort/send 或 host 切换——suspend 前的守卫不够。
+     *  - #3 identity fence（有限：仅 serverGroupFp——same-group profile/endpoint/
+     *    bundle/reconfigure 下 fp 不变；完整 BundleStamp/connection-epoch fence 待 P0-A）。
+     * Recovery（§P0-F 收窄保守）：
+     *  - 只释放 abort-pending 锁。
+     *  - 不在此 writeComposer{-sid}（长 suspend 间隙会误清新 send 的 POST 桥），
+     *    不在此 applySessionStatus（陈旧快照覆盖风险）。权威 status 经正常 SSE/poller
+     *    通道到达；R5 generation/ownership + status-apply gate 待 P0-A。
+     *  - server 仍 busy / fetch 失败 → 发恢复提示；锁已释放，用户可重试（不永久锁）。
      */
     internal suspend fun reconcileStaleAbort(sid: String, expectedToken: Long, expectedFp: String) {
-        // 阻断2: ABA token — only act if this abort is still the current one.
+        // §#2 初始守卫（suspend 前）。
         if (core.sessionListFlow.value.abortPendingSessionIds[sid] != expectedToken) return
-        // 阻断7: identity fence — host switched mid-abort → don't pollute new host.
+        // §#3 identity fence（有限：仅 serverGroupFp——same-group profile/endpoint/
+        // bundle/reconfigure 下 fp 不变；完整 BundleStamp/connection-epoch fence 待 P0-A）。
         if (core.currentServerGroupFp() != expectedFp) {
             clearAbortPendingIfToken(sid, expectedToken)
             return
         }
-        val fetchResult = core.repository.getSessionStatus()
-        val serverStatus = fetchResult.getOrNull()?.get(sid)
+        val fetchResult = core.repository.getSessionStatus()  // ── SUSPEND POINT ──
+        // §#2 二次校验（严重，rev-gpt）：suspend 返回后、任何 mutation 前，重验 token +
+        // identity。fetch 期间可能落入新 abort/send 或 host 切换——suspend 前的守卫不够。
+        if (core.sessionListFlow.value.abortPendingSessionIds[sid] != expectedToken) return
+        if (core.currentServerGroupFp() != expectedFp) {
+            clearAbortPendingIfToken(sid, expectedToken)
+            return
+        }
         val settled = if (fetchResult.isFailure) {
             false
         } else {
-            serverStatus?.let { !it.isBusy && !it.isRetry } ?: true
+            fetchResult.getOrNull()?.get(sid)?.let { !it.isBusy && !it.isRetry } ?: true
         }
-        if (settled) {
-            clearAbortPendingIfToken(sid, expectedToken)
-            // §R5 兜底: clear a sendingSessionIds entry the POST onComplete never cleared.
-            core.writeComposer { c -> c.copy(sendingSessionIds = c.sendingSessionIds - sid) }
-            serverStatus?.let { st ->
-                core.store.mutateSessionList { s -> s.applySessionStatus(sid, st).first }
-            }
-        } else {
-            // 阻断3: NOT a permanent lock — release + hint so the user can retry
-            // (each retry gets a fresh token + fresh 10s watchdog).
-            clearAbortPendingIfToken(sid, expectedToken)
+        // §#2/#6（收窄保守）：只释放 abort-pending 锁。
+        // 不在此 writeComposer{-sid}（长 suspend 间隙会误清新 send 的 POST 桥），
+        // 不在此 applySessionStatus（陈旧快照覆盖风险）。权威 status 经正常 SSE/poller
+        // 通道到达；R5 generation/ownership + status-apply gate 待 P0-A。
+        clearAbortPendingIfToken(sid, expectedToken)
+        if (!settled) {
+            // §P0-F 有限恢复：server 仍 busy / fetch 失败 → 发恢复提示；锁已释放，
+            // 用户可重试（不永久锁）。
             core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_abort_pending_stuck))
         }
     }

@@ -92,11 +92,16 @@ internal fun reduceSessionArchived(state: StoreState, action: AppAction.SessionA
     // — descendants that did NOT get their own session.updated still get
     // pruned here). T12's set/remove producer logic is unchanged.
     val cleanedSessionErrors = state.sessionList.sessionErrorsById.filterKeys { it !in subtree }
+    // §P0-F 阻断5: archive subtree must drop in-flight abort-pending flags —
+    // archived sessions cannot be aborted and a stale "stopping" flag would
+    // block the user's next abort on a same-id re-created session.
+    val cleanedAbortPending = state.sessionList.abortPendingSessionIds.filterKeys { it !in subtree }
     return state.copy(
         sessionList = newSessionList.copy(
             pendingQuestions = cleanedQuestions,
             activeSessionIds = newSessionList.activeSessionIds - subtree,
             sessionErrorsById = cleanedSessionErrors,
+            abortPendingSessionIds = cleanedAbortPending,
         ),
         chat = newChatCleaned,
         unread = newUnread,

@@ -985,17 +985,11 @@ class SessionSyncCoordinator(
 
         // status 投影 → SessionListState.sessionStatuses（与 session.status 同 reducer）
         if (status != null) {
-            val parsed = SessionStatus(type = status)
             slices.mutateSessionList {
-                it.applySessionStatus(sid, parsed).first
+                it.applySessionStatus(sid, SessionStatus(type = status)).first
             }
-            // §P0-F 阻断4/R5: digest terminal status also closes the POST bridge
-            // (mirrors LegacySseHandler session.status path).
-            if (!parsed.isBusy && !parsed.isRetry) {
-                slices.mutateComposer { c ->
-                    c.copy(sendingSessionIds = c.sendingSessionIds - sid)
-                }
-            }
+            // §P0-F 阻断6: R5 sendingSessionIds 清理需 generation/ownership，待 P0-A；
+            // 此处不无条件清（误清新 send 风险）。
         }
 
         // lastError 三态投影 → SessionListState.sessionErrorsById

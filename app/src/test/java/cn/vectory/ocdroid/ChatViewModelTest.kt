@@ -975,7 +975,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
     // ── reconcileStaleAbort: 3-param (sid, token, fp) ───────────────────────
 
     @Test
-    fun `P0-F reconcileStaleAbort clears abortPending and sendingSessionIds when server says idle`() = runTest {
+    fun `P0-F reconcileStaleAbort clears abortPending but NOT sendingSessionIds (conservative, P0-A)`() = runTest {
         coEvery { repository.getSessionStatus() } returns Result.success(
             mapOf("s1" to SessionStatus(type = "idle"))
         )
@@ -994,9 +994,12 @@ class ChatViewModelTest : MainViewModelTestBase() {
         chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
         advanceUntilIdle()
 
+        // §收窄: 只清 abort-pending；sendingSessionIds 留待 R5 generation/ownership
         assertFalse("s1" in core.sessionListFlow.value.abortPendingSessionIds)
-        assertFalse("s1" in core.composerFlow.value.sendingSessionIds)
-        assertTrue(core.sessionListFlow.value.sessionStatuses["s1"]?.isIdle == true)
+        assertTrue("sendingSessionIds NOT cleared by reconcile (P0-A)",
+            "s1" in core.composerFlow.value.sendingSessionIds)
+        // reconcile 不再 applySessionStatus → sessionStatuses unchanged
+        assertNull(core.sessionListFlow.value.sessionStatuses["s1"])
     }
 
     @Test
@@ -1099,6 +1102,38 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // Token mismatch → no-op: getSessionStatus NOT called, pending still has token 200
         assertTrue(core.sessionListFlow.value.abortPendingSessionIds["s1"] == 200L)
         coVerify(exactly = 0) { repository.getSessionStatus() }
+    }
+
+    // ── P0-F 阻断2: 二次校验回归（token changed during suspend）────────────
+
+    @Test
+    fun `P0-F reconcile 二次校验 drops when token changed during suspend`() = runTest {
+        val core = createCore()
+        val chatVM = ChatViewModel(core)
+        val fp = core.currentServerGroupFp()
+
+        // Pre-set abortPending with tokenA
+        core.store.mutateSessionList { s ->
+            s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
+        }
+
+        // Mock getSessionStatus to mutate token DURING the suspend (simulating a
+        // new abort racing in while the fetch is in flight).
+        coEvery { repository.getSessionStatus() } coAnswers {
+            core.store.mutateSessionList { s ->
+                s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 200L))
+            }
+            Result.success(mapOf("s1" to SessionStatus(type = "idle")))
+        }
+
+        // Call with expectedToken=100L (stale — token is now 200L after the mock mutated it)
+        chatVM.reconcileStaleAbort("s1", expectedToken = 100L, expectedFp = fp)
+        advanceUntilIdle()
+
+        // #2 secondary check should detect token changed → no-op
+        // pending still contains token 200 (the new abort's token), not cleared
+        assertEquals(200L, core.sessionListFlow.value.abortPendingSessionIds["s1"])
+        coVerify(exactly = 1) { repository.getSessionStatus() }
     }
 
     // ── P0-F 阻断7: identity fence ────────────────────────────────────────

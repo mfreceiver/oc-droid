@@ -40,6 +40,8 @@ internal fun reduceSessionArchivedLocal(state: StoreState, action: AppAction.Ses
             },
             pendingQuestions = action.pendingQuestions,
             activeSessionIds = state.sessionList.activeSessionIds - action.activeSessionIdsToRemove,
+            // §P0-F 阻断5: local archive must drop abort-pending for this session.
+            abortPendingSessionIds = state.sessionList.abortPendingSessionIds - id,
         ),
     )
 }
@@ -55,6 +57,8 @@ internal fun reduceSessionDeletedLocal(state: StoreState, action: AppAction.Sess
             pendingQuestions = state.sessionList.pendingQuestions.filter { it.sessionId !in ids },
             activeSessionIds = state.sessionList.activeSessionIds - ids,
             sessionErrorsById = state.sessionList.sessionErrorsById.filterKeys { it !in ids },
+            // §P0-F 阻断5: local delete must drop abort-pending for removed sessions.
+            abortPendingSessionIds = state.sessionList.abortPendingSessionIds.filterKeys { it !in ids },
         ),
     )
 }
