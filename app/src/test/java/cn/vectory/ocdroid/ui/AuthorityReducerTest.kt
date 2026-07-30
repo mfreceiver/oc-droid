@@ -1097,11 +1097,18 @@ class AuthorityReducerTest {
         assertEquals("outScope has different scopeKey",
             diffScope, store.stateFlow.value.authority.bySid["outScope"]?.scopeKey)
 
+        // Capture current projection so mergeStatusSnapshotInFlight sees
+        // all entries as unchanged → merged = restSnapshot only (no "outScope"
+        // pulled into merged). This prevents the second loop from overwriting
+        // the preserved out-of-scope entry with the current scopeKey.
+        val currentBefore = store.stateFlow.value.authority.bySid.mapValues { it.value.status }
+
         // ApplySnapshot for the default scope (inScope only).
         store.dispatch(AppAction.AuthorityEvent(
             snapshot(
                 snapshot = mapOf("inScope" to SessionStatus(type = "idle")),
                 authoritativeNodeIds = setOf("inScope"),
+                localBefore = currentBefore,
             ),
         ))
 
@@ -1114,6 +1121,8 @@ class AuthorityReducerTest {
             SessionStatus(type = "busy"), bySid["outScope"]?.status)
     }
 
+    // ── §P0-A FIX: ApplySnapshot no-change with out-of-scope entries ─────────
+
     @Test
     fun `rev-gpt ApplySnapshot no-change short-circuit works with out-of-scope entries`() {
         val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
@@ -1123,17 +1132,20 @@ class AuthorityReducerTest {
         // Seed inScope entry matching what snapshot will produce (REST idle).
         store.dispatch(AppAction.AuthorityEvent(
             snapshot(
-                snapshot = emptyMap(),
+                snapshot = mapOf("s1" to SessionStatus(type = "idle")),
                 authoritativeNodeIds = setOf("s1"),
                 sidToWorkdir = mapOf("s1" to "/w"),
                 requestStartMs = 100L,
             ),
         ))
-        // Add an out-of-scope entry.
+        // Add an out-of-scope entry with a sid NOT present in any future
+        // snapshot's REST response (so mergeStatusSnapshotInFlight, given a
+        // proper localBefore, does NOT pick it up into merged).
+        val outScopeSid = "outScopeSid"
         store.mutateState { s ->
             val cur = s.authority
             s.copy(authority = cur.copy(
-                bySid = cur.bySid + ("outScope" to SessionEntry(
+                bySid = cur.bySid + (outScopeSid to SessionEntry(
                     status = SessionStatus(type = "busy"),
                     serverRound = null,
                     optimisticClaim = null,
@@ -1147,14 +1159,19 @@ class AuthorityReducerTest {
         }
 
         val before = store.stateFlow.value
-        // Re-apply the same snapshot → no-change (in-scope entry unchanged,
-        // out-of-scope entry preserved by reference).
+        // Capture the current projection so mergeStatusSnapshotInFlight sees
+        // all entries as unchanged → merged = restSnapshot only → second loop
+        // does NOT pick up the out-of-scope entry.
+        val currentBefore = before.authority.bySid.mapValues { it.value.status }
+        // Re-apply the same snapshot → no-change (in-scope entry data-class-equal,
+        // out-of-scope entry preserved by reference, coverage unchanged).
         store.dispatch(AppAction.AuthorityEvent(
             snapshot(
-                snapshot = emptyMap(),
+                snapshot = mapOf("s1" to SessionStatus(type = "idle")),
                 authoritativeNodeIds = setOf("s1"),
                 sidToWorkdir = mapOf("s1" to "/w"),
                 requestStartMs = 100L,
+                localBefore = currentBefore,
             ),
         ))
         assertSame("re-applied snapshot with out-of-scope entries must be CAS no-op",

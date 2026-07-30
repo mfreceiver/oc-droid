@@ -315,25 +315,20 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
     val merged = mergeStatusSnapshotInFlight(op.localBefore, currentProjection, restSnapshot)
 
     val nextById = LinkedHashMap<String, SessionEntry>()
-    // §P0-A FIX: MERGE instead of full replacement — preserve out-of-scope entries
-    // (entry.scopeKey != op.scopeKey). The snapshot is authoritative only within its
-    // own scope. Entries with null scopeKey (pre-field migration) are treated as
-    // in-scope (consistent with applyMarkFailed).
+    // §P0-A FIX: preserve out-of-scope entries (scopeKey != op.scopeKey).
+    // The snapshot is authoritative only for its own scope. Entries with null
+    // scopeKey (pre-migration) are treated as in-scope (dropped if not in snapshot).
     for ((sid, entry) in cur.bySid) {
         if (entry.scopeKey != null && entry.scopeKey != op.scopeKey) {
             nextById[sid] = entry
         }
     }
-    // Then overlay the merged snapshot (current-scope entries). Out-of-scope
-    // entries (scopeKey != op.scopeKey) are ALREADY preserved in the first loop
-    // above — they must NOT be overwritten by the snapshot-scoped merge values
-    // (the merge carries their currentProjection status from the SSE-wins
-    // protection, but the entry itself belongs to a different scope).
+    // Then overlay the merged snapshot (current-scope entries). The current
+    // scope is authoritative for its SIDs — on a cross-scope SID collision the
+    // current-scope entry WINS (bySid is keyed by SID; one entry per SID).
+    // Out-of-scope entries with no collision were already preserved above.
     for ((id, status) in merged) {
         val priorEntry = cur.bySid[id]
-        if (priorEntry != null && priorEntry.scopeKey != null && priorEntry.scopeKey != op.scopeKey) {
-            continue
-        }
         nextById[id] = if (id in failedSids && priorEntry != null) {
             // Failed-dir: keep prior entry (claim/round/workdir), update status only.
             // Stamp the real scopeKey from the op for applyMarkFailed filtering.

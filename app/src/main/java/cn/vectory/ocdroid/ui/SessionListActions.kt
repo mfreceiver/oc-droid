@@ -237,6 +237,9 @@ internal fun launchLoadChildSessions(
             // §toctou-identity: capture the current host identity BEFORE any
             // suspend so the post-fetch guard can detect a host switch mid-flight.
             val hostProfileIdAtStart = slices.host.value.currentHostProfileId
+            // §toctou-identity: capture identityEpoch BEFORE any suspend so a
+            // mid-flight identity switch invalidates the stale response.
+            val identityEpochAtStart = slices.store.stateFlow.value.identityEpoch
             val hydration = loadCompleteSessionTrees(repository, listOf(root))
             if (rootId in hydration.completeRootIds) {
                 val statusBefore = slices.sessionList.value.sessionStatuses
@@ -244,10 +247,6 @@ internal fun launchLoadChildSessions(
                 // authority op — the reducer stays pure).
                 val requestStartMs = System.currentTimeMillis()
                 val statusSnapshot = repository.getSessionStatus().getOrNull()
-                // §P0-A r2 #2: capture identityEpoch BEFORE entering the CAS
-                // lambda — a read inside the CAS retry loop could observe
-                // a concurrent bump (TOCTOU), so pre-capture here.
-                val identityEpochAtStart = slices.store.stateFlow.value.identityEpoch
                 slices.store.mutateState { snapshot ->
                     // §gpter-blocker: the tree was invalidated mid-flight —
                     // drop the stale result. The root stays incomplete so the
@@ -273,7 +272,7 @@ internal fun launchLoadChildSessions(
                             lastSuccessTimeMs = requestStartMs,
                             scopeKey = slices.store.authorityScope(),
                             requestToken = cn.vectory.ocdroid.data.state.RequestToken(
-                                hostProfileId = null,
+                                hostProfileId = hostProfileIdAtStart,
                                 requestStartMs = requestStartMs,
                                 identityEpoch = identityEpochAtStart,
                             ),

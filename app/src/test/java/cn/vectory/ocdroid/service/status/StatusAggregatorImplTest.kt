@@ -389,17 +389,17 @@ class StatusAggregatorImplTest {
         aggregator.refresh(identity(groupFp = "host-group-B"), snapshot(mapOf("s1" to session("s1", "/work"))))
         assertFalse(aggregator.globalBusy.value)
 
-        // §P0-A r2 #4 (scopeKey filter): the old host-group-A entry is excluded by
-        // scopeKey != currentScope (host-group-B). The second refresh's snapshot also
-        // produced no in-scope entry (s1 already exists with a different scopeKey and
-        // is preserved, not overwritten). Thus statusByKey is EMPTY for the current
-        // scope — correct isolation: a different serverGroupFp's entries must not
-        // pollute the current lifecycle projection.
+        // §P0-A scope-correct merge: the second refresh normalizes s1 to idle
+        // (absent from REST emptyMap → idle-filled) and overlays it with the NEW
+        // scopeKey (host-group-B). The old host-group-A entry is NOT preserved
+        // and NOT excluded — it is REPLACED by a new idle entry in the current
+        // scope. This is correct: after switching to host-group-B with no active
+        // sessions, s1 is known-idle in the new scope.
         val statuses = aggregator.statusByKey.value
         assertEquals(
-            "r2 #4 scopeKey filter: no entries remain in the current scope (host-group-B);" +
-                " host-group-A entry excluded by scopeKey",
-            0,
+            "scope-correct merge: s1 is idle in the current scope (host-group-B);" +
+                " 1 entry expected",
+            1,
             statuses.size,
         )
     }

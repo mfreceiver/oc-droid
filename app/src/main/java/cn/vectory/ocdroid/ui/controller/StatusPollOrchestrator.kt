@@ -183,15 +183,13 @@ internal object StatusPollOrchestrator {
                 // than once).
                 val diagCurrentSid = slices.chat.value.currentSessionId
                 val diagPriorStatus = diagCurrentSid?.let { slices.sessionList.value.sessionStatuses[it] }
+                // §toctou-identity: capture identityEpoch BEFORE the network
+                // suspend so a mid-flight identity switch invalidates the response.
+                val identityEpochAtStart = slices.store.stateFlow.value.identityEpoch
                 val statusResult = repository.getSessionStatus()
                 val activeResult = repository.getActiveSessionIds()
                 val statuses = statusResult.getOrNull()
                 var applied = false
-                // §P0-A r2 #2: capture identityEpoch BEFORE entering the CAS
-                // lambda — a read inside the CAS retry loop could observe
-                // a concurrent bump (TOCTOU), so pre-capture the request-start
-                // value here (after the epoch/host guard but before CAS).
-                val identityEpochAtStart = slices.store.stateFlow.value.identityEpoch
                 slices.store.mutateState { snapshot ->
                     // StateFlow.update may retry this transform after a CAS
                     // collision. Report the result of the final attempt only.
@@ -380,6 +378,9 @@ internal object StatusPollOrchestrator {
                 // snapshot"). fix-10 closed the all-failed gap; this closes
                 // the partial-failure gap.
                 val successfulDirs = mutableSetOf<String>()
+                // §toctou-identity: capture identityEpoch BEFORE the fan-out
+                // suspend so a mid-flight identity switch invalidates the response.
+                val identityEpochAtStart = slices.store.stateFlow.value.identityEpoch
                 val merged: Map<String, SessionStatus> = coroutineScope {
                     val dirList = directories.toList()
                     val results = dirList.map { dir ->
@@ -404,10 +405,6 @@ internal object StatusPollOrchestrator {
                     return@launch
                 }
                 var applied = false
-                // §P0-A r2 #2: capture identityEpoch BEFORE entering the CAS
-                // lambda — a read inside the CAS retry loop could observe
-                // a concurrent bump (TOCTOU), so pre-capture here.
-                val identityEpochAtStart = slices.store.stateFlow.value.identityEpoch
                 slices.store.mutateState { snapshot ->
                     applied = false
                     val current = snapshot.sessionList
