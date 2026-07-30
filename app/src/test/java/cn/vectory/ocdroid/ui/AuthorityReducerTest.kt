@@ -1398,15 +1398,75 @@ class AuthorityReducerTest {
         ))
         val entry = store.stateFlow.value.authority.bySid["A"]!!
         assertEquals("status stays busy", SessionStatus(type = "busy"), entry.status)
-        assertNotNull("claim NOT null (echo not lost)", entry.optimisticClaim)
-        assertTrue("claim serverEchoed = true (echo-confirmed)", entry.optimisticClaim!!.serverEchoed)
+        assertNotNull("claim NOT null (confirmation not lost)", entry.optimisticClaim)
+        // §P0-B final-fix #1: reconcile BUSY_CONFIRMED sets reconcileConfirmed (NOT serverEchoed)
+        assertTrue("claim reconcileConfirmed = true",
+            entry.optimisticClaim!!.reconcileConfirmed)
+        assertFalse("claim serverEchoed = false (SSE-echo-only — not touched by reconcile)",
+            entry.optimisticClaim!!.serverEchoed)
 
-        // 3. Watchdog: serverEchoed=true → skip → no stale claims
+        // 3. Watchdog: serverEchoed || reconcileConfirmed → skip → no stale claims
         val stale = selectStaleClaimsForReconcile(
             store.stateFlow.value.authority,
             now = 999_999L, // far beyond any timeout
         )
         assertTrue("watchdog re-select is empty (no per-tick GET loop)", stale.isEmpty())
+    }
+
+    // ── Test ①b: reconcile confirmation does NOT pollute the next optimistic generation ──
+
+    @Test
+    fun `final-fix-1b reconcile confirmation does not pollute the next optimistic generation`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // 1. OPTIMISTIC busy → claim clientSeq=1, both flags false
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        var claim = store.stateFlow.value.authority.bySid["A"]?.optimisticClaim!!
+        assertEquals("clientSeq = 1", 1L, claim.clientSeq)
+        assertFalse("serverEchoed = false", claim.serverEchoed)
+        assertFalse("reconcileConfirmed = false", claim.reconcileConfirmed)
+
+        // 2. reconcile BUSY_CONFIRMED (matching claimClientSeq=1) → sets reconcileConfirmed=true
+        store.dispatch(AppAction.AuthorityEvent(
+            reconcileOutcome(store, "A", ReconcileOutcome.BUSY_CONFIRMED),
+        ))
+        claim = store.stateFlow.value.authority.bySid["A"]?.optimisticClaim!!
+        assertTrue("reconcileConfirmed = true after BUSY_CONFIRMED", claim.reconcileConfirmed)
+        assertFalse("serverEchoed still false (not touched by reconcile)", claim.serverEchoed)
+
+        // 3. SECOND OPTIMISTIC busy → NEW generation, clientSeq=2
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 200L),
+        ))
+        claim = store.stateFlow.value.authority.bySid["A"]?.optimisticClaim!!
+        assertEquals("new generation clientSeq = 2", 2L, claim.clientSeq)
+        // §P0-B final-fix #1: the NEW claim must NOT inherit reconcileConfirmed
+        assertFalse("reconcileConfirmed = false (NOT inherited — cross-generation pollution prevented)",
+            claim.reconcileConfirmed)
+        // serverEchoed must also be false (no SSE echo happened)
+        assertFalse("serverEchoed = false on new claim (no SSE echo)", claim.serverEchoed)
+
+        // 4. Watchdog STILL arms on the new claim (only 1 stale: the unconfirmed generation)
+        val stale = selectStaleClaimsForReconcile(
+            store.stateFlow.value.authority,
+            now = 999_999L, // far beyond timeout
+        )
+        assertEquals("watchdog returns exactly one stale claim (the new generation)", 1, stale.size)
+        assertEquals("stale claim sid = A", "A", stale[0].sid)
+        assertEquals("stale claim clientSeq = 2", 2L, stale[0].clientSeq)
+
+        // 5. Confirmation gate STILL protects the new claim from a stale legacy IDLE
+        val beforeGate = store.stateFlow.value
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 300L),
+        ))
+        val afterGate = store.stateFlow.value
+        assertEquals("status still busy (gate dropped the stale legacy IDLE)",
+            SessionStatus(type = "busy"), afterGate.authority.bySid["A"]?.status)
+        assertNotNull("claim still present", afterGate.authority.bySid["A"]?.optimisticClaim)
+        assertTrue("guardedIdleDrop set on claim",
+            afterGate.authority.bySid["A"]?.optimisticClaim?.guardedIdleDrop == true)
     }
 
     // ── Test ②: generation fence drops stale-generation outcome (ABA) ──

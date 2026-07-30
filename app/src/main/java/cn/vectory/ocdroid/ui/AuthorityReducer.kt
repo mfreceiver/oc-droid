@@ -255,8 +255,14 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
     // R1 根因修复：一个未确认的 optimistic claim（POST 成功后 server 还没 echo busy）
     // 绝不能被一个 stale legacy IDLE 覆盖。DROP 该 idle，标 guardedIdleDrop，arm watchdog。
     // serverEchoed==true 时，后续 IDLE 是合法 terminal（应用 + 清 claim，走原路径）。
+    //
+    // §P0-B final-fix #1: a claim is confirmed (gate RELEASED → legacy IDLE treated as
+    // legitimate terminal) when confirmed by EITHER a real-time SSE echo (serverEchoed)
+    // OR a delayed reconcile GET (reconcileConfirmed). Only a claim unconfirmed by BOTH
+    // is protected from stale legacy IDLEs.
     if (op.serverRound == null && op.status.isIdle &&
-        prev?.optimisticClaim != null && !prev.optimisticClaim.serverEchoed
+        prev?.optimisticClaim != null &&
+        !prev.optimisticClaim.serverEchoed && !prev.optimisticClaim.reconcileConfirmed
     ) {
         if (prev.optimisticClaim.guardedIdleDrop) {
             return cur  // 已标记过 → 真正 no-op（same ref）
@@ -285,6 +291,10 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
                 clientSeq = priorSeq + 1L,
                 claimedAtMonotonic = op.connectionMonotonicMs,
                 serverEchoed = echoedNow || (prev?.optimisticClaim?.serverEchoed ?: false),
+                // §P0-B final-fix #1: a NEW optimistic generation starts NOT
+                // reconcile-confirmed — never inherit reconcileConfirmed (prevents
+                // cross-generation pollution).
+                reconcileConfirmed = false,
                 guardedIdleDrop = false,
             )
         }
@@ -569,12 +579,15 @@ private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOu
             if (entry == prev) cur else cur.copy(bySid = cur.bySid + (op.sid to entry))
         }
         ReconcileOutcome.BUSY_CONFIRMED -> {
-            // §P0-B (FIX #1): echo-confirm the existing claim (serverEchoed=true)
-            // so the watchdog no longer re-selects this entry (kills the storm).
+            // §P0-B final-fix #1: mark the claim confirmed by the DELAYED reconcile
+            // GET. Use the dedicated reconcileConfirmed flag (NOT serverEchoed) so
+            // the OPTIMISTIC branch's serverEchoed-inheritance does NOT leak this
+            // across generations — a new optimistic POST starts with
+            // reconcileConfirmed=false, keeping the watchdog armed for the new claim.
             val entry = prev.copy(
                 status = cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"),
                 serverRound = op.serverRound ?: prev.serverRound,
-                optimisticClaim = prev.optimisticClaim.copy(serverEchoed = true),
+                optimisticClaim = prev.optimisticClaim.copy(reconcileConfirmed = true),
                 updatedMonotonic = op.monotonic,
             )
             if (entry == prev) cur else cur.copy(bySid = cur.bySid + (op.sid to entry))

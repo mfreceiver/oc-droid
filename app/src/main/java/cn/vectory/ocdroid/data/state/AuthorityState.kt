@@ -92,11 +92,28 @@ data class ServerRound(
  * counter (NEVER compared to [ServerRound.turn]); [serverEchoed] resolves
  * cross-channel reorder (server busy lands before HTTP success); the watchdog
  * arms on [claimedAtMonotonic] + OPTIMISTIC_CONFIRM_TIMEOUT → reconcile.
+ *
+ * §P0-B final-fix #1: two distinct confirmation signals:
+ *  - [serverEchoed] — set ONLY by real-time SSE busy/retry echo (cross-channel
+ *    reorder: server confirms via SSE before the HTTP response). NEVER set by
+ *    the delayed reconcile.
+ *  - [reconcileConfirmed] — set ONLY by the delayed reconcile BUSY_CONFIRMED
+ *    (the watchdog's GET confirmed the server is busy). NEVER set by the
+ *    real-time SSE.
+ * A claim is treated as confirmed (gate released, watchdog skips) iff
+ * `serverEchoed || reconcileConfirmed`. A new optimistic generation starts
+ * with BOTH false (never inherits reconcileConfirmed — prevents cross-generation
+ * pollution).
  */
 data class OptimisticClaim(
     val clientSeq: Long,
     val claimedAtMonotonic: Long,
     val serverEchoed: Boolean,
+    /** §P0-B final-fix #1: set ONLY by a delayed reconcile BUSY_CONFIRMED (the
+     *  watchdog's GET confirmed the server is busy). NOT inherited by a new
+     *  optimistic generation (cross-generation pollution prevention). Default
+     *  false for backward compat with in-memory state at upgrade. */
+    val reconcileConfirmed: Boolean = false,
     val guardedIdleDrop: Boolean,
 )
 
