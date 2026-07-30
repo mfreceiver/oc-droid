@@ -88,10 +88,22 @@ sealed interface AuthorityOp {
     ) : AuthorityOp
 
     /** REST source failure → covered entries become fail-closed unknown (absent
-     *  in the projection). [requestToken] carries the host/epoch guard. */
+     *  in the projection). [requestToken] carries the host/epoch guard.
+     *
+     *  §P0-A Lane 2 (aggregator derivation): the aggregator's
+     *  `markRequestFailed` adapter dispatches this op. The reducer applies
+     *  MERGE TIMING — entries fresher than [monotonic] (the failure's effective
+     *  time) survive (a prior SSE `Busy`/`Retry` is NOT clobbered by a stale
+     *  failure); entries with `updatedMonotonic <= monotonic` are REMOVED
+     *  (absence ≡ unknown, fail-closed). [registeredWorkdirs] is carried so the
+     *  coverage predicate can keep gating `AllIdleFresh` (registered set
+     *  preserved, coveredWorkdirs emptied, lastSuccessTimeMs=-1 → cold-start /
+     *  stale guard fires → derived `project()` returns `Unknown`). */
     data class MarkSourceFailed(
         val scopeKey: ScopeKey,
         val requestToken: RequestToken,
+        val monotonic: Long,
+        val registeredWorkdirs: Set<String>,
     ) : AuthorityOp
 
     /** §B7 REST reconcile terminal outcome (watchdog / explicit reconcile). */

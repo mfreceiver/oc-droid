@@ -307,17 +307,50 @@ private fun applyPurge(cur: AuthorityState, op: AuthorityOp.PurgeHost): Authorit
  * "Unknown" status, so markFailed maps to ABSENCE (remove from bySid) so the
  * single absence-reader (`sid !in sessionStatuses`) reads unknown.
  *
- * NOTE: the aggregator's separate "Unknown does not clear globalBusy" lifecycle
- * classification is fixer #2's concern; P0-A keeps the UI-projection semantics
- * consistent with absence ≡ unknown. (This op is currently unused by P0-A call
- * sites — the markFailed paths stay on the aggregator until #2.)
+ * §P0-A Lane 2 (aggregator derivation): MERGE TIMING is applied — entries
+ * FRESHER than the failure ([op.monotonic]) SURVIVE (a prior SSE `Busy` /
+ * `Retry` whose `updatedMonotonic > monotonic` is NOT clobbered by a stale
+ * failure, matching the legacy `markRequestFailed` merge-timing rule). Entries
+ * with `updatedMonotonic <= monotonic` are removed (absence ≡ unknown). This
+ * preserves the FGS-lifecycle guarantee that a failure never wrongly clears a
+ * fresher busy observation.
+ *
+ * Coverage: [Coverage.registeredWorkdirs] is preserved from [op] (the failure
+ * caller carries the snapshot's registered set so the coverage predicate keeps
+ * gating `AllIdleFresh`); `coveredWorkdirs` is emptied and
+ * `lastSuccessTimeMs = -1` so the derived aggregator `project()` returns
+ * [GlobalBusyState.Unknown] (cold-start / stale-success guard) — matching the
+ * old markFailed → Unknown semantics via the coverage gate rather than Unknown
+ * status entries.
+ *
+ * Purity: this branch is pure (no injected deps, no clock read — [op.monotonic]
+ * is carried data). Same `(state, op)` always yields the same output (CAS retry
+ * idempotent).
  */
 private fun applyMarkFailed(cur: AuthorityState, op: AuthorityOp.MarkSourceFailed): AuthorityState {
-    // P0-A single active scope: clearing the scope's covered entries. (This op
-    // is currently unused by P0-A call sites — the markFailed paths stay on the
-    // aggregator until #2; implemented for typed completeness.)
-    if (cur.bySid.isEmpty()) return cur
-    return cur.copy(bySid = emptyMap())
+    // Merge timing: keep entries strictly fresher than the failure (a prior
+    // SSE Busy/Retry survives); remove entries at-or-older than the failure
+    // (absence ≡ unknown, fail-closed). Equal timestamps overwrite (matches the
+    // legacy `sourceTimeMs >= prev.sourceTimeMs` rule).
+    val survivors = cur.bySid.filterValues { it.updatedMonotonic > op.monotonic }
+    val nextCoverage = cur.coverage + (op.scopeKey to Coverage(
+        registeredWorkdirs = op.registeredWorkdirs,
+        coveredWorkdirs = emptySet(),
+        unmappedActiveIds = emptySet(),
+        lastSuccessTimeMs = -1L,
+    ))
+    // Drop-on-no-change: if nothing actually transitioned, return the same
+    // reference so the CAS layer treats this as a no-op (no emission).
+    val bySidChanged = survivors.size != cur.bySid.size ||
+        survivors.any { (k, v) -> cur.bySid[k] !== v }
+    val priorCov = cur.coverage[op.scopeKey]
+    val covChanged = priorCov == null ||
+        priorCov.registeredWorkdirs != op.registeredWorkdirs ||
+        priorCov.coveredWorkdirs.isNotEmpty() ||
+        priorCov.unmappedActiveIds.isNotEmpty() ||
+        priorCov.lastSuccessTimeMs != -1L
+    if (!bySidChanged && !covChanged) return cur
+    return cur.copy(bySid = survivors, coverage = nextCoverage)
 }
 
 // ── ApplyReconcileOutcome ──────────────────────────────────────────────────
