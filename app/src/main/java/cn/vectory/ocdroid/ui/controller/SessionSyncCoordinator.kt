@@ -985,8 +985,16 @@ class SessionSyncCoordinator(
 
         // status 投影 → SessionListState.sessionStatuses（与 session.status 同 reducer）
         if (status != null) {
+            val parsed = SessionStatus(type = status)
             slices.mutateSessionList {
-                it.applySessionStatus(sid, SessionStatus(type = status)).first
+                it.applySessionStatus(sid, parsed).first
+            }
+            // §P0-F 阻断4/R5: digest terminal status also closes the POST bridge
+            // (mirrors LegacySseHandler session.status path).
+            if (!parsed.isBusy && !parsed.isRetry) {
+                slices.mutateComposer { c ->
+                    c.copy(sendingSessionIds = c.sendingSessionIds - sid)
+                }
             }
         }
 

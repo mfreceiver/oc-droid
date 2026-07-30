@@ -157,6 +157,10 @@ internal fun reduceHostStatePurged(state: StoreState, action: AppAction.HostStat
                 // above (T12's set/remove logic is unchanged — this is a
                 // lifecycle cleanup, not a producer-path change).
                 sessionErrorsById = emptyMap(),
+                // §P0-F 阻断6: cross-group purge must drop in-flight abort-pending
+                // flags — they reference the prior host's sessions; a root-id
+                // collision would let a stale "stopping" lock / watchdog survive.
+                abortPendingSessionIds = emptyMap(),
                 // I-2 v2 §3.3: cross-group purge MUST reset the
                 // aggregation signals — they reference the prior host's
                 // aggregation state and a stale "FAILED" would otherwise

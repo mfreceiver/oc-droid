@@ -307,7 +307,7 @@ fun Composer(
                                 if (event.type == KeyEventType.KeyDown &&
                                     event.key == Key.Enter &&
                                     (native.isCtrlPressed || native.isMetaPressed) &&
-                                    canSend && !questionPending
+                                    canSend && !questionPending && !stopping
                                 ) {
                                     handleComposerSend(
                                         text = text,

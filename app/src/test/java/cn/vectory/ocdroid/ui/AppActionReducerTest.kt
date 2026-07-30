@@ -593,6 +593,34 @@ class AppActionReducerTest {
             out.sessionList.completenessEpoch)
     }
 
+    @Test
+    fun `P0-F reduce HostStatePurged cross-group clears abortPendingSessionIds`() {
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                abortPendingSessionIds = mapOf("s1" to 100L, "s2" to 200L),
+            ),
+        )
+
+        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+
+        assertTrue("abortPendingSessionIds cleared cross-group",
+            out.sessionList.abortPendingSessionIds.isEmpty())
+    }
+
+    @Test
+    fun `P0-F reduce HostStatePurged same-group preserves abortPendingSessionIds`() {
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                abortPendingSessionIds = mapOf("s1" to 100L),
+            ),
+        )
+
+        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
+
+        // Same-group switch: sessions are still valid → pending survives
+        assertEquals(mapOf("s1" to 100L), out.sessionList.abortPendingSessionIds)
+    }
+
     // ── HostStatePurged (same-group = preserve server data) ────────────────
 
     @Test

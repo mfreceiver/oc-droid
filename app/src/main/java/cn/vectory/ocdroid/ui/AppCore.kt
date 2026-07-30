@@ -773,6 +773,14 @@ class AppCore @Inject constructor(
             // `cacheRepository.evictSession` fire-and-forget persistent evict
             // was deleted together with the CacheRepository surface — the
             // process-in LRU is the sole cache layer now.
+            // §P0-F 阻断6: session gone (delete/archive/404 — EvictSession is the
+            // single funnel) → release any in-flight abort-pending flag for this
+            // sid so the "stopping" UI cannot stick and a stale watchdog no-ops.
+            store.mutateSessionList { s ->
+                if (effect.sessionId in s.abortPendingSessionIds)
+                    s.copy(abortPendingSessionIds = s.abortPendingSessionIds - effect.sessionId)
+                else s
+            }
             //
             sessionSwitcher.evictSession(effect.serverGroupFp, effect.sessionId)
             true

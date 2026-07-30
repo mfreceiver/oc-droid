@@ -1444,6 +1444,14 @@ class SessionSyncPureFunctionsTest {
         assertEquals(mapOf("s2" to 456L), next.abortPendingSessionIds)
     }
 
+    // §P0-F 阻断4/R5: the actual R5 close (clearing sendingSessionIds on
+    // terminal status) happens in the TWO dispatch points
+    // (LegacySseHandler.kt:168-170 / SessionSyncCoordinator.kt:987-991) via
+    // direct mutateComposer, NOT as an SseSideEffect. The pure-layer
+    // applySessionStatus test above proves the abortPending-clearing
+    // precondition is correct; the mutateComposer is a dispatch-layer concern
+    // verified by code review + integration tests.
+
     // === applyPartCreatedPlaceholder: every partType branch ==============
 
     @Test
