@@ -35,6 +35,16 @@ data class StoreState(
     val sessionList: SessionListState = SessionListState(),
     val unread: UnreadState = UnreadState(),
     val host: HostState = HostState(),
+    /**
+     * §P0-A (B1 option 1): the SINGLE authoritative source of truth for session
+     * execution status. `sessionList.sessionStatuses` is now a PROJECTION of
+     * this slice, computed by the PURE [reduceAuthority] in the SAME `state.copy`
+     * (single CAS). Every status write funnels through
+     * `dispatch(AppAction.AuthorityEvent(AuthorityOp))`.
+     *
+     * Defaults to empty — mirrors the legacy `sessionStatuses = emptyMap()`
+     * initial value (no status known on cold start). */
+    val authority: cn.vectory.ocdroid.data.state.AuthorityState = cn.vectory.ocdroid.data.state.AuthorityState(),
     /** §A5-3 B1: collapsible-card expansion map (formerly its own
      *  `MutableStateFlow<Map<String, Boolean>>`). */
     val expandedParts: Map<String, Boolean> = emptyMap(),

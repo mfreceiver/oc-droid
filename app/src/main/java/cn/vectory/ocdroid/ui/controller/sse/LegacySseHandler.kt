@@ -165,9 +165,11 @@ class LegacySseHandler(private val host: SseDispatchHost) : SseEventHandler {
                     )
                 }
             }
-            host.slices.mutateSessionList {
-                it.applySessionStatus(statusEvent.sessionId, statusEvent.status).first
-            }
+            host.applyStatusViaAuthority(
+                sid = statusEvent.sessionId,
+                status = statusEvent.status,
+                origin = cn.vectory.ocdroid.data.state.EntryOrigin.SSE_LEGACY,
+            )
             // §P0-F 阻断6: R5 sendingSessionIds 清理需 generation/ownership，待 P0-A；
             // 此处不无条件清（误清新 send 风险）。
             val statusEffects = mutableListOf<SseSideEffect>()

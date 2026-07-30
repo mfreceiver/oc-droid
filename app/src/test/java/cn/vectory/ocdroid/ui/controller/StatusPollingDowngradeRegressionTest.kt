@@ -104,6 +104,22 @@ class StatusPollingDowngradeRegressionTest {
         unmockkAll()
     }
 
+    /** §P0-A test helper: seed a prior session status through the authority
+     *  reducer (the SOLE writer now), so authority.bySid is populated exactly
+     *  as production would after an SSE/REST status event. */
+    private fun seedStatusAuthorityEvent(
+        sid: String,
+        status: SessionStatus,
+    ): cn.vectory.ocdroid.ui.AppAction = cn.vectory.ocdroid.ui.AppAction.AuthorityEvent(
+        cn.vectory.ocdroid.data.state.AuthorityOp.ApplyEvent(
+            sid = sid,
+            status = status,
+            origin = cn.vectory.ocdroid.data.state.EntryOrigin.SSE_LEGACY,
+            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+            connectionMonotonicMs = 0L,
+        ),
+    )
+
     private fun slimRepository(): OpenCodeRepository = mockk(relaxed = true) {
         every { usesSlimStatusFanOut } returns true
         // Defensive stubs for ALL three status endpoints. The @Ignore sweep
@@ -809,9 +825,9 @@ class StatusPollingDowngradeRegressionTest {
             session("s-b", "/work-b"),
         )
         // Prior state: s-b is BUSY (upstream mid-task). s-a is unknown.
-        store.mutateSessionList {
-            it.copy(sessionStatuses = mapOf("s-b" to SessionStatus(type = "busy")))
-        }
+        // §P0-A: status is now the authority projection — seed via authority so
+        // the failed-dir preservation (which reads authority.bySid) sees it.
+        store.dispatch(seedStatusAuthorityEvent("s-b", SessionStatus(type = "busy")))
         // /work-a fetch succeeds; /work-b fetch FAILS (transport error).
         coEvery { repository.getSlimapiSessionsStatus("/work-a") } returns
             Result.success(mapOf("s-a" to SessionStatus(type = "idle")))
@@ -854,9 +870,8 @@ class StatusPollingDowngradeRegressionTest {
             session("s-a", "/work-a"),
             session("s-b", "/work-b"),
         )
-        store.mutateSessionList {
-            it.copy(sessionStatuses = mapOf("s-b" to SessionStatus(type = "retry")))
-        }
+        // §P0-A: status is now the authority projection — seed via authority.
+        store.dispatch(seedStatusAuthorityEvent("s-b", SessionStatus(type = "retry")))
         coEvery { repository.getSlimapiSessionsStatus("/work-a") } returns
             Result.success(mapOf("s-a" to SessionStatus(type = "idle")))
         coEvery { repository.getSlimapiSessionsStatus("/work-b") } returns

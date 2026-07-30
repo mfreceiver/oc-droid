@@ -249,6 +249,15 @@ internal fun reduceHostStatePurged(state: StoreState, action: AppAction.HostStat
         chat = newChat,
         sessionList = newSessionList,
         unread = newUnread,
+        // §P0-A / §4c.3: cross-group purge resets the authority slice fully (its
+        // bySid/coverage/incarnations reference the prior host's sessions; a
+        // root-id collision would otherwise let the prior host's status survive).
+        // Same-group branch (above) PRESERVES authority (server-identical data),
+        // mirroring the sessionStatuses/sessionList preservation. No-op while
+        // authority is empty; the cross-group sessionStatuses=emptyMap() write in
+        // newSessionList stays consistent with the empty projection.
+        authority = if (action.preserveServerGroupData) state.authority
+            else cn.vectory.ocdroid.data.state.AuthorityState(),
         // Per-profile UX — ALWAYS reset regardless of group.
         composer = state.composer.copy(draftWorkdir = null),
         settings = state.settings.copy(availableCommands = emptyList()),

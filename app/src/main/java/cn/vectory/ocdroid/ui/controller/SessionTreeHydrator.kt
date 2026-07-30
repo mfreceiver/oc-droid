@@ -4,7 +4,6 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.SharedStateStore
-import cn.vectory.ocdroid.ui.mergeStatusSnapshot
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -104,6 +103,9 @@ internal class ForegroundSessionTreeHydrator(
             try {
                 val result = loadCompleteSessionTrees(repository, roots)
                 val statusBefore = store.sessionListFlow.value.sessionStatuses
+                // §P0-A: requestStartMs captured at the caller (carried into the
+                // authority op — the reducer stays pure, reads no clock).
+                val requestStartMs = System.currentTimeMillis()
                 val statusSnapshot = repository.getSessionStatus().getOrNull()
                 // T1c: call-site computes validated deltas + epochAtStart;
                 // SessionTreeHydrated reduce owns the epoch-guarded 3-field commit.
@@ -130,23 +132,41 @@ internal class ForegroundSessionTreeHydrator(
                             }
                         }
                         val nextChildren = current.childSessions + validParents
-                        val nextStatuses = if (statusSnapshot != null) {
-                            val authoritativeIds = allSessionsById(
-                                current.sessions,
-                                current.directorySessions,
-                                nextChildren,
-                            ).keys
-                            val normalizedStatuses = normalizeAuthoritativeStatusSnapshot(statusSnapshot, authoritativeIds)
-                            mergeStatusSnapshot(statusBefore, current.sessionStatuses, normalizedStatuses)
+                        val authoritativeSessions = allSessionsById(
+                            current.sessions,
+                            current.directorySessions,
+                            nextChildren,
+                        )
+                        // §P0-A: build the authority ApplySnapshot (the reducer
+                        // owns normalize + the REST in-flight merge via
+                        // op.localBefore=statusBefore). null when no snapshot.
+                        val statusOp = if (statusSnapshot != null) {
+                            cn.vectory.ocdroid.ui.buildAuthorityApplySnapshot(
+                                snapshot = statusSnapshot,
+                                authoritativeSessions = authoritativeSessions,
+                                authoritativeNodeIds = authoritativeSessions.keys,
+                                coveredWorkdirs = authoritativeSessions.values.asSequence()
+                                    .map { it.directory }.filter { it.isNotBlank() }.toSet(),
+                                partialFailureWorkdirs = emptySet(),
+                                unmappedActiveIds = emptySet(),
+                                lastSuccessTimeMs = requestStartMs,
+                                scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+                                requestToken = cn.vectory.ocdroid.data.state.RequestToken(
+                                    hostProfileId = hostId,
+                                    epoch = epochAtStart,
+                                    requestStartMs = requestStartMs,
+                                ),
+                                localBefore = statusBefore,
+                            )
                         } else {
-                            current.sessionStatuses
+                            null
                         }
                         store.dispatch(
                             AppAction.SessionTreeHydrated(
                                 epochAtStart = epochAtStart,
                                 childSessionsDelta = validParents,
                                 completeRootIdsDelta = validRoots,
-                                sessionStatuses = nextStatuses,
+                                statusOp = statusOp,
                             )
                         )
                     }

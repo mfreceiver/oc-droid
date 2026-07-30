@@ -121,6 +121,11 @@ class BackgroundUnreadPoller internal constructor(
         // identityValid(), which is also invoked AFTER this poll's own commit
         // has legitimately bumped the epoch).
         val startEpoch = store.sessionListFlow.value.completenessEpoch
+        // §P0-A: capture the status projection at request start so the authority
+        // reducer's ApplySnapshot can apply the REST in-flight (SSE-wins)
+        // protection inside the commit CAS (an SSE status that landed during the
+        // REST round-trip must not be clobbered by this background snapshot).
+        val localBefore = store.sessionListFlow.value.sessionStatuses
         fun identityValid(): Boolean = isBackground() &&
             lifecycleGeneration() == startGeneration &&
             store.hostFlow.value.currentHostProfileId == startHostId &&
@@ -161,12 +166,11 @@ class BackgroundUnreadPoller internal constructor(
         val children = hydration.childrenByParent
         // OpenCode's authoritative status endpoint omits idle entries. A
         // successful snapshot therefore proves every fetched tree node absent
-        // from the response is idle; normalize that protocol encoding to an
-        // explicit status. Fetch failures returned above, so they remain
-        // unknown/fail-closed rather than being mistaken for idle.
+        // from the response is idle; the authority reducer's ApplySnapshot
+        // normalizes that protocol encoding (idle-fill [authoritativeNodeIds]).
+        // IDs outside the authoritative tree remain absent/unknown → fail-closed.
         val authoritativeNodeIds = (sessions.asSequence() + children.values.asSequence().flatten())
             .mapTo(mutableSetOf()) { it.id }
-        val normalizedStatuses = normalizeAuthoritativeStatusSnapshot(statuses, authoritativeNodeIds)
 
         if (!identityValid()) return UnreadPollResult.Aborted
         val now = clock()
@@ -176,15 +180,42 @@ class BackgroundUnreadPoller internal constructor(
             if (!identityValid() || snapshot.host.currentHostProfileId != startHostId ||
                 snapshot.sessionList.completenessEpoch != startEpoch
             ) return@mutateState snapshot
+            // §P0-A (§4a.1): status flows through the PURE authority reducer
+            // inside this same CAS — authority.bySid + the sessionStatuses
+            // projection are updated atomically with the sessions/child/tree/
+            // completenessEpoch/unread overlay below. reduceAuthority is pure →
+            // safe + idempotent under CAS retry.
+            val authoritativeSessions = allSessionsById(
+                sessions,
+                snapshot.sessionList.directorySessions,
+                children,
+            )
+            val op = cn.vectory.ocdroid.ui.buildAuthorityApplySnapshot(
+                snapshot = statuses,
+                authoritativeSessions = authoritativeSessions,
+                authoritativeNodeIds = authoritativeNodeIds,
+                coveredWorkdirs = authoritativeSessions.values.asSequence()
+                    .map { it.directory }.filter { it.isNotBlank() }.toSet(),
+                partialFailureWorkdirs = emptySet(),
+                unmappedActiveIds = emptySet(),
+                lastSuccessTimeMs = now,
+                scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+                requestToken = cn.vectory.ocdroid.data.state.RequestToken(
+                    hostProfileId = startHostId,
+                    epoch = startEpoch,
+                    requestStartMs = now,
+                ),
+                localBefore = localBefore,
+            )
+            val withStatus = cn.vectory.ocdroid.ui.reduceAuthority(snapshot, op)
             // Bump the epoch alongside the authoritative completeness snapshot:
             // any foreground hydration captured an earlier epoch is dropped at
             // its commit (fail-closed) instead of re-certifying roots against a
             // stale session map and overwriting this background result.
-            val nextSessionList = snapshot.sessionList.copy(
+            val nextSessionList = withStatus.sessionList.copy(
                 sessions = sessions,
                 childSessions = children,
                 completeRootIds = hydration.completeRootIds,
-                sessionStatuses = normalizedStatuses,
                 activeSessionIds = activeIds
                     ?.intersect(authoritativeNodeIds)
                     ?: snapshot.sessionList.activeSessionIds.intersect(authoritativeNodeIds),
@@ -195,6 +226,7 @@ class BackgroundUnreadPoller internal constructor(
                 .flatMap { treeIds(it.id, sessionsById) }
                 .toSet()
             val provisional = snapshot.copy(
+                authority = withStatus.authority,
                 sessionList = nextSessionList,
                 unread = snapshot.unread.removeSessions(archivedTreeIds),
             )

@@ -80,6 +80,22 @@ class SessionListActionsTest {
         }
     }
 
+    /** §P0-A test helper: seed a prior session status through the authority
+     *  reducer (the SOLE writer now), populating authority.bySid exactly as
+     *  production would after an SSE/REST status event. */
+    private fun seedAuthorityEvent(
+        sid: String,
+        status: cn.vectory.ocdroid.data.model.SessionStatus,
+    ): AppAction = AppAction.AuthorityEvent(
+        cn.vectory.ocdroid.data.state.AuthorityOp.ApplyEvent(
+            sid = sid,
+            status = status,
+            origin = cn.vectory.ocdroid.data.state.EntryOrigin.SSE_LEGACY,
+            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+            connectionMonotonicMs = 0L,
+        ),
+    )
+
     @After
     fun tearDown() {
         unmockkAll()
@@ -1096,16 +1112,16 @@ class SessionListActionsTest {
     fun `preserves SSE status updated during in-flight REST over stale snapshot`() = runTest {
         // §sse-rest-race: REST 在途时 SSE 已把 X 推到 idle; REST 返回的旧快照仍 X=busy.
         // 守卫应保留 SSE 的 idle, 不被旧 REST busy 覆盖 (gpter🟠/groker🟠/opuser🟠).
+        // §P0-A: status is now the authority projection. Seed X=busy via authority
+        // and simulate the in-flight SSE X=idle via authority (ApplyEvent) so
+        // authority.bySid reflects the change the reducer's in-flight merge sees.
         slices.mutateSessionList {
-            it.copy(sessionStatuses = mutableMapOf(
-                "X" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")
-            ))
+            it.copy(sessions = listOf(Session(id = "X", directory = "/x")))
         }
+        store.dispatch(seedAuthorityEvent("X", cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")))
         coEvery { repository.getSessionStatus() } coAnswers {
-            // 模拟 REST 在途期间 SSE 写入 X=idle
-            slices.mutateSessionList {
-                it.copy(sessionStatuses = it.sessionStatuses + ("X" to cn.vectory.ocdroid.data.model.SessionStatus(type = "idle")))
-            }
+            // 模拟 REST 在途期间 SSE 写入 X=idle (now via the authority funnel).
+            store.dispatch(seedAuthorityEvent("X", cn.vectory.ocdroid.data.model.SessionStatus(type = "idle")))
             Result.success(mapOf("X" to cn.vectory.ocdroid.data.model.SessionStatus(type = "busy")))
         }
 

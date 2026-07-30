@@ -124,3 +124,54 @@ interface SseDispatchHost {
      */
     fun closeSkeletonSession(sessionId: String)
 }
+
+/**
+ * §P0-A (B1): the shared funnel for SSE-driven single-status writes
+ * (slim `session.digest` status relay + legacy `session.status`). Replaces the
+ * former `mutateSessionList { it.applySessionStatus(sid, status).first }`:
+ *
+ *  - the STATUS write now funnels through the authority reducer
+ *    (`dispatch(AuthorityEvent(ApplyEvent(origin)))`) so authority.bySid is the
+ *    single source of truth and `sessionStatuses` is its projection;
+ *  - the `abortPendingSessionIds` release (§P0-F/R6: server confirmed a
+ *    non-running status → release the in-flight abort flag) stays SEPARATE —
+ *    authority does NOT own abort-pending; this thin mutateSessionList owns it,
+ *    exactly mirroring [applySessionStatus]'s release branch.
+ *
+ * [origin] is [cn.vectory.ocdroid.data.state.EntryOrigin.SSE_SLIM] for the
+ * digest relay and [cn.vectory.ocdroid.data.state.EntryOrigin.SSE_LEGACY] for
+ * the legacy session.status event. The reducer's ApplyEvent fence is lenient
+ * for P0-A (no B11 identity guard yet); connectionMonotonicMs = the host's
+ * SSE clock (TTL/tie-break, non-causal).
+ */
+internal fun SseDispatchHost.applyStatusViaAuthority(
+    sid: String,
+    status: cn.vectory.ocdroid.data.model.SessionStatus,
+    origin: cn.vectory.ocdroid.data.state.EntryOrigin,
+) {
+    // ① status → authority (single source of truth + projection, single CAS).
+    slices.store.dispatch(
+        cn.vectory.ocdroid.ui.AppAction.AuthorityEvent(
+            cn.vectory.ocdroid.data.state.AuthorityOp.ApplyEvent(
+                sid = sid,
+                status = status,
+                origin = origin,
+                scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(
+                    serverGroupFp = serverGroupFp(),
+                    endpointFp = "", // P0-C placeholder (lenient ApplyEvent guard).
+                ),
+                connectionMonotonicMs = sseClock(),
+            ),
+        ),
+    )
+    // ② abortPending release — SEPARATE field (§P0-F), NOT owned by authority.
+    if (!status.isBusy && !status.isRetry) {
+        slices.mutateSessionList { sl ->
+            if (sid in sl.abortPendingSessionIds) {
+                sl.copy(abortPendingSessionIds = sl.abortPendingSessionIds - sid)
+            } else {
+                sl
+            }
+        }
+    }
+}

@@ -27,7 +27,22 @@ internal fun reduceSessionCreatedLocal(state: StoreState, action: AppAction.Sess
 
 internal fun reduceSessionArchivedLocal(state: StoreState, action: AppAction.SessionArchivedLocal): StoreState {
     val id = action.session.id
+    // §B5 / §4c.2: prune the archived session's id from authority.bySid so its
+    // status (and thus the sessionStatuses projection) cannot survive the
+    // archive. No-op while authority is empty (additive); consistent with the
+    // sessions/childSessions cleanup below once status flows through authority.
+    val prunedAuth = if (id in state.authority.bySid) {
+        state.authority.copy(bySid = state.authority.bySid - id)
+    } else {
+        state.authority
+    }
+    val nextSessionStatuses = if (prunedAuth === state.authority) {
+        state.sessionList.sessionStatuses
+    } else {
+        projectSessionStatuses(prunedAuth)
+    }
     return state.copy(
+        authority = prunedAuth,
         sessionList = state.sessionList.copy(
             sessions = state.sessionList.sessions.map {
                 if (it.id == id) action.session else it
@@ -38,6 +53,7 @@ internal fun reduceSessionArchivedLocal(state: StoreState, action: AppAction.Ses
             childSessions = state.sessionList.childSessions.mapValues { (_, list) ->
                 list.map { if (it.id == id) action.session else it }
             },
+            sessionStatuses = nextSessionStatuses,
             pendingQuestions = action.pendingQuestions,
             activeSessionIds = state.sessionList.activeSessionIds - action.activeSessionIdsToRemove,
             // §P0-E(a) R9 fix: archive must also clear the archived session's
@@ -57,12 +73,27 @@ internal fun reduceSessionArchivedLocal(state: StoreState, action: AppAction.Ses
 
 internal fun reduceSessionDeletedLocal(state: StoreState, action: AppAction.SessionDeletedLocal): StoreState {
     val ids = action.removedIds
+    // §B5 / §4c.2: prune deleted ids from authority.bySid (and recompute the
+    // projection so sessionStatuses stays consistent in the same CAS). No-op
+    // while authority is empty; correct once status flows through authority.
+    val prunedAuth = if (ids.any { it in state.authority.bySid }) {
+        state.authority.copy(bySid = state.authority.bySid.filterKeys { it !in ids })
+    } else {
+        state.authority
+    }
+    val nextSessionStatuses = if (prunedAuth === state.authority) {
+        state.sessionList.sessionStatuses
+    } else {
+        projectSessionStatuses(prunedAuth)
+    }
     return state.copy(
+        authority = prunedAuth,
         sessionList = state.sessionList.copy(
             sessions = state.sessionList.sessions.filter { it.id !in ids },
             directorySessions = state.sessionList.directorySessions
                 .mapValues { (_, list) -> list.filter { it.id !in ids } }
                 .filterValues { it.isNotEmpty() },
+            sessionStatuses = nextSessionStatuses,
             pendingQuestions = state.sessionList.pendingQuestions.filter { it.sessionId !in ids },
             activeSessionIds = state.sessionList.activeSessionIds - ids,
             sessionErrorsById = state.sessionList.sessionErrorsById.filterKeys { it !in ids },
@@ -76,17 +107,6 @@ internal fun reduceSessionDeletedLocal(state: StoreState, action: AppAction.Sess
         ),
     )
 }
-
-internal fun reduceSessionStatusPatched(state: StoreState, action: AppAction.SessionStatusPatched): StoreState = state.copy(
-    sessionList = state.sessionList.copy(
-        sessions = bumpSessionUpdated(
-            state.sessionList.sessions,
-            action.sessionId,
-            action.updatedTimestamp,
-        ),
-        sessionStatuses = state.sessionList.sessionStatuses + (action.sessionId to action.status),
-    ),
-)
 
 internal fun reduceSessionsRefreshedLocal(state: StoreState, action: AppAction.SessionsRefreshedLocal): StoreState = state.copy(
     sessionList = state.sessionList.copy(
@@ -119,11 +139,18 @@ internal fun reduceSessionTreeHydrated(state: StoreState, action: AppAction.Sess
     return if (state.sessionList.completenessEpoch != action.epochAtStart) {
         state // stale hydration → full no-op
     } else {
-        state.copy(
-            sessionList = state.sessionList.copy(
-                childSessions = state.sessionList.childSessions + action.childSessionsDelta,
-                completeRootIds = state.sessionList.completeRootIds + action.completeRootIdsDelta,
-                sessionStatuses = action.sessionStatuses,
+        // §4a.2: apply the authority op (status) via the PURE reducer in the SAME
+        // state.copy as the tree delta (single CAS, M6/B1 atomic). reduceAuthority
+        // is pure → idempotent under CAS retry. null op → status untouched.
+        val withStatus = if (action.statusOp != null) {
+            reduceAuthority(state, action.statusOp)
+        } else {
+            state
+        }
+        withStatus.copy(
+            sessionList = withStatus.sessionList.copy(
+                childSessions = withStatus.sessionList.childSessions + action.childSessionsDelta,
+                completeRootIds = withStatus.sessionList.completeRootIds + action.completeRootIdsDelta,
             ),
         )
     }

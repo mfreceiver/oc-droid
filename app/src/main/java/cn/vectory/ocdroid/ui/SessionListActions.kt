@@ -13,7 +13,6 @@ import cn.vectory.ocdroid.ui.controller.applyAggregationOutcome
 import cn.vectory.ocdroid.ui.controller.aggregationSignal
 import cn.vectory.ocdroid.ui.controller.applySessionDiffIfAbsent
 import cn.vectory.ocdroid.ui.controller.allSessionsById
-import cn.vectory.ocdroid.ui.controller.normalizeAuthoritativeStatusSnapshot
 import cn.vectory.ocdroid.ui.controller.StatusPollOrchestrator
 import cn.vectory.ocdroid.ui.controller.loadCompleteSessionTrees
 import cn.vectory.ocdroid.ui.controller.rootIdOf
@@ -238,22 +237,48 @@ internal fun launchLoadChildSessions(
             val hydration = loadCompleteSessionTrees(repository, listOf(root))
             if (rootId in hydration.completeRootIds) {
                 val statusBefore = slices.sessionList.value.sessionStatuses
+                // §P0-A: requestStartMs captured at the caller (carried into the
+                // authority op — the reducer stays pure).
+                val requestStartMs = System.currentTimeMillis()
                 val statusSnapshot = repository.getSessionStatus().getOrNull()
-                slices.mutateSessionList {
+                slices.store.mutateState { snapshot ->
                     // §gpter-blocker: the tree was invalidated mid-flight —
                     // drop the stale result. The root stays incomplete so the
                     // next tick re-hydrates against the fresh tree.
-                    if (it.completenessEpoch != epochAtStart) return@mutateSessionList it
+                    val it = snapshot.sessionList
+                    if (it.completenessEpoch != epochAtStart) return@mutateState snapshot
                     val nextChildren = it.childSessions + hydration.childrenByParent
-                    val nextStatuses = if (statusSnapshot != null) {
-                        val authoritativeIds = allSessionsById(it.sessions, it.directorySessions, nextChildren).keys
-                        val normalizedStatuses = normalizeAuthoritativeStatusSnapshot(statusSnapshot, authoritativeIds)
-                        mergeStatusSnapshot(statusBefore, it.sessionStatuses, normalizedStatuses)
-                    } else it.sessionStatuses
-                    it.copy(
-                        childSessions = nextChildren,
-                        completeRootIds = it.completeRootIds + rootId,
-                        sessionStatuses = nextStatuses,
+                    val authoritative = allSessionsById(it.sessions, it.directorySessions, nextChildren)
+                    // §P0-A: status via PURE reduceAuthority (authority + projection
+                    // in this same CAS). reduceAuthority owns normalize + the REST
+                    // in-flight merge (op.localBefore=statusBefore).
+                    val withStatus = if (statusSnapshot != null) {
+                        val op = buildAuthorityApplySnapshot(
+                            snapshot = statusSnapshot,
+                            authoritativeSessions = authoritative,
+                            authoritativeNodeIds = authoritative.keys,
+                            coveredWorkdirs = authoritative.values.asSequence()
+                                .map { dir -> dir.directory }.filter { dir -> dir.isNotBlank() }.toSet(),
+                            partialFailureWorkdirs = emptySet(),
+                            unmappedActiveIds = emptySet(),
+                            lastSuccessTimeMs = requestStartMs,
+                            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+                            requestToken = cn.vectory.ocdroid.data.state.RequestToken(
+                                hostProfileId = null,
+                                epoch = epochAtStart,
+                                requestStartMs = requestStartMs,
+                            ),
+                            localBefore = statusBefore,
+                        )
+                        reduceAuthority(snapshot, op)
+                    } else {
+                        snapshot
+                    }
+                    withStatus.copy(
+                        sessionList = withStatus.sessionList.copy(
+                            childSessions = nextChildren,
+                            completeRootIds = it.completeRootIds + rootId,
+                        ),
                     )
                 }
             } else {

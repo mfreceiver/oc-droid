@@ -373,9 +373,31 @@ internal fun launchSendMessage(
                         "optimistic-onSuccess busy write sid=$sessionId",
                     )
                 }
-                // T1c: SessionStatusPatched owns sessions (bump) + sessionStatuses.
+                // §P0-A (B1): optimistic busy now funnels through the authority
+                // reducer — ApplyEvent(OPTIMISTIC) sets the bySid entry + an
+                // optimisticClaim and records the bump timestamp in pendingBumps,
+                // which the reducer applies to sessions (bumpSessionUpdated) and
+                // the sessionStatuses projection in the SAME single CAS. The
+                // optimisticBumpTimestamp IS the caller-captured wall-clock
+                // (System.currentTimeMillis above) — the reducer stays pure (no
+                // clock read; the value is carried in the op).
+                // scopeKey is a P0-C placeholder (ApplyEvent scope guard is lenient
+                // in P0-A — see opScopeValid); connectionMonotonicMs doubles as the
+                // tie-break clock + the optimistic bump timestamp.
                 slices.store.dispatch(
-                    AppAction.SessionStatusPatched(sessionId, updatedTimestamp, busyStatus)
+                    AppAction.AuthorityEvent(
+                        cn.vectory.ocdroid.data.state.AuthorityOp.ApplyEvent(
+                            sid = sessionId,
+                            status = busyStatus,
+                            origin = cn.vectory.ocdroid.data.state.EntryOrigin.OPTIMISTIC,
+                            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(
+                                serverGroupFp = "",
+                                endpointFp = "",
+                            ),
+                            connectionMonotonicMs = updatedTimestamp,
+                            optimisticBumpTimestamp = updatedTimestamp,
+                        ),
+                    ),
                 )
                 onSuccess?.invoke()
                 // §streaming-send-ux-fix: the post-send full-list refresh was

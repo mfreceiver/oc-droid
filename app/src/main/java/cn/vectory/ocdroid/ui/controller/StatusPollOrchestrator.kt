@@ -167,7 +167,14 @@ internal object StatusPollOrchestrator {
             try {
                 // §sse-rest-race: REST 发起前快照本地 status, onSuccess 时识别"REST 在途期间
                 // 被 SSE 更新过的 session"——旧 REST 快照不得覆盖较新的 SSE 值。
+                // §P0-A: this localBefore is carried INTO the authority reducer's
+                // ApplySnapshot (pure in-flight protection); the reducer no longer
+                // re-reads sessionStatuses to merge — it uses op.localBefore.
                 val localBefore = slices.sessionList.value.sessionStatuses
+                // §P0-A: requestStartMs captured at the caller (carried into the op
+                // as the entries' updatedMonotonic + coverage.lastSuccessTimeMs —
+                // the reducer itself reads NO clock, staying pure).
+                val requestStartMs = System.currentTimeMillis()
                 // §verbose-diag-flood: capture the current-session id + its prior
                 // status BEFORE the mutate so the post-mutate verbose log can do a
                 // single scoped + deduped comparison (current-session only + actual
@@ -180,29 +187,52 @@ internal object StatusPollOrchestrator {
                 val activeResult = repository.getActiveSessionIds()
                 val statuses = statusResult.getOrNull()
                 var applied = false
-                slices.mutateSessionList { sl ->
+                slices.store.mutateState { snapshot ->
                     // StateFlow.update may retry this transform after a CAS
                     // collision. Report the result of the final attempt only.
                     applied = false
+                    val sl = snapshot.sessionList
                     // The status epoch and host identity jointly fence both REST
                     // responses. A host switch explicitly clears activeSessionIds;
                     // an old-host response must never repopulate that snapshot.
                     if (myEpoch != statusLoadEpoch.get() ||
-                        slices.host.value.currentHostProfileId != hostAtRequestStart
+                        snapshot.host.currentHostProfileId != hostAtRequestStart
                     ) {
                         DebugLog.d("Sync", "launchLoadSessionStatus: stale epoch/host, discarding snapshot")
-                        return@mutateSessionList sl
+                        return@mutateState snapshot
                     }
-                    val authoritativeIds = allSessionsById(
+                    val authoritative = allSessionsById(
                         sl.sessions,
                         sl.directorySessions,
                         sl.childSessions,
-                    ).keys
-                    val nextStatuses = if (statuses != null) {
-                        val normalized = normalizeAuthoritativeStatusSnapshot(statuses, authoritativeIds)
-                        mergeStatusSnapshot(localBefore, sl.sessionStatuses, normalized)
+                    )
+                    val authoritativeIds = authoritative.keys
+                    // §P0-A: status now flows through the PURE authority reducer.
+                    // reduceAuthority is pure → safe + idempotent inside this CAS
+                    // retry lambda. It updates authority + the sessionStatuses
+                    // projection in the SAME copy; activeSessionIds (NOT an
+                    // authority concern) is overlaid below.
+                    val withStatus = if (statuses != null) {
+                        val op = cn.vectory.ocdroid.ui.buildAuthorityApplySnapshot(
+                            snapshot = statuses,
+                            authoritativeSessions = authoritative,
+                            authoritativeNodeIds = authoritativeIds,
+                            coveredWorkdirs = authoritative.values.asSequence()
+                                .map { it.directory }.filter { it.isNotBlank() }.toSet(),
+                            partialFailureWorkdirs = emptySet(),
+                            unmappedActiveIds = emptySet(),
+                            lastSuccessTimeMs = requestStartMs,
+                            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+                            requestToken = cn.vectory.ocdroid.data.state.RequestToken(
+                                hostProfileId = hostAtRequestStart,
+                                epoch = myEpoch,
+                                requestStartMs = requestStartMs,
+                            ),
+                            localBefore = localBefore,
+                        )
+                        cn.vectory.ocdroid.ui.reduceAuthority(snapshot, op)
                     } else {
-                        sl.sessionStatuses
+                        snapshot
                     }
                     // Fail-closed: a failed active fetch retains the previous
                     // snapshot. Both branches intersect the current tree so a
@@ -211,9 +241,8 @@ internal object StatusPollOrchestrator {
                         ?.intersect(authoritativeIds)
                         ?: sl.activeSessionIds.intersect(authoritativeIds)
                     applied = true
-                    sl.copy(
-                        sessionStatuses = nextStatuses,
-                        activeSessionIds = nextActiveIds,
+                    withStatus.copy(
+                        sessionList = withStatus.sessionList.copy(activeSessionIds = nextActiveIds),
                     )
                 }
                 // §streaming-state-sync-diag (runtime-gated, scoped+dedup):
@@ -302,7 +331,9 @@ internal object StatusPollOrchestrator {
             }
             try {
                 // §sse-rest-race: REST 发起前快照本地 status (mirrors the legacy path).
+                // §P0-A: carried into the authority ApplySnapshot (pure in-flight merge).
                 val localBefore = slices.sessionList.value.sessionStatuses
+                val requestStartMs = System.currentTimeMillis()
                 val sl = slices.sessionList.value
                 val authoritative = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
                 // Derive the distinct workdirs to query (sidecar requires one
@@ -368,13 +399,14 @@ internal object StatusPollOrchestrator {
                     return@launch
                 }
                 var applied = false
-                slices.mutateSessionList { current ->
+                slices.store.mutateState { snapshot ->
                     applied = false
+                    val current = snapshot.sessionList
                     if (myEpoch != statusLoadEpoch.get() ||
-                        slices.host.value.currentHostProfileId != hostAtRequestStart
+                        snapshot.host.currentHostProfileId != hostAtRequestStart
                     ) {
                         DebugLog.d("Sync", "launchLoadSessionStatusSlim: stale epoch/host, discarding snapshot")
-                        return@mutateSessionList current
+                        return@mutateState snapshot
                     }
                     val authoritative = allSessionsById(
                         current.sessions,
@@ -384,31 +416,47 @@ internal object StatusPollOrchestrator {
                     val authoritativeIds = authoritative.keys
                     // §11.1 fix-11a P0-1 (rev-ogpt): sessions whose directory
                     // fetch FAILED must NOT be authoritative-normalized to
-                    // idle. Build the covered set = authoritative sessions
-                    // whose directory is in successfulDirs; sessions of
-                    // failed directories preserve their prior
-                    // sessionStatuses (pre-seed the restSnapshot so
-                    // mergeStatusSnapshot does not drop them). Sessions with
-                    // a blank directory were never queried and retain their
-                    // original normalize-to-idle behavior (unchanged).
+                    // idle. The authority reducer reproduces this exactly via
+                    //   authoritativeNodeIds = coveredAuthoritativeIds (failed-dir
+                    //   sessions excluded from idle-normalize) +
+                    //   partialFailureWorkdirs = failed dirs (their entries keep
+                    //   the prior bySid entry, status updated to the merged value).
+                    // Sessions with a blank directory were never queried and retain
+                    // their original normalize-to-idle behavior (they are in
+                    // coveredAuthoritativeIds, unchanged).
+                    val failedDirs = directories - successfulDirs
                     val failedDirSessionIds = authoritative.values
                         .asSequence()
                         .filter { s -> s.directory.isNotBlank() && s.directory !in successfulDirs }
                         .map { it.id }
                         .toSet()
                     val coveredAuthoritativeIds = authoritativeIds - failedDirSessionIds
-                    val normalized = normalizeAuthoritativeStatusSnapshot(merged, coveredAuthoritativeIds)
-                    val preservedFromFailure = current.sessionStatuses.filterKeys { it in failedDirSessionIds }
-                    val restSnapshot = normalized + preservedFromFailure
-                    val nextStatuses = mergeStatusSnapshot(localBefore, current.sessionStatuses, restSnapshot)
+                    val op = cn.vectory.ocdroid.ui.buildAuthorityApplySnapshot(
+                        snapshot = merged,
+                        authoritativeSessions = authoritative,
+                        authoritativeNodeIds = coveredAuthoritativeIds,
+                        coveredWorkdirs = successfulDirs,
+                        partialFailureWorkdirs = failedDirs,
+                        unmappedActiveIds = emptySet(),
+                        lastSuccessTimeMs = requestStartMs,
+                        scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+                        requestToken = cn.vectory.ocdroid.data.state.RequestToken(
+                            hostProfileId = hostAtRequestStart,
+                            epoch = myEpoch,
+                            requestStartMs = requestStartMs,
+                        ),
+                        localBefore = localBefore,
+                    )
+                    val withStatus = cn.vectory.ocdroid.ui.reduceAuthority(snapshot, op)
                     applied = true
-                    current.copy(
-                        sessionStatuses = nextStatuses,
-                        // Slim activity is digest-relay-owned: preserve the prior
-                        // activeSessionIds snapshot, fail-closed-intersected against
-                        // the authoritative tree (a deleted/archived session cannot
-                        // remain active forever — mirrors the legacy semantics).
-                        activeSessionIds = current.activeSessionIds.intersect(authoritativeIds),
+                    // Slim activity is digest-relay-owned: preserve the prior
+                    // activeSessionIds snapshot, fail-closed-intersected against
+                    // the authoritative tree (a deleted/archived session cannot
+                    // remain active forever — mirrors the legacy semantics).
+                    withStatus.copy(
+                        sessionList = withStatus.sessionList.copy(
+                            activeSessionIds = current.activeSessionIds.intersect(authoritativeIds),
+                        ),
                     )
                 }
                 complete(applied)

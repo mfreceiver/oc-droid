@@ -658,16 +658,6 @@ sealed interface AppAction {
     ) : AppAction
 
     /**
-     * T1c: launchSendMessage onSuccess optimistic busy write. Reducer
-     * delegates sessions to [bumpSessionUpdated].
-     */
-    data class SessionStatusPatched(
-        val sessionId: String,
-        val updatedTimestamp: Long,
-        val status: SessionStatus,
-    ) : AppAction
-
-    /**
      * T1c: launchLoadSessions NON-archive success path. sessionList copy.
      * Distinct from [BulkSessionsRefreshed] (does NOT intersect
      * activeSessionIds / archive-subtree cleanup).
@@ -695,14 +685,16 @@ sealed interface AppAction {
     /**
      * T1c: SessionTreeHydrator.request commit. Epoch-guarded: if live
      * completenessEpoch != [epochAtStart] → full no-op. Else merges
-     * [childSessionsDelta] / [completeRootIdsDelta] and replaces
-     * sessionStatuses.
+     * [childSessionsDelta] / [completeRootIdsDelta] and applies [statusOp]
+     * via the PURE authority reducer in the SAME `state.copy` (single CAS —
+     * §4a.2). [statusOp] is null when no status snapshot was fetched; the
+     * sessionStatuses projection is then left untouched.
      */
     data class SessionTreeHydrated(
         val epochAtStart: Long,
         val childSessionsDelta: Map<String, List<Session>>,
         val completeRootIdsDelta: Set<String>,
-        val sessionStatuses: Map<String, SessionStatus>,
+        val statusOp: cn.vectory.ocdroid.data.state.AuthorityOp?,
     ) : AppAction
 
     // ── §chat-list-detail §12 B0: atomic SelectConversation / CloseDetail /
@@ -799,6 +791,16 @@ sealed interface AppAction {
         val generation: Long,
         val endpointFp: String,
     ) : AppAction
+
+    /**
+     * §P0-A (B1 option 1): the SOLE funnel for session status writes. Carries
+     * a typed [AuthorityOp]; the reducer delegates to the PURE
+     * [reduceAuthority], which updates [StoreState.authority] AND recomputes
+     * the `sessionList.sessionStatuses` projection in the SAME `state.copy`
+     * (single CAS, M6/B1 atomic). */
+    data class AuthorityEvent(
+        val op: cn.vectory.ocdroid.data.state.AuthorityOp,
+    ) : AppAction
 }
 
 /**
@@ -872,7 +874,6 @@ internal fun reduce(
     is AppAction.SessionCreatedLocal -> reduceSessionCreatedLocal(state, action)
     is AppAction.SessionArchivedLocal -> reduceSessionArchivedLocal(state, action)
     is AppAction.SessionDeletedLocal -> reduceSessionDeletedLocal(state, action)
-    is AppAction.SessionStatusPatched -> reduceSessionStatusPatched(state, action)
     is AppAction.SessionsRefreshedLocal -> reduceSessionsRefreshedLocal(state, action)
     is AppAction.SessionsPageAppended -> reduceSessionsPageAppended(state, action)
     is AppAction.SessionTreeHydrated -> reduceSessionTreeHydrated(state, action)
@@ -880,6 +881,7 @@ internal fun reduce(
     is AppAction.CloseDetail -> reduceCloseDetail(state, action)
     is AppAction.DetailMissing -> reduceDetailMissing(state, action)
     is AppAction.ChatContentLoaded -> reduceChatContentLoaded(state, action)
+    is AppAction.AuthorityEvent -> reduceAuthority(state, action.op)
     }
 }
 

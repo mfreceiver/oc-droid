@@ -54,6 +54,7 @@ import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.FLICKER_TAG
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.ui.controller.sse.SseDispatchHost
+import cn.vectory.ocdroid.ui.controller.sse.applyStatusViaAuthority
 import cn.vectory.ocdroid.ui.controller.sse.SseEventRouter
 import cn.vectory.ocdroid.ui.controller.sse.SharedConversationSseHandler
 import cn.vectory.ocdroid.ui.controller.sse.LegacySseHandler
@@ -983,11 +984,15 @@ class SessionSyncCoordinator(
         val deleted = (props?.get("deleted") as? JsonPrimitive)?.booleanOrNull
         val lastErrorEl = props?.get("lastError")
 
-        // status 投影 → SessionListState.sessionStatuses（与 session.status 同 reducer）
+        // status 投影 → authority (single source of truth via §P0-A B1 reducer);
+        // sessionStatuses is the authority projection. Mirrors session.status
+        // (LegacySseHandler) via the shared SSE authority funnel.
         if (status != null) {
-            slices.mutateSessionList {
-                it.applySessionStatus(sid, SessionStatus(type = status)).first
-            }
+            applyStatusViaAuthority(
+                sid = sid,
+                status = SessionStatus(type = status),
+                origin = cn.vectory.ocdroid.data.state.EntryOrigin.SSE_SLIM,
+            )
             // §P0-F 阻断6: R5 sendingSessionIds 清理需 generation/ownership，待 P0-A；
             // 此处不无条件清（误清新 send 风险）。
         }
