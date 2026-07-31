@@ -26,7 +26,9 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -1364,6 +1366,19 @@ class SkeletonReloadCoordinator(
                 val page = repository.getSlimapiMessagesSkeleton(
                     ticket.key.sessionId, ticket.priority.limit, null,
                 )
+                // #4a (blocker-4a): re-check cancellation AFTER the HTTP call and
+                // BEFORE any commit decision. A cooperative repository call would
+                // throw CancellationException mid-IO, but an uncontended
+                // [MessageLoadCoordinator] session [Mutex] resolves via tryLock and
+                // never re-checks cancellation, so a cancel requested during the
+                // HTTP call could otherwise slip through [commitReload] and commit a
+                // stale result. ensureActive() is a pure cancellation check (no
+                // wall-clock / scheduling assumption): if the job was cancelled, it
+                // throws synchronously here → the catch(CancellationException) branch
+                // restores dirty demand and re-throws; the stale page can never
+                // reach [commitReload]. Empty results are likewise fenced (a stale
+                // empty must not consume dirty demand that a newer reload owns).
+                currentCoroutineContext().ensureActive()
                 if (page.items.isEmpty()) ReloadOutcome.Empty
                 else commitReload(ticket, page)
             }

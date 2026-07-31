@@ -1480,8 +1480,25 @@ class SkeletonReloadCoordinatorCoreTest {
     // → no mutation of the (now-new) slot. Uses real dispatcher + CountDownLatch
     // for deterministic cancellation timing (same pattern as the existing ABA
     // test at line 686).
+    //
+    // Determinism note (blocker-4a fix): the reload's repository mock blocks on
+    // a [blocked] CountDownLatch — a NON-cooperative suspend (it does not observe
+    // coroutine cancellation). [onSessionClosed] removes the state slot under
+    // stateLock and ONLY THEN calls cancelAndJoin. So under Dispatchers.Default
+    // thread starvation the reload coroutine could resume from the released
+    // latch and run its commit critical section before [onSessionClosed] is even
+    // dispatched — at which point no cancellation has been requested yet, so no
+    // in-coroutine cancellation check (ensureActive/isActive/epoch token) could
+    // reject the stale commit. To make the outcome DETERMINISTIC, this test
+    // awaits onSessionClosed's slot removal (observable via
+    // [schedulerSnapshotForTest] → null) BEFORE releasing the blocking mock.
+    // That establishes a happens-before edge: slot-removed → blocked.countDown()
+    // → reload resumes → stillOwnsLocked fails → Detached → no commit, regardless
+    // of dispatcher thread availability. (The SUT's runReload #4a ensureActive()
+    // fence independently hardens the latent gap where a cancel requested DURING
+    // a cooperative IO could otherwise slip past the uncontended session Mutex —
+    // a real B1 fix, orthogonal to this test's B2 ordering requirement.)
 
-    @Ignore("FLAKY (pre-existing, NOT caused by W3-1 stabilization): real cancellation/commit race — cancelled reload's stale result [cancelled-m1] intermittently commits to the store before the CancellationException is observed. Uses Dispatchers.Default + latches (no Thread.sleep to tune); JUnit4 (no @Retry). Plan §3 W3-1 scoped only the ABA test (687-817); this blocker-4a was an undiscovered additional flaky test blocking check.sh gate. ~75% failure rate under back-to-back full runs. Proper fix needs SUT change (cancellation/commit ordering in SkeletonReloadCoordinator) — out of W3 test-only scope. Manually verify after SUT fix; remove @Ignore then. Reported to omni.")
     @Test
     fun `(blocker-4a) onSessionClosed detached cancellation is no-op - no stale mutation`() {
         val realScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -1511,13 +1528,31 @@ class SkeletonReloadCoordinatorCoreTest {
             c.submit("s", Tuple(100L, "cancelled-m1"), Priority.FORCE_RECONCILE, ReloadReason.REQUEST_RELOAD)
             assertTrue("entered mock barrier", entered.await(5, TimeUnit.SECONDS))
 
-            // onSessionClosed: detach + cancelAndJoin(in-flight) → CancellationException
-            // → runReload catch → onReloadComplete(Cancelled, NonCancellable) → stillOwnsLocked fails → Detached.
+            // onSessionClosed: detach (remove slot under stateLock) + cancelAndJoin
+            // (outside stateLock). The slot removal happens-before the
+            // cancelAndJoin, so we FIRST observe the detach (slot gone) before
+            // releasing the reload's blocking mock — this is what makes the
+            // outcome deterministic (see method kdoc).
             val closeDone = CountDownLatch(1)
             realScope.launch {
                 c.onSessionClosed("s")
                 closeDone.countDown()
             }
+            // Poll for the slot removal (onSessionClosed's synchronized block)
+            // BEFORE releasing the reload. Bounded by the close coroutine
+            // completing; [onSessionClosed] waits in cancelAndJoin for the
+            // in-flight job, which is parked on [blocked.await()] until we
+            // release it below — so the slot removal is observed promptly while
+            // the cancelAndJoin join is still pending.
+            val detachedDeadline = System.nanoTime() + 5_000_000_000L
+            while (c.schedulerSnapshotForTest("s", 1L) != null) {
+                assertTrue(
+                    "onSessionClosed did not remove the state slot within 5s",
+                    System.nanoTime() < detachedDeadline,
+                )
+            }
+            // Slot is gone → release the reload. Its commit's stillOwnsLocked now
+            // deterministically fails → Detached → no mutation.
             blocked.countDown()
             assertTrue("onSessionClosed completed within 10s",
                 closeDone.await(10, TimeUnit.SECONDS))
