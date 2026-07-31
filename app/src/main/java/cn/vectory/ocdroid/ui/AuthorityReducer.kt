@@ -230,6 +230,11 @@ private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
  *  - knownIncarnations per-scope high-water (B6): incarnation advance resets that
  *    scope's entries' serverRound; low incarnation → DROP. (Pure, self-contained
  *    even though slim does not yet supply serverRound.)
+ *  - §3.1 BLK-2 per-sid serverRound high-water: when the live baseline (prev
+ *    serverRound) was cleared by REST/legacy/incarnation-reset but a Tier-1 slim
+ *    frame with a turn arrives, the lex guard is skipped — the PERSISTENT
+ *    [SessionEntry.serverRoundHighWater] watermark still fences a stale low-turn
+ *    frame (strictly-older → DROP). Closes the BLK-2 revival window.
  */
 private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): AuthorityState {
     val prev = cur.bySid[op.sid]
@@ -249,6 +254,33 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
             // §B9 equal-serverRound tie-break: strictly-older monotonic → DROP
             return cur
         }
+    }
+
+    // ── §3.1 BLK-2: baseline-cleared Tier-1 watermark guard ──
+    // The lex guard above requires prev.serverRound != null. When the live baseline
+    // was cleared (REST ApplySnapshot / legacy SSE busy keepRound=null / incarnation-
+    // advance scope reset) but a Tier-1 slim frame carrying a turn arrives, the lex
+    // guard is skipped — and without this guard a stale LOW-turn frame would apply
+    // unconditionally, reviving stale busy (BLK-2 window). Compare the incoming frame
+    // against the PERSISTENT per-sid serverRound high-water (which survives the clear)
+    // and DROP a strictly-older (incarnation,turn). Reaching here means op.incarnation
+    // >= scope highWater (older incarnations were already DROPPED by the B6 guard
+    // above), so a `<` result is a same-incarnation stale-low-turn.
+    // prev == null / watermark == null (cold start) → no watermark → establish baseline.
+    //
+    // KNOWN RESIDUAL (deliberate, documented): only strictly-older `<` is DROPped, not
+    // equal-turn (mirroring §3.1 "strictly DROP low turn" and the live lex guard's
+    // equal handling). An EQUAL-turn frame arriving after a baseline clear is ACCEPTED
+    // to re-establish the baseline; this could let a buffered stale equal-turn digest
+    // revive busy. The live lex guard's `==0` monotonic-tie-break is NOT mirrored here
+    // because its validity depends on the connectionMonotonicMs / updatedMonotonic
+    // clock-domain semantics across the REST and SSE paths (unverified). The strictly-
+    // low window — the dominant, determinism-critical revival vector — is closed.
+    if (op.serverRound != null && prev != null && prev.serverRound == null &&
+        prev.serverRoundHighWater != null &&
+        op.serverRound < prev.serverRoundHighWater
+    ) {
+        return cur // §3.1 BLK-2: stale low-turn after baseline clear → DROP
     }
 
     // ── §3.1 Tier-2 confirmation gate (legacy, no causal serverRound) ──
@@ -308,6 +340,19 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
         else -> prev?.optimisticClaim
     }
 
+    // §3.1 BLK-2: advance the persistent per-sid serverRound high-water. A non-null
+    // incoming Tier-1 serverRound folds forward (lex max — never regresses); for
+    // OPTIMISTIC/legacy/IDLE (op.serverRound == null) the watermark is preserved
+    // unchanged so it survives the baseline clear. This is computed for ALL accepted
+    // frames; nextEntry carries it through both the normal and incarnation-advance
+    // return paths (a new incarnation's round lex-dominates the prior high-water).
+    val prevHw = prev?.serverRoundHighWater
+    val nextHighWater: ServerRound? = if (op.serverRound != null) {
+        if (prevHw == null || op.serverRound > prevHw) op.serverRound else prevHw
+    } else {
+        prevHw
+    }
+
     val nextEntry = SessionEntry(
         status = op.status,
         serverRound = keepRound,
@@ -317,6 +362,7 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
         updatedMonotonic = op.connectionMonotonicMs,
         workdir = op.workdir ?: prev?.workdir,
         scopeKey = op.scopeKey,
+        serverRoundHighWater = nextHighWater,
     )
 
     val nextPending = addPendingBump(cur.pendingBumps, op)
@@ -438,6 +484,10 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
             priorEntry.copy(status = status, scopeKey = op.scopeKey)
         } else {
             // REST authoritative for this scope: clear claim + serverRound (§3.1:320).
+            // §3.1 BLK-2: PRESERVE the per-sid serverRound high-water across the REST
+            // baseline clear so a stale low-turn Tier-1 slim digest arriving after
+            // this snapshot is still fenced (the live baseline is gone, but the
+            // persistent watermark remembers the max turn seen for this incarnation).
             SessionEntry(
                 status = status,
                 serverRound = null,
@@ -447,6 +497,7 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
                 updatedMonotonic = op.requestToken.requestStartMs,
                 workdir = op.sidToWorkdir[id],
                 scopeKey = op.scopeKey,
+                serverRoundHighWater = priorEntry?.serverRoundHighWater,
             )
         }
     }
