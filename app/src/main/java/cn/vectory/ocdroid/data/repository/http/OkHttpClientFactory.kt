@@ -39,7 +39,7 @@ import java.util.concurrent.TimeUnit
  * The base chain (see [baseBuilder]) composes, in order:
  *  1. SSL + cache (per [hostPort]).
  *  2. R-07 log gate: `BASIC` in DEBUG builds, `NONE` in release.
- *  3. [DirectoryHeaderInterceptor] → [SlimapiVersionInterceptor] → [ClientIdentityInterceptor] → [AuthInterceptor] → [CacheControlInterceptor].
+ *  3. [DirectoryHeaderInterceptor] → [SlimapiVersionInterceptor] → [ClientIdentityInterceptor] → [ServerGroupFpInterceptor] → [AuthInterceptor] → [CacheControlInterceptor].
  *  4. [TrafficCountingInterceptor].
  *  5. `connectTimeout(10 s)`.
  *
@@ -58,12 +58,21 @@ import java.util.concurrent.TimeUnit
  * `X-Client-Name` / `X-Client-Version` / `X-Client-Id` on REST / SSE /
  * mutation / command / token-stream. Identity is additive + backward-
  * compatible (sidecar works if absent).
+ *
+ * §C5 (oc-slimapi turn-token contract §6.2 method A):
+ * [ServerGroupFpInterceptor] sits IMMEDIATELY AFTER [ClientIdentityInterceptor]
+ * (route gate first, additive identity, then serverGroupFp passthrough), so
+ * the same `/slimapi/` + `slimHost` gating covers `X-Ocdroid-Server-Group-Fp`
+ * on REST / SSE / mutation / command / token-stream. Token-generating paths
+ * (prompt, abort) carry the fp so slimapi can stamp turn tokens per-
+ * (serverGroupFp, sid) without re-deriving the algorithm.
  */
 class OkHttpClientFactory private constructor(
     private val sslConfigFactory: SslConfigFactory,
     private val directoryHeaderInterceptor: DirectoryHeaderInterceptor,
     private val slimapiVersionInterceptor: SlimapiVersionInterceptor,
     private val clientIdentityInterceptor: ClientIdentityInterceptor,
+    private val serverGroupFpInterceptor: ServerGroupFpInterceptor,
     private val slimapiDebugInterceptor: SlimapiDebugInterceptor,
     private val authInterceptor: AuthInterceptor,
     private val cacheControlInterceptor: CacheControlInterceptor,
@@ -79,6 +88,7 @@ class OkHttpClientFactory private constructor(
         directoryHeaderInterceptor: DirectoryHeaderInterceptor,
         slimapiVersionInterceptor: SlimapiVersionInterceptor,
         clientIdentityInterceptor: ClientIdentityInterceptor,
+        serverGroupFpInterceptor: ServerGroupFpInterceptor,
         slimapiDebugInterceptor: SlimapiDebugInterceptor,
         authInterceptor: AuthInterceptor,
         cacheControlInterceptor: CacheControlInterceptor,
@@ -89,6 +99,7 @@ class OkHttpClientFactory private constructor(
         directoryHeaderInterceptor = directoryHeaderInterceptor,
         slimapiVersionInterceptor = slimapiVersionInterceptor,
         clientIdentityInterceptor = clientIdentityInterceptor,
+        serverGroupFpInterceptor = serverGroupFpInterceptor,
         slimapiDebugInterceptor = slimapiDebugInterceptor,
         authInterceptor = authInterceptor,
         cacheControlInterceptor = cacheControlInterceptor,
@@ -140,6 +151,13 @@ class OkHttpClientFactory private constructor(
                 snapshot,
                 clientIdentityInterceptor.clientIdProvider,
             ),
+            // §C5: rebuild with the new HostSnapshot but reuse the SAME
+            // serverGroupFpProvider (the fp is host-profile derived and
+            // resolved lazily at request time).
+            serverGroupFpInterceptor = ServerGroupFpInterceptor(
+                snapshot,
+                serverGroupFpInterceptor.serverGroupFpProvider,
+            ),
             slimapiDebugInterceptor = slimapiDebugInterceptor,
             authInterceptor = AuthInterceptor(snapshot),
             cacheControlInterceptor = CacheControlInterceptor(snapshot, sanitizer),
@@ -188,6 +206,12 @@ class OkHttpClientFactory private constructor(
             // 之后——路由门闩先过，再挂 additive 身份；二者共用 /slimapi/ + slimHost
             // 双门闩，互无顺序耦合。additive + 向后兼容（缺头 sidecar 仍工作）。
             .addInterceptor(clientIdentityInterceptor)
+            // §C5 (oc-slimapi turn-token contract §6.2 method A):
+            // serverGroupFp 透传头（X-Ocdroid-Server-Group-Fp）。紧随
+            // clientIdentityInterceptor 之后——身份头先过，再挂 fp 透传；
+            // 共用 /slimapi/ + slimHost 双门闩，token-generating 请求
+            // （prompt/abort）携带 fp，供 slimapi stamp turn token scope key。
+            .addInterceptor(serverGroupFpInterceptor)
             // V2 removed Opt-A capability header — no capability interceptor.
             // POST-RELEASE instrumentation (slimapi-client-v1): dedicated
             // slimapi DEBUG interceptor — logs method/encodedPath/version
@@ -433,6 +457,11 @@ class OkHttpClientFactory private constructor(
             // token stream too — the path is /slimapi/sessions/{sid}/stream,
             // so the same /slimapi/ identity contract applies.
             .addInterceptor(clientIdentityInterceptor)
+            // §C5: serverGroupFp header on the token stream too —
+            // /slimapi/sessions/{sid}/stream is under /slimapi/, so the same
+            // fp passthrough contract applies (turn-generating-adjacent:
+            // token requests go to slimapi).
+            .addInterceptor(serverGroupFpInterceptor)
             .addInterceptor(authInterceptor)
             .addInterceptor(trafficCountingInterceptor)
             .connectTimeout(10, TimeUnit.SECONDS)
