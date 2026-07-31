@@ -167,6 +167,17 @@ class SessionStreamingService : Service() {
     @Inject lateinit var bootstrapRetryPolicy: cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy
 
     /**
+     * §U-P2 (Batch 2): the independent optimistic-claim watchdog coordinator.
+     * Bound to the SAME connection lifetime as [processStatusPoller] —
+     * [Shell.startPoller] / [Shell.ensurePoller] call [OptimisticClaimWatchdogCoordinator.start]
+     * and [Shell.stopPoller] / [Shell.enterNoSourceTerminal] call
+     * [OptimisticClaimWatchdogCoordinator.stop]. The watchdog runs its OWN
+     * 5s timer (independent of the 30s poller tick) so a stale optimistic
+     * claim is detected within one OPTIMISTIC_CONFIRM_TIMEOUT_MS window.
+     */
+    @Inject lateinit var watchdogCoordinator: cn.vectory.ocdroid.service.streaming.OptimisticClaimWatchdogCoordinator
+
+    /**
      * T5-C4: the SSE → notification bridge is wired into the Service
      * (the Service is the L2 SSE producer, so this is the right scope).
      * Subscribes to [sseEventBridge]'s control-class flow and fires temp
@@ -288,13 +299,21 @@ class SessionStreamingService : Service() {
         ): cn.vectory.ocdroid.service.streaming.SourceActivation {
             // D2 gate #4: delegate to the process-level poller. The loop
             // runs on @ApplicationScope and survives this Service's death.
-            return processStatusPoller.startAndAwaitFirstPoll(identity, snapshot)
+            val activation = processStatusPoller.startAndAwaitFirstPoll(identity, snapshot)
+            // §U-P2: start the independent watchdog alongside the poller
+            // (same connection lifetime). The watchdog's own generation
+            // fence makes a repeat start() safe.
+            watchdogCoordinator.start()
+            return activation
         }
         override fun stopPoller() {
             // D2 gate #4: cancel the process-level poller loop. The
             // coordinator emits StopPoller on the L2Idle→L2Active commit OR
             // when the DebounceFire handoff cancels a non-idle poller.
             processStatusPoller.stop()
+            // §U-P2: stop the watchdog with the poller (same connection
+            // lifetime). Idempotent.
+            watchdogCoordinator.stop()
         }
         override suspend fun ensurePoller(
             identity: ConnectionIdentity,
@@ -302,7 +321,12 @@ class SessionStreamingService : Service() {
         ): cn.vectory.ocdroid.service.streaming.SourceActivation {
             // D5 (#2): delegate to the process-level poller's ensureRunning.
             // Idempotent for the same identity (no cancel/restart).
-            return processStatusPoller.ensureRunning(identity, snapshot)
+            val activation = processStatusPoller.ensureRunning(identity, snapshot)
+            // §U-P2: the supplemental-poller path ALSO keeps the watchdog
+            // armed (a supplemental poller means the connection is still
+            // active — the watchdog must keep reconciling stale claims).
+            watchdogCoordinator.start()
+            return activation
         }
         override suspend fun connectSse(identity: ConnectionIdentity): cn.vectory.ocdroid.service.streaming.SourceActivation {
             // CP9 + D2 gate #4: SSE collector owned here; connect is suspend
@@ -337,6 +361,8 @@ class SessionStreamingService : Service() {
                 .onFailure { DebugLog.w(TAG, "enterNoSourceTerminal: sseOwner.disconnect failed — ${it.message}") }
             runCatching { processStatusPoller.stop() }
                 .onFailure { DebugLog.w(TAG, "enterNoSourceTerminal: processStatusPoller.stop failed — ${it.message}") }
+            runCatching { watchdogCoordinator.stop() }
+                .onFailure { DebugLog.w(TAG, "enterNoSourceTerminal: watchdogCoordinator.stop failed — ${it.message}") }
             runCatching { appLifecycleMonitor.stopBackgroundPollingForNoSource() }
                 .onFailure { DebugLog.w(TAG, "enterNoSourceTerminal: stopBackgroundPollingForNoSource failed — ${it.message}") }
             runCatching {
