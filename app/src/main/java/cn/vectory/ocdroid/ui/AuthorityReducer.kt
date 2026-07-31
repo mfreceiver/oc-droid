@@ -15,6 +15,9 @@ import cn.vectory.ocdroid.ui.controller.normalizeAuthoritativeStatusSnapshot
 /** §P1-B/E: cap on [AuthorityState.retryQueue] size (LRU eviction when exceeded). */
 private const val RETRY_QUEUE_MAX_SIZE = 256
 
+/** §U-CQ9: cap on [ChatState.pendingErrorCheck] set size (drops oldest entries when exceeded). */
+private const val PENDING_ERROR_CHECK_MAX_SIZE = 128
+
 /**
  * §P0-A (B1 option 1): the PURE authority reducer — the SINGLE writer of
  * [StoreState.sessionList.sessionStatuses]. All status mutations funnel here
@@ -136,7 +139,7 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
         // messageId). Only real transitions (not guard-rejected no-ops that
         // returned early above) reach this copy.
         chat = state.chat.copy(
-            pendingErrorCheck = state.chat.pendingErrorCheck + transitionedToIdle,
+            pendingErrorCheck = capPendingErrorCheck(state.chat.pendingErrorCheck + transitionedToIdle),
         ),
     )
 }
@@ -907,6 +910,16 @@ internal fun applyOptimisticBumps(
         current = bumpSessionUpdated(current, sid, ts)
     }
     return current
+}
+
+/**
+ * §U-CQ9: cap the [pendingErrorCheck] set at [PENDING_ERROR_CHECK_MAX_SIZE] to
+ * prevent unbounded growth under rapid busy↔idle oscillations. Drops the OLDEST
+ * entries (first in insertion order) when the set exceeds the cap. Pure.
+ */
+private fun capPendingErrorCheck(set: Set<String>): Set<String> {
+    if (set.size <= PENDING_ERROR_CHECK_MAX_SIZE) return set
+    return set.drop(set.size - PENDING_ERROR_CHECK_MAX_SIZE).toSet()
 }
 
 /**

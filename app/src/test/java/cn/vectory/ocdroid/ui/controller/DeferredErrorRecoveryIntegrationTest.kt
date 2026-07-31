@@ -184,16 +184,16 @@ class DeferredErrorRecoveryIntegrationTest {
         coVerify(exactly = 1) { repository.getMessages(sid, limit = 50) }
     }
 
-    // ── Negative: no session error banner → no drain ─────────────────────────
+    // ── U-CQ9: drain fires for ALL entries regardless of banner ──────────────
 
     @Test
-    fun `deferred drain does NOT fire when sessionErrorsById has no entry for the transitioning session`() = runTest {
+    fun `U-CQ9 drain fires even when sessionErrorsById has no entry for the transitioning session`() = runTest {
         val sid = "S2"
 
         // ── Seed ──────────────────────────────────────────────────────────
         // Authority: S2 is busy.
         seedBusyAuthority(sid)
-        // sessionErrorsById is EMPTY — no error banner for S2.
+        // sessionErrorsById is EMPTY — no error banner for S2 (U-CQ9: drain fires anyway).
         // Chat: user is viewing S2 with a single assistant message (no error).
         store.mutateChat { it.copy(
             currentSessionId = sid,
@@ -210,21 +210,21 @@ class DeferredErrorRecoveryIntegrationTest {
             sid in stateAfterTransition.chat.pendingErrorCheck,
         )
 
-        // Mock getMessages for ANY sid (should never be called for S2).
-        coEvery { repository.getMessages(any(), limit = any()) } returns Result.success(emptyList())
+        // Mock getMessages to return empty (no error to localize).
+        coEvery { repository.getMessages(sid, limit = 50) } returns Result.success(emptyList())
 
-        // Create coordinator — should detect no sessionErrorsById entry → skip.
+        // Create coordinator — U-CQ9: drains ALL pendingErrorCheck regardless of banner.
         makeCoordinator()
         advanceUntilIdle()
 
-        // ── Verify no drain fired ─────────────────────────────────────────
-        // getMessages was NEVER called for S2.
-        coVerify(exactly = 0) { repository.getMessages(sid, any()) }
+        // ── Verify drain fired ────────────────────────────────────────────────
+        // U-CQ9: getMessages IS called for S2 (drain fires for all entries).
+        coVerify(exactly = 1) { repository.getMessages(sid, limit = 50) }
 
-        // pendingErrorCheck still contains S2 (not drained — nothing to localize).
+        // pendingErrorCheck is cleared (the drain settled with no error to attach).
         val finalState = store.stateFlow.value
-        assertTrue(
-            "pendingErrorCheck still contains $sid (no drain fired)",
+        assertFalse(
+            "pendingErrorCheck cleared for $sid (drain fired and settled)",
             sid in finalState.chat.pendingErrorCheck,
         )
     }

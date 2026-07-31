@@ -536,7 +536,7 @@ class AuthorityReducerTest {
     }
 
     @Test
-    fun `U-P3 - legacy SSE busy PRESERVES the slim baseline; stale low-turn fenced by live lex guard`() {
+    fun `U-P3 - legacy SSE busy PRESERVES the slim baseline stale low-turn fenced by live lex guard`() {
         val store = storeWith(listOf(Session(id = "A", directory = "/x")))
         // Establish slim baseline (5,7)
         store.dispatch(AppAction.AuthorityEvent(
@@ -2288,6 +2288,53 @@ class AuthorityReducerTest {
             store.stateFlow.value.chat.pendingErrorCheck.isEmpty())
     }
 
+    // ── U-CQ9: pendingErrorCheck cap ──────────────────────────────────────
+
+    @Test
+    fun `U-CQ9 pendingErrorCheck is capped at 128 entries after 200 busy-idle transitions`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Transition s1 busy→idle 200 times. Each transition adds s1 to pendingErrorCheck.
+        // After the cap is hit, no new entries are added (set membership already holds).
+        repeat(200) { i ->
+            store.dispatch(AppAction.AuthorityEvent(
+                event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY,
+                    monotonic = 100L + i * 2, workdir = "/w"),
+            ))
+            store.dispatch(AppAction.AuthorityEvent(
+                event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY,
+                    monotonic = 101L + i * 2, workdir = "/w"),
+            ))
+        }
+        val size = store.stateFlow.value.chat.pendingErrorCheck.size
+        assertTrue("pendingErrorCheck size $size <= 128 (capped)", size <= 128)
+    }
+
+    @Test
+    fun `U-CQ9 pendingErrorCheck cap with 200 distinct sids`() {
+        val store = storeWith()
+        // 200 distinct sids each transitioning busy→idle. At 128 the cap kicks in
+        // and the oldest sids are dropped.
+        val distinctSids = (0 until 200).map { "busy-idle-$it" }
+        distinctSids.forEachIndexed { i, sid ->
+            val busyOp = AuthorityOp.ApplyEvent(
+                sid = sid, status = SessionStatus(type = "busy"),
+                origin = EntryOrigin.SSE_LEGACY, scopeKey = scope,
+                connectionMonotonicMs = 100L + i * 2L,
+            )
+            val idleOp = AuthorityOp.ApplyEvent(
+                sid = sid, status = SessionStatus(type = "idle"),
+                origin = EntryOrigin.SSE_LEGACY, scopeKey = scope,
+                connectionMonotonicMs = 101L + i * 2L,
+            )
+            store.dispatch(AppAction.AuthorityEvent(busyOp))
+            store.dispatch(AppAction.AuthorityEvent(idleOp))
+        }
+        val size = store.stateFlow.value.chat.pendingErrorCheck.size
+        assertTrue("pendingErrorCheck size $size <= 128 after 200 distinct sids", size <= 128)
+        // The newest sids should be present (oldest dropped).
+        assertTrue("newest sid present", "busy-idle-199" in store.stateFlow.value.chat.pendingErrorCheck)
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // P1-B/E RetryQueued / RetryFired / terminal-cleanup (retry-queue wire)
     // ═══════════════════════════════════════════════════════════════════════
@@ -2946,59 +2993,58 @@ class AuthorityReducerTest {
             stateBefore, store.stateFlow.value)
     }
 
-}
+    // ── U-P6: concurrency invariants under parallel dispatch ────────────
 
-// ── U-P6: concurrency invariants under parallel dispatch ────────────
+    @Test
+    fun `U-P6 - concurrent dispatch of mixed ops preserves authority invariants under CAS retry`() {
+        val store = storeWith(listOf(
+            Session(id = "A", directory = "/x"),
+            Session(id = "B", directory = "/y"),
+        ))
+        val threads = 8
+        val iterations = 200
+        val barrier = CyclicBarrier(threads)
+        val errors = ConcurrentLinkedQueue<Throwable>()
 
-@Test
-fun `U-P6 - concurrent dispatch of mixed ops preserves authority invariants under CAS retry`() {
-    val store = storeWith(listOf(
-        Session(id = "A", directory = "/x"),
-        Session(id = "B", directory = "/y"),
-    ))
-    val threads = 8
-    val iterations = 200
-    val barrier = CyclicBarrier(threads)
-    val errors = ConcurrentLinkedQueue<Throwable>()
-
-    val pool = (1..threads).map { t ->
-        thread(start = true) {
-            barrier.await()
-            repeat(iterations) { i ->
-                try {
-                    when (t % 4) {
-                        0 -> store.dispatch(AppAction.AuthorityEvent(
-                            event("A", SessionStatus(type = "busy"),
-                                EntryOrigin.SSE_SLIM,
-                                serverRound = ServerRound(1L, i.toLong()),
-                                monotonic = 100L + i)))
-                        1 -> store.dispatch(AppAction.AuthorityEvent(
-                            event("B", SessionStatus(type = "busy"),
-                                EntryOrigin.OPTIMISTIC, monotonic = 200L + i)))
-                        2 -> store.dispatch(AppAction.AuthorityEvent(
-                            AuthorityOp.PruneSessions(sids = setOf("C"), scopeKey = scope)))
-                        3 -> store.dispatch(AppAction.AuthorityEvent(
-                            snapshot(snapshot = mapOf("A" to SessionStatus(type = "idle")),
-                                authoritativeNodeIds = setOf("A"))))
-                    }
-                } catch (e: Throwable) { errors.add(e) }
+        val pool = (1..threads).map { t ->
+            thread(start = true) {
+                barrier.await()
+                repeat(iterations) { i ->
+                    try {
+                        when (t % 4) {
+                            0 -> store.dispatch(AppAction.AuthorityEvent(
+                                event("A", SessionStatus(type = "busy"),
+                                    EntryOrigin.SSE_SLIM,
+                                    serverRound = ServerRound(1L, i.toLong()),
+                                    monotonic = 100L + i)))
+                            1 -> store.dispatch(AppAction.AuthorityEvent(
+                                event("B", SessionStatus(type = "busy"),
+                                    EntryOrigin.OPTIMISTIC, monotonic = 200L + i)))
+                            2 -> store.dispatch(AppAction.AuthorityEvent(
+                                AuthorityOp.PruneSessions(sids = setOf("C"), scopeKey = scope)))
+                            3 -> store.dispatch(AppAction.AuthorityEvent(
+                                snapshot(snapshot = mapOf("A" to SessionStatus(type = "idle")),
+                                    authoritativeNodeIds = setOf("A"))))
+                        }
+                    } catch (e: Throwable) { errors.add(e) }
+                }
             }
         }
+        pool.forEach { it.join() }
+
+        assertTrue("no exceptions under concurrent dispatch", errors.isEmpty())
+
+        // Post-condition invariants (hold regardless of interleaving):
+        val auth = store.stateFlow.value.authority
+        // (1) bySid consistency: every entry has a valid status (no torn write)
+        auth.bySid.values.forEach { assertNotNull("entry has status", it.status) }
+        // (2) retryQueue bounded
+        assertTrue("retry queue bounded", auth.retryQueue.size <= 256)
+        // (3) revision monotonic (never decreased)
+        assertTrue("revision non-negative", store.stateFlow.value.authorityRevision >= 0L)
     }
-    pool.forEach { it.join() }
 
-    assertTrue("no exceptions under concurrent dispatch", errors.isEmpty())
-
-    // Post-condition invariants (hold regardless of interleaving):
-    val auth = store.stateFlow.value.authority
-    // (1) bySid consistency: every entry has a valid status (no torn write)
-    auth.bySid.values.forEach { assertNotNull("entry has status", it.status) }
-    // (2) retryQueue bounded
-    assertTrue("retry queue bounded", auth.retryQueue.size <= 256)
-    // (3) revision monotonic (never decreased)
-    assertTrue("revision non-negative", store.stateFlow.value.authorityRevision >= 0L)
+    /** Local assertNotNull to avoid an extra import line churn. */
+    private fun assertNotNull(message: String, actual: Any?) =
+        org.junit.Assert.assertNotNull(message, actual)
 }
-
-/** Local assertNotNull to avoid an extra import line churn. */
-private fun assertNotNull(message: String, actual: Any?) =
-    org.junit.Assert.assertNotNull(message, actual)

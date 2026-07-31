@@ -150,26 +150,31 @@ class ErrorRecoveryCoordinatorTest {
     }
 
     @Test
-    fun `fallback drain does NOT fire when sessionErrorsById is missing for the sid`() = runTest {
-        coEvery { repository.getMessages(any(), limit = any()) } returns Result.success(emptyList())
+    fun `U-CQ9 fallback drain fires even when sessionErrorsById is missing for the sid`() = runTest {
+        coEvery { repository.getMessages("s1", limit = 50) } returns Result.success(
+            listOf(msgWithParts("m1", role = "assistant", error = err("timeout")))
+        )
 
         store.mutateChat { it.copy(
             currentSessionId = "s1",
             pendingErrorCheck = setOf("s1"),
-            // No sessionErrorsById set for s1.
+            // No sessionErrorsById set for s1 — U-CQ9 drain fires regardless.
         )}
 
         val coordinator = makeCoordinator()
         advanceUntilIdle()
 
-        // getMessages should NOT have been called. pendingErrorCheck should still have s1.
-        assertTrue("s1 still in pendingErrorCheck (no fallback drain)",
+        // U-CQ9: drain fires even without banner → pendingErrorCheck cleared.
+        assertFalse("U-CQ9 drain cleared pendingErrorCheck despite missing banner",
             "s1" in store.stateFlow.value.chat.pendingErrorCheck)
+        coVerify(exactly = 1) { repository.getMessages("s1", limit = 50) }
     }
 
     @Test
-    fun `fallback drain does NOT fire when lastAssistant already has an error`() = runTest {
-        coEvery { repository.getMessages(any(), limit = any()) } returns Result.success(emptyList())
+    fun `U-CQ9 fallback drain fires even when lastAssistant already has an error`() = runTest {
+        coEvery { repository.getMessages("s1", limit = 50) } returns Result.success(
+            listOf(msgWithParts("m1", role = "assistant", error = err("timeout")))
+        )
 
         store.mutateChat { it.copy(
             currentSessionId = "s1",
@@ -183,9 +188,10 @@ class ErrorRecoveryCoordinatorTest {
         val coordinator = makeCoordinator()
         advanceUntilIdle()
 
-        // lastAssistant already has error → no GET.
-        assertTrue("s1 still in pendingErrorCheck (lastAssistant already has error)",
+        // U-CQ9: drain fires regardless of lastAssistant error state → cleared.
+        assertFalse("U-CQ9 drain cleared pendingErrorCheck despite assistant having error",
             "s1" in store.stateFlow.value.chat.pendingErrorCheck)
+        coVerify(exactly = 1) { repository.getMessages("s1", limit = 50) }
     }
 
     // ── Network failure ──────────────────────────────────────────────────────

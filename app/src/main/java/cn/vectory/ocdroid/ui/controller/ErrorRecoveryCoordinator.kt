@@ -59,12 +59,14 @@ class ErrorRecoveryCoordinator @Inject constructor(
                 // localize only when the user is viewing that session so the GET's
                 // assistant.id maps to the displayed message list.
                 val reattachToDrain = chat.pendingErrorReattach.keys.filter { it == currentSid }
-                // (c) GET fallback: round ended (pendingErrorCheck) + session-level
-                // error banner present + last assistant has no durable error → recover.
-                val fallbackToDrain = chat.pendingErrorCheck.filter { sid ->
-                    sessionList.sessionErrorsById[sid] != null &&
-                        (lastAssistant == null || (currentSid == sid && lastAssistant.error == null))
-                }
+                // (c) GET fallback (§U-CQ9): drain ALL pendingErrorCheck entries
+                // regardless of sessionErrorsById banner presence. The reducer marks
+                // every busy/retry→idle transition; the GET-fallback scans the
+                // transcript to find a server-identified error-bearing assistant
+                // even when the banner is absent (transient error that didn't
+                // materialize a SlimSessionLastError but left a durable message error).
+                // Entries already being drained by the reattach path are excluded.
+                val fallbackToDrain = chat.pendingErrorCheck - reattachToDrain.toSet()
                 val toDrain = (reattachToDrain + fallbackToDrain).toSet() - inFlight
                 for (sid in toDrain) {
                     inFlight += sid
