@@ -1,15 +1,12 @@
 package cn.vectory.ocdroid.ui.sessions
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Archive
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,13 +15,15 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.ui.SessionAttentionLevel
 import cn.vectory.ocdroid.ui.chat.workdirTone
+import cn.vectory.ocdroid.ui.computeSessionAttention
 import cn.vectory.ocdroid.ui.theme.Dimens
+import cn.vectory.ocdroid.ui.theme.SessionAttentionBadge
 import cn.vectory.ocdroid.util.DebugLog
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -42,6 +41,9 @@ internal fun SessionCard(
     // expanded workdir list) keep their existing simpler rendering.
     hasPendingQuestion: Boolean = false,
     hasPendingPermission: Boolean = false,
+    // §ui-badges: error state from sessionErrorsById. Defaults false so
+    // call sites that don't track errors render unchanged.
+    hasError: Boolean = false,
     onClick: () -> Unit,
     // Q7: carries the long-press Offset (relative to the SessionCard node) so
     // the caller can anchor the DropdownMenu near the touch point.
@@ -142,59 +144,24 @@ internal fun SessionCard(
                 )
             },
             trailingContent = {
+                // §ui-badges: unified attention badge replaces the scattered
+                // "?" text, Lock icon, SessionStatusDot, and unread dot.
+                // Priority: HardError > PendingUserInput > TransientRetry >
+                // Unread > None. The archive icon stays rightmost.
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // §sessux #4: pending-question marker. Rendered as a "?" in
-                    // the session's own workdir-hash colour so the per-tree
-                    // tint stays consistent with the leading icon + tab strip.
-                    // Sibling to the unread dot — question is higher-priority
-                    // (it blocks the agent) but they don't both fire for the
-                    // same session (a pending question precludes new unread).
-                    if (hasPendingQuestion) {
-                        Text(
-                            text = "?",
-                            color = workdirTone(session.directory),
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(end = Dimens.spacing2),
-                        )
-                    }
-                    // §sessux #4: pending-permission marker (small lock).
-                    // Indicates the conversation tree is blocked on a tool-
-                    // use authorisation. Uses onSurfaceVariant (muted) so it
-                    // does not compete with the louder "?" / status dot.
-                    if (hasPendingPermission) {
-                        Icon(
-                            Icons.Default.Lock,
-                            contentDescription = stringResource(R.string.cd_permission_marker),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier
-                                .padding(end = Dimens.spacing2)
-                                .size(Dimens.iconSm),
-                        )
-                    }
-                    // M6: status indicator. retry → solid red dot;
-                    // busy / idle / null → nothing (busy dot removed per §user-req;
-                    // a running session is already signalled elsewhere).
-                    SessionStatusDot(status)
-                    if (isUnread) {
-                        // Small unread dot. Positioned to the LEFT of the
-                        // archive button (not the far right edge) so the
-                        // archive action stays the rightmost, easiest-to-reach
-                        // affordance, and the unread marker sits just inside it.
-                        Box(
-                            modifier = Modifier
-                                .padding(start = Dimens.spacing2)
-                                .size(Dimens.spacing2)
-                                .background(
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    shape = CircleShape
-                                )
-                        )
-                    }
-                    // 归档 icon on the right edge (rightmost). Only rendered
+                    val attention = computeSessionAttention(
+                        hasError = hasError,
+                        hasPendingUserInput = hasPendingQuestion || hasPendingPermission,
+                        isRetry = status?.isRetry == true,
+                        isUnread = isUnread,
+                    )
+                    SessionAttentionBadge(
+                        level = attention,
+                        modifier = Modifier.padding(end = Dimens.spacing2),
+                    )
+                    // Archive icon on the right edge (rightmost). Only rendered
                     // where a handler is supplied (connected-projects expanded
                     // list); omitted from the top "recent sessions" list.
-                    // IconButton gives a 48dp touch target (R-12) in a compact
-                    // right-edge footprint.
                     // §0.8.2 P3.4: icon size 24dp (default) → Dimens.iconSm (18)
                     // to match the workdir-header AddComment icon.
                     if (onArchive != null) {
@@ -210,28 +177,6 @@ internal fun SessionCard(
             }
         )
     }
-}
-
-/**
- * M6: Small (~8dp) status indicator rendered on the right edge of a session
- * card's title row, just before the unread dot. Mapping:
- * - retry → solid red dot (retry/error semantic).
- * - busy / idle / null → nothing rendered. The busy dot was removed per
- *   §user-req; a running session is already surfaced via the chat surface
- *   (streaming indicator / "生成中…" placeholder), so a duplicate list-side
- *   busy marker was visual noise.
- */
-@Composable
-private fun SessionStatusDot(status: SessionStatus?) {
-    // §user-req: busy dot removed — only retry/error renders a status indicator.
-    // idle / null / busy → nothing rendered.
-    if (status == null || status.isIdle || status.isBusy) return
-    Box(
-        modifier = Modifier
-            .padding(start = Dimens.spacing2)
-            .size(Dimens.spacing2)
-            .background(color = MaterialTheme.colorScheme.error, shape = CircleShape)
-    )
 }
 
 private fun formatTime(epochMs: Long): String {

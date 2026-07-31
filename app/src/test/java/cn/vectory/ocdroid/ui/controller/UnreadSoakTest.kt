@@ -59,6 +59,7 @@ class UnreadSoakTest {
         completeRootIds: Set<String> = (sessions + directorySessions.values.flatten())
             .filter { it.parentId == null }
             .mapTo(mutableSetOf()) { it.id },
+        bootTimestamp: Long = 0L,
     ) = evaluateUnread(
         sessions = sessions,
         sessionStatuses = sessionStatuses,
@@ -71,6 +72,7 @@ class UnreadSoakTest {
         now = now,
         soakMs = soakMs,
         completeRootIds = completeRootIds,
+        bootTimestamp = bootTimestamp,
     )
 
     // ── rising edge ────────────────────────────────────────────────────────
@@ -599,6 +601,49 @@ class UnreadSoakTest {
         assertTrue("first threshold crossing marks", "A" in completed.rootsToMarkUnread)
         assertFalse("continuous idle must not create a second mark", "A" in repeated.rootsToMarkUnread)
         assertEquals(mapOf("A" to 1000L), repeated.newIdleSince)
+    }
+
+    // ── §incremental-unread: bootTimestamp ───────────────────────────────
+
+    @Test
+    fun `incremental - viewed null updated before bootTimestamp does not mark`() {
+        val r = eval(
+            sessions = listOf(root("A", updated = 2_000L)),
+            sessionStatuses = mapOf("A" to idle),
+            idleSince = mapOf("A" to 1000L),
+            lastViewedTime = emptyMap(),
+            now = 11_000L,
+            bootTimestamp = 5_000L, // updated=2000 < 5000 → pre-boot存量
+        )
+        assertFalse("pre-boot content must not mark", "A" in r.rootsToMarkUnread)
+    }
+
+    @Test
+    fun `incremental - viewed null updated after bootTimestamp marks`() {
+        val r = eval(
+            sessions = listOf(root("A", updated = 6_000L)),
+            sessionStatuses = mapOf("A" to idle),
+            idleSince = mapOf("A" to 1000L),
+            lastViewedTime = emptyMap(),
+            now = 11_000L,
+            bootTimestamp = 5_000L, // updated=6000 > 5000 → post-boot new
+        )
+        assertTrue("post-boot content must mark", "A" in r.rootsToMarkUnread)
+    }
+
+    @Test
+    fun `incremental - viewed before bootTimestamp and updated after viewed but before boot does not mark`() {
+        // viewed=3000, updated=4000, bootTimestamp=5000
+        // lastSeen = max(3000, 5000) = 5000; updated 4000 < 5000 ⇒ NOT marked
+        val r = eval(
+            sessions = listOf(root("A", updated = 4_000L)),
+            sessionStatuses = mapOf("A" to idle),
+            idleSince = mapOf("A" to 1000L),
+            lastViewedTime = mapOf("A" to 3_000L),
+            now = 11_000L,
+            bootTimestamp = 5_000L,
+        )
+        assertFalse("viewed before boot + updated before boot must not mark", "A" in r.rootsToMarkUnread)
     }
 
     @Test
