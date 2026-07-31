@@ -244,6 +244,7 @@
     <string name="files_add_project">Add project</string>
     <!-- Home hub (session-home-hub): home sections, project-row actions, responsive chat nav. -->
     <string name="home_section_recent">Recently</string>
+    <string name="recent_sessions_title">Recent sessions</string>
     <string name="home_section_projects">Attached projects</string>
     <string name="project_action_git">Git</string>
     <string name="project_action_new_session">New session</string>

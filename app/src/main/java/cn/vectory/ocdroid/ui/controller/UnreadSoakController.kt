@@ -40,6 +40,12 @@ class UnreadSoakController @Inject constructor(
     private var nextActiveRefreshAtMs = 0L
 
     init {
+        // §incremental-unread: stamp process boot timestamp so the unread
+        // evaluator treats server content older than boot as already-read.
+        // Only set once (bootTimestamp == 0) — safe against re-init.
+        store.mutateUnread { u ->
+            if (u.bootTimestamp == 0L) u.copy(bootTimestamp = clock()) else u
+        }
         if (autoStart) appLifecycleMonitor.isInForeground
             .onEach { if (it) startSweep() else stopSweep() }
             .launchIn(scope)
@@ -214,7 +220,8 @@ internal fun cn.vectory.ocdroid.ui.StoreState.evaluateAndApplyUnread(
     val sl = sessionList
     val result = evaluateUnread(sl.sessions, sl.sessionStatuses, sl.activeSessionIds,
         sl.childSessions, sl.directorySessions,
-        chat.currentSessionId, unread.lastViewedTime, unread.idleSince, now, completeRootIds = sl.completeRootIds)
+        chat.currentSessionId, unread.lastViewedTime, unread.idleSince, now,
+        completeRootIds = sl.completeRootIds, bootTimestamp = unread.bootTimestamp)
     var next = unread.copy(idleSince = result.newIdleSince)
     val sessionMap = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
     val currentRootId = chat.currentSessionId?.let { rootIdOf(it, sessionMap) }

@@ -37,6 +37,7 @@ import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.ContextUsage
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
+import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.ui.settings.TofuTrustDialog
@@ -86,6 +87,8 @@ fun ChatOverlayHost(
     recentWorkdirs: List<String>,
     pendingTofuCapture: OpenCodeRepository.TofuCaptureResult?,
     questionSessionIds: Set<String>,
+    permissionSessionIds: Set<String> = emptySet(),
+    sessionErrorsById: Map<String, SlimSessionLastError> = emptyMap(),
     // ── ViewModels (for action methods) ──────────────────────────────────
     composerVM: ComposerViewModel,
     sessionVM: SessionViewModel,
@@ -150,6 +153,8 @@ fun ChatOverlayHost(
             currentSessionId = currentSessionId,
             unreadSessions = unreadSessions,
             questionSessionIds = questionSessionIds,
+            permissionSessionIds = permissionSessionIds,
+            sessionErrorsById = sessionErrorsById,
             onSelect = { sessionId -> onSelectSession(sessionId) },
             onNewSession = { onNewSession() },
             onDismiss = { onDismissSessionPicker() },

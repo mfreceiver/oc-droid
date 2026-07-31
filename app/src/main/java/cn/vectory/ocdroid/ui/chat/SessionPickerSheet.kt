@@ -31,7 +31,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -55,9 +54,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.data.model.SlimSessionLastError
+import cn.vectory.ocdroid.ui.computeSessionAttention
 import cn.vectory.ocdroid.ui.effectiveBusySessionIds
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.Dimens
+import cn.vectory.ocdroid.ui.theme.SessionAttentionBadge
 import cn.vectory.ocdroid.util.workdirBasename
 
 /**
@@ -83,6 +85,10 @@ import cn.vectory.ocdroid.util.workdirBasename
  *
  * @param questionSessionIds per-session "pending question" flag — rendered
  *   as a `?` glyph in the trailing slot (tinted with the workdir tone).
+ * @param permissionSessionIds per-session "pending permission" flag — unioned
+ *   into [hasPendingUserInput] for the attention badge.
+ * @param sessionErrorsById per-session upstream-error store — drives
+ *   [SessionAttentionLevel.HardError] tier.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -93,6 +99,8 @@ fun SessionPickerSheet(
     currentSessionId: String?,
     unreadSessions: Set<String>,
     questionSessionIds: Set<String> = emptySet(),
+    permissionSessionIds: Set<String> = emptySet(),
+    sessionErrorsById: Map<String, SlimSessionLastError> = emptyMap(),
     onSelect: (String) -> Unit,
     @Suppress("UNUSED_PARAMETER") onNewSession: () -> Unit,
     onDismiss: () -> Unit,
@@ -128,7 +136,7 @@ fun SessionPickerSheet(
     // AppBottomSheet does not impose a fixed height cap.
     AppBottomSheet(
         onDismissRequest = onDismiss,
-        title = stringResource(R.string.chat_action_sessions),
+        title = stringResource(R.string.recent_sessions_title),
     ) {
         if (recent.isEmpty()) {
             Text(
@@ -149,6 +157,8 @@ fun SessionPickerSheet(
                         status = sessionStatuses[s.id],
                         isUnread = s.id in unreadSessions && s.id !in effectiveBusy,
                         hasQuestion = s.id in questionSessionIds,
+                        hasPermission = s.id in permissionSessionIds,
+                        hasError = s.id in sessionErrorsById,
                         onClick = { onSelect(s.id) },
                     )
                 }
@@ -165,6 +175,8 @@ private fun SessionPickerRow(
     status: SessionStatus?,
     isUnread: Boolean,
     hasQuestion: Boolean,
+    hasPermission: Boolean = false,
+    hasError: Boolean = false,
     onClick: () -> Unit,
 ) {
     val tone = remember(session.directory) { workdirTone(session.directory) }
@@ -208,39 +220,18 @@ private fun SessionPickerRow(
             Box(modifier = Modifier.size(Dimens.iconXs).clip(CircleShape).background(tone))
         },
         trailingContent = {
-            // §picker-trim: trailing slot carries only the state glyphs
-            // (question `?` / retry dot / unread dot), right-aligned in the
-            // Row. The selection check (PickerTrailingCheck) and the `⋮`
-            // Archive/Unarchive overflow were removed — selection is conveyed
-            // by the headline text turning `primary`, and archive lives on
-            // SessionsScreen.
+            // §ui-badges: unified attention badge replaces the scattered
+            // question `?` / retry dot / unread dot.
+            // Priority: HardError > PendingUserInput > TransientRetry >
+            // Unread > None.
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (hasQuestion) {
-                    Text(
-                        text = "?",
-                        color = tone,
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(end = Dimens.spacingCompact),
-                    )
-                }
-                if (status?.isRetry == true) {
-                    Box(
-                        modifier = Modifier
-                            .size(Dimens.spacing2)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.error)
-                    )
-                    Spacer(Modifier.size(Dimens.spacingCompact))
-                }
-                if (isUnread) {
-                    Box(
-                        modifier = Modifier
-                            .size(Dimens.spacing2)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary)
-                    )
-                    Spacer(Modifier.size(Dimens.spacingCompact))
-                }
+                val attention = computeSessionAttention(
+                    hasError = hasError,
+                    hasPendingUserInput = hasQuestion || hasPermission,
+                    isRetry = status?.isRetry == true,
+                    isUnread = isUnread,
+                )
+                SessionAttentionBadge(level = attention)
             }
         },
         modifier = Modifier

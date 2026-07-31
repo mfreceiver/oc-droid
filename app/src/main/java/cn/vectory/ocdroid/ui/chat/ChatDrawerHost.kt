@@ -195,9 +195,9 @@ internal fun ChatDrawerHost(
                 isStartNewSessionEnabled = recentWorkdirs.isNotEmpty(),
                 interactionsEnabled = !drawerInteractionLocked,
                 // §T17 slimapi v1 §6.1: pass the canonical per-session error
-                // store straight through to the drawer rows. The row's
-                // shouldShowSessionErrorIndicator helper looks up by session
-                // id; absence (sid not in the map / recovered) → no indicator.
+                // store straight through to the drawer rows. Each row feeds it
+                // into computeSessionAttention (hasError = sid in this map);
+                // absence (sid not in the map / recovered) → no HardError tier.
                 sessionErrorsById = sessionErrorsById,
             )
         },

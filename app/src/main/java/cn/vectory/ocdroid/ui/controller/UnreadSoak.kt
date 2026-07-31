@@ -81,6 +81,12 @@ fun evaluateUnread(
     now: Long,
     soakMs: Long = UNREAD_SOAK_MS,
     completeRootIds: Set<String>,
+    /**
+     * §incremental-unread: baseline epoch-ms captured at process boot
+     * ([UnreadState.bootTimestamp]). Content with time.updated ≤ bootTimestamp
+     * is pre-boot存量, treated as read. Default 0L so existing tests stay green.
+     */
+    bootTimestamp: Long = 0L,
 ): UnreadSoakResult {
     // Build the live ROOT set: parentId==null, !isArchived, deduped by id.
     // Order-stable (LinkedHashMap) so deterministic iteration aids reproducible
@@ -153,12 +159,15 @@ fun evaluateUnread(
                      // clock ahead → updated < viewed); gated by the soak +
                      // notViewedSinceIdle conjunction and the current-session
                      // bypass. Local bumpSessionUpdated uses client now (same-domain).
-                    // Viewed-null (never opened) ⇒ baseline 0 ⇒ any subtree node
-                    // that has ever been updated counts as new (a freshly-settled
-                    // root WITH content badges; a truly empty root does not).
-                    // This removes the "open it and there's no new message, only
-                    // a running sub-conversation" symptom.
-                    val lastSeen = viewed ?: 0L
+                    // Viewed-null (never opened) ⇒ baseline bootTimestamp if
+                     // non-zero (cold start all-read), else 0; any subtree node
+                     // that has ever been updated since bootTimestamp counts as
+                     // new (a freshly-settled root WITH content badges; a truly
+                     // empty root does not). §incremental-unread: content with
+                     // time.updated ≤ bootTimestamp is pre-boot存量, treated as
+                     // read. This removes the "open it and there's no new message,
+                     // only a running sub-conversation" symptom.
+                    val lastSeen = maxOf(viewed ?: 0L, bootTimestamp)
                     val hasNewMessages = subtree.any { sid ->
                         sessionsById[sid]?.time?.updated?.let { it > lastSeen } == true
                     }

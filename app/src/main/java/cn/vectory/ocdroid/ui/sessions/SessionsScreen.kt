@@ -33,6 +33,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.ConnectionPhase
@@ -455,6 +456,7 @@ fun SessionsScreen(
                                     status = sessionListState.sessionStatuses[session.id],
                                     hasPendingQuestion = hasPendingQuestion,
                                     hasPendingPermission = hasPendingPermission,
+                                    hasError = session.id in sessionListState.sessionErrorsById,
                                     onClick = { onSessionClick(session.id) },
                                     onLongClick = { offset ->
                                         pressOffset = with(density) {
@@ -559,6 +561,7 @@ fun SessionsScreen(
                                     viewModel.createSessionInWorkdir(workdir)
                                     onSwitchToChat()
                                 },
+                                sessionErrorsById = sessionListState.sessionErrorsById,
                                 // §B3: route the workdir-group session-row tap
                                 // through the SAME route-aware pipeline as the
                                 // main session list (onNavigateToChat →
@@ -739,6 +742,7 @@ private fun HomeWorkdirRow(
     sessionStatuses: Map<String, SessionStatus>,
     unreadSessions: Set<String>,
     effectiveBusy: Set<String>,
+    sessionErrorsById: Map<String, SlimSessionLastError> = emptyMap(),
 ) {
     val displayName = workdir.workdirBasename() ?: workdir
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -821,6 +825,7 @@ private fun HomeWorkdirRow(
                             session = session,
                             isUnread = session.id in unreadSessions && session.id !in effectiveBusy,
                             status = sessionStatuses[session.id],
+                            hasError = session.id in sessionErrorsById,
                             onClick = { onSelectSession(session.id) },
                             onLongClick = { offset ->
                                 pressOffset = with(density) {

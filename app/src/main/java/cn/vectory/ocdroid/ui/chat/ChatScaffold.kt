@@ -1240,6 +1240,10 @@ fun ChatScaffold(
                 isStartNewSessionEnabled = recentWorkdirs.isNotEmpty(),
                 sessionErrorsByID = sessionList.sessionErrorsById,
                 selectedSessionId = chromeSessionId,
+                unreadSessions = unread.unreadSessions,
+                pendingInputSessionIds = questionRootIds(sessionList.pendingQuestions, sessionsById)
+                    .union(sessionList.pendingPermissions.map { it.sessionId }.toSet()),
+                sessionStatuses = sessionList.sessionStatuses,
                 // §polish ②: statusBarsPadding on the pane so its header starts
                 // below the status bar (aligned with ChatTopBar's top baseline)
                 // — the bare Column had no inset handling (intruded under the
@@ -1365,6 +1369,8 @@ fun ChatScaffold(
         recentWorkdirs = recentWorkdirs,
         pendingTofuCapture = connection.pendingTofuCapture,
         questionSessionIds = questionRootIds(sessionList.pendingQuestions, sessionsById),
+        permissionSessionIds = sessionList.pendingPermissions.map { it.sessionId }.toSet(),
+        sessionErrorsById = sessionList.sessionErrorsById,
         composerVM = composerVM,
         sessionVM = sessionVM,
         chatVM = chatVM,

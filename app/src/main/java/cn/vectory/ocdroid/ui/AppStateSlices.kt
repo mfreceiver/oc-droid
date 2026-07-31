@@ -1187,6 +1187,17 @@ class SessionListState internal constructor(
  */
 data class UnreadState(
     val unreadSessions: Set<String> = emptySet(),
+    /**
+     * §incremental-unread: baseline epoch-ms captured at process boot; evaluator
+     * treats content older than this as already-read (incremental semantics —
+     * only track new messages within THIS run). Client-clock domain (same as
+     * [lastViewedTime]). 0L default = tests/preview opt-in — the real value is
+     * stamped once at process start by
+     * [cn.vectory.ocdroid.ui.controller.UnreadSoakController]'s init block
+     * (kept out of [StoreState.initial] so it stays `StoreState()` and
+     * ownership/byte-equality tests are not perturbed).
+     */
+    val bootTimestamp: Long = 0L,
     val lastViewedTime: Map<String, Long> = emptyMap(),
     /**
      * §unread-soak: rootId → epoch-ms when it first entered the all-idle state

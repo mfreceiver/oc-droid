@@ -3,18 +3,18 @@ package cn.vectory.ocdroid.ui.chat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -25,15 +25,19 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.SlimSessionLastError
-import cn.vectory.ocdroid.ui.theme.AppSectionHeader
+import cn.vectory.ocdroid.ui.SessionAttentionLevel
+import cn.vectory.ocdroid.ui.computeSessionAttention
 import cn.vectory.ocdroid.ui.theme.Dimens
+import cn.vectory.ocdroid.ui.theme.SessionAttentionBadge
 
 /**
  * §P2-item2: persistent left session sidebar and drawer content pane. Extracted
@@ -58,6 +62,10 @@ internal fun RecentSessionsPane(
     isStartNewSessionEnabled: Boolean = true,
     sessionErrorsByID: Map<String, SlimSessionLastError> = emptyMap(),
     selectedSessionId: String? = null,
+    // §ui-badges: attention-level inputs for per-row session attention badge.
+    unreadSessions: Set<String> = emptySet(),
+    pendingInputSessionIds: Set<String> = emptySet(),
+    sessionStatuses: Map<String, SessionStatus> = emptyMap(),
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier) {
@@ -75,7 +83,7 @@ internal fun RecentSessionsPane(
             },
             headlineContent = {
                 Text(
-                    text = stringResource(R.string.app_name),
+                    text = stringResource(R.string.recent_sessions_title),
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
@@ -83,28 +91,27 @@ internal fun RecentSessionsPane(
                 )
             },
             trailingContent = {
-                IconButton(onClick = onRefreshSessions) {
-                    Icon(
-                        imageVector = Icons.Filled.Refresh,
-                        contentDescription = stringResource(R.string.common_refresh),
-                        modifier = Modifier.size(Dimens.iconStd),
-                    )
-                }
-                IconButton(
-                    onClick = onStartNewSession,
-                    enabled = isStartNewSessionEnabled,
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Add,
-                        contentDescription = stringResource(R.string.sessions_new_session_fab),
-                        modifier = Modifier.size(Dimens.iconStd),
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onRefreshSessions) {
+                        Icon(
+                            imageVector = Icons.Filled.Refresh,
+                            contentDescription = stringResource(R.string.common_refresh),
+                            modifier = Modifier.size(Dimens.iconStd),
+                        )
+                    }
+                    IconButton(
+                        onClick = onStartNewSession,
+                        enabled = isStartNewSessionEnabled,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Add,
+                            contentDescription = stringResource(R.string.sessions_new_session_fab),
+                            modifier = Modifier.size(Dimens.iconStd),
+                        )
+                    }
                 }
             },
         )
-
-        // ── Section header ──────────────────────────────────────────────
-        AppSectionHeader(text = stringResource(R.string.home_section_recent))
 
         // ── Recent sessions list ────────────────────────────────────────
         LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -112,14 +119,17 @@ internal fun RecentSessionsPane(
                 items = sessions,
                 key = { session -> session.id },
             ) { session ->
+                val rowAttention = computeSessionAttention(
+                    hasError = session.id in sessionErrorsByID,
+                    hasPendingUserInput = session.id in pendingInputSessionIds,
+                    isRetry = sessionStatuses[session.id]?.isRetry == true,
+                    isUnread = session.id in unreadSessions,
+                )
                 RecentSessionRow(
                     session = session,
                     onClick = { onSelect(session.id) },
                     enabled = true,
-                    showErrorIndicator = shouldShowSessionErrorIndicator(
-                        sessionId = session.id,
-                        sessionErrorsById = sessionErrorsByID,
-                    ),
+                    attention = rowAttention,
                     selected = (session.id == selectedSessionId),
                 )
             }
@@ -176,11 +186,16 @@ internal fun RecentSessionsPane(
  *   prevent a selectSession-vs-picker race. Defaults to `true`.
  * @param sessionErrorsById T17 slimapi v1 §6.1: the canonical per-session
  *   upstream-error store (sourced from `SessionListState.sessionErrorsById`
- *   by the caller). Read by [shouldShowSessionErrorIndicator] to decide
- *   whether a row renders the small error indicator. Empty map / sid
- *   absent → no indicator (matches the StatusSlot LastError gate contract).
+ *   by the caller). Drives the [SessionAttentionLevel.HardError] tier in the
+ *   unified [SessionAttentionBadge]. Empty map / sid absent → no HardError.
  *   Defaults to an empty map so callers not surfacing T17 errors (or
  *   pre-T17 test fixtures) render unchanged.
+ * @param unreadSessions §ui-badges: set of session ids with unread content.
+ *   Defaults to empty set.
+ * @param pendingInputSessionIds §ui-badges: set of session ids with pending
+ *   user input (question or permission). Defaults to empty set.
+ * @param sessionStatuses §ui-badges: current session statuses, used to derive
+ *   the TransientRetry tier. Defaults to empty map.
  * @param modifier applied to the outer [ModalDrawerSheet].
  */
 @Composable
@@ -193,6 +208,10 @@ internal fun RecentSessionsDrawer(
     isStartNewSessionEnabled: Boolean = true,
     interactionsEnabled: Boolean = true,
     sessionErrorsById: Map<String, SlimSessionLastError> = emptyMap(),
+    // §ui-badges: attention-level inputs for per-row session attention badge.
+    unreadSessions: Set<String> = emptySet(),
+    pendingInputSessionIds: Set<String> = emptySet(),
+    sessionStatuses: Map<String, SessionStatus> = emptyMap(),
     modifier: Modifier = Modifier,
 ) {
     ModalDrawerSheet(modifier = modifier) {
@@ -205,6 +224,9 @@ internal fun RecentSessionsDrawer(
             isStartNewSessionEnabled = isStartNewSessionEnabled && interactionsEnabled,
             sessionErrorsByID = sessionErrorsById,
             selectedSessionId = null,
+            unreadSessions = unreadSessions,
+            pendingInputSessionIds = pendingInputSessionIds,
+            sessionStatuses = sessionStatuses,
             modifier = Modifier,
         )
     }
@@ -217,27 +239,16 @@ internal fun RecentSessionsDrawer(
  * reuses the [workdirTone] helper already shared with [SessionPickerSheet]
  * (same package) so the colour anchor ties the row to its project.
  *
- * Deliberately leaner than `SessionPickerRow` (no question / retry / unread
- * badges, no selection check): the drawer's [RecentSessionsDrawer] signature
- * does not carry `currentSessionId` (T4 contract), so a selection glyph would
- * be misleading; cross-session state indicators already surface via the
- * StatusSlot in the chat body (SessionTabStrip was deleted in B6). The row
- * shows only identity: display name (headline) + workdir basename (supporting).
- *
- * §T17 slimapi v1 §6.1: when [showErrorIndicator] is true (the session has a
- * SET lastError in `SessionListState.sessionErrorsById`), the row renders a
- * small `ErrorOutline` icon in `trailingContent` tinted to `colorScheme.error`.
- * The indicator is a non-blocking visual cue (the full banner renders in the
- * chat surface's StatusSlot when the user opens the session). Minimal
- * acceptable styling — a @designer pass may tune color/size; the structural
- * contract (indicator present iff [showErrorIndicator]) is the T17 gate.
+ * §ui-badges: trailing slot renders a unified [SessionAttentionBadge] resolved
+ * by [computeSessionAttention] from per-session flags (error / pending input /
+ * retry / unread), replacing the previous standalone error indicator.
  */
 @Composable
 internal fun RecentSessionRow(
     session: Session,
     onClick: () -> Unit,
     enabled: Boolean = true,
-    showErrorIndicator: Boolean = false,
+    attention: SessionAttentionLevel = SessionAttentionLevel.None,
     selected: Boolean = false,
 ) {
     val tone = remember(session.directory) { workdirTone(session.directory) }
@@ -278,20 +289,10 @@ internal fun RecentSessionRow(
             )
         },
         trailingContent = {
-            // §T17: per-session upstream-error indicator. Renders iff
-            // showErrorIndicator (caller-derived from sessionErrorsById).
-            // Anchored in trailingContent to preserve the row's existing
-            // identity layout (workdir dot + name + workdir basename) —
-            // the cue is additive, no redesign of the row.
-            if (showErrorIndicator) {
-                val errorLabel = stringResource(R.string.chat_session_error_label)
-                Icon(
-                    imageVector = Icons.Filled.ErrorOutline,
-                    contentDescription = errorLabel,
-                    modifier = Modifier.size(Dimens.iconSm),
-                    tint = MaterialTheme.colorScheme.error,
-                )
-            }
+            // §ui-badges: unified attention badge replaces the error indicator.
+            // Priority: HardError > PendingUserInput > TransientRetry >
+            // Unread > None.
+            SessionAttentionBadge(level = attention)
         },
         // §P2-item2 (rev-gpt gate fix): drive the selection highlight via ListItem's
         // `colors` containerColor. An external Modifier.background() is painted over by
@@ -309,18 +310,5 @@ internal fun RecentSessionRow(
     )
 }
 
-/**
- * T17 slimapi v1 §6.1: pure resolver backing the per-row error indicator.
- * Returns true iff [sessionId] has a SET entry in the canonical T12 store
- * ([sessionErrorsById]). Absent sid OR empty map → false (no indicator) —
- * matches the StatusSlot LastError gate contract: the map holds SET errors
- * only (T12 REMOVES on recovery), absence = no banner / no indicator.
- *
- * Extracted from the composable so the null-safety contract is
- * JVM-unit-testable without a Compose harness — see
- * `RecentSessionErrorIndicatorTest`.
- */
-internal fun shouldShowSessionErrorIndicator(
-    sessionId: String,
-    sessionErrorsById: Map<String, SlimSessionLastError>,
-): Boolean = sessionErrorsById[sessionId] != null
+// §ui-badges: shouldShowSessionErrorIndicator removed — replaced by
+// computeSessionAttention (pure, in SessionAttention.kt) + SessionAttentionBadge.

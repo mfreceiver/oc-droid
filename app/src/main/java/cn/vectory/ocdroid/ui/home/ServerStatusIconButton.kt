@@ -48,6 +48,7 @@ import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.chat.ServerManagementDialog
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.theme.SemanticColors
+import cn.vectory.ocdroid.ui.theme.SseBreathSpec
 
 /**
  * Home-hub top-bar server-status affordance.
@@ -234,27 +235,5 @@ internal fun ServerStatusIconButton(
     }
 }
 
-/**
- * §breathing-indicator (item ①): breathing-pulse constants for the SSE-
- * connected status dot. Intentionally CALM (slow tween + reverse repeat) so
- * the pulse reads as "stream alive" without being distracting. A designer
- * will separately review the feel; these are a spec-compliant basic pulse.
- *
- * Kept as a private file-level object (not `Dimens`, which is for dp/sp
- * geometry tokens) — these are animation timings + float ranges, not
- * dimensions. §ui-style-spec §2's "no scattered literals" rule applies to dp
- * geometry; animation constants live next to the animation they drive.
- */
-private object SseBreathSpec {
-    /** One half-cycle duration (initialValue → targetValue). Reverse repeat
-     *  doubles the visible period, so a full breathe-in+breathe-out is 2×this. */
-    const val DURATION_MS: Int = 1_600
-    /** Min alpha during the pulse (dot dims to ~65%). */
-    const val ALPHA_MIN: Float = 0.65f
-    /** Max alpha (full opacity). */
-    const val ALPHA_MAX: Float = 1f
-    /** Min scale (dot shrinks to 90% — a subtle "inhale"). */
-    const val SCALE_MIN: Float = 0.9f
-    /** Max scale (resting size). */
-    const val SCALE_MAX: Float = 1f
-}
+// SseBreathSpec has been extracted to ui/theme/SseBreathSpec.kt (shared).
+// This file imports it from cn.vectory.ocdroid.ui.theme.
