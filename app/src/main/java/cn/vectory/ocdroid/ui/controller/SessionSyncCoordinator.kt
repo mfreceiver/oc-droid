@@ -1442,9 +1442,21 @@ class SessionSyncCoordinator(
      * wire, §P1-B/E) AND emits [ControllerEffect.RequestPollerBackoff] /
      * [ControllerEffect.ResetPollerBackoff]. The dispatches are atomic
      * per-op but the fire-then-queue sequence for the same sid is NOT
-     * atomic across concurrent writers (a terminal ApplyEvent can interleave);
-     * the reducer's terminal-status fence in [applyRetryQueued] (rev-ogpt B3)
-     * drops a stale RetryQueued that arrives after the sid is confirmed terminal.
+     * atomic across concurrent writers (a terminal ApplyEvent can interleave).
+     *
+     * §P1-B/E rev-gpt final: there is NO terminal-status fence in
+     * [applyRetryQueued] (the B3 fence proposed by rev-ogpt was removed — it
+     * misfired on the normal idle-session-503 retry case; the op carries no
+     * causal info to distinguish stale summary from real failure). A stale
+     * RetryQueued arriving after a terminal event / cross-host purge is a
+     * KNOWN RESIDUAL (spec §8.5): it re-enters the queue but is self-healing
+     * (next covering sweep's RetryFired when the sid reappears, LRU
+     * eviction at the 256 cap, or a subsequent terminal cleanup). It does
+     * NOT pollute [cn.vectory.ocdroid.data.state.AuthorityState.bySid] (the
+     * authoritative status truth) and does NOT drive the poller's backoff
+     * (the poller uses its own global backoffAttempt) — so real retry
+     * scheduling is unaffected. A proper fix needs sweep-generation /
+     * request-token causal fencing — tracked as backlog.
      *
      * @param summary the fan-out result. Caller (the slim integration
      *   layer / future fan-out scheduler) constructs this via
