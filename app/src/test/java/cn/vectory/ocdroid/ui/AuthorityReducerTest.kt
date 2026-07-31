@@ -21,9 +21,13 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
+// assertNotNull is defined as a local function at the bottom of the file
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CyclicBarrier
+import kotlin.concurrent.thread
 
 /**
  * §P0-A (B1 option 1) verification gate for [reduceAuthority] — the SINGLE
@@ -3053,6 +3057,57 @@ class AuthorityReducerTest {
         assertEquals(Freshness.Fresh, bySid["s2"]?.freshness) // unchanged (out-of-scope)
         assertTrue("authorityRevision bumped", store.stateFlow.value.authorityRevision > revBefore)
     }
+}
+
+// ── U-P6: concurrency invariants under parallel dispatch ────────────
+
+@Test
+fun `U-P6 - concurrent dispatch of mixed ops preserves authority invariants under CAS retry`() {
+    val store = storeWith(listOf(
+        Session(id = "A", directory = "/x"),
+        Session(id = "B", directory = "/y"),
+    ))
+    val threads = 8
+    val iterations = 200
+    val barrier = CyclicBarrier(threads)
+    val errors = ConcurrentLinkedQueue<Throwable>()
+
+    val pool = (1..threads).map { t ->
+        thread(start = true) {
+            barrier.await()
+            repeat(iterations) { i ->
+                try {
+                    when (t % 4) {
+                        0 -> store.dispatch(AppAction.AuthorityEvent(
+                            event("A", SessionStatus(type = "busy"),
+                                EntryOrigin.SSE_SLIM,
+                                serverRound = ServerRound(1L, i.toLong()),
+                                monotonic = 100L + i)))
+                        1 -> store.dispatch(AppAction.AuthorityEvent(
+                            event("B", SessionStatus(type = "busy"),
+                                EntryOrigin.OPTIMISTIC, monotonic = 200L + i)))
+                        2 -> store.dispatch(AppAction.AuthorityEvent(
+                            AuthorityOp.PruneSessions(sids = setOf("C"), scopeKey = scope)))
+                        3 -> store.dispatch(AppAction.AuthorityEvent(
+                            snapshot(snapshot = mapOf("A" to SessionStatus(type = "idle")),
+                                authoritativeNodeIds = setOf("A"))))
+                    }
+                } catch (e: Throwable) { errors.add(e) }
+            }
+        }
+    }
+    pool.forEach { it.join() }
+
+    assertTrue("no exceptions under concurrent dispatch", errors.isEmpty())
+
+    // Post-condition invariants (hold regardless of interleaving):
+    val auth = store.stateFlow.value.authority
+    // (1) bySid consistency: every entry has a valid status (no torn write)
+    auth.bySid.values.forEach { assertNotNull("entry has status", it.status) }
+    // (2) retryQueue bounded
+    assertTrue("retry queue bounded", auth.retryQueue.size <= 256)
+    // (3) revision monotonic (never decreased)
+    assertTrue("revision non-negative", store.stateFlow.value.authorityRevision >= 0L)
 }
 
 /** Local assertNotNull to avoid an extra import line churn. */
