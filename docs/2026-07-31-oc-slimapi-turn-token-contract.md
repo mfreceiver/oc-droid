@@ -379,7 +379,7 @@ slimapi 若由多个组件组成（如 proxy 转发层 + global_hub 事件聚合
 
 > 这是 v3 M7 的明确要求，区别于「flush 时读当前 turn」。
 
-slimapi 在**转发 status 事件给 ocdroid 时（ingest 上游事件的那一刻）**，从 registry 读取当前 `(serverGroupFp,sid)` 的 turn，**快照**进事件的 `properties.turn`。
+slimapi 在**转发 status 事件给 ocdroid 时（ingest 上游事件的那一刻）**，从 registry 读取当前 `(serverGroupFp,sid)` 的 turn，**快照**进事件的 `data` flat 顶层 `turn` 字段（§3.1）。
 
 **禁止**「先把事件缓冲，flush 时才读 registry 当前 turn」——因为 flush 时 turn 可能已被**后续** forward increment，导致事件被 stamp 成错误的（更大的）turn，破坏因果对应。
 
@@ -507,7 +507,7 @@ ocdroid 的 **REST `/session/status` 批量快照**（`ApplySnapshot`）路径**
 | S4 | 非 2xx（post-dispatch）→ **已 increment，产生 hole，不 decrement**（与 S3 同规则，§4.3） | §4.3 |
 | S5 | incarnation **单独持久化**，restart bump，跨 restart 单调；声明策略 A/B | §5.2-5.3 |
 | S6 | 多 worker/容器共享同一 incarnation 持久源；声明实例指纹方案 | §5.4 |
-| S7 | serverGroupFp：选方案 A（header 透传）或 B（自算），**声明并与 §6.1 对齐** | §6 |
+| S7 | serverGroupFp：**方案 A（header 透传）已落地**（ocdroid 0.18.3 `X-Ocdroid-Server-Group-Fp`），与 §6.1 对齐 | §6 |
 | S8 | proxy ↔ global_hub 共享 `(serverGroupFp,sid)→turn` registry，并发安全 | §7.1-7.2 |
 | S9 | 事件 **ingest 时快照** turn/inc（非 flush 时读当前） | §7.4 |
 | S10 | 联调：配合 §11 验收场景（尤其 restart 不冻结、旧帧 DROP、abort fencing） | §11 |
@@ -568,13 +568,14 @@ ocdroid 的 **REST `/session/status` 批量快照**（`ApplySnapshot`）路径**
 
 ```
 session.digest 事件 (SSE, slimapi → ocdroid)
-└─ data.properties
+└─ data                          (ocdroid 的 properties = 整个 data，§3.1)
    ├─ turnIncarnation : integer (可选, ≥0, per-scope 生命周期 epoch)
    ├─ turn            : integer (可选, ≥0, per-(serverGroupFp,sid) 单调)
    ├─ status          : string  ("busy"|"idle"|"error"...)  [既有]
    ├─ archived / deleted / lastError                        [既有]
    └─ ...
 
+注：字段在 data 的 flat 顶层（与 sessionID/status 同层），不在嵌套 properties 子对象内。
 配对规则：turnIncarnation 与 turn 必须同时出现或同时缺失。
 缺失语义：ocdroid 解析为 serverRound=null → 降级 Tier-2 确认门 + watchdog。
 ```
