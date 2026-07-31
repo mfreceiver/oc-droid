@@ -38,6 +38,10 @@ material3WindowSizeClass = "1.2.0"
 robolectric = "4.13"
 # R-21: Robolectric 测试用 ApplicationProvider 取 Context（androidx.test:core）
 androidxTestCore = "1.7.0"
+# §sm-hardening B10 detekt gate: custom architecture rule (ban bypass of
+# SessionListState sole-writer). 2.0.0-alpha.0 is the Kotlin 2.2.10 exact match
+# per the detekt compatibility matrix.
+detekt = "2.0.0-alpha.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -92,10 +96,19 @@ robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "
 # R-21: ApplicationProvider.getApplicationContext — Robolectric 测试取 Context 用
 androidx-test-core = { group = "androidx.test", name = "core", version.ref = "androidxTestCore" }
 
+# §sm-hardening B10: detekt-api (custom rule module) + detekt-test (rule specs)
+detekt-api = { group = "dev.detekt", name = "detekt-api", version.ref = "detekt" }
+detekt-test = { group = "dev.detekt", name = "detekt-test", version.ref = "detekt" }
+
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+# §sm-hardening B10: plain Kotlin JVM plugin for the detekt-rules module (pure
+# JVM, no Android). Shares the project's pinned kotlin version (2.2.10).
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 kover = { id = "org.jetbrains.kotlinx.kover", version.ref = "kover" }
+# §sm-hardening B10: detekt plugin (applied to :app + the custom-rule module)
+detekt = { id = "dev.detekt", version.ref = "detekt" }

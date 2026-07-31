@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.controller
 
-import android.util.Log
 import androidx.annotation.VisibleForTesting
 import cn.vectory.ocdroid.BuildConfig
 import cn.vectory.ocdroid.R
@@ -1476,6 +1475,9 @@ class SessionSyncCoordinator(
         // invocation, skip the entire batch (stale outcomes).
         val idStore = identityStore ?: return
         if (!idStore.isCurrent(identity)) return
+        // §P0-B observability: log only AFTER the guards so "dispatching" is
+        // always paired with a "done" (no orphan dispatch line on early-return).
+        DebugLog.i(TAG, "reconcile: dispatching ${claims.size} stale optimistic claim(s)")
 
         // §P0-A scope guard + §P0-C identity-epoch guard: capture host + epoch
         // ONCE from the store's stateFlow (matching the reducer's state space)
@@ -1502,6 +1504,7 @@ class SessionSyncCoordinator(
                 ),
             )
         }
+        DebugLog.i(TAG, "reconcile: done (${claims.size} claim(s) processed)")
     }
 
     /** §P0-B ITEM 4: reconcile a single stale claim — fetch status + map to [ReconcileOutcome]. */
@@ -1567,6 +1570,9 @@ class SessionSyncCoordinator(
     // now uses SkeletonReloadCoordinator.requestReload directly.
 
     companion object {
+        /** §P0-B watchdog observability tag. */
+        private const val TAG = "SessionSync"
+
         /**
          * §M5 trailing-coalesce window (§7). Leading-edge
          * delta writes immediately; subsequent deltas within this window are

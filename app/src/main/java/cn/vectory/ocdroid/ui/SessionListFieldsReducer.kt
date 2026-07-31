@@ -72,7 +72,7 @@ internal fun reduceSessionArchivedLocal(state: StoreState, action: AppAction.Ses
             // sessionStatuses NOT set here — comes from withAuth (reduceAuthority).
             pendingQuestions = action.pendingQuestions,
             activeSessionIds = state.sessionList.activeSessionIds - action.activeSessionIdsToRemove,
-            sessionErrorsById = state.sessionList.sessionErrorsById.filterKeys { it != id },
+            sessionErrorsById = state.sessionList.sessionErrorsById.filterKeys { it !in subtree },
             abortPendingSessionIds = withAuth.sessionList.abortPendingSessionIds.filterKeys { it !in action.activeSessionIdsToRemove },
         ),
         chat = state.chat.copy(

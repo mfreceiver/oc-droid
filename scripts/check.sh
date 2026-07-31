@@ -25,10 +25,14 @@ case "$MODE" in
   --lint)
     echo "==> lintDebug"
     $GRADLE lintDebug
+    echo "==> detekt (ocdroid sole-writer encapsulation gate)"
+    $GRADLE :app:detekt
     ;;
   --full)
     echo "==> lintDebug"
     $GRADLE lintDebug
+    echo "==> detekt (ocdroid sole-writer encapsulation gate)"
+    $GRADLE :app:detekt
     echo "==> koverVerify（覆盖率门控）"
     $GRADLE koverVerify
     echo "==> koverHtmlReport → app/build/reports/kover/html/index.html"

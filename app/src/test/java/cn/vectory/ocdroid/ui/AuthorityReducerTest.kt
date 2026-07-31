@@ -1469,6 +1469,68 @@ class AuthorityReducerTest {
             afterGate.authority.bySid["A"]?.optimisticClaim?.guardedIdleDrop == true)
     }
 
+    // ── Test ①c: FETCH_FAILED outcome ──
+
+    @Test
+    fun `P0-B ApplyReconcileOutcome FETCH_FAILED removes entry and is a no-op when prev is null`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // 1. OPTIMISTIC busy → claim clientSeq=1
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        assertNotNull("claim present after OPTIMISTIC",
+            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim)
+
+        // 2. FETCH_FAILED with matching claimClientSeq → entry REMOVED
+        store.dispatch(AppAction.AuthorityEvent(
+            reconcileOutcome(store, "A", ReconcileOutcome.FETCH_FAILED),
+        ))
+        assertNull("entry removed after FETCH_FAILED",
+            store.stateFlow.value.authority.bySid["A"])
+
+        // 3. FETCH_FAILED when prev is ALREADY null (entry already gone) → no-op
+        //    Must not crash and state must remain unchanged.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.ApplyReconcileOutcome(
+                sid = "A", scopeKey = scope,
+                outcome = ReconcileOutcome.FETCH_FAILED,
+                serverRound = null, monotonic = 999L,
+                claimClientSeq = 1L,
+                hostProfileId = store.stateFlow.value.host.currentHostProfileId,
+                identityEpochAtCapture = store.stateFlow.value.identityEpoch,
+            ),
+        ))
+        assertNull("entry still absent after no-op FETCH_FAILED (prev was null)",
+            store.stateFlow.value.authority.bySid["A"])
+    }
+
+    @Test
+    fun `P0-B ApplyReconcileOutcome FETCH_FAILED generation fence drops stale-generation outcome`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // 1. OPTIMISTIC busy → claim clientSeq=1
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        assertEquals("clientSeq = 1", 1L,
+            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim?.clientSeq)
+
+        // 2. Another OPTIMISTIC busy → claim advances to clientSeq=2
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 200L),
+        ))
+        assertEquals("clientSeq advanced to 2", 2L,
+            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim?.clientSeq)
+
+        // 3. FETCH_FAILED with stale claimClientSeq=1 → DROPPED (entry NOT removed)
+        store.dispatch(AppAction.AuthorityEvent(
+            reconcileOutcome(store, "A", ReconcileOutcome.FETCH_FAILED, claimClientSeq = 1L),
+        ))
+        val entry = store.stateFlow.value.authority.bySid["A"]
+        assertNotNull("entry NOT removed by stale-generation FETCH_FAILED (fence dropped it)", entry)
+        assertEquals("claim clientSeq unchanged (stale outcome dropped)", 2L,
+            entry?.optimisticClaim?.clientSeq)
+    }
+
     // ── Test ②: generation fence drops stale-generation outcome (ABA) ──
 
     @Test
