@@ -451,6 +451,41 @@ class AuthorityReducerTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // serverRound hole semantics (S2 slimapi contract §9) — regression guard
+    //
+    // A "hole" = a turn that was lost (e.g. a connection failure mid-stream) and
+    // thus NEVER dispatched. The lex guard only requires strict monotonic advance;
+    // it must NOT require contiguous turns. This pins that a gap in the turn
+    // sequence does not break lex-strict progression (turns 1,2,3,5 applied, turn
+    // 4 lost → turn 5 still ACCEPTED).
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `turn sequence with a hole - turns 1,2,3,5 applied, turn 4 lost to connection failure never seen`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Apply turns 1,2,3 → busy (each strictly newer, lex advances).
+        listOf(1L, 2L, 3L).forEachIndexed { _, turn ->
+            store.dispatch(AppAction.AuthorityEvent(
+                event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                    serverRound = ServerRound(1L, turn), monotonic = turn * 100L),
+            ))
+        }
+        // Turn 4 was LOST (connection failure) — it is never dispatched.
+        // Apply turn 5 → idle: must be ACCEPTED (5 > 3, a lex-strict advance
+        // despite the hole — contiguity is NOT required by the lex guard).
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(1L, 5L), monotonic = 500L),
+        ))
+        assertEquals("turn 5 idle accepted across the hole",
+            SessionStatus(type = "idle"),
+            store.stateFlow.value.sessionList.sessionStatuses["s1"])
+        assertEquals("serverRound advanced to turn 5 across the hole",
+            ServerRound(1L, 5L),
+            store.stateFlow.value.authority.bySid["s1"]?.serverRound)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // §3.1 BLK-2 — baseline-cleared low-turn revival window
     //
     // When the live serverRound baseline is cleared (REST ApplySnapshot / legacy
