@@ -2195,6 +2195,148 @@ class AuthorityReducerTest {
         assertTrue("pendingErrorCheck still empty after guarded idle drop",
             store.stateFlow.value.chat.pendingErrorCheck.isEmpty())
     }
+
+    // ── P1-C FreshnessTick (applyFreshnessTick) ──
+
+    @Test
+    fun `freshness tick ages Fresh entry to Stale when age exceeds TTL (30s)`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Seed: entry with updatedMonotonic=0 → freshness=Fresh.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 0L, workdir = "/w"),
+        ))
+        assertEquals(Freshness.Fresh, store.stateFlow.value.authority.bySid["s1"]?.freshness)
+        val revBefore = store.stateFlow.value.authorityRevision
+
+        // Tick: age = 30_001 > 30_000 → Stale.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.FreshnessTick(scopeKey = scope, nowMonotonic = 30_001L),
+        ))
+        val entry = store.stateFlow.value.authority.bySid["s1"]
+        assertEquals(Freshness.Stale, entry?.freshness)
+        assertTrue("authorityRevision bumped", store.stateFlow.value.authorityRevision > revBefore)
+    }
+
+    @Test
+    fun `freshness tick ages entry to Unknown when age exceeds 2x TTL (60s)`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 0L, workdir = "/w"),
+        ))
+        assertEquals(Freshness.Fresh, store.stateFlow.value.authority.bySid["s1"]?.freshness)
+        val revBefore = store.stateFlow.value.authorityRevision
+
+        // Tick: age = 60_001 > 60_000 → Unknown.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.FreshnessTick(scopeKey = scope, nowMonotonic = 60_001L),
+        ))
+        val entry = store.stateFlow.value.authority.bySid["s1"]
+        assertEquals(Freshness.Unknown, entry?.freshness)
+        assertTrue("authorityRevision bumped", store.stateFlow.value.authorityRevision > revBefore)
+    }
+
+    @Test
+    fun `freshness tick keeps entry Fresh when age within TTL`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 0L, workdir = "/w"),
+        ))
+        assertEquals(Freshness.Fresh, store.stateFlow.value.authority.bySid["s1"]?.freshness)
+        val revBefore = store.stateFlow.value.authorityRevision
+
+        // Tick: age = 30_000 → NOT > 30_000 → Fresh (unchanged, same-ref no-op).
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.FreshnessTick(scopeKey = scope, nowMonotonic = 30_000L),
+        ))
+        val entry = store.stateFlow.value.authority.bySid["s1"]
+        assertEquals(Freshness.Fresh, entry?.freshness)
+        assertEquals("authorityRevision unchanged (same-ref no-op)", revBefore, store.stateFlow.value.authorityRevision)
+    }
+
+    @Test
+    fun `freshness tick is a same-ref no-op when all entries already at target freshness`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 0L, workdir = "/w"),
+        ))
+        // Tick to Stale first.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.FreshnessTick(scopeKey = scope, nowMonotonic = 30_001L),
+        ))
+        assertEquals(Freshness.Stale, store.stateFlow.value.authority.bySid["s1"]?.freshness)
+        val revAfterFirstTick = store.stateFlow.value.authorityRevision
+
+        // Tick AGAIN: age = 31_000 still in Stale band (30s–60s) → same target → no-op.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.FreshnessTick(scopeKey = scope, nowMonotonic = 31_000L),
+        ))
+        assertEquals(Freshness.Stale, store.stateFlow.value.authority.bySid["s1"]?.freshness)
+        assertEquals("authorityRevision unchanged (same-ref no-op)",
+            revAfterFirstTick, store.stateFlow.value.authorityRevision)
+    }
+
+    @Test
+    fun `freshness tick skips out-of-scope entries`() {
+        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Seed under the default scope.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 0L, workdir = "/w"),
+        ))
+        // Change scopeKey to a different scope (out-of-scope for the tick).
+        store.mutateState { s ->
+            s.copy(authority = s.authority.copy(
+                bySid = s.authority.bySid.mapValues { (_, entry) ->
+                    entry.copy(scopeKey = diffScope)
+                }
+            ))
+        }
+        assertEquals(diffScope, store.stateFlow.value.authority.bySid["s1"]?.scopeKey)
+        val revBefore = store.stateFlow.value.authorityRevision
+
+        // Tick with scopeKey=scope (different from diffScope) → s1 is out-of-scope → NOT aged.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.FreshnessTick(scopeKey = scope, nowMonotonic = 60_001L),
+        ))
+        val entry = store.stateFlow.value.authority.bySid["s1"]
+        assertEquals(Freshness.Fresh, entry?.freshness) // unchanged
+        assertEquals("authorityRevision unchanged (out-of-scope skip)", revBefore, store.stateFlow.value.authorityRevision)
+    }
+
+    @Test
+    fun `freshness tick ages only in-scope entries when mixed scope present`() {
+        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w"), Session(id = "s2", directory = "/w")))
+        // Seed both under the default scope.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 0L, workdir = "/w"),
+        ))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s2", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 0L, workdir = "/w"),
+        ))
+        // Change s2's scopeKey to be out-of-scope (diffScope).
+        store.mutateState { s ->
+            val cur = s.authority
+            s.copy(authority = cur.copy(
+                bySid = cur.bySid.mapValues { (sid, entry) ->
+                    if (sid == "s2") entry.copy(scopeKey = diffScope) else entry
+                }
+            ))
+        }
+        assertEquals(scope, store.stateFlow.value.authority.bySid["s1"]?.scopeKey)
+        assertEquals(diffScope, store.stateFlow.value.authority.bySid["s2"]?.scopeKey)
+        val revBefore = store.stateFlow.value.authorityRevision
+
+        // Tick with scopeKey=scope → only s1 is in-scope.
+        // age = 45_000 (between 30s and 60s) → Stale for in-scope.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.FreshnessTick(scopeKey = scope, nowMonotonic = 45_000L),
+        ))
+        val bySid = store.stateFlow.value.authority.bySid
+        assertEquals(Freshness.Stale, bySid["s1"]?.freshness) // aged
+        assertEquals(Freshness.Fresh, bySid["s2"]?.freshness) // unchanged (out-of-scope)
+        assertTrue("authorityRevision bumped", store.stateFlow.value.authorityRevision > revBefore)
+    }
 }
 
 /** Local assertNotNull to avoid an extra import line churn. */

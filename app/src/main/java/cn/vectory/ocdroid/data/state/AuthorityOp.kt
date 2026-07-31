@@ -141,6 +141,55 @@ sealed interface AuthorityOp {
         val sids: Set<String>,
         val scopeKey: ScopeKey,
     ) : AuthorityOp
+
+    /**
+     * §P1-C: passive-TTL aging tick. The aggregator's [freshnessJob]
+     * dispatches this on a TTL-boundary wake to age `SessionEntry.freshness`
+     * from `Fresh` → `Stale` / `Unknown` as pure authority-state bookkeeping.
+     *
+     * Purity contract (unchanged from the sealed type): carries [nowMonotonic]
+     * (captured at dispatch) so the reducer needs NO injected clock. The reducer
+     * ages each in-scope entry whose `nowMonotonic - updatedMonotonic >
+     * STATUS_TTL_MS` (30s) to `Stale`, and entries past `2 * STATUS_TTL_MS` to
+     * `Unknown`. This does NOT alter the aggregator's TTL verdict —
+     * [StatusAggregatorImpl.project] computes TTL from `sourceTimeMs`
+     * (= updatedMonotonic), not from the `freshness` field. Aging is observable
+     * bookkeeping for downstream freshness-aware logic; it bumps
+     * [StoreState.authorityRevision] only when at least one entry's freshness
+     * actually transitions (otherwise it is a no-op same-ref).
+     */
+    data class FreshnessTick(
+        val scopeKey: ScopeKey,
+        val nowMonotonic: Long,
+    ) : AuthorityOp
+
+    /**
+     * §P1-B/E: queue a session for bounded retry. The reducer records a
+     * [RetryEntry] in [AuthorityState.retryQueue] keyed by [sid]. Pure state —
+     * the reducer does NOT compute backoff or schedule the retry; [backoffMs] /
+     * [attempt] / [queuedMonotonic] are carried in the op so the reducer needs no
+     * injected clock or scheduler. The queue is bounded (LRU eviction when full);
+     * the reducer enforces the cap.
+     */
+    data class RetryQueued(
+        val sid: String,
+        val scopeKey: ScopeKey,
+        val attempt: Int,
+        val backoffMs: Long,
+        val queuedMonotonic: Long,
+    ) : AuthorityOp
+
+    /**
+     * §P1-B/E: mark a queued retry as FIRED (the retry attempt has been dispatched
+     * externally — e.g. the poller re-swept). The reducer REMOVES the entry from
+     * [AuthorityState.retryQueue]. Pure state transition; the actual retry dispatch
+     * is external.
+     */
+    data class RetryFired(
+        val sid: String,
+        val scopeKey: ScopeKey,
+        val monotonic: Long,
+    ) : AuthorityOp
 }
 
 /**
