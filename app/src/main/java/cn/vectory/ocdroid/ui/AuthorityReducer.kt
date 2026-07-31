@@ -261,35 +261,45 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
         val cmp = op.serverRound.compareTo(prev.serverRound)
         if (cmp < 0) return cur // strictly older → DROP (§3.1 line 303)
         if (cmp == 0 && op.connectionMonotonicMs < prev.updatedMonotonic) {
-            // §B9 equal-serverRound tie-break: strictly-older monotonic → DROP
+            // §U-P3 / §U-MN9: both timestamps are System.currentTimeMillis()
+            // (single wall-clock domain — sseClock() ← clock() ← currentTimeMillis,
+            // requestStartMs ← clock() ← currentTimeMillis). The pre-U-MN9 comment
+            // claiming "cross-clock-domain" was STALE and is removed. The comparison
+            // is valid; fail-closed direction preserved (drop equal+older).
             return cur
         }
     }
 
     // ── §3.1 BLK-2: baseline-cleared Tier-1 watermark guard ──
     // The lex guard above requires prev.serverRound != null. When the live baseline
-    // was cleared (REST ApplySnapshot / legacy SSE busy keepRound=null / incarnation-
-    // advance scope reset) but a Tier-1 slim frame carrying a turn arrives, the lex
-    // guard is skipped — and without this guard a stale LOW-turn frame would apply
-    // unconditionally, reviving stale busy (BLK-2 window). Compare the incoming frame
-    // against the PERSISTENT per-sid serverRound high-water (which survives the clear)
-    // and DROP a strictly-older (incarnation,turn). Reaching here means op.incarnation
-    // >= scope highWater (older incarnations were already DROPPED by the B6 guard
-    // above), so a `<` result is a same-incarnation stale-low-turn.
+    // was cleared (REST ApplySnapshot / incarnation-advance scope reset) but a Tier-1
+    // slim frame carrying a turn arrives, the lex guard is skipped — and without this
+    // guard a stale LOW-turn frame would apply unconditionally, reviving stale busy
+    // (BLK-2 window). Compare the incoming frame against the PERSISTENT per-sid
+    // serverRound high-water (which survives the clear) and DROP a strictly-older
+    // (incarnation,turn). Reaching here means op.incarnation >= scope highWater (older
+    // incarnations were already DROPPED by the B6 guard above), so a `<` result is a
+    // same-incarnation stale-low-turn.
     // prev == null / watermark == null (cold start) → no watermark → establish baseline.
     //
-    // KNOWN RESIDUAL (deliberate, documented in spec §8.1): only strictly-older `<` is
-    // DROPped, not equal-turn (mirroring §3.1 "strictly DROP low turn" and the live lex
-    // guard's equal handling). An EQUAL-turn frame arriving after a baseline clear is
-    // ACCEPTED to re-establish the baseline; this could let a buffered stale equal-turn
-    // digest revive busy. The live lex guard's `==0` monotonic-tie-break is NOT mirrored
-    // here because updatedMonotonic is set from requestStartMs (a WALL clock) on the REST
-    // ApplySnapshot path but from connectionMonotonicMs (a MONOTONIC clock) on the SSE
-    // path — a cross-clock-domain compare is meaningless (device sleep / clock skew would
-    // reorder), so mirroring now would risk a fail-open ordering bug worse than the
-    // current fail-closed equal-turn accept. The strictly-low window — the dominant,
-    // determinism-critical revival vector — is closed. Evolution: unify the clock source
-    // (monotonic everywhere) then safely mirror the `==0` tie-break (see spec §8.1 + §8.5).
+    // §U-P3: legacy SSE busy no longer clears the baseline (keepRound preserves it),
+    // so prev.serverRound==null only arises from REST applySnapshot or incarnation-
+    // advance scope reset (not legacy SSE).
+    //
+    // KNOWN RESIDUAL: only strictly-older `<` is DROPped, not equal-turn (mirroring
+    // §3.1 "strictly DROP low turn"). An EQUAL-turn frame after baseline clear is
+    // accepted (re-establishes baseline). The `==0` monotonic tie-break from the live
+    // lex guard is NOT mirrored here — both timestamps are System.currentTimeMillis()
+    // (single wall-clock domain — see §U-P3 comment at :263-265), but the equal-turn
+    // accept is a deliberate fail-closed choice: a stale equal-turn digest arriving
+    // during a brief baseline window is the lesser evil versus a fail-open rejection
+    // of a legitimate equal-turn re-establishment. The strictly-low window — the
+    // dominant, determinism-critical revival vector — is closed.
+    //
+    // §U-CQ4: the watermark is per-entry (per-sid). On entry deletion (prune / archive
+    // / REST-not-present) the watermark is lost. This is safe because incarnation is
+    // tied to the server process lifecycle — a deleted sid cannot revive under the
+    // same incarnation. See also guard kdoc at :293-298.
     if (op.serverRound != null && prev != null && prev.serverRound == null &&
         prev.serverRoundHighWater != null &&
         op.serverRound < prev.serverRoundHighWater
@@ -320,11 +330,12 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
     }
 
     // ── next entry fields ──
-    val keepRound: ServerRound? = if (op.origin == EntryOrigin.OPTIMISTIC) {
-        prev?.serverRound
-    } else {
-        op.serverRound
-    }
+    // §U-P3: a frame with no serverRound (legacy SSE busy / optimistic) MUST NOT
+    // clear the prior slim baseline — the legacy frame is causally weaker (no
+    // incarnation/turn) and clearing the baseline would reopen the BLK-2 revival
+    // window. Only a fresh slim frame (serverRound != null) or REST whole-graph
+    // replace (applySnapshot, separate path) legitimately advances/clears.
+    val keepRound: ServerRound? = op.serverRound ?: prev?.serverRound
     val nextOptimisticClaim: OptimisticClaim? = when {
         op.origin == EntryOrigin.OPTIMISTIC -> {
             val priorSeq = prev?.optimisticClaim?.clientSeq ?: 0L

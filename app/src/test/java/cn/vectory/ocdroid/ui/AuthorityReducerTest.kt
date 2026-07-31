@@ -533,28 +533,82 @@ class AuthorityReducerTest {
     }
 
     @Test
-    fun `BLK-2 - stale low-turn slim frame is DROPPED after a legacy SSE busy clears the baseline`() {
+    fun `U-P3 - legacy SSE busy PRESERVES the slim baseline; stale low-turn fenced by live lex guard`() {
         val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // Establish slim baseline (5,7)
         store.dispatch(AppAction.AuthorityEvent(
             event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
                 serverRound = ServerRound(5L, 7L), monotonic = 100L),
         ))
-        // Legacy SSE BUSY carries no serverRound → keepRound=null clears the live
-        // baseline; the BLK-2 high-water (5,7) is preserved.
+        // Legacy SSE BUSY (no serverRound) → U-P3: baseline PRESERVED (not cleared)
         store.dispatch(AppAction.AuthorityEvent(
             event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
         ))
-        assertNull("legacy busy clears the live serverRound baseline",
-            store.stateFlow.value.authority.bySid["A"]?.serverRound)
-        assertEquals(ServerRound(5L, 7L),
-            store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
-        // Stale low-turn slim digest → must DROP (not revive stale busy).
+        assertEquals("U-P3: legacy busy preserves the slim baseline",
+            ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        // Stale low-turn slim (5,4) → DROPPED by the LIVE lex guard (:263-265),
+        // NOT by BLK-2 guard (prev.serverRound is now non-null → BLK-2 :293-298
+        // condition prev.serverRound==null is FALSE → skipped).
+        val beforeStale = store.stateFlow.value
         store.dispatch(AppAction.AuthorityEvent(
             event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
                 serverRound = ServerRound(5L, 4L), monotonic = 300L),
         ))
-        assertNull("stale low-turn DROPPED — baseline stays cleared",
-            store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals("stale low-turn DROPPED — baseline preserved",
+            ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals("dropped stale frame is a true no-op (same ref state)",
+            beforeStale, store.stateFlow.value)
+    }
+
+    @Test
+    fun `U-P3 - legacy SSE busy does NOT block fresh higher-turn slim from advancing`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // Establish slim baseline (5,7)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 100L),
+        ))
+        // Legacy SSE BUSY — U-P3 preserves baseline (5,7)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
+        ))
+        assertEquals("baseline preserved after legacy busy",
+            ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        // Fresh higher-turn slim (5,9) → ACCEPTED (serverRound != null → keepRound uses op)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 9L), monotonic = 300L),
+        ))
+        assertEquals("fresh higher-turn slim advances the baseline",
+            ServerRound(5L, 9L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals("high-water advanced to the fresh turn",
+            ServerRound(5L, 9L), store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
+    }
+
+    @Test
+    fun `U-P3 - legacy SSE busy after equal-turn slim with older monotonic is DROPped`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // Establish slim baseline (5,7) at monotonic=100
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 100L),
+        ))
+        assertEquals(ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        // Legacy SSE BUSY — U-P3 preserves baseline
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
+        ))
+        // legacy_update updates updatedMonotonic to 200, preserves baseline (5,7)
+        val afterLegacy = store.stateFlow.value
+        assertEquals(200L, store.stateFlow.value.authority.bySid["A"]?.updatedMonotonic)
+        // Equal-turn slim frame (5,7) with OLDER monotonic (50 < 200) → live lex guard
+        // tie-break DROPS it (cmp==0 && connectionMonotonicMs < updatedMonotonic)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 50L),
+        ))
+        assertSame("equal-turn with older monotonic is same-ref no-op",
+            afterLegacy, store.stateFlow.value)
     }
 
     @Test
