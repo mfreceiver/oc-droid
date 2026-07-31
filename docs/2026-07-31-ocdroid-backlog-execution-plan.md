@@ -52,7 +52,7 @@ W3（flaky 优先）                          ── 独立写域，可并行
 377:
 378: **代码**：`AuthorityReducer.kt:245` —— `if (op.serverRound != null && prev?.serverRound != null)`。`prev.serverRound == null` 时整个 lex 块**跳过**。
 ...
-382: **为何「惰性」**：当前 slimapi **未发** turn token，所有 SSE 事件 `serverRound == null`，lex guard 从不进入，此路径休眠。
+382: slimapi 1.0.1 已发字段，lex guard 现已激活（原「未发 turn → 此路径休眠」状态已过期）。
 ...
 386: **彻底闭合**（超出 doc-only scope）：需改 ocdroid reducer（... 对基线清空后的首个 Tier-1 帧记 high-turn 水位）。列为 P1 backlog。
 ```
