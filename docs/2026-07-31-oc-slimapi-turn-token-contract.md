@@ -16,9 +16,9 @@
 |---|---|
 | 谁发字段 | **oc-slimapi** 在转发的 `session.digest`（携带 status）事件里附加 `turnIncarnation` + `turn` 两个字段。 |
 | 谁消费 | **ocdroid** `SessionSyncCoordinator.handleSessionDigest` 解析为 `ServerRound(inc,turn)`（**已实现**，`0d572d2`）。 |
-| turn 何时 +1 | slimapi **成功把 forward 请求送上上游传输层的那一刻**（请求已发出、在 await 响应之前）。见 §4。 |
-| 连接级失败 | **不 +1**（轮次根本没开始）。 |
-| 非 2xx 响应 | turn 已在送出时 +1（见 §4.3）→ 该 turn 为**计数的空轮次（hole）**，**不回退、不 decrement**。 |
+| turn 何时 +1 | slimapi **send 前 bump**（`await send()` 之前 `turn += 1`）——httpx stream 单 await 栈下唯一保证 in-flight fence 正确的做法（§4.1.1/§4.7）。 |
+| 连接级失败 | **已 +1，成 hole**（不回退、不 decrement）。修订自原「不 increment」——因 §4.1.1，详见 §4.2/§4.7。 |
+| 非 2xx 响应 | 同连接失败：**成 hole，不 decrement**（§4.3）。 |
 | incarnation | slimapi 生命周期 epoch，**单独持久化**，跨 restart 单调；restart→bump。 |
 | 缺字段怎么办 | **字段全部可选**。缺失→ocdroid 降级到 Tier-2 启发式确认门 + watchdog，系统正常工作（§9）。双方可分阶段上线。 |
 | ocdroid 就绪度 | 解析 + 降级**已就绪并 merged**；不需要再改 ocdroid 代码即可联调（slimapi 一发字段即生效）。 |
@@ -142,9 +142,11 @@ digest(busy,  inc=7, turn=3)   ← 旧 inc=7 迟到 → inc < known(8) → DROP�
 
 > 本节是契约的技术核心，也是评审重点。v3 §5.2 紧凑地把「before await」与「非 2xx 不 increment」并列，存在顺序歧义；本节给出**可实现的精确定义**并显式闭合该歧义（§4.3–4.4）。
 
-### 4.1 commit point 定义
+### 4.1 commit point 定义（形式/因果语义，stack-agnostic）
 
-**`turn[(serverGroupFp, sid)] += 1` 发生在：slimapi 成功把 forward 请求送上上游传输层的那一刻**——即上游连接已建立、请求行/头/体已发出（request is on the wire），**在 `await` 上游完整响应之前**。
+> **形式语义（不变量，§4.6 之 4）**：`turn` 标识「一次执行尝试」。为使本轮的 in-flight SSE status 事件被 stamp 成正确 turn，**increment 必须先于「上游因收到本次 forward 而产生的任何 status 活动」对 GlobalHub 可见**。本节给出形式定义；具体 HTTP 栈下「可观测的 seam」见 §4.1.1（httpx stream 单 await 下无 seam → 必须 **send 前 bump**）。
+
+**形式定义**：`turn[(serverGroupFp, sid)] += 1` 发生在 slimapi **把 forward 请求送上上游传输层的那一刻**——即上游连接已建立、请求行/头/体已发出（request is on the wire），**在 `await` 上游完整响应之前**。
 
 涵盖两类 forward：
 - `POST /session/{sid}/prompt`（用户发消息 → 新执行轮次）；
@@ -155,54 +157,70 @@ slimapi 收到 POST /session/{sid}/prompt（来自 ocdroid）
   │
   ├─ ① 准备上游 forward（解析、鉴权、构造上游请求）
   │
-  ├─ ②【commit point】成功把请求送上上游传输层
-  │      ├─ turn[(serverGroupFp,sid)] += 1   ← 在此刻 increment
+  ├─ ②【commit point】把请求送上上游传输层（increment 必须在此完成，见 §4.1.1）
+  │      ├─ turn[(serverGroupFp,sid)] += 1
   │      ├─ 记录 newTurn = turn（用于 stamp 本轮所有事件）
   │      └─ 此后 relay 的本 (serverGroupFp,sid) status 事件都 stamp newTurn
   │
   ├─ ③ await 上游响应（在此期间上游可能经 SSE 回 busy → stamp newTurn）
   │
-  └─ ④ 拿到响应 / 连接结果（决定如何回 ocdroid，见 §4.2-4.3）
+  └─ ④ 拿到响应 / 连接结果（失败 → 该 turn 成 hole，见 §4.2-4.3；禁 decrement）
 ```
 
-### 4.2 连接级失败 → **不 increment**
+### 4.1.1 在 httpx-stream 栈下的可观测 seam → 必须 send 前 bump（**实施约束**）
 
-若 §4.1 的 ①–② 失败——**无法建立上游连接 / 无法发出请求**（DNS、TCP/TLS 失败、send error、上游不可达）——则 **commit point 从未到达，turn 不 +1**。
+> slimapi 现状：catch-all 反代用 `await client.send(req, stream=True)`（`proxy.py:141`）——**单次 await**，Python 层无法精确卡在「请求已上 wire、未 await 完整响应」之间（send 返回 = 请求已发 + **响应头已到**）。这对 commit point 的实现构成硬约束。
 
-> **send error 的边界（post-send 重置归类）**：send error 指**请求未完整发出**的失败（发送中途断开）。若请求**已完整到达上游传输层**（commit point 已过）后连接被重置 / 上游崩溃 / 无 HTTP 响应，则属 §4.3 的 **hole**（turn 已 increment），不回退。判定标准：commit point（§4.1 ②）是否到达——到达则 hole，未到达则不 increment。
+**httpx stream 下的时序真相**：
+```
+await client.send(req, stream=True)   ← 这一个 await 内部完成：
+                                          建连 → 发请求 → [上游处理 + 经 SSE 回 busy] → 收响应头 → 返回
+                                          └─────── 上游因本 forward 产生的活动都在这里 ───────┘
+```
+因此**上游因本 forward 产生的 SSE busy 活动，必然在 `send()` 返回之前就发生**（send 只在响应头到达时返回；上游处理 + SSE busy 在此之前）。GlobalHub（独立 ingest SSE）可能在 `send()` 返回**之前**就 ingest 到该 busy。
 
-理由：轮次根本没开始，没有因果实体可标识。ocdroid 收到 slimapi 的错误响应，**不写 optimistic busy**（POST 失败无回滚对象，方案 v3 §10），双方状态一致：turn 没动、ocdroid 没占 claim。
+**结论**：若 increment 推迟到 `send()` 返回之后（slimapi 选项「send 后 bump」），则 in-flight busy 被 stamp 成**旧 turn**——Tier-1 fence 在最关键的 in-flight 窗口失效（§4.4 要避免的错误，且该错误不可恢复：事件已发出）。**唯一在 httpx-stream 单 await 栈下保证正确性的做法是：increment 在 `await send()` 之前**（slimapi 选项「send 前 bump」）。
 
-### 4.3 上游非 2xx 响应 → **commit 已发生，该 turn 为计数空轮次（hole），不回退**
+**代价 / 权衡**（见 §4.7 详析）：send 前 bump 意味着「`send()` 抛异常（连接级失败）→ 该 turn 已 bump → 成 hole」。这**放宽了** §4.2 原「连接级失败不 increment」的表述（现改为「连接级失败产生 hole」）——但该 hole 对 ocdroid **完全不可见**（无事件 stamp 该 turn，lex 比较统一处理 hole），不破坏任何不变量，只是失去「双方 turn 计数在连接失败时优雅一致」的**装饰性**特性。§4.4（fence 正确性）是不可破的硬约束，§4.2 原表述只是 nice-to-have → 正确权衡是**牺牲 §4.2 装饰性、保 §4.4 正确性**。
 
-这是 v3 紧凑表述「非 2xx → 不 increment」需要**精确化**的地方：
+### 4.2 连接级失败 → 产生 hole（**放宽自原「不 increment」，见 §4.1.1**）
 
-- 非 2xx 是**响应状态**，只能在 §4.1 的 ③ await **之后**才知道；
-- 但 increment 已在 ②（送出请求时）发生，且**可能已有事件被 stamp 了 newTurn**（例如上游在返回非 2xx 前已经经 SSE 回过 busy）；
-- 因此**不能**在得知非 2xx 后「撤销 increment」——那会破坏 monotonicity，并让已 stamp 的事件变成孤儿（turn 号对不上）。
+> **修订（应对 slimapi 反馈，httpx stream 单 await）**：§4.1.1 已论证 httpx-stream 栈下 increment 必须在 `await send()` 之前 → 连接级失败（`send()` 抛异常）时 turn 已 bump → 成 **hole**。原 v3 / 本文档初稿的「连接级失败不 increment」在 httpx-stream 栈下**不可实现且非必要**。本节据此放宽。
 
-**契约定义**：非 2xx → increment **已经提交**，该 turn 是一个**计数的空轮次（hole）**：没有成功 generation，但 turn 号已占用。**禁止 decrement / 回退**（v3「允许 turn 空洞，禁 unsafe decrement」）。下一个成功 forward 从 `turn+1` 继续。
+**契约定义（修订后）**：若 `await send()` 抛异常——无法建立上游连接 / 无法发出请求（DNS、TCP/TLS 失败、send error、上游不可达）——则 **turn 已 bump（send 前 bump），该 turn 成 hole**：没有 generation，但 turn 号已占用。**禁止 decrement / 回退**。下一个 forward 从 `turn+1` 继续。
 
-**安全性**：
+> **send error 的边界（post-send 重置归类）**：send error 指**请求未完整发出**的失败（发送中途断开 / 连接建立失败），此时上游**未收到**本 forward，不会有 in-flight 活动 → hole 是空 hole（无事件 stamp 该 turn）。若请求**已完整到达上游**（send 返回后）再连接重置 / 上游崩溃 / 无 HTTP 响应，则属 §4.3 的 hole（可能有 in-flight 事件 stamp 了该 turn）。两者都 decrement-free。
+
+**安全性（为什么放宽不破坏正确性）**：
 - monotonicity 保持（hole 不破坏单调）；
-- ocdroid 的 lex 比较**天然处理 hole**（没有事件 stamp 该 turn，或事件 stamp 了但代表「本轮失败」——两种情况 lex 比较都正确）；
-- 不需要任何 decrement 逻辑（最简、无竞态）。
+- ocdroid 的 lex 比较**天然处理 hole**（无事件 stamp 该 turn → 无比较发生；或事件 stamp 了但代表「本轮失败」→ lex 仍正确）；
+- **ocdroid 侧完全不可见**该 hole：ocdroid 收到 slimapi 的错误响应不写 optimistic busy（POST 失败无回滚对象），也不会收到 stamp 该 turn 的事件（空 hole）——双方对「该轮失败」的认知一致，只是 slimapi 的 turn 计数器多走了一步（下次成功 forward 是 turn+1 而非 turn）。**无 fence 后果、无协调后果**。
+- 唯一损失：§4.2 初稿的「连接失败时双方 turn 计数优雅一致」装饰性特性。该特性**不可与 §4.4 fence 正确性并存于 httpx-stream 栈**，本契约选保 §4.4（硬）、舍此（软）。
 
-> **与 v3 §5.2 的关系（闭合说明，见 §B）**：v3 把「连接错 / 非 2xx」并列写作「不 increment」。本契约**拆分**二者：连接级失败（pre-dispatch）不 increment；应用级非 2xx（post-dispatch）**已 increment，产生 hole**。两者都 decrement-free。这一拆分是**支持「事件在响应前就 stamp turn」所必需的**（见 §4.4），是把 v3 紧凑叙述落地为无竞态实现的关键精确化。
+### 4.3 上游非 2xx 响应 → 同样产生 hole，不回退（与 §4.2 收敛）
 
-### 4.4 为何 increment 必须在 await 前（不能等 2xx 再 increment）
+非 2xx 是**响应状态**，在 `send()` 返回（响应头到达）后才知道。此时 increment 已在 send 前 bump（§4.1.1）发生，且**可能已有事件被 stamp 了 newTurn**（上游在返回非 2xx 前已经经 SSE 回过 busy）。**不能**在得知非 2xx 后「撤销 increment」——会破坏 monotonicity，让已 stamp 事件变孤儿。
 
-Tier-1 fence 的全部价值在于**精确裁决在途轮次期间到达的事件**。典型场景（cross-channel reorder）：
+**契约定义**：非 2xx → increment **已经提交**，该 turn 是一个**计数的空轮次（hole）**。**禁止 decrement**（v3「允许 turn 空洞，禁 unsafe decrement」）。下一个成功 forward 从 `turn+1` 继续。
+
+> **§4.2 与 §4.3 现已收敛**：修订后两者都是「失败 → hole，禁 decrement」，区别仅在 hole 是否为空（连接失败=空 hole 无事件；非 2xx=可能非空 hole 有 busy 事件）。对 ocdroid 而言无区别。
+
+> **与 v3 §5.2 的关系（历史，详见 §B item 1）**：v3 把「连接错 / 非 2xx」并列作「不 increment」。本契约**初版**曾拆分为「连接级失败不 increment / 非 2xx 产生 hole」；**修订版（应对 httpx-stream，§4.1.1/§4.7）收敛为「任何失败 → hole，禁 decrement」**——因 send 前 bump 下连接级失败时 turn 已 bump，唯一自洽选择是 hole。
+
+### 4.4 为何 increment 必须在 in-flight 窗口之前（不能等 2xx / 不能 send 后 bump）
+
+Tier-1 fence 的全部价值在于**精确裁决在途轮次期间到达的事件**。典型场景（cross-channel reorder，上游 forward 通道与 SSE status 通道分离）：
 
 ```
 t0  ocdroid POST /prompt
-t1  slimapi forward 上游（② commit, turn→3）
-t2  上游经 SSE 回 busy      ← slimapi stamp inc=7,turn=3 转发给 ocdroid
+t1  slimapi send 前 bump turn→3，再 await send()
+t2  [在 send() 内部] 上游收到请求 → 处理 → 经 SSE 回 busy
+        ← GlobalHub ingest 该 busy，stamp turn=3（send 还没返回！）
 t3  ocdroid 收到 busy(7,3)  ← Tier-1 精确知道这是第 3 轮的 busy
-t4  上游 HTTP 200 回到 slimapi（await 完成）
+t4  send() 返回（响应头到），HTTP 200
 ```
 
-若 increment 推迟到 t4（拿到 2xx 后），则 t2 的 busy 事件**无法被 stamp 正确的 turn**（此时 turn 还没 +1）——fence 在最关键的「在途事件」窗口失效。因此 **increment 必须在 forward 送出时（②）**，这也决定了 §4.3「非 2xx 产生 hole」是唯一自洽选择。
+若 increment 推迟到 `send()` 返回后（slimapi 选项「send 后 bump」），则 t2 的 busy 被 stamp 成**旧 turn**——fence 在最关键的 in-flight 窗口失效，且该错误**不可恢复**（事件已转发给 ocdroid）。因此 **increment 必须在 `await send()` 之前**（§4.1.1 的 send 前 bump）。这也决定了 §4.2/§4.3「任何失败产生 hole，禁 decrement」是唯一自洽选择。
 
 ### 4.5 abort 的 turn 语义
 
@@ -223,13 +241,42 @@ digest(busy, inc=7, turn=3)    ← 旧第 3 轮迟到 stale busy → lex 3<4 →
 
 ### 4.6 turn 计数的不变量（可证明）
 
-1. **per-scope monotonic（不减）**：`turn[(serverGroupFp,sid)]` 在其生命周期内**只增不减**；失败不回退，无 decrement。
+1. **per-scope monotonic（不减）**：`turn[(serverGroupFp,sid)]` 在其生命周期内**只增不减**；**任何失败**（连接级 / 非 2xx / post-send 重置，§4.2/§4.3）**都不回退，无 decrement**。失败 → hole（见不变量 3），绝不 decrement。
 2. **per-(serverGroupFp,sid) 独立**：不同 sid 的 turn 互不影响；同 sid 在不同 serverGroupFp 下也是不同计数（ScopeKey 隔离）。
-3. **hole 允许**：turn 序列可出现空洞（如 1,2,3,5——4 是非 2xx hole）；ocdroid 不假设连续。
-4. **单次 forward 恰好 +1**：一次 forward（prompt 或 abort）对应恰好一次 increment（成功送出时）；不会 +0（除非连接级失败）也不会 +2。
+3. **hole 允许**：turn 序列可出现空洞（如 1,2,3,5——4 是某次失败 hole）；ocdroid 不假设连续。
+4. **单次 forward 恰好 +1**：一次 forward（prompt 或 abort）对应恰好一次 increment（**send 前 bump，§4.1.1**）。**成功**：turn+1 且有事件 stamp。**失败**：turn+1 但成 hole（空 hole 无事件，或非空 hole 有 busy 事件）——**无论成败都 +1，永不 +0**（这是 §4.1.1 的直接推论：bump 发生在 send 前，send 成败不影响「bump 已发生」）。
 5. **incarnation advance 不自动重置 turn 计数器（二者解耦）**：inc bump 与 turn 计数器是两个独立机制——bump incarnation **不会**触发 turn 归零。turn 计数器在**单次 incarnation 内**单调不减（失败不回退，无 decrement）。「重置」只发生在 ocdroid 侧（见 §5.4、§8.2：ocdroid 见 inc advance → 清空该 scope 的 **已知 serverRound 比较基线**）。
 
 > 不变量 5 的澄清（防误读）：slimapi 的 turn 计数器与 incarnation 是解耦的——bump incarnation 不会归零 turn。**跨 incarnation（restart）turn 计数器是否持久化是 §7.3 的策略选项**（持久化继续累加 / 不持久化 restart 后归零——**两种都正确**，因为 incarnation bump 会使 ocdroid 侧重置 serverRound 基线，旧 turn 自然过期）。ocdroid 侧「重置」指的是**清空客户端记录的 serverRound 比较基线**（新 epoch，旧基线不可比），**不是**要求 slimapi 把 turn 计数器归零。
+
+### 4.6.1 「request is on the wire」的现实性说明（实施现实主义）
+
+§4.1 形式定义用「request is on the wire」描述 commit 的因果时刻。**实施层面**：应用层（httpx / httpcore / anyio）无法可靠观测「字节已离开本机网卡、被上游 TCP 栈接收」——`send()` 返回只意味着「已交给本地 socket 缓冲 / TLS 层」，不等于上游已收到。
+
+**这意味着什么**：commit point 的精确因果瞬间（上游何时算「已收到请求」）在应用层**不可严格观测**。本契约**不依赖**该精确瞬间——它依赖的是更弱的、**可保证**的性质：
+
+- **send 前 bump 保证**：increment 发生在 slimapi 调用 `await send()` **之前**；
+- **happens-before（§7.2）保证**：上游因本 forward 产生的任何活动（包括 SSE busy）→ 经网络回到 GlobalHub → 被 ingest stamp，整条链路在时间上**必然在** `send()` 被调用**之后**（上游不可能在收到请求前产生因果上属于该请求的活动）。
+
+两段 guarantee 叠加：**increment 先于「上游对本 forward 的任何因果后继活动被 GlobalHub stamp」**。这是 §4.4 正确性所需的全部——不需要「上游已收到字节」这个更强的、不可观测的条件。因此 §4.1 的「request is on the wire」是**因果意图的描述**，实施以「send 前 bump + §7.2 happens-before」兑现，二者一致。
+
+### 4.7 slimapi 实施选项取舍（应对反馈，拍板依据）
+
+> slimapi 反馈（httpx `stream=True`，`proxy.py:141` 单次 await）提出三选项，要求契约方拍板。取舍依据 = **硬约束优先**：§4.4（fence 正确性）与 §4.6.1 不变量 1（禁 decrement）是硬、不可破；§4.2 原「连接失败不 increment」是软/装饰性（hole 对 ocdroid 不可见）。
+
+| 选项 | 做法 | §4.4 fence 正确性（硬） | §4.6.1 不变量1 禁 decrement（硬） | §4.2 连接失败不 increment（软/装饰） | 结论 |
+|---|---|---|---|---|---|
+| **A（send 前 bump）** | 调 `send()` 前 `turn += 1`；send 抛异常 → 该 turn 成 hole | ✅ 满足（increment 先于 send 内的上游活动，§4.6.1） | ✅ 满足（hole 不 decrement） | ❌ 违反（成 hole）——但 hole 对 ocdroid 不可见，无后果 | **✅ 采用（唯一保证硬约束）** |
+| **B（send 后 bump）** | `await send()` 返回后 `turn += 1` | ❌ **破坏**（send 内的 in-flight SSE busy 被 stamp 旧 turn，且不可恢复——事件已发出） | ✅ 满足 | ✅ 满足 | ❌ **否决（破坏 fence）** |
+| **C（换 httpcore/anyio 两阶段）** | 下沉到底层分两阶段，试图在「请求已发、未 await 响应」间 bump | ⚠️ 部分满足（窗口缩小但 TCP 无 wire-ack，§4.6.1，仍有上游活动先于 bump 可见） | ✅ 满足 | ⚠️ 部分满足（仍有窗口） | ❌ **否决（不真正闭合 + 换栈成本不值）** |
+
+**拍板：选项 A。** 理由：
+1. **A 是唯一保证硬约束（§4.4）的选项**——B 直接破坏 fence（in-flight busy 错 stamp，不可恢复）；C 因 TCP 无 wire-ack 仍有窗口（§4.6.1），且换栈成本高、收益为 0（仅为保住装饰性 §4.2）。
+2. **A 违反的 §4.2 是软/装饰性约束**——hole 对 ocdroid **完全不可见**（无事件 stamp 该 turn，lex 统一处理 hole），无 fence 后果、无协调后果，只失去「双方 turn 计数优雅一致」的 nice-to-have。该 nice-to-have **不可与 §4.4 共存于 httpx-stream 栈**，本契约选保硬（§4.4）、舍软（§4.2）。
+3. **A 使模型更简单**——§4.2 与 §4.3 收敛为同一规则（任何失败 → hole，禁 decrement），无特例、无分支。
+4. **A 无需换栈**——slimapi 现有 `await client.send(req, stream=True)` 不动，只在调用前加一行 `turn[(serverGroupFp,sid)] += 1`。
+
+> **契约据此修订**：§4.2 放宽为「连接失败 → hole」（原「不 increment」）；§4.6.1 不变量 1/4 同步；§10.1 S3 / §11 V6 同步。选项 B/C 明确否决，不再作为合规实施路径。
 
 ---
 
@@ -319,7 +366,7 @@ slimapi 若由多个组件组成（如 proxy 转发层 + global_hub 事件聚合
 
 - turn increment 与 event stamp 可能**并发**（proxy forward 的同时 global_hub 在 ingest 上游 SSE）；
 - registry 的 read（stamp）与 write（increment）必须是**线程/协程安全**的（原子读-modify-写，或等价的锁/actor）；
-- **不变量（单调可见性）**：stamp 读到的 turn 是 registry 当前已提交的最大值（单调 acquire 语义）。关键 happens-before 链：`forward send（commit point increment）→ 上游接收 → 上游产生事件 → slimapi ingest 该事件并 stamp turn`。因此**该 forward 的 increment 必须在其触发的任何上游事件被 stamp 之前对 stamp 可见**（forward send → ingest stamp 之间，stamp 看到的 turn ≥ 该 forward 的 increment 值；不会因并发读到旧值）。
+- **不变量（单调可见性）**：stamp 读到的 turn 是 registry 当前已提交的最大值（单调 acquire 语义）。关键 happens-before 链：`commit point increment → forward send（await send() 调用）→ 上游接收 → 上游产生事件 → slimapi ingest 该事件并 stamp turn`。因此**该 forward 的 increment 必须在其触发的任何上游事件被 stamp 之前对 stamp 可见**（forward send → ingest stamp 之间，stamp 看到的 turn ≥ 该 forward 的 increment 值；不会因并发读到旧值）。
 
 ### 7.3 incarnation 独立持久化
 
@@ -341,6 +388,8 @@ slimapi 在**转发 status 事件给 ocdroid 时（ingest 上游事件的那一�
 ```
 
 incarnation 同理：事件 ingest 时快照当前 incarnation（同一次生命周期内恒定，但快照语义保持一致）。
+
+> **已知限制：ingest-time 快照保证下限不保证上限（前瞻性披露，非本次 §4 amend 引入）**。§7.2 的单调可见性不变量保证「本次 forward 的事件见到本次 increment」（下限）。但存在一个**上限**竞态：前一轮 forward 的**迟到** SSE 事件到达 GlobalHub 时，registry 已被后续 forward increment → 读到更高 turn → 被过 stamp 成新轮次（如 round-3 的迟到 busy 在 round-4 forward 后才 ingest，读到 turn=4，错 stamp 成 round-4）。这在快速连续 forward（prompt→abort）+ SSE 延迟下可达，**与 send-前/后-bump 无关**（两种策略都有），且 turn-token 本质是 per-(scope,sid) 单调计数器而非每事件因果戳——**仅靠计数器无法闭合**此上限竞态。本契约**接受**此限制（lex fence 对「过 stamp 的高 turn」不 DROP，但该事件因果上属前一轮，ocdroid 侧表现为「过早 busy」而非 stale 复活，liveness 不破，wall-clock 语义可容忍）。**若联调证明此竞态在高频场景有用户可见后果，后续可补 §7.4 强 stamp 方案（如事件携带 forward 序列号），列为开放问题 O6。**
 
 ---
 
@@ -452,9 +501,9 @@ ocdroid 的 **REST `/session/status` 批量快照**（`ApplySnapshot`）路径**
 | # | 职责 | 契约节 |
 |---|---|---|
 | S1 | 在转发的 `session.digest`（带 status）事件 `properties` 内附加 `turnIncarnation` + `turn`（同时出现/缺失） | §3 |
-| S2 | 实现 turn commit point：forward prompt/abort **送出上游时**（await 前）`turn += 1` | §4.1 |
-| S3 | 连接级失败（pre-dispatch）→ **不 increment** | §4.2 |
-| S4 | 非 2xx（post-dispatch）→ **已 increment，产生 hole，不 decrement** | §4.3 |
+| S2 | 实现 turn commit point：forward prompt/abort **`await send()` 之前** `turn += 1`（send 前 bump，httpx-stream 栈下唯一合规路径，§4.1.1/§4.7） | §4.1, §4.1.1, §4.7 |
+| S3 | **send 抛异常（连接级失败）→ turn 已 bump，成 hole**（修订自原「不 increment」；禁 decrement） | §4.2 |
+| S4 | 非 2xx（post-dispatch）→ **已 increment，产生 hole，不 decrement**（与 S3 同规则，§4.3） | §4.3 |
 | S5 | incarnation **单独持久化**，restart bump，跨 restart 单调；声明策略 A/B | §5.2-5.3 |
 | S6 | 多 worker/容器共享同一 incarnation 持久源；声明实例指纹方案 | §5.4 |
 | S7 | serverGroupFp：选方案 A（header 透传）或 B（自算），**声明并与 §6.1 对齐** | §6 |
@@ -493,10 +542,10 @@ ocdroid 的 **REST `/session/status` 批量快照**（`ApplySnapshot`）路径**
 | V3 | **旧帧不复活（turn）** | 同 inc 内，turn=3 之后到达 turn=2 的 stale 帧 | lex `2 < 3` → **DROP** |
 | V4 | **跨通道反序** | POST 后 server busy（经 SSE，stamp turn=3）先于 HTTP 200 到达 | busy(inc,3) 经 Tier-1 应用；HTTP 200 的 optimistic 经 `serverEchoed` 协调（非数值比较） |
 | V5 | **abort fencing** | abort forward → turn→4；abort 终态 idle 带 turn=4；之后旧 turn=3 的 stale busy 到达 | idle(4) 应用；stale busy(3) → lex DROP（不复活） |
-| V6 | **连接级失败不 increment** | forward 时上游不可达（连接失败）→ 回错 | turn 不变；ocdroid 收错不写 optimistic；下一次成功 forward turn 仍是原值+1（无 hole） |
+| V6 | **连接级失败成 hole**（修订自原「不 increment」，§4.2/§4.7） | send 前 bump（turn→4）→ `send()` 抛异常（上游不可达）→ 回错 | turn=4 已 bump，成**空 hole**（无事件 stamp 该 turn）；ocdroid 收错不写 optimistic，**完全不可见**该 hole；下一次成功 forward turn→5（有 hole）。fence 无影响。 |
 | V7 | **非 2xx 产生 hole** | forward 送出（turn→4）→ 上游回 409/500 | turn=4 已占用（hole）；下一次成功 forward turn→5；ocdroid lex 比较正常（hole 不破坏单调） |
 | V8 | **降级回退（字段缺失）** | slimapi 不发字段（或部分事件不带） | ocdroid 解析 null → 降级 Tier-2 确认门 + watchdog，系统正常（= 今日行为） |
-| V9 | **逐事件混用** | 升级窗口内交替发「带 turn」「不带 turn」帧 | 逐帧独立裁决（带→Tier-1，不带→Tier-2），fence 不破坏 |
+| V9 | **逐事件混用（有条件安全）** | 升级窗口内交替发「带 turn」「不带 turn」帧 | 逐帧独立裁决；**同 incarnation 内混用有 fence 窗口**（§9：Tier-2 清基线后低 turn 帧可绕过 lex guard 复活）→ **联调前提 = slimapi 不在同 incarnation 内混用**（升级走 restart / inc bump）。本场景验证：同 incarnation 全带 turn 或全不带时 fence 正常；混用时复现 §9 窗口（作为已知限制，**非通过判据**）。 |
 | V10 | **ingest 快照正确性** | busy 事件到达时 turn=3，期间 prompt forward（turn→4），但 busy 已 stamp 3 | ocdroid 收到 busy(3)——正确归属第 3 轮（若 flush 时才读会错成 4） |
 | V11 | **serverGroupFp 一致性** | 双方对同一连接算出相同 fp（方案 A 或 B） | turn 归入正确 scope；fence 生效（若 fp 不一致，fence 静默失效——此场景用于校验对齐） |
 
@@ -533,12 +582,14 @@ session.digest 事件 (SSE, slimapi → ocdroid)
 
 本契约以方案 v3 §5 为权威来源，但在以下点做了**面向实施的精确化**（不改变设计意图，只消除紧凑表述的歧义）：
 
-1. **commit point 的「before await vs 非 2xx 不 increment」歧义**（§4.3-4.4）：v3 把「连接错 / 非 2xx」并列作「不 increment」。本契约**拆分**：连接级失败（pre-dispatch）不 increment；应用级非 2xx（post-dispatch）**已 increment，产生 hole**。理由：increment 必须在 forward 送出时发生以支持「在途事件 stamp turn」（§4.4），因此非 2xx 在响应阶段才得知时 increment 已不可撤销，唯一自洽选择是 hole + 禁 decrement。两者均 decrement-free，monotonicity 保持。
+1. **commit point 的「before await vs 非 2xx 不 increment」歧义**（初版 §4.3-4.4）：v3 把「连接错 / 非 2xx」并列作「不 increment」。**初版**本契约**拆分**为「连接级失败（pre-dispatch）不 increment；应用级非 2xx（post-dispatch）产生 hole」。**修订版（应对 slimapi httpx-stream 反馈）**：因 httpx `stream=True` 单 await 无可观测 seam（§4.1.1），increment 必须在 `await send()` 之前（send 前 bump）→ 连接级失败时 turn 已 bump → **修订为「连接级失败也产生 hole」**（§4.2）。至此 §4.2 与 §4.3 **收敛为同一规则**：任何失败（连接级 / 非 2xx / post-send 重置）→ hole，禁 decrement。理由：§4.4（in-flight fence 正确性）是硬约束，要求 increment 先于上游活动可见；§4.2 原「不 increment」是装饰性（hole 对 ocdroid 不可见）→ 保硬舍软（§4.7 三选项拍板）。monotonicity 保持。
 2. **字段位置**（§3.1）：v3 §5.2 的 JSON 示例把字段画在事件顶层；本契约按 ocdroid 实际解析（`0d572d2`）明确字段在 digest 的 **`properties`** 对象内。
 3. **REST status 的 turn 处置**（§8.4）：v3 未展开 REST 批量 status 与 turn 的关系；本契约明确 REST ApplySnapshot **当前清除** serverRound，turn 主走 digest 通道。
-4. **turn 跨 incarnation 不归零**（§4.6 不变量 5）：明确 slimapi turn 计数器跨 incarnation 持续累加；「重置」发生在 ocdroid 侧（基线），非 slimapi 侧（计数器）。
+4. **turn 与 incarnation 解耦**（§4.6 不变量 5）：bump incarnation 不触发 turn 归零（二者独立机制）。跨 incarnation（restart）turn 是否持久化是 §7.3 策略选项（持久化累加 / restart 归零均正确，因 inc bump 使 ocdroid 重置基线）。
+5. **「request is on the wire」是因果语义而非可观测瞬间**（§4.6.1，修订新增）：应对 slimapi 反馈——应用层（httpx/httpcore/anyio）无法可靠观测「字节已上 wire」。本契约**不依赖**该精确瞬间，而依赖「send 前 bump + §7.2 happens-before」两段可保证的性质叠加。
+6. **slimapi httpx-stream 实施选项拍板**（§4.7，修订新增）：三选项 A/B/C 取舍，**采用 A（send 前 bump）**，否决 B（破坏 fence）、C（TCP 无 wire-ack 仍有窗口 + 换栈不值）。
 
-> 上述精确化均**不改变 v3 的设计意图**（强 fence + 计数空间分离 + 字段可选降级），是把紧凑叙述落地为可实施、无竞态规格的必要细化。若任一精确化与 slimapi 实施约束冲突，在 §10 对齐时提出修订。
+> 上述精确化均**不改变 v3 的设计意图**（强 fence + 计数空间分离 + 字段可选降级），是把紧凑叙述落地为可实施、无竞态规格的必要细化。修订点（1/5/6）应对 slimapi httpx-stream 反馈，放宽了 v3 / 初版 §4.2 的装饰性表述以保 §4.4 硬约束。
 
 ---
 
