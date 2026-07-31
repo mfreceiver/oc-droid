@@ -72,6 +72,15 @@ data class SessionEntry(
      *  filter survivors by REAL scope (not workdir approximation). Null on
      *  entries created before the field was added (backward-compat). */
     val scopeKey: ScopeKey? = null,
+    /** §3.1 BLK-2: per-sid serverRound HIGH-WATER — the lexicographically-greatest
+     *  `(incarnation, turn)` ever accepted for this sid. Unlike the live [serverRound]
+     *  baseline, this watermark SURVIVES baseline clears (REST [applySnapshot],
+     *  legacy SSE busy keepRound=null, incarnation-advance scope reset) so that a
+     *  stale low-turn Tier-1 slim frame arriving AFTER the baseline was cleared is
+     *  still fenced (strict-monotonic DROP). Advanced only forward (never regressed);
+     *  a new server incarnation naturally dominates it via [ServerRound.compareTo].
+     *  Null on cold start (the first slim frame establishes the baseline). */
+    val serverRoundHighWater: ServerRound? = null,
 )
 
 /**

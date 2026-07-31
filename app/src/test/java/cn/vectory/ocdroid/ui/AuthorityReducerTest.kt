@@ -450,6 +450,234 @@ class AuthorityReducerTest {
         assertEquals("low-incarnation frame dropped", busy, store.stateFlow.value.sessionList.sessionStatuses["A"])
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // §3.1 BLK-2 — baseline-cleared low-turn revival window
+    //
+    // When the live serverRound baseline is cleared (REST ApplySnapshot / legacy
+    // SSE busy / incarnation-advance scope reset) but a Tier-1 slim frame with a
+    // turn arrives, the lex guard (which requires prev.serverRound != null) is
+    // skipped. Without the BLK-2 per-sid serverRound high-water, a stale LOW-turn
+    // frame would apply unconditionally and revive stale busy. These tests pin
+    // that the persistent watermark closes the window.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `BLK-2 - stale low-turn slim frame is DROPPED after REST snapshot clears the baseline`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // Establish a Tier-1 baseline at incarnation 5, turn 7.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 100L),
+        ))
+        assertEquals(ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        // REST ApplySnapshot clears the live baseline (serverRound → null); the
+        // BLK-2 high-water (5,7) must SURVIVE the clear.
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(snapshot = mapOf("A" to SessionStatus(type = "busy")),
+                     authoritativeNodeIds = setOf("A")),
+        ))
+        assertNull("REST clears the live serverRound baseline",
+            store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals("BLK-2 high-water survives the REST clear",
+            ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
+        // BLK-2 window: a stale LOW-turn slim digest arrives late (cross-channel
+        // reorder). Pre-fix this revived stale busy; it must now be DROPPED.
+        val beforeStale = store.stateFlow.value
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 4L), monotonic = 300L),
+        ))
+        assertNull("stale low-turn frame DROPPED — baseline stays cleared",
+            store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals("dropped stale frame is a true no-op (same ref state)",
+            beforeStale, store.stateFlow.value)
+    }
+
+    @Test
+    fun `BLK-2 - stale low-turn slim frame is DROPPED after a legacy SSE busy clears the baseline`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 100L),
+        ))
+        // Legacy SSE BUSY carries no serverRound → keepRound=null clears the live
+        // baseline; the BLK-2 high-water (5,7) is preserved.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
+        ))
+        assertNull("legacy busy clears the live serverRound baseline",
+            store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals(ServerRound(5L, 7L),
+            store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
+        // Stale low-turn slim digest → must DROP (not revive stale busy).
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 4L), monotonic = 300L),
+        ))
+        assertNull("stale low-turn DROPPED — baseline stays cleared",
+            store.stateFlow.value.authority.bySid["A"]?.serverRound)
+    }
+
+    @Test
+    fun `BLK-2 - a fresh higher-turn slim frame is ACCEPTED after the baseline is cleared`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 100L),
+        ))
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(snapshot = mapOf("A" to SessionStatus(type = "busy")),
+                     authoritativeNodeIds = setOf("A")),
+        ))
+        assertNull(store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        // Fresh higher turn → ACCEPTED, and the high-water advances.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 9L), monotonic = 300L),
+        ))
+        assertEquals("fresh higher turn accepted",
+            ServerRound(5L, 9L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals("high-water advanced to the fresh turn",
+            ServerRound(5L, 9L), store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
+    }
+
+    @Test
+    fun `BLK-2 - an equal-turn slim frame after baseline clear is accepted, not over-fenced`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 100L),
+        ))
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(snapshot = mapOf("A" to SessionStatus(type = "busy")),
+                     authoritativeNodeIds = setOf("A")),
+        ))
+        // §3.1 fences ONLY strictly-low turns (cmp < 0 → DROP). An equal turn is
+        // not stale (the server never regresses to it), so it re-establishes the
+        // baseline — mirroring the live lex guard's equal handling.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 300L),
+        ))
+        assertEquals("equal turn re-establishes the baseline",
+            ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+    }
+
+    @Test
+    fun `BLK-2 - high-water advance then a later stale low-turn frame is fenced`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 100L),
+        ))
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(snapshot = mapOf("A" to SessionStatus(type = "busy")),
+                     authoritativeNodeIds = setOf("A")),
+        ))
+        // A fresh frame advances the watermark to (5, 12).
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 12L), monotonic = 300L),
+        ))
+        // Another REST clear wipes the live baseline again.
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(snapshot = mapOf("A" to SessionStatus(type = "busy")),
+                     authoritativeNodeIds = setOf("A")),
+        ))
+        assertNull(store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals(ServerRound(5L, 12L),
+            store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
+        // A stale frame with a turn between the two baselines (9) is still stale
+        // relative to the ADVANCED watermark (12) → DROP.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 9L), monotonic = 400L),
+        ))
+        assertNull("stale turn below the advanced high-water DROPPED",
+            store.stateFlow.value.authority.bySid["A"]?.serverRound)
+    }
+
+    @Test
+    fun `BLK-2 - cold start with no watermark accepts the first slim frame`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // No prior baseline at all → first slim frame establishes it (no
+        // high-water to compare against → must not be spuriously dropped).
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 1L), monotonic = 100L),
+        ))
+        assertEquals(ServerRound(5L, 1L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals(ServerRound(5L, 1L),
+            store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
+    }
+
+    @Test
+    fun `BLK-2 - high-water survives an incarnation-advance scope reset`() {
+        // Pins the third declared baseline-clear source (incarnation-advance scope
+        // reset at applyEvent ~L348), which uses `.copy(serverRound = null)` and so
+        // PRESERVES the high-water. After the reset a stale LOW-turn frame under the
+        // NEW incarnation must still be fenced by the BLK-2 watermark.
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // Establish a Tier-1 baseline under incarnation 5, turn 7 (also advances the
+        // scope high-water to incarnation 5).
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 100L),
+        ))
+        assertEquals(ServerRound(5L, 7L),
+            store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
+        // Incarnation advance (server restart) to incarnation 6 → resets THIS scope's
+        // entries' live serverRound to null, advances scope high-water to 6.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(6L, 1L), monotonic = 200L),
+        ))
+        assertEquals(6L, store.stateFlow.value.authority.knownIncarnations[scope])
+        // A stale low-incarnation frame (incarnation 4 < scope high-water 6) is caught
+        // by the B6 guard (L239), NOT the BLK-2 guard — assert that first to anchor
+        // which guard owns incarnation fencing.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "idle"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(4L, 99L), monotonic = 250L),
+        ))
+        // Now the BLK-2-relevant case: a DIFFERENT sid "B" that had its baseline
+        // cleared by the incarnation-advance reset (scope-wide null reset). B had
+        // previously seen incarnation 5 turn 7; after the reset its live baseline is
+        // null but its high-water (5,7) survived. A stale same-incarnation-5 low-turn
+        // frame (incarnation 5 is NOT < scope high-water 6, so B6 does NOT fire) must
+        // be fenced by BLK-2.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("B", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 120L),
+        ))
+        // The incarnation-advance to 6 resets B's live serverRound (scope-wide reset).
+        // Re-establish the scope advance by replaying an incarnation-6 frame on B:
+        store.dispatch(AppAction.AuthorityEvent(
+            event("B", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(6L, 2L), monotonic = 210L),
+        ))
+        // Clear B's live baseline via REST so prev.serverRound is null but the
+        // high-water (6,2) survives — this isolates the BLK-2 path.
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(snapshot = mapOf("B" to SessionStatus(type = "busy")),
+                     authoritativeNodeIds = setOf("B")),
+        ))
+        assertNull(store.stateFlow.value.authority.bySid["B"]?.serverRound)
+        assertEquals(ServerRound(6L, 2L),
+            store.stateFlow.value.authority.bySid["B"]?.serverRoundHighWater)
+        // Stale same-incarnation (6) low turn (1 < 2) — B6 does NOT fire (inc 6 ==
+        // scope high-water 6), BLK-2 must DROP.
+        val beforeStale = store.stateFlow.value
+        store.dispatch(AppAction.AuthorityEvent(
+            event("B", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(6L, 1L), monotonic = 300L),
+        ))
+        assertNull("stale low-turn after scope-reset baseline clear DROPPED",
+            store.stateFlow.value.authority.bySid["B"]?.serverRound)
+        assertEquals("dropped stale frame is a no-op (same ref state)",
+            beforeStale, store.stateFlow.value)
+    }
+
     @Test
     fun `an ApplySnapshot with a mismatched host guard is DROPPED`() {
         val store = storeWith(listOf(Session(id = "A", directory = "/x")))
