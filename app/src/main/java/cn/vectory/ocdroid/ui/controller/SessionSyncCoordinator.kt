@@ -1587,7 +1587,19 @@ class SessionSyncCoordinator(
             // above). backoffMs is the NOMINAL exponential base (no jitter —
             // jitter is a runtime non-determinism applied by the poller's
             // scheduleBackoff; the queue records the deterministic strategy
-            // so the metadata is reproducible / testable).
+            // so the metadata is reproducible / testable), clamped to
+            // BACKOFF_MAX_MS so it never exceeds the poller's actual cap
+            // (rev-glm N3: exponentialBackoffMs alone can overshoot at high
+            // attempt counts; the poller applies the same 30s coerceAtMost).
+            //
+            // §P1-B/E rev-glm N6: every Retry sid is enqueued UNCONDITIONALLY
+            // (no active-state filter). A Retry outcome means "the status
+            // fetch failed transiently" — the sid's TRUE status is unknown at
+            // this point, so the queue tracks "sids pending a confirmed
+            // status", NOT "busy sessions needing retry". A sid that was idle
+            // before the 503 still legitimately needs re-fetching; its entry
+            // cleans up once a terminal status (idle/failed) is delivered
+            // (applyEvent terminal-cleanup) or a covering sweep fires it.
             for ((sid, outcome) in summary.perSid) {
                 if (outcome !is cn.vectory.ocdroid.data.repository.StatusOutcome.Retry) continue
                 val prevAttempt = auth.retryQueue[sid]?.attempt ?: 0
@@ -1595,7 +1607,7 @@ class SessionSyncCoordinator(
                     attempt = prevAttempt,
                     baseMs = cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.BACKOFF_BASE_MS,
                     maxShift = cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.BACKOFF_MAX_SHIFT,
-                )
+                ).coerceAtMost(cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.BACKOFF_MAX_MS)
                 slices.store.dispatch(
                     cn.vectory.ocdroid.ui.AppAction.AuthorityEvent(
                         cn.vectory.ocdroid.data.state.AuthorityOp.RetryQueued(

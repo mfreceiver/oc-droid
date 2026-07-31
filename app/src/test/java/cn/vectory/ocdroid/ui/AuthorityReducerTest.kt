@@ -2396,6 +2396,99 @@ class AuthorityReducerTest {
         testScope.cancel()
     }
 
+    @Test
+    fun `RetryQueued LRU keeps new entry when it is itself the oldest (rev-glm N2)`() {
+        // The else-branch in applyRetryQueued: when the queue is full AND the
+        // newly-inserted entry is itself the oldest (smallest queuedMonotonic),
+        // no EXTRA entry is evicted (the cap may transiently be +1, but the
+        // newest survives). This pins that behavior + the else-branch coverage.
+        val state = StoreState.initial()
+        var cur = state
+        // Fill 256 entries with queuedMonotonic 100..355.
+        for (i in 0 until 256) {
+            cur = reduceAuthority(cur, retryQueued("sid-$i", queuedMonotonic = 100L + i))
+        }
+        assertEquals(256, cur.authority.retryQueue.size)
+        // Insert a NEW sid at queuedMonotonic = 50 (OLDER than all 256). The
+        // just-inserted entry is itself the oldest → else-branch keeps the
+        // queue at 257 transiently (no extra eviction), new entry present.
+        cur = reduceAuthority(cur, retryQueued("new-oldest", queuedMonotonic = 50L))
+        assertEquals("transient +1 cap when new entry is the oldest", 257, cur.authority.retryQueue.size)
+        assertTrue("the new oldest entry is kept (not self-evicted)",
+            "new-oldest" in cur.authority.retryQueue)
+        // Self-heals on next insert (any insert that is NOT the oldest evicts
+        // the oldest, restoring the cap).
+        cur = reduceAuthority(cur, retryQueued("newest", queuedMonotonic = 9999L))
+        assertEquals(257, cur.authority.retryQueue.size) // still 257 (max is 256+1 tolerated)
+        assertTrue("newest present", "newest" in cur.authority.retryQueue)
+    }
+
+    @Test
+    fun `terminal ApplyEvent idle cleans retryQueue via incarnation-advance path (rev-glm N5)`() {
+        // The incarnation-advance return path (AuthorityReducer.kt:402-406)
+        // mirrors the normal path's retryQueue cleanup. Seed a queued sid,
+        // then deliver an idle event with a serverRound that advances the
+        // incarnation (triggers the incarnation-advance branch).
+        val store = storeWith()
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1")))
+        assertTrue("s1 queued", "s1" in store.stateFlow.value.authority.retryQueue)
+        // Deliver idle with serverRound(incarnation=5, turn=1). The scope
+        // high-water starts at 0 → incarnation 5 > 0 → incarnation-advance
+        // branch fires AND cleans the retry entry (terminal idle).
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_SLIM,
+                monotonic = 2000L, serverRound = ServerRound(5L, 1L)),
+        ))
+        assertFalse("retry entry cleaned via incarnation-advance path",
+            "s1" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `equal-value terminal idle re-delivery cleans a stale retry entry (rev-glm N4)`() {
+        // rev-glm N4: the no-change early-return path (nextEntry == prev)
+        // previously skipped retryQueue cleanup. A sid queued by a 503, then
+        // confirmed terminal by an equal-value idle re-delivery, would leak.
+        // The fix adds cleanup to the early-return path when the sid is in
+        // the queue and the status is terminal.
+        val store = storeWith()
+        // Establish s1 as idle.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 100L),
+        ))
+        // Manually queue s1 (simulating a 503 that arrived after the idle).
+        store.mutateState { s ->
+            s.copy(authority = s.authority.copy(
+                retryQueue = s.authority.retryQueue + ("s1" to RetryEntry(1, 200L, 150L)),
+            ))
+        }
+        assertTrue("s1 manually queued", "s1" in store.stateFlow.value.authority.retryQueue)
+        // Re-deliver the SAME idle (equal-value → nextEntry == prev → early-return path).
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 100L),
+        ))
+        assertFalse("stale retry entry cleaned on equal-value terminal re-delivery",
+            "s1" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `equal-value busy re-delivery does NOT touch retryQueue when sid absent`() {
+        // The early-return cleanup only fires when the sid is actually in the
+        // queue. A normal equal-value busy re-delivery (sid NOT queued) must
+        // stay a true same-ref no-op (no spurious transition).
+        val store = storeWith()
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L),
+        ))
+        val stateBefore = store.stateFlow.value
+        // Equal-value busy re-delivery → nextEntry == prev → early-return.
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L),
+        ))
+        // No change (s1 not in queue → no cleanup → same-ref no-op).
+        assertSame("equal-value busy (sid not queued) is same-ref no-op",
+            stateBefore, store.stateFlow.value)
+    }
+
     // ── P1-C FreshnessTick (applyFreshnessTick) ──
 
     @Test

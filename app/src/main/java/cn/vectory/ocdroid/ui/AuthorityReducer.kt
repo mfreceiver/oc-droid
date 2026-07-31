@@ -414,7 +414,20 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
     // return cur (same ref). This makes an equal-value SSE re-delivery a true
     // CAS no-op (no emission), completing the B1 idempotency contract. (An
     // OPTIMISTIC op always changes the claim via clientSeq++ → never no-change.)
-    if (nextEntry == prev && nextPending === cur.pendingBumps) return cur
+    //
+    // §P1-B/E rev-glm N4: a terminal status re-delivery (nextEntry == prev,
+    // both terminal) MUST still clean a stale retry entry — a sid queued by an
+    // earlier 503 then confirmed terminal by this equal-value frame would
+    // otherwise leak (the normal + incarnation-advance paths both clean, but
+    // this no-change early-return was the gap). Only fires when the sid is
+    // actually in the queue (real transition); otherwise stays a same-ref no-op.
+    if (nextEntry == prev && nextPending === cur.pendingBumps) {
+        return if (!op.status.isBusy && !op.status.isRetry && op.sid in cur.retryQueue) {
+            cur.copy(retryQueue = cur.retryQueue - op.sid)
+        } else {
+            cur
+        }
+    }
 
     return cur.copy(
         bySid = cur.bySid + (op.sid to nextEntry),
