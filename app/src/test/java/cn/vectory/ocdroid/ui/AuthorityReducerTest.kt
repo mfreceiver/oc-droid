@@ -5,6 +5,7 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.state.AuthorityOp
 import cn.vectory.ocdroid.data.state.AuthorityState
+import cn.vectory.ocdroid.data.state.Coverage
 import cn.vectory.ocdroid.data.state.EntryOrigin
 import cn.vectory.ocdroid.data.state.Freshness
 import cn.vectory.ocdroid.data.state.OptimisticClaim
@@ -2617,6 +2618,133 @@ class AuthorityReducerTest {
         ))
         assertFalse("retry entry cleaned on reconcile FETCH_FAILED",
             "s1" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    // ── FETCH_FAILED fail-closed coverage (U-CQ1) ──
+
+    @Test
+    fun `applyReconcile FETCH_FAILED writes fail-closed coverage preserving prior registeredWorkdirs`() {
+        // §CQ-P1 (U-CQ1): FETCH_FAILED must write fail-closed coverage so the
+        // AllIdleFresh gate reads this scope as unknown (coveredWorkdirs=empty,
+        // unmappedActiveIds=empty, lastSuccessTimeMs=-1), while preserving
+        // registeredWorkdirs from the prior coverage entry.
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // 1. OPTIMISTIC busy → claim clientSeq=1
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        assertNotNull("claim present after OPTIMISTIC",
+            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim)
+
+        // 2. Seed prior coverage with non-empty fields.
+        store.mutateState { s ->
+            s.copy(authority = s.authority.copy(
+                coverage = s.authority.coverage + (scope to Coverage(
+                    registeredWorkdirs = setOf("/a", "/b"),
+                    coveredWorkdirs = setOf("/a"),
+                    unmappedActiveIds = setOf("x"),
+                    lastSuccessTimeMs = 999L,
+                )),
+            ))
+        }
+
+        // 3. FETCH_FAILED with matching claimClientSeq.
+        store.dispatch(AppAction.AuthorityEvent(
+            reconcileOutcome(store, "A", ReconcileOutcome.FETCH_FAILED),
+        ))
+
+        // 4. Assert entry removed and retryQueue clean.
+        assertNull("entry removed after FETCH_FAILED",
+            store.stateFlow.value.authority.bySid["A"])
+        assertFalse("retryQueue clean for removed entry",
+            "A" in store.stateFlow.value.authority.retryQueue)
+
+        // 5. Assert fail-closed coverage: registeredWorkdirs preserved, all other
+        //    fields reset to empty/fresh-failure sentinel.
+        val cov = store.stateFlow.value.authority.coverage[scope]
+        assertNotNull("coverage entry written for scope", cov)
+        assertEquals("registeredWorkdirs preserved", setOf("/a", "/b"), cov!!.registeredWorkdirs)
+        assertEquals("coveredWorkdirs empty (fail-closed)", emptySet<String>(), cov.coveredWorkdirs)
+        assertEquals("unmappedActiveIds empty (fail-closed)", emptySet<String>(), cov.unmappedActiveIds)
+        assertEquals("lastSuccessTimeMs = -1 (stale-success guard)", -1L, cov.lastSuccessTimeMs)
+    }
+
+    @Test
+    fun `applyReconcile FETCH_FAILED with no prior coverage writes empty-registered fail-closed`() {
+        // §CQ-P1 (U-CQ1): when there is NO prior coverage for the scope,
+        // FETCH_FAILED writes registeredWorkdirs=emptySet() — AllIdleFresh gate
+        // reads "no registered workdirs" ⇒ cannot be all-idle ⇒ conservative
+        // unknown (fail-closed).
+        val store = storeWith(listOf(Session(id = "B", directory = "/y")))
+        // 1. OPTIMISTIC busy → claim clientSeq=1
+        store.dispatch(AppAction.AuthorityEvent(
+            event("B", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        assertNotNull("claim present after OPTIMISTIC",
+            store.stateFlow.value.authority.bySid["B"]?.optimisticClaim)
+
+        // 2. Verify no prior coverage for this scope.
+        assertNull("no prior coverage", store.stateFlow.value.authority.coverage[scope])
+
+        // 3. FETCH_FAILED with matching claimClientSeq.
+        store.dispatch(AppAction.AuthorityEvent(
+            reconcileOutcome(store, "B", ReconcileOutcome.FETCH_FAILED),
+        ))
+
+        // 4. Assert fail-closed coverage with empty registeredWorkdirs.
+        val cov = store.stateFlow.value.authority.coverage[scope]
+        assertNotNull("coverage entry written for scope", cov)
+        assertEquals("registeredWorkdirs empty (no prior)", emptySet<String>(), cov!!.registeredWorkdirs)
+        assertEquals("coveredWorkdirs empty (fail-closed)", emptySet<String>(), cov.coveredWorkdirs)
+        assertEquals("unmappedActiveIds empty (fail-closed)", emptySet<String>(), cov.unmappedActiveIds)
+        assertEquals("lastSuccessTimeMs = -1 (stale-success guard)", -1L, cov.lastSuccessTimeMs)
+    }
+
+    @Test
+    fun `FETCH_FAILED fail-closed coverage shape matches applyMarkFailed fail-closed shape`() {
+        // §CQ-P1 (U-CQ1): verify that the coverage shape written by FETCH_FAILED
+        // matches the fail-closed shape written by MarkSourceFailed (coveredWorkdirs
+        // empty, unmappedActiveIds empty, lastSuccessTimeMs = -1). Only
+        // registeredWorkdirs may differ (FETCH_FAILED preserves prior; MarkSourceFailed
+        // carries its own set in the op).
+        val store = storeWith(listOf(Session(id = "C", directory = "/z")))
+        // 1. OPTIMISTIC busy → claim clientSeq=1
+        store.dispatch(AppAction.AuthorityEvent(
+            event("C", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        assertNotNull("claim present after OPTIMISTIC",
+            store.stateFlow.value.authority.bySid["C"]?.optimisticClaim)
+
+        // 2. Seed shared prior registeredWorkdirs.
+        store.mutateState { s ->
+            s.copy(authority = s.authority.copy(
+                coverage = s.authority.coverage + (scope to Coverage(
+                    registeredWorkdirs = setOf("/z"),
+                    coveredWorkdirs = setOf("/z"),
+                    unmappedActiveIds = emptySet(),
+                    lastSuccessTimeMs = 500L,
+                )),
+            ))
+        }
+
+        // 3. FETCH_FAILED.
+        store.dispatch(AppAction.AuthorityEvent(
+            reconcileOutcome(store, "C", ReconcileOutcome.FETCH_FAILED),
+        ))
+
+        val fetchFailedCov = store.stateFlow.value.authority.coverage[scope]
+        assertNotNull("coverage after FETCH_FAILED", fetchFailedCov)
+
+        // 4. Build expected fail-closed shape — same as applyMarkFailed would write
+        //    for the same scope (MarkSourceFailed writes registeredWorkdirs from op,
+        //    FETCH_FAILED preserves prior — they may differ; we only assert the
+        //    fail-closed fields: covered, unmapped, lastSuccessTimeMs).
+        assertEquals("coveredWorkdirs empty (fail-closed)",
+            emptySet<String>(), fetchFailedCov!!.coveredWorkdirs)
+        assertEquals("unmappedActiveIds empty (fail-closed)",
+            emptySet<String>(), fetchFailedCov.unmappedActiveIds)
+        assertEquals("lastSuccessTimeMs = -1 (stale-success guard)",
+            -1L, fetchFailedCov.lastSuccessTimeMs)
     }
 
     @Test

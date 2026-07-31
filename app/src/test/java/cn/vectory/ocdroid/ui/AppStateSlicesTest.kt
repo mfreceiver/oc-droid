@@ -1,9 +1,17 @@
 package cn.vectory.ocdroid.ui
 
+import cn.vectory.ocdroid.data.model.FileDiff
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
+import cn.vectory.ocdroid.data.model.PermissionRequest
+import cn.vectory.ocdroid.data.model.QuestionRequest
+import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.data.model.SessionStatus
+import cn.vectory.ocdroid.data.model.SlimSessionLastError
+import cn.vectory.ocdroid.data.model.TodoItem
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -224,5 +232,121 @@ class AppStateSlicesTest {
         val r3 = r1.copy(path = "/b")
         assertEquals("/b", r3.path)
         assertEquals("x", r3.id)
+    }
+
+    // ── §U-MN3: SessionListState.withProjection + copy propagation ─────────
+
+    @Test
+    fun `withProjection delegates to copy - only sessionStatuses differs`() {
+        val session = Session(id = "s1", directory = "/work")
+        val oldStatuses = mapOf("s1" to SessionStatus("busy"))
+        val newStatuses = mapOf("s1" to SessionStatus("idle"))
+
+        val original = SessionListState(
+            sessions = listOf(session),
+            activeSessionIds = setOf("s1"),
+            expandedSessionIds = setOf("s1"),
+            loadedSessionLimit = 42,
+            hasMoreSessions = false,
+            isLoadingMoreSessions = true,
+            isRefreshingSessions = true,
+            pendingPermissions = listOf(PermissionRequest(id = "p1", sessionId = "s1")),
+            pendingQuestions = listOf(QuestionRequest(id = "q1", sessionId = "s1", questions = emptyList())),
+            childSessions = mapOf("root" to listOf(session)),
+            completeRootIds = setOf("root"),
+            completenessEpoch = 99L,
+            directorySessions = mapOf("/work" to listOf(session)),
+            sessionTodos = mapOf("s1" to listOf(TodoItem(content = "task", status = "pending", priority = "high", id = "t1"))),
+            sessionDiffs = mapOf("s1" to listOf(FileDiff(filePath = "f1"))),
+            sessionErrorsById = mapOf("s1" to SlimSessionLastError(name = "err")),
+            questionAggregationSignal = SlimAggregationSignal(completeness = SlimAggregationCompleteness.INCOMPLETE),
+            permissionAggregationSignal = SlimAggregationSignal(completeness = SlimAggregationCompleteness.INCOMPLETE),
+            pendingCreateIds = setOf("s1"),
+            pendingCreatedAt = mapOf("s1" to 1000L),
+            hasCompletedInitialLoad = true,
+            abortPendingSessionIds = mapOf("s1" to 1L),
+        ).withProjection(oldStatuses)
+
+        val result = original.withProjection(newStatuses)
+
+        assertEquals(newStatuses, result.sessionStatuses)
+        assertEquals(original.sessions, result.sessions)
+        assertEquals(original.activeSessionIds, result.activeSessionIds)
+        assertEquals(original.expandedSessionIds, result.expandedSessionIds)
+        assertEquals(original.loadedSessionLimit, result.loadedSessionLimit)
+        assertEquals(original.hasMoreSessions, result.hasMoreSessions)
+        assertEquals(original.isLoadingMoreSessions, result.isLoadingMoreSessions)
+        assertEquals(original.isRefreshingSessions, result.isRefreshingSessions)
+        assertEquals(original.pendingPermissions, result.pendingPermissions)
+        assertEquals(original.pendingQuestions, result.pendingQuestions)
+        assertEquals(original.childSessions, result.childSessions)
+        assertEquals(original.completeRootIds, result.completeRootIds)
+        assertEquals(original.completenessEpoch, result.completenessEpoch)
+        assertEquals(original.directorySessions, result.directorySessions)
+        assertEquals(original.sessionTodos, result.sessionTodos)
+        assertEquals(original.sessionDiffs, result.sessionDiffs)
+        assertEquals(original.sessionErrorsById, result.sessionErrorsById)
+        assertEquals(original.questionAggregationSignal, result.questionAggregationSignal)
+        assertEquals(original.permissionAggregationSignal, result.permissionAggregationSignal)
+        assertEquals(original.pendingCreateIds, result.pendingCreateIds)
+        assertEquals(original.pendingCreatedAt, result.pendingCreatedAt)
+        assertEquals(original.hasCompletedInitialLoad, result.hasCompletedInitialLoad)
+        assertEquals(original.abortPendingSessionIds, result.abortPendingSessionIds)
+        // manual equals includes sessionStatuses, so two instances with different
+        // sessionStatuses must NOT be equal
+        assertNotEquals(original, result)
+    }
+
+    @Test
+    fun `copy propagates sessionStatuses from receiver`() {
+        val statuses = mapOf("s1" to SessionStatus("idle"))
+        val src = SessionListState().withProjection(statuses)
+        val copied = src.copy()
+        assertEquals(statuses, copied.sessionStatuses)
+    }
+
+    @Test
+    fun `copy propagates all declared constructor fields - JDK reflection guard`() {
+        val session = Session(id = "s1", directory = "/work")
+        val original = SessionListState(
+            sessions = listOf(session),
+            activeSessionIds = setOf("s1"),
+            expandedSessionIds = setOf("s1"),
+            loadedSessionLimit = 42,
+            hasMoreSessions = false,
+            isLoadingMoreSessions = true,
+            isRefreshingSessions = true,
+            pendingPermissions = listOf(PermissionRequest(id = "p1", sessionId = "s1")),
+            pendingQuestions = listOf(QuestionRequest(id = "q1", sessionId = "s1", questions = emptyList())),
+            childSessions = mapOf("root" to listOf(session)),
+            completeRootIds = setOf("root"),
+            completenessEpoch = 99L,
+            directorySessions = mapOf("/work" to listOf(session)),
+            sessionTodos = mapOf("s1" to listOf(TodoItem(content = "task", status = "pending", priority = "high", id = "t1"))),
+            sessionDiffs = mapOf("s1" to listOf(FileDiff(filePath = "f1"))),
+            sessionErrorsById = mapOf("s1" to SlimSessionLastError(name = "err")),
+            questionAggregationSignal = SlimAggregationSignal(completeness = SlimAggregationCompleteness.INCOMPLETE, failureMessage = "err"),
+            permissionAggregationSignal = SlimAggregationSignal(completeness = SlimAggregationCompleteness.FAILED, failureMessage = "err"),
+            pendingCreateIds = setOf("s1"),
+            pendingCreatedAt = mapOf("s1" to 1000L),
+            hasCompletedInitialLoad = true,
+            abortPendingSessionIds = mapOf("s1" to 1L),
+        )
+
+        val copied = original.copy()
+
+        for (field in SessionListState::class.java.declaredFields) {
+            if (field.isSynthetic) continue
+            // sessionStatuses is a class-body var (not a constructor param) whose
+            // propagation relies on copy().also — tested separately in
+            // `copy propagates sessionStatuses from receiver`.
+            if (field.name == "sessionStatuses") continue
+            field.isAccessible = true
+            assertEquals(
+                "copy() did not propagate field '${field.name}'",
+                field.get(original),
+                field.get(copied),
+            )
+        }
     }
 }

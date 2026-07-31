@@ -2273,4 +2273,75 @@ class SkeletonReloadCoordinatorCoreTest {
         } finally { cs.cancel() }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // U-CQ6: blocker-4a ensureActive fence (orthogonal to B2 ordering slot-removal).
+    // Verifies that the ensureActive() call at runReload :1381 drops the stale
+    // HTTP page when cancellation hits during non-cooperative IO (CountDownLatch
+    // blocking inside coAnswers), WITHOUT the slot being removed (no onSessionClosed).
+    // The only guard against stale commit is the ensureActive fence itself.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `(blocker-4a) ensureActive fence drops stale page when cancel hits during non-cooperative IO`() {
+        val realScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val entered = CountDownLatch(1)
+            val blocked = CountDownLatch(1)
+            val store = createReadyStore("s", routeInstance = 42L)
+            val repo = mockk<OpenCodeRepository>(relaxed = false)
+            coEvery { repo.getSlimapiMessagesSkeleton("s", any(), any()) } coAnswers {
+                entered.countDown()
+                blocked.await()              // 非协作：cancel 期间不抛
+                MessagesPage(listOf(mwp(msg("stale-m1", created = 100L))), null)
+            }
+            val identity = AtomicReference(ConnectionIdentity(
+                epoch = 1L, serverGroupFp = "host-A",
+                normalizedWorkdir = "/a", endpointFp = "http://a"))
+            val c = SkeletonReloadCoordinator(
+                scope = realScope, repository = repo, slices = store.slices,
+                foreground = MutableStateFlow(true),
+                currentTransport = { TransportSnapshot(1L, identity.get()) },
+                currentBundleStamp = { BundleStamp(1L, "http://a") },
+            )
+            c.submit("s", Tuple(100L, "stale-m1"), Priority.FORCE_RECONCILE, ReloadReason.REQUEST_RELOAD)
+            assertTrue("entered mock barrier", entered.await(5, TimeUnit.SECONDS))
+
+            // 👇 Slot preserved (NOT onSessionClosed) — confirm it exists.
+            val preCancelSnap = c.schedulerSnapshotForTest("s", 1L)
+            assertNotNull("slot must exist before cancel (no onSessionClosed)", preCancelSnap)
+
+            // 👇 关键：cancel 整个 scope（驱动 reload 子协程 cancel），NOT onSessionClosed → slot 保留
+            realScope.cancel()
+            blocked.countDown()             // 释放非协作 mock → 返回 stale page → ensureActive() 抛
+
+            // Deterministically wait for the reload child to FINISH: after cancel +
+            // release, the child resumes from the mock, hits runReload's ensureActive()
+            // (MessageActions.kt:1381) which throws CancellationException, then the
+            // `catch(CE){ withContext(NonCancellable){ onReloadComplete(Cancelled) } }`
+            // (NonCancellable body runs despite the scope cancel) completes, and the
+            // SupervisorJob's child finishes → scopeJob.isCompleted becomes true.
+            //
+            // We must NOT use a blind Thread.sleep here: it would risk reading the
+            // INITIAL empty chat before ensureActive even runs → a silent false pass.
+            // Bounded busy-poll on isCompleted is the file's established determinism
+            // pattern (ABA test :752-755 / :771-777 poll with nanoTime deadline). Job.join()
+            // is suspend and unusable in a plain @Test.
+            val scopeJob = realScope.coroutineContext[Job]!!
+            val completionDeadline = System.nanoTime() + 5_000_000_000L
+            while (!scopeJob.isCompleted && System.nanoTime() < completionDeadline) {
+                Thread.sleep(25)
+            }
+            assertTrue(
+                "scope must complete after cancel (ensureActive fence + CE handler ran)",
+                scopeJob.isCompleted,
+            )
+
+            // ensureActive() threw CancellationException before commitReload → stale page never committed.
+            assertEquals(
+                "ensureActive fence must prevent stale page from committing",
+                emptyList<String>(), store.slices.chat.value.messages.map { it.id },
+            )
+        } finally { realScope.cancel() }
+    }
+
 }

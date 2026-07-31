@@ -14,7 +14,7 @@ TAG="${GITHUB_REF##*/}"
 VERSION="${TAG#v}"
 SHORT="$(git rev-parse --short HEAD)"
 echo "==> release-check: tag=$TAG version=$VERSION-$SHORT"
-./gradlew --no-daemon --stacktrace clean lintRelease testDebugUnitTest assembleRelease archiveReleaseApk -PreleaseVersion="$VERSION"
+./gradlew --no-daemon --stacktrace clean :app:detekt lintRelease testDebugUnitTest assembleRelease archiveReleaseApk -PreleaseVersion="$VERSION"
 echo "==> 归档产物"
 mkdir -p artifacts
 cp "APK/oc-droid-$VERSION-$SHORT.apk" artifacts/

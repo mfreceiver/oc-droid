@@ -28,6 +28,11 @@ sealed interface AuthorityOp {
      *   (stale-identity defense-in-depth inside the pure CAS).
      * - [connectionMonotonicMs]: TTL / equal-serverRound tie-break clock. NOT a
      *   causal fence by itself (v1 mis-used; v3 corrected — §3.1 line 324).
+     *   §MN-P9 step 1 (U-MN9, 2026-07-31): "Monotonic" is a historical name —
+     *   this is a WALL-CLOCK millisecond (System.currentTimeMillis() ← sseClock),
+     *   NOT monotonic. Same single-clock-domain caveat as
+     *   [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic] (see its
+     *   kdoc + dev-plan §5 U-P3 risk). Rename is U-MN9 step 2 (Batch 3).
      * - [optimisticBumpTimestamp]: §B8 — when non-null, the reducer records it
      *   in [AuthorityState.pendingBumps] and applies `bumpSessionUpdated` in
      *   the SAME `state.copy` (no loss, no conflation).
@@ -108,7 +113,13 @@ sealed interface AuthorityOp {
      *  (absence ≡ unknown, fail-closed). [registeredWorkdirs] is carried so the
      *  coverage predicate can keep gating `AllIdleFresh` (registered set
      *  preserved, coveredWorkdirs emptied, lastSuccessTimeMs=-1 → cold-start /
-     *  stale guard fires → derived `project()` returns `Unknown`). */
+     *  stale guard fires → derived `project()` returns `Unknown`).
+     *
+     *  §MN-P9 step 1 (U-MN9, 2026-07-31): [monotonic] is a WALL-CLOCK
+     *  millisecond (System.currentTimeMillis() ← sourceTimeMs), NOT monotonic —
+     *  same single-clock-domain caveat as
+     *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic] (see its
+     *  kdoc + dev-plan §5 U-P3 risk). Rename is U-MN9 step 2 (Batch 3). */
     data class MarkSourceFailed(
         val scopeKey: ScopeKey,
         val requestToken: RequestToken,
@@ -122,6 +133,10 @@ sealed interface AuthorityOp {
         val scopeKey: ScopeKey,
         val outcome: ReconcileOutcome,
         val serverRound: ServerRound?,
+        /** §B7 reconcile effective time (merge-timing source). §MN-P9 step 1
+         *  (U-MN9, 2026-07-31): WALL-CLOCK ms (System.currentTimeMillis() ←
+         *  SessionSyncCoordinator.clock), NOT monotonic — same caveat as
+         *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic]. */
         val monotonic: Long,
         /** §P0-B generation fence (ABA): the [OptimisticClaim.clientSeq] of the stale
          *  claim this reconcile was triggered for. The reducer DROPS the outcome unless
@@ -160,6 +175,10 @@ sealed interface AuthorityOp {
      */
     data class FreshnessTick(
         val scopeKey: ScopeKey,
+        /** §P1-C aging-tick clock (captured at dispatch). §MN-P9 step 1
+         *  (U-MN9, 2026-07-31): WALL-CLOCK ms (System.currentTimeMillis() ←
+         *  StatusAggregatorImpl:634), NOT monotonic — same caveat as
+         *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic]. */
         val nowMonotonic: Long,
     ) : AuthorityOp
 
@@ -176,6 +195,10 @@ sealed interface AuthorityOp {
         val scopeKey: ScopeKey,
         val attempt: Int,
         val backoffMs: Long,
+        /** §P1-B/E queue-time clock (observability). §MN-P9 step 1
+         *  (U-MN9, 2026-07-31): WALL-CLOCK ms (System.currentTimeMillis()),
+         *  NOT monotonic — same caveat as
+         *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic]. */
         val queuedMonotonic: Long,
     ) : AuthorityOp
 
@@ -188,6 +211,10 @@ sealed interface AuthorityOp {
     data class RetryFired(
         val sid: String,
         val scopeKey: ScopeKey,
+        /** §P1-B/E fired-time clock (observability). §MN-P9 step 1
+         *  (U-MN9, 2026-07-31): WALL-CLOCK ms (System.currentTimeMillis()),
+         *  NOT monotonic — same caveat as
+         *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic]. */
         val monotonic: Long,
     ) : AuthorityOp
 }

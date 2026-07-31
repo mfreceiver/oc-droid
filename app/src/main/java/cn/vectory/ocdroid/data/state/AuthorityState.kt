@@ -67,7 +67,18 @@ data class SessionEntry(
     /** How this entry's value arrived — drives §B9 ServerBusy classification. */
     val origin: EntryOrigin,
     val freshness: Freshness,
-    /** TTL / equal-serverRound tie-break clock (NOT a causal fence). Carried in the op. */
+    /** TTL / equal-serverRound tie-break clock (NOT a causal fence). Carried in the op.
+     *
+     *  §MN-P9 step 1 (U-MN9, 2026-07-31): despite the "Monotonic" suffix
+     *  (historical naming, retained for now), this value is a WALL-CLOCK
+     *  millisecond (System.currentTimeMillis()), NOT a monotonic clock. Both
+     *  REST (requestStartMs) and SSE (connectionMonotonicMs ← sseClock() ←
+     *  currentTimeMillis) source the SAME wall clock — so cross-comparing these
+     *  timestamps is single-clock-domain (NOT cross-clock-domain as spec §8.1
+     *  claims; §8.1's premise is STALE/WRONG — Batch 4 MN-P2 阶段B corrects it,
+     *  see dev-plan §5 U-P3 risk). Wall-clock comparison has known limits under
+     *  device sleep / NTP skew. Renaming is U-MN9 step 2 (Batch 3); unifying to
+     *  a true monotonic clock (elapsedRealtime) is backlog MN-P9. */
     val updatedMonotonic: Long,
     /** §B3 workdir attribution (filled/updated by ApplySnapshot.sidToWorkdir). */
     val workdir: String?,
@@ -87,25 +98,31 @@ data class SessionEntry(
     val serverRoundHighWater: ServerRound? = null,
 )
 
-/**
- * §P1-B/E: a session queued for bounded retry. Lives in
- * [AuthorityState.retryQueue] keyed by sid. Pure bookkeeping — the actual
- * retry trigger is external (SlimStatusFanOut retryableCount → poller backoff);
- * this entry makes the queued-retry state queryable, bounded, and cleaned on
- * terminal status.
- *
- *  - [attempt]: 1-based retry attempt counter (RetryQueued stamps it).
- *  - [backoffMs]: the NOMINAL exponential base delay computed for THIS
- *    attempt from the per-sid [attempt] counter (NOT the poller's global
- *    backoffAttempt — rev-ogpt N1: the two counters live in different
- *    spaces). This is an OBSERVABILITY hint, not the poller's actual delay:
- *    the poller schedules from its OWN global attempt counter and applies
- *    ±20% jitter on top, so the real next-sweep delay may differ. Useful
- *    for diagnosing "how many times has this sid been retried" + "what is
- *    the theoretical backoff strategy", NOT for predicting the exact delay.
- *  - [queuedMonotonic]: clock captured at RetryQueued dispatch (for
- *    observability; the reducer needs no injected clock).
- */
+    /**
+     * §P1-B/E: a session queued for bounded retry. Lives in
+     * [AuthorityState.retryQueue] keyed by sid. Pure bookkeeping — the actual
+     * retry trigger is external (SlimStatusFanOut retryableCount → poller backoff);
+     * this entry makes the queued-retry state queryable, bounded, and cleaned on
+     * terminal status.
+     *
+     *  - [attempt]: 1-based retry attempt counter (RetryQueued stamps it).
+     *  - [backoffMs]: the NOMINAL exponential base delay computed for THIS
+     *    attempt from the per-sid [attempt] counter (NOT the poller's global
+     *    backoffAttempt — rev-ogpt N1: the two counters live in different
+     *    spaces). This is an OBSERVABILITY hint, not the poller's actual delay:
+     *    the poller schedules from its OWN global attempt counter and applies
+     *    ±20% jitter on top, so the real next-sweep delay may differ. Useful
+     *    for diagnosing "how many times has this sid been retried" + "what is
+     *    the theoretical backoff strategy", NOT for predicting the exact delay.
+     *  - [queuedMonotonic]: clock captured at RetryQueued dispatch (for
+     *    observability; the reducer needs no injected clock).
+     *
+     *    §MN-P9 step 1 (U-MN9, 2026-07-31): despite the "Monotonic" suffix
+     *    (historical naming, retained for now), this value is a WALL-CLOCK
+     *    millisecond (System.currentTimeMillis()), NOT a monotonic clock — same
+     *    single-clock-domain caveat as [SessionEntry.updatedMonotonic]
+     *    (see its kdoc + dev-plan §5 U-P3 risk). Renaming is U-MN9 step 2 (Batch 3).
+     */
 data class RetryEntry(
     val attempt: Int,
     val backoffMs: Long,
@@ -130,6 +147,13 @@ data class ServerRound(
  * counter (NEVER compared to [ServerRound.turn]); [serverEchoed] resolves
  * cross-channel reorder (server busy lands before HTTP success); the watchdog
  * arms on [claimedAtMonotonic] + OPTIMISTIC_CONFIRM_TIMEOUT → reconcile.
+ *
+ * §MN-P9 step 1 (U-MN9, 2026-07-31): despite the "Monotonic" suffix (historical
+ * naming, retained for now), [claimedAtMonotonic] is a WALL-CLOCK millisecond
+ * (System.currentTimeMillis(), sourced from connectionMonotonicMs), NOT a
+ * monotonic clock — same single-clock-domain caveat as
+ * [SessionEntry.updatedMonotonic] (see its kdoc + dev-plan §5 U-P3 risk).
+ * Renaming is U-MN9 step 2 (Batch 3).
  *
  * §P0-B final-fix #1: two distinct confirmation signals:
  *  - [serverEchoed] — set ONLY by real-time SSE busy/retry echo (cross-channel

@@ -5,8 +5,8 @@
 # 产物归档到 artifacts/(Debug APK)供 workflow 上传。
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-echo "==> remote-check: lintDebug + testDebugUnitTest + assembleDebug"
-./gradlew --no-daemon --stacktrace lintDebug testDebugUnitTest assembleDebug
+echo "==> remote-check: detekt + lintDebug + testDebugUnitTest + assembleDebug"
+./gradlew --no-daemon --stacktrace :app:detekt lintDebug testDebugUnitTest assembleDebug
 echo "==> 归档 Debug APK"
 mkdir -p artifacts
 cp app/build/outputs/apk/debug/app-debug.apk "artifacts/oc-droid-debug-$(git rev-parse --short HEAD).apk"

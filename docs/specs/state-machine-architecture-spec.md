@@ -8,6 +8,20 @@
 >
 > **相关规格**：`./architecture.md`（分层 / 不变量）、`./decomposition-guidelines.md`（§4.4 纯 Reducer 模式 + §5 单一权威）、`../2026-07-31-oc-slimapi-turn-token-contract.md`（Tier-1 fence 的跨项目契约）。规则冲突以 `.opencode/policies/` + 代码现状为准。
 
+> ⚠️ **已知漂移警告（2026-07-31 应急标注，MN-P2 阶段A）**
+>
+> 本文档存在 **7 类已确认漂移**，将在 **Batch 4（MN-P2 阶段B）正式逐节修订**。在此之前：
+> - **以代码现状为唯一权威**（`AuthorityReducer.kt` / `AuthorityState.kt` / `AuthorityOp.kt` / `SharedStateStore.kt`），不要依据本 spec 的行号 / 字段表做判断。
+> - 漂移清单（explorer-E 核实，见 `.omni-orch/reviews/development-plan.md` §2 + §5）：
+>   1. **detekt** — §8.4「detekt 未配置」与 TL;DR「detekt 未配」已过时：`SessionStatusDirectWriteRule` 已落地（`config/detekt/detekt.yml`），`buildUponDefaultConfig=false`。Batch 1 U-P4 已将 `:app:detekt` 接入 `check.sh` default。
+>   2. **clock 域错误（最严重）** — §8.1 称 SSE 用单调钟、REST 用墙上钟。**实际两路径均用 `System.currentTimeMillis()`（墙上钟）**：`SseDispatchHost.sseClock()` → `SessionSyncCoordinator.clock()` → `currentTimeMillis`；aggregator `sourceTimeMs` 同源。§8.1「跨时钟域比较」前提**不成立** —— 同域墙上钟比较，结论需重写。
+>   3. **字段表** — 与 `AuthorityState.kt` / `AuthorityOp.kt` 现状不符。
+>   4. **variant 表** — slim / legacy 描述与代码不一致。
+>   5. **行号** — 多处 `file:line` 随重构漂移（如 TL;DR `AuthorityReducer.kt:45` 实为 :49）。
+>   6. **freshness** — FreshnessTick 链描述与接线（`StatusAggregatorImpl`）有出入。
+>   7. **publishLocked kdoc** — 与 U-PUBLISH（synchronized）描述不符。
+> - 上述字段名带 "Monotonic" 的时间值（`updatedMonotonic` / `connectionMonotonicMs` / `monotonic` / `queuedMonotonic` / `claimedAtMonotonic` / `nowMonotonic`）实为墙上钟 ms —— 见各字段 kdoc 的 §MN-P9 step 1 (U-MN9) 注释。
+
 ---
 
 ## 0. TL;DR（一分钟版）

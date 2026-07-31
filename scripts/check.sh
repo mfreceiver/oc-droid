@@ -18,6 +18,9 @@ GRADLE="./gradlew"; [[ "${OC_GRADLE_DAEMON:-0}" == "1" ]] || GRADLE="./gradlew -
 echo "==> compileDebugKotlin"
 $GRADLE compileDebugKotlin
 
+echo "==> detekt (ocdroid sole-writer encapsulation gate)"
+$GRADLE :app:detekt
+
 echo "==> testDebugUnitTest"
 $GRADLE testDebugUnitTest
 

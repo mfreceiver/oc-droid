@@ -1002,32 +1002,10 @@ class SessionListState internal constructor(
      * authority projection). Returns a copy with just sessionStatuses changed.
      */
     internal fun withProjection(sessionStatuses: Map<String, SessionStatus>): SessionListState =
-        SessionListState(
-            sessions = this.sessions,
-            activeSessionIds = this.activeSessionIds,
-            expandedSessionIds = this.expandedSessionIds,
-            loadedSessionLimit = this.loadedSessionLimit,
-            hasMoreSessions = this.hasMoreSessions,
-            isLoadingMoreSessions = this.isLoadingMoreSessions,
-            isRefreshingSessions = this.isRefreshingSessions,
-            pendingPermissions = this.pendingPermissions,
-            pendingQuestions = this.pendingQuestions,
-            childSessions = this.childSessions,
-            completeRootIds = this.completeRootIds,
-            completenessEpoch = this.completenessEpoch,
-            directorySessions = this.directorySessions,
-            sessionTodos = this.sessionTodos,
-            sessionDiffs = this.sessionDiffs,
-            sessionErrorsById = this.sessionErrorsById,
-            questionAggregationSignal = this.questionAggregationSignal,
-            permissionAggregationSignal = this.permissionAggregationSignal,
-            pendingCreateIds = this.pendingCreateIds,
-            pendingCreatedAt = this.pendingCreatedAt,
-            hasCompletedInitialLoad = this.hasCompletedInitialLoad,
-            abortPendingSessionIds = this.abortPendingSessionIds,
-        ).also { result ->
-            result.sessionStatuses = sessionStatuses
-        }
+        // §MN-P3 (U-MN3): delegate to [copy] (propagates this.sessionStatuses via
+        // its .also block below at :995-997), then OVERWRITE with the new projection.
+        // Replaces the duplicated 20+ field enumeration that drifted from copy().
+        copy().also { it.sessionStatuses = sessionStatuses }
 
     /**
      * §P0-A rev-gpt #8 B10: manual `equals` over ALL fields (including

@@ -731,12 +731,30 @@ private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOu
         }
         ReconcileOutcome.FETCH_FAILED -> {
             // rev-ogpt B4: entry removal is terminal → clean retry entry too.
-            if (prev == null && op.sid !in cur.retryQueue) {
+            // §CQ-P1 (U-CQ1): write fail-closed coverage (matching applyMarkFailed
+            // :650-682) so the AllIdleFresh gate reads this scope as unknown, not a
+            // stale success. ApplyReconcileOutcome carries scopeKey but not
+            // registeredWorkdirs, so preserve them from the prior coverage entry.
+            val priorCov = cur.coverage[op.scopeKey]
+            val registered = priorCov?.registeredWorkdirs ?: emptySet()
+            val nextCoverage = cur.coverage + (op.scopeKey to Coverage(
+                registeredWorkdirs = registered,
+                coveredWorkdirs = emptySet(),
+                unmappedActiveIds = emptySet(),
+                lastSuccessTimeMs = -1L,
+            ))
+            val bySidChanged = prev != null || op.sid in cur.retryQueue
+            val covChanged = priorCov == null ||
+                priorCov.coveredWorkdirs.isNotEmpty() ||
+                priorCov.unmappedActiveIds.isNotEmpty() ||
+                priorCov.lastSuccessTimeMs != -1L
+            if (!bySidChanged && !covChanged) {
                 cur
             } else {
                 cur.copy(
                     bySid = if (prev != null) cur.bySid - op.sid else cur.bySid,
                     retryQueue = cur.retryQueue - op.sid,
+                    coverage = nextCoverage,
                 )
             }
         }

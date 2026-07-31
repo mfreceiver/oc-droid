@@ -266,15 +266,21 @@ class SharedStateStore @Inject constructor(
     // `state.update { it.copy(xxx = transform(it.xxx)) }` so the per-slice
     // transform sees the CURRENT committed aggregate's slice value (CAS loop),
     // and the write lands as ONE committed aggregate state.
-    fun mutateConnection(transform: (ConnectionState) -> ConnectionState) =
+    fun mutateConnection(transform: (ConnectionState) -> ConnectionState) {
+        // §CQ-P7 (U-CQ7): wall clock read ONCE outside the CAS retry lambda so the
+        // CAS transform stays pure/idempotent across retries (re-running it on a
+        // retried snapshot reproduces the same transition). System.currentTimeMillis()
+        // inside the lambda would read a different value on each retry.
+        val now = System.currentTimeMillis()
         state.update { storeState ->
             val previous = storeState.connection
             val requested = transform(previous)
             // §sse-rest-fallback (TODO 3): auto-stamp disconnectedSince on the
             // Disconnected phase transition (single chokepoint → every writer
             // records it). Pure helper so it is unit-testable in isolation.
-            storeState.copy(connection = stampDisconnectedSince(previous, requested, System.currentTimeMillis()))
+            storeState.copy(connection = stampDisconnectedSince(previous, requested, now))
         }
+    }
     fun mutateTraffic(transform: (TrafficState) -> TrafficState) =
         state.update { it.copy(traffic = transform(it.traffic)) }
     fun mutateComposer(transform: (ComposerState) -> ComposerState) =
