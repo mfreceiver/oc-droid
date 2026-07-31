@@ -827,42 +827,40 @@ private fun applyFreshnessTick(cur: AuthorityState, op: AuthorityOp.FreshnessTic
  * authorityRevision on a real change (new insert OR overwrite with different
  * RetryEntry).
  *
- * §P1-B/E rev-ogpt B3 (terminal-status fence, PURE): if the sid is ALREADY
- * confirmed terminal in [AuthorityState.bySid] (entry present, in-scope,
- * status idle/failed), the RetryQueued is DROPPED — a stale fan-out summary
- * arriving after a terminal ApplyEvent would otherwise revive a cleaned entry.
- * Derives ONLY from `(state, op)`; no injected dependency. Absent bySid entry
- * (status unknown) → NOT fenced (the retry is legitimate: we don't know the
- * true status yet).
+ * §P1-B/E rev-gpt (终审): the terminal-status fence proposed by rev-ogpt B3
+ * was REMOVED — it misfired on the NORMAL retry case (an idle session whose
+ * status fetch returns 503 is a legitimate retry; the fence would have
+ * wrongly dropped it). Stale-summary re-entry after a terminal event
+ * (rev-ogpt B3 / rev-gpt 严重1-3) is a known residual: it is self-healing
+ * (the next sweep's RetryFired, LRU eviction, or a subsequent terminal
+ * cleanup corrects it), and a proper fix requires sweep-generation / request-
+ * token causal fencing — out of scope for this wire ticket (which adds
+ * external dispatch without changing the reducer purity contract). Documented
+ * in spec §8.5.
  */
 private fun applyRetryQueued(cur: AuthorityState, op: AuthorityOp.RetryQueued): AuthorityState {
-    // rev-ogpt B3: reject re-queuing a sid already confirmed terminal. A stale
-    // fan-out summary (snapshot read before a terminal event landed) would
-    // otherwise revive a cleaned retry entry. Pure: reads bySid only.
-    val existingEntry = cur.bySid[op.sid]
-    if (existingEntry != null &&
-        (existingEntry.scopeKey == null || existingEntry.scopeKey == op.scopeKey) &&
-        !existingEntry.status.isBusy && !existingEntry.status.isRetry
-    ) {
-        return cur
-    }
     val entry = RetryEntry(attempt = op.attempt, backoffMs = op.backoffMs, queuedMonotonic = op.queuedMonotonic)
     val existing = cur.retryQueue[op.sid]
     return if (existing == entry) {
         cur  // same ref, no transition
     } else {
         val withInserted = cur.retryQueue + (op.sid to entry)
-        // rev-ogpt B1: STRICT cap — evict smallest-queuedMonotonic entries
-        // until at or under RETRY_QUEUE_MAX_SIZE. When the just-inserted
-        // entry is itself the oldest, it is evicted (loses its spot —
-        // correct LRU; a brand-new entry that is the oldest means the clock
-        // went backwards, and keeping it would violate the bounded contract).
+        // rev-ogpt B1 / rev-gpt: STRICT cap — evict smallest-queuedMonotonic
+        // entries until at or under RETRY_QUEUE_MAX_SIZE.
         var bounded = withInserted
         while (bounded.size > RETRY_QUEUE_MAX_SIZE) {
             val oldestKey = bounded.minByOrNull { it.value.queuedMonotonic }?.key ?: break
             bounded = bounded - oldestKey
         }
-        cur.copy(retryQueue = bounded)
+        // rev-gpt 4: when the new entry self-evicts (was the oldest), the
+        // resulting map equals cur.retryQueue → return cur (same-ref no-op),
+        // NOT a spurious copy + revision bump. Keeps the drop-on-no-change
+        // / replay-stability contract.
+        if (bounded === cur.retryQueue || bounded == cur.retryQueue) {
+            cur
+        } else {
+            cur.copy(retryQueue = bounded)
+        }
     }
 }
 

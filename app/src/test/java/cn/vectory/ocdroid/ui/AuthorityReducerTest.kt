@@ -2427,25 +2427,51 @@ class AuthorityReducerTest {
     }
 
     @Test
-    fun `RetryQueued rejects re-queuing a sid already confirmed terminal (rev-ogpt B3 fence)`() {
-        // rev-ogpt B3: a stale fan-out summary (snapshot read before a terminal
-        // event landed) must not revive a cleaned entry. If the sid is already
-        // confirmed terminal in bySid (in-scope, idle/failed), RetryQueued is
-        // DROPPED. Absent bySid (unknown status) → NOT fenced.
+    fun `RetryQueued accepts a 503 retry for an idle session (rev-gpt B3-rejection)`() {
+        // rev-gpt 终审: the B3 terminal-status fence proposed by rev-ogpt
+        // was WRONG — it misfired on the normal retry case. An idle session
+        // whose status fetch returns 503 is a LEGITIMATE retry (the true
+        // status is now unknown); the fence would have wrongly dropped it.
+        // The fence is REMOVED; this test pins the correct behavior.
         val store = storeWith()
         // Establish s1 as idle (terminal).
         store.dispatch(AppAction.AuthorityEvent(
             event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 100L),
         ))
-        // Stale RetryQueued arrives → DROPPED (s1 already terminal).
+        // A 503 retry arrives for s1 → MUST be accepted (not dropped).
         store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedMonotonic = 200L)))
-        assertFalse("stale RetryQueued dropped (sid already terminal)",
+        assertTrue("RetryQueued accepted for idle session (503 = legitimate retry)",
             "s1" in store.stateFlow.value.authority.retryQueue)
 
-        // Absent bySid (unknown status) → NOT fenced (legitimate retry).
+        // Absent bySid (unknown status) → also accepted.
         store.dispatch(AppAction.AuthorityEvent(retryQueued("absent-sid", attempt = 1, queuedMonotonic = 200L)))
         assertTrue("RetryQueued accepted for absent sid (status unknown)",
             "absent-sid" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `RetryQueued self-eviction is a same-ref no-op (rev-gpt 4)`() {
+        // rev-gpt 4: when the just-inserted entry self-evicts (it WAS the
+        // oldest at capacity), the resulting retryQueue equals the prior one.
+        // The reducer MUST return the same ref (no spurious copy + revision
+        // bump), keeping the drop-on-no-change / replay-stability contract.
+        val state = StoreState.initial()
+        var cur = state
+        // Fill 256 entries with queuedMonotonic 100..355.
+        for (i in 0 until 256) {
+            cur = reduceAuthority(cur, retryQueued("sid-$i", queuedMonotonic = 100L + i))
+        }
+        assertEquals(256, cur.authority.retryQueue.size)
+        // Insert a NEW sid at queuedMonotonic = 50 (oldest). It self-evicts.
+        // The result retryQueue equals cur.retryQueue → same-ref no-op.
+        val result = reduceAuthority(cur, retryQueued("new-oldest", queuedMonotonic = 50L))
+        assertSame("self-eviction is same-ref no-op (no spurious transition)",
+            cur, result)
+        assertFalse("self-evicted entry not present",
+            "new-oldest" in result.authority.retryQueue)
+        // Re-running the same op on the result → STILL same-ref (idempotent).
+        val result2 = reduceAuthority(result, retryQueued("new-oldest", queuedMonotonic = 50L))
+        assertSame("re-running self-evicting op is idempotent", result, result2)
     }
 
     @Test
@@ -2609,13 +2635,15 @@ class AuthorityReducerTest {
     }
 
     @Test
-    fun `stale fan-out summary interleaved with terminal event does not revive queue entry (rev-ogpt B3)`() {
-        // rev-ogpt B3: the fire-then-queue sequence is non-atomic. A stale
-        // summary (snapshot read before a terminal event) could dispatch
-        // RetryQueued AFTER the terminal ApplyEvent cleaned the entry. The B3
-        // terminal-status fence in applyRetryQueued drops it. This simulates
-        // the interleaving synchronously (the net effect is the same: terminal
-        // event lands, THEN stale RetryQueued arrives → dropped).
+    fun `stale fan-out summary after terminal event re-enters queue - known residual, self-healing (rev-gpt B3-rejection)`() {
+        // rev-gpt 终审: the B3 terminal-status fence proposed by rev-ogpt was
+        // REMOVED (it misfired on idle-503). A stale RetryQueued arriving after
+        // a terminal event WILL re-enter the queue — this is a KNOWN RESIDUAL
+        // (documented in spec §8.5). It is self-healing: the next sweep's
+        // RetryFired, LRU eviction, or a subsequent terminal cleanup corrects it.
+        // A proper fix requires sweep-generation / request-token causal fencing
+        // — out of scope for this wire ticket. This test PINS the residual so
+        // it isn't silently re-fixed by re-introducing the wrong fence.
         val store = storeWith()
         // Queue s1 (attempt 1).
         store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedMonotonic = 100L)))
@@ -2625,10 +2653,14 @@ class AuthorityReducerTest {
             event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 150L),
         ))
         assertFalse("terminal cleaned the entry", "s1" in store.stateFlow.value.authority.retryQueue)
-        // Stale RetryQueued arrives AFTER (simulating the delayed dispatch from
-        // a snapshot read before the terminal event). The B3 fence drops it.
+        // Stale RetryQueued arrives AFTER. No fence → it re-enters (residual).
         store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 2, queuedMonotonic = 120L)))
-        assertFalse("stale RetryQueued dropped by B3 fence (sid already terminal)",
+        assertTrue("stale RetryQueued re-entered (known residual — no fence; self-heals via next sweep/LRU)",
+            "s1" in store.stateFlow.value.authority.retryQueue)
+        // Self-heal: a covering sweep's RetryFired (or a re-delivered terminal
+        // event) cleans it. Demonstrate the covering-sweep self-heal:
+        store.dispatch(AppAction.AuthorityEvent(retryFired("s1")))
+        assertFalse("self-healed by covering-sweep RetryFired",
             "s1" in store.stateFlow.value.authority.retryQueue)
     }
 
