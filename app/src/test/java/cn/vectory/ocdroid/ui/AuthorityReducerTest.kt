@@ -10,9 +10,12 @@ import cn.vectory.ocdroid.data.state.Freshness
 import cn.vectory.ocdroid.data.state.OptimisticClaim
 import cn.vectory.ocdroid.data.state.ReconcileOutcome
 import cn.vectory.ocdroid.data.state.RequestToken
+import cn.vectory.ocdroid.data.state.RetryEntry
 import cn.vectory.ocdroid.data.state.ScopeKey
 import cn.vectory.ocdroid.data.state.ServerRound
 import cn.vectory.ocdroid.data.state.SessionEntry
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotSame
@@ -2194,6 +2197,203 @@ class AuthorityReducerTest {
         ))
         assertTrue("pendingErrorCheck still empty after guarded idle drop",
             store.stateFlow.value.chat.pendingErrorCheck.isEmpty())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // P1-B/E RetryQueued / RetryFired / terminal-cleanup (retry-queue wire)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private fun retryQueued(
+        sid: String,
+        attempt: Int = 1,
+        backoffMs: Long = 200L,
+        queuedMonotonic: Long = 1000L,
+    ) = AuthorityOp.RetryQueued(
+        sid = sid,
+        scopeKey = scope,
+        attempt = attempt,
+        backoffMs = backoffMs,
+        queuedMonotonic = queuedMonotonic,
+    )
+
+    private fun retryFired(sid: String, monotonic: Long = 2000L) =
+        AuthorityOp.RetryFired(sid = sid, scopeKey = scope, monotonic = monotonic)
+
+    @Test
+    fun `RetryQueued enqueues entry with correct attempt backoff and queuedMonotonic`() {
+        val store = storeWith()
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, backoffMs = 200L, queuedMonotonic = 1000L)))
+        val entry = store.stateFlow.value.authority.retryQueue["s1"]
+        assertEquals(RetryEntry(attempt = 1, backoffMs = 200L, queuedMonotonic = 1000L), entry)
+    }
+
+    @Test
+    fun `RetryQueued re-queue with different attempt overwrites the entry`() {
+        val store = storeWith()
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, backoffMs = 200L, queuedMonotonic = 1000L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 2, backoffMs = 400L, queuedMonotonic = 2000L)))
+        val entry = store.stateFlow.value.authority.retryQueue["s1"]
+        assertEquals(RetryEntry(attempt = 2, backoffMs = 400L, queuedMonotonic = 2000L), entry)
+    }
+
+    @Test
+    fun `RetryQueued is idempotent - identical op is a same-ref no-op`() {
+        val state = StoreState.initial()
+        val op = retryQueued("s1")
+        val r1 = reduceAuthority(state, op)
+        val r2 = reduceAuthority(r1, op)
+        // Second application: the entry already equals → same ref, no bump.
+        assertSame("identical RetryQueued MUST be a same-ref no-op", r1, r2)
+    }
+
+    @Test
+    fun `RetryQueued LRU evicts oldest entry when queue exceeds 256`() {
+        val state = StoreState.initial()
+        // Fill exactly RETRY_QUEUE_MAX_SIZE (256) entries.
+        var cur = state
+        for (i in 0 until 256) {
+            cur = reduceAuthority(cur, retryQueued("sid-$i", queuedMonotonic = i.toLong()))
+        }
+        assertEquals(256, cur.authority.retryQueue.size)
+        // Insert one more (sid-256 at monotonic=256, newer than all). The
+        // oldest (sid-0 at monotonic=0) MUST be evicted.
+        cur = reduceAuthority(cur, retryQueued("sid-256", queuedMonotonic = 256L))
+        assertEquals("queue capped at 256", 256, cur.authority.retryQueue.size)
+        assertFalse("oldest entry (sid-0) evicted", "sid-0" in cur.authority.retryQueue)
+        assertTrue("new entry (sid-256) present", "sid-256" in cur.authority.retryQueue)
+        assertTrue("second-oldest (sid-1) survives", "sid-1" in cur.authority.retryQueue)
+    }
+
+    @Test
+    fun `RetryQueued does not evict when re-queuing an existing sid at capacity`() {
+        val state = StoreState.initial()
+        var cur = state
+        for (i in 0 until 256) {
+            cur = reduceAuthority(cur, retryQueued("sid-$i", queuedMonotonic = i.toLong()))
+        }
+        assertEquals(256, cur.authority.retryQueue.size)
+        // Re-queue an EXISTING sid (sid-0) with a fresh attempt. The queue
+        // size must NOT grow (overwrite, not insert) → no eviction needed.
+        cur = reduceAuthority(cur, retryQueued("sid-0", attempt = 2, queuedMonotonic = 9999L))
+        assertEquals("re-queue at capacity stays at 256", 256, cur.authority.retryQueue.size)
+        assertEquals(2, cur.authority.retryQueue["sid-0"]?.attempt)
+    }
+
+    @Test
+    fun `RetryFired removes the queued entry`() {
+        val store = storeWith()
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1")))
+        assertTrue("s1 queued", "s1" in store.stateFlow.value.authority.retryQueue)
+        store.dispatch(AppAction.AuthorityEvent(retryFired("s1")))
+        assertFalse("s1 fired (removed)", "s1" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `RetryFired is a same-ref no-op when sid not in queue`() {
+        val state = StoreState.initial()
+        val op = retryFired("absent")
+        val result = reduceAuthority(state, op)
+        assertSame("RetryFired on absent sid MUST be same-ref no-op", state, result)
+    }
+
+    @Test
+    fun `terminal ApplyEvent idle cleans the sid from retryQueue`() {
+        val store = storeWith()
+        // Queue s1, then deliver a terminal idle event.
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 2000L),
+        ))
+        assertFalse("retry entry cleaned on terminal idle",
+            "s1" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `non-terminal ApplyEvent busy keeps the sid in retryQueue`() {
+        val store = storeWith()
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 2000L),
+        ))
+        assertTrue("retry entry kept on non-terminal busy",
+            "s1" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `terminal ApplyEvent retry-status keeps the sid in retryQueue`() {
+        // `retry` status is non-terminal (isRetry == true) → queue retained.
+        val store = storeWith()
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "retry"), EntryOrigin.SSE_LEGACY, monotonic = 2000L),
+        ))
+        assertTrue("retry entry kept on retry status (non-terminal)",
+            "s1" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `retryQueueFlow value reflects enqueue fire and terminal cleanup`() {
+        val store = storeWith()
+        // DerivedStateFlow is lag-free: .value reads selector(state.value).
+        assertTrue(store.retryQueueFlow.value.isEmpty())
+
+        // Enqueue → .value reflects the new entry immediately.
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedMonotonic = 100L)))
+        assertEquals(RetryEntry(1, 200L, 100L), store.retryQueueFlow.value["s1"])
+
+        // Fire → .value reflects the removal.
+        store.dispatch(AppAction.AuthorityEvent(retryFired("s1")))
+        assertTrue(store.retryQueueFlow.value.isEmpty())
+
+        // Enqueue again, then terminal idle cleans it → .value reflects empty.
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedMonotonic = 200L)))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 300L),
+        ))
+        assertTrue("terminal cleanup reflected in flow .value",
+            store.retryQueueFlow.value.isEmpty())
+    }
+
+    @Test
+    fun `retryQueueFlow emits distinct values to collectors on enqueue and fire`() {
+        val store = storeWith()
+        val emissions = mutableListOf<Map<String, RetryEntry>>()
+        val testScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)
+        val job = testScope.launch {
+            store.retryQueueFlow.collect { emissions += it }
+        }
+        // Initial emission: empty.
+        assertEquals("initial emission", emptyMap<String, RetryEntry>(), emissions.last())
+
+        // Enqueue → emits the new entry (distinct from empty).
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedMonotonic = 100L)))
+        assertEquals(RetryEntry(1, 200L, 100L), emissions.last()["s1"])
+
+        // Fire → emits empty (distinct from the queued entry).
+        store.dispatch(AppAction.AuthorityEvent(retryFired("s1")))
+        assertTrue(emissions.last().isEmpty())
+
+        job.cancel()
+        testScope.cancel()
+    }
+
+    @Test
+    fun `retryQueueFlow does not emit on unrelated authority changes`() {
+        val store = storeWith()
+        val emissions = mutableListOf<Map<String, RetryEntry>>()
+        val testScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)
+        val job = testScope.launch {
+            store.retryQueueFlow.collect { emissions += it }
+        }
+        val sizeBefore = emissions.size
+        // Dispatch a busy event (changes bySid + projection but NOT retryQueue).
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L),
+        ))
+        assertEquals("no spurious emission when retryQueue unchanged",
+            sizeBefore, emissions.size)
+        job.cancel()
+        testScope.cancel()
     }
 
     // ── P1-C FreshnessTick (applyFreshnessTick) ──

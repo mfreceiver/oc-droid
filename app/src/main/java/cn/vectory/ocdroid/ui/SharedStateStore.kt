@@ -232,6 +232,21 @@ class SharedStateStore @Inject constructor(
     internal val chatRouteInstanceFlow: StateFlow<Long> = DerivedStateFlow(state) { it.chatRouteInstance }
 
     /**
+     * §P1-B/E retry-queue observability: a lag-free [DerivedStateFlow]
+     * projection over `authority.retryQueue` (the bounded retry queue keyed
+     * by sid). Pure READ side — mirrors the per-slice projection pattern
+     * ([sessionListFlow] / [chatFlow] / …). Introduces NO new writeable
+     * truth: the queue is mutated solely by the pure [reduceAuthority]
+     * (RetryQueued / RetryFired / terminal-cleanup), and this flow is a
+     * plain selector over the single aggregate [state].
+     *
+     * Consumers: diagnostics / tests / future UI retry indicator. Each
+     * `.value` reads `state.value.authority.retryQueue` synchronously.
+     */
+    internal val retryQueueFlow: StateFlow<Map<String, cn.vectory.ocdroid.data.state.RetryEntry>> =
+        DerivedStateFlow(state) { it.authority.retryQueue }
+
+    /**
      * §breathing-indicator (item ①, TOCTOU fix): the last generation that
      * committed [sseConnectedFlow]. Read accessor used by
      * [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner] to SEED

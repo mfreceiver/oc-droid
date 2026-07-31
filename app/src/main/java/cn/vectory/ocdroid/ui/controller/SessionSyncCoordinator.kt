@@ -1552,11 +1552,62 @@ class SessionSyncCoordinator(
             closeSkeletonSession(sid)
             emitCriticalEffect(scope, ControllerEffect.EvictSession(fp, sid))
         }
+        // §P1-B/E retry-queue wire: this sweep IS the retry attempt for any
+        // previously-queued sid it covers. Fire (dequeue) them FIRST so the
+        // queue reflects "the poller re-swept" (RetryFired kdoc contract).
+        // The auth snapshot is captured ONCE (before any dispatch) so the
+        // attempt counter read below is consistent with the fire decision —
+        // each dispatch lands in the single CAS independently, so partial
+        // ordering between fire/queue for the SAME sid is safe (net effect:
+        // old entry removed, new entry inserted with attempt+1).
+        val auth = currentAuthority()
+        val scopeKey = slices.store.authorityScope()
+        val now = clock()
+        for (sid in summary.perSid.keys) {
+            if (sid in auth.retryQueue) {
+                slices.store.dispatch(
+                    cn.vectory.ocdroid.ui.AppAction.AuthorityEvent(
+                        cn.vectory.ocdroid.data.state.AuthorityOp.RetryFired(
+                            sid = sid,
+                            scopeKey = scopeKey,
+                            monotonic = now,
+                        ),
+                    ),
+                )
+            }
+        }
         // T13-C4: retryableCount > 0 → ask the poller to schedule backoff;
         // retryableCount == 0 → ask the poller to reset backoff to base
         // (the success path; symmetric to keep the poller's backoff state
         // machine coherent across sweeps).
         if (summary.retryableCount > 0) {
+            // §P1-B/E retry-queue wire: enqueue each sid whose outcome is
+            // Retry (503 / transport). The attempt counter increments from
+            // the prior queue entry (captured in `auth` before the fires
+            // above). backoffMs is the NOMINAL exponential base (no jitter —
+            // jitter is a runtime non-determinism applied by the poller's
+            // scheduleBackoff; the queue records the deterministic strategy
+            // so the metadata is reproducible / testable).
+            for ((sid, outcome) in summary.perSid) {
+                if (outcome !is cn.vectory.ocdroid.data.repository.StatusOutcome.Retry) continue
+                val prevAttempt = auth.retryQueue[sid]?.attempt ?: 0
+                val nominalBackoffMs = cn.vectory.ocdroid.util.exponentialBackoffMs(
+                    attempt = prevAttempt,
+                    baseMs = cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.BACKOFF_BASE_MS,
+                    maxShift = cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.BACKOFF_MAX_SHIFT,
+                )
+                slices.store.dispatch(
+                    cn.vectory.ocdroid.ui.AppAction.AuthorityEvent(
+                        cn.vectory.ocdroid.data.state.AuthorityOp.RetryQueued(
+                            sid = sid,
+                            scopeKey = scopeKey,
+                            attempt = prevAttempt + 1,
+                            backoffMs = nominalBackoffMs,
+                            queuedMonotonic = now,
+                        ),
+                    ),
+                )
+            }
             effects.tryEmitEffect(ControllerEffect.RequestPollerBackoff)
         } else {
             effects.tryEmitEffect(ControllerEffect.ResetPollerBackoff)
