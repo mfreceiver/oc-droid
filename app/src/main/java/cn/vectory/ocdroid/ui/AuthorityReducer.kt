@@ -8,9 +8,13 @@ import cn.vectory.ocdroid.data.state.EntryOrigin
 import cn.vectory.ocdroid.data.state.Freshness
 import cn.vectory.ocdroid.data.state.OptimisticClaim
 import cn.vectory.ocdroid.data.state.ReconcileOutcome
+import cn.vectory.ocdroid.data.state.RetryEntry
 import cn.vectory.ocdroid.data.state.SessionEntry
 import cn.vectory.ocdroid.data.state.ServerRound
 import cn.vectory.ocdroid.ui.controller.normalizeAuthoritativeStatusSnapshot
+
+/** §P1-B/E: cap on [AuthorityState.retryQueue] size (LRU eviction when exceeded). */
+private const val RETRY_QUEUE_MAX_SIZE = 256
 
 /**
  * §P0-A (B1 option 1): the PURE authority reducer — the SINGLE writer of
@@ -52,6 +56,9 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
         is AuthorityOp.MarkSourceFailed -> applyMarkFailed(cur, op)
         is AuthorityOp.ApplyReconcileOutcome -> applyReconcile(cur, op)
         is AuthorityOp.PruneSessions -> applyPrune(cur, op)
+        is AuthorityOp.FreshnessTick -> applyFreshnessTick(cur, op)
+        is AuthorityOp.RetryQueued -> applyRetryQueued(cur, op)
+        is AuthorityOp.RetryFired -> applyRetryFired(cur, op)
     }
     // §P0-A rev-gpt r2 #5: compute the abort-pending release INDEPENDENT of the
     // same-ref short-circuit. An equal-value terminal-idle ApplyEvent (re-
@@ -210,7 +217,10 @@ private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
             true
         }
         is AuthorityOp.PurgeHost,
-        is AuthorityOp.PruneSessions -> true
+        is AuthorityOp.PruneSessions,
+        is AuthorityOp.FreshnessTick,
+        is AuthorityOp.RetryQueued,
+        is AuthorityOp.RetryFired -> true
     }
 }
 
@@ -388,6 +398,12 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
             bySid = resetById + (op.sid to nextEntry),
             knownIncarnations = cur.knownIncarnations + (op.scopeKey to op.serverRound.incarnation),
             pendingBumps = nextPending,
+            // §P1-B/E: clean retry entry on terminal status
+            retryQueue = if (!op.status.isBusy && !op.status.isRetry) {
+                cur.retryQueue - op.sid
+            } else {
+                cur.retryQueue
+            },
         )
     }
 
@@ -403,6 +419,12 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
     return cur.copy(
         bySid = cur.bySid + (op.sid to nextEntry),
         pendingBumps = nextPending,
+        // §P1-B/E: clean retry entry on terminal status
+        retryQueue = if (!op.status.isBusy && !op.status.isRetry) {
+            cur.retryQueue - op.sid
+        } else {
+            cur.retryQueue
+        },
     )
 }
 
@@ -675,6 +697,96 @@ private fun applyPrune(cur: AuthorityState, op: AuthorityOp.PruneSessions): Auth
         sid in op.sids && (entry.scopeKey == null || entry.scopeKey == op.scopeKey)
     }
     return if (nextById.size == cur.bySid.size) cur else cur.copy(bySid = nextById)
+}
+
+// ── FreshnessTick (P1-C) ────────────────────────────────────────────────────
+
+/**
+ * §P1-C: passive-TTL aging. Ages each in-scope [SessionEntry]'s `freshness`
+ * Fresh→Stale (>TTL) / Stale→Unknown (>2*TTL) as pure bookkeeping. Does NOT
+ * touch `project()`'s TTL verdict (that uses sourceTimeMs, not freshness).
+ *
+ * Bumps authorityRevision only if at least one entry's freshness actually
+ * changes — otherwise returns [cur] (same ref, no transition). The aggregator's
+ * init-collect re-derives projections on the revision bump.
+ *
+ * Out-of-scope entries (non-null scopeKey != op.scopeKey) are skipped (matches
+ * applyEvent/applySnapshot scope filtering).
+ */
+private fun applyFreshnessTick(cur: AuthorityState, op: AuthorityOp.FreshnessTick): AuthorityState {
+    val ttlMs = 30_000L // §P1-C STATUS_TTL_MS (StatusAggregatorImpl.STATUS_TTL_MS)
+    val unknownMs = 60_000L // §P1-C 2 * STATUS_TTL_MS
+    var changed = false
+    val nextById = cur.bySid.mapValues { (_, e) ->
+        // Out-of-scope entries are never aged by this tick.
+        if (e.scopeKey != null && e.scopeKey != op.scopeKey) {
+            return@mapValues e
+        }
+        val age = op.nowMonotonic - e.updatedMonotonic
+        val target = when {
+            age > unknownMs -> Freshness.Unknown
+            age > ttlMs -> Freshness.Stale
+            else -> Freshness.Fresh
+        }
+        if (e.freshness == target) {
+            e
+        } else {
+            changed = true
+            e.copy(freshness = target)
+        }
+    }
+    return if (changed) cur.copy(bySid = nextById) else cur
+}
+
+// ── RetryQueued (P1-B/E) ──────────────────────────────────────────────────
+
+/**
+ * §P1-B/E: enqueue a retry entry. BOUNDED: if the queue is at
+ * RETRY_QUEUE_MAX_SIZE and [sid] is not already queued, the OLDEST entry (by
+ * queuedMonotonic) is evicted before inserting the new one (LRU-style, prevents
+ * unbounded growth under a retry storm). If [sid] is already queued, it is
+ * OVERWRITTEN (refreshed) without eviction. Bumps authorityRevision on a real
+ * change (new insert OR overwrite with different RetryEntry). Scope-filter:
+ * only [sid]'s entry is touched (the op carries its own scopeKey; mismatched
+ * scope entries are not affected because the queue is keyed by sid, and the
+ * caller is responsible for dispatching under the correct scope).
+ */
+private fun applyRetryQueued(cur: AuthorityState, op: AuthorityOp.RetryQueued): AuthorityState {
+    val entry = RetryEntry(attempt = op.attempt, backoffMs = op.backoffMs, queuedMonotonic = op.queuedMonotonic)
+    val existing = cur.retryQueue[op.sid]
+    return if (existing == entry) {
+        cur  // same ref, no transition
+    } else {
+        val withInserted = cur.retryQueue + (op.sid to entry)
+        val bounded = if (withInserted.size <= RETRY_QUEUE_MAX_SIZE) {
+            withInserted
+        } else {
+            // LRU eviction: drop the entry with the smallest queuedMonotonic
+            // (the oldest). The just-inserted entry has op.queuedMonotonic so
+            // it survives only if it is not itself the oldest (unlikely in a
+            // storm, but correct).
+            val oldestKey = withInserted.minByOrNull { it.value.queuedMonotonic }?.key
+            if (oldestKey != null && oldestKey != op.sid) {
+                withInserted - oldestKey
+            } else {
+                withInserted  // the new entry itself is the oldest; keep it, drop nothing extra
+            }
+        }
+        cur.copy(retryQueue = bounded)
+    }
+}
+
+/**
+ * §P1-B/E: dequeue a retry entry (the retry was fired externally). Removes
+ * [op.sid] from retryQueue. Bumps authorityRevision only if the sid was
+ * actually present (real change); same-ref no-op otherwise.
+ */
+private fun applyRetryFired(cur: AuthorityState, op: AuthorityOp.RetryFired): AuthorityState {
+    return if (op.sid in cur.retryQueue) {
+        cur.copy(retryQueue = cur.retryQueue - op.sid)
+    } else {
+        cur
+    }
 }
 
 // ── projection + bumps ─────────────────────────────────────────────────────

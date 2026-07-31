@@ -142,6 +142,11 @@ internal object StatusPollOrchestrator {
             return
         }
         val myEpoch = statusLoadEpoch.incrementAndGet()
+        // §R11: capture completenessEpoch BEFORE the network suspend so a
+        // mid-flight session-list change (which bumps completenessEpoch)
+        // invalidates the result — prevents a stale REST poll from applying
+        // status to a changed session list.
+        val completenessEpochAtStart = slices.sessionList.value.completenessEpoch
         val hostAtRequestStart = slices.host.value.currentHostProfileId
         // T-R1 (slimapi R1) 方案A: in slim mode the paths that reach here are
         // COLD_START (app/session/host-connect init) AND, per P0-1 above, a SWEEP
@@ -153,7 +158,7 @@ internal object StatusPollOrchestrator {
         // (SessionSyncCoordinator.handleSessionDigest → applySessionStatus).
         // Legacy transport behavior remains byte-for-byte unchanged.
         if (repository.usesSlimStatusFanOut) {
-            launchLoadSessionStatusSlim(scope, repository, slices, myEpoch, hostAtRequestStart, onComplete)
+            launchLoadSessionStatusSlim(scope, repository, slices, myEpoch, hostAtRequestStart, completenessEpochAtStart, onComplete)
             return
         }
         scope.launch {
@@ -199,9 +204,12 @@ internal object StatusPollOrchestrator {
                     // responses. A host switch explicitly clears activeSessionIds;
                     // an old-host response must never repopulate that snapshot.
                     if (myEpoch != statusLoadEpoch.get() ||
-                        snapshot.host.currentHostProfileId != hostAtRequestStart
+                        snapshot.host.currentHostProfileId != hostAtRequestStart ||
+                        // §R11: session list changed mid-flight — discard to
+                        // prevent stale REST status from overwriting new sessions.
+                        snapshot.sessionList.completenessEpoch != completenessEpochAtStart
                     ) {
-                        DebugLog.d("Sync", "launchLoadSessionStatus: stale epoch/host, discarding snapshot")
+                        DebugLog.d("Sync", "launchLoadSessionStatus: stale epoch/host/completeness, discarding snapshot")
                         return@mutateState snapshot
                     }
                     val authoritative = allSessionsById(
@@ -322,6 +330,7 @@ internal object StatusPollOrchestrator {
         slices: SliceFlows,
         myEpoch: Long,
         hostAtRequestStart: String?,
+        completenessEpochAtStart: Long,
         onComplete: (Boolean) -> Unit,
     ) {
         scope.launch {
@@ -409,9 +418,12 @@ internal object StatusPollOrchestrator {
                     applied = false
                     val current = snapshot.sessionList
                     if (myEpoch != statusLoadEpoch.get() ||
-                        snapshot.host.currentHostProfileId != hostAtRequestStart
+                        snapshot.host.currentHostProfileId != hostAtRequestStart ||
+                        // §R11: session list changed mid-flight — discard to
+                        // prevent stale REST status from overwriting new sessions.
+                        snapshot.sessionList.completenessEpoch != completenessEpochAtStart
                     ) {
-                        DebugLog.d("Sync", "launchLoadSessionStatusSlim: stale epoch/host, discarding snapshot")
+                        DebugLog.d("Sync", "launchLoadSessionStatusSlim: stale epoch/host/completeness, discarding snapshot")
                         return@mutateState snapshot
                     }
                     val authoritative = allSessionsById(

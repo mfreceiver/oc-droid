@@ -41,6 +41,10 @@ data class AuthorityState(
     /** §B8 optimistic bump timestamps awaiting application to `sessions` in the
      *  same CAS (consumed by [cn.vectory.ocdroid.ui.applyOptimisticBumps]). */
     val pendingBumps: Map<String, Long> = emptyMap(),
+    /** §P1-B/E: bounded retry queue, keyed by sid. Bounded by RETRY_QUEUE_MAX_SIZE
+     *  (enforced in applyRetryQueued — oldest entries evicted LRU-style when full).
+     *  Cleaned on terminal status (idle/failed) in applyEvent. Pure bookkeeping. */
+    val retryQueue: Map<String, RetryEntry> = emptyMap(),
 ) {
     companion object {
         /** Empty default so the [cn.vectory.ocdroid.ui.StoreState] slice seeds cleanly. */
@@ -81,6 +85,25 @@ data class SessionEntry(
      *  a new server incarnation naturally dominates it via [ServerRound.compareTo].
      *  Null on cold start (the first slim frame establishes the baseline). */
     val serverRoundHighWater: ServerRound? = null,
+)
+
+/**
+ * §P1-B/E: a session queued for bounded retry. Lives in
+ * [AuthorityState.retryQueue] keyed by sid. Pure bookkeeping — the actual
+ * retry trigger is external (SlimStatusFanOut retryableCount → poller backoff);
+ * this entry makes the queued-retry state queryable, bounded, and cleaned on
+ * terminal status.
+ *
+ *  - [attempt]: 1-based retry attempt counter (RetryQueued stamps it).
+ *  - [backoffMs]: the backoff the caller requested for THIS attempt (carried in
+ *    RetryQueued; the reducer does NOT compute backoff — it is pure state).
+ *  - [queuedMonotonic]: clock captured at RetryQueued dispatch (for observability;
+ *    the reducer needs no injected clock).
+ */
+data class RetryEntry(
+    val attempt: Int,
+    val backoffMs: Long,
+    val queuedMonotonic: Long,
 )
 
 /**
