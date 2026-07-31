@@ -373,17 +373,15 @@ legacy / optimistic 路径**无因果 token**——确认门 DROP 一个 stale I
 
 ## 8. 已知限制与演进方向（诚实记录）
 
-### 8.1 BLK-2：`prev.serverRound == null` 时 lex guard 跳过
+### 8.1 BLK-2：基线清空后的低 turn 复活窗口（**已于 `e7549e0` 闭合**）
 
-**代码**：`AuthorityReducer.kt:245` —— `if (op.serverRound != null && prev?.serverRound != null)`。`prev.serverRound == null` 时整个 lex 块**跳过**。
+**原始缺口**：`AuthorityReducer.kt:250` 的 lex 守卫要求 `prev?.serverRound != null`。当 Tier-2 事件（无 turn）把某 entry 的 `serverRound` 基线清成 null（三类清空：REST `ApplySnapshot` / legacy SSE busy `keepRound=null` / incarnation-advance scope reset），随后到达一个**有 turn 但 turn 较低**的 Tier-1 帧 → lex 守卫跳过、确认门也跳过（确认门需 `op.serverRound == null`）→ 该低 turn 帧**直接 apply**，stale busy 可能复活。
 
-**后果**：若 Tier-2 事件（无 turn）把某 entry 的 `serverRound` 基线清成 null，随后到达一个**有 turn 但 turn 较低**的 Tier-1 帧 → lex guard 跳过、确认门也跳过（确认门需 `op.serverRound == null`）→ 该低 turn 帧**直接 apply**，stale busy 可能复活。
+**闭合机制**（commit `e7549e0`，`data/state/AuthorityState.kt:75-83`）：`SessionEntry.serverRoundHighWater: ServerRound?` —— per-sid 持久字典序最大 `(incarnation, turn)`，**三类基线清空都保留**（与 live `serverRound` 基线不同，它会被清空；high-water 只向前推进，不随基线清空回退）。冷启动时为 null（首个 slim 帧建立基线）。
 
-**为何「惰性」**：当前 slimapi **未发** turn token，所有 SSE 事件 `serverRound == null`，lex guard 从不进入，此路径休眠。slimapi 一发 turn 才激活。
+**守卫**（`AuthorityReducer.kt:283-288`）：`op.serverRound < prev.serverRoundHighWater` → **DROP**（严格低 turn，fail-closed）。此为**主复活向量**（严格低 turn 跨通道重排）的确定性闭合。reach 此守卫前，B6 per-scope incarnation high-water 守卫（`AuthorityReducer.kt:244`）已 DROP 掉旧 incarnation 帧，故 `<` 命中必为同 incarnation 的 stale 低 turn。
 
-**缓解**：turn-token 契约 §9 要求 slimapi 在同一 incarnation 内**不混用** turn（要么全带，要么全不带）；升级走 restart（inc bump）使旧无-turn 帧成旧 epoch 被 inc fence 拒。
-
-**彻底闭合**（超出 doc-only scope）：需改 ocdroid reducer（如 Tier-2 事件不清已建立的 serverRound，或对基线清空后的首个 Tier-1 帧记 high-turn 水位）。列为 P1 backlog。
+**已知残留（诚实记录）**：equal-turn（`==`）**未 DROP**（守卫仅 `<`）。一个 baseline clear 后到达的等 turn 帧会被接受以重建基线。live lex 守卫（`AuthorityReducer.kt:253`）有 `==0` 的 monotonic tie-break，但 BLK-2 守卫**未镜像**此 tie-break —— 根因是**跨时钟域比较无意义**：`updatedMonotonic` 在 REST `ApplySnapshot` 路径由 `requestStartMs`（**墙上钟**）设，在 SSE `applyEvent` 路径由 `connectionMonotonicMs`（**单调钟**）设；incoming `connectionMonotonicMs` 是单调钟。设备休眠/时钟调整会让两域乱序，强行镜像会引入潜在 fail-open 乱序 bug（风险高于当前的 fail-closed equal-turn 接受）。**主复活向量（严格低 turn）已闭合；equal-turn 窗口为已知残留。** 演进方向：待统一时钟源（全路径用 monotonic，如 `SystemClock.uptimeMillis()`）后，安全镜像 `==0` tie-break（见 `AuthorityReducer.kt:271-282` KNOWN RESIDUAL 注释 + §8.5）。
 
 ### 8.2 持久化水位线搁置
 
@@ -409,7 +407,7 @@ Tier-1 fence 的**消费侧已就绪**（`0d572d2`，解析 + 降级 merged）�
 
 ### 8.5 P1/P2 backlog 方向
 
-- **P1**：BLK-2 彻底闭合（reducer 改）。
+- **P1/P2**：BLK-2 equal-turn 残留 —— baseline clear 后到达的等 turn 帧未镜像 `==0` monotonic tie-break（跨时钟域，详见 §8.1）。待统一 REST/SSE 时钟源（monotonic）后安全镜像。
 - **P1**：C5 header 透传 serverGroupFp（消除 fp 漂移风险）。
 - **P2**：authority 持久化（需 reducer 副作用外移架构）。
 - **P2**：detekt sole-writer 规则。

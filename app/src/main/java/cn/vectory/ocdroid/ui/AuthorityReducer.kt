@@ -268,14 +268,18 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
     // above), so a `<` result is a same-incarnation stale-low-turn.
     // prev == null / watermark == null (cold start) → no watermark → establish baseline.
     //
-    // KNOWN RESIDUAL (deliberate, documented): only strictly-older `<` is DROPped, not
-    // equal-turn (mirroring §3.1 "strictly DROP low turn" and the live lex guard's
-    // equal handling). An EQUAL-turn frame arriving after a baseline clear is ACCEPTED
-    // to re-establish the baseline; this could let a buffered stale equal-turn digest
-    // revive busy. The live lex guard's `==0` monotonic-tie-break is NOT mirrored here
-    // because its validity depends on the connectionMonotonicMs / updatedMonotonic
-    // clock-domain semantics across the REST and SSE paths (unverified). The strictly-
-    // low window — the dominant, determinism-critical revival vector — is closed.
+    // KNOWN RESIDUAL (deliberate, documented in spec §8.1): only strictly-older `<` is
+    // DROPped, not equal-turn (mirroring §3.1 "strictly DROP low turn" and the live lex
+    // guard's equal handling). An EQUAL-turn frame arriving after a baseline clear is
+    // ACCEPTED to re-establish the baseline; this could let a buffered stale equal-turn
+    // digest revive busy. The live lex guard's `==0` monotonic-tie-break is NOT mirrored
+    // here because updatedMonotonic is set from requestStartMs (a WALL clock) on the REST
+    // ApplySnapshot path but from connectionMonotonicMs (a MONOTONIC clock) on the SSE
+    // path — a cross-clock-domain compare is meaningless (device sleep / clock skew would
+    // reorder), so mirroring now would risk a fail-open ordering bug worse than the
+    // current fail-closed equal-turn accept. The strictly-low window — the dominant,
+    // determinism-critical revival vector — is closed. Evolution: unify the clock source
+    // (monotonic everywhere) then safely mirror the `==0` tie-break (see spec §8.1 + §8.5).
     if (op.serverRound != null && prev != null && prev.serverRound == null &&
         prev.serverRoundHighWater != null &&
         op.serverRound < prev.serverRoundHighWater
