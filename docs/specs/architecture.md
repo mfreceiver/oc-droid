@@ -5,7 +5,7 @@
 >
 > 相关规格（操作细节）：`./build-apk.md`（构建发版）、`./emulator-debug.md`（模拟器）、
 > `./ui-style-spec.md`（UI overlay 三层规则，MANDATORY）、`./slim-mode-api-routing.md`（slim 路由契约）、
-> `./sse-client-spec.md`（SSE 控制面）、`./mtls-setup-guide.md`（mTLS）。
+> `./sse-client-spec.md`（SSE 控制面）、`./state-machine-architecture-spec.md`（会话状态机 authority 模式，本文件 §5 之外的状态权威/reducer/fence）、`./mtls-setup-guide.md`（mTLS）。
 
 ---
 
