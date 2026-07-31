@@ -538,10 +538,21 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
             // baseline clear so a stale low-turn Tier-1 slim digest arriving after
             // this snapshot is still fenced (the live baseline is gone, but the
             // persistent watermark remembers the max turn seen for this incarnation).
+            //
+            // §U-P1: preserve an SSE-active UNCONFIRMED optimistic claim across the
+            // REST snapshot. A claim is "active" when it exists AND is unconfirmed
+            // by BOTH signals (!serverEchoed && !reconcileConfirmed) — the watchdog
+            // will reconcile it. A confirmed claim (serverEchoed || reconcileConfirmed)
+            // means the server acknowledged busy → REST snapshot legitimately resolves
+            // it (clear). Mirrors the :309-319 guardedIdleDrop protection at the
+            // applySnapshot level.
+            val preservedClaim = priorEntry?.optimisticClaim?.let { claim ->
+                if (!claim.serverEchoed && !claim.reconcileConfirmed) claim else null
+            }
             SessionEntry(
                 status = status,
                 serverRound = null,
-                optimisticClaim = null,
+                optimisticClaim = preservedClaim,  // §U-P1: was `null`
                 origin = EntryOrigin.REST,
                 freshness = Freshness.Fresh,
                 updatedMonotonic = op.requestToken.requestStartMs,
