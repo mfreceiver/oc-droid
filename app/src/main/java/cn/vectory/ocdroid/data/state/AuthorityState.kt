@@ -66,7 +66,6 @@ data class SessionEntry(
     val optimisticClaim: OptimisticClaim?,
     /** How this entry's value arrived — drives §B9 ServerBusy classification. */
     val origin: EntryOrigin,
-    val freshness: Freshness,
     /** TTL / equal-serverRound tie-break clock (NOT a causal fence). Carried in the op.
      *
      *  §MN-P9 step 1 (U-MN9, 2026-07-31): despite the "Monotonic" suffix
@@ -207,9 +206,6 @@ enum class EntryOrigin {
     TREE,
 }
 
-/** Freshness classification for §B9 liveness expiry (P0-A: stored, TTL computed later). */
-enum class Freshness {
-    Unknown,
-    Stale,
-    Fresh,
-}
+/** §U-MN8: Freshness classification (previously P1-C bookkeeping) was eliminated.
+ *  TTL/liveness is now solely computed by StatusAggregatorImpl.project from
+ *  sourceTimeMs — the freshness field had no consumers (discovery §0.C in design). */

@@ -7,7 +7,6 @@ import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.state.AuthorityOp
 import cn.vectory.ocdroid.data.state.EntryOrigin
-import cn.vectory.ocdroid.data.state.Freshness
 import cn.vectory.ocdroid.data.state.ScopeKey
 import cn.vectory.ocdroid.data.state.SessionEntry
 import cn.vectory.ocdroid.ui.AppAction
@@ -100,7 +99,6 @@ class DeferredErrorRecoveryIntegrationTest {
                         serverRound = null,
                         optimisticClaim = null,
                         origin = EntryOrigin.SSE_SLIM,
-                        freshness = Freshness.Fresh,
                         updatedMonotonic = 0L,
                         workdir = null,
                         scopeKey = scope,

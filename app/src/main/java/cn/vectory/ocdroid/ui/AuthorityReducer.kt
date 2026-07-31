@@ -5,7 +5,6 @@ import cn.vectory.ocdroid.data.state.AuthorityOp
 import cn.vectory.ocdroid.data.state.AuthorityState
 import cn.vectory.ocdroid.data.state.Coverage
 import cn.vectory.ocdroid.data.state.EntryOrigin
-import cn.vectory.ocdroid.data.state.Freshness
 import cn.vectory.ocdroid.data.state.OptimisticClaim
 import cn.vectory.ocdroid.data.state.ReconcileOutcome
 import cn.vectory.ocdroid.data.state.RetryEntry
@@ -56,7 +55,6 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
         is AuthorityOp.MarkSourceFailed -> applyMarkFailed(cur, op)
         is AuthorityOp.ApplyReconcileOutcome -> applyReconcile(cur, op)
         is AuthorityOp.PruneSessions -> applyPrune(cur, op)
-        is AuthorityOp.FreshnessTick -> applyFreshnessTick(cur, op)
         is AuthorityOp.RetryQueued -> applyRetryQueued(cur, op)
         is AuthorityOp.RetryFired -> applyRetryFired(cur, op)
     }
@@ -218,7 +216,6 @@ private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
         }
         is AuthorityOp.PurgeHost,
         is AuthorityOp.PruneSessions,
-        is AuthorityOp.FreshnessTick,
         is AuthorityOp.RetryQueued,
         is AuthorityOp.RetryFired -> true
     }
@@ -391,7 +388,6 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
         serverRound = keepRound,
         optimisticClaim = nextOptimisticClaim,
         origin = op.origin,
-        freshness = Freshness.Fresh,
         updatedMonotonic = op.connectionMonotonicMs,
         workdir = op.workdir ?: prev?.workdir,
         scopeKey = op.scopeKey,
@@ -562,7 +558,6 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
                 serverRound = null,
                 optimisticClaim = preservedClaim,  // §U-P1: was `null`
                 origin = EntryOrigin.REST,
-                freshness = Freshness.Fresh,
                 updatedMonotonic = op.requestToken.requestStartMs,
                 workdir = op.sidToWorkdir[id],
                 scopeKey = op.scopeKey,
@@ -823,45 +818,6 @@ private fun applyPrune(cur: AuthorityState, op: AuthorityOp.PruneSessions): Auth
     } else {
         cur.copy(bySid = nextById, retryQueue = nextRetryQueue)
     }
-}
-
-// ── FreshnessTick (P1-C) ────────────────────────────────────────────────────
-
-/**
- * §P1-C: passive-TTL aging. Ages each in-scope [SessionEntry]'s `freshness`
- * Fresh→Stale (>TTL) / Stale→Unknown (>2*TTL) as pure bookkeeping. Does NOT
- * touch `project()`'s TTL verdict (that uses sourceTimeMs, not freshness).
- *
- * Bumps authorityRevision only if at least one entry's freshness actually
- * changes — otherwise returns [cur] (same ref, no transition). The aggregator's
- * init-collect re-derives projections on the revision bump.
- *
- * Out-of-scope entries (non-null scopeKey != op.scopeKey) are skipped (matches
- * applyEvent/applySnapshot scope filtering).
- */
-private fun applyFreshnessTick(cur: AuthorityState, op: AuthorityOp.FreshnessTick): AuthorityState {
-    val ttlMs = 30_000L // §P1-C STATUS_TTL_MS (StatusAggregatorImpl.STATUS_TTL_MS)
-    val unknownMs = 60_000L // §P1-C 2 * STATUS_TTL_MS
-    var changed = false
-    val nextById = cur.bySid.mapValues { (_, e) ->
-        // Out-of-scope entries are never aged by this tick.
-        if (e.scopeKey != null && e.scopeKey != op.scopeKey) {
-            return@mapValues e
-        }
-        val age = op.nowMonotonic - e.updatedMonotonic
-        val target = when {
-            age > unknownMs -> Freshness.Unknown
-            age > ttlMs -> Freshness.Stale
-            else -> Freshness.Fresh
-        }
-        if (e.freshness == target) {
-            e
-        } else {
-            changed = true
-            e.copy(freshness = target)
-        }
-    }
-    return if (changed) cur.copy(bySid = nextById) else cur
 }
 
 // ── RetryQueued (P1-B/E) ──────────────────────────────────────────────────

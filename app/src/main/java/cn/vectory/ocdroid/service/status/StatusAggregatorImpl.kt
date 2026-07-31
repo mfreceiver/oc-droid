@@ -626,17 +626,10 @@ class StatusAggregatorImpl internal constructor(
                 throw e
             }
             try {
-                // §P1-C: dispatch FreshnessTick for authority-state bookkeeping
-                // (ages SessionEntry.freshness Fresh→Stale/Unknown). If any
-                // entry's freshness transitions, the reducer bumps
-                // authorityRevision → the init-collect re-derives projections.
-                store.dispatch(AppAction.AuthorityEvent(
-                    AuthorityOp.FreshnessTick(scopeKey = currentScope(), nowMonotonic = clock())
-                ))
-                // §P1-C: ALSO re-publish synchronously so clock-only TTL verdict
-                // flips (which project() computes from sourceTimeMs, independent
-                // of freshness) are reflected even when the dispatched tick was
-                // a freshness no-op. publishLocked → rescheduleFreshnessLocked
+                // §U-MN8: re-publish synchronously so clock-only TTL verdict flips
+                // (project() computes from sourceTimeMs) are reflected. The
+                // FreshnessTick dispatch was eliminated — freshness field had no
+                // consumers (design §0.C). publishLocked → rescheduleFreshnessLocked
                 // re-arms the next deadline cooperatively.
                 publishFromState(store.stateFlow.value)
             } catch (e: kotlinx.coroutines.CancellationException) {

@@ -3,7 +3,6 @@ package cn.vectory.ocdroid.ui
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.state.AuthorityState
 import cn.vectory.ocdroid.data.state.EntryOrigin
-import cn.vectory.ocdroid.data.state.Freshness
 import cn.vectory.ocdroid.data.state.OptimisticClaim
 import cn.vectory.ocdroid.data.state.ScopeKey
 import cn.vectory.ocdroid.data.state.SessionEntry
@@ -28,7 +27,6 @@ class OptimisticClaimWatchdogTest {
         serverRound = null,
         optimisticClaim = claim,
         origin = EntryOrigin.OPTIMISTIC,
-        freshness = Freshness.Fresh,
         updatedMonotonic = 0L,
         workdir = null,
         scopeKey = scopeKey,
