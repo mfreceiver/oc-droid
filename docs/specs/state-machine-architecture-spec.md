@@ -20,7 +20,7 @@
 | 两层 fence | **Tier-1（slim，强因果）**：`ServerRound(incarnation,turn)` 字典序严格单调 + per-scope incarnation high-water。**Tier-2（legacy，启发式 + 超时自愈）**：确认门 + 5s watchdog。字段缺失自动降级 Tier-2，逐事件独立裁决。 |
 | 写入漏斗 | 16 个写入点全部收敛到 `reduceAuthority`：6 个走 `dispatch(AuthorityEvent)`，10 个在 `mutateState` / 其他 reducer 内**内联**调用 `reduceAuthority`（同一 CAS 内，非绕过）。**零绕过**。 |
 | reducer 纯度 | `reduceAuthority` 无注入依赖、无 I/O、无时钟读、无输入变更、无 Dispatchers → 可安全跑在 CAS retry lambda 内（幂等）。 |
-| 已知限制 | **BLK-2**：`prev.serverRound == null` 时 lex guard 跳过（`AuthorityReducer.kt:245`），低 turn 帧可能复活；惰性（slimapi 未发 turn 前不触发）。**detekt 未配**（B10 仅靠编译期 gate）。**持久化未做**（authority 全内存，进程死即失）。 |
+| 已知限制 | **BLK-2 残留**：基线清空后的**等 turn（`==`）**帧未镜像 monotonic tie-break（跨 REST/SSE 时钟域，`AuthorityReducer.kt:271-282`，§8.1）；严格低 turn 已闭合（`serverRoundHighWater`，commit `e7549e0`）。**detekt 未配**（B10 仅靠编译期 gate）。**持久化未做**（authority 全内存，进程死即失）。 |
 
 ---
 
@@ -279,7 +279,7 @@ authority 有两个派生读侧（都是**派生**，无可写真相）：
 - **watchdog**（`OptimisticClaimWatchdog.kt:16,48-64`）：扫 `authority.bySid` 找 `age > OPTIMISTIC_CONFIRM_TIMEOUT_MS`（5s）且 `!serverEchoed && !reconcileConfirmed` 的 claim → `SessionSyncCoordinator.reconcileStaleOptimisticClaims`（`:1470-1505`）dispatch `ApplyReconcileOutcome` → `applyReconcile`（`:562-599`）置 `reconcileConfirmed` 或清 claim。
 - **触发条件**：`op.serverRound == null`。含 `SSE_LEGACY`（无 turn）、`OPTIMISTIC`（构造即 null，`:277-278`）、`REST/TREE`（snapshot 清 serverRound，`:441`）、`SSE_SLIM` 缺字段。
 
-**边界**：Tier-1 是逐帧精确裁决；Tier-2 是超时兜底（非无限 DROP，5s 后 REST reconcile 自愈）。两层**并存且分层**：有 turn 走 Tier-1，无 turn 走 Tier-2，逐事件独立。字段缺失自动降级 Tier-2，系统正常工作（= 今日行为，因 slimapi 尚未发 turn）。
+**边界**：Tier-1 是逐帧精确裁决；Tier-2 是超时兜底（非无限 DROP，5s 后 REST reconcile 自愈）。两层**并存且分层**：有 turn 走 Tier-1，无 turn 走 Tier-2，逐事件独立。字段缺失自动降级 Tier-2，系统正常工作（字段缺失时的降级行为；slimapi 1.0.1 已发字段，正常路径走 Tier-1）。
 
 ### 5.3 为什么需要 watchdog 自愈
 
@@ -320,7 +320,7 @@ legacy / optimistic 路径**无因果 token**——确认门 DROP 一个 stale I
 - `ui/controller/OptimisticClaimWatchdog.kt` —— 5s 超时扫 stale claim → reconcile。
 
 ### 契约（跨项目）
-- `docs/2026-07-31-oc-slimapi-turn-token-contract.md` —— Tier-1 turn token 的 slimapi×ocdroid 契约（实施前规格）。
+- `docs/2026-07-31-oc-slimapi-turn-token-contract.md` —— Tier-1 turn token 的 slimapi×ocdroid 契约（已落地，2026-07-31）。
 
 ---
 
@@ -392,14 +392,16 @@ authority 全内存（§3.4）。为何不做：
 
 演进：若要持久化，需把持久化移出 reducer（如 reducer 只产 op，副作用层异步持久化），或用 `providers.exec`/`ValueSource` 在 Gradle 配置期派生（与版本号同模式）。列为 P2。
 
-### 8.3 slimapi turn token 待联调
+### 8.3 slimapi turn token 已落地（待实机联调验证）
 
-Tier-1 fence 的**消费侧已就绪**（`0d572d2`，解析 + 降级 merged）。**生产侧（slimapi）未发字段**。联调需 slimapi 完成（见 turn-token 契约 §10.1 S1–S9）：
-- 发 `turnIncarnation` + `turn` 在 `session.digest` 的 `properties` 内；
-- turn commit point = forward 送出上游时（await 前）；
-- incarnation 单独持久化 + restart bump；
+Tier-1 fence 的**消费侧已就绪**（`0d572d2`，解析 + 降级 merged）+ **生产侧（slimapi）已发字段（1.0.1）**，serverGroupFp header 已注入（ocdroid 0.18.3）。turn-token 契约 §10.1 S1–S9 已实现：
+- 发 `turnIncarnation` + `turn` 在 `session.digest` 的 `data` **flat 顶层**（与 `sessionID`/`status` 同层；ocdroid 的 `properties` = 整个 `data`，flat 顶层可读，解析无需改）；
+- turn commit point = forward 送出上游时（**send 前 bump**：`await send()` 之前 `turn += 1`，httpx-stream 单 await 栈下唯一合规路径）；
+- incarnation 单独持久化（`persisted_last + 1`）+ restart bump；
 - 事件 ingest 时快照 turn（非 flush 时读当前）；
-- serverGroupFp 对齐（方案 A header 透传 / B slimapi 自算）。
+- serverGroupFp 对齐：**方案 A 落地**（`X-Ocdroid-Server-Group-Fp` header 透传，ocdroid 0.18.3 已注入）。
+
+> 剩余：实机联调验证契约 §11 验收场景（restart 不冻结 / 旧帧 DROP / abort fencing / 跨通道反序等）。**wire 权威**在 oc-slimapi `docs/specs/v2-contract.md` §3「Turn token fence」；因果语义 / 不变量 SSOT 在 `docs/2026-07-31-oc-slimapi-turn-token-contract.md`。
 
 ### 8.4 detekt 未配置
 

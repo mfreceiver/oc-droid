@@ -1,12 +1,13 @@
-# oc-slimapi × ocdroid 跨项目协作契约：turn token 强 fence（实施前规格）
+# oc-slimapi × ocdroid 跨项目协作契约：turn token 强 fence（已落地，2026-07-31）
 
-> **状态**：**实施前规格（pre-implementation spec）**——双方对齐后再开工。本文档是 oc-slimapi 与 ocdroid **双方共同阅读**的独立、完整契约。
+> **状态**：**已落地**——oc-slimapi 1.0.1（2026-07-31）实现 turn-token fence 全套（发字段 + 输入头 + commit point + incarnation 持久化 + ingest 时快照），ocdroid 消费侧（`0d572d2`）+ serverGroupFp header 透传（ocdroid 0.18.3）均 merged。本文档是 oc-slimapi 与 ocdroid **双方共同阅读**的独立、完整契约。
 > **日期**：2026-07-31。
 > **bundle**：B-ocdroid-sm-20260730（批次 2 — 文档）。
 > **权威来源**：方案 v3 §5（`docs/2026-07-30-ocdroid-state-machine-improvement-plan.md` §5.1–5.4）+ §3.1（两层 fence）。本文档把 v3 的紧凑叙述**扩写为面向双方的实施规格**，并对 v3 紧凑表述中存在的顺序歧义给出**精确定义**（见 §4.4、§B）。
 > **读者**：① oc-slimapi 维护者（Python 中继层，负责发送字段 / commit point / 持久化 / 共享 registry）；② ocdroid 维护者（Kotlin 客户端，消费字段做因果 fence）。
-> **范围**：**本文档只描述契约，不改任何代码。** ocdroid 侧消费解析**已就绪**（commit `0d572d2`，merged to main），只等 slimapi 发字段。
+> **范围**：**本文档只描述契约，不改任何代码。** slimapi 已发字段（1.0.1），ocdroid 侧消费解析**已就绪并 merged**（commit `0d572d2`）+ serverGroupFp header 已注入（ocdroid 0.18.3），双方就绪，可实机联调。
 > **不可改约束**：上游 opencode 服务端**不可改**；所有 fence 由 slimapi（派生因果标识）+ ocdroid（消费归约）两侧完成，不依赖上游改动。
+> **wire 契约 cross-ref**：本文件是 turn token fence 的**因果语义 / 术语 / 不变量 SSOT**（双方权威）。**wire 权威**（`session.digest` schema、`turnIncarnation?` / `turn?` 字段定义、`X-Ocdroid-Server-Group-Fp` 输入头）在 oc-slimapi `docs/specs/v2-contract.md` §3「Turn token fence」（含 digest schema 补的 `turnIncarnation?`/`turn?` 字段）——**以 oc-slimapi §3.y 为准**；本文件补充因果语义、commit point、持久化、消费侧 fence 规则。
 
 ---
 
@@ -21,7 +22,7 @@
 | 非 2xx 响应 | 同连接失败：**成 hole，不 decrement**（§4.3）。 |
 | incarnation | slimapi 生命周期 epoch，**单独持久化**，跨 restart 单调；restart→bump。 |
 | 缺字段怎么办 | **字段全部可选**。缺失→ocdroid 降级到 Tier-2 启发式确认门 + watchdog，系统正常工作（§9）。双方可分阶段上线。 |
-| ocdroid 就绪度 | 解析 + 降级**已就绪并 merged**；不需要再改 ocdroid 代码即可联调（slimapi 一发字段即生效）。 |
+| ocdroid 就绪度 | 解析 + 降级**已就绪并 merged**（`0d572d2`）；serverGroupFp header 已注入（ocdroid 0.18.3）。slimapi 1.0.1 已发字段，Tier-1 已生效。 |
 
 ---
 
@@ -78,7 +79,7 @@ ocdroid 收到带 `(inc, turn)` 的事件后，用 `ServerRound(inc, turn)` 做 
 
 slimapi 在**转发给 ocdroid 的实时 status 事件**上附加两个可选字段。**主交付通道 = `session.digest` SSE 事件**（digest 携带 `status`，是 ocdroid 今日解析 `(inc,turn)` 的唯一位置）。
 
-> ocdroid 解析点（已实现，`0d572d2`，`SessionSyncCoordinator.kt:1018-1034`）：从 digest 的 **`properties` 对象**内读取 `turnIncarnation` 与 `turn`（与 `archived` / `deleted` / `lastError` 同层），**不**在事件顶层。slimapi 必须把字段放进 digest 的 `properties` 内，否则 ocdroid 解析不到（降级 Tier-2）。
+> ocdroid 解析点（已实现，`0d572d2`，`SessionSyncCoordinator.kt:1018-1034`）：从 digest 的 **`data` flat 顶层**读取 `turnIncarnation` 与 `turn`（与 `sessionID` / `status` / `archived` / `deleted` / `lastError` **同层**）。ocdroid 的 SSE 解析器对 `session.digest`（及 `resync` 等 event-typed 帧）合成 `properties = data`（整个 `data` 对象，`SSEClient.kt` B1 fix path），故「ocdroid 的 `properties`」**就是 digest 的 `data` 全体**——slimapi 把字段放在 `data` flat 顶层即可被读取，**无需**嵌套进一个 `properties` 子对象。
 
 ### 3.2 字段语义
 
@@ -89,7 +90,7 @@ slimapi 在**转发给 ocdroid 的实时 status 事件**上附加两个可选字
 
 **配对规则**：`turnIncarnation` 与 `turn` **必须同时出现或同时缺失**。ocdroid 仅当**两者都非 null** 时构造 `ServerRound(inc, turn)`；任一缺失 → `serverRound = null` → 该事件走 Tier-2 确认门（`SessionSyncCoordinator.kt:1022-1028`）。
 
-### 3.3 JSON 示例（session.digest，字段在 properties 内）
+### 3.3 JSON 示例（session.digest，字段在 data flat 顶层）
 
 ```jsonc
 {
@@ -97,16 +98,16 @@ slimapi 在**转发给 ocdroid 的实时 status 事件**上附加两个可选字
   "data": {
     "sessionID": "01HQ...abc",
     "status": "busy",
-    "properties": {
-      "turnIncarnation": 7,
-      "turn": 3,
-      "lastError": null,
-      "archived": 0,
-      "deleted": false
-    }
+    "turnIncarnation": 7,
+    "turn": 3,
+    "lastError": null,
+    "archived": 0,
+    "deleted": false
   }
 }
 ```
+
+> **字段位置（flat 顶层，非嵌套 `properties`）**：`turnIncarnation` / `turn` 与 `sessionID` / `status` / `archived` / `deleted` / `lastError` 同在 `data` 的**顶层**，**不在**一个嵌套的 `properties` 子对象内。ocdroid 的 SSE 解析器对 `session.digest`（event-typed 帧）合成 `properties = data`（`SSEClient.kt` B1 fix path），即「ocdroid 的 `properties`」= 整个 `data`。故 flat 顶层字段天然落到 ocdroid 的 `props.get(...)` 下，**解析无需改动**（实际实现：slimapi 1.0.1 在 `data` flat 顶层发字段；ocdroid `0d572d2` 解析不变即生效）。
 
 - `turnIncarnation: 7` → 当前 slimapi 生命周期 epoch = 7；
 - `turn: 3` → 该 `(serverGroupFp, sid)` 的第 3 个执行轮次；
@@ -342,7 +343,7 @@ ocdroid 内部经 `@Named("currentServerGroupFp")` provider 注入，`currentSer
 | **A（首选）：header 透传** | ocdroid 在每个发给 slimapi 的请求上加 header（建议名 `X-Ocdroid-Server-Group-Fp: <fp>`），slimapi 直接读 header 作 serverGroupFp。 | 双方**零歧义**（ocdroid 是 fp 的定义方）；slimapi 无需复刻算法；profile 改动自动同步。 | 需 ocdroid 加一个 header（小改动，但**超出本文档 doc-only scope**，见 §10.2 标注）。 |
 | **B（备选）：slimapi 自算** | slimapi 按请求的 host/profile 配置，用与 §6.1 **完全一致**的算法计算 serverGroupFp。 | ocdroid 零改动。 | slimapi 必须严格复刻 §6.1（含 `ifBlank{id}` 与 `manual:<url>` 回退）；profile/group 配置变更时双方需同步；易漂移。 |
 
-> **契约推荐方案 A（header 透传）**，因为 serverGroupFp 是 ocdroid 的概念，由定义方透传最不易错。但 header 透传需要 ocdroid 侧加 header（属代码改动）——**本轮 doc-only 不实现**，留作 §10.2 的 ocdroid 待办项；在 header 透传上线前，slimapi 可先用方案 B 自算过渡。
+> **契约采用方案 A（header 透传，已落地）**——serverGroupFp 是 ocdroid 的概念，由定义方透传最不易错。ocdroid 0.18.3 已在请求头注入 `X-Ocdroid-Server-Group-Fp`，slimapi catch-all 直接读 header 作 serverGroupFp（零歧义、profile 改动自动同步）。
 
 ### 6.3 一致性硬要求
 
@@ -415,7 +416,7 @@ val round = if (inc != null && turn != null) {
 applyStatusViaAuthority(sid, status, origin = EntryOrigin.SSE_SLIM, serverRound = round)
 ```
 
-- 字段在 digest 的 **`properties`** 内读取（§3.1）；
+- 字段在 digest 的 **`data` flat 顶层**读取（ocdroid 的 `properties` = 整个 `data`，§3.1）；
 - **两者都非 null** → `ServerRound(inc, turn)`；
 - **任一缺失** → `null` → 走 Tier-2 确认门（降级，§9）。
 
@@ -467,7 +468,7 @@ ocdroid 的 **REST `/session/status` 批量快照**（`ApplySnapshot`）路径**
 
 | slimapi 状态 | ocdroid 状态 | 行为 |
 |---|---|---|
-| 不发字段 | 已就绪（解析 + 降级） | ocdroid 解析为 null → **全量降级 Tier-2**（确认门 + watchdog），系统正常工作（= 今日行为）。 |
+| 不发字段 | 已就绪（解析 + 降级） | ocdroid 解析为 null → **全量降级 Tier-2**（确认门 + watchdog），系统正常工作（字段缺失时的降级行为；slimapi 1.0.1 已发字段，主路径走 Tier-1）。 |
 | 发字段 | 已就绪 | 带 turn 的事件走 Tier-1；不带的事件走 Tier-2（逐事件混用——**安全前提**见下方框，非无条件安全）。 |
 | 发字段 | 旧版 ocdroid（不解析） | 旧版忽略未知字段 → 行为不变（Tier-2）。slimapi 发字段对旧版**完全无害**。 |
 
@@ -487,20 +488,20 @@ ocdroid 的 **REST `/session/status` 批量快照**（`ApplySnapshot`）路径**
 > | 3 | `digest(busy, inc=7, turn=2)`（Tier-1 stale，2<3） | null（lex guard 跳过） | **apply，stale busy 复活** ❌ |
 >
 > - **安全前提（slimapi 侧约束）**：**slimapi 在同一 incarnation 内对所有 status 事件一致地携带 turn（不混用）**。只要同一 incarnation 内 turn 携带一致，事件 2 不会出现（要么全带 turn 走 Tier-1，要么全不带走 Tier-2），窗口不可达。
-> - **推荐升级路径 = restart（inc bump）**：slimapi 升级（从「不发」到「发」字段）应通过 **restart** 完成，使 pre-restart 的无 turn 帧（旧 incarnation）被 incarnation fence 视为旧 epoch（`inc < known → DROP`），不与 post-restart 的有 turn 帧混入同一 incarnation。
+> - **推荐升级路径 = restart（inc bump）**：slimapi 升级（从「不发」到「发」字段）应通过 **restart** 完成，使 pre-restart 的无 turn 帧（旧 incarnation）被 incarnation fence 视为旧 epoch（`inc < known → DROP`），不与 post-restart 的有 turn 帧混入同一 incarnation。（slimapi 1.0.1 已按此路径上线发字段。）
 > - **彻底闭合（OUT OF DOC-ONLY SCOPE）**：要消除此窗口需改 ocdroid reducer（如 Tier-2 事件不清已建立的 serverRound，或对基线被清空后的首个 Tier-1 帧记录 high-turn 水位）。**此为 ocdroid 代码改动 → 超出本文档 doc-only scope，escalate to omni**。当前契约以「doc 措辞收敛 + slimapi 不混用约束」为主。
 >
 > **结论**：字段缺失 → **全量降级 Tier-2 是安全的**（系统正常工作，= 今日行为）；逐事件混用 → **有上述窄窗口，需 slimapi 不在同 incarnation 内混用**。分阶段上线走 restart（inc bump）即可规避。
 
 ---
 
-## 10. 双方职责清单（实施前对齐）
+## 10. 双方职责清单（已落地核对）
 
 ### 10.1 oc-slimapi 侧
 
 | # | 职责 | 契约节 |
 |---|---|---|
-| S1 | 在转发的 `session.digest`（带 status）事件 `properties` 内附加 `turnIncarnation` + `turn`（同时出现/缺失） | §3 |
+| S1 | 在转发的 `session.digest`（带 status）事件 `data` flat 顶层附加 `turnIncarnation` + `turn`（与 `sessionID`/`status` 同层；同时出现/缺失） | §3 |
 | S2 | 实现 turn commit point：forward prompt/abort **`await send()` 之前** `turn += 1`（send 前 bump，httpx-stream 栈下唯一合规路径，§4.1.1/§4.7） | §4.1, §4.1.1, §4.7 |
 | S3 | **send 抛异常（连接级失败）→ turn 已 bump，成 hole**（修订自原「不 increment」；禁 decrement） | §4.2 |
 | S4 | 非 2xx（post-dispatch）→ **已 increment，产生 hole，不 decrement**（与 S3 同规则，§4.3） | §4.3 |
@@ -518,14 +519,14 @@ ocdroid 的 **REST `/session/status` 批量快照**（`ApplySnapshot`）路径**
 | C1 | `SessionSyncCoordinator` 解析 `(turnIncarnation, turn)` → `ServerRound` | **✅ 已就绪**（`0d572d2`） | §8.1 |
 | C2 | authority reducer Tier-1 fence（lex DROP / inc advance 重置 / 低 inc DROP / 等值 tie-break） | **✅ 已就绪**（P0-B） | §8.2 |
 | C3 | 缺失降级 Tier-2 确认门 + watchdog | **✅ 已就绪**（P0-B） | §9 |
-| C4 | 联调验证 §11 场景 | ⏳ 待 slimapi 发字段 | §11 |
-| C5 | （可选，方案 A）加 `X-Ocdroid-Server-Group-Fp` header 透传 serverGroupFp | 🔵 **本轮 doc-only 不实现**；留作后续小改 | §6.2 |
+| C4 | 联调验证 §11 场景 | ⏳ 待实机联调验证（slimapi 已发字段 1.0.1） | §11 |
+| C5 | （方案 A）加 `X-Ocdroid-Server-Group-Fp` header 透传 serverGroupFp | ✅ **已落地**（ocdroid 0.18.3 已注入 header） | §6.2 |
 
-> **本轮 doc-only 边界**：ocdroid 侧 C1–C3 已就绪，**不需要任何代码改动即可联调**。C5（header 透传）是可选增强，属代码改动，**不在本轮 scope**——若评审/联调要求改 ocdroid 代码，**STOP 报 omni**（超出 doc-only scope）。
+> **就绪边界**：ocdroid 侧 C1–C3 已就绪，C5（header 透传）已落地（ocdroid 0.18.3）。slimapi 侧 S1–S9 已实现（1.0.1）。双方就绪，可实机联调验证 §11 场景。
 
 ### 10.3 联调触发条件
 
-- slimapi 完成 S1–S9（至少 S1 + S2 + S5 + S9 的最小可用集：发字段 + commit point + incarnation 持久化 + ingest 快照）；
+- slimapi 已完成 S1–S9（1.0.1：发字段 + commit point（send 前 bump）+ incarnation 持久化 + ingest 时快照）；✅
 - ocdroid 无需改动（C1–C3 已就绪）；
 - 双方对齐 serverGroupFp 方案（S7）与 incarnation 策略（S5）后即可开始 §11 联调。
 
@@ -544,7 +545,7 @@ ocdroid 的 **REST `/session/status` 批量快照**（`ApplySnapshot`）路径**
 | V5 | **abort fencing** | abort forward → turn→4；abort 终态 idle 带 turn=4；之后旧 turn=3 的 stale busy 到达 | idle(4) 应用；stale busy(3) → lex DROP（不复活） |
 | V6 | **连接级失败成 hole**（修订自原「不 increment」，§4.2/§4.7） | send 前 bump（turn→4）→ `send()` 抛异常（上游不可达）→ 回错 | turn=4 已 bump，成**空 hole**（无事件 stamp 该 turn）；ocdroid 收错不写 optimistic，**完全不可见**该 hole；下一次成功 forward turn→5（有 hole）。fence 无影响。 |
 | V7 | **非 2xx 产生 hole** | forward 送出（turn→4）→ 上游回 409/500 | turn=4 已占用（hole）；下一次成功 forward turn→5；ocdroid lex 比较正常（hole 不破坏单调） |
-| V8 | **降级回退（字段缺失）** | slimapi 不发字段（或部分事件不带） | ocdroid 解析 null → 降级 Tier-2 确认门 + watchdog，系统正常（= 今日行为） |
+| V8 | **降级回退（字段缺失）** | slimapi 不发字段（或部分事件不带） | ocdroid 解析 null → 降级 Tier-2 确认门 + watchdog，系统正常（字段缺失时的降级行为；slimapi 1.0.1 已发字段，正常路径走 Tier-1） |
 | V9 | **逐事件混用（有条件安全）** | 升级窗口内交替发「带 turn」「不带 turn」帧 | 逐帧独立裁决；**同 incarnation 内混用有 fence 窗口**（§9：Tier-2 清基线后低 turn 帧可绕过 lex guard 复活）→ **联调前提 = slimapi 不在同 incarnation 内混用**（升级走 restart / inc bump）。本场景验证：同 incarnation 全带 turn 或全不带时 fence 正常；混用时复现 §9 窗口（作为已知限制，**非通过判据**）。 |
 | V10 | **ingest 快照正确性** | busy 事件到达时 turn=3，期间 prompt forward（turn→4），但 busy 已 stamp 3 | ocdroid 收到 busy(3)——正确归属第 3 轮（若 flush 时才读会错成 4） |
 | V11 | **serverGroupFp 一致性** | 双方对同一连接算出相同 fp（方案 A 或 B） | turn 归入正确 scope；fence 生效（若 fp 不一致，fence 静默失效——此场景用于校验对齐） |
@@ -555,7 +556,7 @@ ocdroid 的 **REST `/session/status` 批量快照**（`ApplySnapshot`）路径**
 
 | # | 问题 | 选项 | 建议 |
 |---|---|---|---|
-| O1 | serverGroupFp 来源 | A=header 透传 / B=slimapi 自算 | A（但需 ocdroid 小改，本轮不实现，过渡用 B） |
+| O1 | serverGroupFp 来源 | A=header 透传 / B=slimapi 自算 | **A 已落地**（ocdroid 0.18.3 `X-Ocdroid-Server-Group-Fp` header 透传） |
 | O2 | incarnation bump 策略 | A=`last+1` / B=时钟/版本派生 | A |
 | O3 | slimapi 实例指纹 | 单实例语义 / 多实例按 `(serverGroupFp, slimapiInstanceFp)` | 视部署拓扑定；ocdroid `ScopeKey.slimapiInstanceFp` 已可选支持 |
 | O4 | turn registry 是否持久化 | 持久化（少 hole）/ 不持久化（restart 归零，inc 保证正确） | 持久化（推荐，减少 hole） |
@@ -583,7 +584,7 @@ session.digest 事件 (SSE, slimapi → ocdroid)
 本契约以方案 v3 §5 为权威来源，但在以下点做了**面向实施的精确化**（不改变设计意图，只消除紧凑表述的歧义）：
 
 1. **commit point 的「before await vs 非 2xx 不 increment」歧义**（初版 §4.3-4.4）：v3 把「连接错 / 非 2xx」并列作「不 increment」。**初版**本契约**拆分**为「连接级失败（pre-dispatch）不 increment；应用级非 2xx（post-dispatch）产生 hole」。**修订版（应对 slimapi httpx-stream 反馈）**：因 httpx `stream=True` 单 await 无可观测 seam（§4.1.1），increment 必须在 `await send()` 之前（send 前 bump）→ 连接级失败时 turn 已 bump → **修订为「连接级失败也产生 hole」**（§4.2）。至此 §4.2 与 §4.3 **收敛为同一规则**：任何失败（连接级 / 非 2xx / post-send 重置）→ hole，禁 decrement。理由：§4.4（in-flight fence 正确性）是硬约束，要求 increment 先于上游活动可见；§4.2 原「不 increment」是装饰性（hole 对 ocdroid 不可见）→ 保硬舍软（§4.7 三选项拍板）。monotonicity 保持。
-2. **字段位置**（§3.1）：v3 §5.2 的 JSON 示例把字段画在事件顶层；本契约按 ocdroid 实际解析（`0d572d2`）明确字段在 digest 的 **`properties`** 对象内。
+2. **字段位置**（§3.1）：v3 §5.2 的 JSON 示例把字段画在 `data` 顶层——**这与实际实现一致**。本契约初版曾「精确化」为「字段在 digest 的嵌套 `properties` 对象内」，后经核实（`SSEClient.kt` B1 fix path 对 `session.digest` 合成 `properties = data`）纠正回 **`data` flat 顶层**（与 `sessionID`/`status` 同层）；ocdroid 的 `properties` = 整个 `data`，故 flat 顶层可读、解析无需嵌套。slimapi 1.0.1 据此在 `data` flat 顶层发字段。
 3. **REST status 的 turn 处置**（§8.4）：v3 未展开 REST 批量 status 与 turn 的关系；本契约明确 REST ApplySnapshot **当前清除** serverRound，turn 主走 digest 通道。
 4. **turn 与 incarnation 解耦**（§4.6 不变量 5）：bump incarnation 不触发 turn 归零（二者独立机制）。跨 incarnation（restart）turn 是否持久化是 §7.3 策略选项（持久化累加 / restart 归零均正确，因 inc bump 使 ocdroid 重置基线）。
 5. **「request is on the wire」是因果语义而非可观测瞬间**（§4.6.1，修订新增）：应对 slimapi 反馈——应用层（httpx/httpcore/anyio）无法可靠观测「字节已上 wire」。本契约**不依赖**该精确瞬间，而依赖「send 前 bump + §7.2 happens-before」两段可保证的性质叠加。
@@ -593,4 +594,4 @@ session.digest 事件 (SSE, slimapi → ocdroid)
 
 ---
 
-*契约结束。下一步：双方按 §10 对齐 O1–O5 开放问题 → slimapi 实施 S1–S9 → 按 §11 联调验收。*
+*契约已落地（oc-slimapi 1.0.1 + ocdroid `0d572d2` / 0.18.3）。下一步：按 §11 实机联调验收。*
