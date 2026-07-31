@@ -304,6 +304,14 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
         prev.serverRoundHighWater != null &&
         op.serverRound < prev.serverRoundHighWater
     ) {
+        // §U-CQ4: this guard's watermark is per-entry; on entry deletion (prune,
+        // archive, REST-not-present, applyMarkFailed, FETCH_FAILED) the watermark is
+        // lost. This is safe because incarnation is tied to the server process lifecycle
+        // — a deleted sid cannot revive under the same incarnation. If an entry is
+        // deleted and the same sid arrives with the same incarnation, prev is null and
+        // this guard is skipped (accepted). That is a known residual covered by the
+        // incarnation semantic guarantee. A per-sid map (backlog) would close this
+        // window but is not required for correct operation.
         return cur // §3.1 BLK-2: stale low-turn after baseline clear → DROP
     }
 

@@ -661,6 +661,39 @@ class AuthorityReducerTest {
     }
 
     @Test
+    fun `U-CQ4 - prune then same-incarnation slim frame is ACCEPTED (watermark lost, known residual)`() {
+        // §U-CQ4: the BLK-2 watermark is per-entry (per-sid). When an entry is
+        // pruned the watermark is lost. If a same-incarnation slim frame arrives
+        // after the prune, prev is null → the BLK-2 guard is skipped → the frame
+        // is accepted. This is a known residual: incarnation is tied to server
+        // process lifecycle, so a deleted sid cannot actually revive under the
+        // same incarnation. Document current behavior.
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // Establish baseline (5,7)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 100L),
+        ))
+        assertEquals(ServerRound(5L, 7L),
+            store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
+        // Prune entry A (simulates archive/delete)
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.PruneSessions(sids = setOf("A"), scopeKey = scope),
+        ))
+        assertNull("entry A pruned", store.stateFlow.value.authority.bySid["A"])
+        // Same-incarnation slim frame arrives after prune — prev==null → no BLK-2
+        // fence → ACCEPTED (known residual, incarnation semantic guarantee).
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 200L),
+        ))
+        assertNotNull("same-incarnation frame accepted (known residual)",
+            store.stateFlow.value.authority.bySid["A"])
+        assertEquals("accepted frame establishes baseline",
+            ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+    }
+
+    @Test
     fun `BLK-2 - high-water advance then a later stale low-turn frame is fenced`() {
         val store = storeWith(listOf(Session(id = "A", directory = "/x")))
         store.dispatch(AppAction.AuthorityEvent(
