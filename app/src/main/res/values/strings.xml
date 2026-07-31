@@ -144,6 +144,14 @@
     <string name="cd_unread_marker">Unread</string>
     <string name="cd_question_marker">Pending question</string>
     <string name="cd_permission_marker">Pending permission</string>
+    <!-- §a11y-sweep: SessionAttentionBadge contentDescriptions. The badge is the
+         SOLE visual signal of session attention state in a session row (the row
+         text is only the session display name), so each non-None tier must
+         announce its state to screen readers. cd_unread_marker is reused for
+         the Unread dot; the rest are badge-level generic labels. -->
+    <string name="cd_retry_marker">Retrying</string>
+    <string name="cd_pending_input_marker">Waiting for input</string>
+    <string name="cd_error_marker">Error</string>
     <string name="chat_empty_no_tab">Pick or start a conversation from Sessions</string>
     <string name="git_no_workdir">No workdir selected</string>
     <string name="sessions_recent_section">Recent</string>

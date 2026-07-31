@@ -139,6 +139,10 @@
     <string name="cd_unread_marker">未读</string>
     <string name="cd_question_marker">待回答</string>
     <string name="cd_permission_marker">待授权</string>
+    <!-- §a11y-sweep: SessionAttentionBadge contentDescription（会话行唯一状态信号） -->
+    <string name="cd_retry_marker">重试中</string>
+    <string name="cd_pending_input_marker">等待输入</string>
+    <string name="cd_error_marker">错误</string>
     <string name="chat_empty_no_tab">在会话页面选择或新建对话</string>
     <string name="git_no_workdir">未选取工作目录</string>
     <string name="sessions_recent_section">最近</string>

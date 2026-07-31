@@ -30,6 +30,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.SessionAttentionLevel
 
 /**
@@ -47,6 +51,13 @@ import cn.vectory.ocdroid.ui.SessionAttentionLevel
  *    PendingUserInput breathes; HardError is static).
  *  - [SessionAttentionLevel.HardError] → static [Icons.Filled.ErrorOutline]
  *    at [Dimens.iconSm] (18dp), tint error.
+ *
+ * §a11y: every non-None tier carries a meaningful contentDescription
+ * (`cd_unread_marker` / `cd_retry_marker` / `cd_pending_input_marker` /
+ * `cd_error_marker`). The badge is the SOLE visual signal of session attention
+ * state — the host row's text is only the session display name — so the state
+ * must be announced to screen readers here. Decorative icons elsewhere that
+ * sit next to their own text label correctly stay `null`; this badge does not.
  *
  * @param level the attention level to render.
  * @param modifier optional modifier applied to the container [Box].
@@ -80,6 +91,13 @@ internal fun SessionAttentionBadge(
         label = "attentionBreathScale",
     )
 
+    // §a11y-sweep: hoisted out of the `when`/`.semantics{}` blocks so the
+    // @Composable stringResource calls stay unconditional and in composable
+    // scope (`.semantics{}` is a non-composable lambda). Unread uses a Box
+    // (no Icon contentDescription param), so its label is consumed in the
+    // semantics modifier below; the Icon tiers read their own labels inline.
+    val unreadDesc = stringResource(R.string.cd_unread_marker)
+
     when (level) {
         is SessionAttentionLevel.None -> return
         is SessionAttentionLevel.Unread -> {
@@ -87,13 +105,14 @@ internal fun SessionAttentionBadge(
                 modifier = modifier
                     .size(Dimens.spacing2)
                     .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.onSurfaceVariant),
+                    .background(MaterialTheme.colorScheme.onSurfaceVariant)
+                    .semantics { contentDescription = unreadDesc },
             )
         }
         is SessionAttentionLevel.TransientRetry -> {
             Icon(
                 imageVector = Icons.Filled.ErrorOutline,
-                contentDescription = null,
+                contentDescription = stringResource(R.string.cd_retry_marker),
                 modifier = modifier.size(Dimens.iconXs),
                 tint = MaterialTheme.colorScheme.error,
             )
@@ -103,7 +122,7 @@ internal fun SessionAttentionBadge(
             val dotScale = if (breathe) breathScale else 1f
             Icon(
                 imageVector = Icons.Filled.HelpOutline,
-                contentDescription = null,
+                contentDescription = stringResource(R.string.cd_pending_input_marker),
                 modifier = modifier
                     .size(Dimens.iconXs)
                     .graphicsLayer {
@@ -117,7 +136,7 @@ internal fun SessionAttentionBadge(
         is SessionAttentionLevel.HardError -> {
             Icon(
                 imageVector = Icons.Filled.ErrorOutline,
-                contentDescription = null,
+                contentDescription = stringResource(R.string.cd_error_marker),
                 modifier = modifier.size(Dimens.iconSm),
                 tint = MaterialTheme.colorScheme.error,
             )
