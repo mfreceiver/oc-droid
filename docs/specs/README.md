@@ -8,6 +8,7 @@
 | 文件 | 作用 |
 |---|---|
 | `architecture.md` | **代码框架规范**（分层 / 双 API 变体共存 / 端口模式 / 能力读模型 / 不变量 / 包约定）—— 新增/重构代码须读 |
+| `state-machine-architecture-spec.md` | **会话状态机 authority 模式规格**（单一权威源 / 纯 reducer + 单 CAS / sole-writer gate / 两层 fence / 写入漏斗 / BLK-2 限制）—— 触碰会话状态须读；互补 `architecture.md` |
 | `decomposition-guidelines.md` | **模块拆分与门面演化准则**（冻结契约 / provider-lambda 注入 / 单一归属 / 单向 DAG / 何时拆何时不拆 / UI 域规则）—— 拆分 god 类须读 |
 | `build-apk.md` | 本地构建 / 签名 / 发版完整指南（本机路径、命令、Gitea 上传） |
 | `opencode-lsp-patch.md` | opencode LSP 诊断膨胀补丁 & 本机二进制维护 **SOP**（shallow clone → patch → build → deploy/恢复；含 version 退化坑） |

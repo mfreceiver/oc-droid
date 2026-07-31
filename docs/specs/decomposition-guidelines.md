@@ -4,7 +4,8 @@
 > 「稳定的门面 + 注入式协作者」结构。新增 / 重构代码须遵守；规则冲突时以代码现状 + `.opencode/policies/` 为准。
 >
 > 相关规格：`./architecture.md`（分层 / 端口模式 / 能力读模型 / 不变量，**本文件的基础**）、
-> `./slim-mode-api-routing.md`（slim 路由契约）、`./sse-client-spec.md`（SSE 控制面）、`./ui-style-spec.md`（UI 三层规则）。
+> `./slim-mode-api-routing.md`（slim 路由契约）、`./sse-client-spec.md`（SSE 控制面）、`./ui-style-spec.md`（UI 三层规则）、
+> `./state-machine-architecture-spec.md`（会话状态机 authority 模式——本文件 §4.4「纯 Reducer」先例的最大尺度实例化）。
 > 一次性执行计划（具体函数 / 行号 / 阶段）归档在 `docs/ocmar/plans/`，**不**进 specs；本文件只沉淀从中提炼的可复用准则。
 
 ---
