@@ -160,16 +160,46 @@ object ProcessStatusPollerModule {
                 sessionSyncCoordinator.applySlimStatusFanOutSummary(summary)
             },
 
-            // §P0-B ITEM 4: wire the watchdog's authority state reader and
-            // reconcile sink. authorityState reads the live store at each
-            // tick; staleClaimReconcileSink routes to the coordinator which
-            // queries the repository per-sid and dispatches ApplyReconcileOutcome.
-            authorityState = { sessionSyncCoordinator.currentAuthority() },
-            staleClaimReconcileSink = { identity, claims ->
-                sessionSyncCoordinator.reconcileStaleOptimisticClaims(identity, claims)
-            },
+            // §U-P2: the watchdog's authorityState reader + reconcile sink
+            // moved to OptimisticClaimWatchdogCoordinator (see
+            // [provideWatchdogCoordinator] below). The poller no longer
+            // carries them.
         )
     }
+
+    /**
+     * §U-P2 (Batch 2): provides the process-level
+     * [OptimisticClaimWatchdogCoordinator] singleton. Extracted as a
+     * `@Provides` so the function-typed deps (`() -> AuthorityState`,
+     * `() -> Long`, the suspend sink) can be filled without Hilt bindings
+     * for the function types (mirrors [provideProcessStatusPoller]'s pattern).
+     *
+     * The coordinator runs its OWN 5s timer (`tickIntervalMs` default =
+     * [cn.vectory.ocdroid.ui.OPTIMISTIC_CONFIRM_TIMEOUT_MS]) on
+     * `@ApplicationScope`, independent of the 30s bulk poller. The
+     * connection lifecycle (ServiceShell startPoller / ensurePoller /
+     * stopPoller / enterNoSourceTerminal) calls [OptimisticClaimWatchdogCoordinator.start]
+     * / [OptimisticClaimWatchdogCoordinator.stop] so the watchdog is bound
+     * to the SAME connection lifetime as the poller.
+     */
+    @Provides
+    @Singleton
+    fun provideWatchdogCoordinator(
+        @ApplicationScope scope: CoroutineScope,
+        sessionSyncCoordinator:
+            cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator,
+        identityStore: ConnectionIdentityStore,
+    ): OptimisticClaimWatchdogCoordinator = OptimisticClaimWatchdogCoordinator(
+        scope = scope,
+        authorityState = { sessionSyncCoordinator.currentAuthority() },
+        identityStore = identityStore,
+        clock = { System.currentTimeMillis() },
+        // §U-P2: reconcile sink routes to the coordinator which queries the
+        // repository per-sid and dispatches ApplyReconcileOutcome.
+        staleClaimReconcileSink = { identity, claims ->
+            sessionSyncCoordinator.reconcileStaleOptimisticClaims(identity, claims)
+        },
+    )
 }
 
 @Module
