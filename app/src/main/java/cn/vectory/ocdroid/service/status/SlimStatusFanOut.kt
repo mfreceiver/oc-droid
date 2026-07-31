@@ -106,10 +106,51 @@ class SlimStatusFanOut(
      *      `Success(idle)` is fake → all reclassify as missing. A non-empty
      *      collection is the normal "session list known" case (idle for a
      *      sid NOT in the collection → missing).
+     *
+     * **§U-CQ8 (Batch 2):** this overload captures [knownSessionIds] BEFORE
+     * the network sweep — a session list that changes DURING the sweep
+     * (archive / create) is not reflected, opening a TOCTOU where a just-
+     * archived session's idle is trusted OR a just-created session's idle
+     * is misjudged missing. Prefer the [checkSlimSessionsStatuses] provider
+     * overload for production paths (it re-reads the snapshot AFTER
+     * `awaitAll`). This overload is retained for backward compatibility +
+     * tests that construct a fixed snapshot.
      */
     suspend fun checkSlimSessionsStatuses(
         sids: Collection<String>,
         knownSessionIds: Collection<String>? = null,
+    ): StatusFanOutSummary = checkSlimSessionsStatuses(sids) { knownSessionIds }
+
+    /**
+     * §U-CQ8 (Batch 2) — the post-network fake-idle cross-check overload.
+     *
+     * Identical to [checkSlimSessionsStatuses] except the fake-idle
+     * cross-check snapshot is supplied as a [knownSessionIdsProvider] lambda
+     * that is invoked AFTER the network sweep (`awaitAll`) completes. This
+     * closes the TOCTOU where the session list changed during the sweep:
+     *  - a session archived mid-sweep → the provider returns a snapshot that
+     *    NO LONGER contains it → its `Success(idle)` is correctly reclassified
+     *    as missing (NOT trusted as a stale idle).
+     *  - a session created mid-sweep → the provider returns a snapshot that
+     *    NOW contains it → its `Success(idle)` is NOT misjudged missing.
+     *
+     * @param sids the session ids to query (captured BEFORE the sweep — the
+     *   sweep targets do not change mid-sweep; we GET what we knew at sweep
+     *   start). De-duplicated like the legacy overload.
+     * @param knownSessionIdsProvider re-invoked AFTER `awaitAll` to read the
+     *   CURRENT session snapshot for the fake-idle cross-check. Declared
+     *   `suspend` because the production snapshot source
+     *   ([cn.vectory.ocdroid.service.streaming.SessionSnapshotProvider.current])
+     *   is itself `suspend` — but the production impl is a pure in-memory
+     *   StateFlow read (no IO), so this introduces no real suspension delay
+     *   post-network. Nullable semantics mirror [checkSlimSessionsStatuses]'s
+     *   [knownSessionIds]:
+     *    - `null` (the provider returns null) — DISABLES the cross-check.
+     *    - non-null (incl. empty) — AUTHORITATIVE cross-check.
+     */
+    suspend fun checkSlimSessionsStatuses(
+        sids: Collection<String>,
+        knownSessionIdsProvider: suspend () -> Collection<String>?,
     ): StatusFanOutSummary = coroutineScope {
         if (sids.isEmpty()) return@coroutineScope StatusFanOutSummary.Empty
         // LinkedHashSet de-dupes while preserving input order so the
@@ -121,8 +162,10 @@ class SlimStatusFanOut(
                 semaphore.withPermit { sid to fetchOutcome(sid) }
             }
         }.awaitAll()
-        val perSid: Map<String, StatusOutcome> = outcomes.toMap()
-        foldStatusOutcomes(perSid, knownSessionIds)
+        // §U-CQ8: invoke the provider AFTER awaitAll (post-network) so the
+        // fake-idle cross-check uses the CURRENT session snapshot, not the
+        // pre-sweep stale one. Closes the TOCTOU window.
+        foldStatusOutcomes(outcomes.toMap(), knownSessionIdsProvider())
     }
 
     /**

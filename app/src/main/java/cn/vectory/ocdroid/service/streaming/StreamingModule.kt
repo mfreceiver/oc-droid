@@ -146,7 +146,16 @@ object ProcessStatusPollerModule {
 
                 fanOut.checkSlimSessionsStatuses(
                     sids = sessionIds,
-                    knownSessionIds = sessionIds,
+                    // §U-CQ8 (Batch 2): re-read the snapshot AFTER the network
+                    // sweep (awaitAll) so the fake-idle cross-check uses the
+                    // CURRENT session list, not the pre-sweep stale one. Closes
+                    // the TOCTOU where a session was archived / created during
+                    // the sweep (archived → its idle correctly reclassified
+                    // missing; created → its idle NOT misjudged missing).
+                    // snapshotProvider is captured from this @Provides closure
+                    // (the param at :98) — it is the SAME provider the poller
+                    // re-reads every tick.
+                    knownSessionIdsProvider = { snapshotProvider.current().sessionsById.keys },
                 )
             },
 

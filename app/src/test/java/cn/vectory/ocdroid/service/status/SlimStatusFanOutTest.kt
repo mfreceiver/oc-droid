@@ -300,4 +300,139 @@ class SlimStatusFanOutTest {
             maxInFlight.get() <= 2,
         )
     }
+
+    // ── §U-CQ8 (Batch 2): post-network fake-idle cross-check (provider) ─────
+
+    @Test
+    fun `U-CQ8 - legacy knownSessionIds overload still works (backward compat)`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSlimapiSessionStatusOutcome("s1") } returns
+            StatusOutcome.Success("s1", SessionStatus(type = "idle"))
+        val fanOut = SlimStatusFanOut(repo)
+
+        // The pre-U-CQ8 overload (captured snapshot) must keep working for
+        // existing callers + tests.
+        val summary = fanOut.checkSlimSessionsStatuses(
+            listOf("s1"),
+            knownSessionIds = setOf("s1"),
+        )
+
+        assertTrue("legacy overload: legitimate idle NOT missing", summary.missingSids.isEmpty())
+    }
+
+    @Test
+    fun `U-CQ8 - provider invoked AFTER awaitAll - session archived mid-sweep reclassifies idle as missing`() = runTest {
+        // §U-CQ8 TOCTOU: session "B" is archived DURING the network sweep.
+        // The provider re-reads the snapshot AFTER awaitAll → returns a set
+        // that no longer contains "B" → "B"'s Success(idle) is correctly
+        // reclassified as missing (NOT trusted as a stale idle).
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val inFlight = java.util.concurrent.atomic.AtomicInteger(0)
+        val networkDoneWhenProviderRan = java.util.concurrent.atomic.AtomicBoolean(false)
+        coEvery { repo.getSlimapiSessionStatusOutcome(any()) } coAnswers {
+            inFlight.incrementAndGet()
+            delay(50)
+            inFlight.decrementAndGet()
+            StatusOutcome.Success(firstArg(), SessionStatus(type = "idle"))
+        }
+        val fanOut = SlimStatusFanOut(repo)
+
+        val providerInvoked = java.util.concurrent.atomic.AtomicBoolean(false)
+        val provider: () -> Collection<String>? = {
+            // Assert the provider runs AFTER every GET completed (inFlight==0
+            // ⇒ post-awaitAll). With the pre-U-CQ8 overload the snapshot was
+            // captured BEFORE the sweep, so this timing assertion would fail.
+            networkDoneWhenProviderRan.set(inFlight.get() == 0)
+            providerInvoked.set(true)
+            // Post-sweep snapshot: "B" was archived → only "A" remains.
+            setOf("A")
+        }
+
+        val summary = fanOut.checkSlimSessionsStatuses(
+            sids = listOf("A", "B"),
+            knownSessionIdsProvider = provider,
+        )
+
+        assertTrue("provider was invoked", providerInvoked.get())
+        assertTrue(
+            "provider ran AFTER all GETs completed (post-awaitAll, closes TOCTOU)",
+            networkDoneWhenProviderRan.get(),
+        )
+        assertEquals(
+            "B archived mid-sweep → its idle reclassified missing",
+            listOf("B"),
+            summary.missingSids,
+        )
+        assertTrue("A still in post-sweep snapshot → idle NOT missing", "A" !in summary.missingSids)
+    }
+
+    @Test
+    fun `U-CQ8 - provider returns post-sweep snapshot - newly-created session idle NOT misjudged missing`() = runTest {
+        // §U-CQ8 inverse: session "C" is created DURING the sweep and IS in
+        // the sweep set (a concurrent refresh added it). The provider re-reads
+        // the snapshot AFTER awaitAll → returns a set that NOW contains "C" →
+        // "C"'s Success(idle) is NOT misjudged missing. (The pre-U-CQ8 overload
+        // captured {A} before the sweep → "C" would have been a false missing.)
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSlimapiSessionStatusOutcome(any()) } coAnswers {
+            StatusOutcome.Success(firstArg(), SessionStatus(type = "idle"))
+        }
+        val fanOut = SlimStatusFanOut(repo)
+
+        val provider: () -> Collection<String>? = {
+            // Post-sweep snapshot: "C" was created → {A, C}.
+            setOf("A", "C")
+        }
+
+        val summary = fanOut.checkSlimSessionsStatuses(
+            sids = listOf("A", "C"),
+            knownSessionIdsProvider = provider,
+        )
+
+        assertTrue(
+            "newly-created C is in the post-sweep snapshot → its idle NOT misjudged missing",
+            summary.missingSids.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `U-CQ8 - contrast - pre-sweep snapshot WOULD misjudge newly-created session missing`() = runTest {
+        // Same scenario as above but via the legacy overload with the PRE-sweep
+        // snapshot {A} (C not yet known). This is the BUG U-CQ8 fixes: "C"'s
+        // idle is misjudged missing because the stale snapshot omits it.
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSlimapiSessionStatusOutcome(any()) } coAnswers {
+            StatusOutcome.Success(firstArg(), SessionStatus(type = "idle"))
+        }
+        val fanOut = SlimStatusFanOut(repo)
+
+        val summary = fanOut.checkSlimSessionsStatuses(
+            sids = listOf("A", "C"),
+            knownSessionIds = setOf("A"),  // pre-sweep snapshot (C not yet known)
+        )
+
+        assertEquals(
+            "pre-U-CQ8 bug: C misjudged missing because the stale snapshot omits it",
+            listOf("C"),
+            summary.missingSids,
+        )
+    }
+
+    @Test
+    fun `U-CQ8 - provider returning null disables the cross-check`() = runTest {
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSlimapiSessionStatusOutcome("s1") } returns
+            StatusOutcome.Success("s1", SessionStatus(type = "idle"))
+        val fanOut = SlimStatusFanOut(repo)
+
+        val summary = fanOut.checkSlimSessionsStatuses(
+            sids = listOf("s1"),
+            knownSessionIdsProvider = { null },
+        )
+
+        assertTrue(
+            "provider returns null → cross-check disabled → idle trusted as-is",
+            summary.missingSids.isEmpty(),
+        )
+    }
 }
