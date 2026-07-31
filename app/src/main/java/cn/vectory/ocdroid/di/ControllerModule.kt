@@ -246,7 +246,6 @@ object ControllerModule {
         // mode flag — byte-for-byte equal today (both = slimConnection/slim mode).
         supportsWatermarkResync = { repository.supportsWatermarkResync },
         repository = repository,
-        reconcileDispatcher = Dispatchers.Default,
         // lite-v2-dev (plan §4.2/§4.5): SlimFullReconciler 全量退役——digest /
         // reconnect 不再走 /full 单条 reconcile，改为 skeleton reload（见
         // [SkeletonReloadCoordinator.onDigestChange] / [requestReload]）。SSC 的
