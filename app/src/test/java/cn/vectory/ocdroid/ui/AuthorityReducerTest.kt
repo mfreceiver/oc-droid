@@ -2397,11 +2397,12 @@ class AuthorityReducerTest {
     }
 
     @Test
-    fun `RetryQueued LRU keeps new entry when it is itself the oldest (rev-glm N2)`() {
-        // The else-branch in applyRetryQueued: when the queue is full AND the
-        // newly-inserted entry is itself the oldest (smallest queuedMonotonic),
-        // no EXTRA entry is evicted (the cap may transiently be +1, but the
-        // newest survives). This pins that behavior + the else-branch coverage.
+    fun `RetryQueued LRU strictly caps at 256 - evicts even when new entry is itself the oldest (rev-ogpt B1)`() {
+        // rev-ogpt B1: the queue MUST stay at or under RETRY_QUEUE_MAX_SIZE (256)
+        // at ALL times, including when the just-inserted entry is itself the
+        // oldest (clock went backwards). The strict-cap loop evicts it, keeping
+        // the bounded contract inviolable (the prior +1-tolerant else-branch
+        // was rejected). A brand-new entry that is the oldest loses its spot.
         val state = StoreState.initial()
         var cur = state
         // Fill 256 entries with queuedMonotonic 100..355.
@@ -2410,17 +2411,225 @@ class AuthorityReducerTest {
         }
         assertEquals(256, cur.authority.retryQueue.size)
         // Insert a NEW sid at queuedMonotonic = 50 (OLDER than all 256). The
-        // just-inserted entry is itself the oldest → else-branch keeps the
-        // queue at 257 transiently (no extra eviction), new entry present.
+        // strict cap evicts the oldest — which is now "new-oldest" itself.
         cur = reduceAuthority(cur, retryQueued("new-oldest", queuedMonotonic = 50L))
-        assertEquals("transient +1 cap when new entry is the oldest", 257, cur.authority.retryQueue.size)
-        assertTrue("the new oldest entry is kept (not self-evicted)",
+        assertEquals("strict cap at 256 (no transient overflow)", 256, cur.authority.retryQueue.size)
+        assertFalse("the new oldest entry is evicted (it WAS the oldest)",
             "new-oldest" in cur.authority.retryQueue)
-        // Self-heals on next insert (any insert that is NOT the oldest evicts
-        // the oldest, restoring the cap).
+        assertTrue("the prior oldest (sid-0 at monotonic=100) survives the self-eviction",
+            "sid-0" in cur.authority.retryQueue)
+        // A normal insert (newest) evicts the oldest (sid-0 now), cap stays 256.
         cur = reduceAuthority(cur, retryQueued("newest", queuedMonotonic = 9999L))
-        assertEquals(257, cur.authority.retryQueue.size) // still 257 (max is 256+1 tolerated)
+        assertEquals(256, cur.authority.retryQueue.size)
         assertTrue("newest present", "newest" in cur.authority.retryQueue)
+        assertFalse("prior oldest (sid-0) evicted by the newest insert",
+            "sid-0" in cur.authority.retryQueue)
+    }
+
+    @Test
+    fun `RetryQueued rejects re-queuing a sid already confirmed terminal (rev-ogpt B3 fence)`() {
+        // rev-ogpt B3: a stale fan-out summary (snapshot read before a terminal
+        // event landed) must not revive a cleaned entry. If the sid is already
+        // confirmed terminal in bySid (in-scope, idle/failed), RetryQueued is
+        // DROPPED. Absent bySid (unknown status) → NOT fenced.
+        val store = storeWith()
+        // Establish s1 as idle (terminal).
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 100L),
+        ))
+        // Stale RetryQueued arrives → DROPPED (s1 already terminal).
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedMonotonic = 200L)))
+        assertFalse("stale RetryQueued dropped (sid already terminal)",
+            "s1" in store.stateFlow.value.authority.retryQueue)
+
+        // Absent bySid (unknown status) → NOT fenced (legitimate retry).
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("absent-sid", attempt = 1, queuedMonotonic = 200L)))
+        assertTrue("RetryQueued accepted for absent sid (status unknown)",
+            "absent-sid" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `applyPurge cross-group clears retryQueue (rev-ogpt B2)`() {
+        // rev-ogpt B2: a cross-group purge (host switch) must clear the retry
+        // queue — sids belong to the purged host. Without this, host A's queued
+        // sids leak into host B (cross-host attempt counter pollution).
+        val store = storeWith()
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", queuedMonotonic = 100L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s2", queuedMonotonic = 200L)))
+        assertEquals(2, store.stateFlow.value.authority.retryQueue.size)
+        // Cross-group purge.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.PurgeHost(scopeKey = scope, preserveServerGroup = false),
+        ))
+        assertTrue("retryQueue cleared on cross-group purge",
+            store.stateFlow.value.authority.retryQueue.isEmpty())
+    }
+
+    @Test
+    fun `applyPurge same-group preserves retryQueue (rev-ogpt B2)`() {
+        val store = storeWith()
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", queuedMonotonic = 100L)))
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.PurgeHost(scopeKey = scope, preserveServerGroup = true),
+        ))
+        assertTrue("retryQueue preserved on same-group purge",
+            "s1" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `applyPurge clears retryQueue even when bySid already empty (rev-ogpt B2)`() {
+        // rev-ogpt B2: the emptiness early-return previously skipped retryQueue
+        // when bySid was empty. Now retryQueue is part of the check + reset.
+        val store = storeWith()
+        // Seed retry entries only (no bySid entries).
+        store.mutateState { s ->
+            s.copy(authority = s.authority.copy(
+                retryQueue = mapOf("s1" to RetryEntry(1, 200L, 100L)),
+            ))
+        }
+        assertTrue(store.stateFlow.value.authority.bySid.isEmpty())
+        assertTrue(store.stateFlow.value.authority.retryQueue.isNotEmpty())
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.PurgeHost(scopeKey = scope, preserveServerGroup = false),
+        ))
+        assertTrue("retryQueue cleared even when bySid was empty",
+            store.stateFlow.value.authority.retryQueue.isEmpty())
+    }
+
+    @Test
+    fun `terminal ApplyEvent failed-status cleans retryQueue (rev-ogpt B4)`() {
+        // rev-ogpt B4: terminal cleanup covers FAILED too (not just idle).
+        // `failed` is neither busy nor retry → terminal → retry entry cleaned.
+        val store = storeWith()
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1")))
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "failed"), EntryOrigin.SSE_LEGACY, monotonic = 2000L),
+        ))
+        assertFalse("retry entry cleaned on terminal failed status",
+            "s1" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `ApplySnapshot idle-transition cleans retryQueue (rev-ogpt B4)`() {
+        // rev-ogpt B4: a REST snapshot can transition a sid busy → idle
+        // (terminal). The queued retry entry must be cleaned.
+        val store = storeWith()
+        val busy = SessionStatus(type = "busy")
+        // Seed s1 as busy (so the snapshot's idle is a real transition).
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", busy, EntryOrigin.SSE_LEGACY, monotonic = 100L, workdir = "/w"),
+        ))
+        // Queue s1.
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1")))
+        assertTrue("s1 queued", "s1" in store.stateFlow.value.authority.retryQueue)
+        // Snapshot transitions s1 → idle (terminal). Pass localBefore = busy
+        // so the REST in-flight protection sees no SSE change → REST idle wins.
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = mapOf("s1" to SessionStatus(type = "idle")),
+                authoritativeNodeIds = setOf("s1"),
+                sidToWorkdir = mapOf("s1" to "/w"),
+                localBefore = mapOf("s1" to busy),
+            ),
+        ))
+        assertEquals("s1 is now idle", "idle",
+            store.stateFlow.value.authority.bySid["s1"]?.status?.type)
+        assertFalse("retry entry cleaned on snapshot idle transition",
+            "s1" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `ApplyReconcileOutcome IDLE_CONFIRMED cleans retryQueue (rev-ogpt B4)`() {
+        // rev-ogpt B4: reconcile IDLE_CONFIRMED is terminal → clean retry entry.
+        // Seed s1 as BUSY with optimistic (NOT idle — B3 fence would drop the
+        // RetryQueued for an already-terminal sid).
+        val store = storeWith()
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        val claimClientSeq = store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim?.clientSeq ?: 1L
+        // Queue s1 (busy → B3 fence does NOT trigger).
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1")))
+        assertTrue("s1 queued", "s1" in store.stateFlow.value.authority.retryQueue)
+        // Reconcile confirms idle (terminal).
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.ApplyReconcileOutcome(
+                sid = "s1", scopeKey = scope,
+                outcome = ReconcileOutcome.IDLE_CONFIRMED,
+                serverRound = null, monotonic = 200L,
+                claimClientSeq = claimClientSeq,
+                hostProfileId = store.stateFlow.value.host.currentHostProfileId,
+                identityEpochAtCapture = 0L,
+            ),
+        ))
+        assertFalse("retry entry cleaned on reconcile IDLE_CONFIRMED",
+            "s1" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `ApplyReconcileOutcome FETCH_FAILED cleans retryQueue (rev-ogpt B4)`() {
+        // rev-ogpt B4: FETCH_FAILED removes the bySid entry (terminal) → clean
+        // retry entry too. Seed s1 as BUSY with optimistic.
+        val store = storeWith()
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        val claimClientSeq = store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim?.clientSeq ?: 1L
+        // Queue s1 (busy → B3 fence does NOT trigger).
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1")))
+        assertTrue("s1 queued", "s1" in store.stateFlow.value.authority.retryQueue)
+        // Reconcile FETCH_FAILED.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.ApplyReconcileOutcome(
+                sid = "s1", scopeKey = scope,
+                outcome = ReconcileOutcome.FETCH_FAILED,
+                serverRound = null, monotonic = 200L,
+                claimClientSeq = claimClientSeq,
+                hostProfileId = store.stateFlow.value.host.currentHostProfileId,
+                identityEpochAtCapture = 0L,
+            ),
+        ))
+        assertFalse("retry entry cleaned on reconcile FETCH_FAILED",
+            "s1" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `PruneSessions cleans retryQueue for pruned in-scope sids (rev-ogpt B4)`() {
+        // rev-ogpt B4: deleted/archived sids leave the retry queue.
+        val store = storeWith()
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", queuedMonotonic = 100L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s2", queuedMonotonic = 200L)))
+        assertEquals(2, store.stateFlow.value.authority.retryQueue.size)
+        // Prune s1 (in-scope).
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.PruneSessions(sids = setOf("s1"), scopeKey = scope),
+        ))
+        assertFalse("s1 pruned from retryQueue", "s1" in store.stateFlow.value.authority.retryQueue)
+        assertTrue("s2 survives (not pruned)", "s2" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `stale fan-out summary interleaved with terminal event does not revive queue entry (rev-ogpt B3)`() {
+        // rev-ogpt B3: the fire-then-queue sequence is non-atomic. A stale
+        // summary (snapshot read before a terminal event) could dispatch
+        // RetryQueued AFTER the terminal ApplyEvent cleaned the entry. The B3
+        // terminal-status fence in applyRetryQueued drops it. This simulates
+        // the interleaving synchronously (the net effect is the same: terminal
+        // event lands, THEN stale RetryQueued arrives → dropped).
+        val store = storeWith()
+        // Queue s1 (attempt 1).
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedMonotonic = 100L)))
+        assertTrue("s1 queued", "s1" in store.stateFlow.value.authority.retryQueue)
+        // Terminal event lands FIRST (cleans the entry).
+        store.dispatch(AppAction.AuthorityEvent(
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 150L),
+        ))
+        assertFalse("terminal cleaned the entry", "s1" in store.stateFlow.value.authority.retryQueue)
+        // Stale RetryQueued arrives AFTER (simulating the delayed dispatch from
+        // a snapshot read before the terminal event). The B3 fence drops it.
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 2, queuedMonotonic = 120L)))
+        assertFalse("stale RetryQueued dropped by B3 fence (sid already terminal)",
+            "s1" in store.stateFlow.value.authority.retryQueue)
     }
 
     @Test

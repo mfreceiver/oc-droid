@@ -409,12 +409,14 @@ Tier-1 fence 的**消费侧已就绪**（`0d572d2`，解析 + 降级 merged）+ 
 
 ### 8.5 P1/P2 backlog 方向
 
-- **已接线（P1-B/E）retry queue**：`AuthorityState.retryQueue`（`Map<sid, RetryEntry>`，LRU 上限 `RETRY_QUEUE_MAX_SIZE=256`，reducer 纯 bookkeeping）现已接入真实 dispatch：
-  - **入队** `RetryQueued`：`SessionSyncCoordinator.applySlimStatusFanOutSummary`（`SessionSyncCoordinator.kt:1544`）——当 slim fan-out sweep 返回 `retryableCount > 0` 时，对每个 `StatusOutcome.Retry` sid 派发 `RetryQueued`（attempt 从既有条目递增，backoffMs 用纯函数 `exponentialBackoffMs` 算 nominal base——jitter 由 poller 外部施加，队列记录确定性策略）。
-  - **出队** `RetryFired`：同方法开头——sweep 覆盖到的既有 queued sid 派发 `RetryFired`（re-sweep = retry attempt dispatched，符合 kdoc 契约）。
-  - **terminal 清理**：`applyEvent` 在 session 进 idle/failed（`!isBusy && !isRetry`）时移除该 sid 的 retry 条目（`AuthorityReducer.kt:402-406,422-427`，两个 return 路径均覆盖）。
-  - **可观测性** `retryQueueFlow`：`SharedStateStore.retryQueueFlow`（`SharedStateStore.kt`，`DerivedStateFlow(state) { it.authority.retryQueue }`）——lag-free 派生读侧，不新增可写真相（与 `sessionListFlow`/`chatFlow` 同模式）。单测在 `AuthorityReducerTest`（入队 / LRU / 幂等 / 出队 / terminal 清理 / Flow emission / 不相关变更不 emit）。
-  - **reducer 纯度**：接线只加外部 dispatch，**未**向 reducer 注入 clock/scheduler/repository（§7.5 纯度红线保持）。
+- **已接线（P1-B/E）retry queue**：`AuthorityState.retryQueue`（`Map<sid, RetryEntry>`，LRU 严格上限 `RETRY_QUEUE_MAX_SIZE=256`，reducer 纯 bookkeeping）现已接入真实 dispatch：
+  - **入队** `RetryQueued`：`SessionSyncCoordinator.applySlimStatusFanOutSummary`（`SessionSyncCoordinator.kt:1544`）——当 slim fan-out sweep 返回 `retryableCount > 0` 时，对每个 `StatusOutcome.Retry` sid 派发 `RetryQueued`（attempt 从既有条目递增，backoffMs 用纯函数 `exponentialBackoffMs` 算 nominal base 并 clamp 到 `BACKOFF_MAX_MS`——jitter 由 poller 外部施加，队列记录确定性策略）。
+  - **terminal-status fence**（rev-ogpt B3，纯）：`applyRetryQueued` 在入队前检查 `bySid[sid]`——若已确认 terminal（idle/failed，in-scope），DROP（防 stale summary 在 terminal event 后重入）。缺 bySid（状态未知）→ 不 fence。
+  - **出队** `RetryFired`：同方法开头——sweep 覆盖到的既有 queued sid 派发 `RetryFired`（re-sweep = retry attempt dispatched）。
+  - **terminal 清理**（全路径，rev-ogpt B4）：`applyEvent`（idle/failed，含 incarnation-advance + no-change 早返回两条路径）/ `applySnapshot`（busy→idle transition）/ `applyReconcileOutcome`（IDLE_CONFIRMED + FETCH_FAILED）/ `applyPruneSessions`（delete/archive）/ `applyPurgeHost`（cross-group host switch 清空整个队列，rev-ogpt B2）均清理对应 sid 的 retry 条目。
+  - **严格 LRU 上限**（rev-ogpt B1）：`applyRetryQueued` 用 while-loop 淘汰直到 ≤256（旧 +1 容忍已移除；new entry 本身最旧时被淘汰，保持 bounded 不变量）。
+  - **可观测性** `retryQueueFlow`：`SharedStateStore.retryQueueFlow`（`SharedStateStore.kt`，`DerivedStateFlow(state) { it.authority.retryQueue }`）——lag-free 派生读侧，不新增可写真相。单测在 `AuthorityReducerTest`（入队 / 严格 LRU / 幂等 / 出队 / 全路径 terminal 清理 / B3 fence / B2 purge / Flow emission）+ `RetryQueueWireTest`（coordinator 接线级 10 cases）。
+  - **reducer 纯度**：接线只加外部 dispatch，B3 fence 纯（只读 bySid），**未**向 reducer 注入 clock/scheduler/repository（§7.5 纯度红线保持）。
 - **P1/P2**：BLK-2 equal-turn 残留 —— baseline clear 后到达的等 turn 帧未镜像 `==0` monotonic tie-break（跨时钟域，详见 §8.1）。待统一 REST/SSE 时钟源（monotonic）后安全镜像。
 - **P1**：C5 header 透传 serverGroupFp（消除 fp 漂移风险）。
 - **P2**：authority 持久化（需 reducer 副作用外移架构）。

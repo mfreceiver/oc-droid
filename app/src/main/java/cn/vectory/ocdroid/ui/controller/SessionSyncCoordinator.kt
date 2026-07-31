@@ -1435,12 +1435,16 @@ class SessionSyncCoordinator(
      *    transport fault → next sweep slows down); reset the backoff to
      *    base when == 0 (the success path).
      *
-     * **Minimally scoped** (T11/T12 just heavily modified this file):
-     * this hook touches ONLY the effect bus — it does NOT read or mutate
-     * the slice flows, the repo's slim SSE state, or the per-sid stripe
-     * locks. The hook is a pure routing step from a [StatusFanOutSummary]
-     * (produced by [cn.vectory.ocdroid.service.status.SlimStatusFanOut])
-     * to effect emissions.
+     * **Scope** (rev-ogpt S1): this hook routes a [StatusFanOutSummary]
+     * (produced by [cn.vectory.ocdroid.service.status.SlimStatusFanOut]) to
+     * BOTH effect emissions AND authority dispatches — it dispatches
+     * [RetryFired] / [RetryQueued] ops into the single CAS (the retry-queue
+     * wire, §P1-B/E) AND emits [ControllerEffect.RequestPollerBackoff] /
+     * [ControllerEffect.ResetPollerBackoff]. The dispatches are atomic
+     * per-op but the fire-then-queue sequence for the same sid is NOT
+     * atomic across concurrent writers (a terminal ApplyEvent can interleave);
+     * the reducer's terminal-status fence in [applyRetryQueued] (rev-ogpt B3)
+     * drops a stale RetryQueued that arrives after the sid is confirmed terminal.
      *
      * @param summary the fan-out result. Caller (the slim integration
      *   layer / future fan-out scheduler) constructs this via

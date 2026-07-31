@@ -553,15 +553,34 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
     // for this scope is unchanged → NO transition → return cur (same ref).
     // This makes a re-fetch that produces the identical snapshot a true CAS
     // no-op (no emission), completing the B1 idempotency contract.
+    //
+    // §P1-B/E rev-ogpt B4: a snapshot can transition a sid busy/retry → idle
+    // (terminal). Those sids must leave the retry queue — the REST snapshot
+    // authoritatively confirmed a non-running status. Clean any queued sid
+    // that is now terminal in nextById (absent ≡ gone, or present + idle).
+    val nextRetryQueue = if (cur.retryQueue.isEmpty()) {
+        cur.retryQueue
+    } else {
+        val terminalQueued = cur.retryQueue.keys.filter { sid ->
+            val e = nextById[sid]
+            // Only clean sids that belong to THIS snapshot's scope (nextById
+            // already contains only in-scope + retained out-of-scope entries;
+            // a retained out-of-scope entry is NOT this snapshot's verdict).
+            // An absent in-scope sid (dropped from snapshot) is gone → terminal.
+            (e == null || (!e.status.isBusy && !e.status.isRetry)) &&
+                (e?.scopeKey == null || e.scopeKey == op.scopeKey)
+        }
+        if (terminalQueued.isEmpty()) cur.retryQueue else cur.retryQueue - terminalQueued.toSet()
+    }
     val priorCov = cur.coverage[op.scopeKey]
     val coverageUnchanged = priorCov != null &&
         priorCov.registeredWorkdirs == op.registeredWorkdirs &&
         priorCov.coveredWorkdirs == op.coveredWorkdirs &&
         priorCov.unmappedActiveIds == op.unmappedActiveIds &&
         priorCov.lastSuccessTimeMs == op.lastSuccessTimeMs
-    if (nextById == cur.bySid && coverageUnchanged) return cur
+    if (nextById == cur.bySid && coverageUnchanged && nextRetryQueue === cur.retryQueue) return cur
 
-    return cur.copy(bySid = nextById, coverage = nextCoverage)
+    return cur.copy(bySid = nextById, coverage = nextCoverage, retryQueue = nextRetryQueue)
 }
 
 // ── PurgeHost ──────────────────────────────────────────────────────────────
@@ -575,16 +594,28 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
  *  P0-A single-active-scope invariant (the data model's `Map<ScopeKey,...>`
  *  notwithstanding). A per-entry `scopeKey` filter (matching [applyPrune]) would
  *  be the strictly safer future-proofing, but that is a behavior change deferred
- *  to a dedicated multi-scope epic — NOT done here, per "仅加固，不改核心状态机逻辑". */
+ *  to a dedicated multi-scope epic — NOT done here, per "仅加固，不改核心状态机逻辑".
+ *
+ *  §P1-B/E rev-ogpt B2: `retryQueue` IS cleared on cross-group purge. The
+ *  queue has no per-entry scope (keyed by sid), so a host switch leaves host
+ *  A's queued sids pointing at stale data. Clearing unconditionally on
+ *  cross-group purge matches the `bySid` reset and closes the cross-host
+ *  leak (host A's queued sid fire-then-requeue under host B with inherited
+ *  attempt counter). The same-group path (`preserveServerGroup=true`) returns
+ *  `cur` unchanged (queue preserved — same host). */
 private fun applyPurge(cur: AuthorityState, op: AuthorityOp.PurgeHost): AuthorityState {
     if (op.preserveServerGroup) return cur
-    if (cur.bySid.isEmpty() && op.scopeKey !in cur.knownIncarnations && op.scopeKey !in cur.coverage) {
+    // rev-ogpt B2: include retryQueue in the emptiness check so a purge when
+    // ONLY retryQueue has content still clears it (was previously skipped).
+    if (cur.bySid.isEmpty() && op.scopeKey !in cur.knownIncarnations && op.scopeKey !in cur.coverage && cur.retryQueue.isEmpty()) {
         return cur
     }
     return cur.copy(
         bySid = emptyMap(),
         knownIncarnations = cur.knownIncarnations - op.scopeKey,
         coverage = cur.coverage - op.scopeKey,
+        // rev-ogpt B2: clear the retry queue — sids belong to the purged host.
+        retryQueue = emptyMap(),
     )
 }
 
@@ -654,7 +685,9 @@ private fun applyMarkFailed(cur: AuthorityState, op: AuthorityOp.MarkSourceFaile
 
 /** §B7 REST reconcile terminal outcome. Pure.
  *  §P0-A rev-gpt #1: returns cur (same ref) when the outcome produces no change.
- *  §P0-B (FIX #2): generation fence at top drops stale-generation outcomes (ABA). */
+ *  §P0-B (FIX #2): generation fence at top drops stale-generation outcomes (ABA).
+ *  §P1-B/E rev-ogpt B4: IDLE_CONFIRMED / FETCH_FAILED are terminal outcomes —
+ *  they clean the sid's retryQueue entry (matching applyEvent terminal cleanup). */
 private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOutcome): AuthorityState {
     val prev = cur.bySid[op.sid]
     // §P0-B generation fence (ABA): the reconcile was triggered for a specific stale
@@ -672,7 +705,15 @@ private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOu
                 updatedMonotonic = op.monotonic,
             )
             // §P0-A rev-gpt #1: no-change if the resulting entry equals prev.
-            if (entry == prev) cur else cur.copy(bySid = cur.bySid + (op.sid to entry))
+            if (entry == prev && op.sid !in cur.retryQueue) {
+                cur
+            } else {
+                cur.copy(
+                    bySid = cur.bySid + (op.sid to entry),
+                    // rev-ogpt B4: idle is terminal → clean retry entry.
+                    retryQueue = cur.retryQueue - op.sid,
+                )
+            }
         }
         ReconcileOutcome.BUSY_CONFIRMED -> {
             // §P0-B final-fix #1: mark the claim confirmed by the DELAYED reconcile
@@ -689,7 +730,15 @@ private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOu
             if (entry == prev) cur else cur.copy(bySid = cur.bySid + (op.sid to entry))
         }
         ReconcileOutcome.FETCH_FAILED -> {
-            if (prev == null) cur else cur.copy(bySid = cur.bySid - op.sid)
+            // rev-ogpt B4: entry removal is terminal → clean retry entry too.
+            if (prev == null && op.sid !in cur.retryQueue) {
+                cur
+            } else {
+                cur.copy(
+                    bySid = if (prev != null) cur.bySid - op.sid else cur.bySid,
+                    retryQueue = cur.retryQueue - op.sid,
+                )
+            }
         }
     }
 }
@@ -703,13 +752,29 @@ private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOu
  * scope ([op.scopeKey]) or is null (pre-field migration, backward-compat). Out-of-
  * scope entries (different [scopeKey]) are retained — consistent with
  * [applyMarkFailed]'s scope filtering.
+ *
+ * §P1-B/E rev-ogpt B4: pruned sids (deleted/archived lifecycle) also leave the
+ * retry queue — a gone session has no retry to track. In-scope prune only
+ * (matches the bySid filter); out-of-scope queue entries survive.
  */
 private fun applyPrune(cur: AuthorityState, op: AuthorityOp.PruneSessions): AuthorityState {
     if (op.sids.isEmpty()) return cur
     val nextById = cur.bySid.filterNot { (sid, entry) ->
         sid in op.sids && (entry.scopeKey == null || entry.scopeKey == op.scopeKey)
     }
-    return if (nextById.size == cur.bySid.size) cur else cur.copy(bySid = nextById)
+    // rev-ogpt B4: drop retry entries for in-scope pruned sids. The queue has
+    // no per-entry scope, so we conservatively drop any sid in op.sids whose
+    // bySid entry was pruned (scopeKey matched) OR has no bySid entry (was
+    // already absent — queued retry for a sid that no longer exists).
+    val sidsToClean = cur.retryQueue.keys.filter { sid ->
+        sid in op.sids && (cur.bySid[sid]?.scopeKey?.let { it == null || it == op.scopeKey } ?: true)
+    }
+    val nextRetryQueue = if (sidsToClean.isEmpty()) cur.retryQueue else cur.retryQueue - sidsToClean.toSet()
+    return if (nextById.size == cur.bySid.size && nextRetryQueue === cur.retryQueue) {
+        cur
+    } else {
+        cur.copy(bySid = nextById, retryQueue = nextRetryQueue)
+    }
 }
 
 // ── FreshnessTick (P1-C) ────────────────────────────────────────────────────
@@ -754,36 +819,48 @@ private fun applyFreshnessTick(cur: AuthorityState, op: AuthorityOp.FreshnessTic
 // ── RetryQueued (P1-B/E) ──────────────────────────────────────────────────
 
 /**
- * §P1-B/E: enqueue a retry entry. BOUNDED: if the queue is at
- * RETRY_QUEUE_MAX_SIZE and [sid] is not already queued, the OLDEST entry (by
- * queuedMonotonic) is evicted before inserting the new one (LRU-style, prevents
- * unbounded growth under a retry storm). If [sid] is already queued, it is
- * OVERWRITTEN (refreshed) without eviction. Bumps authorityRevision on a real
- * change (new insert OR overwrite with different RetryEntry). Scope-filter:
- * only [sid]'s entry is touched (the op carries its own scopeKey; mismatched
- * scope entries are not affected because the queue is keyed by sid, and the
- * caller is responsible for dispatching under the correct scope).
+ * §P1-B/E: enqueue a retry entry. BOUNDED: the queue is STRICTLY capped at
+ * RETRY_QUEUE_MAX_SIZE — when full, entries with the smallest queuedMonotonic
+ * are evicted until at or under the cap (LRU-style). If [sid] is already
+ * queued, it is OVERWRITTEN (refreshed); the overwrite counts as one removal
+ * + one insert so capacity is preserved without extra eviction. Bumps
+ * authorityRevision on a real change (new insert OR overwrite with different
+ * RetryEntry).
+ *
+ * §P1-B/E rev-ogpt B3 (terminal-status fence, PURE): if the sid is ALREADY
+ * confirmed terminal in [AuthorityState.bySid] (entry present, in-scope,
+ * status idle/failed), the RetryQueued is DROPPED — a stale fan-out summary
+ * arriving after a terminal ApplyEvent would otherwise revive a cleaned entry.
+ * Derives ONLY from `(state, op)`; no injected dependency. Absent bySid entry
+ * (status unknown) → NOT fenced (the retry is legitimate: we don't know the
+ * true status yet).
  */
 private fun applyRetryQueued(cur: AuthorityState, op: AuthorityOp.RetryQueued): AuthorityState {
+    // rev-ogpt B3: reject re-queuing a sid already confirmed terminal. A stale
+    // fan-out summary (snapshot read before a terminal event landed) would
+    // otherwise revive a cleaned retry entry. Pure: reads bySid only.
+    val existingEntry = cur.bySid[op.sid]
+    if (existingEntry != null &&
+        (existingEntry.scopeKey == null || existingEntry.scopeKey == op.scopeKey) &&
+        !existingEntry.status.isBusy && !existingEntry.status.isRetry
+    ) {
+        return cur
+    }
     val entry = RetryEntry(attempt = op.attempt, backoffMs = op.backoffMs, queuedMonotonic = op.queuedMonotonic)
     val existing = cur.retryQueue[op.sid]
     return if (existing == entry) {
         cur  // same ref, no transition
     } else {
         val withInserted = cur.retryQueue + (op.sid to entry)
-        val bounded = if (withInserted.size <= RETRY_QUEUE_MAX_SIZE) {
-            withInserted
-        } else {
-            // LRU eviction: drop the entry with the smallest queuedMonotonic
-            // (the oldest). The just-inserted entry has op.queuedMonotonic so
-            // it survives only if it is not itself the oldest (unlikely in a
-            // storm, but correct).
-            val oldestKey = withInserted.minByOrNull { it.value.queuedMonotonic }?.key
-            if (oldestKey != null && oldestKey != op.sid) {
-                withInserted - oldestKey
-            } else {
-                withInserted  // the new entry itself is the oldest; keep it, drop nothing extra
-            }
+        // rev-ogpt B1: STRICT cap — evict smallest-queuedMonotonic entries
+        // until at or under RETRY_QUEUE_MAX_SIZE. When the just-inserted
+        // entry is itself the oldest, it is evicted (loses its spot —
+        // correct LRU; a brand-new entry that is the oldest means the clock
+        // went backwards, and keeping it would violate the bounded contract).
+        var bounded = withInserted
+        while (bounded.size > RETRY_QUEUE_MAX_SIZE) {
+            val oldestKey = bounded.minByOrNull { it.value.queuedMonotonic }?.key ?: break
+            bounded = bounded - oldestKey
         }
         cur.copy(retryQueue = bounded)
     }
