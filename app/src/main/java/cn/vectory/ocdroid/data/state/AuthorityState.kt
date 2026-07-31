@@ -95,10 +95,16 @@ data class SessionEntry(
  * terminal status.
  *
  *  - [attempt]: 1-based retry attempt counter (RetryQueued stamps it).
- *  - [backoffMs]: the backoff the caller requested for THIS attempt (carried in
- *    RetryQueued; the reducer does NOT compute backoff — it is pure state).
- *  - [queuedMonotonic]: clock captured at RetryQueued dispatch (for observability;
- *    the reducer needs no injected clock).
+ *  - [backoffMs]: the NOMINAL exponential base delay computed for THIS
+ *    attempt from the per-sid [attempt] counter (NOT the poller's global
+ *    backoffAttempt — rev-ogpt N1: the two counters live in different
+ *    spaces). This is an OBSERVABILITY hint, not the poller's actual delay:
+ *    the poller schedules from its OWN global attempt counter and applies
+ *    ±20% jitter on top, so the real next-sweep delay may differ. Useful
+ *    for diagnosing "how many times has this sid been retried" + "what is
+ *    the theoretical backoff strategy", NOT for predicting the exact delay.
+ *  - [queuedMonotonic]: clock captured at RetryQueued dispatch (for
+ *    observability; the reducer needs no injected clock).
  */
 data class RetryEntry(
     val attempt: Int,

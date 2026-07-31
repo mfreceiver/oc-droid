@@ -1435,12 +1435,28 @@ class SessionSyncCoordinator(
      *    transport fault → next sweep slows down); reset the backoff to
      *    base when == 0 (the success path).
      *
-     * **Minimally scoped** (T11/T12 just heavily modified this file):
-     * this hook touches ONLY the effect bus — it does NOT read or mutate
-     * the slice flows, the repo's slim SSE state, or the per-sid stripe
-     * locks. The hook is a pure routing step from a [StatusFanOutSummary]
-     * (produced by [cn.vectory.ocdroid.service.status.SlimStatusFanOut])
-     * to effect emissions.
+     * **Scope** (rev-ogpt S1): this hook routes a [StatusFanOutSummary]
+     * (produced by [cn.vectory.ocdroid.service.status.SlimStatusFanOut]) to
+     * BOTH effect emissions AND authority dispatches — it dispatches
+     * [RetryFired] / [RetryQueued] ops into the single CAS (the retry-queue
+     * wire, §P1-B/E) AND emits [ControllerEffect.RequestPollerBackoff] /
+     * [ControllerEffect.ResetPollerBackoff]. The dispatches are atomic
+     * per-op but the fire-then-queue sequence for the same sid is NOT
+     * atomic across concurrent writers (a terminal ApplyEvent can interleave).
+     *
+     * §P1-B/E rev-gpt final: there is NO terminal-status fence in
+     * [applyRetryQueued] (the B3 fence proposed by rev-ogpt was removed — it
+     * misfired on the normal idle-session-503 retry case; the op carries no
+     * causal info to distinguish stale summary from real failure). A stale
+     * RetryQueued arriving after a terminal event / cross-host purge is a
+     * KNOWN RESIDUAL (spec §8.5): it re-enters the queue but is self-healing
+     * (next covering sweep's RetryFired when the sid reappears, LRU
+     * eviction at the 256 cap, or a subsequent terminal cleanup). It does
+     * NOT pollute [cn.vectory.ocdroid.data.state.AuthorityState.bySid] (the
+     * authoritative status truth) and does NOT drive the poller's backoff
+     * (the poller uses its own global backoffAttempt) — so real retry
+     * scheduling is unaffected. A proper fix needs sweep-generation /
+     * request-token causal fencing — tracked as backlog.
      *
      * @param summary the fan-out result. Caller (the slim integration
      *   layer / future fan-out scheduler) constructs this via
@@ -1552,11 +1568,74 @@ class SessionSyncCoordinator(
             closeSkeletonSession(sid)
             emitCriticalEffect(scope, ControllerEffect.EvictSession(fp, sid))
         }
+        // §P1-B/E retry-queue wire: this sweep IS the retry attempt for any
+        // previously-queued sid it covers. Fire (dequeue) them FIRST so the
+        // queue reflects "the poller re-swept" (RetryFired kdoc contract).
+        // The auth snapshot is captured ONCE (before any dispatch) so the
+        // attempt counter read below is consistent with the fire decision —
+        // each dispatch lands in the single CAS independently, so partial
+        // ordering between fire/queue for the SAME sid is safe (net effect:
+        // old entry removed, new entry inserted with attempt+1).
+        val auth = currentAuthority()
+        val scopeKey = slices.store.authorityScope()
+        val now = clock()
+        for (sid in summary.perSid.keys) {
+            if (sid in auth.retryQueue) {
+                slices.store.dispatch(
+                    cn.vectory.ocdroid.ui.AppAction.AuthorityEvent(
+                        cn.vectory.ocdroid.data.state.AuthorityOp.RetryFired(
+                            sid = sid,
+                            scopeKey = scopeKey,
+                            monotonic = now,
+                        ),
+                    ),
+                )
+            }
+        }
         // T13-C4: retryableCount > 0 → ask the poller to schedule backoff;
         // retryableCount == 0 → ask the poller to reset backoff to base
         // (the success path; symmetric to keep the poller's backoff state
         // machine coherent across sweeps).
         if (summary.retryableCount > 0) {
+            // §P1-B/E retry-queue wire: enqueue each sid whose outcome is
+            // Retry (503 / transport). The attempt counter increments from
+            // the prior queue entry (captured in `auth` before the fires
+            // above). backoffMs is the NOMINAL exponential base (no jitter —
+            // jitter is a runtime non-determinism applied by the poller's
+            // scheduleBackoff; the queue records the deterministic strategy
+            // so the metadata is reproducible / testable), clamped to
+            // BACKOFF_MAX_MS so it never exceeds the poller's actual cap
+            // (rev-glm N3: exponentialBackoffMs alone can overshoot at high
+            // attempt counts; the poller applies the same 30s coerceAtMost).
+            //
+            // §P1-B/E rev-glm N6: every Retry sid is enqueued UNCONDITIONALLY
+            // (no active-state filter). A Retry outcome means "the status
+            // fetch failed transiently" — the sid's TRUE status is unknown at
+            // this point, so the queue tracks "sids pending a confirmed
+            // status", NOT "busy sessions needing retry". A sid that was idle
+            // before the 503 still legitimately needs re-fetching; its entry
+            // cleans up once a terminal status (idle/failed) is delivered
+            // (applyEvent terminal-cleanup) or a covering sweep fires it.
+            for ((sid, outcome) in summary.perSid) {
+                if (outcome !is cn.vectory.ocdroid.data.repository.StatusOutcome.Retry) continue
+                val prevAttempt = auth.retryQueue[sid]?.attempt ?: 0
+                val nominalBackoffMs = cn.vectory.ocdroid.util.exponentialBackoffMs(
+                    attempt = prevAttempt,
+                    baseMs = cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.BACKOFF_BASE_MS,
+                    maxShift = cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.BACKOFF_MAX_SHIFT,
+                ).coerceAtMost(cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.BACKOFF_MAX_MS)
+                slices.store.dispatch(
+                    cn.vectory.ocdroid.ui.AppAction.AuthorityEvent(
+                        cn.vectory.ocdroid.data.state.AuthorityOp.RetryQueued(
+                            sid = sid,
+                            scopeKey = scopeKey,
+                            attempt = prevAttempt + 1,
+                            backoffMs = nominalBackoffMs,
+                            queuedMonotonic = now,
+                        ),
+                    ),
+                )
+            }
             effects.tryEmitEffect(ControllerEffect.RequestPollerBackoff)
         } else {
             effects.tryEmitEffect(ControllerEffect.ResetPollerBackoff)
