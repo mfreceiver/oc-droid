@@ -152,4 +152,65 @@ class OptimisticClaimWatchdogTest {
         assertEquals("only stale claim returned", 1, result.size)
         assertEquals("correct sid", "stale", result[0].sid)
     }
+
+    // ── §P0-B Part 2: extra SLA coverage (a), (b), (e) ──
+
+    @Test
+    fun `P0-B watchdog SLA boundary - 4999 not stale 5001 is stale`() {
+        val claim = OptimisticClaim(
+            clientSeq = 1L,
+            claimedAtMonotonic = 0L,
+            serverEchoed = false,
+            guardedIdleDrop = false,
+        )
+        val auth = AuthorityState(bySid = mapOf(
+            "A" to entry(claim = claim),
+        ))
+        // age = 4999, NOT > 5000 → not stale
+        val before = selectStaleClaimsForReconcile(auth, now = 4_999L, timeoutMs = 5_000L)
+        assertTrue("age=4999 < timeout=5000: not stale", before.isEmpty())
+
+        // age = 5001, > 5000 → stale, with correct sid/scopeKey/clientSeq
+        val after = selectStaleClaimsForReconcile(auth, now = 5_001L, timeoutMs = 5_000L)
+        assertEquals("age=5001 > timeout=5000: 1 stale", 1, after.size)
+        assertEquals("sid matches", "A", after[0].sid)
+        assertEquals("scopeKey matches", scope, after[0].scopeKey)
+        assertEquals("clientSeq matches", 1L, after[0].clientSeq)
+    }
+
+    @Test
+    fun `P0-B watchdog SLA reconcileConfirmed claim never selected regardless of age`() {
+        val claim = OptimisticClaim(
+            clientSeq = 1L,
+            claimedAtMonotonic = 0L,
+            serverEchoed = false,
+            reconcileConfirmed = true, // confirmed by delayed reconcile GET
+            guardedIdleDrop = false,
+        )
+        val auth = AuthorityState(bySid = mapOf(
+            "A" to entry(claim = claim),
+        ))
+        val result = selectStaleClaimsForReconcile(auth, now = 999_999L, timeoutMs = 5_000L)
+        assertTrue("reconcileConfirmed claim never selected even at extreme age", result.isEmpty())
+    }
+
+    @Test
+    fun `P0-B watchdog SLA default timeout boundary - 5000 not stale 5001 stale`() {
+        val claim = OptimisticClaim(
+            clientSeq = 1L,
+            claimedAtMonotonic = 0L,
+            serverEchoed = false,
+            guardedIdleDrop = false,
+        )
+        val auth = AuthorityState(bySid = mapOf(
+            "A" to entry(claim = claim),
+        ))
+        // No explicit timeoutMs → relies on default OPTIMISTIC_CONFIRM_TIMEOUT_MS = 5000
+        val before = selectStaleClaimsForReconcile(auth, now = 5_000L)
+        assertTrue("default timeout: now=5000, age=5000 NOT > 5000 → not stale", before.isEmpty())
+
+        val after = selectStaleClaimsForReconcile(auth, now = 5_001L)
+        assertEquals("default timeout: now=5001, age=5001 > 5000 → stale", 1, after.size)
+        assertEquals("stale claim sid", "A", after[0].sid)
+    }
 }

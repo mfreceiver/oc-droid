@@ -478,8 +478,14 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
 
 /** §4c.3: cross-group clears the scope; same-group keeps. Pure.
  *  (P0-A host-purge path resets authority directly in the reducer copy; this
- *  op is implemented for typed completeness. Single active scope ⇒ full
- *  bySid reset on cross-group; per-entry scope filtering is P0-C.) */
+ *  op is implemented for typed completeness.)
+ *
+ *  §sm-hardening note (rev-glm ses_04ccdaa78 nit#1 — non-blocking): cross-group
+ *  purge resets `bySid = emptyMap()` unconditionally, which is correct under the
+ *  P0-A single-active-scope invariant (the data model's `Map<ScopeKey,...>`
+ *  notwithstanding). A per-entry `scopeKey` filter (matching [applyPrune]) would
+ *  be the strictly safer future-proofing, but that is a behavior change deferred
+ *  to a dedicated multi-scope epic — NOT done here, per "仅加固，不改核心状态机逻辑". */
 private fun applyPurge(cur: AuthorityState, op: AuthorityOp.PurgeHost): AuthorityState {
     if (op.preserveServerGroup) return cur
     if (cur.bySid.isEmpty() && op.scopeKey !in cur.knownIncarnations && op.scopeKey !in cur.coverage) {

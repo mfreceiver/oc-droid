@@ -734,10 +734,13 @@ data class ChatState(
       *  §P0-E NARROWED: producer-only scaffolding (records payloads; no consumer
       *  yet). Wiring deferred to post-P0-A. */
      val pendingErrorReattach: Map<String, PendingChatError> = emptyMap(),
-     /** §P0-E(c) NARROWED: INERT — no writer and no consumer. The two-phase marker
-      *  requires the real status writer (slim/legacy/REST idle transitions bypass the
-      *  reducer today) + a drain consumer, both deferred to post-P0-A. Kept as a
-      *  struct placeholder. */
+      /** §P0-E(c) TWO-PHASE ERROR RECOVERY: sessions that transitioned busy/retry →
+       *  terminal-idle and need a GET-fallback to localize a potential durable error.
+       *  Writer: AuthorityReducer (busy/retry→idle transition adds the sid).
+       *  Consumer: ErrorRecoveryCoordinator (drains via getMessages GET when
+       *  sessionErrorsById[sid] != null and last assistant lacks an error).
+       *  Cleared on: ErrorLocalizationSettled, session delete/archive (subtree),
+       *  host purge, bulk refresh archive. */
      val pendingErrorCheck: Set<String> = emptySet(),
  )
 

@@ -1,0 +1,11 @@
+# §sm-hardening B10: ocdroid detekt config.
+# CRITICAL: `buildUponDefaultConfig: false` in app/build.gradle.kts means ONLY
+# rules explicitly listed here are active. This is deliberate — running the full
+# detekt default rule set produces 1975 pre-existing violations (complexity /
+# return-count / exception-handling) that are OUT OF SCOPE for the hardening
+# batch ("不改核心逻辑"). This gate enforces ONLY the custom `ocdroid` ruleset
+# (sole-writer encapsulation). Default rules may be layered in incrementally in
+# a future cleanup epic.
+ocdroid:
+  SessionStatusDirectWriteRule:
+    active: true

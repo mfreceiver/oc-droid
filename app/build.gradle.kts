@@ -20,6 +20,7 @@ plugins {
     alias(libs.plugins.hilt)
     alias(libs.plugins.ksp)
     alias(libs.plugins.kover)
+    alias(libs.plugins.detekt)
 }
 
 // === Version from git (go-around pattern; see .opencode/policies/versioning.md) ===
@@ -474,4 +475,36 @@ dependencies {
     
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+
+    // §sm-hardening B10: custom detekt rule (sole-writer encapsulation gate).
+    // The :detekt-rules module is compiled before :app; detekt loads its
+    // RuleSetProvider via META-INF/services. See config/detekt/detekt.yml.
+    detektPlugins(project(":detekt-rules"))
+}
+
+// §sm-hardening B10: detekt static-analysis gate (sole-writer encapsulation).
+// disableDefaultRuleSets = true → ONLY the custom `ocdroid` ruleset runs
+// (config/detekt/detekt.yml). The full detekt default suite produces 1975
+// pre-existing violations that are out of scope for this hardening batch.
+// (detekt 2.0.0-alpha.0 Property-based DetektExtension DSL.)
+detekt {
+    config.setFrom(rootProject.file("config/detekt/detekt.yml"))
+    disableDefaultRuleSets.set(true)
+    buildUponDefaultConfig.set(false)
+    parallel.set(true)
+}
+
+tasks.withType<dev.detekt.gradle.Detekt>().configureEach {
+    // Match the project's JVM target (compileOptions = VERSION_17).
+    jvmTarget.set("17")
+    // Exclude test source sets from the sole-writer encapsulation gate.
+    // The invariant guards PRODUCTION code only: SessionListState.sessionStatuses
+    // must not be written outside withProjection. Test fixtures (SeedFixture — a
+    // data class mirroring the deleted AppState, see SeedFixture.kt:74) legitimately
+    // construct arbitrary state including sessionStatuses via their own copy().
+    exclude("**/test/**")
+    exclude("**/androidTest/**")
+    reports {
+        html.required.set(true)
+    }
 }

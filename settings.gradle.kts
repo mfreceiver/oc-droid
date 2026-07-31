@@ -24,3 +24,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "ocdroid"
 include(":app")
+// §sm-hardening B10: custom detekt rules module (sole-writer encapsulation gate).
+// Pure Kotlin JVM module compiled BEFORE :app; provides a custom RuleSetProvider
+// that :app loads via detektPlugins. Must not depend on Android.
+include(":detekt-rules")
