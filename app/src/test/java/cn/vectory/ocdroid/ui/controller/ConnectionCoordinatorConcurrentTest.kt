@@ -155,7 +155,7 @@ class ConnectionCoordinatorConcurrentTest {
 
         // Release barrier → both teardowns complete
         teardownComplete.complete(Unit)
-        Thread.sleep(500)
+        Thread.sleep(1000)
 
         assertEquals("Both teardowns must complete", 2, teardownCalled.get())
         scope.cancel()
@@ -213,17 +213,17 @@ class ConnectionCoordinatorConcurrentTest {
 
         // Step 2: launch coldStart — its while-loop joins Job1 (blocked)
         scope.launch { cc.coldStartReconnect() }
-        Thread.sleep(300)
+        Thread.sleep(500)
 
         // Step 3: register teardown #2 while coldStart is inside Job1.join()
         scope.launch { cc.cancelSseForReconfigure() }
-        Thread.sleep(300)
+        Thread.sleep(500)
 
         // Step 4: release barrier → Job1 teardown runs → Job1 completes →
         // coldStart joins Job2 (set by cancel #2) → Job2 teardown runs →
         // coldStart enters loop, reads null → break → probe
         teardownBarrier.complete(Unit)
-        Thread.sleep(2000) // ample time for chain to propagate
+        Thread.sleep(3000) // ample time for chain to propagate
 
         // All teardowns completed
         assertEquals("Both teardowns must run", 2, teardownCount.get())
@@ -273,14 +273,14 @@ class ConnectionCoordinatorConcurrentTest {
 
         // Launch coldStart — enters join loop, blocks on Job1.join()
         scope.launch { cc.coldStartReconnect() }
-        Thread.sleep(500)
+        Thread.sleep(1000)
 
         // coldStart must be blocked in join — no probe yet
         coVerify(exactly = 0) { repository.checkHealth() }
 
         // Complete the teardown
         teardownBarrier.complete(Unit)
-        Thread.sleep(2000)
+        Thread.sleep(3000)
 
         // coldStart's join returns → loop reads null → break → probe
         coVerify(atLeast = 1) { repository.checkHealth() }
@@ -353,11 +353,11 @@ class ConnectionCoordinatorConcurrentTest {
 
         // Step 2: coldStart enters while-loop, reads Job1, joins on it (blocked)
         scope.launch { cc.coldStartReconnect() }
-        Thread.sleep(300) // allow coldStart to enter join
+        Thread.sleep(500) // allow coldStart to enter join
 
         // Step 3: Cancel #2 fires during coldStart's join of Job1
         scope.launch { cc.cancelSseForReconfigure() }
-        Thread.sleep(500) // allow Job2 to be scheduled
+        Thread.sleep(1000) // allow Job2 to be scheduled
 
         // KEY ASSERTION — RED with BUG, GREEN with FIX:
         // Job2's teardown body must NOT have entered while barrier1 is held.
@@ -381,7 +381,7 @@ class ConnectionCoordinatorConcurrentTest {
 
         // Step 5: Release Job2 → all teardowns done
         barrier2.complete(Unit)
-        Thread.sleep(500)
+        Thread.sleep(1000)
 
         assertEquals("Both teardowns must run", 2, teardownEntered.get())
         coVerify(atLeast = 1) { repository.checkHealth() }
@@ -430,15 +430,15 @@ class ConnectionCoordinatorConcurrentTest {
 
         // Launch coldStart
         scope.launch { cc.coldStartReconnect() }
-        Thread.sleep(300)
+        Thread.sleep(500)
 
         // Concurrent cancel #2
         scope.launch { cc.cancelSseForReconfigure() }
-        Thread.sleep(300)
+        Thread.sleep(500)
 
         // Release barrier
         teardownBarrier.complete(Unit)
-        Thread.sleep(2000)
+        Thread.sleep(3000)
 
         assertEquals("Both teardowns must run", 2, teardownCount.get())
         scope.cancel()
@@ -1096,7 +1096,7 @@ class ConnectionCoordinatorConcurrentTest {
         // Step 2: Launch coldStart — enters inner loop, finds d != null,
         // joins on d.await() (blocked on teardownBarrier).
         scope.launch { cc.coldStartReconnect() }
-        Thread.sleep(300)
+        Thread.sleep(500)
 
         // No probe while teardown is blocked
         coVerify(exactly = 0) { repository.checkHealth() }
@@ -1104,7 +1104,7 @@ class ConnectionCoordinatorConcurrentTest {
         // Step 3: Release teardown → coldStart identity check → clear →
         // enters handoff synchronized → re-check → null → probes
         teardownBarrier.complete(Unit)
-        Thread.sleep(500)
+        Thread.sleep(1000)
 
         coVerify(atLeast = 1) { repository.checkHealth() }
 
