@@ -124,12 +124,14 @@ class SessionSyncCoordinatorDispatcherTest {
         }
 
     @Test
-    fun `reconcileDispatcher is not a constructor param - coordinator has no hardcoded dispatcher field`() {
-        // Static guarantee: SessionSyncCoordinator's public constructor does NOT
-        // expose a CoroutineDispatcher param. If a future change re-introduces
-        // one, this construction call breaks (compile error) — pinning the
-        // "no hardcoded dispatcher" invariant. The ONLY scheduling lever is the
-        // injected CoroutineScope, which tests drive via TestScope.
+    fun `construction smoke - current SessionSyncCoordinator signature has no dispatcher param`() {
+        // rev-glm N2: this is a construction SMOKE test of the current no-dispatcher
+        // signature, NOT a compile-guarantee that a future re-introduction breaks.
+        // (A re-introduced param WITH a default value, like the original
+        // `reconcileDispatcher: CoroutineDispatcher = Dispatchers.Default`, would
+        // still compile here via the default.) The determinism proof lives in the
+        // two StandardTestDispatcher tests above; this test just snapshots that
+        // construction works without any dispatcher argument today.
         val c = SessionSyncCoordinator(
             scope = TestScope(StandardTestDispatcher()),
             slices = cn.vectory.ocdroid.ui.SharedStateStore().slices,
