@@ -205,6 +205,12 @@ fun ChatScaffold(
     // slice; the `by` delegate and the handle read the SAME State instance.
     val connectionState = chatVM.connectionFlow.collectAsStateWithLifecycle()
     val connection by connectionState
+    // §sse-feedback-ux (P2-1): derived SSE-disconnect status for the in-chat
+    // banner. Pure projection of the connection slice (see
+    // [cn.vectory.ocdroid.ui.deriveSseConnectionFeedback]); collected here so
+    // the banner recomposes only on a status change / ticker tick while a
+    // disconnect is visible (WhileSubscribed upstream; healthy path = no churn).
+    val sseFeedback by chatVM.sseConnectionFeedback.collectAsStateWithLifecycle()
     val trafficState = connectionVM.trafficFlow.collectAsStateWithLifecycle()
     val traffic by trafficState
     val composerState = composerVM.composerFlow.collectAsStateWithLifecycle()
@@ -1006,6 +1012,26 @@ fun ChatScaffold(
                 tonalElevation = if (isWide) 1.dp else 0.dp
             ) {
                 Column(modifier = Modifier.fillMaxSize()) {
+                    // §sse-feedback-ux (P2-1): persistent banner at the top of
+                    // the chat area surfacing a sustained SSE disconnect / debug
+                    // REST-only mode. Renders nothing on the healthy path
+                    // (showBanner == false), so it is a zero-height no-op then.
+                    // Refresh reuses the REST-fallback recovery path.
+                    //
+                    // rev-glm nit (方案 A): gate on chromeSessionId != null so the
+                    // banner renders ONLY inside a real chat session. In the empty-
+                    // session state (all tabs closed / no draft), chromeSessionId is
+                    // null → refreshCurrentSession would silently no-op (no sid, no
+                    // feedback), leaving the user tapping a dead button. The empty
+                    // state already has its own connection-status UI (ChatEmptyState),
+                    // so this banner's "chat-session recovery" semantics belong here
+                    // only when a session is actually open.
+                    if (chromeSessionId != null) {
+                        SseDisconnectBanner(
+                            feedback = sseFeedback,
+                            onRefresh = { chatVM.refreshCurrentSession(chromeSessionId) },
+                        )
+                    }
                     Box(
                         modifier = Modifier
                             .weight(1f)

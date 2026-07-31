@@ -1126,6 +1126,128 @@ internal fun shouldAutoUnanchorOnColdStart(
     disconnectedSince != null &&
     (now - disconnectedSince) >= thresholdMs
 
+// ════════════════════════════════════════════════════════════════════════════
+// §sse-feedback-ux (P2-1): user-facing SSE / live-updates status, derived
+// PURELY from the authoritative connection slice. The REST-fallback mechanism
+// above (predicate + stamping + auto-unanchor) keeps the DATA correct when SSE
+// is down, but the USER had no in-chat signal that live updates were paused or
+// how long the outage had lasted — only a tiny home-page status dot and a
+// transient staleNotice snackbar fired on the foreground-catch-up path. This
+// projection closes that gap: it is a READ-ONLY derivation (NO new writable
+// truth, NO mutation of the connection slice or the authority reducer) consumed
+// by the in-chat [cn.vectory.ocdroid.ui.chat.SseDisconnectBanner] so a
+// sustained terminal disconnect (or a debug REST-only mode) is surfaced
+// persistently with an elapsed-time label + a one-tap Refresh that reuses the
+// existing REST-fallback recovery path ([ChatViewModel.refreshCurrentSession]).
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * §sse-feedback-ux: cadence at which the in-chat disconnect banner refreshes
+ * its elapsed-time label while a disconnect is visible. Coarse on purpose —
+ * the label is "Nm / Nh ago", so sub-minute precision is noise. Cheap enough
+ * that the ticker (gated to WhileSubscribed in the ViewModel) is a non-issue.
+ */
+internal const val SSE_FEEDBACK_TICK_MS = 30_000L
+
+/**
+ * §sse-feedback-ux: user-facing SSE / live-updates status. A pure projection
+ * of ([ConnectionPhase] + [ConnectionState.disconnectedSince] + the SSE
+ * transport-delivery signal) — NOT a writable slice. The banner surfaces
+ * [Disconnected] / [Disabled] persistently; the other variants are carried so
+ * the derivation is exhaustive and available to future read sites (e.g. an
+ * empty-state label) without a second pass.
+ *
+ *  - [Live]              — health Connected AND the SSE transport has proven
+ *                          delivery (the breathing dot is green/blue). Live
+ *                          updates are flowing.
+ *  - [WaitingForStream]  — health Connected but the SSE transport has NOT yet
+ *                          delivered a frame (the "stall" case: HTTP is up,
+ *                          SSE is not). Kept distinct so a future surface can
+ *                          distinguish "connected, waiting" from a hard down.
+ *  - [Connecting]        — a connect probe is in flight.
+ *  - [Reconnecting]      — host-switch / retry-loop reconnect signal; carries
+ *                          the attempt counter when the phase provides one.
+ *  - [AwaitingTofuTrust] — SSL/cert decision pending (the TOFU dialog overlays;
+ *                          the banner stays silent — [showBanner] is false).
+ *  - [Disconnected]      — terminal disconnect (retries exhausted / one-shot
+ *                          failure). Carries [sinceMs] (the stamped transition
+ *                          time) AND [now] (the derivation clock) so the
+ *                          banner can render an elapsed-time label AND so the
+ *                          emitted value varies each tick (the ViewModel ticker
+ *                          re-derives every [SSE_FEEDBACK_TICK_MS]; because
+ *                          [now] changes, distinctUntilChanged passes the tick
+ *                          through ONLY while a disconnect is shown — when
+ *                          healthy the equal [Live]/[Idle] emissions are
+ *                          dropped, so there is zero churn on the happy path).
+ *  - [Disabled]          — the debug `sse_disabled` flag is ON (REST-only by
+ *                          user choice); surfaced so the banner explains
+ *                          "live updates are off" instead of looking broken.
+ *  - [Idle]              — no connection activity (initial / clean reset).
+ */
+sealed interface SseConnectionFeedback {
+    data object Live : SseConnectionFeedback
+    data object WaitingForStream : SseConnectionFeedback
+    data object Connecting : SseConnectionFeedback
+    data class Reconnecting(val attempt: Int?, val maxAttempts: Int?) : SseConnectionFeedback
+    data object AwaitingTofuTrust : SseConnectionFeedback
+    data class Disconnected(val sinceMs: Long, val now: Long) : SseConnectionFeedback
+    data object Disabled : SseConnectionFeedback
+    data object Idle : SseConnectionFeedback
+}
+
+/**
+ * §sse-feedback-ux: pure derivation of [SseConnectionFeedback] from the
+ * authoritative connection inputs. Pure (all inputs are params, no store /
+ * no clock side-effect) so it is unit-testable with a controlled clock and
+ * exhaustively covers every [ConnectionPhase] variant (no `else` — the
+ * compiler forces an update when a new phase is added, mirroring
+ * [ConnectionPhase.displayTextForEmptyState]).
+ *
+ * The single source of truth for [ConnectionState.disconnectedSince] is the
+ * auto-stamper in [SharedStateStore.mutateConnection]
+ * ([stampDisconnectedSince]); this function only READS it. When the stamper
+ * has not yet run (e.g. a test that sets Disconnected directly without a
+ * timestamp), it falls back to [now] so the elapsed label is "just now"
+ * rather than crashing on null arithmetic.
+ */
+internal fun deriveSseConnectionFeedback(
+    phase: ConnectionPhase,
+    disconnectedSince: Long?,
+    sseConnected: Boolean,
+    now: Long,
+): SseConnectionFeedback = when (phase) {
+    ConnectionPhase.Idle -> SseConnectionFeedback.Idle
+    ConnectionPhase.Connecting -> SseConnectionFeedback.Connecting
+    ConnectionPhase.Connected -> if (sseConnected) SseConnectionFeedback.Live else SseConnectionFeedback.WaitingForStream
+    ConnectionPhase.Reconnecting -> SseConnectionFeedback.Reconnecting(attempt = null, maxAttempts = null)
+    is ConnectionPhase.ReconnectingAttempt -> SseConnectionFeedback.Reconnecting(attempt = phase.attempt, maxAttempts = phase.maxAttempts)
+    ConnectionPhase.AwaitingTofuTrust -> SseConnectionFeedback.AwaitingTofuTrust
+    ConnectionPhase.Disconnected ->
+        SseConnectionFeedback.Disconnected(sinceMs = disconnectedSince ?: now, now = now)
+    ConnectionPhase.SseDisabled -> SseConnectionFeedback.Disabled
+}
+
+/**
+ * §sse-feedback-ux: should the in-chat banner be shown for this feedback?
+ * True ONLY for a sustained terminal disconnect or a user-chosen REST-only
+ * mode — the transient / healthy / decision-pending variants stay silent so
+ * the banner never cries wolf on a brief network blip or while the TOFU dialog
+ * is handling a cert decision.
+ */
+internal val SseConnectionFeedback.showBanner: Boolean
+    get() = this is SseConnectionFeedback.Disconnected || this is SseConnectionFeedback.Disabled
+
+/**
+ * §sse-feedback-ux: elapsed ms since the terminal disconnect was stamped, or
+ * null when the feed is not in a banner-worthy disconnect. Computed from the
+ * derivation clock ([Disconnected.now]) captured at emit time so the label is
+ * consistent with the value the banner received (not a fresh re-read that
+ * could drift past the last tick). Coerced to ≥0 so a clock skew can never
+ * render a negative duration.
+ */
+internal fun SseConnectionFeedback.disconnectDurationMs(): Long? =
+    (this as? SseConnectionFeedback.Disconnected)?.let { (it.now - it.sinceMs).coerceAtLeast(0L) }
+
 /**
  * Returns `true` iff the clear+reload actually ran; `false` iff the isLoading
  * guard suppressed it (when [explicit], an Info feedback was emitted on suppress).

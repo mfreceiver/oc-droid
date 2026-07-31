@@ -508,6 +508,17 @@
     <string name="chat_phase_disconnected">disconnected</string>
     <!-- §sse-disabled-debug-toggle: REST-only degraded mode (debug flag sse_disabled=true). -->
     <string name="chat_phase_sse_disabled">SSE disabled (REST-only)</string>
+
+    <!-- §sse-feedback-ux (P2-1): in-chat disconnect banner. Surfaces a sustained
+         SSE disconnect (or a debug REST-only mode) with an elapsed-time label +
+         a Refresh action. The banner reuses common_refresh for its button. -->
+    <string name="sse_feedback_disconnected_title">Live updates paused</string>
+    <string name="sse_feedback_disconnected_now">Disconnected · just now</string>
+    <string name="sse_feedback_disconnected_minutes">Disconnected · %1$d min ago</string>
+    <string name="sse_feedback_disconnected_hours">Disconnected · %1$d h ago</string>
+    <string name="sse_feedback_disabled_title">Live updates off</string>
+    <string name="sse_feedback_disabled_subtitle">REST-only mode (debug toggle)</string>
+
     <string name="chat_jump_to_latest">Jump to latest</string>
 
     <!-- §R18 Phase 2-G: UiEvent.Error / UiEvent.Success resource strings.

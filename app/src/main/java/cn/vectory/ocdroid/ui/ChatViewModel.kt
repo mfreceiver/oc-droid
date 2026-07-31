@@ -8,13 +8,27 @@ import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.util.DebugLog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.net.SocketTimeoutException
 import javax.inject.Inject
+
+/**
+ * §sse-feedback-ux (P2-1): WhileSubscribed stop timeout for
+ * [ChatViewModel.sseConnectionFeedback]. Keeps the ticker + upstream alive
+ * briefly across a config-change recomposition so the disconnect label does
+ * not blink, then tears down to zero overhead on the happy path.
+ */
+private const val STOP_TIMEOUT_MS = 5_000L
 
 /**
  * * R-17 batch3 → batch3d: Chat-domain ViewModel. Owns the chat slice + the
@@ -97,6 +111,69 @@ class ChatViewModel @Inject constructor(
                 .map { it.currentModel }
                 .distinctUntilChanged()
         }
+
+    /**
+     * §sse-feedback-ux (P2-1): derived projection of [SseConnectionFeedback]
+     * for the in-chat disconnect banner. Combines [connectionFlow] (phase +
+     * disconnectedSince) + [cn.vectory.ocdroid.ui.SharedStateStore.sseConnectedFlow]
+     * + a coarse wall-clock ticker ([SSE_FEEDBACK_TICK_MS]) so the "disconnected
+     * Nm ago" label refreshes while a sustained disconnect is visible.
+     *
+     * Pure READ — introduces NO writable truth: it projects the authoritative
+     * connection slice through the pure [deriveSseConnectionFeedback]. The
+     * upstream (incl. the ticker) only runs while collected:
+     * [SharingStarted.WhileSubscribed] starts the pipeline when the banner
+     * subscribes and tears it down 5s after the last collector leaves (config-
+     * change grace), so there is no forever-ticker on the happy path — when
+     * healthy the distinct [SseConnectionFeedback.Live] emission is stable and
+     * the ticker's equal re-emissions are dropped by distinctUntilChanged.
+     *
+     * Consumers: [cn.vectory.ocdroid.ui.chat.SseDisconnectBanner] (rendered by
+     * ChatScaffold). The banner's Refresh action calls
+     * [refreshCurrentSession] — the existing REST-fallback recovery path — so
+     * the feedback loop closes without a new write surface.
+     */
+    val sseConnectionFeedback: StateFlow<SseConnectionFeedback> =
+        combine(
+            core.connectionFlow,
+            core.store.sseConnectedFlow,
+            disconnectTickerFlow(),
+        ) { conn, sseConnected, now ->
+            deriveSseConnectionFeedback(
+                phase = conn.connectionPhase,
+                disconnectedSince = conn.disconnectedSince,
+                sseConnected = sseConnected,
+                now = now,
+            )
+        }
+            .distinctUntilChanged()
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = run {
+                    val conn = core.connectionFlow.value
+                    deriveSseConnectionFeedback(
+                        phase = conn.connectionPhase,
+                        disconnectedSince = conn.disconnectedSince,
+                        sseConnected = core.store.sseConnectedFlow.value,
+                        now = System.currentTimeMillis(),
+                    )
+                },
+            )
+
+    /**
+     * §sse-feedback-ux: coarse wall-clock ticker — emits the current time
+     * immediately then every [SSE_FEEDBACK_TICK_MS]. A plain cold [Flow]; it
+     * only runs while [sseConnectionFeedback] has a subscriber (WhileSubscribed
+     * upstream), and [delay] is cancellable so collection stops promptly on
+     * teardown.
+     */
+    private fun disconnectTickerFlow(): Flow<Long> = flow {
+        while (true) {
+            emit(System.currentTimeMillis())
+            delay(SSE_FEEDBACK_TICK_MS)
+        }
+    }
 
     /** §R-17 batch3e: repository exposed so ChatMessageList can pass it down
      *  to MessageRow without touching `.core.` from a Composable. */

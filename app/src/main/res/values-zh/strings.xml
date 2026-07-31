@@ -472,6 +472,16 @@
     <string name="chat_phase_disconnected">已断开</string>
     <!-- §sse-disabled-debug-toggle：仅 REST 降级模式（调试开关 sse_disabled=true）。 -->
     <string name="chat_phase_sse_disabled">SSE 已禁用（仅 REST）</string>
+
+    <!-- §sse-feedback-ux (P2-1)：聊天内断连横幅。持续 SSE 断连（或调试仅 REST 模式）
+         附带经过时长标签 + 刷新操作。按钮复用 common_refresh。 -->
+    <string name="sse_feedback_disconnected_title">实时更新已暂停</string>
+    <string name="sse_feedback_disconnected_now">已断开 · 刚刚</string>
+    <string name="sse_feedback_disconnected_minutes">已断开 · %1$d 分钟前</string>
+    <string name="sse_feedback_disconnected_hours">已断开 · %1$d 小时前</string>
+    <string name="sse_feedback_disabled_title">实时更新已关闭</string>
+    <string name="sse_feedback_disabled_subtitle">仅 REST 模式（调试开关）</string>
+
     <string name="chat_jump_to_latest">跳到最新</string>
 
     <!-- §R18 Phase 2-G: UiEvent.Error / UiEvent.Success 资源字符串。
