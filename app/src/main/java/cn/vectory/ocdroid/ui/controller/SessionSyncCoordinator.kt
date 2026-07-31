@@ -59,9 +59,7 @@ import cn.vectory.ocdroid.ui.controller.sse.SharedConversationSseHandler
 import cn.vectory.ocdroid.ui.controller.sse.LegacySseHandler
 import cn.vectory.ocdroid.ui.controller.sse.SlimSseHandler
 import cn.vectory.ocdroid.util.STREAMING_FLICKER_DEBUG
-import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -70,7 +68,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -208,9 +205,7 @@ class SessionSyncCoordinator(
      * subsequent `/since` fetch must follow immediately. An effect hop would
      * race the next digest frame against an unadvanced bookmark.
      */
-    override val repository: OpenCodeRepository? = null,
-    /** Worker lane for network/reconcile computation. UI commits switch to Main. */
-    internal val reconcileDispatcher: CoroutineDispatcher = Dispatchers.Default,
+     override val repository: OpenCodeRepository? = null,
     /**
      * lite-v2-dev (plan §4.2/§4.5): the single authoritative sync path.
      * digest / reconnect 触发点改为调用 [SkeletonReloadCoordinator.onDigestChange]

@@ -271,7 +271,7 @@ authority 有两个派生读侧（都是**派生**，无可写真相）：
 
 **Tier-1**（数学可证，不依赖 wall-clock）：
 - **lex `ServerRound` 比较**（`:245-252`）+ **per-scope incarnation high-water**（`:239-242`）。
-- 触发条件：`op.serverRound != null`（slim digest 的 `properties.turnIncarnation` + `turn` 均非 null，`SessionSyncCoordinator.handleSessionDigest` 解析）。
+- 触发条件：`op.serverRound != null`（slim digest 的 `turnIncarnation` + `turn` 均非 null，`SessionSyncCoordinator.handleSessionDigest` 解析）。
 - `EntryOrigin.SSE_SLIM` 带 turn → Tier-1。
 
 **Tier-2**（启发式 + 超时自愈）：

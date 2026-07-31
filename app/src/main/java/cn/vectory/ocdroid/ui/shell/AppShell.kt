@@ -77,8 +77,15 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
     val sessionVM: SessionViewModel = hiltViewModel()
     val hostVM: HostViewModel = hiltViewModel()
     val settingsVM: SettingsViewModel = hiltViewModel()
-    // FIXME(P4-features): scope FilesViewModel to the files graph; chat preview must not share it.
-    val filesVM: FilesViewModel = hiltViewModel()
+    // §P2-2 (docs-plumbing): FilesViewModel is NO LONGER hoisted at the AppShell
+    // top level (Activity-scoped). It is now obtained per-NavBackStackEntry via
+    // hiltViewModel() inside each destination's composable{} block — Files/Git
+    // get a stateful instance scoped to their entry (browse state isolated per
+    // destination; viewModelScope cleared on pop, no Activity-level leak);
+    // ChatFilePreview/Sessions get an entry-scoped instance for .repository
+    // only (no browse state shared with the Files tab). This closes the
+    // FIXME(P4-features) scope leak: chat preview no longer shares the Files
+    // browse VM. See the per-block hiltViewModel() calls below.
 
     val navController = rememberNavController()
     val entry by navController.currentBackStackEntryAsState()
@@ -374,8 +381,13 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                     navArgument("path") { type = NavType.StringType; nullable = true; defaultValue = null },
                 ),
             ) { routeEntry ->
+                // §P2-2: entry-scoped FilesViewModel (not the shared top-level
+                // instance). Only .repository is consumed here; the VM's browse
+                // state is irrelevant to chat preview, and is cleared when this
+                // entry is popped (no Activity-level leak).
+                val previewFilesVM: FilesViewModel = hiltViewModel()
                 ChatFilePreviewScreen(
-                    repository = filesVM.repository,
+                    repository = previewFilesVM.repository,
                     workdir = routeEntry.arguments?.getString("workdir")?.takeIf { it.isNotBlank() },
                     path = routeEntry.arguments?.getString("path")?.takeIf { it.isNotBlank() },
                     onClose = { navController.popBackStack() },
@@ -428,12 +440,15 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                 // to Files/Git; the server-management dialog routes to
                 // Settings; session-row tap switches to Chat. Home is root,
                 // so showBackNavigation = false.
+                // §P2-2: entry-scoped FilesViewModel for .repository only
+                // (browse state irrelevant to the home hub; cleared on pop).
+                val homeFilesVM: FilesViewModel = hiltViewModel()
                 SessionsScreen(
                     viewModel = sessionVM,
                     composerVM = composerVM,
                     orchestratorVM = orchestratorVM,
                     settingsVM = settingsVM,
-                    repository = filesVM.repository,
+                    repository = homeFilesVM.repository,
                     connectionVM = connectionVM,
                     hostVM = hostVM,
                     // §unified-nav A2: new-draft → Chat is an explicit nav intent
@@ -471,6 +486,10 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                 val explicitWorkdir = routeEntry.arguments?.getString("workdir")?.takeIf { it.isNotBlank() }
                 // §home-hub T5: FilesScreen is browser-only now (workdir from
                 // initialWorkdir). Back exits to home (Sessions).
+                // §P2-2: entry-scoped FilesViewModel — browse state lives only
+                // for this destination's lifetime (cleared on pop, no
+                // Activity-level leak; chat preview / home hub can't see it).
+                val filesVM: FilesViewModel = hiltViewModel()
                 FilesScreen(
                     viewModel = filesVM,
                     orchestratorVM = orchestratorVM,
@@ -506,6 +525,11 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                 // now read-only — recentWorkdirs / defaultWorkdir / onSelect
                 // are no longer consumed. Kept flowing for signature
                 // stability.
+                // §P2-2: entry-scoped FilesViewModel (Git only reads
+                // .repository; the VM's browse state is isolated to this
+                // destination and cleared on pop — no leak, no cross-dest
+                // contamination).
+                val filesVM: FilesViewModel = hiltViewModel()
                 GitScreen(
                     filesVM = filesVM,
                     sessionVM = sessionVM,
