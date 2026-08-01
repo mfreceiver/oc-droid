@@ -370,20 +370,28 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                     // and a full-capacity append cascades into a full re-format
                     // (fixup2 r4 regression). A seq-keyed TreeMap makes eviction
                     // ORDER-INDEPENDENT: firstKey() is always the smallest seq,
-                    // which (because seq is monotonic) is exactly the entry the
-                    // ring buffer drops next. So the cache mirrors the ring
-                    // buffer's own eviction deterministically.
+                    // which on the COMMON path (seq published in allocation order)
+                    // is the entry the ring buffer drops next — so the cache
+                    // mirrors the ring buffer's own eviction in the common case.
+                    // (Caveat: DebugLog.log allocates seq before the deque lock,
+                    // so under heavy concurrent logging a still-pending low-seq
+                    // entry could in rare cases be evicted slightly early, causing
+                    // a transient extra miss; bounded — see BOUND below. The cap
+                    // itself holds in ALL states regardless of publish order.)
                     //
-                    // NO CASCADE on the hot path (running append at full capacity):
-                    // ring holds seqs [N-2999 .. N]; append N+1 evicts N-2999 from
-                    // the ring. forEach visits N+1 (miss → insert → size>cap →
-                    // pollFirstEntry evicts N-2999, which is no longer in `filtered`
-                    // so it is not revisited), then N, N-1, … all HIT. Net: 1 format
-                    // + 1 eviction per append. (LRU evicted N instead → cascade.)
+                    // NO CASCADE on the hot path (running append at full capacity,
+                    // common seq order): ring holds seqs [N-2999 .. N]; append N+1
+                    // evicts N-2999 from the ring. forEach visits N+1 (miss →
+                    // insert → size>cap → pollFirstEntry evicts N-2999, which is no
+                    // longer in `filtered` so it is not revisited), then N, N-1, …
+                    // all HIT. Net: 1 format + 1 eviction per append. (LRU evicted
+                    // N instead → cascade.)
                     //
                     // PAUSED: forEach iterates the frozen snapshot, whose seqs were
-                    // all cached before pause → all HIT, zero inserts/evictions, so
-                    // background appends do not perturb the cache while paused.
+                    // typically all cached before pause → HIT, zero inserts/
+                    // evictions, so background appends usually do not perturb the
+                    // cache while paused. (Edge case: if pause+filter-change exposes
+                    // rows never formatted, they miss once and insert+evict.)
                     //
                     // BOUND: eviction runs only on the new-seq miss path, removing
                     // the single smallest seq when size > MAX_ENTRIES. The map is
@@ -405,10 +413,11 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                         // node identity follows the Entry, not the list index.
                         key(entry.seq) {
                             // §row-text-cache access: hit → reuse; miss → format
-                            // and, if over cap, evict the smallest seq (which the
-                            // ring buffer has already dropped or is about to).
-                            // getOrPut alone doesn't bound a TreeMap, so the cap
-                            // check runs only on the miss path.
+                            // and, if over cap, evict the smallest seq (the entry
+                            // the ring buffer has dropped next on the common seq
+                            // path — see §row-text-cache caveat above). getOrPut
+                            // alone doesn't bound a TreeMap, so the cap check runs
+                            // only on the miss path.
                             val cached = rowTextCache[entry.seq]
                             val text = cached ?: run {
                                 val formatted = "[${sdf.format(entry.timeMs)}] ${entry.tag}/${entry.level}: ${entry.message}"

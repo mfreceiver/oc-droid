@@ -66,7 +66,8 @@ object DebugLog {
     //
     // §row-text-cache (需求5): exposed `internal` so the in-app log viewer
     // (DebugLogSection) can size its formatted-text cache to match this ring
-    // buffer's cap exactly — single source of truth, see removeEldestEntry.
+    // buffer's cap exactly — single source of truth (the cache evicts the
+    // smallest seq via TreeMap.pollFirstEntry when it exceeds this cap).
     internal const val MAX_ENTRIES = 3000
 
     /** Monotonic per-entry sequence — a stable, collision-free LazyColumn key
