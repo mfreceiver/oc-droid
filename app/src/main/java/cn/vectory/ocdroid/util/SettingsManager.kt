@@ -323,20 +323,27 @@ class SettingsManager @Inject constructor(
         modelPrefs.clearModelDataForGroup(profileId)
 
     /**
-     * §需求12 rev-4 blocker B: clears ALL per-profile persisted data for
-     * [profileId] — model availability + disabled, recent workdirs, drafts,
-     * and the basic-auth password. Used on profile deletion so the deleted
-     * profile leaves no orphan ESP slots (the per-profile lifecycle must be
-     * complete: a profile gone from [HostProfileStore] must be gone from ESP
-     * too). Mirrors the four per-fp storage surfaces this app keeps.
+     * §需求12 rev-4 blocker B / §需求12 rev-6 blocker D: clears ALL per-profile
+     * persisted data for [profileId] — model availability + disabled, recent
+     * workdirs, drafts, the basic-auth password, and the R-20 Phase 5 migration
+     * idempotency flag. Used on profile deletion so the deleted profile leaves
+     * no orphan ESP slots (the per-profile lifecycle must be complete: a
+     * profile gone from [HostProfileStore] must be gone from ESP too). Mirrors
+     * the five per-fp storage surfaces this app keeps.
      *
      * Composition:
      *  - [clearModelDataForGroup] — `disabled_models_<id>` / `model_availability_<id>`.
      *  - [clearRecentWorkdirs] — `recent_workdirs_<id>`.
      *  - [SessionPrefs.clearDraftsForProfile] — every entry inside the shared
-     *    `session_drafts` JSON map whose composite key's profileId == [profileId].
+     *    `session_drafts` JSON map whose composite key's profileId == [profileId]
+     *    (§需求12 rev-6 blocker C: also cancels in-flight debounce write-backs
+     *    via a deletion barrier so no pending job resurrects the cleared data).
      *  - [setBasicAuthPassword]`(profileId, null)` — `basic_auth_password_<id>`
      *    (null/blank removes the key per [ConnectionPrefs]).
+     *  - [migrationHelper.clearMigrationFlag] — `cache_migration_v1_done_<id>`
+     *    (§需求12 rev-6 blocker D: a per-profile ESP key the orphan sweep
+     *    intentionally PRESERVES since the deleted id is a canonical UUID, so
+     *    only a direct clear on deletion closes the lifecycle).
      *
      * Note: client-cert material is cleared SEPARATELY by the caller
      * ([cn.vectory.ocdroid.ui.controller.ProfileMutationEngine.deleteHostProfile]
@@ -348,6 +355,7 @@ class SettingsManager @Inject constructor(
         clearRecentWorkdirs(profileId)
         sessionPrefs.clearDraftsForProfile(profileId)
         setBasicAuthPassword(profileId, null)
+        migrationHelper.clearMigrationFlag(profileId)  // §需求12 rev-6 blocker D
     }
 
     /**

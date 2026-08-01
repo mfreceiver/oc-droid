@@ -117,6 +117,21 @@ internal class MigrationHelper(
     }
 
     /**
+     * §需求12 rev-6 blocker D: removes the per-profile R-20 Phase 5 migration
+     * idempotency flag (`cache_migration_v1_done_<profileId>`) for [profileId].
+     * Called by [SettingsManager.clearAllForProfile] on profile deletion so the
+     * flag does not leak as an orphan (the deleted profile's id is a canonical
+     * UUID, so [cleanupOrphanGroupKeys] intentionally PRESERVES it — only a
+     * direct clear on deletion closes the lifecycle). No-op on blank
+     * [profileId] (defensive) and when the flag was never set ([remove] on a
+     * missing key is a no-op).
+     */
+    fun clearMigrationFlag(profileId: String) {
+        if (profileId.isBlank()) return
+        encryptedPrefs.edit().remove(migrationFlagKey(profileId)).apply()
+    }
+
+    /**
      * §需求12阶段4: one-shot, idempotent purge of per-group orphan keys whose
      * suffix is NOT a valid UUID.
      *

@@ -476,4 +476,169 @@ class SessionPrefsDebounceTest {
             sp.getString(SessionPrefs.KEY_SESSION_DRAFTS, null),
         )
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Group 5 — clearDraftsForProfile DELETION BARRIER (§需求12 rev-6 blocker C)
+    //
+    //  A naive ESP-only clear leaks via the in-memory debounce path: a pending
+    //  write-back job (or one whose RMW is waiting on persistLock) fires AFTER
+    //  the clear and re-persists the deleted profile's draft — resurrecting
+    //  sensitive unsent text the user expected gone. The deletion barrier
+    //  closes every window:
+    //   - pending-not-yet-claimed: clearDraftsForProfile cancels the job.
+    //   - pending-claimed-but-waiting-on-persistLock: performDraftWrite re-checks
+    //     the barrier inside persistLock and drops the write.
+    //   - re-selected profile: setDraftText lifts the barrier so new writes
+    //     persist again.
+    //   - cross-profile isolation: clearing A does not touch B's pending.
+    //  rev-6 explicitly flagged the existing Group 4 tests all flushDraftText()
+    //  first (no pending state at clear time) → the resurrection race was
+    //  uncovered. These tests arm the pending state + the barrier.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `clearDraftsForProfile cancels pending debounce and prevents resurrection`() = testScope.runTest {
+        // Seed a pending draft for profile-A (debounceScope active, NOT flushed).
+        prefs.setDraftText("profile-A", "ses-1", "secret-unsent")
+        assertEquals(
+            "pending mutation armed, not yet written",
+            "secret-unsent",
+            prefs.peekPendingDraft("profile-A", "ses-1")?.text,
+        )
+        assertEquals("ESP untouched inside debounce window", "", prefs.getDraftText("profile-A", "ses-1"))
+
+        // Bulk-clear profile-A's drafts. Step 1 cancels the pending debounce
+        // job + removes the pending mutation; step 2 clears ESP (empty here).
+        prefs.clearDraftsForProfile("profile-A")
+
+        assertNull("pending mutation removed by the clear", prefs.peekPendingDraft("profile-A", "ses-1"))
+
+        // Advance PAST the debounce window. Without the barrier the cancelled
+        // job would have fired here and resurrected the draft; with it, the
+        // job is cancelled so nothing fires.
+        advanceTimeBy(SessionPrefs.DEBOUNCE_MS * 2)
+        runCurrent()
+        assertEquals(
+            "draft MUST NOT resurrect after clear (pending job was cancelled)",
+            "",
+            prefs.getDraftText("profile-A", "ses-1"),
+        )
+    }
+
+    @Test
+    fun `performDraftWrite drops a claimed write-back whose profile is under the deletion barrier`() {
+        // §需求12 rev-6 blocker C step 3: the hardest window — a write-back job
+        // already CLAIMED its mutation (removed it from pendingDrafts under
+        // debounceLock) BEFORE clearDraftsForProfile ran, then waited on
+        // persistLock while clearDraftsForProfile set the barrier + cleared
+        // ESP. By the time the job's performDraftWrite acquires persistLock,
+        // the profile is under barrier → the write MUST be dropped.
+        //
+        // StandardTestDispatcher virtual time can't reliably position a job
+        // between its claim and performDraftWrite (the body is synchronous, no
+        // suspension point), so this test drives the guard directly: arm the
+        // barrier via a real clearDraftsForProfile, then invoke
+        // performDraftWrite (as the claimed write-back job would) and assert
+        // it's a no-op.
+        val profileId = "profile-A"
+        // Sanity: without the barrier, a direct performDraftWrite writes.
+        invokePerformDraftWrite(profileId, "ses-1", "should-persist-without-barrier")
+        assertEquals(
+            "sanity: no barrier → write lands",
+            "should-persist-without-barrier",
+            prefs.getDraftText(profileId, "ses-1"),
+        )
+
+        // clearDraftsForProfile arms the barrier (step 1) + clears ESP (step 2).
+        // This simulates the race: a write-back job already claimed its
+        // mutation before the clear and is now waiting on persistLock.
+        prefs.clearDraftsForProfile(profileId)
+        assertEquals("ESP cleared by clearDraftsForProfile", "", prefs.getDraftText(profileId, "ses-1"))
+
+        // The claimed write-back fires AFTER the clear (the resurrection
+        // window). The barrier re-check inside performDraftWrite MUST drop it.
+        invokePerformDraftWrite(profileId, "ses-1", "RESURRECT-attempt")
+        assertEquals(
+            "claimed write-back MUST be dropped when profile is under barrier",
+            "",
+            prefs.getDraftText(profileId, "ses-1"),
+        )
+
+        // A DIFFERENT profile's write is unaffected (barrier is per-profile).
+        invokePerformDraftWrite("profile-B", "ses-1", "b-draft")
+        assertEquals(
+            "B's write unaffected by A's barrier",
+            "b-draft",
+            prefs.getDraftText("profile-B", "ses-1"),
+        )
+    }
+
+    @Test
+    fun `setDraftText after clear lifts the deletion barrier so a re-selected profile persists again`() = testScope.runTest {
+        // Profile-A is seeded then cleared (barrier armed for A).
+        prefs.setDraftText("profile-A", "ses-1", "old")
+        prefs.flushDraftText()
+        assertEquals("old draft durable", "old", prefs.getDraftText("profile-A", "ses-1"))
+        prefs.clearDraftsForProfile("profile-A")
+        assertEquals("old draft cleared", "", prefs.getDraftText("profile-A", "ses-1"))
+
+        // The profile is re-selected / re-created and the user types a new
+        // draft. setDraftText lifts the barrier; the new draft MUST persist.
+        prefs.setDraftText("profile-A", "ses-1", "new-draft")
+        advanceTimeBy(SessionPrefs.DEBOUNCE_MS)
+        runCurrent()
+        assertEquals(
+            "new draft persists after barrier lift",
+            "new-draft",
+            prefs.getDraftText("profile-A", "ses-1"),
+        )
+    }
+
+    @Test
+    fun `clearDraftsForProfile does not affect a different profile's pending draft`() = testScope.runTest {
+        // Two profiles' drafts pending independently.
+        prefs.setDraftText("profile-A", "ses-1", "a-draft")
+        prefs.setDraftText("profile-B", "ses-1", "b-draft")
+        assertEquals(2, prefs.peekAllPendingDrafts().size)
+
+        // Clear ONLY profile-A.
+        prefs.clearDraftsForProfile("profile-A")
+
+        // A's pending gone; B's pending UNTOUCHED.
+        assertNull("A pending removed", prefs.peekPendingDraft("profile-A", "ses-1"))
+        assertEquals(
+            "B pending survives clear of A",
+            "b-draft",
+            prefs.peekPendingDraft("profile-B", "ses-1")?.text,
+        )
+
+        // Fire the debounce. B's write-back fires + persists; A's was cancelled.
+        advanceTimeBy(SessionPrefs.DEBOUNCE_MS)
+        runCurrent()
+        assertEquals("A's draft not resurrected", "", prefs.getDraftText("profile-A", "ses-1"))
+        assertEquals(
+            "B's draft persists (clear of A did not touch it)",
+            "b-draft",
+            prefs.getDraftText("profile-B", "ses-1"),
+        )
+    }
+
+    // ─── reflection helper for the blocker-C barrier re-check ──────────────
+
+    /**
+     * Invokes the private [SessionPrefs.performDraftWrite] directly, simulating
+     * a claimed write-back job whose mutation was removed from pendingDrafts
+     * (under debounceLock) before [SessionPrefs.clearDraftsForProfile] ran.
+     * Used to deterministically test the barrier re-check without trying to
+     * position a coroutine between its claim and its persistLock RMW (which
+     * StandardTestDispatcher virtual time can't do — the body is synchronous).
+     */
+    private fun invokePerformDraftWrite(profileId: String, sessionId: String, text: String) {
+        val method = SessionPrefs::class.java.getDeclaredMethod(
+            "performDraftWrite",
+            String::class.java, String::class.java, String::class.java,
+        )
+        method.isAccessible = true
+        method.invoke(prefs, profileId, sessionId, text)
+    }
 }

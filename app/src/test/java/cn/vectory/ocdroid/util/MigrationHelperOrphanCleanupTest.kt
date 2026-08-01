@@ -360,4 +360,47 @@ class MigrationHelperOrphanCleanupTest {
         assertEquals("UUID-prefixed entry survives", "draft-keep", after["$uuidA${sep}ses_keep"])
         assertEquals(1, after.size)
     }
+
+    // ───────────────── §需求12 rev-6 blocker D: clearMigrationFlag ─────────────────
+    //
+    // `cache_migration_v1_done_<id>` is a per-profile ESP key. The orphan
+    // sweep (cleanupOrphanGroupKeys) intentionally PRESERVES UUID-suffixed
+    // keys (a live profile's flag must survive), so a deleted profile's UUID-
+    // suffixed flag would leak forever. clearMigrationFlag is the direct clear
+    // invoked by SettingsManager.clearAllForProfile on deletion to close the
+    // lifecycle. These tests exercise the helper directly (constructed off the
+    // same ESP instance the orphan tests use).
+
+    @Test
+    fun `clearMigrationFlag removes the per-profile flag and leaves other profiles untouched`() {
+        val esp = rawPrefs()
+        val flagA = "cache_migration_v1_done_$uuidA"
+        val flagB = "cache_migration_v1_done_$uuidB"
+        esp.edit().putBoolean(flagA, true).putBoolean(flagB, true).apply()
+        assertTrue("A flag seeded", esp.getBoolean(flagA, false))
+        assertTrue("B flag seeded", esp.getBoolean(flagB, false))
+
+        val helper = MigrationHelper(esp)
+        helper.clearMigrationFlag(uuidA)
+
+        assertFalse("A's flag removed by clearMigrationFlag", esp.contains(flagA))
+        assertTrue("B's flag survives (per-profile isolation)", esp.getBoolean(flagB, false))
+    }
+
+    @Test
+    fun `clearMigrationFlag is a no-op on blank profileId and on a never-set flag`() {
+        val esp = rawPrefs()
+        val helper = MigrationHelper(esp)
+
+        // Blank profileId → defensive no-op (must not throw, must not remove
+        // an unrelated key). `cache_migration_v1_done_` (empty suffix) is the
+        // theoretical target; assert it is NOT created/removed.
+        helper.clearMigrationFlag("")
+        assertFalse("blank profileId clear creates no stray key", esp.contains("cache_migration_v1_done_"))
+
+        // Removing a never-set flag is a no-op (SharedPreferences.remove on a
+        // missing key is safe).
+        helper.clearMigrationFlag(uuidA)
+        assertFalse(esp.contains("cache_migration_v1_done_$uuidA"))
+    }
 }
