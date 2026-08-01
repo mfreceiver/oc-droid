@@ -365,12 +365,13 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                     //
                     // WHY TREEMAP (not LinkedHashMap/LRU): the viewer iterates
                     // in the deque's publish order (typically newest-first). Under
-                    // that access pattern an access-order LRU's "eldest" is the
-                    // LARGEST seq (the entry we just touched), so an LRU evicts the
-                    // wrong end and a full-capacity append cascades into a full
-                    // re-format (fixup2 r4 regression). A seq-keyed TreeMap makes
-                    // eviction ORDER-INDEPENDENT: firstKey() is always the smallest
-                    // seq, which on the common path (seq published in allocation
+                    // that access pattern (on the common seq-ordered path) an
+                    // access-order LRU ends up making the oldest-seq entry the
+                    // LRU-eviction victim, so an LRU evicts the wrong end and a
+                    // full-capacity append cascades into a full re-format (fixup2
+                    // r4 regression). A seq-keyed TreeMap makes eviction
+                    // ORDER-INDEPENDENT: firstKey() is always the smallest seq,
+                    // which on the common path (seq published in allocation
                     // order) is the entry the ring buffer drops next.
                     //
                     // Concurrency caveat (cache is a perf optimization, NOT a
@@ -401,7 +402,8 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                     // cache while paused. (Edge cases that CAN cause misses while
                     // paused: a pause followed by a level-filter change that exposes
                     // rows never previously formatted, or the concurrency caveat
-                    // above. Each miss just inserts+evicts; the cap still holds.)
+                    // above. Each miss inserts; if that pushes size > MAX_ENTRIES
+                    // the smallest seq is evicted — see BOUND. The cap still holds.)
                     //
                     // BOUND: eviction runs only on the new-seq miss path, removing
                     // the single smallest seq when size > MAX_ENTRIES. The map is
