@@ -213,7 +213,11 @@ class ProfileMutationEngine internal constructor(
             // Repository will reconfigure on restart with the new current profile.
             // §需求12阶段3: unconditional clear + evict (no sibling profiles
             // can reference the group under 需求12).
-            deletedProfileId?.let { settingsManager.clearModelDataForGroup(it) }
+            // §需求12 rev-4 blocker B: clear the COMPLETE per-profile ESP
+            // lifecycle, not just the model data — drafts, recent workdirs,
+            // and the basic-auth password must also be purged so the deleted
+            // profile leaves no orphan ESP slots.
+            deletedProfileId?.let { settingsManager.clearAllForProfile(it) }
             purgePerHostState()
             deletedProfileId?.let {
                 effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
@@ -229,7 +233,7 @@ class ProfileMutationEngine internal constructor(
             }
         } else {
             // §需求12阶段3 (rev-3 blocker #2 fix): non-active deletion must
-            // ALSO clear the deleted profile's persisted model data — under
+            // ALSO clear the deleted profile's persisted ESP data — under
             // 需求12 profiles are fully independent (a group can never have
             // sibling profiles), so the per-profile-id availability/disabled
             // ESP keys are orphans the instant their owning profile is gone.
@@ -238,8 +242,13 @@ class ProfileMutationEngine internal constructor(
             // (only `clearOrphanGroupKeys` migration would eventually catch
             // them, and only if the id isn't a UUID — but profile ids ARE
             // UUIDs, so they'd never be cleaned). Mirror the active branch.
+            //
+            // §需求12 rev-4 blocker B: clear the COMPLETE per-profile ESP
+            // lifecycle (drafts / recent workdirs / basic-auth password in
+            // addition to the model data), so non-active deletion is
+            // symmetric with active deletion — no orphan ESP slots leak.
             deletedProfileId?.let {
-                settingsManager.clearModelDataForGroup(it)
+                settingsManager.clearAllForProfile(it)
                 effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
             }
         }

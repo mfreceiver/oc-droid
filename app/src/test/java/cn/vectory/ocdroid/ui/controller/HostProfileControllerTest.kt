@@ -842,6 +842,9 @@ class HostProfileControllerTest {
         // (`remainingInGroup` / conditional EvictGroup) is dead under 需求12 —
         // a group can never have sibling profiles. EvictGroup is now
         // UNCONDITIONAL on active deletion.
+        // §需求12 rev-4 blocker B: active deletion clears the COMPLETE
+        // per-profile ESP lifecycle (clearAllForProfile), not just the model
+        // data — drafts, recent workdirs, basic-auth password too.
         seed { it.copy(currentHostProfileId = "p-A") }
         every { store.currentProfile() } returns profileB
 
@@ -853,6 +856,8 @@ class HostProfileControllerTest {
             1,
             collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
         assertEquals("p-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().profileId)
+        // §需求12 rev-4 blocker B: full per-profile ESP lifecycle cleared.
+        verify(exactly = 1) { settingsManager.clearAllForProfile("p-A") }
     }
 
     @Test
@@ -861,17 +866,21 @@ class HostProfileControllerTest {
         // independent — a group can never have sibling profiles. The
         // per-profile-id model availability/disabled ESP keys are orphans
         // the instant their owning profile is deleted. Non-active deletion
-        // MUST also call clearModelDataForGroup(deletedId), not just emit
+        // MUST also call clearAllForProfile(deletedId), not just emit
         // EvictGroup — otherwise the ESP keys leak forever (UUID-suffixed
         // keys are never swept by clearOrphanGroupKeys, which only purges
         // non-UUID A/B/C/D suffixes).
+        // §需求12 rev-4 blocker B: clearAllForProfile now covers the COMPLETE
+        // per-profile ESP lifecycle (model data + drafts + recent workdirs +
+        // basic-auth password).
         seed { it.copy(currentHostProfileId = "p-A") }
 
         controller.deleteHostProfile("p-B")
         scope.testScheduler.advanceUntilIdle()
 
-        // Persisted model data for the deleted non-current profile is cleared.
-        verify(exactly = 1) { settingsManager.clearModelDataForGroup("p-B") }
+        // Persisted per-profile ESP data for the deleted non-current profile
+        // is cleared (full lifecycle: model + drafts + workdirs + basic-auth).
+        verify(exactly = 1) { settingsManager.clearAllForProfile("p-B") }
         // EvictGroup still fires (in-memory authority/session eviction).
         assertEquals(
             "EvictGroup(p-B) fires for the deleted non-current profile",

@@ -628,4 +628,73 @@ class SettingsManagerTest {
         settings.clearAllLocalData()
         assertNull("flow must be null after clearAllLocalData (direct assign)", settings.currentWorkdirFlow.value)
     }
+
+    // ───────────────── §需求12 rev-4 blocker B: clearAllForProfile ─────────────────
+    //
+    // Profile deletion must clear the COMPLETE per-profile ESP lifecycle:
+    // model availability + disabled, recent workdirs, drafts, and the basic-
+    // auth password. A profile gone from HostProfileStore must be gone from
+    // ESP too — no orphan slots leak. This test seeds all four surfaces for
+    // a single profileId and verifies clearAllForProfile wipes every one.
+
+    @Test
+    fun `clearAllForProfile clears all four per-profile ESP surfaces`() {
+        val profileId = "11111111-1111-4111-8111-111111111111"
+
+        // Seed all four per-profile surfaces.
+        settings.setDisabledModels(profileId, setOf("openai/gpt-4"))
+        settings.setModelAvailability(profileId, setOf("anthropic/claude"))
+        settings.setRecentWorkdirs(profileId, listOf("/proj-a", "/proj-b"))
+        settings.setDraftText(profileId, "ses-1", "draft-1")
+        settings.flushDraftText()
+        settings.setBasicAuthPassword(profileId, "secret-pw")
+
+        // Sanity-check the seed landed on every surface.
+        assertEquals(setOf("openai/gpt-4"), settings.getDisabledModels(profileId))
+        assertEquals(setOf("anthropic/claude"), settings.getModelAvailability(profileId))
+        assertEquals(listOf("/proj-a", "/proj-b"), settings.getRecentWorkdirs(profileId))
+        assertEquals("draft-1", settings.getDraftText(profileId, "ses-1"))
+        assertEquals("secret-pw", settings.basicAuthPassword(profileId))
+
+        settings.clearAllForProfile(profileId)
+
+        // All four surfaces cleared.
+        assertEquals("disabled models cleared", emptySet<String>(), settings.getDisabledModels(profileId))
+        assertEquals("model availability cleared", emptySet<String>(), settings.getModelAvailability(profileId))
+        assertEquals("recent workdirs cleared", emptyList<String>(), settings.getRecentWorkdirs(profileId))
+        assertEquals("draft cleared", "", settings.getDraftText(profileId, "ses-1"))
+        assertNull("basic-auth password cleared", settings.basicAuthPassword(profileId))
+    }
+
+    @Test
+    fun `clearAllForProfile does not touch a different profile's surfaces`() {
+        val profileA = "11111111-1111-4111-8111-111111111111"
+        val profileB = "22222222-2222-4222-8222-222222222222"
+
+        // Seed both profiles.
+        settings.setDisabledModels(profileA, setOf("a-model"))
+        settings.setDisabledModels(profileB, setOf("b-model"))
+        settings.setDraftText(profileA, "ses-1", "a-draft")
+        settings.setDraftText(profileB, "ses-1", "b-draft")
+        settings.flushDraftText()
+        settings.setBasicAuthPassword(profileA, "pw-a")
+        settings.setBasicAuthPassword(profileB, "pw-b")
+        settings.setRecentWorkdirs(profileA, listOf("/a"))
+        settings.setRecentWorkdirs(profileB, listOf("/b"))
+
+        // Clear ONLY profileA.
+        settings.clearAllForProfile(profileA)
+
+        // profileA surfaces cleared.
+        assertEquals(emptySet<String>(), settings.getDisabledModels(profileA))
+        assertEquals("", settings.getDraftText(profileA, "ses-1"))
+        assertNull(settings.basicAuthPassword(profileA))
+        assertEquals(emptyList<String>(), settings.getRecentWorkdirs(profileA))
+
+        // profileB surfaces SURVIVE untouched (cross-profile isolation).
+        assertEquals("B's disabled models survive", setOf("b-model"), settings.getDisabledModels(profileB))
+        assertEquals("B's draft survives", "b-draft", settings.getDraftText(profileB, "ses-1"))
+        assertEquals("B's basic-auth password survives", "pw-b", settings.basicAuthPassword(profileB))
+        assertEquals("B's recent workdirs survive", listOf("/b"), settings.getRecentWorkdirs(profileB))
+    }
 }

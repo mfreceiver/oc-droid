@@ -323,6 +323,34 @@ class SettingsManager @Inject constructor(
         modelPrefs.clearModelDataForGroup(profileId)
 
     /**
+     * §需求12 rev-4 blocker B: clears ALL per-profile persisted data for
+     * [profileId] — model availability + disabled, recent workdirs, drafts,
+     * and the basic-auth password. Used on profile deletion so the deleted
+     * profile leaves no orphan ESP slots (the per-profile lifecycle must be
+     * complete: a profile gone from [HostProfileStore] must be gone from ESP
+     * too). Mirrors the four per-fp storage surfaces this app keeps.
+     *
+     * Composition:
+     *  - [clearModelDataForGroup] — `disabled_models_<id>` / `model_availability_<id>`.
+     *  - [clearRecentWorkdirs] — `recent_workdirs_<id>`.
+     *  - [SessionPrefs.clearDraftsForProfile] — every entry inside the shared
+     *    `session_drafts` JSON map whose composite key's profileId == [profileId].
+     *  - [setBasicAuthPassword]`(profileId, null)` — `basic_auth_password_<id>`
+     *    (null/blank removes the key per [ConnectionPrefs]).
+     *
+     * Note: client-cert material is cleared SEPARATELY by the caller
+     * ([cn.vectory.ocdroid.ui.controller.ProfileMutationEngine.deleteHostProfile]
+     * calls [clearClientCert]) since the cert id is distinct from the profile
+     * id and may be shared across profiles in principle.
+     */
+    fun clearAllForProfile(profileId: String) {
+        clearModelDataForGroup(profileId)
+        clearRecentWorkdirs(profileId)
+        sessionPrefs.clearDraftsForProfile(profileId)
+        setBasicAuthPassword(profileId, null)
+    }
+
+    /**
      * §需求4: atomic reconcile of the per-fp model data so a concurrent manual
      * model toggle (setModelDisabled) cannot lose its update against this
      * read-compute-write. Delegates to [modelPrefs.reconcileModelData] which

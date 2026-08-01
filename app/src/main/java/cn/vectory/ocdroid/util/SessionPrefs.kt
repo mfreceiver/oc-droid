@@ -206,7 +206,7 @@ internal class SessionPrefs(
     }
 
     /**
-     * §C1 / P1-gate-fix: cancels ALL pending debounce jobs and writes EVERY
+     * §C1 / §P1-gate-fix: cancels ALL pending debounce jobs and writes EVERY
      * pending draft (across all composite keys) to ESP immediately. Used by
      * app-background (AppLifecycleMonitor.onEnterBackground) and any
      * transition that must guarantee all in-flight drafts are durable
@@ -233,6 +233,35 @@ internal class SessionPrefs(
         // these are sequential here, the per-key write-back jobs (running
         // concurrently on Dispatchers.Default) are also race-safe.
         drained.forEach { performDraftWrite(it.profileId, it.sessionId, it.text) }
+    }
+
+    /**
+     * §需求12 rev-4 blocker B: removes ALL draft entries whose composite key's
+     * profileId equals [profileId]. Used on profile deletion so the deleted
+     * profile's drafts (potentially sensitive unsent text) don't leak as
+     * orphans. Serialized under [persistLock] (mirrors [performDraftWrite]) so
+     * the whole-map RMW is atomic vs concurrent draft writes.
+     *
+     * No-op on blank [profileId] (defensive — caller in
+     * [cn.vectory.ocdroid.util.SettingsManager.clearAllForProfile] should
+     * always pass a real profile.id, which is a non-blank UUID) and on
+     * corrupt/unparseable JSON (leave the user's data alone rather than
+     * risk dropping entries on a parse error).
+     */
+    fun clearDraftsForProfile(profileId: String) {
+        if (profileId.isBlank()) return
+        synchronized(persistLock) {
+            val json = encryptedPrefs.getString(KEY_SESSION_DRAFTS, null) ?: return
+            val map: MutableMap<String, String> = try {
+                Json.decodeFromString<Map<String, String>>(json).toMutableMap()
+            } catch (e: Exception) {
+                return  // Corrupt — leave alone.
+            }
+            val toRemove = map.keys.filter { it.substringBefore(COMPOSITE_KEY_SEPARATOR) == profileId }
+            if (toRemove.isEmpty()) return
+            toRemove.forEach { map.remove(it) }
+            encryptedPrefs.edit().putString(KEY_SESSION_DRAFTS, Json.encodeToString(map)).apply()
+        }
     }
 
     /**

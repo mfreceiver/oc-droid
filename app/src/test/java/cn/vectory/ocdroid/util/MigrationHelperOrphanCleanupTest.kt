@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -223,5 +225,139 @@ class MigrationHelperOrphanCleanupTest {
 
         assertTrue("flag set even when nothing was purged", esp.getBoolean("orphan_group_cleanup_v1_done", false))
         assertEquals(setOf("keep"), esp.getStringSet("disabled_models_$uuidA", emptySet()))
+    }
+
+    // ───────────────── session_drafts nested composite-key sweep (rev-4 blocker A) ─────────────────
+    //
+    // SessionPrefs stores ALL per-(profileId, sessionId) drafts inside a
+    // SINGLE `session_drafts` JSON map keyed by composite "<profileId>\u0000<sessionId>".
+    // The top-level prefix sweep above can't see INSIDE this map, so old
+    // group-keyed drafts (profileId = "A"/"B"/"C"/"D") and pre-Phase-5
+    // bare-sessionId legacy entries leak forever once the orphan cleanup
+    // flag lands. rev-4 blocker A adds a second sweep that parses the map
+    // and drops any entry whose composite key's profileId portion is NOT a
+    // canonical UUID.
+
+    /** Encodes a draft map to the on-disk JSON form SessionPrefs uses. */
+    private fun encodeDrafts(map: Map<String, String>): String = Json.encodeToString(map)
+
+    /** Decodes the `session_drafts` JSON back to a map (empty on missing/null). */
+    private fun decodeDrafts(json: String?): Map<String, String> =
+        if (json == null) emptyMap() else Json.decodeFromString(json)
+
+    @Test
+    fun `purges drafts whose composite profileId is a non-UUID group label`() {
+        val esp = rawPrefs()
+        val sep = SessionPrefs.COMPOSITE_KEY_SEPARATOR
+        val seed = mapOf(
+            "A${sep}ses_1" to "draft-a",
+            "B${sep}ses_2" to "draft-b",
+            "$uuidA${sep}ses_3" to "draft-uuid",
+        )
+        esp.edit().putString(SessionPrefs.KEY_SESSION_DRAFTS, encodeDrafts(seed)).apply()
+
+        settings.cleanupOrphanGroupKeys()
+
+        val after = decodeDrafts(esp.getString(SessionPrefs.KEY_SESSION_DRAFTS, null))
+        assertFalse("A-prefixed entry must be purged", after.keys.any { it.startsWith("A$sep") })
+        assertFalse("B-prefixed entry must be purged", after.keys.any { it.startsWith("B$sep") })
+        assertEquals("UUID-prefixed entry must survive", "draft-uuid", after["$uuidA${sep}ses_3"])
+        assertEquals("map shrinks to 1 entry", 1, after.size)
+    }
+
+    @Test
+    fun `purges pre-Phase-5 bare-sessionId legacy draft entries (no separator)`() {
+        val esp = rawPrefs()
+        val sep = SessionPrefs.COMPOSITE_KEY_SEPARATOR
+        // `ses_legacy` has NO NUL separator — a pre-Phase-5 bare-sessionId
+        // entry the R-20 migration never reached. substringBefore returns
+        // the whole key when there's no separator, so the profileId portion
+        // is "ses_legacy" → not a UUID → purge.
+        val seed = mapOf(
+            "ses_legacy" to "old-draft",
+            "$uuidA${sep}ses_3" to "keep",
+        )
+        esp.edit().putString(SessionPrefs.KEY_SESSION_DRAFTS, encodeDrafts(seed)).apply()
+
+        settings.cleanupOrphanGroupKeys()
+
+        val after = decodeDrafts(esp.getString(SessionPrefs.KEY_SESSION_DRAFTS, null))
+        assertFalse("bare sessionId entry must be purged", "ses_legacy" in after)
+        assertEquals("UUID-prefixed entry survives", "keep", after["$uuidA${sep}ses_3"])
+        assertEquals(1, after.size)
+    }
+
+    @Test
+    fun `preserves session_drafts map entirely when all profileIds are UUIDs`() {
+        val esp = rawPrefs()
+        val sep = SessionPrefs.COMPOSITE_KEY_SEPARATOR
+        val seed = mapOf(
+            "$uuidA${sep}ses_1" to "draft-a",
+            "$uuidB${sep}ses_2" to "draft-b",
+        )
+        esp.edit().putString(SessionPrefs.KEY_SESSION_DRAFTS, encodeDrafts(seed)).apply()
+
+        settings.cleanupOrphanGroupKeys()
+
+        val after = decodeDrafts(esp.getString(SessionPrefs.KEY_SESSION_DRAFTS, null))
+        assertEquals("map unchanged when all profileIds are UUIDs", seed, after)
+    }
+
+    @Test
+    fun `idempotent across the session_drafts sweep`() {
+        val esp = rawPrefs()
+        val sep = SessionPrefs.COMPOSITE_KEY_SEPARATOR
+        val seed = mapOf(
+            "A${sep}ses_1" to "draft-a",
+            "B${sep}ses_2" to "draft-b",
+            "$uuidA${sep}ses_3" to "draft-uuid",
+        )
+        esp.edit().putString(SessionPrefs.KEY_SESSION_DRAFTS, encodeDrafts(seed)).apply()
+
+        settings.cleanupOrphanGroupKeys()
+        // Second call: flag already set → entire scan skipped (top-level + draft).
+        settings.cleanupOrphanGroupKeys()
+
+        val after = decodeDrafts(esp.getString(SessionPrefs.KEY_SESSION_DRAFTS, null))
+        assertEquals("UUID-prefixed entry survives both runs", "draft-uuid", after["$uuidA${sep}ses_3"])
+        assertEquals(1, after.size)
+    }
+
+    @Test
+    fun `does NOT touch a corrupt session_drafts JSON`() {
+        val esp = rawPrefs()
+        val corrupt = "{not valid json"
+        esp.edit().putString(SessionPrefs.KEY_SESSION_DRAFTS, corrupt).apply()
+
+        settings.cleanupOrphanGroupKeys()
+
+        assertEquals(
+            "corrupt JSON must be left untouched (parse failure → no-op)",
+            corrupt,
+            esp.getString(SessionPrefs.KEY_SESSION_DRAFTS, null),
+        )
+    }
+
+    @Test
+    fun `session_drafts sweep commits even when top-level prefix sweep found nothing`() {
+        // rev-4 blocker A ordering guarantee: the draft edits MUST always
+        // commit even when the top-level sweep found nothing (no top-level
+        // orphan keys). Seed ONLY a session_drafts orphan (no top-level
+        // keys at all) → the top-level `changed` stays false; the draft
+        // sweep must still drive the batched apply().
+        val esp = rawPrefs()
+        val sep = SessionPrefs.COMPOSITE_KEY_SEPARATOR
+        val seed = mapOf(
+            "C${sep}ses_orphan" to "draft-orphan",
+            "$uuidA${sep}ses_keep" to "draft-keep",
+        )
+        esp.edit().putString(SessionPrefs.KEY_SESSION_DRAFTS, encodeDrafts(seed)).apply()
+
+        settings.cleanupOrphanGroupKeys()
+
+        val after = decodeDrafts(esp.getString(SessionPrefs.KEY_SESSION_DRAFTS, null))
+        assertFalse("C-prefixed orphan must be purged even with no top-level orphans", after.keys.any { it.startsWith("C$sep") })
+        assertEquals("UUID-prefixed entry survives", "draft-keep", after["$uuidA${sep}ses_keep"])
+        assertEquals(1, after.size)
     }
 }

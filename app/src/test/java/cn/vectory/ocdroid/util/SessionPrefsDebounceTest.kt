@@ -392,4 +392,88 @@ class SessionPrefsDebounceTest {
             realScope.cancel()
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Group 4 — clearDraftsForProfile (§需求12 rev-4 blocker B)
+    //
+    //  Profile deletion must remove ALL of the deleted profile's draft entries
+    //  from the shared session_drafts JSON map. The method scans the composite
+    //  keys (`profileId\u0000sessionId`) and removes every entry whose
+    //  profileId portion matches. Other profiles' drafts MUST survive
+    //  untouched. Uses the test's plain SharedPreferences fixture (the ESP
+    //  encryption layer is orthogonal to the scan/remove logic).
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun `clearDraftsForProfile removes only the targeted profile's drafts and preserves others`() {
+        // Seed drafts for profile-A (2 sessions) + profile-B (1 session).
+        prefs.setDraftText("profile-A", "ses-1", "a-1")
+        prefs.setDraftText("profile-A", "ses-2", "a-2")
+        prefs.setDraftText("profile-B", "ses-9", "b-9")
+        prefs.flushDraftText()
+        assertEquals("a-1", prefs.getDraftText("profile-A", "ses-1"))
+        assertEquals("a-2", prefs.getDraftText("profile-A", "ses-2"))
+        assertEquals("b-9", prefs.getDraftText("profile-B", "ses-9"))
+
+        prefs.clearDraftsForProfile("profile-A")
+
+        assertEquals("A's draft ses-1 must be gone", "", prefs.getDraftText("profile-A", "ses-1"))
+        assertEquals("A's draft ses-2 must be gone", "", prefs.getDraftText("profile-A", "ses-2"))
+        assertEquals("B's draft must survive untouched", "b-9", prefs.getDraftText("profile-B", "ses-9"))
+    }
+
+    @Test
+    fun `clearDraftsForProfile is a no-op when no drafts match the profileId`() {
+        prefs.setDraftText("profile-A", "ses-1", "a-1")
+        prefs.flushDraftText()
+
+        // No entries match → no-op (no rewrite, no crash).
+        prefs.clearDraftsForProfile("profile-nonexistent")
+
+        assertEquals("A's draft survives the no-op clear", "a-1", prefs.getDraftText("profile-A", "ses-1"))
+    }
+
+    @Test
+    fun `clearDraftsForProfile is a no-op on blank profileId`() {
+        prefs.setDraftText("profile-A", "ses-1", "a-1")
+        prefs.flushDraftText()
+
+        // Blank profileId → defensive no-op (a real profile.id is always a
+        // non-blank UUID; the guard protects against misuse).
+        prefs.clearDraftsForProfile("")
+
+        assertEquals("blank profileId clear is a no-op", "a-1", prefs.getDraftText("profile-A", "ses-1"))
+    }
+
+    @Test
+    fun `clearDraftsForProfile is a no-op when the session_drafts map is absent`() {
+        // No setDraftText yet → session_drafts key doesn't exist. The method
+        // must short-circuit cleanly (no crash, no spurious write creating an
+        // empty map).
+        prefs.clearDraftsForProfile("profile-A")
+
+        val sp = ApplicationProvider.getApplicationContext<Context>()
+            .getSharedPreferences("session_prefs_debounce_test", Context.MODE_PRIVATE)
+        assertNull("session_drafts key must not be created by a no-op clear",
+            sp.getString(SessionPrefs.KEY_SESSION_DRAFTS, null))
+    }
+
+    @Test
+    fun `clearDraftsForProfile leaves corrupt session_drafts JSON untouched`() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val sp = ctx.getSharedPreferences("session_prefs_corrupt_clear_test", Context.MODE_PRIVATE)
+        sp.edit().clear().commit()
+        val corrupt = "{not valid json"
+        sp.edit().putString(SessionPrefs.KEY_SESSION_DRAFTS, corrupt).commit()
+        // null scope → direct construction (no debounce) for a deterministic probe.
+        val directPrefs = SessionPrefs(sp, debounceScope = null)
+
+        directPrefs.clearDraftsForProfile("profile-A")
+
+        assertEquals(
+            "corrupt JSON must be left untouched (parse failure → no-op)",
+            corrupt,
+            sp.getString(SessionPrefs.KEY_SESSION_DRAFTS, null),
+        )
+    }
 }

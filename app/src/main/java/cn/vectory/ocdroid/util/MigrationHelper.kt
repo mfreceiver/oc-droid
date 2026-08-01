@@ -160,6 +160,18 @@ internal class MigrationHelper(
                 changed = true
             }
         }
+        // ── §需求12阶段4 rev-4 blocker A: session_drafts nested composite-key sweep ──
+        // SessionPrefs stores all drafts in a SINGLE JSON map keyed by
+        // "<profileId>\u0000<sessionId>". Old group-keyed drafts (profileId =
+        // "A"/"B"/"C"/"D") live INSIDE this map and are invisible to the
+        // top-level prefix sweep above. Parse the map and drop every entry
+        // whose profileId portion is NOT a canonical UUID (mirrors the
+        // top-level rule). purgeOrphanDraftEntries stages its own edits into
+        // `e` and returns true iff it dropped anything; OR-ing into the
+        // top-level sweep's `changed` GUARANTEES the batched apply() below
+        // fires iff EITHER sweep changed anything (the draft edits MUST
+        // always commit even when the top-level sweep found nothing).
+        changed = purgeOrphanDraftEntries(e) || changed
         if (changed) e.apply()
         // Always set the flag (even when nothing was deleted) so the scan
         // never repeats — the orphan set is bounded by this one pass.
@@ -172,6 +184,48 @@ internal class MigrationHelper(
      */
     private fun isCanonicalUuid(value: String): Boolean =
         UUID_REGEX.matches(value)
+
+    /**
+     * §需求12阶段4 rev-4 blocker A: purges draft entries whose composite key's
+     * profileId portion is not a canonical UUID. Reads the `session_drafts`
+     * JSON map, filters entries, writes back iff something was removed.
+     * Entries whose composite key's profileId IS a UUID are preserved (current
+     * profile.id-keyed drafts). Stages the write into [editor] so it shares
+     * the single batched apply() with the top-level sweep + the flag.
+     *
+     * Returns `true` iff any entry was dropped, so the caller can OR the
+     * result into its own `changed` flag and guarantee the batched
+     * `editor.apply()` fires iff EITHER sweep changed anything (the draft
+     * edits must always commit, even when the top-level prefix sweep found
+     * nothing).
+     */
+    private fun purgeOrphanDraftEntries(editor: SharedPreferences.Editor): Boolean {
+        val json = encryptedPrefs.getString(SessionPrefs.KEY_SESSION_DRAFTS, null) ?: return false
+        val map: MutableMap<String, String> = try {
+            Json.decodeFromString<Map<String, String>>(json).toMutableMap()
+        } catch (e: Exception) {
+            return false  // Corrupt JSON — leave untouched (don't risk dropping user data on a parse error).
+        }
+        var changed = false
+        val itr = map.entries.iterator()
+        while (itr.hasNext()) {
+            val (compositeKey, _) = itr.next()
+            // Composite key format: "<profileId>\u0000<sessionId>". Extract the
+            // profileId portion (before the NUL separator). If the entry has NO
+            // separator (a pre-Phase-5 bare-sessionId legacy entry that the
+            // R-20 migration never reached), substringBefore returns the whole
+            // key — definitely not a UUID → purge (orphan legacy draft).
+            val profileIdPart = compositeKey.substringBefore(SessionPrefs.COMPOSITE_KEY_SEPARATOR)
+            if (!isCanonicalUuid(profileIdPart)) {
+                itr.remove()
+                changed = true
+            }
+        }
+        if (changed) {
+            editor.putString(SessionPrefs.KEY_SESSION_DRAFTS, Json.encodeToString(map))
+        }
+        return changed
+    }
 
     /**
      * Helper: rewrites a JSON Map<String, String> ESP entry from bare-sessionId
