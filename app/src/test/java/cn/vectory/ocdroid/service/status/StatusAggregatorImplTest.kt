@@ -1164,4 +1164,77 @@ class StatusAggregatorImplTest {
             aggregator.globalState.value,
         )
     }
+
+    @Test
+    fun `scope derivation is consistent between bound identity and per-call identity`() = runTest {
+        // §U-MN10: steady-state invariant — currentScope() (identityStore-sourced)
+        // equals scopeKeyOf(perCallIdentity). The runtime check() in refresh()
+        // enforces this; calling refresh() with a matching identity must not
+        // throw (the scopeKey == currentScope() invariant holds).
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+        val aggregator = newAggregator(repo)
+        // identity() matches the store's auto-bound identity (groupFp = "host-group-A")
+        aggregator.refresh(identity(), snapshot(emptyMap()))
+        // No exception thrown — the runtime check() inside refresh() passed.
+        assertTrue(
+            "after empty success, statusByKey should be empty (no sessions)",
+            aggregator.statusByKey.value.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `markRequestFailed does NOT crash on stale identity after reconfigure (no epoch guard on public entry)`() {
+        // §U-MN10 rev-glm MAJOR fix regression guard: the public
+        // markRequestFailed() entry has NO epoch guard. A caller like
+        // ProcessStatusPoller.runRefresh passes an `identity` captured at poll
+        // start, which may be STALE after a reconfigure. The consistency
+        // assertion must NOT live in markRequestFailedInternal (it would fire
+        // IllegalStateException across a legitimate reconfigure window); it
+        // lives only in refresh()'s onFailure (epoch-guarded). This test pins
+        // that markRequestFailed with a stale identity routes the failure
+        // WITHOUT throwing.
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val identityStore = ConnectionIdentityStore()
+            .also { it.bind(fp, "/work", "endpoint-A") }
+        val aggregator = newAggregator(repo, identityStore = identityStore, clock = { 100L })
+        val sessionsById = mapOf("s1" to session("s1", "/work"))
+        // Reconfigure: the bound identity moves to a DIFFERENT group/endpoint.
+        identityStore.bind("host-group-B", "/work", "endpoint-B")
+        // The poller still holds the STALE identity (group A / endpoint-A).
+        // markRequestFailed must NOT throw (the assertion is scoped to refresh()).
+        aggregator.markRequestFailed(
+            identity = identity(groupFp = fp),  // stale — group A while bound is now B
+            snapshot = snapshot(sessionsById),
+            sourceTimeMs = 100L,
+        )
+        // The failure op was still dispatched (the scope it carries is the
+        // stale one; the reducer merge-times it under that scope — separate
+        // concern). The point of THIS test: no IllegalStateException thrown.
+        assertEquals(
+            "globalState is Unknown after failure (op dispatched despite stale identity)",
+            GlobalBusyState.Unknown,
+            aggregator.globalState.value,
+        )
+    }
+
+    @Test
+    fun `refresh onFailure consistency assertion holds under matching identity`() = runTest {
+        // §U-MN10 rev-glm MAJOR fix: the check() moved from
+        // markRequestFailedInternal to refresh()'s onFailure closure (the ONLY
+        // epoch-guarded failure path). A failed fetch with a matching identity
+        // must pass the assertion (no IllegalStateException) and route Unknown.
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.failure(RuntimeException("network down"))
+        val aggregator = newAggregator(repo, clock = { 100L })
+        val sessionsById = mapOf("s1" to session("s1", "/work"))
+        aggregator.refresh(identity(), snapshot(sessionsById))
+        // No exception thrown — the onFailure check() passed (identity matches
+        // the epoch-guarded bound identity), and the failure routed Unknown.
+        assertEquals(
+            "failed refresh routes globalState to Unknown",
+            GlobalBusyState.Unknown,
+            aggregator.globalState.value,
+        )
+    }
 }

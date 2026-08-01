@@ -45,7 +45,7 @@ data class StaleClaim(
 /**
  * Pure: scan [authority.bySid] for entries whose [SessionEntry.optimisticClaim]
  * is non-null AND unconfirmed by EITHER signal (see below) AND whose age
- * (`now - claimedAtMonotonic`) STRICTLY exceeds [timeoutMs].
+ * (`now - claimedAtMs`) STRICTLY exceeds [timeoutMs].
  *
  * §P0-B final-fix #1: a claim is confirmed (watchdog skips it) iff
  * `serverEchoed || reconcileConfirmed`. serverEchoed is set by a real-time
@@ -71,7 +71,7 @@ internal fun selectStaleClaimsForReconcile(
         // §P0-B final-fix #1: skip once confirmed by EITHER a real-time SSE echo
         // or a delayed reconcile GET (either means the server acknowledged the claim).
         if (claim.serverEchoed || claim.reconcileConfirmed) continue
-        val age = now - claim.claimedAtMonotonic
+        val age = now - claim.claimedAtMs
         if (age > timeoutMs) {
             stale.add(StaleClaim(sid = sid, scopeKey = entry.scopeKey ?: continue, clientSeq = claim.clientSeq))
         }

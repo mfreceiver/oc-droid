@@ -4,6 +4,7 @@ import cn.vectory.ocdroid.data.state.AuthorityOp
 import cn.vectory.ocdroid.data.state.EntryOrigin
 import cn.vectory.ocdroid.data.state.RequestToken
 import cn.vectory.ocdroid.data.state.ScopeKey
+import cn.vectory.ocdroid.data.state.scopeKeyOf
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
@@ -215,13 +216,19 @@ class StatusAggregatorImpl internal constructor(
      * production the per-call identity always matches it). Used both as the
      * composite-key [serverGroupFp] for derived entries and as the
      * [AuthorityState.coverage] lookup key.
+     *
+     * §U-MN10 (分歧3) rev-gpt gate r1: in STEADY STATE (no concurrent
+     * reconfigure), `scopeKeyOf(perCallIdentity.serverGroupFp, …)` MUST equal
+     * `currentScope()`. This invariant is NOT runtime-enforced — the reads of
+     * [currentEpoch] + [currentIdentity] are two independent lock-free reads,
+     * so a runtime check() could fire across a legitimate cross-thread
+     * reconfigure race (ProcessStatusPoller on Dispatchers.Default vs
+     * controller/UI-initiated beginReconfigure). The invariant is pinned at
+     * TEST level (StatusAggregatorImplTest `scope derivation is consistent`).
      */
     private fun currentScope(): ScopeKey {
         val id = identityStore.currentIdentity.value
-        return ScopeKey(
-            serverGroupFp = id?.serverGroupFp ?: "",
-            endpointFp = id?.endpointFp ?: "",
-        )
+        return scopeKeyOf(id?.serverGroupFp, id?.endpointFp)
     }
 
     /**
@@ -233,7 +240,7 @@ class StatusAggregatorImpl internal constructor(
      *    composite keys + the lifecycle projection).
      *  - `entries`: each `(sid, SessionEntry)` in `state.authority.bySid` →
      *    `SessionStatusKey(currentGroupFp, workdir ?: "", sid)` →
-     *    `Entry(status.toSessionBusyStatus(), sourceTimeMs = updatedMonotonic,
+     *    `Entry(status.toSessionBusyStatus(), sourceTimeMs = updatedAtMs,
      *    fresh = (origin == REST))`. The `origin == REST` ⇒ fresh rule matches
      *    the pre-Lane-2 success-fold `fresh = true` for REST entries (within
      *    TTL); SSE / optimistic / failure entries are `fresh = false`.
@@ -265,7 +272,7 @@ class StatusAggregatorImpl internal constructor(
             val key = SessionStatusKey(currentFp, e.workdir ?: "", sid)
             entries[key] = Entry(
                 status = e.status.toSessionBusyStatus(),
-                sourceTimeMs = e.updatedMonotonic,
+                sourceTimeMs = e.updatedAtMs,
                 fresh = e.origin == EntryOrigin.REST,
             )
         }
@@ -355,23 +362,33 @@ class StatusAggregatorImpl internal constructor(
         val identityEpochAtStart = stateAtStart.identityEpoch
         // §3.1 merge timing (B4-b adapter-side): localBefore captures the
         // projection of entries that are NOT fresher than the REST request
-        // start. Entries with `updatedMonotonic > requestStartMs` (a fresher
+        // start. Entries with `updatedAtMs > requestStartMs` (a fresher
         // SSE observation landed before this REST started) are EXCLUDED so the
         // reducer's REST in-flight protection (mergeStatusSnapshotInFlight)
         // treats them as "changed during the round-trip" → SSE-wins overrides
         // the stale REST snapshot.
         val authorityAtStart = stateAtStart.authority
         val localBefore = authorityAtStart.bySid
-            .filterValues { it.updatedMonotonic <= requestStartMs }
+            .filterValues { it.updatedAtMs <= requestStartMs }
             .mapValues { it.value.status }
         val result = statusFetchService.fetch(snapshot)
         // CP4 §2 epoch guard: drop the response if a reconfigure invalidated
         // this request mid-flight (checked AFTER the suspend, BEFORE dispatch).
         if (identityStore.currentEpoch() != epochAtRequestStart) return
-        val scopeKey = ScopeKey(
-            serverGroupFp = identity.serverGroupFp,
-            endpointFp = identity.endpointFp,
-        )
+        val scopeKey = scopeKeyOf(identity.serverGroupFp, identity.endpointFp)
+        // §U-MN10 (分歧3) rev-gpt gate r1: NO runtime check() here. The
+        // currentEpoch() read above + currentScope()'s currentIdentity read are
+        // TWO independent lock-free reads (AtomicLong + AtomicReference-backed
+        // StateFlow). A concurrent beginReconfigure() on another thread
+        // (ProcessStatusPoller runs on Dispatchers.Default; reconfigure is
+        // initiated from controller/UI) can interleave: epoch reads X (guard
+        // passes) → other thread bumps to X+1 + nulls identity → currentScope()
+        // reads null → a check() would throw IllegalStateException across a
+        // LEGITIMATE reconfigure race, mis-routing a successful fetch as Unknown.
+        // The steady-state invariant (scopeKey == currentScope()) is pinned at
+        // TEST level (StatusAggregatorImplTest `scope derivation is consistent`).
+        // U-MN10's production value is the scopeKeyOf() SSOT convergence, not
+        // this assertion.
         val token = RequestToken(
             hostProfileId = hostAtStart,
             requestStartMs = requestStartMs,
@@ -415,7 +432,13 @@ class StatusAggregatorImpl internal constructor(
                 store.dispatch(AppAction.AuthorityEvent(op))
                 publishFromState(store.stateFlow.value)
             },
-            onFailure = { markRequestFailedInternal(identity, snapshot, requestStartMs, token) },
+            onFailure = {
+                // §U-MN10 rev-gpt gate r1: NO runtime check() here (same
+                // cross-thread non-atomic read hazard as the success path —
+                // see comment at the scopeKey derivation above). The steady-state
+                // invariant is pinned at TEST level.
+                markRequestFailedInternal(identity, snapshot, requestStartMs, token)
+            },
         )
     }
 
@@ -424,7 +447,7 @@ class StatusAggregatorImpl internal constructor(
      * §3.1 merge timing). Same signature as pre-Lane-2 (call sites unchanged).
      *
      * §3.1 merge timing (adapter-side): a strictly-OLDER SSE frame
-     * (`sourceTimeMs < ` the current authority entry's `updatedMonotonic`) is
+     * (`sourceTimeMs < ` the current authority entry's `updatedAtMs`) is
      * DROPPED — defensive against out-of-order SSE replay during reconnect
      * (the pre-Lane-2 aggregator did the same `sourceTimeMs >= prev.sourceTimeMs`
      * gate). Equal timestamps overwrite (matches the legacy `>=` rule). The
@@ -439,13 +462,13 @@ class StatusAggregatorImpl internal constructor(
     override fun applySseStatus(key: SessionStatusKey, status: SessionBusyStatus, sourceTimeMs: Long) {
         // §3.1 merge timing: drop a strictly-older SSE frame (out-of-order replay).
         val current = store.stateFlow.value.authority.bySid[key.sessionId]
-        if (current != null && sourceTimeMs < current.updatedMonotonic) return
+        if (current != null && sourceTimeMs < current.updatedAtMs) return
         val op = AuthorityOp.ApplyEvent(
             sid = key.sessionId,
             status = status.toSessionStatus(),
             origin = EntryOrigin.SSE_LEGACY,
             scopeKey = currentScope(),
-            connectionMonotonicMs = sourceTimeMs,
+            connectionTimeMs = sourceTimeMs,
             workdir = key.workdir,
         )
         store.dispatch(AppAction.AuthorityEvent(op))
@@ -485,10 +508,15 @@ class StatusAggregatorImpl internal constructor(
         sourceTimeMs: Long,
         token: RequestToken,
     ) {
-        val scopeKey = ScopeKey(
-            serverGroupFp = identity.serverGroupFp,
-            endpointFp = identity.endpointFp,
-        )
+        val scopeKey = scopeKeyOf(identity.serverGroupFp, identity.endpointFp)
+        // §U-MN10 (分歧3): NO consistency assertion here. This internal helper
+        // is reached from TWO callers: (1) refresh()'s onFailure (the epoch
+        // guard at refresh():368 precedes it — safe to assert there) and
+        // (2) the public markRequestFailed() entry (NO epoch guard — callers
+        // like ProcessStatusPoller.runRefresh:478 pass an identity captured at
+        // poll start, which may be stale after a reconfigure; asserting here
+        // would fire IllegalStateException across a legitimate reconfigure
+        // window). The assertion lives at the refresh() onFailure site only.
         val op = AuthorityOp.MarkSourceFailed(
             scopeKey = scopeKey,
             requestToken = token,

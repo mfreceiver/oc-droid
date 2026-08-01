@@ -71,7 +71,7 @@ import javax.inject.Singleton
  *   re-read every tick so a dispatch that lands between ticks is observed.
  * @param identityStore the single process-level identity guard (§2 epoch).
  * @param clock the watchdog clock (production: wall-clock millis — the SAME
- *   clock domain as the claim's `claimedAtMonotonic` so the age comparison in
+ *   clock domain as the claim's `claimedAtMs` so the age comparison in
  *   [selectStaleClaimsForReconcile] is consistent).
  * @param staleClaimReconcileSink the sink that turns detected stale claims
  *   into per-sid reconcile GETs (production routes through

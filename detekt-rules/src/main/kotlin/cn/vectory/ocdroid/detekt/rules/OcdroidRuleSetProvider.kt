@@ -16,6 +16,7 @@ class OcdroidRuleSetProvider : RuleSetProvider {
         ruleSetId,
         listOf(
             ::SessionStatusDirectWriteRule,
+            ::AuthorityDirectWriteRule,           // §U-MN6 Batch 3
         ),
     )
 

@@ -116,7 +116,7 @@ class StatusPollingDowngradeRegressionTest {
             status = status,
             origin = cn.vectory.ocdroid.data.state.EntryOrigin.SSE_LEGACY,
             scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
-            connectionMonotonicMs = 0L,
+            connectionTimeMs = 0L,
         ),
     )
 

@@ -59,7 +59,7 @@ class AuthorityReducerTest {
         origin = origin,
         serverRound = serverRound,
         scopeKey = scope,
-        connectionMonotonicMs = monotonic,
+        connectionTimeMs = monotonic,
         workdir = workdir,
         optimisticBumpTimestamp = bump,
     )
@@ -600,11 +600,11 @@ class AuthorityReducerTest {
         store.dispatch(AppAction.AuthorityEvent(
             event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
         ))
-        // legacy_update updates updatedMonotonic to 200, preserves baseline (5,7)
+        // legacy_update updates updatedAtMs to 200, preserves baseline (5,7)
         val afterLegacy = store.stateFlow.value
-        assertEquals(200L, store.stateFlow.value.authority.bySid["A"]?.updatedMonotonic)
+        assertEquals(200L, store.stateFlow.value.authority.bySid["A"]?.updatedAtMs)
         // Equal-turn slim frame (5,7) with OLDER monotonic (50 < 200) → live lex guard
-        // tie-break DROPS it (cmp==0 && connectionMonotonicMs < updatedMonotonic)
+        // tie-break DROPS it (cmp==0 && connectionTimeMs < updatedAtMs)
         store.dispatch(AppAction.AuthorityEvent(
             event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
                 serverRound = ServerRound(5L, 7L), monotonic = 50L),
@@ -1514,7 +1514,7 @@ class AuthorityReducerTest {
                     serverRound = null,
                     optimisticClaim = null,
                     origin = EntryOrigin.SSE_LEGACY,
-                    updatedMonotonic = 50L,
+                    updatedAtMs = 50L,
                     workdir = "/other",
                     scopeKey = diffScope,
                 ))
@@ -1988,7 +1988,7 @@ class AuthorityReducerTest {
                     serverRound = ServerRound(1L, 1L),
                     optimisticClaim = null,
                     origin = EntryOrigin.SSE_SLIM,
-                    updatedMonotonic = 100L,
+                    updatedAtMs = 100L,
                     workdir = "/other",
                     scopeKey = diffScope,
                 ))
@@ -2044,7 +2044,7 @@ class AuthorityReducerTest {
         capturedIdentity = capturedIdentity,
         identityEpochAtCapture = identityEpochAtCapture,
         scopeKey = scope,
-        connectionMonotonicMs = monotonic,
+        connectionTimeMs = monotonic,
     )
 
     @Test
@@ -2103,7 +2103,7 @@ class AuthorityReducerTest {
             capturedIdentity = null,
             identityEpochAtCapture = 0L,
             scopeKey = scope,
-            connectionMonotonicMs = 100L,
+            connectionTimeMs = 100L,
         )
         val result = reduceAuthority(state, op)
         val entry = result.authority.bySid["s1"]
@@ -2143,7 +2143,7 @@ class AuthorityReducerTest {
             capturedIdentity = capturedIdentity,
             identityEpochAtCapture = 5L,
             scopeKey = altScope, // derived from captured identity, NOT current host
-            connectionMonotonicMs = 100L,
+            connectionTimeMs = 100L,
         )
         val result = reduceAuthority(state, op)
         val entry = result.authority.bySid["s1"]
@@ -2167,7 +2167,7 @@ class AuthorityReducerTest {
                     status = SessionStatus(type = "busy"),
                     serverRound = null, optimisticClaim = null,
                     origin = EntryOrigin.SSE_LEGACY,
-                    updatedMonotonic = 50L, workdir = "/other", scopeKey = diffScope,
+                    updatedAtMs = 50L, workdir = "/other", scopeKey = diffScope,
                 ))
             ))
         }
@@ -2318,12 +2318,12 @@ class AuthorityReducerTest {
             val busyOp = AuthorityOp.ApplyEvent(
                 sid = sid, status = SessionStatus(type = "busy"),
                 origin = EntryOrigin.SSE_LEGACY, scopeKey = scope,
-                connectionMonotonicMs = 100L + i * 2L,
+                connectionTimeMs = 100L + i * 2L,
             )
             val idleOp = AuthorityOp.ApplyEvent(
                 sid = sid, status = SessionStatus(type = "idle"),
                 origin = EntryOrigin.SSE_LEGACY, scopeKey = scope,
-                connectionMonotonicMs = 101L + i * 2L,
+                connectionTimeMs = 101L + i * 2L,
             )
             store.dispatch(AppAction.AuthorityEvent(busyOp))
             store.dispatch(AppAction.AuthorityEvent(idleOp))
@@ -2342,14 +2342,14 @@ class AuthorityReducerTest {
         sid: String,
         attempt: Int = 1,
         backoffMs: Long = 200L,
-        queuedMonotonic: Long = 1000L,
+        queuedAtMs: Long = 1000L,
         identityEpochAtCapture: Long = 0L,
     ) = AuthorityOp.RetryQueued(
         sid = sid,
         scopeKey = scope,
         attempt = attempt,
         backoffMs = backoffMs,
-        queuedMonotonic = queuedMonotonic,
+        queuedAtMs = queuedAtMs,
         identityEpochAtCapture = identityEpochAtCapture,
     )
 
@@ -2358,20 +2358,20 @@ class AuthorityReducerTest {
             monotonic = monotonic, identityEpochAtCapture = identityEpochAtCapture)
 
     @Test
-    fun `RetryQueued enqueues entry with correct attempt backoff and queuedMonotonic`() {
+    fun `RetryQueued enqueues entry with correct attempt backoff and queuedAtMs`() {
         val store = storeWith()
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, backoffMs = 200L, queuedMonotonic = 1000L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, backoffMs = 200L, queuedAtMs = 1000L)))
         val entry = store.stateFlow.value.authority.retryQueue["s1"]
-        assertEquals(RetryEntry(attempt = 1, backoffMs = 200L, queuedMonotonic = 1000L), entry)
+        assertEquals(RetryEntry(attempt = 1, backoffMs = 200L, queuedAtMs = 1000L), entry)
     }
 
     @Test
     fun `RetryQueued re-queue with different attempt overwrites the entry`() {
         val store = storeWith()
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, backoffMs = 200L, queuedMonotonic = 1000L)))
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 2, backoffMs = 400L, queuedMonotonic = 2000L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, backoffMs = 200L, queuedAtMs = 1000L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 2, backoffMs = 400L, queuedAtMs = 2000L)))
         val entry = store.stateFlow.value.authority.retryQueue["s1"]
-        assertEquals(RetryEntry(attempt = 2, backoffMs = 400L, queuedMonotonic = 2000L), entry)
+        assertEquals(RetryEntry(attempt = 2, backoffMs = 400L, queuedAtMs = 2000L), entry)
     }
 
     @Test
@@ -2390,12 +2390,12 @@ class AuthorityReducerTest {
         // Fill exactly RETRY_QUEUE_MAX_SIZE (256) entries.
         var cur = state
         for (i in 0 until 256) {
-            cur = reduceAuthority(cur, retryQueued("sid-$i", queuedMonotonic = i.toLong()))
+            cur = reduceAuthority(cur, retryQueued("sid-$i", queuedAtMs = i.toLong()))
         }
         assertEquals(256, cur.authority.retryQueue.size)
         // Insert one more (sid-256 at monotonic=256, newer than all). The
         // oldest (sid-0 at monotonic=0) MUST be evicted.
-        cur = reduceAuthority(cur, retryQueued("sid-256", queuedMonotonic = 256L))
+        cur = reduceAuthority(cur, retryQueued("sid-256", queuedAtMs = 256L))
         assertEquals("queue capped at 256", 256, cur.authority.retryQueue.size)
         assertFalse("oldest entry (sid-0) evicted", "sid-0" in cur.authority.retryQueue)
         assertTrue("new entry (sid-256) present", "sid-256" in cur.authority.retryQueue)
@@ -2407,12 +2407,12 @@ class AuthorityReducerTest {
         val state = StoreState.initial()
         var cur = state
         for (i in 0 until 256) {
-            cur = reduceAuthority(cur, retryQueued("sid-$i", queuedMonotonic = i.toLong()))
+            cur = reduceAuthority(cur, retryQueued("sid-$i", queuedAtMs = i.toLong()))
         }
         assertEquals(256, cur.authority.retryQueue.size)
         // Re-queue an EXISTING sid (sid-0) with a fresh attempt. The queue
         // size must NOT grow (overwrite, not insert) → no eviction needed.
-        cur = reduceAuthority(cur, retryQueued("sid-0", attempt = 2, queuedMonotonic = 9999L))
+        cur = reduceAuthority(cur, retryQueued("sid-0", attempt = 2, queuedAtMs = 9999L))
         assertEquals("re-queue at capacity stays at 256", 256, cur.authority.retryQueue.size)
         assertEquals(2, cur.authority.retryQueue["sid-0"]?.attempt)
     }
@@ -2476,7 +2476,7 @@ class AuthorityReducerTest {
         assertTrue(store.retryQueueFlow.value.isEmpty())
 
         // Enqueue → .value reflects the new entry immediately.
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedMonotonic = 100L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedAtMs = 100L)))
         assertEquals(RetryEntry(1, 200L, 100L), store.retryQueueFlow.value["s1"])
 
         // Fire → .value reflects the removal.
@@ -2484,7 +2484,7 @@ class AuthorityReducerTest {
         assertTrue(store.retryQueueFlow.value.isEmpty())
 
         // Enqueue again, then terminal idle cleans it → .value reflects empty.
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedMonotonic = 200L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedAtMs = 200L)))
         store.dispatch(AppAction.AuthorityEvent(
             event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 300L),
         ))
@@ -2504,7 +2504,7 @@ class AuthorityReducerTest {
         assertEquals("initial emission", emptyMap<String, RetryEntry>(), emissions.last())
 
         // Enqueue → emits the new entry (distinct from empty).
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedMonotonic = 100L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedAtMs = 100L)))
         assertEquals(RetryEntry(1, 200L, 100L), emissions.last()["s1"])
 
         // Fire → emits empty (distinct from the queued entry).
@@ -2543,21 +2543,21 @@ class AuthorityReducerTest {
         // was rejected). A brand-new entry that is the oldest loses its spot.
         val state = StoreState.initial()
         var cur = state
-        // Fill 256 entries with queuedMonotonic 100..355.
+        // Fill 256 entries with queuedAtMs 100..355.
         for (i in 0 until 256) {
-            cur = reduceAuthority(cur, retryQueued("sid-$i", queuedMonotonic = 100L + i))
+            cur = reduceAuthority(cur, retryQueued("sid-$i", queuedAtMs = 100L + i))
         }
         assertEquals(256, cur.authority.retryQueue.size)
-        // Insert a NEW sid at queuedMonotonic = 50 (OLDER than all 256). The
+        // Insert a NEW sid at queuedAtMs = 50 (OLDER than all 256). The
         // strict cap evicts the oldest — which is now "new-oldest" itself.
-        cur = reduceAuthority(cur, retryQueued("new-oldest", queuedMonotonic = 50L))
+        cur = reduceAuthority(cur, retryQueued("new-oldest", queuedAtMs = 50L))
         assertEquals("strict cap at 256 (no transient overflow)", 256, cur.authority.retryQueue.size)
         assertFalse("the new oldest entry is evicted (it WAS the oldest)",
             "new-oldest" in cur.authority.retryQueue)
         assertTrue("the prior oldest (sid-0 at monotonic=100) survives the self-eviction",
             "sid-0" in cur.authority.retryQueue)
         // A normal insert (newest) evicts the oldest (sid-0 now), cap stays 256.
-        cur = reduceAuthority(cur, retryQueued("newest", queuedMonotonic = 9999L))
+        cur = reduceAuthority(cur, retryQueued("newest", queuedAtMs = 9999L))
         assertEquals(256, cur.authority.retryQueue.size)
         assertTrue("newest present", "newest" in cur.authority.retryQueue)
         assertFalse("prior oldest (sid-0) evicted by the newest insert",
@@ -2577,12 +2577,12 @@ class AuthorityReducerTest {
             event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 100L),
         ))
         // A 503 retry arrives for s1 → MUST be accepted (not dropped).
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedMonotonic = 200L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedAtMs = 200L)))
         assertTrue("RetryQueued accepted for idle session (503 = legitimate retry)",
             "s1" in store.stateFlow.value.authority.retryQueue)
 
         // Absent bySid (unknown status) → also accepted.
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("absent-sid", attempt = 1, queuedMonotonic = 200L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("absent-sid", attempt = 1, queuedAtMs = 200L)))
         assertTrue("RetryQueued accepted for absent sid (status unknown)",
             "absent-sid" in store.stateFlow.value.authority.retryQueue)
     }
@@ -2595,20 +2595,20 @@ class AuthorityReducerTest {
         // bump), keeping the drop-on-no-change / replay-stability contract.
         val state = StoreState.initial()
         var cur = state
-        // Fill 256 entries with queuedMonotonic 100..355.
+        // Fill 256 entries with queuedAtMs 100..355.
         for (i in 0 until 256) {
-            cur = reduceAuthority(cur, retryQueued("sid-$i", queuedMonotonic = 100L + i))
+            cur = reduceAuthority(cur, retryQueued("sid-$i", queuedAtMs = 100L + i))
         }
         assertEquals(256, cur.authority.retryQueue.size)
-        // Insert a NEW sid at queuedMonotonic = 50 (oldest). It self-evicts.
+        // Insert a NEW sid at queuedAtMs = 50 (oldest). It self-evicts.
         // The result retryQueue equals cur.retryQueue → same-ref no-op.
-        val result = reduceAuthority(cur, retryQueued("new-oldest", queuedMonotonic = 50L))
+        val result = reduceAuthority(cur, retryQueued("new-oldest", queuedAtMs = 50L))
         assertSame("self-eviction is same-ref no-op (no spurious transition)",
             cur, result)
         assertFalse("self-evicted entry not present",
             "new-oldest" in result.authority.retryQueue)
         // Re-running the same op on the result → STILL same-ref (idempotent).
-        val result2 = reduceAuthority(result, retryQueued("new-oldest", queuedMonotonic = 50L))
+        val result2 = reduceAuthority(result, retryQueued("new-oldest", queuedAtMs = 50L))
         assertSame("re-running self-evicting op is idempotent", result, result2)
     }
 
@@ -2618,8 +2618,8 @@ class AuthorityReducerTest {
         // queue — sids belong to the purged host. Without this, host A's queued
         // sids leak into host B (cross-host attempt counter pollution).
         val store = storeWith()
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", queuedMonotonic = 100L)))
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s2", queuedMonotonic = 200L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", queuedAtMs = 100L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s2", queuedAtMs = 200L)))
         assertEquals(2, store.stateFlow.value.authority.retryQueue.size)
         // Cross-group purge.
         store.dispatch(AppAction.AuthorityEvent(
@@ -2632,7 +2632,7 @@ class AuthorityReducerTest {
     @Test
     fun `applyPurge same-group preserves retryQueue (rev-ogpt B2)`() {
         val store = storeWith()
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", queuedMonotonic = 100L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", queuedAtMs = 100L)))
         store.dispatch(AppAction.AuthorityEvent(
             AuthorityOp.PurgeHost(scopeKey = scope, preserveServerGroup = true),
         ))
@@ -2888,8 +2888,8 @@ class AuthorityReducerTest {
     fun `PruneSessions cleans retryQueue for pruned in-scope sids (rev-ogpt B4)`() {
         // rev-ogpt B4: deleted/archived sids leave the retry queue.
         val store = storeWith()
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", queuedMonotonic = 100L)))
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s2", queuedMonotonic = 200L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", queuedAtMs = 100L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s2", queuedAtMs = 200L)))
         assertEquals(2, store.stateFlow.value.authority.retryQueue.size)
         // Prune s1 (in-scope).
         store.dispatch(AppAction.AuthorityEvent(
@@ -2911,7 +2911,7 @@ class AuthorityReducerTest {
         // it isn't silently re-fixed by re-introducing the wrong fence.
         val store = storeWith()
         // Queue s1 (attempt 1).
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedMonotonic = 100L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 1, queuedAtMs = 100L)))
         assertTrue("s1 queued", "s1" in store.stateFlow.value.authority.retryQueue)
         // Terminal event lands FIRST (cleans the entry).
         store.dispatch(AppAction.AuthorityEvent(
@@ -2919,7 +2919,7 @@ class AuthorityReducerTest {
         ))
         assertFalse("terminal cleaned the entry", "s1" in store.stateFlow.value.authority.retryQueue)
         // Stale RetryQueued arrives AFTER. No fence → it re-enters (residual).
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 2, queuedMonotonic = 120L)))
+        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", attempt = 2, queuedAtMs = 120L)))
         assertTrue("stale RetryQueued re-entered (known residual — no fence; self-heals via next sweep/LRU)",
             "s1" in store.stateFlow.value.authority.retryQueue)
         // Self-heal: a covering sweep's RetryFired (or a re-delivered terminal

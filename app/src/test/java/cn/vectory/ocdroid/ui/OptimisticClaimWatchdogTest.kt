@@ -27,17 +27,17 @@ class OptimisticClaimWatchdogTest {
         serverRound = null,
         optimisticClaim = claim,
         origin = EntryOrigin.OPTIMISTIC,
-        updatedMonotonic = 0L,
+        updatedAtMs = 0L,
         workdir = null,
         scopeKey = scopeKey,
     )
 
     @Test
     fun `selectStaleClaimsForReconcile returns stale unconfirmed claim`() {
-        // Stale claim: claimedAtMonotonic=0, now=6001, timeout=5000 → age=6001 > 5000
+        // Stale claim: claimedAtMs=0, now=6001, timeout=5000 → age=6001 > 5000
         val staleClaim = OptimisticClaim(
             clientSeq = 1L,
-            claimedAtMonotonic = 0L,
+            claimedAtMs = 0L,
             serverEchoed = false,
             guardedIdleDrop = false,
         )
@@ -52,13 +52,13 @@ class OptimisticClaimWatchdogTest {
 
     @Test
     fun `selectStaleClaimsForReconcile does NOT return fresh claims`() {
-        // Fresh claim: claimedAtMonotonic=1000, now=6001, timeout=5000 → age=5001 > 5000
+        // Fresh claim: claimedAtMs=1000, now=6001, timeout=5000 → age=5001 > 5000
         // Wait, 6001 - 1000 = 5001 which IS > 5000, so this is stale!
         // Let me use a truly fresh claim.
-        // Fresh claim: claimedAtMonotonic=2000, now=6001, timeout=5000 → age=4001 <= 5000
+        // Fresh claim: claimedAtMs=2000, now=6001, timeout=5000 → age=4001 <= 5000
         val freshClaim = OptimisticClaim(
             clientSeq = 1L,
-            claimedAtMonotonic = 2000L,
+            claimedAtMs = 2000L,
             serverEchoed = false,
             guardedIdleDrop = false,
         )
@@ -74,7 +74,7 @@ class OptimisticClaimWatchdogTest {
         // Echoed claim: very old but server confirmed
         val echoedClaim = OptimisticClaim(
             clientSeq = 1L,
-            claimedAtMonotonic = 0L,
+            claimedAtMs = 0L,
             serverEchoed = true,
             guardedIdleDrop = false,
         )
@@ -98,7 +98,7 @@ class OptimisticClaimWatchdogTest {
     fun `selectStaleClaimsForReconcile boundary - exact timeout does NOT trigger`() {
         val claim = OptimisticClaim(
             clientSeq = 1L,
-            claimedAtMonotonic = 0L,
+            claimedAtMs = 0L,
             serverEchoed = false,
             guardedIdleDrop = false,
         )
@@ -114,7 +114,7 @@ class OptimisticClaimWatchdogTest {
     fun `selectStaleClaimsForReconcile boundary - just over timeout triggers`() {
         val claim = OptimisticClaim(
             clientSeq = 1L,
-            claimedAtMonotonic = 0L,
+            claimedAtMs = 0L,
             serverEchoed = false,
             guardedIdleDrop = false,
         )
@@ -129,15 +129,15 @@ class OptimisticClaimWatchdogTest {
     @Test
     fun `selectStaleClaimsForReconcile mixes stale and fresh returns only stale`() {
         val staleClaim = OptimisticClaim(
-            clientSeq = 1L, claimedAtMonotonic = 0L,
+            clientSeq = 1L, claimedAtMs = 0L,
             serverEchoed = false, guardedIdleDrop = false,
         )
         val freshClaim = OptimisticClaim(
-            clientSeq = 2L, claimedAtMonotonic = 2000L,
+            clientSeq = 2L, claimedAtMs = 2000L,
             serverEchoed = false, guardedIdleDrop = false,
         )
         val echoedClaim = OptimisticClaim(
-            clientSeq = 3L, claimedAtMonotonic = 0L,
+            clientSeq = 3L, claimedAtMs = 0L,
             serverEchoed = true, guardedIdleDrop = false,
         )
         val auth = AuthorityState(bySid = mapOf(
@@ -157,7 +157,7 @@ class OptimisticClaimWatchdogTest {
     fun `P0-B watchdog SLA boundary - 4999 not stale 5001 is stale`() {
         val claim = OptimisticClaim(
             clientSeq = 1L,
-            claimedAtMonotonic = 0L,
+            claimedAtMs = 0L,
             serverEchoed = false,
             guardedIdleDrop = false,
         )
@@ -180,7 +180,7 @@ class OptimisticClaimWatchdogTest {
     fun `P0-B watchdog SLA reconcileConfirmed claim never selected regardless of age`() {
         val claim = OptimisticClaim(
             clientSeq = 1L,
-            claimedAtMonotonic = 0L,
+            claimedAtMs = 0L,
             serverEchoed = false,
             reconcileConfirmed = true, // confirmed by delayed reconcile GET
             guardedIdleDrop = false,
@@ -196,7 +196,7 @@ class OptimisticClaimWatchdogTest {
     fun `P0-B watchdog SLA default timeout boundary - 5000 not stale 5001 stale`() {
         val claim = OptimisticClaim(
             clientSeq = 1L,
-            claimedAtMonotonic = 0L,
+            claimedAtMs = 0L,
             serverEchoed = false,
             guardedIdleDrop = false,
         )
