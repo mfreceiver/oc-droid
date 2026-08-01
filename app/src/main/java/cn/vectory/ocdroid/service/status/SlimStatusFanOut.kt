@@ -226,6 +226,14 @@ data class StatusFanOutSummary(
     val perSid: Map<String, StatusOutcome>,
     val retryableCount: Int,
     val missingSids: List<String>,
+    /** §U-CQ5 sweep-start identity causal fence (backlog-cleanup): the store
+     *  identityEpoch captured BEFORE the network sweep. The consumer
+     *  ([SessionSyncCoordinator.applySlimStatusFanOutSummary]) DROPS the whole
+     *  summary if this != current store epoch (host switch mid-sweep invalidated
+     *  every per-sid outcome). Mirrors the REST path's RequestToken.identityEpoch.
+     *  Default 0L = backward-compat (tests / legacy callers that don't exercise
+     *  the fence; the fence passes when current epoch is also 0L). */
+    val sweepStartEpoch: Long = 0L,
 ) {
     companion object {
         val Empty: StatusFanOutSummary = StatusFanOutSummary(emptyMap(), 0, emptyList())

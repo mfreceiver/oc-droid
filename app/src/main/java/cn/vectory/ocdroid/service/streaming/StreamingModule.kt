@@ -142,9 +142,17 @@ object ProcessStatusPollerModule {
                 // digest SSE event (→ EvictSession via handleSessionDigest).
                 if (!serverCompatProfile.slimPerSessionStatusEndpointAvailable) return@runner null
 
+                // §U-CQ5 sweep-start identity causal fence (backlog-cleanup):
+                // capture store epoch BEFORE the network sweep so the summary is
+                // causally tied to the identity it was born under. Stamped post-
+                // sweep; validated by applySlimStatusFanOutSummary. Must be
+                // captured HERE (pre-network), not after — the fence value must
+                // reflect sweep-start, not sweep-end.
+                val sweepStartEpoch = sessionSyncCoordinator.captureStoreIdentityEpoch()
+
                 val sessionIds = snapshot.sessionsById.keys
 
-                fanOut.checkSlimSessionsStatuses(
+                val summary = fanOut.checkSlimSessionsStatuses(
                     sids = sessionIds,
                     // §U-CQ8 (Batch 2): re-read the snapshot AFTER the network
                     // sweep (awaitAll) so the fake-idle cross-check uses the
@@ -157,6 +165,7 @@ object ProcessStatusPollerModule {
                     // re-reads every tick.
                     knownSessionIdsProvider = { snapshotProvider.current().sessionsById.keys },
                 )
+                summary.copy(sweepStartEpoch = sweepStartEpoch)
             },
 
             // §final-gate I-1 (oracle §3.6): route the summary to the
