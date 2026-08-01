@@ -34,6 +34,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -64,6 +65,8 @@ import cn.vectory.ocdroid.ui.ScrollBehavior
 import cn.vectory.ocdroid.ui.currentSessionStatus
 import cn.vectory.ocdroid.ui.filterBeforeRevert
 import cn.vectory.ocdroid.ui.injectMetadataMarkers
+import cn.vectory.ocdroid.ui.isStaleQuestionPart
+import cn.vectory.ocdroid.ui.isInterruptedQuestionPart
 import cn.vectory.ocdroid.ui.isStaleRunningPart
 import cn.vectory.ocdroid.ui.theme.AppTextStyles
 import cn.vectory.ocdroid.ui.theme.CardWidthScope
@@ -73,6 +76,7 @@ import cn.vectory.ocdroid.util.flickerFilterOutCount
 import cn.vectory.ocdroid.util.workdirBasename
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
@@ -285,12 +289,54 @@ internal fun ChatMessageList(
     // §stale-question: compute the set of part ids that are stuck "running"
     // question parts WITHOUT a matching live QuestionRequest — these render
     // in a terminal "Interrupted" state instead of a perpetual spinner.
-    // Recomputed only when the message window or the pending-questions list
-    // changes. Pure derivation: reads partsByMessage + sessionListState.
+    // §need-8 (rev-2 fix): unified entry isStaleRunningPart — handles both:
+    //   - thin-placeholder → session idle 即 stale（isStaleRunningPart 直判）；
+    //   - question part → 三重 AND（isStaleQuestionPart ∧ idle ∧ grace elapsed）。
+    // Part 无时间戳，question 的 running-since 在 UI 层记录；thin-placeholder
+    // 不需宽限故不记录。Map 每轮用 retainAll 清理（消失的 part / 不再候选的 part），
+    // 防止条目残留导致永久 tick。Tick 仅当 session idle 且有未过期候选时启动。
     val pendingQuestions = sessionListState.pendingQuestions
-    val staleQuestionPartKeys: Set<String> = remember(partsByMessage, pendingQuestions, currentSessionStatus) {
-        partsByMessage.values.flatten().mapNotNullTo(HashSet()) { part ->
-            if (isStaleRunningPart(part, pendingQuestions, currentSessionStatus)) part.id else null
+    val questionRunningSince = remember { mutableStateMapOf<String, Long>() }
+    val questionGraceTick = remember { mutableIntStateOf(0) }
+    val staleQuestionPartKeys: Set<String> =
+        remember(partsByMessage, pendingQuestions, currentSessionStatus, questionGraceTick.intValue) {
+            val now = System.currentTimeMillis()
+            // 1. 收集当前 live 的 question 候选（running + 无 pending 匹配）
+            val liveQuestionCandidates = HashSet<String>()
+            val keys = HashSet<String>()
+            for (part in partsByMessage.values.flatten()) {
+                if (isStaleQuestionPart(part, pendingQuestions)) {
+                    liveQuestionCandidates.add(part.id)
+                    questionRunningSince.putIfAbsent(part.id, now)
+                }
+                // 统一入口 isStaleRunningPart：
+                //   thin-placeholder → session idle 即 stale（无宽限）；
+                //   question → 三重 AND（stale ∧ idle ∧ grace elapsed）。
+                if (isStaleRunningPart(
+                        part, pendingQuestions, currentSessionStatus,
+                        now, questionRunningSince[part.id]
+                    )) {
+                    keys.add(part.id)
+                }
+            }
+            // 2. 清理 map：仅保留当前 live 的 question 候选。
+            //    消除两类泄漏：
+            //   (a) part 消失（会话切换/消息删除）→ 已不在 partsByMessage；
+            //   (b) 不再候选（已匹配 pending / 离开 running）。
+            //    防止条目残留 → hasPendingGraceCandidates 永远为 true → 永久 tick
+            questionRunningSince.keys.retainAll(liveQuestionCandidates)
+            keys
+        }
+    // Periodic tick: 仅当 session 可中断（idle）且存在"已记录但尚未过期"的候选时启动。
+    // 非 idle（busy/retry/null）永不中断 → 无需 tick。
+    val sessionCanInterrupt = currentSessionStatus?.isIdle == true
+    val hasPendingGraceCandidates = sessionCanInterrupt &&
+        questionRunningSince.isNotEmpty() &&
+        staleQuestionPartKeys.size < questionRunningSince.size
+    LaunchedEffect(hasPendingGraceCandidates) {
+        while (isActive && hasPendingGraceCandidates) {
+            delay(1_000)
+            questionGraceTick.intValue++
         }
     }
 

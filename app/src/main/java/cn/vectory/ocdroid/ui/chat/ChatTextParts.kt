@@ -197,28 +197,21 @@ internal fun TextPart(
             }
         }
     } else {
-        // §0.6.2 ora-2 (streaming markdown rewrite): the body prose now renders
-        // markdown formatting (bold / list / link / table / code) DURING
-        // streaming, with 0 visible height-shrink flicker, via three mechanisms
-        // (see StreamingMarkdownHelpers.kt / StreamingMarkdownRender.kt):
-        //   (i)   block-level decomposition — only the growing tail re-parses;
-        //         completed blocks keep a globally-stable key (cache reuse).
-        //   (ii)  the tail ALSO renders as Markdown (not plain Text) → inline
-        //         formatting visible mid-stream, no plain-Text→Markdown boundary
-        //         shrink.
-        //   (iii) HeightAnchor pins visible height to max(H_natural(t),
-        //         H_anchor(t-1)) → non-decreasing → 0 shrink.
-        // The streaming branch calls StreamingMarkdownRender (HeightAnchor +
-        // StreamingMarkdownContent); the completed branch wraps its render in a
-        // bare HeightAnchor. Both share `stableKey` so HeightAnchorRegistry
-        // carries the maxHeight across the streaming→completed fork (different
-        // composition positions) → the finalization snap inherits the streaming
-        // maxHeight → seamless (ora-2 (iii)).
+        // §batch3 req-2 (streaming markdown): during streaming the body renders
+        // as PLAIN TEXT (correctness first — no per-frame IntelliJ parser /
+        // mikepenz Markdown re-parse). The completed branch runs the full
+        // Markdown renderer once at finalization. Both branches share `stableKey`
+        // so HeightAnchorRegistry carries the maxHeight across the
+        // streaming→completed fork (different composition positions) → the
+        // finalization snap inherits the streaming maxHeight → no height drop
+        // (ora-2 (iii) HeightAnchor mechanism, retained).
         //
-        // This supersedes the 0.6.x "code-formatted, prose-as-plain-Text" hybrid
-        // (splitCodeAndProse). The mikepenz 151-shrink/turn pathology is killed
-        // by (i) + (iii); the boundary-aware 57-shrink pathology is killed by
-        // (ii) + (iii).
+        // The plain text style matches the completed Markdown BODY exactly
+        // (fontSizes.body=14sp × 1.4 line-height, LocalAppFontFamily, onSurface)
+        // so the streaming→completed snap shows formatting appearing with NO
+        // font/line-height/color jump. See StreamingMarkdownRender.kt. The 0.6.x
+        // ora-2 block decomposition + per-frame AST machinery is removed as dead
+        // code; only HeightAnchor + HeightShrinkCounter remain.
         val renderText = rememberPacedStreamingText(text, isStreaming)
         val fontSizes = LocalMarkdownFontSizes.current
         val innerModifier = modifier.padding(12.dp)

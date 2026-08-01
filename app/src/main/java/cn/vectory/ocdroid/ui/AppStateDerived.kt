@@ -358,13 +358,51 @@ fun isStaleQuestionPart(part: Part, pending: List<QuestionRequest>): Boolean {
     }
 }
 
+/**
+ * §need-8: 5s grace period before a stale question part is considered
+ * "interrupted". REST GET /question lag is typically < 2s; 2.5x margin.
+ */
+internal const val QUESTION_INTERRUPT_GRACE_MS = 5_000L
+
+/**
+ * §need-8: whether a question part should display as "Interrupted". Triple-AND gate:
+ *   1. [isStaleQuestionPart] is true (running question + no pending match);
+ *   2. [sessionStatus] is indeed idle (busy/retry = REST may lag → don't judge;
+ *      null = not loaded → conservatively don't judge);
+ *   3. elapsed time since [runningSinceEpochMs] >= [graceMs] (if [runningSinceEpochMs]
+ *      is null, treat as if grace has already elapsed — first observation is terminal,
+ *      avoiding null never-aging).
+ *
+ * Race fix: SSE message.part.updated(running) arrives first, REST GET /question lags
+ * → intermediate window has empty pending. Gates 2+3 ensure: session not idle = no
+ * judgement (REST still en route); after idle + 5s grace = judgement. True disconnected
+ * question: session enters idle → 5s later correctly shows "Interrupted" (no
+ * unconditional streaming exemption).
+ */
+fun isInterruptedQuestionPart(
+    part: Part,
+    pending: List<QuestionRequest>,
+    sessionStatus: SessionStatus?,
+    nowEpochMs: Long,
+    runningSinceEpochMs: Long?,
+    graceMs: Long = QUESTION_INTERRUPT_GRACE_MS
+): Boolean {
+    if (!isStaleQuestionPart(part, pending)) return false
+    if (sessionStatus?.isIdle != true) return false
+    if (runningSinceEpochMs != null && nowEpochMs - runningSinceEpochMs < graceMs) return false
+    return true
+}
+
 fun isStaleRunningPart(
     part: Part,
     pending: List<QuestionRequest>,
     sessionStatus: SessionStatus?,
+    nowEpochMs: Long,
+    runningSinceEpochMs: Long?,
+    graceMs: Long = QUESTION_INTERRUPT_GRACE_MS
 ): Boolean {
     if (part.isThinPlaceholder()) return sessionStatus?.isIdle == true
-    return isStaleQuestionPart(part, pending)
+    return isInterruptedQuestionPart(part, pending, sessionStatus, nowEpochMs, runningSinceEpochMs, graceMs)
 }
 
 private fun logContextUsageUnavailable(reason: String): ContextUsage? {

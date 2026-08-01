@@ -5,6 +5,8 @@ import cn.vectory.ocdroid.data.model.PartState
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.ui.isStaleQuestionPart
 import cn.vectory.ocdroid.ui.isStaleRunningPart
+import cn.vectory.ocdroid.ui.isInterruptedQuestionPart
+import cn.vectory.ocdroid.ui.QUESTION_INTERRUPT_GRACE_MS
 import cn.vectory.ocdroid.data.model.SessionStatus
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -158,12 +160,136 @@ class StaleQuestionPartTest {
             type = "text",
             text = "[内容已折叠，点开查看]",
         )
-        assertTrue(isStaleRunningPart(p, pending = emptyList(), sessionStatus = SessionStatus("idle")))
+        assertTrue(
+            isStaleRunningPart(
+                p, pending = emptyList(), sessionStatus = SessionStatus("idle"),
+                nowEpochMs = 100_000L, runningSinceEpochMs = null,
+            )
+        )
     }
 
     @Test
     fun `thin placeholder stays live while session is busy`() {
         val p = Part(id = "thin_placeholder_msg-1", type = "text")
-        assertFalse(isStaleRunningPart(p, pending = emptyList(), sessionStatus = SessionStatus("busy")))
+        assertFalse(
+            isStaleRunningPart(
+                p, pending = emptyList(), sessionStatus = SessionStatus("busy"),
+                nowEpochMs = 100_000L, runningSinceEpochMs = null,
+            )
+        )
+    }
+
+    // ── §need-8: isInterruptedQuestionPart gate tests ───────────────────────
+
+    @Test
+    fun `interrupted session idle plus grace elapsed plus no match returns true`() {
+        val p = part()
+        val now = 100_000L
+        // runningSince = now - 6000 > grace (5000) → grace elapsed
+        assertTrue(
+            isInterruptedQuestionPart(
+                part = p, pending = emptyList(),
+                sessionStatus = SessionStatus("idle"),
+                nowEpochMs = now, runningSinceEpochMs = now - 6_000,
+            )
+        )
+    }
+
+    @Test
+    fun `not interrupted session busy plus grace elapsed plus no match returns false`() {
+        val p = part()
+        val now = 100_000L
+        // Even though grace elapsed, session is busy → not interrupted
+        assertFalse(
+            isInterruptedQuestionPart(
+                part = p, pending = emptyList(),
+                sessionStatus = SessionStatus("busy"),
+                nowEpochMs = now, runningSinceEpochMs = now - 6_000,
+            )
+        )
+    }
+
+    @Test
+    fun `not interrupted session null plus grace elapsed plus no match returns false`() {
+        val p = part()
+        val now = 100_000L
+        // SessionStatus is null → conservative: don't judge
+        assertFalse(
+            isInterruptedQuestionPart(
+                part = p, pending = emptyList(),
+                sessionStatus = null,
+                nowEpochMs = now, runningSinceEpochMs = now - 6_000,
+            )
+        )
+    }
+
+    @Test
+    fun `not interrupted session idle plus grace not yet elapsed returns false`() {
+        val p = part()
+        val now = 100_000L
+        // runningSince = now - 1000 < grace (5000) → grace NOT elapsed
+        assertFalse(
+            isInterruptedQuestionPart(
+                part = p, pending = emptyList(),
+                sessionStatus = SessionStatus("idle"),
+                nowEpochMs = now, runningSinceEpochMs = now - 1_000,
+            )
+        )
+    }
+
+    @Test
+    fun `not interrupted matching pending exists returns false`() {
+        val p = part(messageId = "msg-1", callId = "call-1")
+        val pending = listOf(qRef(messageId = "msg-1", callId = "call-1"))
+        // isStaleQuestionPart returns false first → isInterruptedQuestionPart returns false
+        assertFalse(
+            isInterruptedQuestionPart(
+                part = p, pending = pending,
+                sessionStatus = SessionStatus("idle"),
+                nowEpochMs = 100_000L, runningSinceEpochMs = 100_000L - 6_000,
+            )
+        )
+    }
+
+    @Test
+    fun `interrupted runningSince null with session idle returns true`() {
+        val p = part()
+        val now = 100_000L
+        // runningSince = null → treat as grace already elapsed → interrupted
+        assertTrue(
+            isInterruptedQuestionPart(
+                part = p, pending = emptyList(),
+                sessionStatus = SessionStatus("idle"),
+                nowEpochMs = now, runningSinceEpochMs = null,
+            )
+        )
+    }
+
+    @Test
+    fun `not interrupted retry session plus grace elapsed returns false`() {
+        val p = part()
+        val now = 100_000L
+        assertFalse(
+            isInterruptedQuestionPart(
+                part = p, pending = emptyList(),
+                sessionStatus = SessionStatus("retry"),
+                nowEpochMs = now, runningSinceEpochMs = now - 6_000,
+            )
+        )
+    }
+
+    @Test
+    fun `interrupted at exact grace boundary returns true`() {
+        val p = part()
+        val now = 10_000L
+        // now - runningSince == 5000 == QUESTION_INTERRUPT_GRACE_MS
+        // Implementation uses `< graceMs` → 5000 < 5000 is false → grace elapsed → interrupted
+        assertTrue(
+            isInterruptedQuestionPart(
+                part = p, pending = emptyList(),
+                sessionStatus = SessionStatus("idle"),
+                nowEpochMs = now, runningSinceEpochMs = 5_000L,
+            )
+        )
     }
 }

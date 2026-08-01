@@ -1,37 +1,40 @@
 package cn.vectory.ocdroid.ui.chat
 
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.SubcomposeLayout
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.sp
+import cn.vectory.ocdroid.ui.theme.LocalAppFontFamily
 import cn.vectory.ocdroid.ui.theme.LocalMarkdownFontSizes
-import cn.vectory.ocdroid.ui.theme.markdownTypography
-import cn.vectory.ocdroid.ui.util.DataUriImageTransformer
-import com.mikepenz.markdown.compose.components.markdownComponents
-import com.mikepenz.markdown.m3.Markdown
-import com.mikepenz.markdown.model.markdownPadding
 
-// ── §0.6.2 ora-2 streaming markdown renderer ──────────────────────────────
+// ── batch3 / req-2 streaming markdown renderer ─────────────────────────────
 // This file is the @Composable-heavy counterpart to [StreamingMarkdownHelpers.kt]
 // (pure logic). It is excluded from kover coverage (same pattern as
-// [ChatTextParts.kt]); the pure [buildStreamingRenderUnits] / [HeightShrinkCounter]
-// live in the helpers file and ARE covered.
+// [ChatTextParts.kt]); the pure [HeightShrinkCounter] lives in the helpers file
+// and IS covered.
+//
+// **Batch3 req-2 (streaming plain-text)**: the streaming-branch (isStreaming=true)
+// now renders as PLAIN TEXT (correctness priority — avoid per-frame IntelliJ AST
+// rebuild and mikepenz Markdown re-parse). The completed-branch Markdown rendering
+// in [ChatTextParts.kt] remains unchanged — one full re-parse at finalization.
+// [HeightAnchor] / [HeightAnchorRegistry] are preserved for 0-shrink + cross-
+// streaming→completed anchor inheritance.
 //
 // Public surface (all `internal`):
 //   • [HeightAnchor]            — production 0-shrink anchor (SubcomposeLayout).
 //   • [DebugHeightAnchor]       — + [HeightShrinkCounter] for androidTest.
 //   • [HeightAnchorRegistry]    — cross-call-site maxHeight sharing by (stableKey, width).
-//   • [StreamingMarkdownContent]— renders a [List]<[StreamingRenderUnit]>.
-//   • [StreamingMarkdownRender] — HeightAnchor + StreamingMarkdownContent (prod).
-//   • [DebugStreamingMarkdownRender] — DebugHeightAnchor + content (tests).
+//   • [StreamingMarkdownRender] — HeightAnchor + plain Text (prod streaming branch).
+//   • [DebugStreamingMarkdownRender] — DebugHeightAnchor + plain Text (tests).
 
 /**
  * Cross-call-site maxHeight registry, keyed by the WIDTH-AWARE composite
@@ -262,103 +265,33 @@ internal fun DebugHeightAnchor(
     }
 }
 
-// ── StreamingMarkdownContent (units list + block spacing) ─────────────────
-
-/**
- * Renders an ordered list of [StreamingRenderUnit]s as a [Column] of independent
- * [Markdown] (prose) / [CodeBlockSurface] (code) blocks, spaced by mikepenz's
- * own block gap so the streaming layout matches the completed [Markdown] layout
- * (height-neutral finalization snap).
- *
- * Each unit is wrapped in `key(unit.stableKey)` so a completed block keeps its
- * composition slot across frames (ora-2 (i) cache reuse + gpter #2 stable key).
- * Only the tail unit (last in the list) has changing content → only it
- * recomposes; completed blocks are cache hits.
- *
- * Prose units go through the full [Markdown] renderer (ora-2 (ii): the tail
- * shows inline bold / list / link / table formatting DURING streaming, killing
- * the "plain-Text → Markdown" boundary shrink). Code units render via the same
- * [CodeBlockSurface] used by completed code blocks (height-monotonic while a
- * fence grows, no markdown block-structure reflow).
- *
- * @param fontSizes passed in from the caller (already read via
- *  [LocalMarkdownFontSizes]) so this composable is side-effect-free w.r.t. the
- *  Local and re-runs only when the units or font sizes change.
- * @param modifier the inner padding modifier (applied to the Column).
- */
-@Composable
-internal fun StreamingMarkdownContent(
-    units: List<StreamingRenderUnit>,
-    fontSizes: cn.vectory.ocdroid.util.MarkdownFontSizes,
-    modifier: Modifier = Modifier
-) {
-    // §block-spacing: use mikepenz's own inter-block gap so the streaming
-    // Column matches the completed single-Markdown layout → height-neutral
-    // finalization. The completed-state Markdown(...) is invoked WITHOUT an
-    // explicit markdownPadding arg, so it uses mikepenz's internal default
-    // (`markdownPadding()`). The streaming gap must use the SAME default.
-    //
-    // §self-contained: do NOT read LocalMarkdownPadding.current here — this
-    // composable is rendered WITHOUT a Markdown(...) ancestor (TextPart's
-    // streaming branch calls StreamingMarkdownRender directly, not inside a
-    // Markdown), so LocalMarkdownPadding has no provider → reading it throws
-    // "No local Padding" (crashed the 0-shrink androidTest + would crash the
-    // first streaming message in production). Calling the `markdownPadding()`
-    // factory directly yields the same default the completed Markdown uses
-    // (ora-2 iii) and needs no ancestor provider. (MarkdownPadding is an
-    // interface in com.mikepenz.markdown.model, not a data class — `markdownPadding()`
-    // is the factory.) Each per-unit Markdown(unit.raw, ...) below provides its
-    // OWN LocalMarkdownPadding internally, so they are unaffected.
-    val blockGap: androidx.compose.ui.unit.Dp = markdownPadding().block
-
-    SelectionContainer {
-        CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
-            androidx.compose.foundation.layout.Column(modifier = modifier) {
-                units.forEachIndexed { index, unit ->
-                    if (index > 0) {
-                        Spacer(modifier = Modifier.height(blockGap))
-                    }
-                    androidx.compose.runtime.key(unit.stableKey) {
-                        when (unit) {
-                            is StreamingRenderUnit.Prose -> {
-                                // ora-2 (ii): prose — INCLUDING the tail — renders
-                                // via Markdown so inline formatting is visible
-                                // during streaming (no plain-Text boundary shrink).
-                                Markdown(
-                                    content = unit.raw,
-                                    typography = markdownTypography(fontSizes),
-                                    components = markdownComponents(
-                                        codeBlock = { WrappedCodeBlock(it) },
-                                        codeFence = { WrappedCodeBlock(it) },
-                                        table = { WrappedTable(it) }
-                                    ),
-                                    imageTransformer = DataUriImageTransformer
-                                )
-                            }
-                            is StreamingRenderUnit.Code -> CodeBlockSurface(
-                                code = unit.code,
-                                language = unit.language
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 // ── Entry composables ─────────────────────────────────────────────────────
+// §batch3 req-2: streaming-branch renders as plain Text directly in
+// [StreamingMarkdownRender] / [DebugStreamingMarkdownRender] (correctness
+// first — no per-frame IntelliJ parser / mikepenz Markdown re-parse). The
+// former ora-2 block decomposition + per-frame AST machinery is removed as
+// dead code; only [HeightAnchor] / [HeightShrinkCounter] /
+// [HeightAnchorRegistry] remain (0-shrink + cross-streaming→completed anchor
+// inheritance).
 
 /**
- * Production streaming-markdown entry point: [HeightAnchor] (0-shrink) wrapping
- * [StreamingMarkdownContent] built from [text].
+ * Production streaming-markdown entry point (batch3 req-2 plain-text variant):
+ * [HeightAnchor] (0-shrink) wrapping a plain [Text] composable with the same
+ * font/line-height as the completed-state Markdown body (14sp ×1.4), so the
+ * streaming→completed snap has NO font/line-height jump — only formatting
+ * appears.
+ *
+ * No IntelliJ Markdown parser or mikepenz Markdown renderer is called during
+ * streaming — correctness priority. The completed branch in [TextPart] runs
+ * the full Markdown renderer once at finalization.
  *
  * Used by [TextPart]'s streaming branch. The same [stableKey] MUST also wrap the
  * completed-state render ([HeightAnchor] in [TextPart]'s else-branch) so
  * [HeightAnchorRegistry] carries the maxHeight across the streaming→completed
- * transition → seamless finalization (ora-2 (iii)).
+ * transition → seamless finalization (no height drop on finalization).
  *
  * @param stableKey `"$messageId|$partId"` — shared with the completed branch.
+ * @param modifier the inner padding modifier (applied to the Text), e.g. 12.dp.
  */
 @Composable
 internal fun StreamingMarkdownRender(
@@ -366,25 +299,34 @@ internal fun StreamingMarkdownRender(
     stableKey: Any?,
     modifier: Modifier = Modifier
 ) {
-    val units = remember(text) { buildStreamingRenderUnits(text) }
     val fontSizes = LocalMarkdownFontSizes.current
+    val plainTextStyle = TextStyle(
+        fontFamily = LocalAppFontFamily.current,
+        fontSize = fontSizes.body.sp,
+        lineHeight = (fontSizes.body * 1.4f).sp
+    )
     HeightAnchor(
         stableKey = stableKey,
         modifier = Modifier.fillMaxWidth()
     ) {
-        StreamingMarkdownContent(
-            units = units,
-            fontSizes = fontSizes,
-            modifier = modifier
-        )
+        SelectionContainer {
+            CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
+                Text(
+                    text = text,
+                    style = plainTextStyle,
+                    softWrap = true,
+                    modifier = modifier
+                )
+            }
+        }
     }
 }
 
 /**
- * Debug streaming-markdown entry point for the 0-shrink androidTest: identical
- * to [StreamingMarkdownRender] but uses [DebugHeightAnchor] so the test can read
- * [HeightShrinkCounter.shrinkCount] after driving a growing-text (and optional
- * width-change) sequence.
+ * Debug streaming-markdown entry point (batch3 req-2 plain-text variant):
+ * identical to [StreamingMarkdownRender] but uses [DebugHeightAnchor] so the
+ * test can read [HeightShrinkCounter.shrinkCount] after driving a growing-text
+ * (and optional width-change) sequence.
  */
 @Composable
 internal fun DebugStreamingMarkdownRender(
@@ -393,17 +335,26 @@ internal fun DebugStreamingMarkdownRender(
     counter: HeightShrinkCounter,
     modifier: Modifier = Modifier
 ) {
-    val units = remember(text) { buildStreamingRenderUnits(text) }
     val fontSizes = LocalMarkdownFontSizes.current
+    val plainTextStyle = TextStyle(
+        fontFamily = LocalAppFontFamily.current,
+        fontSize = fontSizes.body.sp,
+        lineHeight = (fontSizes.body * 1.4f).sp
+    )
     DebugHeightAnchor(
         stableKey = stableKey,
         counter = counter,
         modifier = Modifier.fillMaxWidth()
     ) {
-        StreamingMarkdownContent(
-            units = units,
-            fontSizes = fontSizes,
-            modifier = modifier
-        )
+        SelectionContainer {
+            CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
+                Text(
+                    text = text,
+                    style = plainTextStyle,
+                    softWrap = true,
+                    modifier = modifier
+                )
+            }
+        }
     }
 }
