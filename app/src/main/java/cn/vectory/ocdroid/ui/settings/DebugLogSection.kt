@@ -363,21 +363,29 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                     // key on `filtered`/`displayed` would rebuild the whole map on
                     // every append and destroy the benefit (per fixup2 r2).
                     //
-                    // WHY TREEMAP (not LinkedHashMap/LRU): the viewer ALWAYS
-                    // iterates newest-first (largest seq first). Under that access
-                    // pattern an access-order LRU's "eldest" is the LARGEST seq
-                    // (the entry we just touched), so an LRU evicts the wrong end
-                    // and a full-capacity append cascades into a full re-format
-                    // (fixup2 r4 regression). A seq-keyed TreeMap makes eviction
-                    // ORDER-INDEPENDENT: firstKey() is always the smallest seq,
-                    // which on the COMMON path (seq published in allocation order)
-                    // is the entry the ring buffer drops next — so the cache
-                    // mirrors the ring buffer's own eviction in the common case.
-                    // (Caveat: DebugLog.log allocates seq before the deque lock,
-                    // so under heavy concurrent logging a still-pending low-seq
-                    // entry could in rare cases be evicted slightly early, causing
-                    // a transient extra miss; bounded — see BOUND below. The cap
-                    // itself holds in ALL states regardless of publish order.)
+                    // WHY TREEMAP (not LinkedHashMap/LRU): the viewer iterates
+                    // in the deque's publish order (typically newest-first). Under
+                    // that access pattern an access-order LRU's "eldest" is the
+                    // LARGEST seq (the entry we just touched), so an LRU evicts the
+                    // wrong end and a full-capacity append cascades into a full
+                    // re-format (fixup2 r4 regression). A seq-keyed TreeMap makes
+                    // eviction ORDER-INDEPENDENT: firstKey() is always the smallest
+                    // seq, which on the common path (seq published in allocation
+                    // order) is the entry the ring buffer drops next.
+                    //
+                    // Concurrency caveat (cache is a perf optimization, NOT a
+                    // correctness mechanism — see BOUND for the hard guarantee):
+                    // DebugLog.log allocates seq BEFORE the deque lock, so under
+                    // concurrent logging a later-published entry can carry a
+                    // smaller seq than an already-published one. A small-seq entry
+                    // still in the visible window can then be the cache's smallest
+                    // key and get evicted (pollFirstEntry) before the data it
+                    // represents leaves the ring — causing that entry to miss again
+                    // on later recompositions until it ages out of the ring. This
+                    // degrades hit-rate but never breaks the cap or corrupts text
+                    // (every miss just re-formats). In practice the app's log
+                    // sources publish near-sequentially, so this is rare; the bound
+                    // and correctness hold in ALL states regardless.
                     //
                     // NO CASCADE on the hot path (running append at full capacity,
                     // common seq order): ring holds seqs [N-2999 .. N]; append N+1
@@ -390,8 +398,10 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                     // PAUSED: forEach iterates the frozen snapshot, whose seqs were
                     // typically all cached before pause → HIT, zero inserts/
                     // evictions, so background appends usually do not perturb the
-                    // cache while paused. (Edge case: if pause+filter-change exposes
-                    // rows never formatted, they miss once and insert+evict.)
+                    // cache while paused. (Edge cases that CAN cause misses while
+                    // paused: a pause followed by a level-filter change that exposes
+                    // rows never previously formatted, or the concurrency caveat
+                    // above. Each miss just inserts+evicts; the cap still holds.)
                     //
                     // BOUND: eviction runs only on the new-seq miss path, removing
                     // the single smallest seq when size > MAX_ENTRIES. The map is
