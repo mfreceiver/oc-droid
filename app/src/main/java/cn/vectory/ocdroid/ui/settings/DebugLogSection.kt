@@ -350,50 +350,50 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
-                    // §row-text-cache: bounded cache of formatted row text.
-                    // The log is newest-first (§stable-seq-key), so every append
-                    // shifts all following entries and forces their recomposition
-                    // — without a cache that re-runs sdf.format + string-template
-                    // for up to MAX_ENTRIES rows each time. Caching by entry.seq
-                    // makes that unavoidable recomposition cheap: seq is monotonic
-                    // and never reused (DebugLog's AtomicLong), so getOrPut hits
-                    // for any entry seen before — INCLUDING across appends, since
-                    // the cache has NO remember-key (a key on `filtered`/`displayed`
-                    // would rebuild the whole map on every append and destroy the
-                    // benefit, per fixup2 history).
+                    // §row-text-cache: bounded cache of formatted row text,
+                    // keyed by entry.seq in a TreeMap.
                     //
-                    // Bounding — a hard insertion-order cap mirrors the ring
-                    // buffer's OWN eviction: eldest = oldest seq (smallest, since
-                    // seq is monotonic) = exactly the entry the ring buffer will
-                    // drop next. So the cache can never hold more than the data
-                    // source itself, regardless of state (running / paused /
-                    // post-clear). This is structural, NOT event-driven: there is
-                    // no watermark, no retainAll, no per-frame O(n) scan. The cap
-                    // = DebugLog.MAX_ENTRIES (single source of truth), so it stays
-                    // in sync if the ring buffer is ever resized.
+                    // WHY CACHE: the log is newest-first (§stable-seq-key), so
+                    // every append shifts all following entries and forces their
+                    // recomposition — without a cache that re-runs sdf.format +
+                    // string-template for up to MAX_ENTRIES rows each time. seq is
+                    // monotonic and never reused (DebugLog's AtomicLong), so a seq
+                    // key is stable: an entry formatted once is reused on every
+                    // subsequent recomposition. The cache has NO remember-key — a
+                    // key on `filtered`/`displayed` would rebuild the whole map on
+                    // every append and destroy the benefit (per fixup2 r2).
                     //
-                    // clear() semantics: DebugLog.clear() publishes emptyList →
-                    // displayed/filtered empty → forEach adds nothing → the cache
-                    // stops growing; existing entries age out as the new live log
-                    // repopulates (each new put evicts the eldest). While PAUSED
-                    // the frozen snapshot keeps forEach repopulating frozen rows,
-                    // so the cache retains up to MAX_ENTRIES frozen strings until
-                    // the user resumes — which is ACCEPTABLE because the cap is
-                    // structural: it can never exceed the ring buffer's own bound.
-                    // (Earlier fixup rounds chased "release immediately on paused
-                    // clear" and each created a worse edge case; a structural cap
-                    // is provably bounded in ALL states — see b1-fixup2-r4.)
+                    // WHY TREEMAP (not LinkedHashMap/LRU): the viewer ALWAYS
+                    // iterates newest-first (largest seq first). Under that access
+                    // pattern an access-order LRU's "eldest" is the LARGEST seq
+                    // (the entry we just touched), so an LRU evicts the wrong end
+                    // and a full-capacity append cascades into a full re-format
+                    // (fixup2 r4 regression). A seq-keyed TreeMap makes eviction
+                    // ORDER-INDEPENDENT: firstKey() is always the smallest seq,
+                    // which (because seq is monotonic) is exactly the entry the
+                    // ring buffer drops next. So the cache mirrors the ring
+                    // buffer's own eviction deterministically.
+                    //
+                    // NO CASCADE on the hot path (running append at full capacity):
+                    // ring holds seqs [N-2999 .. N]; append N+1 evicts N-2999 from
+                    // the ring. forEach visits N+1 (miss → insert → size>cap →
+                    // pollFirstEntry evicts N-2999, which is no longer in `filtered`
+                    // so it is not revisited), then N, N-1, … all HIT. Net: 1 format
+                    // + 1 eviction per append. (LRU evicted N instead → cascade.)
+                    //
+                    // PAUSED: forEach iterates the frozen snapshot, whose seqs were
+                    // all cached before pause → all HIT, zero inserts/evictions, so
+                    // background appends do not perturb the cache while paused.
+                    //
+                    // BOUND: eviction runs only on the new-seq miss path, removing
+                    // the single smallest seq when size > MAX_ENTRIES. The map is
+                    // therefore structurally capped at DebugLog.MAX_ENTRIES in ALL
+                    // states (running / paused / post-clear) — the cap is the ring
+                    // buffer's own capacity (single source of truth, DebugLog.kt).
                     //
                     // levelColor is NOT cached — it reads MaterialTheme.colorScheme,
                     // so it stays recomposed per row.
-                    @Suppress("UnusedPrivateProperty") // cacheCapacity only documents the cap
-                    val rowTextCache = remember {
-                        object : LinkedHashMap<Long, String>(64, 0.75f, true) {
-                            private val cacheCapacity = DebugLog.MAX_ENTRIES
-                            override fun removeEldestEntry(eldest: Map.Entry<Long, String>): Boolean =
-                                size > cacheCapacity
-                        }
-                    }
+                    val rowTextCache = remember { java.util.TreeMap<Long, String>() }
                     filtered.forEach { entry ->
                         val levelColor = when (entry.level) {
                             DebugLog.Level.DEBUG -> MaterialTheme.colorScheme.onSurfaceVariant
@@ -404,10 +404,22 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                         // §stable-seq-key (see comment above): wrap in key() so
                         // node identity follows the Entry, not the list index.
                         key(entry.seq) {
+                            // §row-text-cache access: hit → reuse; miss → format
+                            // and, if over cap, evict the smallest seq (which the
+                            // ring buffer has already dropped or is about to).
+                            // getOrPut alone doesn't bound a TreeMap, so the cap
+                            // check runs only on the miss path.
+                            val cached = rowTextCache[entry.seq]
+                            val text = cached ?: run {
+                                val formatted = "[${sdf.format(entry.timeMs)}] ${entry.tag}/${entry.level}: ${entry.message}"
+                                rowTextCache[entry.seq] = formatted
+                                if (rowTextCache.size > DebugLog.MAX_ENTRIES) {
+                                    rowTextCache.pollFirstEntry()
+                                }
+                                formatted
+                            }
                             Text(
-                                text = rowTextCache.getOrPut(entry.seq) {
-                                    "[${sdf.format(entry.timeMs)}] ${entry.tag}/${entry.level}: ${entry.message}"
-                                },
+                                text = text,
                                 style = MaterialTheme.typography.labelSmall,
                                 fontFamily = BundledMonoFamily,
                                 color = levelColor
