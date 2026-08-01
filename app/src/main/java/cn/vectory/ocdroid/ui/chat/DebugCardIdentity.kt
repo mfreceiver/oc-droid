@@ -7,7 +7,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.semantics
 import cn.vectory.ocdroid.data.model.Part
@@ -17,6 +20,36 @@ import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
 import dagger.hilt.components.SingletonComponent
+
+// ── §需求7: debug identity surface contract ───────────────────────────────
+// Cards that OWN their background call [debugIdentitySurfaceColor] for their
+// Surface `color`. While [DebugCardIdentity] is active it provides
+// [LocalDebugCardIdentityAlpha] = [DEBUG_IDENTITY_SURFACE_ALPHA] so those
+// owning surfaces become semi-transparent — visually flagging debug-rendered
+// cards without dimming badges/text: those keep their own opaque colors, and
+// the content subtree is NEVER given a Modifier.alpha (which would wash out
+// contrast). ThinkingCapsule uses 0.95f as a production fill; debug cards go
+// lower (0.88f) so they read as distinctly "debug" yet keep onSurfaceVariant
+// text legible in both light and dark themes.
+
+/**
+ * Alpha applied to owning-card surfaces while debug card identity is ON.
+ */
+private const val DEBUG_IDENTITY_SURFACE_ALPHA = 0.88f
+
+/** Active debug-surface alpha; 1f when debug card identity is OFF (default). */
+internal val LocalDebugCardIdentityAlpha = staticCompositionLocalOf<Float> { 1f }
+
+/**
+ * §debug identity surface contract: blends [base] toward transparency by the
+ * active debug alpha. Returns [base] unchanged when debug identity is OFF, so
+ * production rendering is byte-identical to before.
+ */
+@Composable
+internal fun debugIdentitySurfaceColor(base: Color): Color {
+    val alpha = LocalDebugCardIdentityAlpha.current
+    return if (alpha >= 1f) base else base.copy(alpha = base.alpha * alpha)
+}
 
 /**
  * §debug-card-identity: debug overlay that identifies which composable renders
@@ -42,9 +75,13 @@ internal fun DebugCardIdentity(
         content()
         return
     }
-    Box(modifier = Modifier.fillMaxWidth()) {
-        content()
-        DebugBadge(name = name, source = source, part = part)
+    // §需求7: expose the debug-surface alpha to owning-card Surfaces rendered
+    // inside [content]. The badge below is NOT a consumer — it stays opaque.
+    CompositionLocalProvider(LocalDebugCardIdentityAlpha provides DEBUG_IDENTITY_SURFACE_ALPHA) {
+        Box(modifier = Modifier.fillMaxWidth()) {
+            content()
+            DebugBadge(name = name, source = source, part = part)
+        }
     }
 }
 

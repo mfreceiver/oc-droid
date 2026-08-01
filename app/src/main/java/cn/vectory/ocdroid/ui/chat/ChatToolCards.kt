@@ -134,7 +134,7 @@ internal fun ToolCardContainer(
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RectangleShape,
-        color = if (expanded) MaterialTheme.colorScheme.surfaceContainer else Color.Transparent,
+        color = if (expanded) debugIdentitySurfaceColor(MaterialTheme.colorScheme.surfaceContainer) else Color.Transparent,
         border = if (expanded) BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null
     ) {
         content()
@@ -176,7 +176,7 @@ internal fun ToolCard(
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RectangleShape,
-        color = if (expanded) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent
+        color = if (expanded) debugIdentitySurfaceColor(MaterialTheme.colorScheme.surfaceContainerLow) else Color.Transparent
     ) {
         CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
             Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp).then(if (isRunning) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {

@@ -119,7 +119,7 @@ internal fun ToolCallFoldBar(
                 role = Role.Button
             },
         shape = RectangleShape,
-        color = MaterialTheme.colorScheme.surfaceContainer
+        color = debugIdentitySurfaceColor(MaterialTheme.colorScheme.surfaceContainer)
     ) {
         Row(
             modifier = Modifier

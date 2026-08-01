@@ -126,7 +126,7 @@ internal fun SubAgentCard(
         // card reads with the same emphasis as ReasoningCard — M3's
         // surfaceContainerLow tonal step is too faint to register as a filled
         // card against the chat background.
-        color = MaterialTheme.colorScheme.surfaceContainer
+        color = debugIdentitySurfaceColor(MaterialTheme.colorScheme.surfaceContainer)
     ) {
         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -359,7 +359,7 @@ internal fun CompletedTaskCard(
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RectangleShape,
-        color = if (expanded) MaterialTheme.colorScheme.surfaceContainerLow else Color.Transparent
+        color = if (expanded) debugIdentitySurfaceColor(MaterialTheme.colorScheme.surfaceContainerLow) else Color.Transparent
     ) {
         Column(modifier = Modifier.animateContentSize(AppMotion.expandSizeSpec)) {
             Row(
