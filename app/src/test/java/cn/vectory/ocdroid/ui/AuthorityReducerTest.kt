@@ -3053,6 +3053,109 @@ class AuthorityReducerTest {
             "s1" in result.authority.retryQueue)
     }
 
+    // ── U-P1: preservedClaim across REST snapshot ──────────────────────────
+
+    @Test
+    fun `U-P1 - unconfirmed optimistic claim survives REST snapshot`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // POST-busy stamps an unconfirmed optimistic claim (serverEchoed=false,
+        // reconcileConfirmed=false)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        val before = store.stateFlow.value.authority.bySid["A"]
+        assertNotNull("claim present after POST", before?.optimisticClaim)
+        assertFalse("claim unconfirmed", before?.optimisticClaim?.serverEchoed == true)
+        assertFalse("claim not reconcile-confirmed", before?.optimisticClaim?.reconcileConfirmed == true)
+
+        // REST snapshot arrives (server says idle). Without U-P1 the claim
+        // would be cleared. With U-P1, the unconfirmed claim is preserved.
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = mapOf("A" to SessionStatus(type = "idle")),
+                authoritativeNodeIds = setOf("A"),
+            ),
+        ))
+        val after = store.stateFlow.value.authority.bySid["A"]
+        assertNotNull("entry still present after snapshot", after)
+        assertNotNull(
+            "U-P1: unconfirmed claim preserved across REST snapshot",
+            after?.optimisticClaim,
+        )
+        assertFalse("claim still unconfirmed after snapshot",
+            after?.optimisticClaim?.serverEchoed == true)
+        assertEquals("entry origin is REST", EntryOrigin.REST, after?.origin)
+    }
+
+    @Test
+    fun `U-P1 - confirmed (serverEchoed) claim is cleared by REST snapshot`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // POST-busy with unconfirmed claim
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        // SSE_SLIM busy echo-confirms the claim (serverEchoed=true)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM, monotonic = 200L),
+        ))
+        assertTrue("claim serverEchoed after SSE",
+            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim?.serverEchoed == true)
+
+        // REST snapshot shows idle — confirmed claim must be cleared
+        // (U-P1 only preserves unconfirmed claims).
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = mapOf("A" to SessionStatus(type = "idle")),
+                authoritativeNodeIds = setOf("A"),
+            ),
+        ))
+        val after = store.stateFlow.value.authority.bySid["A"]
+        assertNull(
+            "U-P1: confirmed claim cleared by REST snapshot",
+            after?.optimisticClaim,
+        )
+    }
+
+    @Test
+    fun `U-P1 - watchdog reconcile chain clears preserved claim via reconcileConfirmed`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // POST-busy with unconfirmed claim
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
+        ))
+        assertNotNull("claim present after POST",
+            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim)
+
+        // REST snapshot #1: claim is unconfirmed → preserved (U-P1)
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = mapOf("A" to SessionStatus(type = "idle")),
+                authoritativeNodeIds = setOf("A"),
+            ),
+        ))
+        assertNotNull("U-P1: claim preserved across first snapshot",
+            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim)
+
+        // Watchdog reconcile: BUSY_CONFIRMED → reconcileConfirmed=true
+        store.dispatch(AppAction.AuthorityEvent(
+            reconcileOutcome(store, "A", ReconcileOutcome.BUSY_CONFIRMED),
+        ))
+        assertTrue("claim reconcileConfirmed after watchdog",
+            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim?.reconcileConfirmed == true)
+
+        // REST snapshot #2: claim is now confirmed → cleared (no longer U-P1 eligible)
+        store.dispatch(AppAction.AuthorityEvent(
+            snapshot(
+                snapshot = mapOf("A" to SessionStatus(type = "idle")),
+                authoritativeNodeIds = setOf("A"),
+            ),
+        ))
+        assertNull(
+            "U-P1: confirmed claim cleared by subsequent REST snapshot",
+            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim,
+        )
+    }
+
     // ── U-P6: concurrency invariants under parallel dispatch ────────────
 
     @Test
