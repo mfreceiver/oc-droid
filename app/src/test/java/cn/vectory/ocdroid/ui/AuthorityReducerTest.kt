@@ -20,7 +20,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
-// assertNotNull is defined as a local function at the bottom of the file
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
