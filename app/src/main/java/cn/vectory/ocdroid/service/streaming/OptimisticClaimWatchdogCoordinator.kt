@@ -4,6 +4,7 @@ import cn.vectory.ocdroid.data.state.AuthorityState
 import cn.vectory.ocdroid.di.ApplicationScope
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.ui.OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS
 import cn.vectory.ocdroid.ui.OPTIMISTIC_CONFIRM_TIMEOUT_MS
 import cn.vectory.ocdroid.ui.StaleClaim
 import cn.vectory.ocdroid.ui.selectStaleClaimsForReconcile
@@ -77,9 +78,10 @@ import javax.inject.Singleton
  *   [cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator.reconcileStaleOptimisticClaims]).
  *   Invoked ONLY when the identity is still current at sink time.
  * @param tickIntervalMs the watchdog tick interval. Production =
- *   [OPTIMISTIC_CONFIRM_TIMEOUT_MS] (5s) so a stale claim is detected within
- *   ONE timeout window. Test override (tests pass a short interval or drive
- *   the virtual clock).
+ *   [OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS] (1s — STRICTLY LESS THAN the 5s
+ *   [OPTIMISTIC_CONFIRM_TIMEOUT_MS] so worst-case detection ≤ timeout+tick
+ *   ≈ 6s, honoring the ~7.5s self-heal SLA; rev-gpt gate r1 #2). Test
+ *   override (tests pass a short interval or drive the virtual clock).
  */
 @Singleton
 class OptimisticClaimWatchdogCoordinator internal constructor(
@@ -89,9 +91,12 @@ class OptimisticClaimWatchdogCoordinator internal constructor(
     private val clock: () -> Long,
     private val staleClaimReconcileSink:
         suspend (ConnectionIdentity, List<StaleClaim>) -> Unit,
-    /** §U-P2: watchdog tick interval. Production = [OPTIMISTIC_CONFIRM_TIMEOUT_MS]
-     *  (5s) so a stale claim is detected within one timeout window. Test override. */
-    private val tickIntervalMs: Long = OPTIMISTIC_CONFIRM_TIMEOUT_MS,
+    /** §U-P2: watchdog tick interval. Production =
+     *  [OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS] (1s — STRICTLY LESS THAN
+     *  [OPTIMISTIC_CONFIRM_TIMEOUT_MS] so worst-case detection ≤ timeout+tick
+     *  ≈ 6s, honoring the ~7.5s self-heal SLA; rev-gpt gate r1 #2). Test
+     *  override (tests pass a short interval or drive the virtual clock). */
+    private val tickIntervalMs: Long = OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
 ) {
 
     /** The current loop job, or null when no loop is running. Read/written

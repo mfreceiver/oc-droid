@@ -333,7 +333,12 @@ class SessionStreamingService : Service() {
             // §U-P2: the supplemental-poller path ALSO keeps the watchdog
             // armed (a supplemental poller means the connection is still
             // active — the watchdog must keep reconciling stale claims).
-            watchdogCoordinator.start()
+            // §rev-gpt gate r2 follow-up: symmetric Ready guard (matches
+            // startPoller) — a Rejected ensurePoller does NOT own the
+            // connection lifetime, so it must not re-arm the watchdog.
+            if (activation is cn.vectory.ocdroid.service.streaming.SourceActivation.Ready) {
+                watchdogCoordinator.start()
+            }
             return activation
         }
         override suspend fun connectSse(identity: ConnectionIdentity): cn.vectory.ocdroid.service.streaming.SourceActivation {
