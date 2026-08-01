@@ -52,15 +52,15 @@ internal object NotificationChannels {
     // excludes res/values/strings.xml, so we keep these literals inline
     // rather than fragmenting the lane by touching resources. A future
     // i18n pass can promote them to R.string entries.
-    private const val CHANNEL_DECISIONS_NAME = "opencode decisions"
-    private const val CHANNEL_DECISIONS_DESC = "Permission and question prompts from opencode sessions"
-    private const val CHANNEL_IDLE_NAME = "opencode completions"
-    private const val CHANNEL_IDLE_DESC = "Completed sessions that are ready to review"
-    private const val CHANNEL_ERRORS_NAME = "opencode errors"
-    private const val CHANNEL_ERRORS_DESC = "Connection and runtime errors from opencode"
-    private const val CHANNEL_SESSION_STATUS_NAME = "opencode session status"
+    private const val CHANNEL_DECISIONS_NAME = "opencode 决策"
+    private const val CHANNEL_DECISIONS_DESC = "来自 opencode 会话的权限和问题提示"
+    private const val CHANNEL_IDLE_NAME = "opencode 完成"
+    private const val CHANNEL_IDLE_DESC = "已完成、待审查的会话"
+    private const val CHANNEL_ERRORS_NAME = "opencode 错误"
+    private const val CHANNEL_ERRORS_DESC = "来自 opencode 的连接和运行时错误"
+    private const val CHANNEL_SESSION_STATUS_NAME = "opencode 会话状态"
     private const val CHANNEL_SESSION_STATUS_DESC =
-        "Ongoing session-status notifications while opencode is connected in the background"
+        "opencode 后台连接时的持续会话状态通知"
 
     private const val TAG = "NotificationChannels"
 

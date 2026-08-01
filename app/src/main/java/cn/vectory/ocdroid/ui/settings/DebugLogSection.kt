@@ -1,5 +1,6 @@
 // DebugLogSection.kt — the in-Settings debug-log viewer (level filter, pause,
-// copy, clear, virtualized LazyColumn) plus its private LevelChip helper.
+// copy, clear, non-virtualized Column + SelectionContainer for cross-line selection)
+// plus its private LevelChip helper.
 //
 // §grouping-rewrite 项 2: the two R-19 Sprint 1 Lane D diagnostic panels
 // (EffectBusDroppedPanel + SseUnknownEventsPanel) and their Hilt @EntryPoint
@@ -24,9 +25,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -292,48 +293,47 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // ── Virtualized log view (LazyColumn) ──
-            // Virtualization: only ~15 visible rows compose/recompose instead
-            // of all entries (up to 1000), each of which called
-            // SimpleDateFormat.format() on every recomposition. That was a
-            // 10–50% CPU hotspot during high-frequency SSE streams while
-            // Settings was open.
+            // ── Non-virtualized log view (Column + SelectionContainer) ──
+            // Replaces the prior LazyColumn to support cross-line text selection.
+            // SelectionContainer + LazyColumn is known-unstable across screen
+            // boundaries (only materialized items are selectable, selection is lost
+            // on scroll), so we sacrifice virtualization in favor of usable
+            // multi-line selection. The ring-buffer cap (MAX_ENTRIES = 3000)
+            // keeps composition cost acceptable.
             //
             // §scroll-safety: the .heightIn(max = 360.dp) below is LOAD-BEARING.
-            // This LazyColumn is hosted inside SettingsScreen's
+            // This Column is hosted inside SettingsScreen's
             // Column(Modifier.verticalScroll(...)), whose children receive an
-            // infinite max-height constraint. Without this cap the LazyColumn
-            // would crash with "Vertically scrollable component was measured
-            // with an infinity maximum height constraints". Do NOT remove it.
-            val logListState = rememberLazyListState()
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 360.dp),
-                state = logListState
-            ) {
-                if (filtered.isEmpty()) {
-                    item {
+            // infinite max-height constraint. Without this cap the Column would
+            // grow unbounded. Do NOT remove it.
+            SelectionContainer {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    if (filtered.isEmpty()) {
                         Text(
                             if (liveEntries.isEmpty()) stringResource(R.string.debug_log_empty) else stringResource(R.string.debug_log_empty_filtered),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
-                }
-                items(items = filtered, key = { entry -> entry.seq }) { entry ->
-                    val levelColor = when (entry.level) {
-                        DebugLog.Level.DEBUG -> MaterialTheme.colorScheme.onSurfaceVariant
-                        DebugLog.Level.INFO -> MaterialTheme.colorScheme.onSurface
-                        DebugLog.Level.WARN -> MaterialTheme.colorScheme.error
-                        DebugLog.Level.ERROR -> MaterialTheme.colorScheme.error
+                    filtered.forEach { entry ->
+                        val levelColor = when (entry.level) {
+                            DebugLog.Level.DEBUG -> MaterialTheme.colorScheme.onSurfaceVariant
+                            DebugLog.Level.INFO -> MaterialTheme.colorScheme.onSurface
+                            DebugLog.Level.WARN -> MaterialTheme.colorScheme.error
+                            DebugLog.Level.ERROR -> MaterialTheme.colorScheme.error
+                        }
+                        Text(
+                            text = "[${sdf.format(entry.timeMs)}] ${entry.tag}/${entry.level}: ${entry.message}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = BundledMonoFamily,
+                            color = levelColor
+                        )
                     }
-                    Text(
-                        text = "[${sdf.format(entry.timeMs)}] ${entry.tag}/${entry.level}: ${entry.message}",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = BundledMonoFamily,
-                        color = levelColor
-                    )
                 }
             }
         }
