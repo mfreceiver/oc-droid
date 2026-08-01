@@ -47,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -301,6 +302,27 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
             // multi-line selection. The ring-buffer cap (MAX_ENTRIES = 3000)
             // keeps composition cost acceptable.
             //
+            // §stable-seq-key: each Text is wrapped in `key(entry.seq)` so
+            // Compose matches nodes by the Entry's monotonic sequence number,
+            // NOT by position. This is mandatory because the log is newest-first
+            // (DebugLog.log addFirst to index 0): every new entry shifts all
+            // existing entries down one slot, so a position-only identity would
+            // cause Text instances (and their SelectionContainer selectable
+            // registrations) to be reused across different log lines on every
+            // recomposition — corrupting the active selection. `seq` is the
+            // stable, collision-free key designed for exactly this (see
+            // DebugLog.Entry KDoc). As a side benefit, only the single new row
+            // enters recomposition on append; existing rows are reused.
+            //
+            // §platform-limit-autoscroll: Compose Foundation 1.10 (composeBom
+            // 2025.12.00) does NOT auto-scroll the viewport when a drag
+            // selection extends beyond the visible bounds — that capability
+            // lands in Foundation 1.11+. Cross-line selection is fully usable
+            // within the viewport; to extend a selection past the edge the user
+            // must scroll manually (then continue dragging). This is an
+            // accepted platform trade-off (user decision: keep cross-line
+            // selection), not a bug.
+            //
             // §scroll-safety: the .heightIn(max = 360.dp) below is LOAD-BEARING.
             // This Column is hosted inside SettingsScreen's
             // Column(Modifier.verticalScroll(...)), whose children receive an
@@ -327,12 +349,16 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                             DebugLog.Level.WARN -> MaterialTheme.colorScheme.error
                             DebugLog.Level.ERROR -> MaterialTheme.colorScheme.error
                         }
-                        Text(
-                            text = "[${sdf.format(entry.timeMs)}] ${entry.tag}/${entry.level}: ${entry.message}",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = BundledMonoFamily,
-                            color = levelColor
-                        )
+                        // §stable-seq-key (see comment above): wrap in key() so
+                        // node identity follows the Entry, not the list index.
+                        key(entry.seq) {
+                            Text(
+                                text = "[${sdf.format(entry.timeMs)}] ${entry.tag}/${entry.level}: ${entry.message}",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = BundledMonoFamily,
+                                color = levelColor
+                            )
+                        }
                     }
                 }
             }
