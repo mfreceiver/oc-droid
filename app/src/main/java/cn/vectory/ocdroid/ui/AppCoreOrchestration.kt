@@ -1267,25 +1267,55 @@ internal data class BannerHysteresisConfig(
 )
 
 /**
+ * §C3: Input to the hysteresis reducer — carries both the semantic category
+ * and the captured auth reason (mtlsDegradedError) at the moment the category
+ * was established. The reducer preserves this payload through transitions
+ * so the displayed info is always a coherent snapshot.
+ */
+internal data class BannerCategoryInput(
+    val category: BannerCategory,
+    val authReason: String?,
+)
+
+/**
  * §1.3: UI-facing visibility — what the banner composable reads.
  * [Hidden] = render nothing; [Showing] = render with the given category.
+ *
+ * §C3: [Showing] carries [authReason] as part of a coherent payload.
  */
 internal sealed class BannerVisibility {
     data object Hidden : BannerVisibility()
-    data class Showing(val category: BannerCategory, val sinceMs: Long) : BannerVisibility()
+    data class Showing(
+        val category: BannerCategory,
+        /** §C3: captured auth reason, non-null only for AUTH_FAILURE. */
+        val authReason: String?,
+        val sinceMs: Long,
+    ) : BannerVisibility()
 }
 
 /**
  * §1.3: Internal phase of the hysteresis state machine. Tracks intermediate
  * states (PendingShow/PendingHide) that are invisible to the UI but carry
  * timing information for the reducer transitions.
+ *
+ * §C3: All phases that carry a category now also carry [authReason] for a
+ * coherent displayed payload (no torn-read between visibility and feedback).
  */
 internal sealed class BannerHysteresisPhase {
     data object Hidden : BannerHysteresisPhase()
-    data class PendingShow(val category: BannerCategory, val atMs: Long) : BannerHysteresisPhase()
-    data class Showing(val category: BannerCategory, val sinceMs: Long) : BannerHysteresisPhase()
+    data class PendingShow(
+        val category: BannerCategory,
+        val authReason: String?,
+        val atMs: Long,
+    ) : BannerHysteresisPhase()
+    data class Showing(
+        val category: BannerCategory,
+        val authReason: String?,
+        val sinceMs: Long,
+    ) : BannerHysteresisPhase()
     data class PendingHide(
         val category: BannerCategory,
+        val authReason: String?,
         val atMs: Long,
         val sinceMs: Long,
     ) : BannerHysteresisPhase()
@@ -1306,76 +1336,110 @@ internal data class BannerHysteresisState(
  * "what category" logic ([bannerCategory]).
  *
  * State machine transitions (implemented exactly — this is the anti-flash contract):
+ * The `authReason` field is pure payload — it is carried through transitions
+ * but NEVER influences the transition logic (which only checks null-ness of
+ * [input]):
  *
  * ```
- * Hidden        + category!=null          → PendingShow(now)               // grace starts; NOT visible
- * PendingShow   + category!=null & now≥at+grace → Showing(category,now)   // grace elapses → visible
- * PendingShow   + category==null          → Hidden                         // recovered within grace: never shown
- * PendingShow   + category!=null & now<at+grace → PendingShow(category,at) // stay in grace, update category
- * Showing       + category!=null          → Showing(category,since)        // stay; update category
- * Showing       + category==null & now≥since+minDisplay → PendingHide(now) // min-display met, start hide delay
- * Showing       + category==null & now<since+minDisplay → Showing         // min-display NOT met: keep showing
- * PendingHide   + category!=null          → Showing(category,since)       // re-show (anti flap)
- * PendingHide   + category==null & now≥at+recoverDelay → Hidden
- * PendingHide   + category==null & now<at+recoverDelay → PendingHide
+ * Hidden        + input!=null          → PendingShow(now)                    // grace starts; NOT visible
+ * PendingShow   + input!=null & now≥at+grace → Showing(now)                 // grace elapses → visible
+ * PendingShow   + input==null          → Hidden                              // recovered within grace: never shown
+ * PendingShow   + input!=null & now<at+grace → PendingShow(at)              // stay in grace, update payload
+ * Showing       + input!=null          → Showing(since)                      // stay; update payload
+ * Showing       + input==null & now≥since+minDisplay → PendingHide(now)      // min-display met, start hide delay
+ * Showing       + input==null & now<since+minDisplay → Showing               // min-display NOT met: keep showing
+ * PendingHide   + input!=null          → Showing(since)                      // re-show (anti flap)
+ * PendingHide   + input==null & now≥at+recoverDelay → Hidden
+ * PendingHide   + input==null & now<at+recoverDelay → PendingHide
  * ```
+ *
+ * §C3: [input] carries both the semantic [BannerCategory] and the
+ * [BannerCategoryInput.authReason] captured at the moment the category was
+ * established. The reducer preserves `authReason` through all transitions
+ * so the displayed payload is always a coherent snapshot (no torn reads
+ * between visibility and the underlying feedback).
  *
  * Inject a controllable [now] clock for testability. Pure — no side effects.
  *
  * @param prev    previous state.
- * @param category current banner category (null = not banner-worthy right now).
+ * @param input   current banner category input (null = not banner-worthy right now).
  * @param now     current wall-clock ms (injected for testability).
  * @param config  timing parameters.
  */
 internal fun bannerHysteresisReducer(
     prev: BannerHysteresisState,
-    category: BannerCategory?,
+    input: BannerCategoryInput?,
     now: Long,
     config: BannerHysteresisConfig = BannerHysteresisConfig(),
 ): BannerHysteresisState {
     val nextPhase: BannerHysteresisPhase = when (val p = prev.phase) {
         is BannerHysteresisPhase.Hidden -> {
-            if (category != null) {
-                BannerHysteresisPhase.PendingShow(category = category, atMs = now)
+            if (input != null) {
+                BannerHysteresisPhase.PendingShow(
+                    category = input.category,
+                    authReason = input.authReason,
+                    atMs = now,
+                )
             } else {
                 BannerHysteresisPhase.Hidden
             }
         }
 
         is BannerHysteresisPhase.PendingShow -> {
-            if (category == null) {
+            if (input == null) {
                 // Recovered within grace — never shown
                 BannerHysteresisPhase.Hidden
             } else if (now >= p.atMs + config.showGraceMs) {
                 // Grace elapsed → promote to Showing
-                BannerHysteresisPhase.Showing(category = category, sinceMs = now)
+                BannerHysteresisPhase.Showing(
+                    category = input.category,
+                    authReason = input.authReason,
+                    sinceMs = now,
+                )
             } else {
-                // Still within grace period — stay PendingShow, update category
-                BannerHysteresisPhase.PendingShow(category = category, atMs = p.atMs)
+                // Still within grace period — stay PendingShow, update payload
+                BannerHysteresisPhase.PendingShow(
+                    category = input.category,
+                    authReason = input.authReason,
+                    atMs = p.atMs,
+                )
             }
         }
 
         is BannerHysteresisPhase.Showing -> {
-            if (category != null) {
-                // Stay showing; update category if changed (REST_OUTAGE↔AUTH_FAILURE)
-                BannerHysteresisPhase.Showing(category = category, sinceMs = p.sinceMs)
+            if (input != null) {
+                // Stay showing; update payload if changed (REST_OUTAGE↔AUTH_FAILURE)
+                BannerHysteresisPhase.Showing(
+                    category = input.category,
+                    authReason = input.authReason,
+                    sinceMs = p.sinceMs,
+                )
             } else if (now >= p.sinceMs + config.minDisplayMs) {
                 // Min-display met → start hide delay
                 BannerHysteresisPhase.PendingHide(
                     category = p.category,
+                    authReason = p.authReason,
                     atMs = now,
                     sinceMs = p.sinceMs,
                 )
             } else {
                 // Min-display NOT met — keep showing
-                BannerHysteresisPhase.Showing(category = p.category, sinceMs = p.sinceMs)
+                BannerHysteresisPhase.Showing(
+                    category = p.category,
+                    authReason = p.authReason,
+                    sinceMs = p.sinceMs,
+                )
             }
         }
 
         is BannerHysteresisPhase.PendingHide -> {
-            if (category != null) {
+            if (input != null) {
                 // Recovered during hide delay — re-show (anti flap), preserve original sinceMs
-                BannerHysteresisPhase.Showing(category = category, sinceMs = p.sinceMs)
+                BannerHysteresisPhase.Showing(
+                    category = input.category,
+                    authReason = input.authReason,
+                    sinceMs = p.sinceMs,
+                )
             } else if (now >= p.atMs + config.recoverHideDelayMs) {
                 // Hide delay elapsed → fully hidden
                 BannerHysteresisPhase.Hidden
@@ -1383,6 +1447,7 @@ internal fun bannerHysteresisReducer(
                 // Still within hide delay — wait
                 BannerHysteresisPhase.PendingHide(
                     category = p.category,
+                    authReason = p.authReason,
                     atMs = p.atMs,
                     sinceMs = p.sinceMs,
                 )
@@ -1395,13 +1460,42 @@ internal fun bannerHysteresisReducer(
         is BannerHysteresisPhase.Hidden -> BannerVisibility.Hidden
         is BannerHysteresisPhase.PendingShow -> BannerVisibility.Hidden
         is BannerHysteresisPhase.Showing ->
-            BannerVisibility.Showing(category = nextPhase.category, sinceMs = nextPhase.sinceMs)
+            BannerVisibility.Showing(
+                category = nextPhase.category,
+                authReason = nextPhase.authReason,
+                sinceMs = nextPhase.sinceMs,
+            )
         is BannerHysteresisPhase.PendingHide ->
             // Still visible during hide delay (anti-flap)
-            BannerVisibility.Showing(category = nextPhase.category, sinceMs = nextPhase.sinceMs)
+            BannerVisibility.Showing(
+                category = nextPhase.category,
+                authReason = nextPhase.authReason,
+                sinceMs = nextPhase.sinceMs,
+            )
     }
 
     return BannerHysteresisState(visibility = nextVisibility, phase = nextPhase)
+}
+
+/**
+ * §C1: Computes the next wall-clock deadline at which the hysteresis state
+ * machine needs to re-evaluate. Returns null when no pending deadline exists
+ * (Showing and Hidden have no fixed timeouts — they wait for external events).
+ *
+ * Used by [BannerHysteresisOwner] to schedule a focused delay at the exact
+ * deadline, replacing the old 30s coarse ticker for hysteresis timing.
+ */
+internal fun computeHysteresisDeadlineMs(
+    state: BannerHysteresisState,
+    now: Long,
+    config: BannerHysteresisConfig = BannerHysteresisConfig(),
+): Long? {
+    return when (val p = state.phase) {
+        is BannerHysteresisPhase.PendingShow -> p.atMs + config.showGraceMs
+        is BannerHysteresisPhase.PendingHide -> p.atMs + config.recoverHideDelayMs
+        is BannerHysteresisPhase.Showing -> null
+        is BannerHysteresisPhase.Hidden -> null
+    }
 }
 
 /**

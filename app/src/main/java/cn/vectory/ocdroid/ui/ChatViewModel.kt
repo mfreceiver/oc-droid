@@ -8,16 +8,9 @@ import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.util.DebugLog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.scan
-import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.net.SocketTimeoutException
@@ -58,6 +51,7 @@ private const val STOP_TIMEOUT_MS = 5_000L
 @HiltViewModel
 class ChatViewModel @Inject constructor(
     internal val core: AppCore,
+    private val bannerOwner: BannerHysteresisOwner,
 ) : ViewModel() {
     private val revertConversation = RevertConversation(core)
     private val revertCutoffCoordinator = RevertCutoffCoordinator(core)
@@ -114,113 +108,10 @@ class ChatViewModel @Inject constructor(
         }
 
     /**
-     * §sse-feedback-ux (P2-1): derived projection of [SseConnectionFeedback]
-     * for the in-chat disconnect banner. Combines [connectionFlow] (phase +
-     * disconnectedSince) + [cn.vectory.ocdroid.ui.SharedStateStore.sseConnectedFlow]
-     * + a coarse wall-clock ticker ([SSE_FEEDBACK_TICK_MS]) so the "disconnected
-     * Nm ago" label refreshes while a sustained disconnect is visible.
-     *
-     * Pure READ — introduces NO writable truth: it projects the authoritative
-     * connection slice through the pure [deriveSseConnectionFeedback]. The
-     * upstream (incl. the ticker) only runs while collected:
-     * [SharingStarted.WhileSubscribed] starts the pipeline when the banner
-     * subscribes and tears it down 5s after the last collector leaves (config-
-     * change grace), so there is no forever-ticker on the happy path — when
-     * healthy the distinct [SseConnectionFeedback.Live] emission is stable and
-     * the ticker's equal re-emissions are dropped by distinctUntilChanged.
-     *
-     * Consumers: [cn.vectory.ocdroid.ui.chat.SseDisconnectBanner] (rendered by
-     * ChatScaffold). The banner's Refresh action calls
-     * [refreshCurrentSession] — the existing REST-fallback recovery path — so
-     * the feedback loop closes without a new write surface.
+     * §C1/C2: banner visibility state driven by [BannerHysteresisOwner] —
+     * process-scoped, no WhileSubscribed reset, deadline-accurate timing.
      */
-    val sseConnectionFeedback: StateFlow<SseConnectionFeedback> =
-        combine(
-            core.connectionFlow,
-            core.store.sseConnectedFlow,
-            disconnectTickerFlow(),
-        ) { conn, sseConnected, now ->
-            deriveSseConnectionFeedback(
-                phase = conn.connectionPhase,
-                disconnectedSince = conn.disconnectedSince,
-                sseConnected = sseConnected,
-                now = now,
-                mtlsDegradedError = conn.mtlsDegradedError,
-            )
-        }
-            .distinctUntilChanged()
-            .stateIn(
-                scope = viewModelScope,
-                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
-                initialValue = run {
-                    val conn = core.connectionFlow.value
-                    deriveSseConnectionFeedback(
-                        phase = conn.connectionPhase,
-                        disconnectedSince = conn.disconnectedSince,
-                        sseConnected = core.store.sseConnectedFlow.value,
-                        now = System.currentTimeMillis(),
-                        mtlsDegradedError = conn.mtlsDegradedError,
-                    )
-                },
-            )
-
-    /**
-     * §sse-feedback-ux (§1.3): banner visibility state driven by hysteresis
-     * reducer. Computes [BannerCategory] from [sseConnectionFeedback] +
-     * [ConnectionState.mtlsDegradedError], then folds through
-     * [bannerHysteresisReducer] for grace / min-display / recover-hide.
-     *
-     * The reducer is driven by feedback transitions (distinctUntilChanged) AND
-     * the ticker (which advances PendingShow/PendingHide timers). The ticker
-     * cadence is [SSE_FEEDBACK_TICK_MS]=30s — coarse but acceptable: a real
-     * sustained outage will tick within 30s anyway, and the grace is anti-flash,
-     * not precision timing. Feedback state transitions land immediately via
-     * distinctUntilChanged; the ticker only advances elapsed timers.
-     *
-     * Pure scan (fold) — no side effects. WhileSubscribed teardown per
-     * [STOP_TIMEOUT_MS].
-     */
-    internal val bannerVisibility: StateFlow<BannerHysteresisState> =
-        combine(
-            sseConnectionFeedback,
-            // §b4-reactivity-fix: subscribe to connectionFlow (NOT read .value)
-            // so the AUTH_FAILURE↔REST_OUTAGE category flip is REACTIVE to
-            // mtlsDegradedError changes. Reading .value inside combine would
-            // miss a mtlsDegradedError flip that happens while the feedback
-            // category is otherwise stable (e.g. error set/cleared on a stable
-            // Disconnected phase) until the next ticker tick (≤30s late).
-            // distinctUntilChanged on the Pair below drops redundant emissions.
-            core.connectionFlow,
-            disconnectTickerFlow(),
-        ) { feedback, conn, now ->
-            Pair(
-                feedback.bannerCategory(mtlsDegradedError = conn.mtlsDegradedError),
-                now,
-            )
-        }
-            .distinctUntilChanged()
-            .scan(initial = BannerHysteresisState()) { prev, (category, now) ->
-                bannerHysteresisReducer(prev, category, now)
-            }
-            .stateIn(
-                scope = viewModelScope,
-                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
-                initialValue = BannerHysteresisState(),
-            )
-
-    /**
-     * §sse-feedback-ux: coarse wall-clock ticker — emits the current time
-     * immediately then every [SSE_FEEDBACK_TICK_MS]. A plain cold [Flow]; it
-     * only runs while [sseConnectionFeedback] has a subscriber (WhileSubscribed
-     * upstream), and [delay] is cancellable so collection stops promptly on
-     * teardown.
-     */
-    private fun disconnectTickerFlow(): Flow<Long> = flow {
-        while (true) {
-            emit(System.currentTimeMillis())
-            delay(SSE_FEEDBACK_TICK_MS)
-        }
-    }
+    internal val bannerVisibility: StateFlow<BannerHysteresisState> = bannerOwner.state
 
     /** §R-17 batch3e: repository exposed so ChatMessageList can pass it down
      *  to MessageRow without touching `.core.` from a Composable. */

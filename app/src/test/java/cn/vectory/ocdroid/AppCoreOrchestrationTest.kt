@@ -34,6 +34,10 @@ import cn.vectory.ocdroid.ui.resetLocalDataAndResync
 import cn.vectory.ocdroid.ui.sendMessage
 import cn.vectory.ocdroid.ui.shouldAutoUnanchorOnColdStart
 import cn.vectory.ocdroid.ui.SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS
+import cn.vectory.ocdroid.ui.BannerHysteresisOwner
+import cn.vectory.ocdroid.ui.BannerHysteresisState
+import io.mockk.mockk
+import kotlinx.coroutines.flow.MutableStateFlow
 import cn.vectory.ocdroid.ui.stampDisconnectedSince
 import cn.vectory.ocdroid.util.ThemeMode
 import io.mockk.coEvery
@@ -77,7 +81,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
      */
     private fun wire(): AppCore {
         val core = createCore()
-        ChatViewModel(core)
+        ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         SessionViewModel(core)
         ConnectionViewModel(core)
         HostViewModel(core)

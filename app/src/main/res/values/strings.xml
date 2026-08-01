@@ -523,6 +523,7 @@
     <string name="sse_feedback_disconnected_hours">Disconnected · %1$d h ago</string>
     <string name="sse_feedback_disabled_title">Live updates off</string>
     <string name="sse_feedback_disabled_subtitle">REST-only mode (debug toggle)</string>
+    <string name="sse_feedback_auth_failure_subtitle">Certificate or credential could not be loaded</string>
 
     <string name="chat_jump_to_latest">Jump to latest</string>
 

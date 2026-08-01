@@ -1,23 +1,3 @@
-// SseDisconnectBanner.kt — §sse-feedback-ux (P2-1): persistent in-chat banner
-// that surfaces a sustained SSE disconnect with per-category visual semantics.
-//
-// §1.x (batch4): semantically split into 4 categories — REST_OUTAGE / AUTH_FAILURE
-// (error, red) vs SSE_STALLED / USER_DISABLED (info, calm). Grace/hysteresis
-// handled upstream by [BannerHysteresisState] / [bannerHysteresisReducer].
-//
-// The banner is a PURE READ of [BannerVisibility] + [SseConnectionFeedback] (pure
-// projections of the authoritative connection slice — see
-// [cn.vectory.ocdroid.ui.deriveSseConnectionFeedback] / [bannerCategory]). It
-// introduces NO writable truth. The Refresh action reuses the existing REST-fallback
-// recovery path ([ChatViewModel.refreshCurrentSession] → clear + UNANCHORED
-// re-fetch), so the feedback loop closes without a new write surface.
-//
-// §ui-style-spec: built on the shared [cn.vectory.ocdroid.ui.theme.StatusBanner]
-// primitive (Surface + Row chrome, Dimens padding). No scattered dp literals.
-// a11y: the leading icon is DECORATIVE (the title text conveys the status), so
-// its contentDescription is null per the app a11y rule (decorative icons stay
-// null; the Refresh TextButton is labelled by its text and is fully accessible).
-
 package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.foundation.BorderStroke
@@ -34,6 +14,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -42,44 +27,20 @@ import androidx.compose.ui.text.font.FontWeight
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.BannerCategory
 import cn.vectory.ocdroid.ui.BannerVisibility
-import cn.vectory.ocdroid.ui.SseConnectionFeedback
-import cn.vectory.ocdroid.ui.disconnectDurationMs
+import cn.vectory.ocdroid.ui.SSE_FEEDBACK_TICK_MS
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.theme.StatusBanner
+import kotlinx.coroutines.delay
 
-/**
- * §sse-feedback-ux (§1.4-1.5): persistent in-chat banner with per-category
- * visual dispatch.
- *
- * Renders NOTHING when [visibility] is [BannerVisibility.Hidden], so the call
- * site can collect the [BannerHysteresisState] flow unconditionally and defer
- * all visibility to this composable.
- *
- * Two-tier visual hierarchy:
- *  - Errors (REST_OUTAGE, AUTH_FAILURE) = red/alarming: [errorContainer] bg,
- *    [error] border, [onErrorContainer] tint.
- *  - Info (SSE_STALLED, USER_DISABLED) = calm: [surfaceVariant] bg,
- *    [outline] border, [onSurfaceVariant] tint.
- *
- * @param visibility  current banner visibility (Hidden = render nothing).
- * @param feedback    the latest derived SSE connection status (used for
- *                    [disconnectDurationMs] and type checks).
- * @param onRefresh   invoked by the Refresh button; shown ONLY for
- *                    REST_OUTAGE and AUTH_FAILURE.
- * @param modifier    applied to the outer [StatusBanner].
- */
 @Composable
 internal fun SseDisconnectBanner(
     visibility: BannerVisibility,
-    feedback: SseConnectionFeedback,
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // Extract the displayed category from visibility
     val showing = visibility as? BannerVisibility.Showing ?: return
     val category = showing.category
 
-    // Per-category visual properties (§1.5 designer spec)
     val (bgColor, borderColor, iconTint, icon, showRefresh) = when (category) {
         BannerCategory.REST_OUTAGE, BannerCategory.AUTH_FAILURE -> CategoryVisuals(
             color = MaterialTheme.colorScheme.errorContainer,
@@ -88,7 +49,7 @@ internal fun SseDisconnectBanner(
             icon = when (category) {
                 BannerCategory.REST_OUTAGE -> Icons.Default.CloudOff
                 BannerCategory.AUTH_FAILURE -> Icons.Default.ErrorOutline
-                else -> Icons.Default.CloudOff // unreachable
+                else -> Icons.Default.CloudOff
             },
             showRefresh = true,
         )
@@ -99,13 +60,12 @@ internal fun SseDisconnectBanner(
             icon = when (category) {
                 BannerCategory.SSE_STALLED -> Icons.Default.Sync
                 BannerCategory.USER_DISABLED -> Icons.Default.CloudOff
-                else -> Icons.Default.CloudOff // unreachable
+                else -> Icons.Default.CloudOff
             },
             showRefresh = false,
         )
     }
 
-    // Title by category (§1.4)
     val title = stringResource(
         when (category) {
             BannerCategory.REST_OUTAGE -> R.string.sse_feedback_rest_outage_title
@@ -115,15 +75,27 @@ internal fun SseDisconnectBanner(
         }
     )
 
-    // Subtitle: elapsed-time for REST_OUTAGE/AUTH_FAILURE; fixed info for others
+    // §C3: elapsed from showing.sinceMs + fresh clock (not torn feedback)
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(showing.sinceMs, showing.category) {
+        now = System.currentTimeMillis()
+        while (true) {
+            delay(SSE_FEEDBACK_TICK_MS)
+            now = System.currentTimeMillis()
+        }
+    }
+    val elapsedMs = (now - showing.sinceMs).coerceAtLeast(0L)
+
     val subtitle: String = when (category) {
-        BannerCategory.REST_OUTAGE, BannerCategory.AUTH_FAILURE ->
+        BannerCategory.REST_OUTAGE ->
             resolveDisconnectDurationLabel(
-                durationMs = feedback.disconnectDurationMs() ?: 0L,
+                durationMs = elapsedMs,
                 justNow = stringResource(R.string.sse_feedback_disconnected_now),
                 minutes = stringResource(R.string.sse_feedback_disconnected_minutes),
                 hours = stringResource(R.string.sse_feedback_disconnected_hours),
             )
+        BannerCategory.AUTH_FAILURE ->
+            showing.authReason ?: stringResource(R.string.sse_feedback_auth_failure_subtitle)
         BannerCategory.SSE_STALLED ->
             stringResource(R.string.sse_feedback_sse_stalled_subtitle)
         BannerCategory.USER_DISABLED ->
@@ -140,8 +112,6 @@ internal fun SseDisconnectBanner(
     ) {
         Icon(
             imageVector = icon,
-            // Decorative — the title text conveys the status. App a11y rule:
-            // decorative icons keep contentDescription = null.
             contentDescription = null,
             tint = iconTint,
             modifier = Modifier.size(Dimens.iconStd),
@@ -160,7 +130,6 @@ internal fun SseDisconnectBanner(
                 color = iconTint,
             )
         }
-        // Refresh TextButton: only for REST_OUTAGE and AUTH_FAILURE (§1.5)
         if (showRefresh) {
             TextButton(onClick = onRefresh) {
                 Text(refreshLabel, color = iconTint)
@@ -169,10 +138,6 @@ internal fun SseDisconnectBanner(
     }
 }
 
-/**
- * Holder for per-category visual properties — avoids tuple destructuring
- * in the [when] branches above.
- */
 private data class CategoryVisuals(
     val color: Color,
     val border: Color,
@@ -181,14 +146,6 @@ private data class CategoryVisuals(
     val showRefresh: Boolean,
 )
 
-/**
- * §sse-feedback-ux: pure (non-composable) elapsed-time label picker. Buckets
- * the disconnect duration into "just now" (< 1 min) / "N min ago" (< 1 h) /
- * "N h ago" (≥ 1 h) and formats against the supplied localized templates. Pure
- * so it is unit-testable without a Compose context.
- *
- * @param durationMs elapsed ms since the disconnect was stamped (≥ 0).
- */
 internal fun resolveDisconnectDurationLabel(
     durationMs: Long,
     justNow: String,

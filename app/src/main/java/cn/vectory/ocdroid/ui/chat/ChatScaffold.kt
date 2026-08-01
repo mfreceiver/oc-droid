@@ -211,7 +211,7 @@ fun ChatScaffold(
     // / [bannerHysteresisReducer]); collected here so the banner recomposes
     // only on a status change / ticker tick while a disconnect is visible
     // (WhileSubscribed upstream; healthy path = no churn).
-    val sseFeedback by chatVM.sseConnectionFeedback.collectAsStateWithLifecycle()
+    // §C2: banner visibility driven by process-scoped [BannerHysteresisOwner].
     val bannerVisibility by chatVM.bannerVisibility.collectAsStateWithLifecycle()
     val trafficState = connectionVM.trafficFlow.collectAsStateWithLifecycle()
     val traffic by trafficState
@@ -1031,7 +1031,6 @@ fun ChatScaffold(
                     if (chromeSessionId != null) {
                         SseDisconnectBanner(
                             visibility = bannerVisibility.visibility,
-                            feedback = sseFeedback,
                             onRefresh = { chatVM.refreshCurrentSession(chromeSessionId) },
                         )
                     }

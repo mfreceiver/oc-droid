@@ -485,6 +485,7 @@
     <string name="sse_feedback_disconnected_hours">已断开 · %1$d 小时前</string>
     <string name="sse_feedback_disabled_title">实时更新已关闭</string>
     <string name="sse_feedback_disabled_subtitle">仅 REST 模式（调试开关）</string>
+    <string name="sse_feedback_auth_failure_subtitle">无法加载证书或凭据</string>
 
     <string name="chat_jump_to_latest">跳到最新</string>
 
