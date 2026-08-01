@@ -8,6 +8,7 @@ import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.MainViewModelTimings
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.mergeRefreshedSessionsPreservingLocalActivity
+import cn.vectory.ocdroid.ui.preserveSessionsAddedDuringRequest
 import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -43,6 +44,9 @@ class SessionMetadataPoller @Inject constructor(
     private var pollJob: Job? = null
     @Volatile
     private var currentPollMode: PollMode? = null
+    /** §需求10 C4: previous poll mode, used to detect mode transitions and restart
+     *  the polling loop so the new delay applies promptly. */
+    private var previousPollMode: PollMode? = null
     private var fallbackBackoffMs = FALLBACK_POLL_INITIAL_MS
 
     init {
@@ -65,12 +69,21 @@ class SessionMetadataPoller @Inject constructor(
         }
             .distinctUntilChanged()
             .onEach { mode ->
+                val prevMode = previousPollMode
+                previousPollMode = mode
                 currentPollMode = mode
-                // §2.2: reset exponential backoff on return to baseline (SSE recovered)
-                if (mode == PollMode.BASELINE) {
-                    fallbackBackoffMs = FALLBACK_POLL_INITIAL_MS
+                // §需求10 C4: on ANY mode transition, restart the polling loop so
+                // the new delay applies promptly (interrupts the in-progress delay).
+                if (prevMode != mode) {
+                    // Reset exponential backoff on transition INTO FALLBACK
+                    // (fresh start for the backoff sequence) and INTO null
+                    // (so a subsequent FALLBACK entry starts from initial).
+                    if (mode == PollMode.FALLBACK || mode == null) {
+                        fallbackBackoffMs = FALLBACK_POLL_INITIAL_MS
+                    }
+                    stopPolling()
+                    if (mode != null) startPolling()
                 }
-                if (mode != null) startPolling() else stopPolling()
             }
             .launchIn(scope)
     }
@@ -103,12 +116,32 @@ class SessionMetadataPoller @Inject constructor(
         val mode = currentPollMode ?: return
         if (!appLifecycleMonitor.isInForeground.value) return
 
+        // §需求10 C3: if a full session-list refresh is in-flight, skip the poll
+        // to avoid a concurrent duplicate getSessions network call.
+        if (store.sessionListLoadInFlight) {
+            DebugLog.d(TAG, "poll: list load in flight, skipping")
+            return
+        }
+
         // §2.3 (§design-contract §0.2): capture identity BEFORE the network call
         // so commitIfCurrent can atomically guard the commit against a host switch.
         val cap = identityStore.capture()
 
+        // §需求10 C1: no bound identity — poll is a no-op. The poll loop
+        // keeps running (mode transitions are still reactive) but commits
+        // nothing until a profile is bound. Restart-required profile-switch
+        // limitation is batch 5 scope.
+        if (cap.identity == null) {
+            DebugLog.d(TAG, "poll: no bound identity, skipping")
+            return
+        }
+
         // §2.2: in baseline mode, skip if connection dropped during the capture
         if (mode == PollMode.BASELINE && !store.connectionFlow.value.isConnected) return
+
+        // §需求10 C2: capture the set of session IDs present at request-start
+        // so SSE-created-during-request sessions can be preserved after the merge.
+        val localIdsAtRequestStart = store.sessionListFlow.value.sessions.map { it.id }.toSet()
 
         val refreshed = repository.getSessions(MainViewModelTimings.sessionFullLoadLimit)
             .getOrElse {
@@ -139,6 +172,15 @@ class SessionMetadataPoller @Inject constructor(
                     currentSessionId = store.chatFlow.value.currentSessionId,
                     pendingCreateIds = current.pendingCreateIds,
                 )
+                // §需求10 C2: preserve sessions that were added by SSE during the
+                // REST request window (absent from the stale REST response but
+                // present in the now-current local list and NOT in the request-
+                // start snapshot).
+                val withPreserved = preserveSessionsAddedDuringRequest(
+                    merged = mergedSessions,
+                    local = current.sessions,
+                    localIdsAtRequestStart = localIdsAtRequestStart,
+                )
                 val refreshedById = refreshed.associateBy { it.id }
                 val mergedDirectorySessions = current.directorySessions.mapValues { (_, list) ->
                     list.map { existing ->
@@ -151,7 +193,7 @@ class SessionMetadataPoller @Inject constructor(
                     }
                 }
                 current.copy(
-                    sessions = mergedSessions,
+                    sessions = withPreserved,
                     directorySessions = mergedDirectorySessions,
                 )
             }

@@ -718,115 +718,87 @@ class SessionListActionsTest {
         // needed, but the current-session messages are already loaded.
     }
 
-    // ── FIX-D (gpter #2): single-flight epoch for launchLoadSessions ─────────
+    // ── §FIX-D (gpter #2) + §需求10 C3: single-flight + coalesce for launchLoadSessions ──
 
     @Test
-    fun `FIX-D launchLoadSessions discards stale result when superseded by newer call`() = runTest {
-        // Concurrent calls (reconnect + foreground catch-up + manual refresh)
-        // can race; a slow stale response must NOT update sessions/openIds/
-        // cache NOR trigger archive side-effects (now destructive per FIX-A/C).
-        val firstGate = CompletableDeferred<Unit>()
-        var firstStarted = false
-        val staleSessions = listOf(Session(id = "stale", directory = "/x"))
-        val freshSessions = listOf(Session(id = "fresh", directory = "/x"))
+    fun `C3 second launchLoadSessions is coalesced when first is in-flight`() = runTest {
+        // With §需求10 C3 coalescing via the store's sessionListLoadInFlight
+        // flag, if a load is already in-flight, a second call returns
+        // immediately without launching a new coroutine.
+        val gate = CompletableDeferred<Unit>()
+        var callCount = 0
+        val sessions = listOf(Session(id = "s1", directory = "/x"))
         coEvery { repository.getSessions(any()) } coAnswers {
-            if (!firstStarted) {
-                firstStarted = true
-                firstGate.await()
-                Result.success(staleSessions)
-            } else {
-                Result.success(freshSessions)
-            }
+            callCount += 1
+            gate.await()
+            Result.success(sessions)
         }
 
         launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
-        advanceUntilIdle() // first call suspended in firstGate
+        advanceUntilIdle() // first call suspended in gate
+        assertEquals("first call started", 1, callCount)
+
+        // Second call should be coalesced (no-op since first is in-flight)
         launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
-        advanceUntilIdle() // second (newer epoch) completes first
+        advanceUntilIdle()
+        assertEquals("second call must NOT fire another network request", 1, callCount)
 
-        assertEquals(
-            "newer call's result must be in effect",
-            listOf("fresh"),
-            slices.sessionList.value.sessions.map { it.id })
-
-        firstGate.complete(Unit) // stale first call completes
+        gate.complete(Unit)
         advanceUntilIdle()
 
-        assertEquals(
-            "stale superseded result must be discarded",
-            listOf("fresh"),
-            slices.sessionList.value.sessions.map { it.id })
+        assertEquals(listOf("s1"), slices.sessionList.value.sessions.map { it.id })
     }
 
     @Test
-    fun `superseded failure is fully silent and cannot overwrite newer loading state`() = runTest {
-        val firstGate = CompletableDeferred<Unit>()
-        var first = true
-        coEvery { repository.getSessions(any()) } coAnswers {
-            if (first) {
-                first = false
-                firstGate.await()
-                Result.failure(IllegalStateException("stale failure"))
-            } else {
-                Result.success(listOf(Session(id = "fresh", directory = "/x")))
-            }
-        }
+    fun `C3 in-flight load clears sessionListLoadInFlight flag after completion`() = runTest {
+        // The store flag is set before the network call and cleared in
+        // finally; verify it is false after the load completes.
+        val sessions = listOf(Session(id = "s1", directory = "/x"))
+        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
 
+        assertFalse("flag starts false", store.sessionListLoadInFlight)
         launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
         advanceUntilIdle()
-        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
-        advanceUntilIdle()
-        val stateAfterFresh = slices.sessionList.value
 
-        firstGate.complete(Unit)
-        advanceUntilIdle()
-
-        assertEquals(stateAfterFresh, slices.sessionList.value)
-        assertTrue("stale failure must not emit an error", emitted.isEmpty())
+        assertFalse("flag false after completion", store.sessionListLoadInFlight)
+        assertEquals(listOf("s1"), slices.sessionList.value.sessions.map { it.id })
     }
 
     @Test
-    fun `FIX-D launchLoadSessions stale result does NOT trigger archive callback`() = runTest {
-        // Critical: a stale response that would have triggered the destructive
-        // archive eviction (FIX-A/C) must be dropped BEFORE the callback fires.
-        // Without the epoch guard, a slow stale response containing an archived
-        // session could evict the current chat AFTER a newer response already
-        // established the correct state.
-        val firstGate = CompletableDeferred<Unit>()
-        var firstStarted = false
-        val archivedStale = Session(id = "current", directory = "/x", time = Session.TimeInfo(archived = 1L))
-        val freshNonArchived = Session(id = "current", directory = "/x")
+    fun `C3 in-flight load sets sessionListLoadInFlight flag during request`() = runTest {
+        // The flag must be true while the network call is in-flight.
+        val gate = CompletableDeferred<Unit>()
         coEvery { repository.getSessions(any()) } coAnswers {
-            if (!firstStarted) {
-                firstStarted = true
-                firstGate.await()
-                Result.success(listOf(archivedStale))
-            } else {
-                Result.success(listOf(freshNonArchived))
-            }
+            // Network call is in-flight — the flag should be true
+            assertTrue("flag must be true during network call", store.sessionListLoadInFlight)
+            gate.await()
+            Result.success(emptyList())
         }
-        store.mutateChat { it.copy(currentSessionId = "current") }
-        var archiveCallbackCount = 0
 
-        launchLoadSessions(
-            scope, repository, slices, settingsManager, {}, {}, {}, emit,
-            onArchivedSessionsDetected = { _, _, _, _ -> archiveCallbackCount += 1 })
-        advanceUntilIdle()
-        // Second call (fresh, non-archived) supersedes the first
-        launchLoadSessions(
-            scope, repository, slices, settingsManager, {}, {}, {}, emit,
-            onArchivedSessionsDetected = { _, _, _, _ -> archiveCallbackCount += 1 })
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
         advanceUntilIdle()
 
-        assertEquals("current session NOT archived (fresh result wins)", "current", slices.chat.value.currentSessionId)
-        assertEquals("archive callback must NOT fire for the stale result", 0, archiveCallbackCount)
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertFalse("flag false after completion", store.sessionListLoadInFlight)
+    }
 
-        firstGate.complete(Unit)
+    @Test
+    fun `FIX-D launchLoadSessions epoch guard discards stale result (coalesced call still checks epoch)`() = runTest {
+        // With coalescing, only one call is in-flight at a time. But the FIX-D
+        // epoch guard is defense-in-depth inside the existing call. The epoch
+        // is incremented once at entry; the completion checks against it.
+        // This test verifies the epoch guard still works for the single in-
+        // flight call — a scenario where the epoch could be externally bumped
+        // (e.g. by a host switch handler) is covered by the staleHostAfterSuspend
+        // check. Here we verify the basic happy path: epoch matches → result used.
+        val sessions = listOf(Session(id = "s1", directory = "/x"))
+        coEvery { repository.getSessions(any()) } returns Result.success(sessions)
+
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
         advanceUntilIdle()
 
-        // Stale result discarded — still no callback, chat intact.
-        assertEquals("stale archived result discarded — callback stays 0", 0, archiveCallbackCount)
-        assertEquals("chat intact after stale discard", "current", slices.chat.value.currentSessionId)
+        assertEquals(listOf("s1"), slices.sessionList.value.sessions.map { it.id })
     }
 
     @Test

@@ -20,6 +20,7 @@ import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.WorkdirPaths
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicLong
@@ -38,6 +39,17 @@ internal class SessionListRefreshOrchestrator(
     /** FIX-D (gpter #2, review-blocker): single-flight epoch. Intentionally separate from P7's StatusPollOrchestrator status epoch. */
     private val sessionListLoadEpoch = AtomicLong(0)
 
+    /** §需求10 C3: non-null when a session-list full refresh is in-flight.
+     *  Used for coalescing concurrent [launchLoadSessions] calls — if a load
+     *  is already active, subsequent calls return early. Also drives the
+     *  [SharedStateStore.sessionListLoadInFlight] flag for cross-controller
+     *  coordination (e.g. [SessionMetadataPoller] skips its own poll when a
+     *  full refresh is running). */
+    private var inFlightLoad: Job? = null
+
+    /** Whether a session-list full refresh is currently in-flight. */
+    internal fun isListLoadInFlight(): Boolean = inFlightLoad?.isActive == true
+
     // ── Full refresh (launchLoadSessions) ──────────────────────────────────
 
     internal fun launchLoadSessions(
@@ -53,13 +65,26 @@ internal class SessionListRefreshOrchestrator(
         currentServerGroupFp: (() -> String)? = null,
         onArchivedSessionsDetected: ((mergedSessions: List<Session>, hasMoreSessions: Boolean, confirmedServerIds: Set<String>, sweepNow: Long) -> Unit)? = null,
     ) {
-        scope.launch {
-            fun staleHostAfterSuspend(): Boolean = expectedServerGroupFp != null &&
-                currentServerGroupFp != null &&
-                expectedServerGroupFp != currentServerGroupFp()
+        // §需求10 C3: coalesce — if a load is already in-flight (per the store's
+        // cross-controller flag), skip. Uses slices.store.sessionListLoadInFlight
+        // (per-store, test-safe) rather than inFlightLoad (singleton orchestrator
+        // field which would cause test isolation leakage).
+        if (slices.store.sessionListLoadInFlight) {
+            DebugLog.d("Sync", "launchLoadSessions: coalescing, in-flight load already active")
+            return
+        }
+        inFlightLoad = scope.launch {
+            try {
+                // Signal cross-controller (e.g. SessionMetadataPoller) that a
+                // full refresh is in-flight so they can skip their own poll.
+                slices.store.sessionListLoadInFlight = true
 
-            // FIX-D (gpter #2): capture this request's epoch.
-            val myEpoch = sessionListLoadEpoch.incrementAndGet()
+                fun staleHostAfterSuspend(): Boolean = expectedServerGroupFp != null &&
+                    currentServerGroupFp != null &&
+                    expectedServerGroupFp != currentServerGroupFp()
+
+                // FIX-D (gpter #2): capture this request's epoch.
+                val myEpoch = sessionListLoadEpoch.incrementAndGet()
 
             val limit = MainViewModelTimings.sessionFullLoadLimit
             slices.mutateSessionList {
@@ -220,6 +245,10 @@ internal class SessionListRefreshOrchestrator(
                         )
                     }
                     emit.emit(UiEvent.Error(R.string.error_load_sessions_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
+                }
+            } finally {
+                    inFlightLoad = null
+                    slices.store.sessionListLoadInFlight = false
                 }
         }
     }

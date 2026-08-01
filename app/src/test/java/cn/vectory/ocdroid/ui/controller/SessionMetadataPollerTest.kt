@@ -12,8 +12,10 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.flow.MutableStateFlow
+import cn.vectory.ocdroid.ui.preserveSessionsAddedDuringRequest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -245,6 +247,73 @@ class SessionMetadataPollerTest {
             sseConnected = false,
         )
         assertEquals(null, mode)
+    }
+
+    // ── §需求10 C1: null identity guard ─────────────────────────────────────
+
+    @Test
+    fun `C1 capture from unbound store has null identity`() {
+        // An unbound ConnectionIdentityStore has null identity. The C1 guard
+        // in poll() checks cap.identity == null before commitIfCurrent — this
+        // test verifies that the capture correctly returns null identity.
+        val identityStore = ConnectionIdentityStore()
+        val cap = identityStore.capture()
+
+        assertNull("unbound store must have null identity", cap.identity)
+    }
+
+    // ── §需求10 C2: preserveSessionsAddedDuringRequest ──────────────────────
+
+    @Test
+    fun `C2 preserveSessionsAddedDuringRequest keeps SSE-created sessions`() {
+        // Scenario: local = [A, B, C]; localIdsAtRequestStart = {A, B};
+        // REST merged = [A] (B removed by server during the request).
+        // C was added by SSE during the request — must survive.
+        val merged = listOf(session("A"))
+        val local = listOf(session("A"), session("B"), session("C"))
+        val localIdsAtRequestStart = setOf("A", "B")
+
+        val result = preserveSessionsAddedDuringRequest(merged, local, localIdsAtRequestStart)
+
+        assertEquals("SSE-created session C must be preserved", setOf("A", "C"), result.map { it.id }.toSet())
+    }
+
+    @Test
+    fun `C2 preserveSessionsAddedDuringRequest no-op when no SSE arrivals`() {
+        // No sessions were added during the request — result is identical to merged.
+        val merged = listOf(session("A"), session("B"))
+        val local = listOf(session("A"), session("B"))
+        val localIdsAtRequestStart = setOf("A", "B")
+
+        val result = preserveSessionsAddedDuringRequest(merged, local, localIdsAtRequestStart)
+
+        assertEquals("result must equal merged when no SSE arrivals", merged, result)
+    }
+
+    @Test
+    fun `C2 preserveSessionsAddedDuringRequest does not doubly-add session already in merged`() {
+        // If a session was in localIdsAtRequestStart AND in merged, it must NOT
+        // be duplicated.
+        val merged = listOf(session("A"), session("B"))
+        val local = listOf(session("A"), session("B"), session("C"))
+        val localIdsAtRequestStart = setOf("A", "B", "C")
+
+        val result = preserveSessionsAddedDuringRequest(merged, local, localIdsAtRequestStart)
+
+        // C is in localIdsAtRequestStart, so it's NOT preserved (it was already
+        // there before the request). Result should still be [A, B] (no duplicates).
+        assertEquals(listOf("A", "B"), result.map { it.id })
+    }
+
+    @Test
+    fun `C2 preserveSessionsAddedDuringRequest preserves multiple SSE arrivals`() {
+        val merged = listOf(session("A"))
+        val local = listOf(session("A"), session("B"), session("C"), session("D"))
+        val localIdsAtRequestStart = setOf("A", "B")
+
+        val result = preserveSessionsAddedDuringRequest(merged, local, localIdsAtRequestStart)
+
+        assertEquals("C and D arrived during request", setOf("A", "C", "D"), result.map { it.id }.toSet())
     }
 
 }

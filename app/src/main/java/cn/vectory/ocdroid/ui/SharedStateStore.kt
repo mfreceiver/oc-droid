@@ -67,6 +67,18 @@ class SharedStateStore @Inject constructor(
     internal var state: MutableStateFlow<StoreState> = MutableStateFlow(StoreState.initial())
         private set
 
+    /**
+     * §需求10 C3: non-null when a session-list full refresh (launchLoadSessions)
+     * is in-flight. Set by [SessionListRefreshOrchestrator.launchLoadSessions]
+     * at entry, cleared in finally. Read by [SessionMetadataPoller.poll] to
+     * skip its own [repository.getSessions] call when a full refresh (triggered
+     * by ON_RESUME / foreground return / reconnect) is already running —
+     * preventing duplicate concurrent `getSessions` network calls.
+     */
+    @Volatile
+    var sessionListLoadInFlight: Boolean = false
+        internal set
+
     /** Track the last identityStore epoch that triggered a store identityEpoch bump.
      *  One bump per unique identityStore epoch value avoids double-bumps when
      *  mutateHost and identityStore bind both fire for the same reconfigure cycle.
