@@ -271,6 +271,13 @@ class AppCore @Inject constructor(
         // §G-ACL: one-time migration of legacy slimapi profiles (http:4097 → https:14097 mTLS).
         hostProfileStore.migrateAllForGacl()
         applySavedSettings(repository, settingsManager, hostProfileStore, store.slices)
+        // §需求12阶段4: one-shot purge of per-group orphan keys (legacy named-
+        // group A/B/C/D + legacy baseUrl-keyed slots) whose suffix is not a
+        // canonical UUID. Runs AFTER applySavedSettings so the current host's
+        // legacy data is migrated to its per-fp slot first; then this pass
+        // deletes every remaining non-UUID-suffixed per-fp key. Idempotent via
+        // the orphan_group_cleanup_v1_done flag — a second cold start is a no-op.
+        settingsManager.cleanupOrphanGroupKeys()
         // §streaming-state-sync-diag (release-enabling): seed the runtime
         // verbose-diag flag from its ESP-persisted value so the 5 *Diag tags
         // (SendDiag/SseDiag/StatusDiag/DigestDiag/LayerDiag) start emitting
@@ -298,7 +305,6 @@ class AppCore @Inject constructor(
                                     passwordId = devId,
                                 ),
                                 slim = false,
-                                serverGroupFp = devId,
                                 lastUsedAt = System.currentTimeMillis(),
                             ),
                             basicAuthPassword = "pass",

@@ -171,27 +171,22 @@ class HostViewModelTest : MainViewModelTestBase() {
 
     @Test
     fun `selectHostProfile clears the per-session message cache on cross-group switch`() = runTest {
-        // R-20 Phase 1: selectHostProfile uses a 4-step previous/target fp
-        // compare. Cache eviction (EvictGroup → clearMemoryForGroup) only
-        // fires on a CROSS-GROUP switch (previousFp != targetFp); a same-
-        // group switch keeps the cache (server-identical data). The two
-        // profiles here have explicit, distinct serverGroupFp values so the
-        // 异组 branch fires. (defaultDirect() generates random UUIDs which
+        // §需求12: every host switch is an unconditional full purge (profiles
+        // are independent — no same-group branch remains). The two profiles
+        // here have distinct ids ("default" vs "other") which is all the
+        // purge trigger needs. (defaultDirect() generates random UUIDs which
         // would also be distinct, but we mock currentProfile() to return the
-        // target BEFORE select — see below — which would collapse previousFp
-        // onto targetFp. Explicit fps + an answers-based currentProfile()
-        // holder keeps the test deterministic.)
+        // target BEFORE select — see below — so explicit ids + an answers-
+        // based currentProfile() holder keeps the test deterministic.)
         val defaultProfile = HostProfile(
             id = "default",
             name = "Default",
             serverUrl = "http://server.test",
-            serverGroupFp = "g-default"
         )
         val otherProfile = HostProfile(
             id = "other",
             name = "Other",
             serverUrl = "http://other.test",
-            serverGroupFp = "g-other"
         )
         // answers-based holder: currentProfile() returns defaultProfile UNTIL
         // select("other") is called, then returns otherProfile. This matches

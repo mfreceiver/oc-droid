@@ -29,7 +29,6 @@ class ConnectionBootstrapEngineTest {
         id = "profile",
         name = "Test",
         serverUrl = "https://server:443",
-        serverGroupFp = "group",
     )
 
     private data class Fixture(
@@ -52,7 +51,7 @@ class ConnectionBootstrapEngineTest {
         every { resolver.resolve() } returns EffectiveConnectionConfig(
             source = EffectiveConnectionSource.Profile,
             profileId = profile.id,
-            serverGroupFp = profile.serverGroupFp,
+            serverGroupFp = profile.id,
             url = profile.serverUrl,
             username = null,
             password = null,
@@ -91,7 +90,7 @@ class ConnectionBootstrapEngineTest {
         }
         coVerify(exactly = 1) { f.repository.checkHealth() }
         assertEquals(result.identity, f.store.currentIdentity.value)
-        assertEquals("group", result.identity.profileId)
+        assertEquals("profile", result.identity.profileId)
         assertEquals("/work", result.identity.normalizedWorkdir)
     }
 

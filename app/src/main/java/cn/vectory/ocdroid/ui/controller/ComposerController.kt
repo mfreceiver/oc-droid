@@ -62,7 +62,7 @@ class ComposerController(
         writeComposer { it.copy(inputText = text) }
         // R-20 Phase 5: per-(fp, sessionId) composite key — the draft is
         // scoped to the current host group + the active session.
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val fp = hostProfileStore.currentProfile().id
         store.chatFlow.value.currentSessionId?.let { settingsManager.setDraftText(fp, it, text) }
     }
 
@@ -179,7 +179,7 @@ class ComposerController(
         // R-20 Phase 5: per-(fp, sessionId) composite key for draft persistence
         // — mirrors setInputText; the new text (with the appended "File: <path>"
         // line) is what gets stored.
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val fp = hostProfileStore.currentProfile().id
         store.chatFlow.value.currentSessionId?.let { settingsManager.setDraftText(fp, it, store.composerFlow.value.inputText) }
     }
 
@@ -204,7 +204,7 @@ class ComposerController(
             )
         }
         if (removedPath != null) {
-            val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+            val fp = hostProfileStore.currentProfile().id
             store.chatFlow.value.currentSessionId?.let { settingsManager.setDraftText(fp, it, store.composerFlow.value.inputText) }
         }
     }

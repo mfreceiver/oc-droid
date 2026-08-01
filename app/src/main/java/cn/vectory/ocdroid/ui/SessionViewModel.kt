@@ -270,7 +270,7 @@ class SessionViewModel @Inject constructor(
         // pop-to-Sessions.
         if (!isCurrent) return
         if (curId != null) {
-            val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+            val fp = hostProfileStore.currentProfile().id
             settingsManager.setDraftText(fp, curId, store.composerFlow.value.inputText)
             settingsManager.flushDraftText()
         }
@@ -353,7 +353,7 @@ class SessionViewModel @Inject constructor(
         store.dispatch(AppAction.WorkdirDraftStarted(workdir = workdir))
         settingsManager.currentWorkdir = workdir
         // glm-3 🟡#1: single-read fp.
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val fp = hostProfileStore.currentProfile().id
         settingsManager.addRecentWorkdir(fp, workdir)
         // §R18 Phase 3 Wave 2 (drift #6): ephemeral directory-session prefetch
         // → viewModelScope. If the user navigates away mid-fetch the partial
@@ -376,7 +376,7 @@ class SessionViewModel @Inject constructor(
 
     fun archiveSession(sessionId: String) {
         // glm-3 🟡#1: single-read fp (was inline lambda double-read currentProfile).
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val fp = hostProfileStore.currentProfile().id
         launchSetSessionArchived(
             appScope, repository, store.slices, settingsManager, sessionId, archived = true,
             EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
@@ -389,7 +389,7 @@ class SessionViewModel @Inject constructor(
 
     fun restoreSession(sessionId: String) {
         // glm-3 🟡#1: single-read fp.
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val fp = hostProfileStore.currentProfile().id
         launchSetSessionArchived(
             appScope, repository, store.slices, settingsManager, sessionId, archived = false,
             EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
@@ -426,7 +426,7 @@ class SessionViewModel @Inject constructor(
 
     fun deleteSession(sessionId: String) {
         // glm-3 🟡#1: single-read fp.
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val fp = hostProfileStore.currentProfile().id
         launchDeleteSession(
             appScope, repository, store.slices, settingsManager, sessionId, ::selectSession,
             EventEmitter { event -> effectBus.tryEmitUiEvent(event) },

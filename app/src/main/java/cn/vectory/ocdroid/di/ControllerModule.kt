@@ -71,9 +71,8 @@ import javax.inject.Singleton
 object ControllerModule {
 
     /**
-     * R-20 Phase 1 / §需求12阶段3: zero-arg lambda returning the CURRENT
-     * host profile's profileId (renamed from `currentServerGroupFp`).
-     * Injected into every controller/helper that emits
+     * R-20 Phase 1 / §需求12: zero-arg lambda returning the CURRENT host
+     * profile's profileId. Injected into every controller/helper that emits
      * [cn.vectory.ocdroid.ui.controller.ControllerEffect.VerifyAndHydrate]
      * / [cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession]
      * / [cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictGroup] so
@@ -82,27 +81,15 @@ object ControllerModule {
      * round-3 consensus (plan §3 freegpt #3 + maxer) was "one authoritative
      * provider, not each controller re-deriving it".
      *
-     * `.ifBlank { id }` is the nonblank-invariant fallback
-     * (see [HostProfile.serverGroupFp] + [HostProfileStore.decodeProfiles]
-     * normalize step — legacy JSON that predates Phase 0 normalizes blank
-     * → id on read, so this is belt-and-braces for a corrupt row that
-     * skipped normalization).
-     *
-     * TODO §需求12阶段5: the body still reads `profile.serverGroupFp` —
-     * rename to `profile.profileId` once the HostProfile field is renamed.
-     * Under 需求12 the value is always `profile.id`, but the field read
-     * stays during the transition.
+     * §需求12: the fp is now exactly the profile's [id] (the serverGroupFp
+     * field is deleted; profiles are fully independent).
      */
     @Provides
     @Singleton
     @Named("currentProfileId")
     fun provideCurrentProfileId(
         hostProfileStore: HostProfileStore
-    ): () -> String = {
-        val profile = hostProfileStore.currentProfile()
-        // §需求12阶段3: field renamed in 阶段5; value unchanged.
-        profile.serverGroupFp.ifBlank { profile.id }
-    }
+    ): () -> String = { hostProfileStore.currentProfile().id }
 
     @Provides
     @Singleton

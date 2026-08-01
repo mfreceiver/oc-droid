@@ -200,6 +200,8 @@ class ArchiveSubtreeAuthorityPruneTest {
 
     @Test
     fun `resolveScopeKey uses profile id when serverGroupFp is blank`() {
+        // §需求12: serverGroupFp field is deleted; resolveScopeKey always
+        // returns profile.id (the former blank-fallback is now the only path).
         val profileId = "prof-uuid-1"
         val state = StoreState.initial().copy(
             host = HostState(
@@ -209,7 +211,7 @@ class ArchiveSubtreeAuthorityPruneTest {
             liveEndpointFp = "ep-fp-1",
         )
         val scope = state.resolveScopeKey()
-        assertEquals("blank serverGroupFp falls back to profile id", profileId, scope.profileId)
+        assertEquals("uses profile id", profileId, scope.profileId)
         assertEquals("endpointFp from liveEndpointFp", "ep-fp-1", scope.endpointFp)
     }
 
@@ -222,7 +224,7 @@ class ArchiveSubtreeAuthorityPruneTest {
         val state = StoreState.initial().copy(
             host = HostState(
                 hostProfiles = listOf(HostProfile(
-                    id = profileId, name = "p2", serverUrl = "http://h", serverGroupFp = "A",
+                    id = profileId, name = "p2", serverUrl = "http://h",
                 )),
                 currentHostProfileId = profileId,
             ),
@@ -240,8 +242,8 @@ class ArchiveSubtreeAuthorityPruneTest {
         val state = StoreState.initial().copy(
             host = HostState(
                 hostProfiles = listOf(
-                    HostProfile(id = otherId, name = "other", serverUrl = "http://h", serverGroupFp = "B"),
-                    HostProfile(id = currentId, name = "current", serverUrl = "http://h", serverGroupFp = "A"),
+                    HostProfile(id = otherId, name = "other", serverUrl = "http://h"),
+                    HostProfile(id = currentId, name = "current", serverUrl = "http://h"),
                 ),
                 currentHostProfileId = currentId,
             ),

@@ -1186,13 +1186,11 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         val originalProfile = cn.vectory.ocdroid.data.model.HostProfile(
             id = "host-A",
             name = "A",
-            serverUrl = "http://a",
-            serverGroupFp = "fp-A")
+            serverUrl = "http://a")
         val switchedProfile = cn.vectory.ocdroid.data.model.HostProfile(
             id = "host-B",
             name = "B",
-            serverUrl = "http://b",
-            serverGroupFp = "fp-B")
+            serverUrl = "http://b")
         every { hostProfileStore.currentProfile() } returns originalProfile
         coEvery { repository.probeLatestMessageIdForCurrent(any()) } returns
             cn.vectory.ocdroid.data.repository.ProbeResult(ok = true, messageID = "server-new", updatedAt = 200L)

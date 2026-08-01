@@ -1694,7 +1694,7 @@ internal fun AppCore.performForceRefresh(sessionId: String) {
 internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
     // capture fp once (glm-3 🟡#1 single-read) for the cache hook + the G6
     // current-workdir input.
-    val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+    val fp = hostProfileStore.currentProfile().id
     // G6 inputs: SSE coverage baseline + the live SSE workdir (drives shouldProbeCatchUp).
     val sseSnap = sessionSyncCoordinator.sseSyncStateSnapshot()
     // §P0-3 (SSE-liveness wiring): gate the coverage short-circuit on REAL SSE

@@ -205,7 +205,7 @@ class HostViewModel @Inject constructor(
      */
     fun toggleModelDisabled(providerId: String, modelId: String) {
         val profile = currentHostProfile()
-        val fp = profile.serverGroupFp.ifBlank { profile.id }
+        val fp = profile.id
         val key = "$providerId/$modelId"
         val currentlyDisabled = key in store.settingsFlow.value.disabledModels
         settingsManager.setModelDisabled(fp, providerId, modelId, disabled = !currentlyDisabled)
@@ -225,7 +225,7 @@ class HostViewModel @Inject constructor(
      */
     fun setProviderModelsEnabled(providerId: String, enabled: Boolean) {
         val profile = currentHostProfile()
-        val fp = profile.serverGroupFp.ifBlank { profile.id }
+        val fp = profile.id
         val providers = store.settingsFlow.value.providers?.providers.orEmpty()
         val provider = providers.firstOrNull { it.id == providerId } ?: return
         val current = store.settingsFlow.value.disabledModels.toMutableSet()

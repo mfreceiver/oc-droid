@@ -146,105 +146,33 @@ class HostProfileStoreTest {
         assertEquals("https://opencode.example.com", profiles.first().serverUrl)
     }
 
-    // ───────────── R-20 Phase 0: serverGroupFp nonblank invariant ─────────
-    // Legacy JSON that predates Phase 0 has no serverGroupFp field. After
-    // decode every profile MUST carry serverGroupFp == id, distinct per
-    // profile — otherwise unrelated legacy profiles collapse into a shared
-    // blank group and contaminate the cache key.
+    // ───────────── §需求12: serverGroupFp field removed ─────────────
+    // The R-20 Phase 0 `serverGroupFp` nonblank invariant + its decode-time
+    // normalization are GONE — the field is deleted (fp == id implicitly) and
+    // `ignoreUnknownKeys=true` silently drops any legacy `serverGroupFp` key
+    // in old JSON. These normalize-invariant tests were removed with the field.
 
     @Test
-    fun `legacy json without serverGroupFp normalizes each profile to its own group`() {
-        // Two pre-Phase-0 profiles — no serverGroupFp field on either.
-        val rawArray = """
-            [
-              {"id":"p-1","name":"A","serverURL":"https://a.example.com"},
-              {"id":"p-2","name":"B","serverURL":"https://b.example.com"}
-            ]
-        """.trimIndent()
-        hostProfilesJson = rawArray
-        currentHostProfileId = "p-1"
-
-        val profiles = store.profiles()
-
-        assertEquals(2, profiles.size)
-        // Every profile nonblank and equal to its id (one-member group).
-        profiles.forEach { p ->
-            assertEquals(p.id, p.serverGroupFp)
-            assertTrue(p.serverGroupFp.isNotBlank())
-        }
-        // Distinct groups — no cross-contamination.
-        val groups = profiles.map { it.serverGroupFp }.toSet()
-        assertEquals(profiles.size, groups.size)
-    }
-
-    @Test
-    fun `normalization persists so subsequent reads see nonblank groups`() {
-        hostProfilesJson = """
-            [
-              {"id":"p-1","name":"A","serverURL":"https://a.example.com"}
-            ]
-        """.trimIndent()
-
-        // First call triggers the normalize + persist.
-        store.profiles()
-        // The persisted JSON must contain the serverGroupFp field.
-        val persisted = hostProfilesJson ?: error("expected persisted JSON")
-        assertTrue("persisted JSON should carry serverGroupFp: $persisted", persisted.contains("serverGroupFp"))
-
-        // A fresh store reads back the nonblank invariant.
-        val reread = store.profiles()
-        reread.forEach { p -> assertEquals(p.id, p.serverGroupFp) }
-    }
-
-    @Test
-    fun `save guarantees nonblank serverGroupFp on disk`() {
-        // Construct a profile with blank serverGroupFp and persist via save().
-        val blank = HostProfile(
-            id = "blank-1",
-            name = "Blank",
-            serverUrl = "https://x.example.com",
-            serverGroupFp = ""
-        )
-        store.save(blank)
-
-        // Persisted JSON must NOT contain a blank serverGroupFp value.
-        val persisted = hostProfilesJson ?: error("expected persisted JSON")
-        assertFalse("persisted should normalize blank → id: $persisted",
-            persisted.contains("\"serverGroupFp\":\"\""))
-
-        // Read-back normalizes too (defense in depth).
-        val readBack = store.profiles().first { it.id == "blank-1" }
-        assertEquals("blank-1", readBack.serverGroupFp)
-    }
-
-    @Test
-    fun `duplicate creates an independent single-member group`() {
-        // Seed a profile, then duplicate — the duplicate's serverGroupFp must
-        // equal its OWN new id, NOT inherit the source's group (plan §1:
-        // duplicate ≡ import → fresh independent group).
+    fun `duplicate creates an independent profile`() {
+        // §需求12: duplicate clones config into a fresh id (fp == id, no
+        // grouping concept remains).
         val original = store.currentProfile()
         val dup = store.duplicate(original.id)
 
         assertNotEquals(original.id, dup.id)
-        assertEquals(dup.id, dup.serverGroupFp)
-        assertNotEquals(original.serverGroupFp, dup.serverGroupFp)
+        assertTrue(dup.name.contains("Copy"))
     }
 
     @Test
-    fun `imported profile starts as its own independent group`() {
+    fun `imported profile decodes successfully`() {
         val payload = """
             {"version":1,"name":"Imported","serverURL":"https://imp.example.com"}
         """.trimIndent()
 
         val imported = store.importJson(payload)
 
-        assertEquals(imported.id, imported.serverGroupFp)
-    }
-
-    @Test
-    fun `defaultDirect seeds serverGroupFp equal to id`() {
-        val p = HostProfile.defaultDirect()
-        assertEquals(p.id, p.serverGroupFp)
+        assertEquals("Imported", imported.name)
+        assertEquals("https://imp.example.com", imported.serverUrl)
     }
 
     // ───────────── R8 slim-mode foundation: serialization migration ─────
@@ -294,7 +222,6 @@ class HostProfileStoreTest {
             id = "slim-1",
             name = "Slim",
             serverUrl = "http://localhost:4097",
-            serverGroupFp = "slim-1",
             slim = true,
             mtlsEnabled = true
         )
@@ -340,38 +267,8 @@ class HostProfileStoreTest {
         assertTrue(byId["mtls-1"]!!.mtlsEnabled)
     }
 
-    // ───────────── R-20 grouping: manual A-D slots / profilesInGroup ─
-
-    @Test
-    fun `profilesInGroup returns matching profiles and ignores others`() {
-        hostProfilesJson = """
-            [
-              {"id":"a","name":"A","serverURL":"https://a.example.com","serverGroupFp":"g1"},
-              {"id":"b","name":"B","serverURL":"https://b.example.com","serverGroupFp":"g1"},
-              {"id":"c","name":"C","serverURL":"https://c.example.com","serverGroupFp":"g2"}
-            ]
-        """.trimIndent()
-
-        val g1 = store.profilesInGroup("g1")
-        assertEquals(2, g1.size)
-        assertTrue(g1.all { it.serverGroupFp == "g1" })
-        assertEquals(1, store.profilesInGroup("g2").size)
-        // Blank query never matches (the nonblank invariant forbids blank groups).
-        assertTrue(store.profilesInGroup("").isEmpty())
-    }
-
-    @Test
-    fun `export payload does not leak serverGroupFp`() {
-        val p = HostProfile(
-            id = "leak-1",
-            name = "Leak",
-            serverUrl = "https://leak.example.com",
-            serverGroupFp = "super-secret-group"
-        )
-        val exported = store.exportJson(p)
-        assertFalse("export must NOT include serverGroupFp: $exported",
-            exported.contains("super-secret-group"))
-        assertFalse("export must NOT include serverGroupFp field: $exported",
-            exported.contains("serverGroupFp"))
-    }
+    // ───────────── §需求12: profilesInGroup + serverGroupFp export tests ─────────────
+    // `profilesInGroup` was deleted (grouping concept removed under 需求12) and
+    // the `serverGroupFp` field is gone, so the "export does not leak
+    // serverGroupFp" test is vacuous. Both removed with the field.
 }

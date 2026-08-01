@@ -95,7 +95,7 @@ class ComposerViewModel @Inject constructor(
         // R-20 Phase 5: disabled-model set is now keyed by serverGroupFp (was
         // baseUrl) — two profiles reaching the same URL but in different
         // groups no longer clobber each other.
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val fp = hostProfileStore.currentProfile().id
         val key = "$providerId/$modelId"
         val currentlyDisabled = key in store.settingsFlow.value.disabledModels
         settingsManager.setModelDisabled(fp, providerId, modelId, disabled = !currentlyDisabled)
@@ -109,7 +109,7 @@ class ComposerViewModel @Inject constructor(
         // 复用 setDisabledModels 批量写入（一次 IO），避免 N 次增量写。
         // 语义：enabled=true → 移除该 provider 所有 model 的 disabled 条目（全启用）；
         //       enabled=false → 添加该 provider 所有 model 的 disabled 条目（全禁用）。
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val fp = hostProfileStore.currentProfile().id
         val providers = store.settingsFlow.value.providers?.providers.orEmpty()
         val provider = providers.firstOrNull { it.id == providerId } ?: return
         val current = store.settingsFlow.value.disabledModels.toMutableSet()

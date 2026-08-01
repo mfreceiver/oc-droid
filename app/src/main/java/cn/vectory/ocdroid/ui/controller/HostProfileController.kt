@@ -323,12 +323,11 @@ class HostProfileController(
         // RestartRequired when the user re-taps the current profile.
         if (profileId == slices.host.value.currentHostProfileId) return
         scope.launch {
-            // Step 1: snapshot previousFp BEFORE select (select's side effect
-            // makes post-select currentProfile() read the NEW profile). Used
-            // for the unconditional EvictGroup(previousFp) below.
-            // TODO §需求12阶段5: rename previousFp → previousProfileId once
-            // HostProfile.serverGroupFp field is renamed.
-            val previousFp = hostProfileStore.currentProfile().serverGroupFp
+            // Step 1: snapshot previousProfileId BEFORE select (select's side
+            // effect makes post-select currentProfile() read the NEW profile).
+            // Used for the unconditional EvictGroup(previousProfileId) below.
+            // §需求12: fp == profile.id (serverGroupFp field deleted).
+            val previousProfileId = hostProfileStore.currentProfile().id
             // C-8: host switch = restart. withHostReconfiguration(needsReconfigure=true)
             // persists selection + purges per-host state + emits RestartRequired.
             // No runtime reconfigure (configureRepositoryForProfileRaw removed),
@@ -344,7 +343,7 @@ class HostProfileController(
                 // §需求12阶段3: EvictGroup is now UNCONDITIONAL (under 需求12
                 // the former same-group branch is dead — every switch is to
                 // an independent profile). Evicts the prior profile's cache.
-                effects.emitEffect(ControllerEffect.EvictGroup(previousFp))
+                effects.emitEffect(ControllerEffect.EvictGroup(previousProfileId))
                 refreshHostProfileState()
             }
             // RestartRequired is emitted by withHostReconfiguration inside the block.

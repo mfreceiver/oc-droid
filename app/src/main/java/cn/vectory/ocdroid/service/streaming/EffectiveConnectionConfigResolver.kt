@@ -130,7 +130,7 @@ class DefaultEffectiveConnectionConfigResolver @Inject constructor(
         return EffectiveConnectionConfig(
             source = EffectiveConnectionSource.Manual,
             profileId = profile?.id,
-            serverGroupFp = profile?.serverGroupFp?.ifBlank { profile.id } ?: "manual:$url",
+            serverGroupFp = profile?.id ?: "manual:$url",
             url = url,
             username = settingsManager.username,
             password = settingsManager.password,
@@ -151,7 +151,7 @@ class DefaultEffectiveConnectionConfigResolver @Inject constructor(
         return EffectiveConnectionConfig(
             source = EffectiveConnectionSource.Profile,
             profileId = profile.id,
-            serverGroupFp = profile.serverGroupFp.ifBlank { profile.id },
+            serverGroupFp = profile.id,
             url = url,
             username = profile.basicAuth?.username,
             password = profile.basicAuth?.passwordId?.let(settingsManager::basicAuthPassword),

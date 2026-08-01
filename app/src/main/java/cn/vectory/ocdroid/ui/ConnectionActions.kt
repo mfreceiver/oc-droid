@@ -32,7 +32,8 @@ internal fun applySavedSettings(
     // `cache_migration_v1_done_<fp>` flag in EncryptedSharedPreferences.
     // Pure ESP synchronous read+write, no network. Repeated cold starts
     // skip the rewrite. See SettingsManager.migrateLegacyKeysToFp.
-    val currentFp = currentProfile.serverGroupFp.ifBlank { currentProfile.id }
+    // §需求12: fp == profile.id (serverGroupFp field deleted).
+    val currentFp = currentProfile.id
     settingsManager.migrateLegacyKeysToFp(currentFp, currentProfile.serverUrl)
 
     val password = currentProfile.basicAuth?.passwordId?.let { settingsManager.basicAuthPassword(it) }
@@ -182,7 +183,7 @@ internal fun applyReloadDisabledModelsForCurrentHost(
     // R-20 Phase 5: per-serverGroupFp (was per-baseUrl). The current profile's
     // fp isolates the disable set so two profiles reaching the same URL but in
     // different groups don't clobber each other.
-    val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+    val fp = hostProfileStore.currentProfile().id
     val set = settingsManager.getDisabledModels(fp)
     slices.mutateSettings { it.copy(disabledModels = set) }
 }

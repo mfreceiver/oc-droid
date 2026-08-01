@@ -19,7 +19,6 @@ class EffectiveConnectionConfigResolverTest {
         id = "profile-a",
         name = "Profile",
         serverUrl = "https://profile.example",
-        serverGroupFp = "group-a",
     )
 
     @Test

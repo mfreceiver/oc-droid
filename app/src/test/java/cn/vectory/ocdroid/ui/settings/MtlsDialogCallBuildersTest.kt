@@ -33,7 +33,6 @@ class MtlsDialogCallBuildersTest {
         name: String = "Localhost",
         serverUrl: String = "http://localhost:4096",
         basicAuth: BasicAuthConfig? = null,
-        serverGroupFp: String = "",
         mtlsEnabled: Boolean = false,
         clientCertId: String? = null,
     ): HostProfile = HostProfile(
@@ -41,7 +40,6 @@ class MtlsDialogCallBuildersTest {
         name = name,
         serverUrl = serverUrl,
         basicAuth = basicAuth,
-        serverGroupFp = serverGroupFp,
         mtlsEnabled = mtlsEnabled,
         clientCertId = clientCertId,
     )

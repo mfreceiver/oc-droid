@@ -5,7 +5,7 @@ import android.content.SharedPreferences
 /**
  * L4b domain split of [SettingsManager] — MODEL-MANAGEMENT domain.
  *
- * Owns the per-(serverGroupFp) model-availability catalog and disabled-model
+ * Owns the per-(profileId) model-availability catalog and disabled-model
  * set used by Settings → Model management and the chat quick-switch picker.
  *
  * §L4b ESP-key ownership: this class owns the per-fp key builders
@@ -22,10 +22,10 @@ internal class ModelPrefs(
     private val encryptedPrefs: SharedPreferences,
 ) {
     /**
-     * §model-selection / R-20 Phase 5: per-serverGroupFp disabled-model set.
+     * §model-selection / R-20 Phase 5: per-profileId disabled-model set.
      * Models the user has unchecked in Settings → Model management; those
      * entries are hidden from the chat quick-switch picker. Storage key
-     * format: `disabled_models_<serverGroupFp>` (was `disabled_models_<normalizedBaseUrl>`
+     * format: `disabled_models_<profileId>` (was `disabled_models_<normalizedBaseUrl>`
      * before Phase 5 — the URL dimension could not distinguish two profiles
      * reaching the same URL but treated as separate caches, and leaked
      * across identities sharing a URL). Stored as a StringSet whose entries
@@ -36,18 +36,18 @@ internal class ModelPrefs(
      * [MigrationHelper.migrateLegacyKeysToFp] (idempotent).
      */
     @Synchronized
-    fun getDisabledModels(serverGroupFp: String): Set<String> {
-        return encryptedPrefs.getStringSet(disabledModelsKey(serverGroupFp), emptySet()) ?: emptySet()
+    fun getDisabledModels(profileId: String): Set<String> {
+        return encryptedPrefs.getStringSet(disabledModelsKey(profileId), emptySet()) ?: emptySet()
     }
 
     /**
      * §model-selection: toggle a single model's disabled flag for
-     * [serverGroupFp]. [providerId]/[modelId] form the entry key
+     * [profileId]. [providerId]/[modelId] form the entry key
      * `"$providerId/$modelId"`.
      */
     @Synchronized
-    fun setModelDisabled(serverGroupFp: String, providerId: String, modelId: String, disabled: Boolean) {
-        val key = disabledModelsKey(serverGroupFp)
+    fun setModelDisabled(profileId: String, providerId: String, modelId: String, disabled: Boolean) {
+        val key = disabledModelsKey(profileId)
         val current = (encryptedPrefs.getStringSet(key, emptySet()) ?: emptySet()).toMutableSet()
         val entry = "$providerId/$modelId"
         if (disabled) current.add(entry) else current.remove(entry)
@@ -55,40 +55,40 @@ internal class ModelPrefs(
     }
 
     /**
-     * §bug5: bulk replace the disabled set for a serverGroupFp (used by manual
+     * §bug5: bulk replace the disabled set for a profileId (used by manual
      * refresh inherit so we don't issue N incremental writes). Entries are
      * `"$providerId/$modelId"`.
      */
     @Synchronized
-    fun setDisabledModels(serverGroupFp: String, disabledKeys: Set<String>) {
-        encryptedPrefs.edit().putStringSet(disabledModelsKey(serverGroupFp), disabledKeys).apply()
+    fun setDisabledModels(profileId: String, disabledKeys: Set<String>) {
+        encryptedPrefs.edit().putStringSet(disabledModelsKey(profileId), disabledKeys).apply()
     }
 
-    // §bug5: per-serverGroupFp model availability catalog (server-fetched full
+    // §bug5: per-profileId model availability catalog (server-fetched full
     // set) so that manual refresh can inherit disable status only for models
     // still present.
     @Synchronized
-    fun getModelAvailability(serverGroupFp: String): Set<String> {
-        return encryptedPrefs.getStringSet(modelAvailabilityKey(serverGroupFp), emptySet()) ?: emptySet()
+    fun getModelAvailability(profileId: String): Set<String> {
+        return encryptedPrefs.getStringSet(modelAvailabilityKey(profileId), emptySet()) ?: emptySet()
     }
 
     @Synchronized
-    fun setModelAvailability(serverGroupFp: String, availableKeys: Set<String>) {
-        encryptedPrefs.edit().putStringSet(modelAvailabilityKey(serverGroupFp), availableKeys).apply()
+    fun setModelAvailability(profileId: String, availableKeys: Set<String>) {
+        encryptedPrefs.edit().putStringSet(modelAvailabilityKey(profileId), availableKeys).apply()
     }
 
     /**
-     * R-20 Phase 5: clear ALL per-serverGroupFp model data (availability +
+     * R-20 Phase 5: clear ALL per-profileId model data (availability +
      * disabled) — used on异组 host switch / server-profile deletion so stale
      * data does not leak across identities. Replaces the legacy
      * `clearModelDataForUrl(baseUrl)` (URL was the wrong dimension: two
      * profiles with same URL but different group would clobber each other).
      */
     @Synchronized
-    fun clearModelDataForGroup(serverGroupFp: String) {
+    fun clearModelDataForGroup(profileId: String) {
         encryptedPrefs.edit()
-            .remove(modelAvailabilityKey(serverGroupFp))
-            .remove(disabledModelsKey(serverGroupFp))
+            .remove(modelAvailabilityKey(profileId))
+            .remove(disabledModelsKey(profileId))
             .apply()
     }
 
@@ -102,22 +102,22 @@ internal class ModelPrefs(
      * Mirrors the old inline logic in launchLoadProviders but serialized.
      */
     @Synchronized
-    fun reconcileModelData(serverGroupFp: String, availableKeys: Set<String>): Set<String> {
-        val oldDisabled = getDisabledModels(serverGroupFp)
+    fun reconcileModelData(profileId: String, availableKeys: Set<String>): Set<String> {
+        val oldDisabled = getDisabledModels(profileId)
         val inheritedDisabled = oldDisabled.intersect(availableKeys)
-        setModelAvailability(serverGroupFp, availableKeys)
-        setDisabledModels(serverGroupFp, inheritedDisabled)
+        setModelAvailability(profileId, availableKeys)
+        setDisabledModels(profileId, inheritedDisabled)
         return inheritedDisabled
     }
 
     companion object {
         /** R-20 Phase 5: per-fp disabled-models key (replaces the legacy
          *  baseUrl-keyed slot). */
-        internal fun disabledModelsKey(serverGroupFp: String): String =
-            "disabled_models_$serverGroupFp"
+        internal fun disabledModelsKey(profileId: String): String =
+            "disabled_models_$profileId"
 
         /** R-20 Phase 5: per-fp model-availability key. */
-        internal fun modelAvailabilityKey(serverGroupFp: String): String =
-            "model_availability_$serverGroupFp"
+        internal fun modelAvailabilityKey(profileId: String): String =
+            "model_availability_$profileId"
     }
 }

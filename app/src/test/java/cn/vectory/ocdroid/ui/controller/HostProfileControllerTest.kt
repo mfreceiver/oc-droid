@@ -97,19 +97,15 @@ class HostProfileControllerTest {
     private val recordedEvents = mutableListOf<UiEvent>()
 
     // Real data-class fixtures (avoid relaxed-mock proxies for value types).
-    // R-20 Phase 1: explicit serverGroupFp so the two profiles are DIFFERENT
-    // groups (selectHostProfile's 4-step异组 path needs this to fire). Without
-    // explicit fps both default to "" → same group → the purgePerHostState
-    // preserveServerGroupData branch keeps server data, breaking tests that
-    // expect the full purge (currentSessionId null, ClearSessionWindowCache
-    // emitted, etc).
-    private val profileA = HostProfile(id = "p-A", name = "Host A", serverUrl = "http://a:4096", serverGroupFp = "g-A")
+    // §需求12: explicit ids "p-A" / "p-B" so the two profiles are distinct
+    // (selectHostProfile's unconditional purge fires on any id change). fp ==
+    // id now (serverGroupFp field deleted).
+    private val profileA = HostProfile(id = "p-A", name = "Host A", serverUrl = "http://a:4096")
     private val profileB = HostProfile(
         id = "p-B",
         name = "Host B",
         serverUrl = "http://b:4096",
         basicAuth = BasicAuthConfig(username = "user-b", passwordId = "p-B"),
-        serverGroupFp = "g-B"
     )
 
     /**
@@ -642,13 +638,13 @@ class HostProfileControllerTest {
 
         // §review-fix #5: ClearSessionWindowCache was removed from
         // purgePerHostState (over-broad nuke replaced by group-scoped
-        // EvictGroup). profileA (g-A) → profileB (g-B) is cross-group →
-        // EvictGroup(g-A) fires.
+        // EvictGroup). §需求12: switching profileA (p-A) → profileB (p-B)
+        // fires EvictGroup(p-A) — the previous profile's id.
         assertEquals(
-            "EvictGroup(g-A) replaces ClearSessionWindowCache",
+            "EvictGroup(p-A) replaces ClearSessionWindowCache",
             1,
             collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
-        assertEquals("g-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().profileId)
+        assertEquals("p-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().profileId)
         // ClearSessionWindowCache is no longer emitted here.
         assertTrue(
             "ClearSessionWindowCache must NOT fire (EvictGroup handles group-scoped clear)",
@@ -835,7 +831,7 @@ class HostProfileControllerTest {
             "ClearSessionWindowCache (nuke-all) must NOT fire on cross-group switch — EvictGroup (group-scoped) handles it",
             collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().isEmpty())
         assertEquals(
-            "EvictGroup(g-A) fires for the previous group only",
+            "EvictGroup(p-A) fires for the previous profile only",
             1,
             collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
     }
@@ -853,10 +849,10 @@ class HostProfileControllerTest {
         scope.testScheduler.advanceUntilIdle()
 
         assertEquals(
-            "EvictGroup(g-A) fires unconditionally on active deletion",
+            "EvictGroup(p-A) fires unconditionally on active deletion",
             1,
             collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
-        assertEquals("g-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().profileId)
+        assertEquals("p-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().profileId)
     }
 
     // ── §fix-3 gro-1/gpt-2/glm-2: saveHostProfile mTLS live-reconfigure ──────

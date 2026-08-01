@@ -100,7 +100,6 @@ class AuthorityReducerTest {
                         id = PROFILE_ID,
                         name = "Test",
                         serverUrl = "https://test.example.com",
-                        serverGroupFp = scope.profileId,
                     )),
                 ),
                 liveEndpointFp = scope.endpointFp,

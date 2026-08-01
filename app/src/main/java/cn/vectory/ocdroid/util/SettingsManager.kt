@@ -173,20 +173,20 @@ class SettingsManager @Inject constructor(
         get() = workdirPrefs.currentWorkdir
         set(value) { workdirPrefs.currentWorkdir = value }
 
-    fun getRecentWorkdirs(serverGroupFp: String): List<String> =
-        workdirPrefs.getRecentWorkdirs(serverGroupFp)
+    fun getRecentWorkdirs(profileId: String): List<String> =
+        workdirPrefs.getRecentWorkdirs(profileId)
 
-    fun setRecentWorkdirs(serverGroupFp: String, workdirs: List<String>) =
-        workdirPrefs.setRecentWorkdirs(serverGroupFp, workdirs)
+    fun setRecentWorkdirs(profileId: String, workdirs: List<String>) =
+        workdirPrefs.setRecentWorkdirs(profileId, workdirs)
 
-    fun addRecentWorkdir(serverGroupFp: String, workdir: String) =
-        workdirPrefs.addRecentWorkdir(serverGroupFp, workdir)
+    fun addRecentWorkdir(profileId: String, workdir: String) =
+        workdirPrefs.addRecentWorkdir(profileId, workdir)
 
-    fun removeRecentWorkdir(serverGroupFp: String, workdir: String) =
-        workdirPrefs.removeRecentWorkdir(serverGroupFp, workdir)
+    fun removeRecentWorkdir(profileId: String, workdir: String) =
+        workdirPrefs.removeRecentWorkdir(profileId, workdir)
 
-    fun clearRecentWorkdirs(serverGroupFp: String) =
-        workdirPrefs.clearRecentWorkdirs(serverGroupFp)
+    fun clearRecentWorkdirs(profileId: String) =
+        workdirPrefs.clearRecentWorkdirs(profileId)
 
     // ── Appearance domain (AppearancePrefs) ────────────────────────────────
 
@@ -273,11 +273,11 @@ class SettingsManager @Inject constructor(
         get() = sessionPrefs.sessionCache
         set(value) { sessionPrefs.sessionCache = value }
 
-    fun getDraftText(serverGroupFp: String, sessionId: String): String =
-        sessionPrefs.getDraftText(serverGroupFp, sessionId)
+    fun getDraftText(profileId: String, sessionId: String): String =
+        sessionPrefs.getDraftText(profileId, sessionId)
 
-    fun setDraftText(serverGroupFp: String, sessionId: String, text: String) =
-        sessionPrefs.setDraftText(serverGroupFp, sessionId, text)
+    fun setDraftText(profileId: String, sessionId: String, text: String) =
+        sessionPrefs.setDraftText(profileId, sessionId, text)
 
     /**
      * §C1: cancels any pending debounce and writes the latest pending draft
@@ -304,23 +304,23 @@ class SettingsManager @Inject constructor(
 
     // ── Model-management domain (ModelPrefs) ────────────────────────────────
 
-    fun getDisabledModels(serverGroupFp: String): Set<String> =
-        modelPrefs.getDisabledModels(serverGroupFp)
+    fun getDisabledModels(profileId: String): Set<String> =
+        modelPrefs.getDisabledModels(profileId)
 
-    fun setModelDisabled(serverGroupFp: String, providerId: String, modelId: String, disabled: Boolean) =
-        modelPrefs.setModelDisabled(serverGroupFp, providerId, modelId, disabled)
+    fun setModelDisabled(profileId: String, providerId: String, modelId: String, disabled: Boolean) =
+        modelPrefs.setModelDisabled(profileId, providerId, modelId, disabled)
 
-    fun setDisabledModels(serverGroupFp: String, disabledKeys: Set<String>) =
-        modelPrefs.setDisabledModels(serverGroupFp, disabledKeys)
+    fun setDisabledModels(profileId: String, disabledKeys: Set<String>) =
+        modelPrefs.setDisabledModels(profileId, disabledKeys)
 
-    fun getModelAvailability(serverGroupFp: String): Set<String> =
-        modelPrefs.getModelAvailability(serverGroupFp)
+    fun getModelAvailability(profileId: String): Set<String> =
+        modelPrefs.getModelAvailability(profileId)
 
-    fun setModelAvailability(serverGroupFp: String, availableKeys: Set<String>) =
-        modelPrefs.setModelAvailability(serverGroupFp, availableKeys)
+    fun setModelAvailability(profileId: String, availableKeys: Set<String>) =
+        modelPrefs.setModelAvailability(profileId, availableKeys)
 
-    fun clearModelDataForGroup(serverGroupFp: String) =
-        modelPrefs.clearModelDataForGroup(serverGroupFp)
+    fun clearModelDataForGroup(profileId: String) =
+        modelPrefs.clearModelDataForGroup(profileId)
 
     /**
      * §需求4: atomic reconcile of the per-fp model data so a concurrent manual
@@ -330,13 +330,22 @@ class SettingsManager @Inject constructor(
      * Returns the inherited (intersected) disabled set for the caller to mirror
      * into the in-memory slice.
      */
-    fun reconcileModelData(serverGroupFp: String, availableKeys: Set<String>): Set<String> =
-        modelPrefs.reconcileModelData(serverGroupFp, availableKeys)
+    fun reconcileModelData(profileId: String, availableKeys: Set<String>): Set<String> =
+        modelPrefs.reconcileModelData(profileId, availableKeys)
 
     // ── Migration domain (MigrationHelper) ──────────────────────────────────
 
-    fun migrateLegacyKeysToFp(serverGroupFp: String, legacyBaseUrl: String) =
-        migrationHelper.migrateLegacyKeysToFp(serverGroupFp, legacyBaseUrl)
+    fun migrateLegacyKeysToFp(profileId: String, legacyBaseUrl: String) =
+        migrationHelper.migrateLegacyKeysToFp(profileId, legacyBaseUrl)
+
+    /**
+     * §需求12阶段4: one-shot purge of per-group orphan keys whose suffix is not
+     * a canonical UUID (legacy named-group A/B/C/D + legacy baseUrl-keyed slots).
+     * Idempotent via the [MigrationHelper.ORPHAN_CLEANUP_FLAG] flag. See
+     * [MigrationHelper.cleanupOrphanGroupKeys].
+     */
+    fun cleanupOrphanGroupKeys() =
+        migrationHelper.cleanupOrphanGroupKeys()
 
     // ── Cross-domain hard reset ─────────────────────────────────────────────
 

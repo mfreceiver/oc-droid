@@ -123,9 +123,7 @@ class ProfileMutationEngine internal constructor(
                 settingsManager.setBasicAuthPassword(normalized.id, "")
             }
             if (urlChanged) {
-                settingsManager.clearModelDataForGroup(
-                    normalized.serverGroupFp.ifBlank { normalized.id }
-                )
+                settingsManager.clearModelDataForGroup(normalized.id)
             }
             hostProfileStore.save(normalized)
             // lite-v2: NO configureRepositoryForProfileRaw — restart applies new settings.
@@ -205,9 +203,8 @@ class ProfileMutationEngine internal constructor(
     fun deleteHostProfile(profileId: String) {
         val wasCurrent = profileId == slices.host.value.currentHostProfileId
         val deletedProfile = hostProfileStore.profiles().firstOrNull { it.id == profileId }
-        // TODO §需求12阶段5: rename deletedFp → deletedProfileId once
-        // HostProfile.serverGroupFp field is renamed.
-        val deletedFp = deletedProfile?.serverGroupFp
+        // §需求12: fp == profile.id (the serverGroupFp field is deleted).
+        val deletedProfileId = deletedProfile?.id
         hostProfileStore.delete(profileId)
         deletedProfile?.clientCertId?.let { settingsManager.clearClientCert(it) }
         val current = hostProfileStore.currentProfile()
@@ -216,9 +213,9 @@ class ProfileMutationEngine internal constructor(
             // Repository will reconfigure on restart with the new current profile.
             // §需求12阶段3: unconditional clear + evict (no sibling profiles
             // can reference the group under 需求12).
-            deletedFp?.let { settingsManager.clearModelDataForGroup(it) }
+            deletedProfileId?.let { settingsManager.clearModelDataForGroup(it) }
             purgePerHostState()
-            deletedFp?.let {
+            deletedProfileId?.let {
                 effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
             }
             // lite-v2: RestartRequired supersedes runtime reconfigure.
@@ -232,7 +229,7 @@ class ProfileMutationEngine internal constructor(
             }
         } else {
             // Non-active deletion: still evict the deleted profile's cache.
-            deletedFp?.let {
+            deletedProfileId?.let {
                 effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
             }
         }

@@ -15,7 +15,7 @@ import kotlinx.serialization.json.Json
  *
  * Owns the cold-start session-list seeding surface: the browser-tab style
  * open-session id list, the persisted session-metadata cache, and the
- * per-(serverGroupFp, sessionId) draft text map.
+ * per-(profileId, sessionId) draft text map.
  *
  * §L4b ESP-key ownership: this class owns the [COMPOSITE_KEY_SEPARATOR]
  * constant and the [compositeSessionKey] builder used by the drafts map
@@ -31,7 +31,7 @@ import kotlinx.serialization.json.Json
  * [setDraftText] is a HOT PATH invoked on every keystroke. When
  * [debounceScope] is non-null, writes are coalesced and deferred ~500ms to
  * avoid an AES-GCM EncryptedSharedPreferences write per character. Pending
- * state is keyed by the composite `(serverGroupFp, sessionId)` so each
+ * state is keyed by the composite `(profileId, sessionId)` so each
  * session/host gets its OWN debounce timer — interleaved edits across keys
  * never clobber each other (per-key isolation). Callers that need immediate
  * persistence call [flushDraftText] (session switch / tab close /
@@ -73,7 +73,7 @@ internal class SessionPrefs(
         }
 
     /**
-     * R-20 Phase 5: per-(serverGroupFp, sessionId) draft text. The composite
+     * R-20 Phase 5: per-(profileId, sessionId) draft text. The composite
      * map key is `"<fp>\u0000<sessionId>"` (NUL separator — fp is a UUID /
      * branded string that never contains NUL, so the split is unambiguous).
      *
@@ -92,10 +92,10 @@ internal class SessionPrefs(
      * **Read-through**: always reads directly from EncryptedSharedPreferences
      * (latest committed value). The debounce only affects the write side.
      */
-    fun getDraftText(serverGroupFp: String, sessionId: String): String {
+    fun getDraftText(profileId: String, sessionId: String): String {
         val json = encryptedPrefs.getString(KEY_SESSION_DRAFTS, null) ?: return ""
         return try {
-            Json.decodeFromString<Map<String, String>>(json)[compositeSessionKey(serverGroupFp, sessionId)] ?: ""
+            Json.decodeFromString<Map<String, String>>(json)[compositeSessionKey(profileId, sessionId)] ?: ""
         } catch (e: Exception) {
             ""
         }
@@ -104,7 +104,7 @@ internal class SessionPrefs(
     // ── Draft-text debounce ──────────────────────────────────────────────
 
     /**
-     * §C1 / P1-gate-fix: per-(serverGroupFp, sessionId) pending mutations,
+     * §C1 / P1-gate-fix: per-(profileId, sessionId) pending mutations,
      * keyed by [compositeSessionKey]. Each composite key has its OWN
      * [DraftMutation] (in [pendingDrafts]) AND its OWN debounce [Job] (in
      * [debounceJobs]) so rapid writes to DIFFERENT sessions/hosts never
@@ -144,13 +144,13 @@ internal class SessionPrefs(
 
     /** §C1: coalesced pending draft mutation (one entry per composite key). */
     private data class DraftMutation(
-        val serverGroupFp: String,
+        val profileId: String,
         val sessionId: String,
         val text: String,
     )
 
     /**
-     * §C1 / P1-gate-fix: sets the draft text for `(serverGroupFp, sessionId)`.
+     * §C1 / P1-gate-fix: sets the draft text for `(profileId, sessionId)`.
      * When [debounceScope] is non-null, the ESP write is deferred ~500ms and
      * coalesces with any subsequent call FOR THE SAME composite key (rapid
      * typing produces one write per session). Writes to OTHER keys are fully
@@ -165,15 +165,15 @@ internal class SessionPrefs(
      * keys' jobs are untouched). The write-back ([performDraftWrite]) runs on
      * [debounceScope] OUTSIDE the lock.
      */
-    fun setDraftText(serverGroupFp: String, sessionId: String, text: String) {
+    fun setDraftText(profileId: String, sessionId: String, text: String) {
         val scope = debounceScope
         if (scope == null) {
             // No debounce scope → immediate write (direct construction in tests).
-            performDraftWrite(serverGroupFp, sessionId, text)
+            performDraftWrite(profileId, sessionId, text)
             return
         }
-        val compositeKey = compositeSessionKey(serverGroupFp, sessionId)
-        val mutation = DraftMutation(serverGroupFp, sessionId, text)
+        val compositeKey = compositeSessionKey(profileId, sessionId)
+        val mutation = DraftMutation(profileId, sessionId, text)
         synchronized(debounceLock) {
             pendingDrafts[compositeKey] = mutation
             // Cancel ONLY this key's prior timer; other keys keep running.
@@ -200,7 +200,7 @@ internal class SessionPrefs(
                 // pending-state lock). Its own whole-map RMW is serialized under
                 // persistLock so concurrent per-key write-backs cannot lose
                 // updates on the shared session_drafts JSON.
-                if (m != null) performDraftWrite(m.serverGroupFp, m.sessionId, m.text)
+                if (m != null) performDraftWrite(m.profileId, m.sessionId, m.text)
             }
         }
     }
@@ -232,20 +232,20 @@ internal class SessionPrefs(
         // serialized under persistLock inside performDraftWrite, so even though
         // these are sequential here, the per-key write-back jobs (running
         // concurrently on Dispatchers.Default) are also race-safe.
-        drained.forEach { performDraftWrite(it.serverGroupFp, it.sessionId, it.text) }
+        drained.forEach { performDraftWrite(it.profileId, it.sessionId, it.text) }
     }
 
     /**
      * §C1 / P1-gate-fix: mutable-freeze snapshot for testability. Returns
-     * the pending mutation for the exact `(serverGroupFp, sessionId)`
+     * the pending mutation for the exact `(profileId, sessionId)`
      * composite key without consuming it, or null when that key has nothing
      * pending.
      */
-    internal fun peekPendingDraft(serverGroupFp: String, sessionId: String): DraftMutationSnapshot? {
-        val compositeKey = compositeSessionKey(serverGroupFp, sessionId)
+    internal fun peekPendingDraft(profileId: String, sessionId: String): DraftMutationSnapshot? {
+        val compositeKey = compositeSessionKey(profileId, sessionId)
         return synchronized(debounceLock) {
             pendingDrafts[compositeKey]?.let {
-                DraftMutationSnapshot(it.serverGroupFp, it.sessionId, it.text)
+                DraftMutationSnapshot(it.profileId, it.sessionId, it.text)
             }
         }
     }
@@ -257,13 +257,13 @@ internal class SessionPrefs(
     internal fun peekAllPendingDrafts(): List<DraftMutationSnapshot> =
         synchronized(debounceLock) {
             pendingDrafts.values.map {
-                DraftMutationSnapshot(it.serverGroupFp, it.sessionId, it.text)
+                DraftMutationSnapshot(it.profileId, it.sessionId, it.text)
             }
         }
 
     /** §C1: immutable value class for exposing [DraftMutation] to tests. */
     internal data class DraftMutationSnapshot(
-        val serverGroupFp: String,
+        val profileId: String,
         val sessionId: String,
         val text: String,
     )
@@ -297,7 +297,7 @@ internal class SessionPrefs(
      *    is NEVER acquired while holding [persistLock] → single ordering, no
      *    deadlock.
      */
-    private fun performDraftWrite(serverGroupFp: String, sessionId: String, text: String) {
+    private fun performDraftWrite(profileId: String, sessionId: String, text: String) {
         synchronized(persistLock) {
             val json = encryptedPrefs.getString(KEY_SESSION_DRAFTS, null)
             val map: MutableMap<String, String> = try {
@@ -305,7 +305,7 @@ internal class SessionPrefs(
             } catch (e: Exception) {
                 mutableMapOf()
             }
-            val key = compositeSessionKey(serverGroupFp, sessionId)
+            val key = compositeSessionKey(profileId, sessionId)
             if (text.isBlank()) {
                 map.remove(key)
             } else {
@@ -328,8 +328,8 @@ internal class SessionPrefs(
         internal const val KEY_SESSION_DRAFTS = "session_drafts"
 
         /**
-         * R-20 Phase 5: separator used in the composite `(serverGroupFp,
-         * sessionId)` map key. NUL (\u0000) is chosen because serverGroupFp
+         * R-20 Phase 5: separator used in the composite `(profileId,
+         * sessionId)` map key. NUL (\u0000) is chosen because profileId
          * is a UUID / branded string (Phase 0 guarantees nonblank + the
          * HostProfile decode normalize step never produces one containing
          * NUL), so `"$fp\u0000$sessionId"` is an unambiguous reversible
@@ -344,7 +344,7 @@ internal class SessionPrefs(
          * R-20 Phase 5: builds the composite map key for per-(fp, sessionId)
          * storage (drafts / agents / models). See [COMPOSITE_KEY_SEPARATOR].
          */
-        internal fun compositeSessionKey(serverGroupFp: String, sessionId: String): String =
-            "$serverGroupFp$COMPOSITE_KEY_SEPARATOR$sessionId"
+        internal fun compositeSessionKey(profileId: String, sessionId: String): String =
+            "$profileId$COMPOSITE_KEY_SEPARATOR$sessionId"
     }
 }

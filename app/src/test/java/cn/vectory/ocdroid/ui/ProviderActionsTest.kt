@@ -58,7 +58,8 @@ class ProviderActionsTest {
         hostProfileStore = mockk(relaxed = true)
         // R-20 Phase 5: stub the profile with a fixed fp so tests can match
         // the per-fp keys (was per-baseUrl before Phase 5).
-        every { hostProfileStore.currentProfile() } returns HostProfile.defaultDirect(serverUrl = "https://h.test").copy(serverGroupFp = "fp-h-test")
+        // §需求12: fp == id (serverGroupFp field deleted), so pin the id.
+        every { hostProfileStore.currentProfile() } returns HostProfile(id = "fp-h-test", name = "h", serverUrl = "https://h.test")
         scope = TestScope(UnconfinedTestDispatcher())
     }
 

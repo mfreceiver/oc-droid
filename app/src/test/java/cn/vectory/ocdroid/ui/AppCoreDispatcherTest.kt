@@ -639,10 +639,9 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
     // (T2-C1..C4).
 
     private fun pinnedTestProfile() = cn.vectory.ocdroid.data.model.HostProfile(
-        id = "test-host",
+        id = "test-fp",
         name = "Test",
         serverUrl = "http://server.test",
-        serverGroupFp = "test-fp",
     )
 
     @Test

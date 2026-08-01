@@ -154,7 +154,7 @@ class SettingsViewModel @Inject constructor(
         // (ComposerController/ConnectionActions/SessionViewModel…).
         // The tick re-triggers on disconnectWorkdir (C1 fix).
         val profile = hostProfileStore.currentProfile()
-        val fp = profile.serverGroupFp.ifBlank { profile.id }
+        val fp = profile.id
         settingsManager.getRecentWorkdirs(fp)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
@@ -197,7 +197,7 @@ class SettingsViewModel @Inject constructor(
         val wd = workdir.trim()
         if (wd.isEmpty()) return
         val profile = hostProfileStore.currentProfile()
-        val fp = profile.serverGroupFp.ifBlank { profile.id }
+        val fp = profile.id
         appScope.launch {
             settingsManager.removeRecentWorkdir(fp, wd)
             // §grouping-rewrite Round-2 C1 (+ Round-3 N2):
@@ -240,7 +240,7 @@ class SettingsViewModel @Inject constructor(
         val wd = workdir.trim()
         if (wd.isEmpty()) return
         val profile = hostProfileStore.currentProfile()
-        val fp = profile.serverGroupFp.ifBlank { profile.id }
+        val fp = profile.id
         appScope.launch {
             settingsManager.addRecentWorkdir(fp, wd)
             // Neither addRecentWorkdir pokes hostFlow/sessionListFlow, so bump

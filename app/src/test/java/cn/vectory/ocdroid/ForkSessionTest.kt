@@ -213,7 +213,7 @@ class ForkSessionTest {
             // §P0-E(b)(c): durable-error GET drain coordinator.
             errorRecoveryCoordinator,
             // §review-fix #1: fp provider (same as MainViewModelTestBase).
-            { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
+            { hostProfileStore.currentProfile().id },
             appScope,
             // CP1 (notify Phase-0): single connection-identity store.
             identityStore,

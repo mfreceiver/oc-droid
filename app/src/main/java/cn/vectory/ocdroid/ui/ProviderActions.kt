@@ -70,7 +70,7 @@ internal fun launchLoadProviders(
                 // could observe different profiles if the user switched host
                 // between them.
                 val profile = hostProfileStore.currentProfile()
-                val fp = profile.serverGroupFp.ifBlank { profile.id }
+                val fp = profile.id
                 val newAvailableKeys = buildSet {
                     providers.providers.forEach { provider ->
                         provider.models.keys.forEach { modelId ->
