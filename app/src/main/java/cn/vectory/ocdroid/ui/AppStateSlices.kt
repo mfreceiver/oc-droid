@@ -303,6 +303,16 @@ data class SettingsState(
     // `currentAgentName = effectiveAgent` to ChatTopBar); no settings-slice
     // mirror is needed.
     val providers: ProvidersResponse? = null,
+    /**
+     * §需求13: true while a model-catalog fetch (launchLoadProviders) is in
+     * flight. Drives the Model management refresh IconButton's loading state
+     * + the per-row Switch disabled state so the user can't toggle a model
+     * whose catalog is mid-refresh. Set true at fetch start, false on
+     * success/failure/cancellation. Independent of [providers] (catalog
+     * content) — a manual refresh sets this even when providers is already
+     * non-null. Mirrors the [SessionListState.isRefreshingSessions] pattern.
+     */
+    val isLoadingProviders: Boolean = false,
     val availableCommands: List<CommandInfo> = emptyList(),
     /**
      * §model-selection: per-baseUrl disabled-model entries (format

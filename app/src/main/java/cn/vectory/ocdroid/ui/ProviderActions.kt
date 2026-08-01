@@ -38,53 +38,80 @@ internal fun launchLoadProviders(
      */
     currentProfileId: () -> String = { "" },
 ) {
+    // §需求13: flip the loading flag SYNCHRONOUSLY on the calling thread
+    // (mirrors launchLoadMessages setting isLoadingMessages at
+    // MessageActions.kt:132) so the Model management IconButton + per-row
+    // Switches disable immediately on user tap, not after the coroutine
+    // dispatches. Cleared in the `finally` below on success / failure /
+    // cancellation.
+    slices.mutateSettings { it.copy(isLoadingProviders = true) }
     scope.launch {
-        repository.getProviders()
-            .onSuccess { providers ->
-                // §需求4 host/fp guard: if the user switched host during the
-                // REST call, expectedProfileId != currentProfileId() —
-                // stale host response dropped (no write to the new host's
-                // persisted state).
-                if (expectedProfileId != currentProfileId()) return@onSuccess
-                // §R-17 M3 / batch2 step d: providers lives on the settings
-                // slice — written directly via thread-safe update.
-                //
-                // §bug5 / R-20 Phase 5 / §需求4: also reconcile the per-
-                // serverGroupFp model data against the freshly-fetched catalog
-                // so disable status is inherited ONLY for models still present
-                // on the server (was per-baseUrl before Phase 5):
-                //  1. Build the new availability set (`"$providerId/$modelId"`).
-                //  2. Atomically (§需求4: single monitor-held RMW via
-                //     [SettingsManager.reconcileModelData] →
-                //     [ModelPrefs.reconcileModelData], so a concurrent manual
-                //     model toggle cannot lose its update against this RMW):
-                //     read the previously-persisted disabled set, intersect
-                //     with the new availability (drop disabled entries that no
-                //     longer exist server-side), persist availability + the
-                //     trimmed disabled set, return the inherited disabled set.
-                //  3. Update the in-memory slice's disabledModels atomically
-                //     with providers so the UI stays consistent.
-                //
-                // §需求4: single read of currentProfile() — closes the TOCTOU
-                // where two reads (one for .serverGroupFp, one for .id fallback)
-                // could observe different profiles if the user switched host
-                // between them.
-                val profile = hostProfileStore.currentProfile()
-                val fp = profile.id
-                val newAvailableKeys = buildSet {
-                    providers.providers.forEach { provider ->
-                        provider.models.keys.forEach { modelId ->
-                            add("${provider.id}/$modelId")
+        try {
+            repository.getProviders()
+                .onSuccess { providers ->
+                    // §需求4 host/fp guard: if the user switched host during the
+                    // REST call, expectedProfileId != currentProfileId() —
+                    // stale host response dropped (no write to the new host's
+                    // persisted state). The loading flag is still cleared by
+                    // the outer `finally`.
+                    if (expectedProfileId != currentProfileId()) return@onSuccess
+                    // §R-17 M3 / batch2 step d: providers lives on the settings
+                    // slice — written directly via thread-safe update.
+                    //
+                    // §bug5 / R-20 Phase 5 / §需求4: also reconcile the per-
+                    // serverGroupFp model data against the freshly-fetched catalog
+                    // so disable status is inherited ONLY for models still present
+                    // on the server (was per-baseUrl before Phase 5):
+                    //  1. Build the new availability set (`"$providerId/$modelId"`).
+                    //  2. Atomically (§需求4: single monitor-held RMW via
+                    //     [SettingsManager.reconcileModelData] →
+                    //     [ModelPrefs.reconcileModelData], so a concurrent manual
+                    //     model toggle cannot lose its update against this RMW):
+                    //     read the previously-persisted disabled set, intersect
+                    //     with the new availability (drop disabled entries that no
+                    //     longer exist server-side), persist availability + the
+                    //     trimmed disabled set, return the inherited disabled set.
+                    //  3. Update the in-memory slice's disabledModels atomically
+                    //     with providers so the UI stays consistent.
+                    //
+                    // §需求4: single read of currentProfile() — closes the TOCTOU
+                    // where two reads (one for .serverGroupFp, one for .id fallback)
+                    // could observe different profiles if the user switched host
+                    // between them.
+                    //
+                    // §需求13: isLoadingProviders=false folded into this same
+                    // mutateSettings call (single CAS) — the `finally` below is
+                    // the canonical clearer (this is a redundant-but-harmless
+                    // early clear on the success path that minimizes the
+                    // perceived loading window by one dispatch).
+                    val profile = hostProfileStore.currentProfile()
+                    val fp = profile.id
+                    val newAvailableKeys = buildSet {
+                        providers.providers.forEach { provider ->
+                            provider.models.keys.forEach { modelId ->
+                                add("${provider.id}/$modelId")
+                            }
                         }
                     }
+                    val inheritedDisabled = settingsManager.reconcileModelData(fp, newAvailableKeys)
+                    slices.mutateSettings {
+                        it.copy(
+                            providers = providers,
+                            disabledModels = inheritedDisabled,
+                            isLoadingProviders = false,
+                        )
+                    }
                 }
-                val inheritedDisabled = settingsManager.reconcileModelData(fp, newAvailableKeys)
-                slices.mutateSettings {
-                    it.copy(providers = providers, disabledModels = inheritedDisabled)
+                .onFailure { error ->
+                    onNonFatalError("Failed to load providers", error)
                 }
-            }
-            .onFailure { error ->
-                onNonFatalError("Failed to load providers", error)
-            }
+        } finally {
+            // §需求13: clear the loading flag on EVERY exit path — success,
+            // failure (onNonFatalError above), AND CancellationException (host
+            // switch during the in-flight REST call, viewModelScope clear,
+            // etc.). MutateSettings is a CAS so this is safe even if the
+            // success path already cleared it (idempotent write of false).
+            slices.mutateSettings { it.copy(isLoadingProviders = false) }
+        }
     }
 }

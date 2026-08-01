@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.data.model.HostProfile
+import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.HostProfileController
 import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
 import cn.vectory.ocdroid.util.SettingsManager
@@ -82,6 +83,13 @@ class HostViewModel @Inject constructor(
     private val store: SharedStateStore,
     private val hostProfileController: HostProfileController,
     private val settingsManager: SettingsManager,
+    /**
+     * §需求13: needed by [refreshProviders] to emit [ControllerEffect.LoadProviders]
+     * onto the shared effect bus. Mirrors the ComposerViewModel / SessionViewModel
+     * pattern (this VM already routes cross-domain actions through the effect
+     * bus via [HostProfileController.resetLocalDataAndResync]).
+     */
+    private val effectBus: SharedEffectBus,
 ) : ViewModel() {
 
     /**
@@ -89,7 +97,7 @@ class HostViewModel @Inject constructor(
      * [SettingsViewModel.secondary constructor] rationale. Forwards the same
      * deps the production Hilt binding uses.
      */
-    internal constructor(core: AppCore) : this(core.store, core.hostProfileController, core.settingsManager)
+    internal constructor(core: AppCore) : this(core.store, core.hostProfileController, core.settingsManager, core.effectBus)
 
     val hostFlow get() = store.hostFlow
     val connectionFlow get() = store.connectionFlow
@@ -235,6 +243,23 @@ class HostViewModel @Inject constructor(
         }
         settingsManager.setDisabledModels(fp, current)
         store.mutateSettings { it.copy(disabledModels = current) }
+    }
+
+    /**
+     * §需求13: manual model-catalog refresh entry point for the Host
+     * Profiles Manager screen's Model management section. Mirrors
+     * [ComposerViewModel.refreshProviders] — emits
+     * [ControllerEffect.LoadProviders] on the shared effect bus; AppCore's
+     * dispatchEffect collector routes it to [launchLoadProviders] (sets
+     * `isLoadingProviders=true` synchronously, fetches, clears the flag in
+     * its `finally`). The Host screen's ModelManagementSection refresh
+     * IconButton is its sole call site.
+     *
+     * Failure surfaces as a UiEvent.Error snackbar via the onNonFatalError
+     * hook in AppCore's LoadProviders handler.
+     */
+    fun refreshProviders() {
+        effectBus.tryEmitEffect(ControllerEffect.LoadProviders)
     }
 
     /**

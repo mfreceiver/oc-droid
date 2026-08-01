@@ -406,6 +406,11 @@
     <string name="settings_model_management_empty">No models returned by server</string>
     <string name="settings_model_management_summary_none">%1$d</string>
     <string name="settings_model_management_summary_disabled">%1$d disabled · %2$d total</string>
+    <!-- §需求13: manual model-catalog refresh affordance. -->
+    <string name="model_management_refresh">Refresh model list</string>
+    <!-- §需求13: user-visible error when the manual / first-launch model-catalog
+         fetch fails (previously silent — only Log.w via reportNonFatalIssue). -->
+    <string name="model_management_refresh_failed">Failed to refresh model list</string>
     <string name="chat_marker_agent_prefix">Agent</string>
     <string name="chat_marker_model_prefix">Model</string>
     <string name="chat_marker_agent_switched">Switched to %1$s</string>

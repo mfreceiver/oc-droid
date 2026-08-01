@@ -521,7 +521,20 @@ class ConnectionCoordinator(
         // §R18 Phase 3 Wave 1 (P1-3 C 类): loadInitialData 五连发顺序敏感 → 保持同步 tryEmitEffect (scope.launch 包裹会破坏顺序)。
         effects.tryEmitEffect(ControllerEffect.LoadSessions)
         effects.tryEmitEffect(ControllerEffect.LoadAgents)
-        effects.tryEmitEffect(ControllerEffect.LoadProviders)
+        // §需求13: do NOT proactively fetch the model catalog on every
+        // soft-refresh / health-probe recovery / ON_RESUME. Only fetch on the
+        // TRUE first launch (providers == null) so the Model management
+        // section isn't empty before the user ever taps the manual refresh
+        // icon. Subsequent refreshes are user-driven via the Model management
+        // refresh IconButton. All 4 proactive auto-paths (ON_RESUME, sessions
+        // refresh button, ServerStatus force-refresh chain, health-probe
+        // recovery) route through this fan-out, so gating here blocks them
+        // all without per-button edits. `slices` is this controller's private
+        // SliceFlows field (same accessor as the nearby `slices.chat.value`
+        // reads + `slices.settings.value` projections).
+        if (slices.settings.value.providers == null) {
+            effects.tryEmitEffect(ControllerEffect.LoadProviders)
+        }
         effects.tryEmitEffect(ControllerEffect.LoadPendingQuestions)
         effects.tryEmitEffect(ControllerEffect.LoadPendingPermissions)
         // Same-domain inline: slash commands merged with client-side commands.

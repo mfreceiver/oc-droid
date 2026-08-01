@@ -357,6 +357,11 @@ fun SettingsModelsRoute(
         .collectAsStateWithLifecycle(initialValue = null)
     val disabledModels by remember { settingsVM.settingsFlow.map { it.disabledModels }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = emptySet())
+    // §需求13: model-catalog loading flag — drives the Model management refresh
+    // IconButton's spinner + per-row Switch disabled state. distinctUntilChanged
+    // so unrelated settings churn doesn't recompose this screen.
+    val isLoadingProviders by remember { settingsVM.settingsFlow.map { it.isLoadingProviders }.distinctUntilChanged() }
+        .collectAsStateWithLifecycle(initialValue = false)
 
     SettingsSubRouteScaffold(titleRes = R.string.settings_section_models, onBack = onBack) { mod ->
         // §review-AB: no parent horizontal padding — ModelManagementSection's
@@ -368,6 +373,8 @@ fun SettingsModelsRoute(
             ModelManagementSection(
                 providers = providers,
                 disabledModels = disabledModels,
+                isLoadingProviders = isLoadingProviders,
+                onRefreshProviders = { composerVM.refreshProviders() },
                 onToggleModelDisabled = { providerId, modelId ->
                     composerVM.toggleModelDisabled(providerId, modelId)
                 },

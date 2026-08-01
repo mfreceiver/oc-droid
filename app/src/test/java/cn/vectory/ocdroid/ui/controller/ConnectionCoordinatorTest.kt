@@ -565,6 +565,39 @@ class ConnectionCoordinatorTest {
         coVerify { repository.getCommands() }
     }
 
+    /**
+     * §需求13: the LoadProviders emit is now GATED on
+     * `slices.settings.value.providers == null` (true first-launch only).
+     * Subsequent loadInitialData calls (ON_RESUME soft-refresh, sessions
+     * refresh button, ServerStatus force-refresh chain, health-probe recovery)
+     * must NOT re-emit LoadProviders — the user refreshes via the Model
+     * management IconButton instead. The other 4 fan-out effects
+     * (LoadSessions/LoadAgents/LoadPendingQuestions/LoadPendingPermissions)
+     * stay unconditional.
+     */
+    @Test
+    fun `loadInitialData skips LoadProviders when providers already cached (需求13 first-launch gate)`() {
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        every { settingsManager.currentWorkdir } returns null
+        // §需求13: pre-populate the catalog as if a prior fetch succeeded —
+        // any non-null ProvidersResponse flips the gate to "skip".
+        slices.mutateSettings {
+            it.copy(providers = cn.vectory.ocdroid.data.model.ProvidersResponse(providers = emptyList()))
+        }
+
+        coordinator.loadInitialData()
+        runPending()
+
+        // The other four fan-outs stay unconditional.
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadSessions>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadAgents>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingQuestions>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingPermissions>().size)
+        // §需求13: LoadProviders is GATED OUT — the single high-leverage
+        // change that blocks all 4 proactive auto-fetch paths at once.
+        assertEquals(0, collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size)
+    }
+
     @Test
     fun `loadInitialData merges server commands with the client-side local commands`() {
         coEvery { repository.getCommands() } returns Result.success(

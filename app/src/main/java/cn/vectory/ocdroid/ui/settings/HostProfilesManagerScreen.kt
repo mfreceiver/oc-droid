@@ -113,6 +113,10 @@ internal fun HostProfilesManagerScreen(
         .collectAsStateWithLifecycle(initialValue = null)
     val disabledModels by remember { viewModel.settingsFlow.map { it.disabledModels }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = emptySet())
+    // §需求13: model-catalog loading flag for the Model management refresh
+    // IconButton on this screen. Same projection as SettingsModelsRoute.
+    val isLoadingProviders by remember { viewModel.settingsFlow.map { it.isLoadingProviders }.distinctUntilChanged() }
+        .collectAsStateWithLifecycle(initialValue = false)
 
     // §WT5: the host manager screen now uses the shared SettingsSubRouteScaffold
     // (same shell as every other settings sub-route) instead of a hand-rolled
@@ -192,6 +196,8 @@ internal fun HostProfilesManagerScreen(
             ModelManagementSection(
                 providers = providers,
                 disabledModels = disabledModels,
+                isLoadingProviders = isLoadingProviders,
+                onRefreshProviders = { viewModel.refreshProviders() },
                 onToggleModelDisabled = { providerId, modelId ->
                     viewModel.toggleModelDisabled(providerId, modelId)
                 },

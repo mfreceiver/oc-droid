@@ -869,6 +869,15 @@ class AppCore @Inject constructor(
             // @Named("currentProfileId") provider — single source of truth
             // for fp derivation (ControllerModule.provideCurrentProfileId),
             // equivalent to hostProfileStore.currentProfile().serverGroupFp.ifBlank { .id }.
+            //
+            // §需求13: previously the failure path was SILENT —
+            // onNonFatalError → reportNonFatalIssue → Log.w only. The user
+            // tapping the new manual refresh IconButton saw the spinner clear
+            // with no explanation. Now ALSO emit a UiEvent.Error so the
+            // SnackbarHost shows "Failed to refresh model list". reportNonFatalIssue
+            // is kept for the structured log trail; the UiEvent is the
+            // user-facing channel. Mirrors the ConnectionHealthProbe:622 +
+            // SessionListRefreshOrchestrator:256 pattern.
             launchLoadProviders(
                 scope = appScope,
                 repository = repository,
@@ -877,7 +886,10 @@ class AppCore @Inject constructor(
                 hostProfileStore = hostProfileStore,
                 expectedProfileId = currentProfileId(),
                 currentProfileId = currentProfileId,
-                onNonFatalError = { message, error -> reportNonFatalIssue(TAG, message, error) },
+                onNonFatalError = { message, error ->
+                    reportNonFatalIssue(TAG, message, error)
+                    effectBus.tryEmitUiEvent(UiEvent.Error(R.string.model_management_refresh_failed))
+                },
             )
             true
         }
