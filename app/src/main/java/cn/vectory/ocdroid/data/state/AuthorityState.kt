@@ -88,12 +88,14 @@ data class SessionEntry(
     val scopeKey: ScopeKey? = null,
     /** §3.1 BLK-2: per-sid serverRound HIGH-WATER — the lexicographically-greatest
      *  `(incarnation, turn)` ever accepted for this sid. Unlike the live [serverRound]
-     *  baseline, this watermark SURVIVES baseline clears (REST [applySnapshot],
-     *  legacy SSE busy keepRound=null, incarnation-advance scope reset) so that a
-     *  stale low-turn Tier-1 slim frame arriving AFTER the baseline was cleared is
-     *  still fenced (strict-monotonic DROP). Advanced only forward (never regressed);
-     *  a new server incarnation naturally dominates it via [ServerRound.compareTo].
-     *  Null on cold start (the first slim frame establishes the baseline). */
+     *  baseline, this watermark SURVIVES the two baseline clears (REST [applySnapshot]
+     *  + incarnation-advance scope reset — the only paths that null the live baseline;
+     *  §U-P3 legacy SSE busy no longer clears it, [keepRound] preserves the prior round)
+     *  so that a stale low-turn Tier-1 slim frame arriving AFTER the baseline was
+     *  cleared is still fenced (strict-monotonic DROP). Advanced only forward (never
+     *  regressed); a new server incarnation naturally dominates it via
+     *  [ServerRound.compareTo]. Null on cold start (the first slim frame establishes
+     *  the baseline). */
     val serverRoundHighWater: ServerRound? = null,
 )
 

@@ -78,6 +78,70 @@ class RetryQueueWireTest {
     private fun retryQueue() = slices.store.stateFlow.value.authority.retryQueue
 
     @Test
+    fun `fence DROPS stale summary when identity epoch changed between sweep-start and dispatch`() = runTest {
+        // §U-CQ5: verify the initial identityEpoch is 0L.
+        assertEquals(0L, slices.store.stateFlow.value.identityEpoch)
+        // Bump identityEpoch via mutateHost to simulate a host switch.
+        slices.store.mutateHost { it.copy(currentHostProfileId = "new-host") }
+        assertEquals(1L, slices.store.stateFlow.value.identityEpoch)
+
+        // Collect effects so we can assert ZERO dispatch across ALL side-effect
+        // paths (EvictSession / RequestPollerBackoff / ResetPollerBackoff), not
+        // just retryQueue. This locks the fence's position to BEFORE the
+        // missingSids→EvictSession loop (regression guard: moving the fence to
+        // after that loop would leak EvictSession, which this test now catches).
+        val collected = mutableListOf<ControllerEffect>()
+        val job = launch(start = CoroutineStart.UNDISPATCHED) { effects.effectsConsumed.toList(collected) }
+
+        // Construct a summary whose sweepStartEpoch (0L) != current epoch (1L)
+        // → the fence MUST DROP the entire summary (no dispatch). Non-empty
+        // missingSids + a Retry sid + retryableCount=1 so that WITHOUT the
+        // fence ALL four side-effect paths would fire (EvictSession +
+        // RequestPollerBackoff + RetryQueued). Failing-first: a fence placed
+        // too late (e.g. after the EvictSession loop) would still enqueue s1
+        // (queue non-empty) AND emit EvictSession — the old single-assertion
+        // test caught only the queue; this one catches both.
+        val staleSummary = StatusFanOutSummary(
+            perSid = mapOf("s1" to StatusOutcome.Retry("s1", null)),
+            retryableCount = 1,
+            missingSids = listOf("stale-sid"),
+            sweepStartEpoch = 0L,
+        )
+        coordinator.applySlimStatusFanOutSummary(staleSummary)
+        advanceUntilIdle()
+        job.cancel()
+
+        // §U-CQ5: DROP → zero side effects across all paths.
+        assertTrue("retryQueue empty after stale summary DROP", retryQueue().isEmpty())
+        assertTrue("no EvictSession leaked after stale summary DROP",
+            collected.none { it is ControllerEffect.EvictSession })
+        assertTrue("no RequestPollerBackoff leaked after stale summary DROP",
+            collected.none { it is ControllerEffect.RequestPollerBackoff })
+    }
+
+    @Test
+    fun `fence PASS when sweepStartEpoch matches current epoch (non-zero explicit)`() {
+        // Bump epoch first so we test with non-zero epoch (not just the default 0L path).
+        slices.store.mutateHost { it.copy(currentHostProfileId = "new-host") }
+        val currentEpoch = slices.store.stateFlow.value.identityEpoch
+        assertEquals(1L, currentEpoch)
+
+        clockNow = 5_000L
+        val summary = StatusFanOutSummary(
+            perSid = mapOf("s1" to StatusOutcome.Retry("s1", null)),
+            retryableCount = 1,
+            missingSids = emptyList(),
+            sweepStartEpoch = currentEpoch,  // explicit match → fence passes
+        )
+        coordinator.applySlimStatusFanOutSummary(summary)
+
+        // Normal dispatch: retryQueue has the entry.
+        assertEquals(1, retryQueue().size)
+        assertNotNull("s1 enqueued", retryQueue()["s1"])
+        assertEquals(1, retryQueue()["s1"]?.attempt)
+    }
+
+    @Test
     fun `retryable sweep enqueues Retry sids with attempt 1 and nominal backoff`() {
         clockNow = 5_000L
         val summary = StatusFanOutSummary(

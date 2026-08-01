@@ -1464,6 +1464,12 @@ class SessionSyncCoordinator(
     internal fun currentAuthority(): cn.vectory.ocdroid.data.state.AuthorityState =
         slices.store.stateFlow.value.authority
 
+    /** §U-CQ5 sweep-start epoch reader for the slim fan-out runner. Delegates to
+     *  [slices.store.captureIdentityEpoch] (store.stateFlow.value.identityEpoch) so
+     *  the sweep-start capture + sink-time validate + reducer guard are all
+     *  same-source (B1 fix discipline). */
+    internal fun captureStoreIdentityEpoch(): Long = slices.store.captureIdentityEpoch()
+
     /**
      * §P0-B ITEM 4: reconcile stale optimistic claims detected by the
      * watchdog. For each stale (unconfirmed, timed-out) claim, queries the
@@ -1553,6 +1559,19 @@ class SessionSyncCoordinator(
     }
 
     fun applySlimStatusFanOutSummary(summary: cn.vectory.ocdroid.service.status.StatusFanOutSummary) {
+        // §U-CQ5 sweep-start identity causal fence (backlog-cleanup): DROP the
+        // entire summary if the identity advanced between sweep-start and now.
+        // The summary's sids belong to the sweep-start host; a host switch
+        // (mutateHost bumps store.identityEpoch synchronously) invalidated every
+        // per-sid outcome. Mirrors the REST path's RequestToken.identityEpoch fence
+        // (reducer opScopeValid for ApplySnapshot). This is the MISSING causal
+        // fence identified as a pre-condition for slim fan-out activation.
+        val currentEpoch = slices.store.stateFlow.value.identityEpoch
+        if (summary.sweepStartEpoch != currentEpoch) {
+            DebugLog.w(TAG, "applySlimStatusFanOutSummary: dropped stale summary " +
+                "(sweep epoch=${summary.sweepStartEpoch}, current=$currentEpoch)")
+            return
+        }
         val fp = currentServerGroupFp()
         // T13-C3: missingSids → delete-session effect per sid. 404 and
         // fake-idle (T13-C5) both land here (folded by [foldStatusOutcomes]).
