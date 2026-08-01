@@ -5,7 +5,6 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.state.AuthorityState
 import cn.vectory.ocdroid.data.state.EntryOrigin
-import cn.vectory.ocdroid.data.state.Freshness
 import cn.vectory.ocdroid.data.state.ScopeKey
 import cn.vectory.ocdroid.data.state.SessionEntry
 import org.junit.Assert.assertEquals
@@ -50,7 +49,6 @@ class ArchiveSubtreeAuthorityPruneTest {
         serverRound = null,
         optimisticClaim = null,
         origin = EntryOrigin.REST,
-        freshness = Freshness.Fresh,
         updatedMonotonic = 0L,
         workdir = workdir,
     )
@@ -74,7 +72,7 @@ class ArchiveSubtreeAuthorityPruneTest {
                     childSid to busyEntry("/child"),
                     otherSid to SessionEntry(
                         status = idle, serverRound = null, optimisticClaim = null,
-                        origin = EntryOrigin.REST, freshness = Freshness.Fresh,
+                        origin = EntryOrigin.REST,
                         updatedMonotonic = 0L, workdir = "/other",
                     ),
                 ),
@@ -122,7 +120,7 @@ class ArchiveSubtreeAuthorityPruneTest {
                     childSid to busyEntry("/child"),
                     otherSid to SessionEntry(
                         status = idle, serverRound = null, optimisticClaim = null,
-                        origin = EntryOrigin.REST, freshness = Freshness.Fresh,
+                        origin = EntryOrigin.REST,
                         updatedMonotonic = 0L, workdir = "/other",
                     ),
                 ),
@@ -270,7 +268,7 @@ class ArchiveSubtreeAuthorityPruneTest {
                     childSid to busyEntry("/child"),
                     otherSid to SessionEntry(
                         status = idle, serverRound = null, optimisticClaim = null,
-                        origin = EntryOrigin.REST, freshness = Freshness.Fresh,
+                        origin = EntryOrigin.REST,
                         updatedMonotonic = 0L, workdir = "/other",
                     ),
                 ),
@@ -313,7 +311,7 @@ class ArchiveSubtreeAuthorityPruneTest {
                     childSid to busyEntry("/child"),
                     otherSid to SessionEntry(
                         status = idle, serverRound = null, optimisticClaim = null,
-                        origin = EntryOrigin.REST, freshness = Freshness.Fresh,
+                        origin = EntryOrigin.REST,
                         updatedMonotonic = 0L, workdir = "/other",
                     ),
                 ),

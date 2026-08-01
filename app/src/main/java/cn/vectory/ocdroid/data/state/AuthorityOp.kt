@@ -158,31 +158,6 @@ sealed interface AuthorityOp {
     ) : AuthorityOp
 
     /**
-     * §P1-C: passive-TTL aging tick. The aggregator's [freshnessJob]
-     * dispatches this on a TTL-boundary wake to age `SessionEntry.freshness`
-     * from `Fresh` → `Stale` / `Unknown` as pure authority-state bookkeeping.
-     *
-     * Purity contract (unchanged from the sealed type): carries [nowMonotonic]
-     * (captured at dispatch) so the reducer needs NO injected clock. The reducer
-     * ages each in-scope entry whose `nowMonotonic - updatedMonotonic >
-     * STATUS_TTL_MS` (30s) to `Stale`, and entries past `2 * STATUS_TTL_MS` to
-     * `Unknown`. This does NOT alter the aggregator's TTL verdict —
-     * [StatusAggregatorImpl.project] computes TTL from `sourceTimeMs`
-     * (= updatedMonotonic), not from the `freshness` field. Aging is observable
-     * bookkeeping for downstream freshness-aware logic; it bumps
-     * [StoreState.authorityRevision] only when at least one entry's freshness
-     * actually transitions (otherwise it is a no-op same-ref).
-     */
-    data class FreshnessTick(
-        val scopeKey: ScopeKey,
-        /** §P1-C aging-tick clock (captured at dispatch). §MN-P9 step 1
-         *  (U-MN9, 2026-07-31): WALL-CLOCK ms (System.currentTimeMillis() ←
-         *  StatusAggregatorImpl:634), NOT monotonic — same caveat as
-         *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic]. */
-        val nowMonotonic: Long,
-    ) : AuthorityOp
-
-    /**
      * §P1-B/E: queue a session for bounded retry. The reducer records a
      * [RetryEntry] in [AuthorityState.retryQueue] keyed by [sid]. Pure state —
      * the reducer does NOT compute backoff or schedule the retry; [backoffMs] /
@@ -200,6 +175,13 @@ sealed interface AuthorityOp {
          *  NOT monotonic — same caveat as
          *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic]. */
         val queuedMonotonic: Long,
+        /** §U-CQ5: [StoreState.identityEpoch] captured at dispatch time. The reducer's
+         *  [cn.vectory.ocdroid.ui.opScopeValid] DROPs the op when this epoch does NOT
+         *  match [StoreState.identityEpoch] (stale-identity guard — defense-in-depth
+         *  inside the pure CAS). Default 0L for backward-compat with dispatch sites
+         *  not yet migrated (they pass identityEpoch=0L → lenient pass when
+         *  state.identityEpoch is also 0L, which is the initial/empty state). */
+        val identityEpochAtCapture: Long = 0L,
     ) : AuthorityOp
 
     /**
@@ -216,6 +198,10 @@ sealed interface AuthorityOp {
          *  NOT monotonic — same caveat as
          *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic]. */
         val monotonic: Long,
+        /** §U-CQ5: [StoreState.identityEpoch] captured at dispatch time. Same guard
+         *  contract as [RetryQueued.identityEpochAtCapture]. Default 0L for
+         *  backward-compat. */
+        val identityEpochAtCapture: Long = 0L,
     ) : AuthorityOp
 }
 

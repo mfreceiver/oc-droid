@@ -549,7 +549,6 @@ class AppActionReducerTest {
                     serverRound = null,
                     optimisticClaim = null,
                     origin = cn.vectory.ocdroid.data.state.EntryOrigin.REST,
-                    freshness = cn.vectory.ocdroid.data.state.Freshness.Fresh,
                     updatedMonotonic = 0L,
                     workdir = "/p",
                 )),

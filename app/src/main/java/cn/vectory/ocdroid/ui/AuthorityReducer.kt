@@ -5,7 +5,6 @@ import cn.vectory.ocdroid.data.state.AuthorityOp
 import cn.vectory.ocdroid.data.state.AuthorityState
 import cn.vectory.ocdroid.data.state.Coverage
 import cn.vectory.ocdroid.data.state.EntryOrigin
-import cn.vectory.ocdroid.data.state.Freshness
 import cn.vectory.ocdroid.data.state.OptimisticClaim
 import cn.vectory.ocdroid.data.state.ReconcileOutcome
 import cn.vectory.ocdroid.data.state.RetryEntry
@@ -15,6 +14,9 @@ import cn.vectory.ocdroid.ui.controller.normalizeAuthoritativeStatusSnapshot
 
 /** §P1-B/E: cap on [AuthorityState.retryQueue] size (LRU eviction when exceeded). */
 private const val RETRY_QUEUE_MAX_SIZE = 256
+
+/** §U-CQ9: cap on [ChatState.pendingErrorCheck] set size (drops oldest entries when exceeded). */
+private const val PENDING_ERROR_CHECK_MAX_SIZE = 128
 
 /**
  * §P0-A (B1 option 1): the PURE authority reducer — the SINGLE writer of
@@ -56,7 +58,6 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
         is AuthorityOp.MarkSourceFailed -> applyMarkFailed(cur, op)
         is AuthorityOp.ApplyReconcileOutcome -> applyReconcile(cur, op)
         is AuthorityOp.PruneSessions -> applyPrune(cur, op)
-        is AuthorityOp.FreshnessTick -> applyFreshnessTick(cur, op)
         is AuthorityOp.RetryQueued -> applyRetryQueued(cur, op)
         is AuthorityOp.RetryFired -> applyRetryFired(cur, op)
     }
@@ -138,7 +139,7 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
         // messageId). Only real transitions (not guard-rejected no-ops that
         // returned early above) reach this copy.
         chat = state.chat.copy(
-            pendingErrorCheck = state.chat.pendingErrorCheck + transitionedToIdle,
+            pendingErrorCheck = capPendingErrorCheck(state.chat.pendingErrorCheck + transitionedToIdle),
         ),
     )
 }
@@ -217,10 +218,12 @@ private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
             true
         }
         is AuthorityOp.PurgeHost,
-        is AuthorityOp.PruneSessions,
-        is AuthorityOp.FreshnessTick,
-        is AuthorityOp.RetryQueued,
-        is AuthorityOp.RetryFired -> true
+        is AuthorityOp.PruneSessions -> true
+        // §U-CQ5: epoch guard for RetryQueued/Fired — DROP if the identity advanced
+        // between capture and this CAS. Default 0L backward-compat: passes when
+        // state.identityEpoch is also 0L (initial / empty state).
+        is AuthorityOp.RetryQueued -> op.identityEpochAtCapture == state.identityEpoch
+        is AuthorityOp.RetryFired -> op.identityEpochAtCapture == state.identityEpoch
     }
 }
 
@@ -261,39 +264,57 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
         val cmp = op.serverRound.compareTo(prev.serverRound)
         if (cmp < 0) return cur // strictly older → DROP (§3.1 line 303)
         if (cmp == 0 && op.connectionMonotonicMs < prev.updatedMonotonic) {
-            // §B9 equal-serverRound tie-break: strictly-older monotonic → DROP
+            // §U-P3 / §U-MN9: both timestamps are System.currentTimeMillis()
+            // (single wall-clock domain — sseClock() ← clock() ← currentTimeMillis,
+            // requestStartMs ← clock() ← currentTimeMillis). The pre-U-MN9 comment
+            // claiming "cross-clock-domain" was STALE and is removed. The comparison
+            // is valid; fail-closed direction preserved (drop equal+older).
             return cur
         }
     }
 
     // ── §3.1 BLK-2: baseline-cleared Tier-1 watermark guard ──
     // The lex guard above requires prev.serverRound != null. When the live baseline
-    // was cleared (REST ApplySnapshot / legacy SSE busy keepRound=null / incarnation-
-    // advance scope reset) but a Tier-1 slim frame carrying a turn arrives, the lex
-    // guard is skipped — and without this guard a stale LOW-turn frame would apply
-    // unconditionally, reviving stale busy (BLK-2 window). Compare the incoming frame
-    // against the PERSISTENT per-sid serverRound high-water (which survives the clear)
-    // and DROP a strictly-older (incarnation,turn). Reaching here means op.incarnation
-    // >= scope highWater (older incarnations were already DROPPED by the B6 guard
-    // above), so a `<` result is a same-incarnation stale-low-turn.
+    // was cleared (REST ApplySnapshot / incarnation-advance scope reset) but a Tier-1
+    // slim frame carrying a turn arrives, the lex guard is skipped — and without this
+    // guard a stale LOW-turn frame would apply unconditionally, reviving stale busy
+    // (BLK-2 window). Compare the incoming frame against the PERSISTENT per-sid
+    // serverRound high-water (which survives the clear) and DROP a strictly-older
+    // (incarnation,turn). Reaching here means op.incarnation >= scope highWater (older
+    // incarnations were already DROPPED by the B6 guard above), so a `<` result is a
+    // same-incarnation stale-low-turn.
     // prev == null / watermark == null (cold start) → no watermark → establish baseline.
     //
-    // KNOWN RESIDUAL (deliberate, documented in spec §8.1): only strictly-older `<` is
-    // DROPped, not equal-turn (mirroring §3.1 "strictly DROP low turn" and the live lex
-    // guard's equal handling). An EQUAL-turn frame arriving after a baseline clear is
-    // ACCEPTED to re-establish the baseline; this could let a buffered stale equal-turn
-    // digest revive busy. The live lex guard's `==0` monotonic-tie-break is NOT mirrored
-    // here because updatedMonotonic is set from requestStartMs (a WALL clock) on the REST
-    // ApplySnapshot path but from connectionMonotonicMs (a MONOTONIC clock) on the SSE
-    // path — a cross-clock-domain compare is meaningless (device sleep / clock skew would
-    // reorder), so mirroring now would risk a fail-open ordering bug worse than the
-    // current fail-closed equal-turn accept. The strictly-low window — the dominant,
-    // determinism-critical revival vector — is closed. Evolution: unify the clock source
-    // (monotonic everywhere) then safely mirror the `==0` tie-break (see spec §8.1 + §8.5).
+    // §U-P3: legacy SSE busy no longer clears the baseline (keepRound preserves it),
+    // so prev.serverRound==null only arises from REST applySnapshot or incarnation-
+    // advance scope reset (not legacy SSE).
+    //
+    // KNOWN RESIDUAL: only strictly-older `<` is DROPped, not equal-turn (mirroring
+    // §3.1 "strictly DROP low turn"). An EQUAL-turn frame after baseline clear is
+    // accepted (re-establishes baseline). The `==0` monotonic tie-break from the live
+    // lex guard is NOT mirrored here — both timestamps are System.currentTimeMillis()
+    // (single wall-clock domain — see §U-P3 comment at :263-265), but the equal-turn
+    // accept is a deliberate fail-closed choice: a stale equal-turn digest arriving
+    // during a brief baseline window is the lesser evil versus a fail-open rejection
+    // of a legitimate equal-turn re-establishment. The strictly-low window — the
+    // dominant, determinism-critical revival vector — is closed.
+    //
+    // §U-CQ4: the watermark is per-entry (per-sid). On entry deletion (prune / archive
+    // / REST-not-present) the watermark is lost. This is safe because incarnation is
+    // tied to the server process lifecycle — a deleted sid cannot revive under the
+    // same incarnation. See also guard kdoc at :293-298.
     if (op.serverRound != null && prev != null && prev.serverRound == null &&
         prev.serverRoundHighWater != null &&
         op.serverRound < prev.serverRoundHighWater
     ) {
+        // §U-CQ4: this guard's watermark is per-entry; on entry deletion (prune,
+        // archive, REST-not-present, applyMarkFailed, FETCH_FAILED) the watermark is
+        // lost. This is safe because incarnation is tied to the server process lifecycle
+        // — a deleted sid cannot revive under the same incarnation. If an entry is
+        // deleted and the same sid arrives with the same incarnation, prev is null and
+        // this guard is skipped (accepted). That is a known residual covered by the
+        // incarnation semantic guarantee. A per-sid map (backlog) would close this
+        // window but is not required for correct operation.
         return cur // §3.1 BLK-2: stale low-turn after baseline clear → DROP
     }
 
@@ -320,11 +341,12 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
     }
 
     // ── next entry fields ──
-    val keepRound: ServerRound? = if (op.origin == EntryOrigin.OPTIMISTIC) {
-        prev?.serverRound
-    } else {
-        op.serverRound
-    }
+    // §U-P3: a frame with no serverRound (legacy SSE busy / optimistic) MUST NOT
+    // clear the prior slim baseline — the legacy frame is causally weaker (no
+    // incarnation/turn) and clearing the baseline would reopen the BLK-2 revival
+    // window. Only a fresh slim frame (serverRound != null) or REST whole-graph
+    // replace (applySnapshot, separate path) legitimately advances/clears.
+    val keepRound: ServerRound? = op.serverRound ?: prev?.serverRound
     val nextOptimisticClaim: OptimisticClaim? = when {
         op.origin == EntryOrigin.OPTIMISTIC -> {
             val priorSeq = prev?.optimisticClaim?.clientSeq ?: 0L
@@ -372,7 +394,6 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
         serverRound = keepRound,
         optimisticClaim = nextOptimisticClaim,
         origin = op.origin,
-        freshness = Freshness.Fresh,
         updatedMonotonic = op.connectionMonotonicMs,
         workdir = op.workdir ?: prev?.workdir,
         scopeKey = op.scopeKey,
@@ -527,12 +548,22 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
             // baseline clear so a stale low-turn Tier-1 slim digest arriving after
             // this snapshot is still fenced (the live baseline is gone, but the
             // persistent watermark remembers the max turn seen for this incarnation).
+            //
+            // §U-P1: preserve an SSE-active UNCONFIRMED optimistic claim across the
+            // REST snapshot. A claim is "active" when it exists AND is unconfirmed
+            // by BOTH signals (!serverEchoed && !reconcileConfirmed) — the watchdog
+            // will reconcile it. A confirmed claim (serverEchoed || reconcileConfirmed)
+            // means the server acknowledged busy → REST snapshot legitimately resolves
+            // it (clear). Mirrors the :309-319 guardedIdleDrop protection at the
+            // applySnapshot level.
+            val preservedClaim = priorEntry?.optimisticClaim?.let { claim ->
+                if (!claim.serverEchoed && !claim.reconcileConfirmed) claim else null
+            }
             SessionEntry(
                 status = status,
                 serverRound = null,
-                optimisticClaim = null,
+                optimisticClaim = preservedClaim,  // §U-P1: was `null`
                 origin = EntryOrigin.REST,
-                freshness = Freshness.Fresh,
                 updatedMonotonic = op.requestToken.requestStartMs,
                 workdir = op.sidToWorkdir[id],
                 scopeKey = op.scopeKey,
@@ -795,45 +826,6 @@ private fun applyPrune(cur: AuthorityState, op: AuthorityOp.PruneSessions): Auth
     }
 }
 
-// ── FreshnessTick (P1-C) ────────────────────────────────────────────────────
-
-/**
- * §P1-C: passive-TTL aging. Ages each in-scope [SessionEntry]'s `freshness`
- * Fresh→Stale (>TTL) / Stale→Unknown (>2*TTL) as pure bookkeeping. Does NOT
- * touch `project()`'s TTL verdict (that uses sourceTimeMs, not freshness).
- *
- * Bumps authorityRevision only if at least one entry's freshness actually
- * changes — otherwise returns [cur] (same ref, no transition). The aggregator's
- * init-collect re-derives projections on the revision bump.
- *
- * Out-of-scope entries (non-null scopeKey != op.scopeKey) are skipped (matches
- * applyEvent/applySnapshot scope filtering).
- */
-private fun applyFreshnessTick(cur: AuthorityState, op: AuthorityOp.FreshnessTick): AuthorityState {
-    val ttlMs = 30_000L // §P1-C STATUS_TTL_MS (StatusAggregatorImpl.STATUS_TTL_MS)
-    val unknownMs = 60_000L // §P1-C 2 * STATUS_TTL_MS
-    var changed = false
-    val nextById = cur.bySid.mapValues { (_, e) ->
-        // Out-of-scope entries are never aged by this tick.
-        if (e.scopeKey != null && e.scopeKey != op.scopeKey) {
-            return@mapValues e
-        }
-        val age = op.nowMonotonic - e.updatedMonotonic
-        val target = when {
-            age > unknownMs -> Freshness.Unknown
-            age > ttlMs -> Freshness.Stale
-            else -> Freshness.Fresh
-        }
-        if (e.freshness == target) {
-            e
-        } else {
-            changed = true
-            e.copy(freshness = target)
-        }
-    }
-    return if (changed) cur.copy(bySid = nextById) else cur
-}
-
 // ── RetryQueued (P1-B/E) ──────────────────────────────────────────────────
 
 /**
@@ -921,6 +913,16 @@ internal fun applyOptimisticBumps(
         current = bumpSessionUpdated(current, sid, ts)
     }
     return current
+}
+
+/**
+ * §U-CQ9: cap the [pendingErrorCheck] set at [PENDING_ERROR_CHECK_MAX_SIZE] to
+ * prevent unbounded growth under rapid busy↔idle oscillations. Drops the OLDEST
+ * entries (first in insertion order) when the set exceeds the cap. Pure.
+ */
+private fun capPendingErrorCheck(set: Set<String>): Set<String> {
+    if (set.size <= PENDING_ERROR_CHECK_MAX_SIZE) return set
+    return set.drop(set.size - PENDING_ERROR_CHECK_MAX_SIZE).toSet()
 }
 
 /**

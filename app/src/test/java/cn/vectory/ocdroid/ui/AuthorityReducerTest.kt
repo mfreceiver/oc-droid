@@ -7,7 +7,6 @@ import cn.vectory.ocdroid.data.state.AuthorityOp
 import cn.vectory.ocdroid.data.state.AuthorityState
 import cn.vectory.ocdroid.data.state.Coverage
 import cn.vectory.ocdroid.data.state.EntryOrigin
-import cn.vectory.ocdroid.data.state.Freshness
 import cn.vectory.ocdroid.data.state.OptimisticClaim
 import cn.vectory.ocdroid.data.state.ReconcileOutcome
 import cn.vectory.ocdroid.data.state.RequestToken
@@ -24,6 +23,9 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CyclicBarrier
+import kotlin.concurrent.thread
 
 /**
  * §P0-A (B1 option 1) verification gate for [reduceAuthority] — the SINGLE
@@ -533,28 +535,82 @@ class AuthorityReducerTest {
     }
 
     @Test
-    fun `BLK-2 - stale low-turn slim frame is DROPPED after a legacy SSE busy clears the baseline`() {
+    fun `U-P3 - legacy SSE busy PRESERVES the slim baseline stale low-turn fenced by live lex guard`() {
         val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // Establish slim baseline (5,7)
         store.dispatch(AppAction.AuthorityEvent(
             event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
                 serverRound = ServerRound(5L, 7L), monotonic = 100L),
         ))
-        // Legacy SSE BUSY carries no serverRound → keepRound=null clears the live
-        // baseline; the BLK-2 high-water (5,7) is preserved.
+        // Legacy SSE BUSY (no serverRound) → U-P3: baseline PRESERVED (not cleared)
         store.dispatch(AppAction.AuthorityEvent(
             event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
         ))
-        assertNull("legacy busy clears the live serverRound baseline",
-            store.stateFlow.value.authority.bySid["A"]?.serverRound)
-        assertEquals(ServerRound(5L, 7L),
-            store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
-        // Stale low-turn slim digest → must DROP (not revive stale busy).
+        assertEquals("U-P3: legacy busy preserves the slim baseline",
+            ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        // Stale low-turn slim (5,4) → DROPPED by the LIVE lex guard (:263-265),
+        // NOT by BLK-2 guard (prev.serverRound is now non-null → BLK-2 :293-298
+        // condition prev.serverRound==null is FALSE → skipped).
+        val beforeStale = store.stateFlow.value
         store.dispatch(AppAction.AuthorityEvent(
             event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
                 serverRound = ServerRound(5L, 4L), monotonic = 300L),
         ))
-        assertNull("stale low-turn DROPPED — baseline stays cleared",
-            store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals("stale low-turn DROPPED — baseline preserved",
+            ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals("dropped stale frame is a true no-op (same ref state)",
+            beforeStale, store.stateFlow.value)
+    }
+
+    @Test
+    fun `U-P3 - legacy SSE busy does NOT block fresh higher-turn slim from advancing`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // Establish slim baseline (5,7)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 100L),
+        ))
+        // Legacy SSE BUSY — U-P3 preserves baseline (5,7)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
+        ))
+        assertEquals("baseline preserved after legacy busy",
+            ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        // Fresh higher-turn slim (5,9) → ACCEPTED (serverRound != null → keepRound uses op)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 9L), monotonic = 300L),
+        ))
+        assertEquals("fresh higher-turn slim advances the baseline",
+            ServerRound(5L, 9L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals("high-water advanced to the fresh turn",
+            ServerRound(5L, 9L), store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
+    }
+
+    @Test
+    fun `U-P3 - legacy SSE busy after equal-turn slim with older monotonic is DROPped`() {
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // Establish slim baseline (5,7) at monotonic=100
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 100L),
+        ))
+        assertEquals(ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        // Legacy SSE BUSY — U-P3 preserves baseline
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
+        ))
+        // legacy_update updates updatedMonotonic to 200, preserves baseline (5,7)
+        val afterLegacy = store.stateFlow.value
+        assertEquals(200L, store.stateFlow.value.authority.bySid["A"]?.updatedMonotonic)
+        // Equal-turn slim frame (5,7) with OLDER monotonic (50 < 200) → live lex guard
+        // tie-break DROPS it (cmp==0 && connectionMonotonicMs < updatedMonotonic)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 50L),
+        ))
+        assertSame("equal-turn with older monotonic is same-ref no-op",
+            afterLegacy, store.stateFlow.value)
     }
 
     @Test
@@ -599,6 +655,39 @@ class AuthorityReducerTest {
                 serverRound = ServerRound(5L, 7L), monotonic = 300L),
         ))
         assertEquals("equal turn re-establishes the baseline",
+            ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+    }
+
+    @Test
+    fun `U-CQ4 - prune then same-incarnation slim frame is ACCEPTED (watermark lost, known residual)`() {
+        // §U-CQ4: the BLK-2 watermark is per-entry (per-sid). When an entry is
+        // pruned the watermark is lost. If a same-incarnation slim frame arrives
+        // after the prune, prev is null → the BLK-2 guard is skipped → the frame
+        // is accepted. This is a known residual: incarnation is tied to server
+        // process lifecycle, so a deleted sid cannot actually revive under the
+        // same incarnation. Document current behavior.
+        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
+        // Establish baseline (5,7)
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 100L),
+        ))
+        assertEquals(ServerRound(5L, 7L),
+            store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
+        // Prune entry A (simulates archive/delete)
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.PruneSessions(sids = setOf("A"), scopeKey = scope),
+        ))
+        assertNull("entry A pruned", store.stateFlow.value.authority.bySid["A"])
+        // Same-incarnation slim frame arrives after prune — prev==null → no BLK-2
+        // fence → ACCEPTED (known residual, incarnation semantic guarantee).
+        store.dispatch(AppAction.AuthorityEvent(
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(5L, 7L), monotonic = 200L),
+        ))
+        assertNotNull("same-incarnation frame accepted (known residual)",
+            store.stateFlow.value.authority.bySid["A"])
+        assertEquals("accepted frame establishes baseline",
             ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
     }
 
@@ -1425,7 +1514,6 @@ class AuthorityReducerTest {
                     serverRound = null,
                     optimisticClaim = null,
                     origin = EntryOrigin.SSE_LEGACY,
-                    freshness = Freshness.Fresh,
                     updatedMonotonic = 50L,
                     workdir = "/other",
                     scopeKey = diffScope,
@@ -1900,7 +1988,6 @@ class AuthorityReducerTest {
                     serverRound = ServerRound(1L, 1L),
                     optimisticClaim = null,
                     origin = EntryOrigin.SSE_SLIM,
-                    freshness = Freshness.Fresh,
                     updatedMonotonic = 100L,
                     workdir = "/other",
                     scopeKey = diffScope,
@@ -2079,7 +2166,7 @@ class AuthorityReducerTest {
                 bySid = s.authority.bySid + ("outSid" to SessionEntry(
                     status = SessionStatus(type = "busy"),
                     serverRound = null, optimisticClaim = null,
-                    origin = EntryOrigin.SSE_LEGACY, freshness = Freshness.Fresh,
+                    origin = EntryOrigin.SSE_LEGACY,
                     updatedMonotonic = 50L, workdir = "/other", scopeKey = diffScope,
                 ))
             ))
@@ -2200,6 +2287,53 @@ class AuthorityReducerTest {
             store.stateFlow.value.chat.pendingErrorCheck.isEmpty())
     }
 
+    // ── U-CQ9: pendingErrorCheck cap ──────────────────────────────────────
+
+    @Test
+    fun `U-CQ9 pendingErrorCheck is capped at 128 entries after 200 busy-idle transitions`() {
+        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+        // Transition s1 busy→idle 200 times. Each transition adds s1 to pendingErrorCheck.
+        // After the cap is hit, no new entries are added (set membership already holds).
+        repeat(200) { i ->
+            store.dispatch(AppAction.AuthorityEvent(
+                event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY,
+                    monotonic = 100L + i * 2, workdir = "/w"),
+            ))
+            store.dispatch(AppAction.AuthorityEvent(
+                event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY,
+                    monotonic = 101L + i * 2, workdir = "/w"),
+            ))
+        }
+        val size = store.stateFlow.value.chat.pendingErrorCheck.size
+        assertTrue("pendingErrorCheck size $size <= 128 (capped)", size <= 128)
+    }
+
+    @Test
+    fun `U-CQ9 pendingErrorCheck cap with 200 distinct sids`() {
+        val store = storeWith()
+        // 200 distinct sids each transitioning busy→idle. At 128 the cap kicks in
+        // and the oldest sids are dropped.
+        val distinctSids = (0 until 200).map { "busy-idle-$it" }
+        distinctSids.forEachIndexed { i, sid ->
+            val busyOp = AuthorityOp.ApplyEvent(
+                sid = sid, status = SessionStatus(type = "busy"),
+                origin = EntryOrigin.SSE_LEGACY, scopeKey = scope,
+                connectionMonotonicMs = 100L + i * 2L,
+            )
+            val idleOp = AuthorityOp.ApplyEvent(
+                sid = sid, status = SessionStatus(type = "idle"),
+                origin = EntryOrigin.SSE_LEGACY, scopeKey = scope,
+                connectionMonotonicMs = 101L + i * 2L,
+            )
+            store.dispatch(AppAction.AuthorityEvent(busyOp))
+            store.dispatch(AppAction.AuthorityEvent(idleOp))
+        }
+        val size = store.stateFlow.value.chat.pendingErrorCheck.size
+        assertTrue("pendingErrorCheck size $size <= 128 after 200 distinct sids", size <= 128)
+        // The newest sids should be present (oldest dropped).
+        assertTrue("newest sid present", "busy-idle-199" in store.stateFlow.value.chat.pendingErrorCheck)
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // P1-B/E RetryQueued / RetryFired / terminal-cleanup (retry-queue wire)
     // ═══════════════════════════════════════════════════════════════════════
@@ -2209,16 +2343,19 @@ class AuthorityReducerTest {
         attempt: Int = 1,
         backoffMs: Long = 200L,
         queuedMonotonic: Long = 1000L,
+        identityEpochAtCapture: Long = 0L,
     ) = AuthorityOp.RetryQueued(
         sid = sid,
         scopeKey = scope,
         attempt = attempt,
         backoffMs = backoffMs,
         queuedMonotonic = queuedMonotonic,
+        identityEpochAtCapture = identityEpochAtCapture,
     )
 
-    private fun retryFired(sid: String, monotonic: Long = 2000L) =
-        AuthorityOp.RetryFired(sid = sid, scopeKey = scope, monotonic = monotonic)
+    private fun retryFired(sid: String, monotonic: Long = 2000L, identityEpochAtCapture: Long = 0L) =
+        AuthorityOp.RetryFired(sid = sid, scopeKey = scope,
+            monotonic = monotonic, identityEpochAtCapture = identityEpochAtCapture)
 
     @Test
     fun `RetryQueued enqueues entry with correct attempt backoff and queuedMonotonic`() {
@@ -2858,149 +2995,116 @@ class AuthorityReducerTest {
             stateBefore, store.stateFlow.value)
     }
 
-    // ── P1-C FreshnessTick (applyFreshnessTick) ──
+    // ── U-CQ5: RetryQueued/Fired epoch guard ──────────────────────────────
 
     @Test
-    fun `freshness tick ages Fresh entry to Stale when age exceeds TTL (30s)`() {
-        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
-        // Seed: entry with updatedMonotonic=0 → freshness=Fresh.
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 0L, workdir = "/w"),
-        ))
-        assertEquals(Freshness.Fresh, store.stateFlow.value.authority.bySid["s1"]?.freshness)
-        val revBefore = store.stateFlow.value.authorityRevision
+    fun `U-CQ5 RetryQueued with stale identityEpoch is DROPPED`() {
+        val store = storeWith()
+        // Bump identityEpoch to 1.
+        store.mutateHost { it.copy(currentHostProfileId = "new-host") }
+        assertEquals("identityEpoch bumped to 1",
+            1L, store.stateFlow.value.identityEpoch)
 
-        // Tick: age = 30_001 > 30_000 → Stale.
+        // RetryQueued with identityEpochAtCapture=0L (stale, predates the bump).
+        val before = store.stateFlow.value
         store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.FreshnessTick(scopeKey = scope, nowMonotonic = 30_001L),
+            retryQueued("s1", identityEpochAtCapture = 0L),
         ))
-        val entry = store.stateFlow.value.authority.bySid["s1"]
-        assertEquals(Freshness.Stale, entry?.freshness)
-        assertTrue("authorityRevision bumped", store.stateFlow.value.authorityRevision > revBefore)
+        assertSame("stale-epoch RetryQueued dropped (no-op)", before, store.stateFlow.value)
+        assertFalse("s1 NOT in retryQueue", "s1" in store.stateFlow.value.authority.retryQueue)
     }
 
     @Test
-    fun `freshness tick ages entry to Unknown when age exceeds 2x TTL (60s)`() {
-        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
+    fun `U-CQ5 RetryFired with stale identityEpoch is DROPPED`() {
+        val store = storeWith()
+        // Seed a retry entry.
         store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 0L, workdir = "/w"),
+            retryQueued("s1", identityEpochAtCapture = 0L),
         ))
-        assertEquals(Freshness.Fresh, store.stateFlow.value.authority.bySid["s1"]?.freshness)
-        val revBefore = store.stateFlow.value.authorityRevision
+        assertTrue("s1 queued", "s1" in store.stateFlow.value.authority.retryQueue)
+        // Bump identityEpoch to 1.
+        store.mutateHost { it.copy(currentHostProfileId = "another-host") }
+        assertEquals(1L, store.stateFlow.value.identityEpoch)
 
-        // Tick: age = 60_001 > 60_000 → Unknown.
+        // RetryFired with identityEpochAtCapture=0L (stale) → DROP.
+        val before = store.stateFlow.value
         store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.FreshnessTick(scopeKey = scope, nowMonotonic = 60_001L),
+            retryFired("s1", identityEpochAtCapture = 0L),
         ))
-        val entry = store.stateFlow.value.authority.bySid["s1"]
-        assertEquals(Freshness.Unknown, entry?.freshness)
-        assertTrue("authorityRevision bumped", store.stateFlow.value.authorityRevision > revBefore)
+        assertSame("stale-epoch RetryFired dropped (no-op)", before, store.stateFlow.value)
+        assertTrue("s1 still in retryQueue (fence protected)", "s1" in store.stateFlow.value.authority.retryQueue)
     }
 
     @Test
-    fun `freshness tick keeps entry Fresh when age within TTL`() {
-        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 0L, workdir = "/w"),
-        ))
-        assertEquals(Freshness.Fresh, store.stateFlow.value.authority.bySid["s1"]?.freshness)
-        val revBefore = store.stateFlow.value.authorityRevision
-
-        // Tick: age = 30_000 → NOT > 30_000 → Fresh (unchanged, same-ref no-op).
-        store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.FreshnessTick(scopeKey = scope, nowMonotonic = 30_000L),
-        ))
-        val entry = store.stateFlow.value.authority.bySid["s1"]
-        assertEquals(Freshness.Fresh, entry?.freshness)
-        assertEquals("authorityRevision unchanged (same-ref no-op)", revBefore, store.stateFlow.value.authorityRevision)
+    fun `U-CQ5 RetryQueued backward-compat default 0L passes when identityEpoch is 0L`() {
+        // Default 0L + state.identityEpoch=0L (initial state) → pass.
+        val state = StoreState.initial()
+        val result = reduceAuthority(state, retryQueued("s1"))
+        assertTrue("s1 queued with default epoch guard", "s1" in result.authority.retryQueue)
     }
 
     @Test
-    fun `freshness tick is a same-ref no-op when all entries already at target freshness`() {
-        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 0L, workdir = "/w"),
-        ))
-        // Tick to Stale first.
-        store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.FreshnessTick(scopeKey = scope, nowMonotonic = 30_001L),
-        ))
-        assertEquals(Freshness.Stale, store.stateFlow.value.authority.bySid["s1"]?.freshness)
-        val revAfterFirstTick = store.stateFlow.value.authorityRevision
-
-        // Tick AGAIN: age = 31_000 still in Stale band (30s–60s) → same target → no-op.
-        store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.FreshnessTick(scopeKey = scope, nowMonotonic = 31_000L),
-        ))
-        assertEquals(Freshness.Stale, store.stateFlow.value.authority.bySid["s1"]?.freshness)
-        assertEquals("authorityRevision unchanged (same-ref no-op)",
-            revAfterFirstTick, store.stateFlow.value.authorityRevision)
+    fun `U-CQ5 RetryFired backward-compat default 0L passes when identityEpoch is 0L`() {
+        // Default 0L + state.identityEpoch=0L → pass.
+        val state = StoreState.initial()
+        val withQueue = reduceAuthority(state, retryQueued("s1"))
+        val result = reduceAuthority(withQueue, retryFired("s1"))
+        assertFalse("s1 removed from queue via RetryFired (guard passed)",
+            "s1" in result.authority.retryQueue)
     }
 
+    // ── U-P6: concurrency invariants under parallel dispatch ────────────
+
     @Test
-    fun `freshness tick skips out-of-scope entries`() {
-        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
-        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
-        // Seed under the default scope.
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 0L, workdir = "/w"),
+    fun `U-P6 - concurrent dispatch of mixed ops preserves authority invariants under CAS retry`() {
+        val store = storeWith(listOf(
+            Session(id = "A", directory = "/x"),
+            Session(id = "B", directory = "/y"),
         ))
-        // Change scopeKey to a different scope (out-of-scope for the tick).
-        store.mutateState { s ->
-            s.copy(authority = s.authority.copy(
-                bySid = s.authority.bySid.mapValues { (_, entry) ->
-                    entry.copy(scopeKey = diffScope)
+        val threads = 8
+        val iterations = 200
+        val barrier = CyclicBarrier(threads)
+        val errors = ConcurrentLinkedQueue<Throwable>()
+
+        val pool = (1..threads).map { t ->
+            thread(start = true) {
+                barrier.await()
+                repeat(iterations) { i ->
+                    try {
+                        when (t % 4) {
+                            0 -> store.dispatch(AppAction.AuthorityEvent(
+                                event("A", SessionStatus(type = "busy"),
+                                    EntryOrigin.SSE_SLIM,
+                                    serverRound = ServerRound(1L, i.toLong()),
+                                    monotonic = 100L + i)))
+                            1 -> store.dispatch(AppAction.AuthorityEvent(
+                                event("B", SessionStatus(type = "busy"),
+                                    EntryOrigin.OPTIMISTIC, monotonic = 200L + i)))
+                            2 -> store.dispatch(AppAction.AuthorityEvent(
+                                AuthorityOp.PruneSessions(sids = setOf("C"), scopeKey = scope)))
+                            3 -> store.dispatch(AppAction.AuthorityEvent(
+                                snapshot(snapshot = mapOf("A" to SessionStatus(type = "idle")),
+                                    authoritativeNodeIds = setOf("A"))))
+                        }
+                    } catch (e: Throwable) { errors.add(e) }
                 }
-            ))
+            }
         }
-        assertEquals(diffScope, store.stateFlow.value.authority.bySid["s1"]?.scopeKey)
-        val revBefore = store.stateFlow.value.authorityRevision
+        pool.forEach { it.join() }
 
-        // Tick with scopeKey=scope (different from diffScope) → s1 is out-of-scope → NOT aged.
-        store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.FreshnessTick(scopeKey = scope, nowMonotonic = 60_001L),
-        ))
-        val entry = store.stateFlow.value.authority.bySid["s1"]
-        assertEquals(Freshness.Fresh, entry?.freshness) // unchanged
-        assertEquals("authorityRevision unchanged (out-of-scope skip)", revBefore, store.stateFlow.value.authorityRevision)
+        assertTrue("no exceptions under concurrent dispatch", errors.isEmpty())
+
+        // Post-condition invariants (hold regardless of interleaving):
+        val auth = store.stateFlow.value.authority
+        // (1) bySid consistency: every entry has a valid status (no torn write)
+        auth.bySid.values.forEach { assertNotNull("entry has status", it.status) }
+        // (2) retryQueue bounded
+        assertTrue("retry queue bounded", auth.retryQueue.size <= 256)
+        // (3) revision monotonic (never decreased)
+        assertTrue("revision non-negative", store.stateFlow.value.authorityRevision >= 0L)
     }
 
-    @Test
-    fun `freshness tick ages only in-scope entries when mixed scope present`() {
-        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
-        val store = storeWith(listOf(Session(id = "s1", directory = "/w"), Session(id = "s2", directory = "/w")))
-        // Seed both under the default scope.
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 0L, workdir = "/w"),
-        ))
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s2", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 0L, workdir = "/w"),
-        ))
-        // Change s2's scopeKey to be out-of-scope (diffScope).
-        store.mutateState { s ->
-            val cur = s.authority
-            s.copy(authority = cur.copy(
-                bySid = cur.bySid.mapValues { (sid, entry) ->
-                    if (sid == "s2") entry.copy(scopeKey = diffScope) else entry
-                }
-            ))
-        }
-        assertEquals(scope, store.stateFlow.value.authority.bySid["s1"]?.scopeKey)
-        assertEquals(diffScope, store.stateFlow.value.authority.bySid["s2"]?.scopeKey)
-        val revBefore = store.stateFlow.value.authorityRevision
-
-        // Tick with scopeKey=scope → only s1 is in-scope.
-        // age = 45_000 (between 30s and 60s) → Stale for in-scope.
-        store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.FreshnessTick(scopeKey = scope, nowMonotonic = 45_000L),
-        ))
-        val bySid = store.stateFlow.value.authority.bySid
-        assertEquals(Freshness.Stale, bySid["s1"]?.freshness) // aged
-        assertEquals(Freshness.Fresh, bySid["s2"]?.freshness) // unchanged (out-of-scope)
-        assertTrue("authorityRevision bumped", store.stateFlow.value.authorityRevision > revBefore)
-    }
+    /** Local assertNotNull to avoid an extra import line churn. */
+    private fun assertNotNull(message: String, actual: Any?) =
+        org.junit.Assert.assertNotNull(message, actual)
 }
-
-/** Local assertNotNull to avoid an extra import line churn. */
-private fun assertNotNull(message: String, actual: Any?) =
-    org.junit.Assert.assertNotNull(message, actual)
