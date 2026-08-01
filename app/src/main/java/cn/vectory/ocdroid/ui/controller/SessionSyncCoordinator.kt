@@ -1582,6 +1582,15 @@ class SessionSyncCoordinator(
                             sid = sid,
                             scopeKey = scopeKey,
                             monotonic = now,
+                            // §U-CQ5: capture the identity epoch at fire
+                            // dispatch. The reducer's opScopeValid DROPS the
+                            // op if the identity advanced (host switch)
+                            // between fire + CAS — defense-in-depth inside
+                            // the pure CAS on top of the poller's generation
+                            // guard. currentEpoch() reads
+                            // identityStore.currentEpoch() (0L when no store
+                            // wired — matches state.identityEpoch initial).
+                            identityEpochAtCapture = currentEpoch(),
                         ),
                     ),
                 )
@@ -1627,6 +1636,15 @@ class SessionSyncCoordinator(
                             attempt = prevAttempt + 1,
                             backoffMs = nominalBackoffMs,
                             queuedMonotonic = now,
+                            // §U-CQ5: capture the identity epoch at queue
+                            // dispatch. The reducer's opScopeValid DROPS the
+                            // op if the identity advanced (host switch)
+                            // between queue + CAS — defense-in-depth inside
+                            // the pure CAS on top of the poller's generation
+                            // guard. (The reducer-side enforcement is Lane 1's
+                            // responsibility; this dispatch site only carries
+                            // the value.)
+                            identityEpochAtCapture = currentEpoch(),
                         ),
                     ),
                 )
