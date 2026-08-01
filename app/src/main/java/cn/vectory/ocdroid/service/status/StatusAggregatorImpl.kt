@@ -300,7 +300,8 @@ class StatusAggregatorImpl internal constructor(
      * adapter method (synchronous B4-b read) AND the [freshnessJob] TTL
      * wake-up.
      */
-    private fun publishFromState(state: StoreState) {
+    @Suppress("unused")
+    internal fun publishFromState(state: StoreState) {
         synchronized(publishLock) {
             val rev = state.authorityRevision
             if (rev < maxPublishedRevision) return
