@@ -509,10 +509,15 @@
     <!-- §sse-disabled-debug-toggle: REST-only degraded mode (debug flag sse_disabled=true). -->
     <string name="chat_phase_sse_disabled">SSE disabled (REST-only)</string>
 
-    <!-- §sse-feedback-ux (P2-1): in-chat disconnect banner. Surfaces a sustained
-         SSE disconnect (or a debug REST-only mode) with an elapsed-time label +
-         a Refresh action. The banner reuses common_refresh for its button. -->
-    <string name="sse_feedback_disconnected_title">Live updates paused</string>
+    <!-- §sse-feedback-ux (§1.x batch4): in-chat disconnect banner with 4
+         semantic categories. REST_OUTAGE / AUTH_FAILURE = error (red);
+         SSE_STALLED / USER_DISABLED = info (calm). The duration labels
+         (disconnected_now/minutes/hours) are reused by REST_OUTAGE and
+         AUTH_FAILURE subtitles. -->
+    <string name="sse_feedback_rest_outage_title">Can\'t reach server</string>
+    <string name="sse_feedback_auth_failure_title">Certificate or credential error</string>
+    <string name="sse_feedback_sse_stalled_title">Waiting for live updates</string>
+    <string name="sse_feedback_sse_stalled_subtitle">Live updates haven\'t arrived yet</string>
     <string name="sse_feedback_disconnected_now">Disconnected · just now</string>
     <string name="sse_feedback_disconnected_minutes">Disconnected · %1$d min ago</string>
     <string name="sse_feedback_disconnected_hours">Disconnected · %1$d h ago</string>

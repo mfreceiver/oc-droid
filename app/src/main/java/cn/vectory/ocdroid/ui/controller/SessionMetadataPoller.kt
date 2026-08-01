@@ -3,6 +3,8 @@ package cn.vectory.ocdroid.ui.controller
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.di.UiApplicationScope
+import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.MainViewModelTimings
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.mergeRefreshedSessionsPreservingLocalActivity
@@ -13,7 +15,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -21,11 +22,15 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Slim fallback: polls session metadata (including titles) every 30s when
- * foregrounded + connected, to compensate for the slim protocol's lack of
- * title-bearing session.updated events. Merges via
- * [mergeRefreshedSessionsPreservingLocalActivity] (fresher-wins) so this
- * NEVER conflicts with SSE-driven session list updates.
+ * §需求10 §2.2: polls session metadata (including titles) when foregrounded AND
+ * either connected (SSE healthy — baseline 30s) OR SSE is effectively down
+ * (fallback REST poll with exponential backoff 10s→20s→40s→60s).  Merges via
+ * [mergeRefreshedSessionsPreservingLocalActivity] (fresher-wins) so this NEVER
+ * conflicts with SSE-driven session list updates.
+ *
+ * Host-identity guard via [ConnectionIdentityStore.commitIfCurrent] (§2.3,
+ * §design-contract §0.2): a host switch during the poll's network call atomically
+ * prevents the stale snapshot from committing to the new host's session list.
  */
 @Singleton
 class SessionMetadataPoller @Inject constructor(
@@ -33,20 +38,39 @@ class SessionMetadataPoller @Inject constructor(
     @UiApplicationScope private val scope: CoroutineScope,
     private val repository: OpenCodeRepository,
     private val store: SharedStateStore,
+    private val identityStore: ConnectionIdentityStore,
 ) {
     private var pollJob: Job? = null
     @Volatile
-    private var pollGeneration = 0L
+    private var currentPollMode: PollMode? = null
+    private var fallbackBackoffMs = FALLBACK_POLL_INITIAL_MS
 
     init {
         combine(
             appLifecycleMonitor.isInForeground,
-            store.connectionFlow.map { it.isConnected },
-        ) { foreground, connected -> foreground && connected }
+            store.connectionFlow,
+            store.sseConnectedFlow,
+        ) { foreground, conn, sseConnected ->
+            if (!foreground) null
+            else {
+                val sseEffectivelyDown =
+                    (conn.connectionPhase is ConnectionPhase.Connected && !sseConnected) ||
+                    conn.connectionPhase is ConnectionPhase.Disconnected
+                when {
+                    conn.isConnected && !sseEffectivelyDown -> PollMode.BASELINE
+                    sseEffectivelyDown -> PollMode.FALLBACK
+                    else -> null
+                }
+            }
+        }
             .distinctUntilChanged()
-            .onEach { shouldPoll ->
-                pollGeneration++
-                if (shouldPoll) startPolling() else stopPolling()
+            .onEach { mode ->
+                currentPollMode = mode
+                // §2.2: reset exponential backoff on return to baseline (SSE recovered)
+                if (mode == PollMode.BASELINE) {
+                    fallbackBackoffMs = FALLBACK_POLL_INITIAL_MS
+                }
+                if (mode != null) startPolling() else stopPolling()
             }
             .launchIn(scope)
     }
@@ -56,7 +80,16 @@ class SessionMetadataPoller @Inject constructor(
         pollJob = scope.launch {
             while (isActive) {
                 poll()
-                delay(SESSION_METADATA_POLL_INTERVAL_MS)
+                val delayMs = when (currentPollMode) {
+                    PollMode.BASELINE -> SESSION_METADATA_POLL_INTERVAL_MS
+                    PollMode.FALLBACK -> {
+                        val d = fallbackBackoffMs
+                        fallbackBackoffMs = (d * 2).coerceAtMost(FALLBACK_POLL_MAX_MS)
+                        d
+                    }
+                    null -> return@launch
+                }
+                delay(delayMs)
             }
         }
     }
@@ -67,24 +100,33 @@ class SessionMetadataPoller @Inject constructor(
     }
 
     private suspend fun poll() {
+        val mode = currentPollMode ?: return
         if (!appLifecycleMonitor.isInForeground.value) return
-        if (!store.connectionFlow.value.isConnected) return
 
-        val generation = pollGeneration   // capture the generation before network call
+        // §2.3 (§design-contract §0.2): capture identity BEFORE the network call
+        // so commitIfCurrent can atomically guard the commit against a host switch.
+        val cap = identityStore.capture()
+
+        // §2.2: in baseline mode, skip if connection dropped during the capture
+        if (mode == PollMode.BASELINE && !store.connectionFlow.value.isConnected) return
+
         val refreshed = repository.getSessions(MainViewModelTimings.sessionFullLoadLimit)
             .getOrElse {
                 DebugLog.w(TAG, "getSessions failed: ${it.message}")
                 return
             }
 
-        // Long RTT guard: re-check foreground + connected after network call
+        // Long RTT guard: re-check foreground + mode after network call
         if (!appLifecycleMonitor.isInForeground.value) return
-        if (!store.connectionFlow.value.isConnected) return
+        if (currentPollMode == null) return
+        if (mode == PollMode.BASELINE && !store.connectionFlow.value.isConnected) return
 
-        store.mutateSessionList { current ->
-            // Atomic backstop: if gate changed during the poll's lifetime, skip commit
-            if (generation != pollGeneration) current
-            else {
+        // §2.3: authoritative host-identity guard — commitIfCurrent replaces
+        // the old pollGeneration atomic backstop (§design-contract §2.3).
+        // Runs the mutation atomically under identityStore's lock, mutually
+        // exclusive with beginReconfigure().
+        val committed = identityStore.commitIfCurrent(cap.identity, cap.epoch) {
+            store.mutateSessionList { current ->
                 // §title-sync-fix (rev-gpt reviewed): patch ONLY title for
                 // existing entries in each directory bucket — do NOT run the
                 // full merge. `refreshed` is a global cross-directory snapshot;
@@ -114,10 +156,17 @@ class SessionMetadataPoller @Inject constructor(
                 )
             }
         }
+        if (!committed) {
+            DebugLog.d(TAG, "poll: identity superseded (host switched), dropping stale snapshot")
+        }
     }
+
+    private enum class PollMode { BASELINE, FALLBACK }
 
     private companion object {
         private const val SESSION_METADATA_POLL_INTERVAL_MS = 30_000L
+        private const val FALLBACK_POLL_INITIAL_MS = 10_000L
+        private const val FALLBACK_POLL_MAX_MS = 60_000L
         private const val TAG = "SessionMetadataPoller"
     }
 }

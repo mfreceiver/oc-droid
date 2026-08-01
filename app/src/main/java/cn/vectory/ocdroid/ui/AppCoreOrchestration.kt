@@ -1184,6 +1184,16 @@ internal const val SSE_FEEDBACK_TICK_MS = 30_000L
  *                          "live updates are off" instead of looking broken.
  *  - [Idle]              — no connection activity (initial / clean reset).
  */
+/**
+ * §sse-feedback-ux (§1.1): semantic category for the in-chat banner. Pure
+ * derivation — what to show, separate from when to show it (handled by
+ * [BannerHysteresisState] / [bannerHysteresisReducer]).
+ *
+ * Priority: AUTH_FAILURE (more specific/actionable) wins over REST_OUTAGE when
+ * [ConnectionState.mtlsDegradedError] is non-null.
+ */
+internal enum class BannerCategory { REST_OUTAGE, AUTH_FAILURE, SSE_STALLED, USER_DISABLED }
+
 sealed interface SseConnectionFeedback {
     data object Live : SseConnectionFeedback
     data object WaitingForStream : SseConnectionFeedback
@@ -1215,6 +1225,10 @@ internal fun deriveSseConnectionFeedback(
     disconnectedSince: Long?,
     sseConnected: Boolean,
     now: Long,
+    /** §1.1: mTLS cert/credential degradation — null = no auth issue.
+     *  Read by [SseConnectionFeedback.bannerCategory] for AUTH_FAILURE / REST_OUTAGE
+     *  disambiguation. Kept as a param so this function stays PURE. */
+    mtlsDegradedError: String? = null,
 ): SseConnectionFeedback = when (phase) {
     ConnectionPhase.Idle -> SseConnectionFeedback.Idle
     ConnectionPhase.Connecting -> SseConnectionFeedback.Connecting
@@ -1227,15 +1241,214 @@ internal fun deriveSseConnectionFeedback(
     ConnectionPhase.SseDisabled -> SseConnectionFeedback.Disabled
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// §sse-feedback-ux (§1.3): Banner hysteresis — grace / min-display / recover-hide
+// anti-flash reducer. Separates "WHAT to show" (pure [bannerCategory]) from
+// "WHEN to show" (stateful hysteresis with a controllable clock).
+// ════════════════════════════════════════════════════════════════════════════
+
 /**
- * §sse-feedback-ux: should the in-chat banner be shown for this feedback?
- * True ONLY for a sustained terminal disconnect or a user-chosen REST-only
- * mode — the transient / healthy / decision-pending variants stay silent so
- * the banner never cries wolf on a brief network blip or while the TOFU dialog
+ * §1.3: Tunable timing parameters for the banner hysteresis reducer.
+ * These are ANTI-FLASH constants, NOT data-recovery thresholds (do NOT
+ * reuse [SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS]).
+ *
+ * @param showGraceMs       disconnect must sustain this long before showing
+ *                          (transient blip → never shown). Default 5s.
+ * @param minDisplayMs      once shown, must remain visible at least this long
+ *                          (anti one-frame flash). Default 3s.
+ * @param recoverHideDelayMs after recovery, delay this long before hiding
+ *                          (anti flapping on intermittent connectivity).
+ *                          Default 5s.
+ */
+internal data class BannerHysteresisConfig(
+    val showGraceMs: Long = 5_000L,
+    val minDisplayMs: Long = 3_000L,
+    val recoverHideDelayMs: Long = 5_000L,
+)
+
+/**
+ * §1.3: UI-facing visibility — what the banner composable reads.
+ * [Hidden] = render nothing; [Showing] = render with the given category.
+ */
+internal sealed class BannerVisibility {
+    data object Hidden : BannerVisibility()
+    data class Showing(val category: BannerCategory, val sinceMs: Long) : BannerVisibility()
+}
+
+/**
+ * §1.3: Internal phase of the hysteresis state machine. Tracks intermediate
+ * states (PendingShow/PendingHide) that are invisible to the UI but carry
+ * timing information for the reducer transitions.
+ */
+internal sealed class BannerHysteresisPhase {
+    data object Hidden : BannerHysteresisPhase()
+    data class PendingShow(val category: BannerCategory, val atMs: Long) : BannerHysteresisPhase()
+    data class Showing(val category: BannerCategory, val sinceMs: Long) : BannerHysteresisPhase()
+    data class PendingHide(
+        val category: BannerCategory,
+        val atMs: Long,
+        val sinceMs: Long,
+    ) : BannerHysteresisPhase()
+}
+
+/**
+ * §1.3: Combined state of the hysteresis reducer. [visibility] is what the UI
+ * checks; [phase] is the internal machine state that drives transitions.
+ */
+internal data class BannerHysteresisState(
+    val visibility: BannerVisibility = BannerVisibility.Hidden,
+    internal val phase: BannerHysteresisPhase = BannerHysteresisPhase.Hidden,
+)
+
+/**
+ * §1.3: Pure hysteresis state-machine reducer. Drives the "when to show"
+ * logic with grace / min-display / recover-hide delay, independent of the
+ * "what category" logic ([bannerCategory]).
+ *
+ * State machine transitions (implemented exactly — this is the anti-flash contract):
+ *
+ * ```
+ * Hidden        + category!=null          → PendingShow(now)               // grace starts; NOT visible
+ * PendingShow   + category!=null & now≥at+grace → Showing(category,now)   // grace elapses → visible
+ * PendingShow   + category==null          → Hidden                         // recovered within grace: never shown
+ * PendingShow   + category!=null & now<at+grace → PendingShow(category,at) // stay in grace, update category
+ * Showing       + category!=null          → Showing(category,since)        // stay; update category
+ * Showing       + category==null & now≥since+minDisplay → PendingHide(now) // min-display met, start hide delay
+ * Showing       + category==null & now<since+minDisplay → Showing         // min-display NOT met: keep showing
+ * PendingHide   + category!=null          → Showing(category,since)       // re-show (anti flap)
+ * PendingHide   + category==null & now≥at+recoverDelay → Hidden
+ * PendingHide   + category==null & now<at+recoverDelay → PendingHide
+ * ```
+ *
+ * Inject a controllable [now] clock for testability. Pure — no side effects.
+ *
+ * @param prev    previous state.
+ * @param category current banner category (null = not banner-worthy right now).
+ * @param now     current wall-clock ms (injected for testability).
+ * @param config  timing parameters.
+ */
+internal fun bannerHysteresisReducer(
+    prev: BannerHysteresisState,
+    category: BannerCategory?,
+    now: Long,
+    config: BannerHysteresisConfig = BannerHysteresisConfig(),
+): BannerHysteresisState {
+    val nextPhase: BannerHysteresisPhase = when (val p = prev.phase) {
+        is BannerHysteresisPhase.Hidden -> {
+            if (category != null) {
+                BannerHysteresisPhase.PendingShow(category = category, atMs = now)
+            } else {
+                BannerHysteresisPhase.Hidden
+            }
+        }
+
+        is BannerHysteresisPhase.PendingShow -> {
+            if (category == null) {
+                // Recovered within grace — never shown
+                BannerHysteresisPhase.Hidden
+            } else if (now >= p.atMs + config.showGraceMs) {
+                // Grace elapsed → promote to Showing
+                BannerHysteresisPhase.Showing(category = category, sinceMs = now)
+            } else {
+                // Still within grace period — stay PendingShow, update category
+                BannerHysteresisPhase.PendingShow(category = category, atMs = p.atMs)
+            }
+        }
+
+        is BannerHysteresisPhase.Showing -> {
+            if (category != null) {
+                // Stay showing; update category if changed (REST_OUTAGE↔AUTH_FAILURE)
+                BannerHysteresisPhase.Showing(category = category, sinceMs = p.sinceMs)
+            } else if (now >= p.sinceMs + config.minDisplayMs) {
+                // Min-display met → start hide delay
+                BannerHysteresisPhase.PendingHide(
+                    category = p.category,
+                    atMs = now,
+                    sinceMs = p.sinceMs,
+                )
+            } else {
+                // Min-display NOT met — keep showing
+                BannerHysteresisPhase.Showing(category = p.category, sinceMs = p.sinceMs)
+            }
+        }
+
+        is BannerHysteresisPhase.PendingHide -> {
+            if (category != null) {
+                // Recovered during hide delay — re-show (anti flap), preserve original sinceMs
+                BannerHysteresisPhase.Showing(category = category, sinceMs = p.sinceMs)
+            } else if (now >= p.atMs + config.recoverHideDelayMs) {
+                // Hide delay elapsed → fully hidden
+                BannerHysteresisPhase.Hidden
+            } else {
+                // Still within hide delay — wait
+                BannerHysteresisPhase.PendingHide(
+                    category = p.category,
+                    atMs = p.atMs,
+                    sinceMs = p.sinceMs,
+                )
+            }
+        }
+    }
+
+    // Derive UI-facing visibility from the phase
+    val nextVisibility: BannerVisibility = when (nextPhase) {
+        is BannerHysteresisPhase.Hidden -> BannerVisibility.Hidden
+        is BannerHysteresisPhase.PendingShow -> BannerVisibility.Hidden
+        is BannerHysteresisPhase.Showing ->
+            BannerVisibility.Showing(category = nextPhase.category, sinceMs = nextPhase.sinceMs)
+        is BannerHysteresisPhase.PendingHide ->
+            // Still visible during hide delay (anti-flap)
+            BannerVisibility.Showing(category = nextPhase.category, sinceMs = nextPhase.sinceMs)
+    }
+
+    return BannerHysteresisState(visibility = nextVisibility, phase = nextPhase)
+}
+
+/**
+ * §sse-feedback-ux (§1.1): should the in-chat banner EVER be considered for
+ * this feedback? True for terminal disconnect / SSE stall / user-disabled —
+ * the transient / healthy / decision-pending variants stay silent so the
+ * banner never cries wolf on a brief network blip or while the TOFU dialog
  * is handling a cert decision.
+ *
+ * NOTE: this only determines WHETHER the feedback is "banner-worthy" at all.
+ * The actual VISIBILITY (debounce / grace / min-display / recover-hide) is
+ * governed by [BannerHysteresisState] / [bannerHysteresisReducer]. The
+ * auth-vs-outage distinction (REST_OUTAGE vs AUTH_FAILURE) is decided by
+ * [bannerCategory], NOT by showBanner.
+ *
+ * §1.1 漏报 fix: [WaitingForStream] now returns true — previously silent.
  */
 internal val SseConnectionFeedback.showBanner: Boolean
-    get() = this is SseConnectionFeedback.Disconnected || this is SseConnectionFeedback.Disabled
+    get() = this is SseConnectionFeedback.Disconnected ||
+        this is SseConnectionFeedback.Disabled ||
+        this is SseConnectionFeedback.WaitingForStream
+
+/**
+ * §sse-feedback-ux (§1.1): what semantic category does this feedback represent?
+ * Pure function of [SseConnectionFeedback] + the mTLS-auth signal. Returns
+ * null when the feedback is NOT banner-worthy (Live / Connecting / Reconnecting
+ * / AwaitingTofuTrust / Idle) — the caller interprets null as "no banner".
+ *
+ * Priority rule: AUTH_FAILURE wins over REST_OUTAGE when
+ * [mtlsDegradedError] is non-null (more actionable root cause).
+ *
+ * §1.1 漏报 fix: [WaitingForStream] → [BannerCategory.SSE_STALLED].
+ */
+internal fun SseConnectionFeedback.bannerCategory(
+    mtlsDegradedError: String?,
+): BannerCategory? = when (this) {
+    is SseConnectionFeedback.Disabled -> BannerCategory.USER_DISABLED
+    is SseConnectionFeedback.WaitingForStream -> BannerCategory.SSE_STALLED
+    is SseConnectionFeedback.Disconnected ->
+        if (mtlsDegradedError != null) BannerCategory.AUTH_FAILURE else BannerCategory.REST_OUTAGE
+    // Live / Connecting / Reconnecting / ReconnectingAttempt / AwaitingTofuTrust / Idle → no banner
+    is SseConnectionFeedback.Live -> null
+    is SseConnectionFeedback.Connecting -> null
+    is SseConnectionFeedback.Reconnecting -> null
+    is SseConnectionFeedback.AwaitingTofuTrust -> null
+    is SseConnectionFeedback.Idle -> null
+}
 
 /**
  * §sse-feedback-ux: elapsed ms since the terminal disconnect was stamped, or

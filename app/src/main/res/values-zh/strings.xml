@@ -473,9 +473,13 @@
     <!-- §sse-disabled-debug-toggle：仅 REST 降级模式（调试开关 sse_disabled=true）。 -->
     <string name="chat_phase_sse_disabled">SSE 已禁用（仅 REST）</string>
 
-    <!-- §sse-feedback-ux (P2-1)：聊天内断连横幅。持续 SSE 断连（或调试仅 REST 模式）
-         附带经过时长标签 + 刷新操作。按钮复用 common_refresh。 -->
-    <string name="sse_feedback_disconnected_title">实时更新已暂停</string>
+    <!-- §sse-feedback-ux (§1.x batch4)：聊天内断连横幅，4 类语义。
+         REST_OUTAGE / AUTH_FAILURE = 错误（红）；SSE_STALLED / USER_DISABLED = 提示。
+         时长标签 (disconnected_now/minutes/hours) 复用给 REST_OUTAGE 和 AUTH_FAILURE。 -->
+    <string name="sse_feedback_rest_outage_title">无法连接服务器</string>
+    <string name="sse_feedback_auth_failure_title">证书或凭据加载失败</string>
+    <string name="sse_feedback_sse_stalled_title">等待实时更新</string>
+    <string name="sse_feedback_sse_stalled_subtitle">实时更新暂未到达</string>
     <string name="sse_feedback_disconnected_now">已断开 · 刚刚</string>
     <string name="sse_feedback_disconnected_minutes">已断开 · %1$d 分钟前</string>
     <string name="sse_feedback_disconnected_hours">已断开 · %1$d 小时前</string>

@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.scan
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -144,6 +145,7 @@ class ChatViewModel @Inject constructor(
                 disconnectedSince = conn.disconnectedSince,
                 sseConnected = sseConnected,
                 now = now,
+                mtlsDegradedError = conn.mtlsDegradedError,
             )
         }
             .distinctUntilChanged()
@@ -157,8 +159,53 @@ class ChatViewModel @Inject constructor(
                         disconnectedSince = conn.disconnectedSince,
                         sseConnected = core.store.sseConnectedFlow.value,
                         now = System.currentTimeMillis(),
+                        mtlsDegradedError = conn.mtlsDegradedError,
                     )
                 },
+            )
+
+    /**
+     * §sse-feedback-ux (§1.3): banner visibility state driven by hysteresis
+     * reducer. Computes [BannerCategory] from [sseConnectionFeedback] +
+     * [ConnectionState.mtlsDegradedError], then folds through
+     * [bannerHysteresisReducer] for grace / min-display / recover-hide.
+     *
+     * The reducer is driven by feedback transitions (distinctUntilChanged) AND
+     * the ticker (which advances PendingShow/PendingHide timers). The ticker
+     * cadence is [SSE_FEEDBACK_TICK_MS]=30s — coarse but acceptable: a real
+     * sustained outage will tick within 30s anyway, and the grace is anti-flash,
+     * not precision timing. Feedback state transitions land immediately via
+     * distinctUntilChanged; the ticker only advances elapsed timers.
+     *
+     * Pure scan (fold) — no side effects. WhileSubscribed teardown per
+     * [STOP_TIMEOUT_MS].
+     */
+    internal val bannerVisibility: StateFlow<BannerHysteresisState> =
+        combine(
+            sseConnectionFeedback,
+            // §b4-reactivity-fix: subscribe to connectionFlow (NOT read .value)
+            // so the AUTH_FAILURE↔REST_OUTAGE category flip is REACTIVE to
+            // mtlsDegradedError changes. Reading .value inside combine would
+            // miss a mtlsDegradedError flip that happens while the feedback
+            // category is otherwise stable (e.g. error set/cleared on a stable
+            // Disconnected phase) until the next ticker tick (≤30s late).
+            // distinctUntilChanged on the Pair below drops redundant emissions.
+            core.connectionFlow,
+            disconnectTickerFlow(),
+        ) { feedback, conn, now ->
+            Pair(
+                feedback.bannerCategory(mtlsDegradedError = conn.mtlsDegradedError),
+                now,
+            )
+        }
+            .distinctUntilChanged()
+            .scan(initial = BannerHysteresisState()) { prev, (category, now) ->
+                bannerHysteresisReducer(prev, category, now)
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = BannerHysteresisState(),
             )
 
     /**
