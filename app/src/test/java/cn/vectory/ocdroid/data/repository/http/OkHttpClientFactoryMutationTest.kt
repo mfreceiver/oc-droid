@@ -69,10 +69,6 @@ class OkHttpClientFactoryMutationTest {
             // §B: identity interceptor — device id absent (no X-Client-Id);
             // default HostConfig has slim=false so it's a no-op here anyway.
             ClientIdentityInterceptor(hostConfig),
-            // §C5: serverGroupFp interceptor — default hostConfig has slim=false
-            // so it's a no-op; ServerGroupFpInterceptor(hostConfig) defers fp to
-            // empty string (compatibility constructor).
-            ServerGroupFpInterceptor(hostConfig),
             SlimapiDebugInterceptor(),
             AuthInterceptor(hostConfig),
             CacheControlInterceptor(hostConfig, cachePathSanitizer),

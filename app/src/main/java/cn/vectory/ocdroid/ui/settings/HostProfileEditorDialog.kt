@@ -17,14 +17,9 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -126,7 +121,6 @@ internal fun HostProfileEditorDialog(
     // feedback that the save is running.
     isSaving: Boolean = false,
 ) {
-    val groupLabels = NamedGroupLabels // §grouping-rewrite Round-2 #4: was a local listOf("A","B","C","D") — centralised in SettingsSections.kt so the editor + ConnectionProfileSection stats line stay in lockstep.
     var name by remember(initial.id) { mutableStateOf(initial.name) }
     var serverUrl by remember(initial.id) { mutableStateOf(initial.serverUrl) }
     var authUsername by remember(initial.id) { mutableStateOf(initial.basicAuth?.username.orEmpty()) }
@@ -134,10 +128,6 @@ internal fun HostProfileEditorDialog(
     var passwordEdited by remember(initial.id) { mutableStateOf(false) }
     var showBasicPassword by remember(initial.id) { mutableStateOf(false) }
     var showDeleteConfirm by remember(initial.id) { mutableStateOf(false) }
-    val initialGroup = remember(initial.id, initial.serverGroupFp) {
-        initial.serverGroupFp.takeIf { it in groupLabels }
-    }
-    var selectedGroup by remember(initial.id, initial.serverGroupFp) { mutableStateOf(initialGroup) }
     // §tofu R2: the legacy `allowInsecure` toggle (per-host trust-all) is
     // GONE — self-signed / unknown-issuer endpoints now surface a TOFU trust
     // dialog at first connect (the connection coordinator captures the leaf
@@ -224,8 +214,6 @@ internal fun HostProfileEditorDialog(
     // isConverting 期间禁用 Save/Test/再次粘贴并显示进度圈。
     val scope = rememberCoroutineScope()
     var isConverting by remember(initial.id) { mutableStateOf(false) }
-    // §issue-4: 分组说明改为 i 按钮点击弹窗（替代常驻描述行，省高度）。
-    var showGroupInfo by remember(initial.id) { mutableStateOf(false) }
 
     // §mtls-clipboard: 剪贴板读取（仅在粘贴按钮点击时）。容忍纯 base64 与粘贴的
     // PEM（sanitation 在 util 层做）。
@@ -445,8 +433,6 @@ internal fun HostProfileEditorDialog(
                                 initial = initial,
                                 name = name,
                                 serverUrl = serverUrl,
-                                selectedGroup = selectedGroup,
-                                initialGroup = initialGroup,
                                 basicAuthEnabled = basicAuthEnabled,
                                 authUsername = authUsername,
                                 authPassword = authPassword,
@@ -519,8 +505,7 @@ internal fun HostProfileEditorDialog(
             mutableStateOf(
                 initial.basicAuth != null ||
                     initial.mtlsEnabled ||
-                    initial.slim ||
-                    initial.serverGroupFp in listOf("A", "B", "C", "D")
+                    initial.slim
             )
         }
         val advancedExpandedDesc = stringResource(R.string.common_collapse)
@@ -596,40 +581,6 @@ internal fun HostProfileEditorDialog(
                 )
             }
             Spacer(modifier = Modifier.height(Dimens.spacing3))
-            var groupExpanded by remember(initial.id) { mutableStateOf(false) }
-            val groupOptions = listOf<Pair<String?, String>>(
-                null to stringResource(R.string.host_group_none),
-                "A" to "A", "B" to "B", "C" to "C", "D" to "D"
-            )
-            val selectedGroupLabel = groupOptions.find { it.first == selectedGroup }?.second
-                ?: stringResource(R.string.host_group_none)
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(stringResource(R.string.host_group_label), style = MaterialTheme.typography.labelMedium)
-                IconButton(onClick = { showGroupInfo = true }) {
-                    Icon(Icons.Outlined.Info, contentDescription = stringResource(R.string.host_group_info), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Spacer(modifier = Modifier.width(Dimens.spacing2))
-                ExposedDropdownMenuBox(
-                    expanded = groupExpanded,
-                    onExpandedChange = { groupExpanded = it },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    OutlinedTextField(
-                        value = selectedGroupLabel, onValueChange = {}, readOnly = true, singleLine = true,
-                        modifier = Modifier.fillMaxWidth().menuAnchor(),
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = groupExpanded) }
-                    )
-                    ExposedDropdownMenu(expanded = groupExpanded, onDismissRequest = { groupExpanded = false }) {
-                        groupOptions.forEach { (value, label) ->
-                            DropdownMenuItem(text = { Text(label) }, onClick = {
-                                selectedGroup = value
-                                groupExpanded = false
-                            })
-                        }
-                    }
-                }
-            }
-            Spacer(modifier = Modifier.height(Dimens.spacing3))
             CollapsibleSection(
                 title = stringResource(R.string.host_mtls_title),
                 subtitle = stringResource(R.string.host_mtls_summary),
@@ -699,20 +650,6 @@ internal fun HostProfileEditorDialog(
             dismissText = stringResource(R.string.common_cancel),
             onDismiss = { showDeleteConfirm = false },
             destructive = true,
-        )
-    }
-
-    // §issue-4: 分组说明气泡（i 按钮触发）。原常驻描述行移除此弹窗，省表单高度。
-    if (showGroupInfo) {
-        AlertDialog(
-            onDismissRequest = { showGroupInfo = false },
-            title = { Text(stringResource(R.string.host_group_label)) },
-            text = { Text(stringResource(R.string.host_group_warning)) },
-            confirmButton = {
-                TextButton(onClick = { showGroupInfo = false }) {
-                    Text(stringResource(R.string.common_ok))
-                }
-            }
         )
     }
 

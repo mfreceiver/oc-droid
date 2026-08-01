@@ -49,7 +49,6 @@ import java.io.IOException
 import java.util.Base64
 import java.security.cert.X509Certificate
 import javax.inject.Inject
-import javax.inject.Named
 import javax.inject.Singleton
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
@@ -141,16 +140,6 @@ class OpenCodeRepository @Inject constructor(
         // [clientIdStore], so the provider MUST defer the read (mirrors the
         // identityStoreOrFallback lazy pattern).
         clientIdProvider = { clientIdStoreOrFallback().getDeviceId() },
-        // §C5 (oc-slimapi turn-token contract §6.2 method A): lazy
-        // serverGroupFp provider for ServerGroupFpInterceptor. Resolves
-        // from the Hilt field-injected @Named("currentServerGroupFp")
-        // below at request time — the graph is built during this field
-        // initializer, BEFORE Hilt field injection populates
-        // [currentServerGroupFp], so the provider MUST defer the read
-        // (mirrors the clientIdStoreOrFallback lazy pattern). The outer
-        // lambda defers to [serverGroupFpOrFallback] which returns the
-        // Hilt-injected () -> String or the fallback.
-        serverGroupFpProvider = { serverGroupFpOrFallback().invoke() },
     )
 
     /** The sole volatile publication point for all network clients and APIs. */
@@ -272,26 +261,6 @@ class OpenCodeRepository @Inject constructor(
 
     private fun clientIdStoreOrFallback(): cn.vectory.ocdroid.data.repository.http.ClientIdStore =
         if (::clientIdStore.isInitialized) clientIdStore else fallbackClientIdStore
-
-    /**
-     * §C5 (oc-slimapi turn-token contract §6.2 method A): the live
-     * serverGroupFp provider for [ServerGroupFpInterceptor]. Injected by
-     * Hilt (field injection) — same pattern as [clientIdStore]. Bound to
-     * [cn.vectory.ocdroid.di.ControllerModule.provideCurrentServerGroupFp]
-     * in production; [fallbackServerGroupFp] (empty string) is used in
-     * plain unit-test constructions that bypass Hilt.
-     *
-     * Read lazily (via [serverGroupFpOrFallback]) by [networkGraph]'s
-     * `serverGroupFpProvider` lambda — the graph is built before Hilt
-     * populates this field, so the read MUST be lazy.
-     */
-    @Inject @Named("currentServerGroupFp")
-    lateinit var currentServerGroupFp: () -> String
-
-    private val fallbackServerGroupFp: () -> String = { "" }
-
-    private fun serverGroupFpOrFallback(): () -> String =
-        if (::currentServerGroupFp.isInitialized) currentServerGroupFp else fallbackServerGroupFp
 
     /**
      * Opaque capability for one configured slim-state incarnation (C-D3).

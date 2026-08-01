@@ -83,17 +83,6 @@ object SlimapiContract {
      */
     const val CLIENT_IDENTITY_HEADER_MAX_BYTES = 128
 
-    // ── C5 (oc-slimapi turn-token contract §6.2 method A): serverGroupFp passthrough ──
-    //
-    // ocdroid injects its authoritative serverGroupFp so slimapi can use it
-    // directly as the turn-token scope key without re-deriving the
-    // HostProfile.serverGroupFp / "manual:<url>" algorithm (contract §6.1).
-    // slimapi reads this header on /slimapi/** requests (catch-all reverse
-    // proxy) and uses it to stamp (turnIncarnation, turn) per-(serverGroupFp, sid).
-
-    /** HTTP 头名：ocdroid 的 serverGroupFp 透传（C5，契约 §6.2 方案 A）。 */
-    const val X_OCDROID_SERVER_GROUP_FP = "X-Ocdroid-Server-Group-Fp"
-
     // V1 Opt-A capability constants X_SLIMAPI_CAPABILITIES and
     // MID_PARTIAL_ENVELOPE_CAPABILITY were removed in V2 (spec §1:34).
     // V2 ignores the capabilities header entirely.

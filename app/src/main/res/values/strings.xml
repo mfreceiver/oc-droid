@@ -567,13 +567,6 @@
     <string name="error_sse_failed">SSE Error: %1$s</string>
     <string name="error_respond_permission_failed">Failed to respond to permission: %1$s</string>
 
-    <!-- §Grouping rewrite 2026-07-07: manual server grouping (item 1/2/3/4/5). -->
-    <string name="host_group_label">Server group</string>
-    <string name="host_group_none">Standalone</string>
-    <string name="host_group_info">Group description</string>
-    <string name="host_group_warning">Profiles in the same group share cached chat history, drafts, model preferences, and recent directories. Choosing the wrong group will mix or strand this data; only \"Clear all local data\" can recover it.</string>
-    <string name="group_stats_named">%1$s · %2$d connection(s) · %3$d cached session(s)</string>
-    <string name="group_stats_solo">Standalone · 1 connection · %1$d cached session(s)</string>
     <!-- §P5b-B (Q8): 清除数据 section strings. -->
     <string name="cache_clear_cache">Reset local data</string>
     <string name="cache_cached_data_size">Message cache %1$s</string>

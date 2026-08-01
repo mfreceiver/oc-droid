@@ -158,30 +158,6 @@ class SettingsViewModel @Inject constructor(
         settingsManager.getRecentWorkdirs(fp)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    /**
-     * §grouping-rewrite 项 2: profile count for the active fp, surfaced so
-     * [ConnectionProfileSection]'s stats line can render without a
-     * synchronous store read on every recomposition. Built off the same
-     * `store.hostFlow` + `store.sessionListFlow` triggers as [recentWorkdirs]
-     * so an fp switch / session-list change re-derives the count. The fp is
-     * derived the standard way (`serverGroupFp.ifBlank { id }`).
-     *
-     * `profilesInGroup(fp)` is synchronous (HostProfileStore is in-memory +
-     * ESP-backed).
-     *
-     * remove-message-persistence Task 5: the sibling cached-session-count
-     * flow was removed together with the cacheRepository surface (SQLite
-     * persistence layer deletion).
-     */
-    val activeGroupProfileCount: StateFlow<Int> = combine(
-        store.hostFlow,
-        store.sessionListFlow,
-    ) { host, _ ->
-        val profile = hostProfileStore.currentProfile()
-        val fp = profile.serverGroupFp.ifBlank { profile.id }
-        hostProfileStore.profilesInGroup(fp).size
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
-
     fun setThemeMode(mode: ThemeMode) {
         settingsManager.themeMode = mode
         store.mutateSettings { it.copy(themeMode = mode) }

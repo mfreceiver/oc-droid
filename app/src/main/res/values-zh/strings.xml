@@ -525,13 +525,6 @@
     <string name="error_sse_failed">SSE 错误：%1$s</string>
     <string name="error_respond_permission_failed">响应权限请求失败：%1$s</string>
 
-    <!-- §分组重写 2026-07-07：人工服务器分组（项1/2/3/4/5）。 -->
-    <string name="host_group_label">服务器分组</string>
-    <string name="host_group_none">独立</string>
-    <string name="host_group_info">分组说明</string>
-    <string name="host_group_warning">同组 profile 共享：聊天历史、草稿、模型偏好、最近目录。选错组会导致这些数据串台或搁浅，仅可用「清除全部数据」恢复。</string>
-    <string name="group_stats_named">%1$s · %2$d 个连接 · %3$d 条缓存会话</string>
-    <string name="group_stats_solo">独立 · 1 个连接 · %1$d 条缓存会话</string>
     <!-- §P5b-B (Q8)：清除数据 section 字符串。 -->
     <string name="cache_clear_cache">重置本地数据</string>
     <string name="cache_cached_data_size">消息缓存占用 %1$s</string>

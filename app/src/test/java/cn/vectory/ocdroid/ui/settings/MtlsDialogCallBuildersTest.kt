@@ -15,10 +15,9 @@ import org.junit.Test
  * [buildTestCall] dialog snapshot builders — hoisted out of the Compose Save
  * `onClick` lambda and the `triggerTestConnection` local `fun` so the
  * section-off credential-clearing rules (basicAuth / mTLS), the
- * `name.ifBlank{"Untitled"}` fallback, the `selectedGroup != initialGroup`
- * groupFp rewrite, the `effectivePasswordEdited` forced-clear, and the
- * `hasMaterial` gating via [mtlsHasMaterial] are all unit-testable without
- * spinning up Compose.
+ * `name.ifBlank{"Untitled"}` fallback, the `effectivePasswordEdited` forced-
+ * clear, and the `hasMaterial` gating via [mtlsHasMaterial] are all unit-
+ * testable without spinning up Compose.
  *
  * Same style as [MtlsHasMaterialTest] (plain `@Test` funs, no mockk, pure JDK).
  * Fixtures use [HostProfile.defaultDirect] for the default profile and the
@@ -55,8 +54,6 @@ class MtlsDialogCallBuildersTest {
         initial: HostProfile,
         name: String = initial.name,
         serverUrl: String = initial.serverUrl,
-        selectedGroup: String? = null,
-        initialGroup: String? = null,
         slimEnabled: Boolean = false,
         clientCleared: Boolean = false,
         stagedP12: ByteArray? = null,
@@ -65,8 +62,6 @@ class MtlsDialogCallBuildersTest {
         initial = initial,
         name = name,
         serverUrl = serverUrl,
-        selectedGroup = selectedGroup,
-        initialGroup = initialGroup,
         basicAuthEnabled = false,
         authUsername = "",
         authPassword = "",
@@ -114,7 +109,7 @@ class MtlsDialogCallBuildersTest {
         // §kover-4.5: covers the 1st case from the task list (default profile,
         // all sections off, no clientCleared, no stagedP12).
         val initial = HostProfile.defaultDirect("http://localhost:4096")
-        val r = saveAllOff(initial, selectedGroup = null, initialGroup = null)
+        val r = saveAllOff(initial)
 
         assertEquals("Localhost", r.saved.name)
         assertEquals("http://localhost:4096", r.saved.serverUrl)
@@ -134,8 +129,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Renamed",
             serverUrl = "https://example.com",
-            selectedGroup = null,
-            initialGroup = null,
             basicAuthEnabled = true,
             authUsername = "alice",
             authPassword = "pw",
@@ -181,8 +174,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Test",
             serverUrl = "http://localhost:4096",
-            selectedGroup = null,
-            initialGroup = null,
             basicAuthEnabled = true,
             authUsername = "",
             authPassword = "",
@@ -207,8 +198,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Test",
             serverUrl = "http://localhost:4096",
-            selectedGroup = null,
-            initialGroup = null,
             basicAuthEnabled = false,
             authUsername = "",
             authPassword = "",
@@ -242,8 +231,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Test",
             serverUrl = "http://localhost:4096",
-            selectedGroup = null,
-            initialGroup = null,
             basicAuthEnabled = false,
             authUsername = "",
             authPassword = "",
@@ -267,81 +254,6 @@ class MtlsDialogCallBuildersTest {
     }
 
     @Test
-    fun `buildSaveCall selectedGroup differs from initialGroup sets the new group`() {
-        // §kover-4.5: covers the 12th case — half (selectedGroup non-null).
-        // Editor seeded initialGroup="A" (matches the legacy serverGroupFp).
-        // User changed it to "B" → saved.serverGroupFp = "B".
-        val initial = profile(serverGroupFp = "A")
-        val r = buildSaveCall(
-            initial = initial,
-            name = "Test",
-            serverUrl = "http://localhost:4096",
-            selectedGroup = "B",
-            initialGroup = "A",
-            basicAuthEnabled = false,
-            authUsername = "",
-            authPassword = "",
-            passwordEdited = false,
-            mtlsEnabled = false,
-            slimEnabled = false,
-            clientCleared = false,
-            stagedP12 = null,
-            caStage = CaStage.Unchanged,
-        )
-        assertEquals("B", r.saved.serverGroupFp)
-    }
-
-    @Test
-    fun `buildSaveCall selectedGroup null differs from initialGroup sets to initial id`() {
-        // §kover-4.5: covers the 12th case — other half (selectedGroup=null
-        // while initialGroup is non-null → "not grouped" → saved.serverGroupFp
-        // = initial.id, per NamedGroupLabels rewrite).
-        val initial = profile(serverGroupFp = "A")
-        val r = buildSaveCall(
-            initial = initial,
-            name = "Test",
-            serverUrl = "http://localhost:4096",
-            selectedGroup = null,
-            initialGroup = "A",
-            basicAuthEnabled = false,
-            authUsername = "",
-            authPassword = "",
-            passwordEdited = false,
-            mtlsEnabled = false,
-            slimEnabled = false,
-            clientCleared = false,
-            stagedP12 = null,
-            caStage = CaStage.Unchanged,
-        )
-        assertEquals("p1", r.saved.serverGroupFp)
-    }
-
-    @Test
-    fun `buildSaveCall selectedGroup unchanged preserves initial groupFp including legacy values`() {
-        // §kover-4.5: covers the 12th case — when the user did not move the
-        // selector, the original serverGroupFp is preserved verbatim. This is
-        // the soft-migration path for legacy non-slot values.
-        val initial = profile(serverGroupFp = "legacy-key")
-        val r = buildSaveCall(
-            initial = initial,
-            name = "Test",
-            serverUrl = "http://localhost:4096",
-            selectedGroup = null, // editor maps non-slot serverGroupFp to null in initialGroup
-            initialGroup = null,
-            basicAuthEnabled = false,
-            authUsername = "",
-            authPassword = "",
-            passwordEdited = false,
-            mtlsEnabled = false,
-            slimEnabled = false,
-            clientCleared = false,
-            stagedP12 = null,
-            caStage = CaStage.Unchanged,
-        )
-        assertEquals("legacy-key", r.saved.serverGroupFp)
-    }
-
-    @Test
     fun `buildSaveCall caStage passthrough carries Replace and Clear through`() {
         // §kover-4.5: covers the caStage / p12Password / p12PasswordEdited
         // passthrough fields (the dialog's onSave 11-arg pos 8/9/10).
@@ -351,8 +263,6 @@ class MtlsDialogCallBuildersTest {
             initial = initial,
             name = "Test",
             serverUrl = "http://localhost:4096",
-            selectedGroup = null,
-            initialGroup = null,
             basicAuthEnabled = false,
             authUsername = "",
             authPassword = "",
