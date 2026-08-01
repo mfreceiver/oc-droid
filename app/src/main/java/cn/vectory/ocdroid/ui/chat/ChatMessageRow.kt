@@ -436,6 +436,7 @@ internal fun OmittedContentCard(
         anyLoading -> {
             StatusBanner(
                 modifier = modifier,
+                color = debugIdentitySurfaceColor(MaterialTheme.colorScheme.surfaceContainer),
                 content = {
                     CircularProgressIndicator(
                         modifier = Modifier.size(Dimens.iconSm),
@@ -455,7 +456,7 @@ internal fun OmittedContentCard(
         anyFailedOrExhausted -> {
             StatusBanner(
                 modifier = modifier,
-                color = MaterialTheme.colorScheme.errorContainer,
+                color = debugIdentitySurfaceColor(MaterialTheme.colorScheme.errorContainer),
                 border = null,
                 content = {
                     Icon(
@@ -506,6 +507,7 @@ internal fun OmittedContentCard(
         anyIdle && isMessageStreaming -> {
             StatusBanner(
                 modifier = modifier,
+                color = debugIdentitySurfaceColor(MaterialTheme.colorScheme.surfaceContainer),
                 content = {
                     CircularProgressIndicator(
                         modifier = Modifier.size(Dimens.iconSm),
@@ -544,6 +546,7 @@ internal fun OmittedContentCard(
                             contentDescription = categoryText
                             role = Role.Button
                         },
+                    color = debugIdentitySurfaceColor(MaterialTheme.colorScheme.surfaceContainer),
                     onClick = { onExpandParts(idleParts) },
                     content = {
                         Icon(
