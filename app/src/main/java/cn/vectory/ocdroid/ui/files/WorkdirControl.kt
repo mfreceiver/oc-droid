@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -35,7 +34,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.chat.workdirTone
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
@@ -186,7 +184,6 @@ private fun WorkdirSwitcherBody(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(max = 600.dp)
             .verticalScroll(rememberScrollState()),
     ) {
         // §WT0: 原 `.padding(bottom = Dimens.spacing4)` 删除——AppBottomSheet

@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Description
@@ -232,23 +234,28 @@ internal fun FolderContents(
                 .thenBy { it.name.lowercase() }
         )
     }
-    // §WT1: 去掉原外层 Column 的 `padding(vertical = 8.dp)`（AppBottomSheet title 行
-        // 已有 8dp 垂直 padding；底部 inset 由 recipe 统一）。保留 16dp 水平 padding 让
-        // 条目文本与 sheet 边距对齐（条目本身是手写 Row 而非 ListItem，需自带 padding）。
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = Dimens.spacing4)) {
+    // §rev-gpt regression-fix: 内容区由 scaffold 统一 heightIn(max=0.8 屏高) 封顶，
+    // 原外层 Column 静态渲染超出会被裁剪且无法滚动；改为 Recipe A 单一 LazyColumn。
+    // LazyColumn 本身不加水平 padding（避免与 scaffold content wrapper 叠加），原 16dp
+    // 水平 padding 下放到每个 Row / 空态 Text 以保持视觉一致。
+    LazyColumn(modifier = Modifier.fillMaxWidth()) {
         if (sorted.isEmpty()) {
-            Text(
-                text = "This directory has no entries.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(vertical = Dimens.spacing3)
-            )
+            item {
+                Text(
+                    text = "This directory has no entries.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Dimens.spacing4, vertical = Dimens.spacing3)
+                )
+            }
         } else {
-            sorted.forEach { entry ->
+            items(sorted, key = { it.name }) { entry ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = Dimens.spacingCompact)
+                        .padding(horizontal = Dimens.spacing4, vertical = Dimens.spacingCompact)
                         .testTag("toolcard.folder.entry.${entry.name}"),
                     verticalAlignment = Alignment.CenterVertically
                 ) {

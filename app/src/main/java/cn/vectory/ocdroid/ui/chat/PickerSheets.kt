@@ -7,7 +7,6 @@ package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -16,9 +15,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.AgentInfo
 import cn.vectory.ocdroid.data.model.ProvidersResponse
@@ -43,13 +40,12 @@ internal fun AgentPickerSheet(
         onDismissRequest = onDismiss,
         title = stringResource(R.string.chat_switch_agent),
     ) {
-        // §fix-sheet-remeasure-jump: same height cap as ModelPickerSheet —
-        // structurally identical LazyColumn picker; bound it so a long agent
-        // list cannot trigger the same remeasure-driven sheet jump.
-        val pickerMaxHeight = (LocalConfiguration.current.screenHeightDp * 0.8f).dp
-        LazyColumn(modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(max = pickerMaxHeight)) {
+        // §fix-sheet-remeasure-jump: structurally identical LazyColumn picker
+        // as ModelPickerSheet — a long agent list could trigger the same
+        // remeasure-driven sheet jump. The cap is now applied centrally by the
+        // scaffold's contentMaxHeightFraction=0.8 (SheetRecipe.kt), so no
+        // per-call heightIn is needed here.
+        LazyColumn(modifier = Modifier.fillMaxWidth()) {
             // 默认 agent（选中 = null）。
             item(key = "__default__") {
                 val isSelected = currentAgentName == null
@@ -113,9 +109,8 @@ internal fun ModelPickerSheet(
     // visible "height反复跳动" during a real-finger drag. Bounding the list
     // height breaks that feedback loop — the LazyColumn scrolls internally
     // against a stable bounded constraint instead of remeasuring the sheet.
-    // Local to the picker per SheetRecipe's "调用方封顶" contract (the recipe
-    // itself deliberately does NOT impose a fixed cap).
-    val pickerMaxHeight = (LocalConfiguration.current.screenHeightDp * 0.8f).dp
+    // The cap is now applied centrally by the scaffold's
+    // contentMaxHeightFraction=0.8 (SheetRecipe.kt), not per-call.
     AppBottomSheet(
         onDismissRequest = onDismiss,
         title = stringResource(R.string.chat_model_picker_title),
@@ -130,9 +125,7 @@ internal fun ModelPickerSheet(
         // (non-empty) branch, so an empty catalog rendered ONLY the empty
         // message — T7-C4 requires 默认 to always be available + highlighted
         // when the effective model is null.
-        LazyColumn(modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(max = pickerMaxHeight)) {
+        LazyColumn(modifier = Modifier.fillMaxWidth()) {
             // §chat-ux-batch T7 (B2): top "默认" item — selected when the
             // effective model (pending ?: infer ?: null) is null. Routes
             // to onClear (ComposerViewModel.clearSessionModel), which

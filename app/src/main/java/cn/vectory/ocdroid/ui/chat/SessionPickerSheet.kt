@@ -132,8 +132,9 @@ fun SessionPickerSheet(
 
     // §WT1: AppBottomSheet (WT0 primitive) — titleLarge + 24/8 padding via the
     // recipe; container colour + sheetState defaults handled by the recipe.
-    // No footer (the FAB was deleted). The body LazyColumn sizes naturally —
-    // AppBottomSheet does not impose a fixed height cap.
+    // No footer (the FAB was deleted). The body LazyColumn sizes naturally up
+    // to scaffold's contentMaxHeightFraction=0.8 屏高 cap (Recipe A)，超出部分
+    // LazyColumn 内部滚动。
     AppBottomSheet(
         onDismissRequest = onDismiss,
         title = stringResource(R.string.recent_sessions_title),

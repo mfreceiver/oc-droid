@@ -593,16 +593,20 @@ fun SessionsScreen(
             onDismissRequest = { pendingWorkdirPick = false },
             title = stringResource(R.string.sessions_pick_workdir_title),
         ) {
-            recentWorkdirs.forEach { workdir ->
-                val basename = workdir.workdirBasename() ?: workdir
-                ListItem(
-                    headlineContent = { Text(basename) },
-                    modifier = Modifier.clickable {
-                        pendingWorkdirPick = false
-                        viewModel.createSessionInWorkdir(workdir)
-                        onSwitchToChat()
-                    },
-                )
+            // §rev-gpt regression-fix: 内容区由 scaffold 统一 heightIn(max=0.8 屏高) 封顶，
+            // 原 forEach 静态渲染超出会被裁剪且无法滚动；改为 Recipe A 单一 LazyColumn。
+            LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                items(recentWorkdirs, key = { it }) { workdir ->
+                    val basename = workdir.workdirBasename() ?: workdir
+                    ListItem(
+                        headlineContent = { Text(basename) },
+                        modifier = Modifier.clickable {
+                            pendingWorkdirPick = false
+                            viewModel.createSessionInWorkdir(workdir)
+                            onSwitchToChat()
+                        },
+                    )
+                }
             }
         }
     }
