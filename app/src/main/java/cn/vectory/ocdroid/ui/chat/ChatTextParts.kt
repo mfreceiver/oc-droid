@@ -180,7 +180,7 @@ internal fun TextPart(
         BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
             val maxBubble = maxWidth * 0.82f
             Surface(
-                color = MaterialTheme.colorScheme.primaryContainer,
+                color = debugIdentitySurfaceColor(MaterialTheme.colorScheme.primaryContainer),
                 shape = MaterialTheme.shapes.large,
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
