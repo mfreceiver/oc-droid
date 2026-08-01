@@ -9,3 +9,5 @@
 ocdroid:
   SessionStatusDirectWriteRule:
     active: true
+  AuthorityDirectWriteRule:        # §U-MN6 Batch 3
+    active: true
