@@ -68,49 +68,39 @@ class SharedStateStore @Inject constructor(
         private set
 
     /**
-     * §需求10 C3 (rev-3 🔴1+🔴2 fix): atomic single-flight gate for the session-list
-     * full refresh. Replaces the previous `@Volatile Boolean` check-then-set (which
-     * was racy across dispatchers and let the poller + orchestrator both read false
-     * then both launch — the "poll-first concurrent getSessions" defect).
+     * §需求10 C3 (round-4, oracle-driven cancel-and-replace): the heavyweight
+     * session-list refresh flag.
      *
-     * [tryAcquireSessionListLoad] is the SINGLE atomic gate: it does a compare-and-set
-     * on an AtomicBoolean and returns true iff THIS caller won the race. Both
-     * [SessionListRefreshOrchestrator.launchLoadSessions] AND
-     * [SessionMetadataPoller.poll] go through it, so at most ONE caller can be running
-     * a full `getSessions` at a time across ON_RESUME / ForegroundCatchUp / reconnect
-     * / poller — regardless of who fires first.
+     * ## Concurrency model (the authoritative invariant set)
      *
-     * [sessionListLoadPendingRerun] is the trailing-rerun flag for rev-3 🔴1 (FIX-D
-     * supersession regression): a caller that LOSES the acquire race (a newer refresh
-     * intent arriving while an older one is in flight) sets this true. The winner
-     * checks it in its `finally` and, if set, the WINNER re-triggers one trailing
-     * load — so a fresh refresh intent arriving mid-flight is NOT silently dropped
-     * (the original FIX-D "newer request supersedes older" semantic is preserved)
-     * while still coalescing the network call to one at a time.
+     * - **Orchestrator ([SessionListRefreshOrchestrator.launchLoadSessions])**:
+     *   cancel-and-replace, newer-wins. A new caller bumps the epoch at ENTRY and
+     *   cancels the in-flight job so the older coroutine dies BEFORE any write
+     *   (cancellation is delivered to the suspend Retrofit call; onSuccess/onFailure
+     *   do not run). The per-call epoch check in onSuccess/onFailure is kept as
+     *   defense-in-depth against the cancellation-delivery race. This is original
+     *   FIX-D + "and cancel the loser so it stops consuming the network."
+     * - **Poller ([SessionMetadataPoller.poll])**: ambient, read-only skip. It is
+     *   self-serialized by its single pollJob and carries no intent, so it is NOT
+     *   part of the single-flight. It READS this flag to skip its own light
+     *   title-patch when a heavyweight refresh is running (avoids one duplicate
+     *   cheap GET). It never acquires/cancels anything.
+     *
+     * ≤1 concurrent is guaranteed for the heavyweight refresh path (orchestrator
+     * vs orchestrator). Orchestrator-vs-poller overlap is a bounded, benign known
+     * limitation: the poller's title-patch commit is independently guarded by
+     * commitIfCurrent + fresher-wins merge, cost is one cheap GET, self-heals next
+     * tick. Strict ≤1-concurrent across both would require coupling the poller's
+     * in-flight call to a shared job handle in the store — not worth one cheap GET.
+     *
+     * Set/clear is owned by the orchestrator: set INSIDE the coroutine body (so a
+     * scope cancellation between acquire and body-launch can't leak the flag),
+     * cleared in `finally` ONLY if this job still holds the current epoch (so a
+     * superseded job doesn't wipe the newer job's flag).
      */
-    private val sessionListLoadInFlightAtomic = java.util.concurrent.atomic.AtomicBoolean(false)
-    /** Convenience read of the atomic gate (for diagnostics / tests). */
-    val sessionListLoadInFlight: Boolean get() = sessionListLoadInFlightAtomic.get()
-
-    /** §rev-3 🔴1: set by a caller that loses the acquire race to request a trailing rerun. */
     @Volatile
-    var sessionListLoadPendingRerun: Boolean = false
+    var sessionListLoadInFlight: Boolean = false
         internal set
-
-    /**
-     * Atomically acquire the single-flight gate. Returns true iff THIS caller won
-     * (the gate transitioned false→true); the winner MUST call [releaseSessionListLoad]
-     * in a `finally`. Returns false if another caller holds the gate.
-     */
-    fun tryAcquireSessionListLoad(): Boolean = sessionListLoadInFlightAtomic.compareAndSet(false, true)
-
-    /**
-     * Release the gate (winner's finally). Does NOT clear [sessionListLoadPendingRerun]
-     * — the winner is responsible for checking that flag and re-triggering if set.
-     */
-    fun releaseSessionListLoad() {
-        sessionListLoadInFlightAtomic.set(false)
-    }
 
     /** Track the last identityStore epoch that triggered a store identityEpoch bump.
      *  One bump per unique identityStore epoch value avoids double-bumps when

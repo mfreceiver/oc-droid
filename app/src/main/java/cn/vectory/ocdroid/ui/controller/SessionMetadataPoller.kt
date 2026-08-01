@@ -116,49 +116,49 @@ class SessionMetadataPoller @Inject constructor(
         val mode = currentPollMode ?: return
         if (!appLifecycleMonitor.isInForeground.value) return
 
-        // §需求10 C3 (rev-3 🔴2 fix): atomic single-flight acquire, SHARED with
-        // SessionListRefreshOrchestrator via slices.store.tryAcquireSessionListLoad.
-        // Whoever fires first (poller / ON_RESUME / ForegroundCatchUp / reconnect)
-        // wins; the loser no-ops. This closes the prior "poll-first concurrent
-        // getSessions" defect where the poller only READ the flag (read-then-set
-        // race) and could fire its own getSessions concurrently with an
-        // orchestrator full refresh. The poller does NOT queue a trailing rerun —
-        // its loop naturally retries on the next tick (no freshness loss).
-        if (!store.tryAcquireSessionListLoad()) {
+        // §需求10 C3 (round-4, oracle cancel-and-replace): the poller is AMBIENT
+        // and carries no intent — it does NOT participate in the single-flight.
+        // It READS the heavyweight-refresh flag to skip its own light title-patch
+        // when a full refresh (ON_RESUME / ForegroundCatchUp / reconnect) is
+        // running, avoiding one duplicate cheap GET. It never acquires/cancels.
+        // Self-serialized by the single pollJob; commit independently guarded by
+        // commitIfCurrent + fresher-wins merge. See SharedStateStore.sessionListLoadInFlight
+        // KDoc for the authoritative concurrency-model invariant set.
+        if (store.sessionListLoadInFlight) {
             DebugLog.d(TAG, "poll: list load in flight, skipping")
             return
         }
-        try {
-            // §2.3 (§design-contract §0.2): capture identity BEFORE the network call
-            // so commitIfCurrent can atomically guard the commit against a host switch.
-            val cap = identityStore.capture()
 
-            // §需求10 C1: no bound identity — poll is a no-op. The poll loop
-            // keeps running (mode transitions are still reactive) but commits
-            // nothing until a profile is bound. Restart-required profile-switch
-            // limitation is batch 5 scope.
-            if (cap.identity == null) {
-                DebugLog.d(TAG, "poll: no bound identity, skipping")
+        // §2.3 (§design-contract §0.2): capture identity BEFORE the network call
+        // so commitIfCurrent can atomically guard the commit against a host switch.
+        val cap = identityStore.capture()
+
+        // §需求10 C1: no bound identity — poll is a no-op. The poll loop
+        // keeps running (mode transitions are still reactive) but commits
+        // nothing until a profile is bound. Restart-required profile-switch
+        // limitation is batch 5 scope.
+        if (cap.identity == null) {
+            DebugLog.d(TAG, "poll: no bound identity, skipping")
+            return
+        }
+
+        // §2.2: in baseline mode, skip if connection dropped during the capture
+        if (mode == PollMode.BASELINE && !store.connectionFlow.value.isConnected) return
+
+        // §需求10 C2: capture the set of session IDs present at request-start
+        // so SSE-created-during-request sessions can be preserved after the merge.
+        val localIdsAtRequestStart = store.sessionListFlow.value.sessions.map { it.id }.toSet()
+
+        val refreshed = repository.getSessions(MainViewModelTimings.sessionFullLoadLimit)
+            .getOrElse {
+                DebugLog.w(TAG, "getSessions failed: ${it.message}")
                 return
             }
 
-            // §2.2: in baseline mode, skip if connection dropped during the capture
-            if (mode == PollMode.BASELINE && !store.connectionFlow.value.isConnected) return
-
-            // §需求10 C2: capture the set of session IDs present at request-start
-            // so SSE-created-during-request sessions can be preserved after the merge.
-            val localIdsAtRequestStart = store.sessionListFlow.value.sessions.map { it.id }.toSet()
-
-            val refreshed = repository.getSessions(MainViewModelTimings.sessionFullLoadLimit)
-                .getOrElse {
-                    DebugLog.w(TAG, "getSessions failed: ${it.message}")
-                    return
-                }
-
-            // Long RTT guard: re-check foreground + mode after network call
-            if (!appLifecycleMonitor.isInForeground.value) return
-            if (currentPollMode == null) return
-            if (mode == PollMode.BASELINE && !store.connectionFlow.value.isConnected) return
+        // Long RTT guard: re-check foreground + mode after network call
+        if (!appLifecycleMonitor.isInForeground.value) return
+        if (currentPollMode == null) return
+        if (mode == PollMode.BASELINE && !store.connectionFlow.value.isConnected) return
 
         // §2.3: authoritative host-identity guard — commitIfCurrent replaces
         // the old pollGeneration atomic backstop (§design-contract §2.3).
@@ -206,14 +206,6 @@ class SessionMetadataPoller @Inject constructor(
         }
         if (!committed) {
             DebugLog.d(TAG, "poll: identity superseded (host switched), dropping stale snapshot")
-        }
-        } finally {
-            // §需求10 C3 (rev-3 🔴2): release the single-flight gate atomically.
-            // try/finally guarantees release on every return path (early returns
-            // for null identity / dropped connection / foreground loss, network
-            // failure, or successful commit). The poller does NOT queue a trailing
-            // rerun — its loop naturally retries on the next tick.
-            store.releaseSessionListLoad()
         }
     }
 

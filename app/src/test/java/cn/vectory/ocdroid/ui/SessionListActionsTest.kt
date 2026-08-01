@@ -721,41 +721,54 @@ class SessionListActionsTest {
     // ── §FIX-D (gpter #2) + §需求10 C3: single-flight + coalesce for launchLoadSessions ──
 
     @Test
-    fun `C3 second launchLoadSessions queues trailing rerun instead of concurrent call`() = runTest {
-        // §需求10 C3 (rev-3 🔴1+🔴2 fix): the single-flight gate is now an atomic
-        // acquire (slices.store.tryAcquireSessionListLoad). A second call while the
-        // first is in-flight does NOT fire a concurrent getSessions — it sets the
-        // trailing-rerun flag, and the FIRST call's finally re-triggers ONE load
-        // with the latest caller's closures. So at most one getSessions runs at a
-        // time, AND a fresh refresh intent arriving mid-flight is honored (the
-        // original FIX-D "newer supersedes older" semantic is preserved).
-        val gate = CompletableDeferred<Unit>()
+    fun `C3 second launchLoadSessions cancels the first instead of running concurrently`() = runTest {
+        // §需求10 C3 (round-4, oracle cancel-and-replace): a new caller CANCELS the
+        // in-flight job (newer intent wins; the older coroutine dies BEFORE any write
+        // because cancellation is delivered to the suspend Retrofit call and onSuccess/
+        // onFailure never run). This preserves the original FIX-D "newer supersedes
+        // older, older discarded pre-write" semantic — no stale side effects (cache
+        // persist / archive callback / ClearChat) from the cancelled request — AND
+        // guarantees ≤1 concurrent getSessions on the heavyweight refresh path.
+        val firstGate = CompletableDeferred<Unit>()
+        val secondGate = CompletableDeferred<Unit>()
         var callCount = 0
-        val sessions = listOf(Session(id = "s1", directory = "/x"))
+        var firstCallCancelled = false
+        val sessions1 = listOf(Session(id = "stale", directory = "/x"))
+        val sessions2 = listOf(Session(id = "fresh", directory = "/x"))
         coEvery { repository.getSessions(any()) } coAnswers {
             callCount += 1
-            gate.await()
-            Result.success(sessions)
+            if (callCount == 1) {
+                try { firstGate.await() } catch (e: kotlinx.coroutines.CancellationException) {
+                    firstCallCancelled = true
+                    throw e
+                }
+                Result.success(sessions1)
+            } else {
+                secondGate.await()
+                Result.success(sessions2)
+            }
         }
 
         launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
-        advanceUntilIdle() // first call suspended in gate
+        advanceUntilIdle() // first call suspended in firstGate
         assertEquals("first call started", 1, callCount)
 
-        // Second call while first is in-flight: must NOT fire a concurrent network
-        // request, but MUST queue a trailing rerun (rev-3 🔴1: no silent drop).
+        // Second call: must CANCEL the first (cancel-and-replace), not coalesce.
         launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
         advanceUntilIdle()
-        assertEquals("second call must NOT fire concurrent network request", 1, callCount)
-        assertTrue("trailing rerun queued", slices.store.sessionListLoadPendingRerun)
 
-        gate.complete(Unit)
+        // The first call's suspend Retrofit threw CancellationException (cancel-and-replace).
+        assertTrue("first call was cancelled (cancel-and-replace)", firstCallCancelled)
+        // The second call started after cancelling the first.
+        assertEquals("second call started after cancelling first", 2, callCount)
+
+        secondGate.complete(Unit)
         advanceUntilIdle()
 
-        // After the first completes, its finally re-triggers the trailing load.
-        assertEquals("trailing rerun fired the second network call", 2, callCount)
-        assertFalse("trailing rerun flag cleared after rerun", slices.store.sessionListLoadPendingRerun)
-        assertEquals("second (latest) result is the one kept", listOf("s1"), slices.sessionList.value.sessions.map { it.id })
+        // The cancelled first request committed NOTHING (no stale side effects). Only
+        // the second (latest) result is kept — this is the FIX-D newer-wins semantic.
+        assertEquals("only the second (fresh) result kept", listOf("fresh"), slices.sessionList.value.sessions.map { it.id })
+        assertFalse("flag cleared after second completes", store.sessionListLoadInFlight)
     }
 
     @Test

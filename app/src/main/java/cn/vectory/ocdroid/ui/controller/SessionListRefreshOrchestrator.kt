@@ -40,12 +40,16 @@ internal class SessionListRefreshOrchestrator(
     private val sessionListLoadEpoch = AtomicLong(0)
 
     /**
-     * §需求10 C3 (rev-3 🔴1+🔴2 fix): obsolete — kept only for the FIX-D stale-result
-     * fencing inside the in-flight body. The single-flight GATE is now the atomic
-     * [SharedStateStore.tryAcquireSessionListLoad] / [releaseSessionListLoad] pair
-     * on the store, shared atomically with [SessionMetadataPoller] so that
-     * regardless of who fires first (ON_RESUME / ForegroundCatchUp / reconnect /
-     * poller), at most ONE full `getSessions` runs concurrently.
+     * §需求10 C3 (round-4, oracle-driven cancel-and-replace): the in-flight
+     * heavyweight refresh job. A new caller CANCELS this (cancel-and-replace:
+     * newer intent wins; the older coroutine dies BEFORE any write because
+     * cancellation is delivered to the suspend Retrofit call and onSuccess/
+     * onFailure do not run). See [SharedStateStore.sessionListLoadInFlight]
+     * KDoc for the authoritative concurrency-model invariant set.
+     *
+     * NOT nulled in the finally: `cancel()` on a completed job is a no-op,
+     * `isListLoadInFlight()` checks `isActive`, and nulling here would clobber
+     * a newer job's reference (old finally wiping new ref) for no benefit.
      */
     private var inFlightLoad: Job? = null
 
@@ -67,37 +71,29 @@ internal class SessionListRefreshOrchestrator(
         currentServerGroupFp: (() -> String)? = null,
         onArchivedSessionsDetected: ((mergedSessions: List<Session>, hasMoreSessions: Boolean, confirmedServerIds: Set<String>, sweepNow: Long) -> Unit)? = null,
     ) {
-        // §需求10 C3 (rev-3 🔴2 fix): atomic single-flight gate. Both this
-        // orchestrator AND SessionMetadataPoller.poll go through the SAME atomic
-        // CAS on slices.store — so whoever fires first wins, the other no-ops,
-        // regardless of dispatch order (closes the "poll-first concurrent
-        // getSessions" defect where the old read-then-set Boolean let both read
-        // false then both launch).
-        //
-        // §rev-3 🔴1 fix (FIX-D supersession regression): a caller that LOSES the
-        // acquire race sets sessionListLoadPendingRerun=true. The WINNER checks
-        // that flag in its `finally` and, if set, re-triggers ONE trailing load —
-        // so a fresh refresh intent arriving mid-flight is NOT silently dropped
-        // (preserves the original FIX-D "newer request supersedes older"
-        // semantic: the trailing rerun runs with the LATEST caller's closures).
-        if (!slices.store.tryAcquireSessionListLoad()) {
-            // Lost the race — request a trailing rerun so the newer intent is honored
-            // after the in-flight winner finishes (instead of being silently dropped).
-            slices.store.sessionListLoadPendingRerun = true
-            DebugLog.d("Sync", "launchLoadSessions: in-flight, queued trailing rerun")
-            return
-        }
+        // §需求10 C3 (round-4, oracle cancel-and-replace): newer intent supersedes
+        // the older in-flight request. Bump the epoch at ENTRY (synchronously) so the
+        // in-flight job's completion checks see the epoch moved and self-discard even
+        // before its cancellation is observed; then CANCEL the in-flight job so it dies
+        // BEFORE any write (cancellation delivered to suspend Retrofit → onSuccess/
+        // onFailure never run → no cache persist / archive callback / ClearChat).
+        // This is original FIX-D (newer-wins via epoch) + "cancel the loser so it stops
+        // consuming the network" — net code DELETION vs the prior CAS-gate + trailing-
+        // rerun design, which structurally dissolves all 3 rev-4 defects (no loser →
+        // no stale-closure rerun; flag set inside body → no acquire-before-launch leak;
+        // poller out of the gate → no lost-pending).
+        val myEpoch = sessionListLoadEpoch.incrementAndGet()
+        inFlightLoad?.cancel()
         inFlightLoad = scope.launch {
             try {
+                // Flag set INSIDE the body: a scope cancellation between entry and
+                // body-launch can't leak the flag (the flag is never set if the body
+                // never runs).
+                slices.store.sessionListLoadInFlight = true
+
                 fun staleHostAfterSuspend(): Boolean = expectedServerGroupFp != null &&
                     currentServerGroupFp != null &&
                     expectedServerGroupFp != currentServerGroupFp()
-
-                // FIX-D (gpter #2): capture this request's epoch. Still bumped here
-                // (not at the old entry gate) so a trailing rerun's epoch supersedes
-                // an about-to-finish older request's epoch — stale-result fencing
-                // preserved.
-                val myEpoch = sessionListLoadEpoch.incrementAndGet()
 
             val limit = MainViewModelTimings.sessionFullLoadLimit
             slices.mutateSessionList {
@@ -260,30 +256,14 @@ internal class SessionListRefreshOrchestrator(
                     emit.emit(UiEvent.Error(R.string.error_load_sessions_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
             } finally {
-                inFlightLoad = null
-                // §rev-3 🔴1+🔴2: release the atomic single-flight gate. Check the
-                // trailing-rerun flag: if a newer caller lost the acquire race while
-                // this load was in flight, re-trigger ONE load with the latest
-                // caller's closures (honors the original FIX-D "newer supersedes
-                // older" semantic instead of silently dropping the newer intent).
-                // The rerun re-acquires the gate, so it serializes cleanly.
-                slices.store.releaseSessionListLoad()
-                if (slices.store.sessionListLoadPendingRerun) {
-                    slices.store.sessionListLoadPendingRerun = false
-                    DebugLog.d("Sync", "launchLoadSessions: trailing rerun queued")
-                    launchLoadSessions(
-                        scope = scope,
-                        repository = repository,
-                        slices = slices,
-                        settingsManager = settingsManager,
-                        onSelectSession = onSelectSession,
-                        onLoadSessionStatus = onLoadSessionStatus,
-                        onLoadMessages = onLoadMessages,
-                        emit = emit,
-                        expectedServerGroupFp = expectedServerGroupFp,
-                        currentServerGroupFp = currentServerGroupFp,
-                        onArchivedSessionsDetected = onArchivedSessionsDetected,
-                    )
+                // §需求10 C3 (round-4, oracle cancel-and-replace): clear the flag
+                // ONLY if this job still holds the current epoch — a superseded
+                // (cancelled) job must NOT wipe the newer job's flag. inFlightLoad
+                // is intentionally NOT nulled (see its KDoc): cancel() on a
+                // completed job is a no-op, isListLoadInFlight() checks isActive,
+                // and nulling here would clobber a newer job's reference.
+                if (sessionListLoadEpoch.get() == myEpoch) {
+                    slices.store.sessionListLoadInFlight = false
                 }
             }
         }
