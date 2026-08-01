@@ -107,11 +107,11 @@ class OptimisticClaimWatchdogCoordinator internal constructor(
     private var generation: Long = 0L
 
     /**
-     * §U-P2 — start the watchdog loop. Idempotent: a loop that is already
-     * running for the current generation is a no-op (calling [start] again
-     * while a loop is active first cancels the prior loop, then launches a
-     * fresh one — same single-flight discipline as the poller's
-     * [ProcessStatusPoller.startAndAwaitFirstPoll]).
+     * §U-P2 — start the watchdog loop. Idempotent: calling [start] when a
+     * loop is already active is a pure no-op (the existing loop continues
+     * uninterrupted). This preserves the watchdog's SLA timer — a repeated
+     * [start] from [SessionStreamingService.ensurePoller] mid-window does NOT
+     * reset the 5s delay.
      *
      * The loop [delay]s [tickIntervalMs] BEFORE the first tick (no immediate
      * tick at t=0 — a just-stamped claim is by definition NOT yet stale; the
@@ -125,10 +125,13 @@ class OptimisticClaimWatchdogCoordinator internal constructor(
         // Single-flight: cancel any prior loop before launching the new one.
         val prior = synchronized(stateLock) {
             if (loopJob?.isActive == true) {
-                // Already running — bump generation to invalidate the live
-                // loop, then fall through to launch a replacement (mirrors
-                // the poller's "cancel + relaunch" semantics so a repeat
-                // start() is safe but not a pure no-op).
+                // §U-P2 S1 fix (batch2-review): make start() truly idempotent.
+                // Previously the if-block was empty, causing every call to
+                // cancel+relaunch and reset the 5s watchdog timer — which could
+                // delay detection from ~5s to ~10s when ensurePoller() fires
+                // mid-window. Now it's a pure no-op when a loop is already
+                // running, preserving the ~7.5s SLA guarantee.
+                return
             }
             generation += 1
             loopJob.also { loopJob = null }

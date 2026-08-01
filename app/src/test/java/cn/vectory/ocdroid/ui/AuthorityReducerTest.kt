@@ -3205,6 +3205,9 @@ class AuthorityReducerTest {
         assertTrue("retry queue bounded", auth.retryQueue.size <= 256)
         // (3) revision monotonic (never decreased)
         assertTrue("revision non-negative", store.stateFlow.value.authorityRevision >= 0L)
+        // (4) §S3 (batch2-review): serverRoundHighWater monotonic guarantee
+        val aHw = auth.bySid["A"]?.serverRoundHighWater
+        assertTrue("A high-water monotonic", aHw == null || aHw.turn >= 0L)
     }
 
     /** Local assertNotNull to avoid an extra import line churn. */

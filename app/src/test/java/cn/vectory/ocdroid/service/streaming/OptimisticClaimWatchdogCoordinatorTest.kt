@@ -335,4 +335,51 @@ class OptimisticClaimWatchdogCoordinatorTest {
             sinkCount,
         )
     }
+
+    // ── S1 (batch2-review): mid-window start() regression ─────────────────────
+
+    @Test
+    fun `U-P2 S1 - mid-window start does not reset the tick timer`() = runTest {
+        var wallClock = 0L
+        val staleClaim = claim(claimedAtMonotonic = 0L)
+        val authority = AuthorityState(bySid = mapOf("A" to entry(staleClaim)))
+        val (store, _) = boundStore()
+
+        var sinkCount = 0
+        val coordinator = OptimisticClaimWatchdogCoordinator(
+            scope = backgroundScope,
+            authorityState = { authority },
+            identityStore = store,
+            clock = { wallClock },
+            staleClaimReconcileSink = { _, _ -> sinkCount += 1 },
+            tickIntervalMs = OPTIMISTIC_CONFIRM_TIMEOUT_MS,
+        )
+
+        coordinator.start()
+
+        // Advance to just before the first tick fires (4999ms out of 5000ms).
+        // The claim is not stale (wallClock is still 0).
+        advanceTimeBy(OPTIMISTIC_CONFIRM_TIMEOUT_MS - 1)
+        runCurrent()
+        assertEquals("no tick yet (just before timeout)", 0, sinkCount)
+
+        // Mid-window start() — with the S1 fix, this is a no-op (timer is
+        // NOT reset). Without the fix, it cancels+relaunches, resetting the
+        // delay to 0 and pushing the tick out by another 5000ms.
+        coordinator.start()
+
+        // Make the claim stale AND advance the remaining 2ms so total
+        // elapsed = 5001ms (past the original tickIntervalMs).
+        wallClock = OPTIMISTIC_CONFIRM_TIMEOUT_MS + 1L
+        advanceTimeBy(2)
+        runCurrent()
+
+        assertEquals(
+            "tick fires at expected time despite mid-window start() — " +
+                "timer was NOT reset (S1 fix)",
+            1,
+            sinkCount,
+        )
+        coordinator.stop()
+    }
 }
