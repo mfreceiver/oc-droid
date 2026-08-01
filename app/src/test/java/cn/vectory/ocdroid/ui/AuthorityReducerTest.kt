@@ -2344,16 +2344,19 @@ class AuthorityReducerTest {
         attempt: Int = 1,
         backoffMs: Long = 200L,
         queuedMonotonic: Long = 1000L,
+        identityEpochAtCapture: Long = 0L,
     ) = AuthorityOp.RetryQueued(
         sid = sid,
         scopeKey = scope,
         attempt = attempt,
         backoffMs = backoffMs,
         queuedMonotonic = queuedMonotonic,
+        identityEpochAtCapture = identityEpochAtCapture,
     )
 
-    private fun retryFired(sid: String, monotonic: Long = 2000L) =
-        AuthorityOp.RetryFired(sid = sid, scopeKey = scope, monotonic = monotonic)
+    private fun retryFired(sid: String, monotonic: Long = 2000L, identityEpochAtCapture: Long = 0L) =
+        AuthorityOp.RetryFired(sid = sid, scopeKey = scope,
+            monotonic = monotonic, identityEpochAtCapture = identityEpochAtCapture)
 
     @Test
     fun `RetryQueued enqueues entry with correct attempt backoff and queuedMonotonic`() {
@@ -2991,6 +2994,64 @@ class AuthorityReducerTest {
         // No change (s1 not in queue → no cleanup → same-ref no-op).
         assertSame("equal-value busy (sid not queued) is same-ref no-op",
             stateBefore, store.stateFlow.value)
+    }
+
+    // ── U-CQ5: RetryQueued/Fired epoch guard ──────────────────────────────
+
+    @Test
+    fun `U-CQ5 RetryQueued with stale identityEpoch is DROPPED`() {
+        val store = storeWith()
+        // Bump identityEpoch to 1.
+        store.mutateHost { it.copy(currentHostProfileId = "new-host") }
+        assertEquals("identityEpoch bumped to 1",
+            1L, store.stateFlow.value.identityEpoch)
+
+        // RetryQueued with identityEpochAtCapture=0L (stale, predates the bump).
+        val before = store.stateFlow.value
+        store.dispatch(AppAction.AuthorityEvent(
+            retryQueued("s1", identityEpochAtCapture = 0L),
+        ))
+        assertSame("stale-epoch RetryQueued dropped (no-op)", before, store.stateFlow.value)
+        assertFalse("s1 NOT in retryQueue", "s1" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `U-CQ5 RetryFired with stale identityEpoch is DROPPED`() {
+        val store = storeWith()
+        // Seed a retry entry.
+        store.dispatch(AppAction.AuthorityEvent(
+            retryQueued("s1", identityEpochAtCapture = 0L),
+        ))
+        assertTrue("s1 queued", "s1" in store.stateFlow.value.authority.retryQueue)
+        // Bump identityEpoch to 1.
+        store.mutateHost { it.copy(currentHostProfileId = "another-host") }
+        assertEquals(1L, store.stateFlow.value.identityEpoch)
+
+        // RetryFired with identityEpochAtCapture=0L (stale) → DROP.
+        val before = store.stateFlow.value
+        store.dispatch(AppAction.AuthorityEvent(
+            retryFired("s1", identityEpochAtCapture = 0L),
+        ))
+        assertSame("stale-epoch RetryFired dropped (no-op)", before, store.stateFlow.value)
+        assertTrue("s1 still in retryQueue (fence protected)", "s1" in store.stateFlow.value.authority.retryQueue)
+    }
+
+    @Test
+    fun `U-CQ5 RetryQueued backward-compat default 0L passes when identityEpoch is 0L`() {
+        // Default 0L + state.identityEpoch=0L (initial state) → pass.
+        val state = StoreState.initial()
+        val result = reduceAuthority(state, retryQueued("s1"))
+        assertTrue("s1 queued with default epoch guard", "s1" in result.authority.retryQueue)
+    }
+
+    @Test
+    fun `U-CQ5 RetryFired backward-compat default 0L passes when identityEpoch is 0L`() {
+        // Default 0L + state.identityEpoch=0L → pass.
+        val state = StoreState.initial()
+        val withQueue = reduceAuthority(state, retryQueued("s1"))
+        val result = reduceAuthority(withQueue, retryFired("s1"))
+        assertFalse("s1 removed from queue via RetryFired (guard passed)",
+            "s1" in result.authority.retryQueue)
     }
 
     // ── U-P6: concurrency invariants under parallel dispatch ────────────

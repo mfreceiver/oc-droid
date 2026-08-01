@@ -175,6 +175,13 @@ sealed interface AuthorityOp {
          *  NOT monotonic — same caveat as
          *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic]. */
         val queuedMonotonic: Long,
+        /** §U-CQ5: [StoreState.identityEpoch] captured at dispatch time. The reducer's
+         *  [cn.vectory.ocdroid.ui.opScopeValid] DROPs the op when this epoch does NOT
+         *  match [StoreState.identityEpoch] (stale-identity guard — defense-in-depth
+         *  inside the pure CAS). Default 0L for backward-compat with dispatch sites
+         *  not yet migrated (they pass identityEpoch=0L → lenient pass when
+         *  state.identityEpoch is also 0L, which is the initial/empty state). */
+        val identityEpochAtCapture: Long = 0L,
     ) : AuthorityOp
 
     /**
@@ -191,6 +198,10 @@ sealed interface AuthorityOp {
          *  NOT monotonic — same caveat as
          *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic]. */
         val monotonic: Long,
+        /** §U-CQ5: [StoreState.identityEpoch] captured at dispatch time. Same guard
+         *  contract as [RetryQueued.identityEpochAtCapture]. Default 0L for
+         *  backward-compat. */
+        val identityEpochAtCapture: Long = 0L,
     ) : AuthorityOp
 }
 

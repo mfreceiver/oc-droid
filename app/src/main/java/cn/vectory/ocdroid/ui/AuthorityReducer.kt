@@ -218,9 +218,12 @@ private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
             true
         }
         is AuthorityOp.PurgeHost,
-        is AuthorityOp.PruneSessions,
-        is AuthorityOp.RetryQueued,
-        is AuthorityOp.RetryFired -> true
+        is AuthorityOp.PruneSessions -> true
+        // §U-CQ5: epoch guard for RetryQueued/Fired — DROP if the identity advanced
+        // between capture and this CAS. Default 0L backward-compat: passes when
+        // state.identityEpoch is also 0L (initial / empty state).
+        is AuthorityOp.RetryQueued -> op.identityEpochAtCapture == state.identityEpoch
+        is AuthorityOp.RetryFired -> op.identityEpochAtCapture == state.identityEpoch
     }
 }
 
