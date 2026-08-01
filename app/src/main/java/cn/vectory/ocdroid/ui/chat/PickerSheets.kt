@@ -14,10 +14,13 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.AgentInfo
+import cn.vectory.ocdroid.data.model.ConfigProvider
+import cn.vectory.ocdroid.data.model.ProviderModel
 import cn.vectory.ocdroid.data.model.ProvidersResponse
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.AppSectionHeader
@@ -80,6 +83,14 @@ internal fun AgentPickerSheet(
     }
 }
 
+// §req1-stability: 稳定派生结构，让 LazyColumn 的 items() 每帧不重建 List<Pair>。
+// 在 LazyColumn 外一次性预计算 provider→models 并 remember，避免 forEach 内每帧
+// 重建 List<Pair> 导致的无关重组 / 滚动闪烁。
+private data class PickerSection(
+    val provider: ConfigProvider,
+    val models: List<Pair<String, ProviderModel>>,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ModelPickerSheet(
@@ -100,7 +111,37 @@ internal fun ModelPickerSheet(
     // 底部 inset 由 recipe 统一）。provider header 用 labelLarge + 顶 8dp/
     // 底 4dp（与 Agent 标题节奏对称）；trailing 槽统一 Filled Check（替代
     // Outlined Memory）。
-    val catalog = visiblePickerProviders(providers, disabledModels)
+    val catalog = remember(providers, disabledModels) {
+        // §req1-stability: catalog 加 remember，避免每次重组重跑
+        // visiblePickerProviders（List 重建 → items() 误判变化 → 无关重组）。
+        visiblePickerProviders(providers, disabledModels)
+    }
+    // §req1-stability: 把 currentModel 的相等性判断预计算为稳定 String key，
+    // item lambda 主路径只比较 String key，减少对 currentModel 对象的捕获。
+    // 注意原 isSelected 逻辑含 fallback：currentModel.modelId == model.id 兜底
+    // 匹配——该 fallback 仍保留在 item lambda 内（见下，model.id 可能与 map key
+    // modelId 不同，不可丢）。
+    val selectedKey = remember(currentModel) {
+        if (currentModel != null) {
+            // canonical: "${providerId}/${modelId}"
+            "${currentModel.providerId}/${currentModel.modelId}"
+        } else null
+    }
+    // §req1-stability: 在 LazyColumn 外一次性派生 provider→models，避免 forEach 内
+    // 每帧重建 List<Pair>。稳定 key = (catalog, disabledModels)；catalog 已 remember，
+    // disabledModels 来自 settingsFlow distinctUntilChanged，settings 不变则同实例。
+    val sections = remember(catalog, disabledModels) {
+        catalog.map { provider ->
+            PickerSection(
+                provider = provider,
+                models = provider.models.entries
+                    .map { (modelId, model) -> modelId to model }
+                    .filter { (modelId, _) ->
+                        "${provider.id}/$modelId" !in disabledModels
+                    },
+            )
+        }.filter { it.models.isNotEmpty() }
+    }
     // §fix-sheet-remeasure-jump: cap the picker list at ~80% of the screen
     // height. Instrumented repro (contentHeight 1975↔2103px on a 2400px screen
     // ≈ 82-88%) confirmed the LazyColumn's intrinsic height rides close to the
@@ -163,29 +204,31 @@ internal fun ModelPickerSheet(
                     )
                 }
             } else {
-                catalog.forEach { provider ->
-                    val matchingModels = provider.models.entries
-                        .map { (modelId, model) -> modelId to model }
-                        .filter { (modelId, _) ->
-                            "${provider.id}/$modelId" !in disabledModels
-                        }
-                    if (matchingModels.isEmpty()) return@forEach
+                sections.forEach { section ->
                     // §WT1 provider header：用 AppSectionHeader（titleSmall 14sp/Med
                     // + onSurfaceVariant + 16dp/8dp padding），替代原手写 labelLarge
                     // + 硬编码 padding(start=24,end=24,top=8,bottom=4)——与 ui-style-spec
                     // §2 的 section header 原语对齐，跨 picker 统一。
-                    item(key = "header_${provider.id}") {
+                    item(key = "header_${section.provider.id}") {
                         AppSectionHeader(
-                            text = provider.name?.takeIf { it.isNotEmpty() } ?: provider.id,
+                            text = section.provider.name?.takeIf { it.isNotEmpty() }
+                                ?: section.provider.id,
                         )
                     }
                     items(
-                        items = matchingModels,
-                        key = { (modelId, _) -> "${provider.id}/$modelId" },
+                        items = section.models,
+                        key = { (modelId, _) -> "${section.provider.id}/$modelId" },
                     ) { (modelId, model) ->
-                        val isSelected = currentModel != null &&
-                            currentModel.providerId == provider.id &&
-                            (currentModel.modelId == modelId || currentModel.modelId == model.id)
+                        // §req1-stability: 主路径只比较稳定 String key（selectedKey），
+                        // 不读 currentModel 对象。保留原 fallback 语义：当 map key
+                        // (modelId) 与 ProviderModel.id 不同时，用 model.id 兜底匹配
+                        // （原逻辑 currentModel.modelId == model.id）——该分支才读
+                        // currentModel，属必要保留。
+                        val isSelected = selectedKey != null && (
+                            selectedKey == "${section.provider.id}/$modelId" ||
+                                (currentModel != null && currentModel.modelId == model.id &&
+                                    "${section.provider.id}/${model.id}" == selectedKey)
+                            )
                         androidx.compose.material3.ListItem(
                             headlineContent = {
                                 Text(
@@ -195,7 +238,7 @@ internal fun ModelPickerSheet(
                                 )
                             },
                             trailingContent = { PickerTrailingCheck(selected = isSelected) },
-                            modifier = Modifier.clickable { onSwitch(provider.id, modelId) },
+                            modifier = Modifier.clickable { onSwitch(section.provider.id, modelId) },
                         )
                     }
                 }

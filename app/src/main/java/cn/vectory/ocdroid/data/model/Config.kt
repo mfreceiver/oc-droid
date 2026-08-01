@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.data.model
 
+import androidx.compose.runtime.Stable
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
@@ -12,6 +13,12 @@ data class HealthResponse(
     val version: String? = null
 )
 
+// §req1-stability: @Stable 显式断言「调用方不会 mutate 这些集合」。这两个 data
+// class 经 settingsFlow distinctUntilChanged 读取后不 mutate，Compose 默认视
+// List/Map 字段为不稳定会导致 ModelPickerSheet 不可跳过；加 @Stable 配合 PickerSheets
+// 内的 remember 后，Compose 编译器可把 ModelPickerSheet 标记为可跳过，减少无关重组。
+// 注意：ProviderModel（两个 String? 字段）编译器已推断为稳定，不加。
+@Stable
 @Serializable
 data class ProvidersResponse(
     val providers: List<ConfigProvider> = emptyList(),
@@ -24,6 +31,7 @@ data class ProvidersResponse(
         }
 }
 
+@Stable
 @Serializable
 data class ConfigProvider(
     val id: String = "",
