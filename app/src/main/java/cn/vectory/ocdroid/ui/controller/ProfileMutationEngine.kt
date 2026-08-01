@@ -228,8 +228,18 @@ class ProfileMutationEngine internal constructor(
                 effects.emitEffect(ControllerEffect.RestartRequired)
             }
         } else {
-            // Non-active deletion: still evict the deleted profile's cache.
+            // §需求12阶段3 (rev-3 blocker #2 fix): non-active deletion must
+            // ALSO clear the deleted profile's persisted model data — under
+            // 需求12 profiles are fully independent (a group can never have
+            // sibling profiles), so the per-profile-id availability/disabled
+            // ESP keys are orphans the instant their owning profile is gone.
+            // Without this, deleting a non-current profile leaks
+            // `model_availability_<id>` / `disabled_models_<id>` forever
+            // (only `clearOrphanGroupKeys` migration would eventually catch
+            // them, and only if the id isn't a UUID — but profile ids ARE
+            // UUIDs, so they'd never be cleaned). Mirror the active branch.
             deletedProfileId?.let {
+                settingsManager.clearModelDataForGroup(it)
                 effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
             }
         }

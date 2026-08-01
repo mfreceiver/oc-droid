@@ -855,6 +855,33 @@ class HostProfileControllerTest {
         assertEquals("p-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().profileId)
     }
 
+    @Test
+    fun `deleteHostProfile of non-current profile also clears its persisted model data (rev-3 blocker #2)`() {
+        // §需求12阶段3 rev-3 blocker #2: under 需求12 profiles are fully
+        // independent — a group can never have sibling profiles. The
+        // per-profile-id model availability/disabled ESP keys are orphans
+        // the instant their owning profile is deleted. Non-active deletion
+        // MUST also call clearModelDataForGroup(deletedId), not just emit
+        // EvictGroup — otherwise the ESP keys leak forever (UUID-suffixed
+        // keys are never swept by clearOrphanGroupKeys, which only purges
+        // non-UUID A/B/C/D suffixes).
+        seed { it.copy(currentHostProfileId = "p-A") }
+
+        controller.deleteHostProfile("p-B")
+        scope.testScheduler.advanceUntilIdle()
+
+        // Persisted model data for the deleted non-current profile is cleared.
+        verify(exactly = 1) { settingsManager.clearModelDataForGroup("p-B") }
+        // EvictGroup still fires (in-memory authority/session eviction).
+        assertEquals(
+            "EvictGroup(p-B) fires for the deleted non-current profile",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
+        assertEquals("p-B", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().profileId)
+        // Non-active deletion does NOT purge the active host's state or restart.
+        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.RestartRequired>().isEmpty())
+    }
+
     // ── §fix-3 gro-1/gpt-2/glm-2: saveHostProfile mTLS live-reconfigure ──────
 
     /**
