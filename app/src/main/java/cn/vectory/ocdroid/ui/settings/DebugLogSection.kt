@@ -311,13 +311,21 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
             // registrations) to be reused across different log lines on every
             // recomposition — corrupting the active selection. `seq` is the
             // stable, collision-free key designed for exactly this (see
-            // DebugLog.Entry KDoc). As a side benefit, only the single new row
-            // enters recomposition on append; existing rows are reused.
+            // DebugLog.Entry KDoc). Note: `key` stabilizes node IDENTITY so the
+            // active selection survives appends (no mis-assignment / clearing),
+            // but it does NOT skip recomposition — because the list is
+            // newest-first, inserting a row still shifts all following entries,
+            // and Compose recomposes shifted keyed nodes. The per-row text is
+            // therefore cached (see §row-text-cache) to make that unavoidable
+            // recomposition cheap.
             //
-            // §platform-limit-autoscroll: Compose Foundation 1.10 (composeBom
-            // 2025.12.00) does NOT auto-scroll the viewport when a drag
-            // selection extends beyond the visible bounds — that capability
-            // lands in Foundation 1.11+. Cross-line selection is fully usable
+            // §platform-limit-autoscroll: the Compose Foundation LIBRARY
+            // (androidx.compose.foundation:foundation) at the version pinned by
+            // composeBom 2025.12.00 does NOT auto-scroll the viewport when a
+            // drag selection extends beyond the visible bounds. That capability
+            // (auto-scroll-on-drag-beyond-viewport) is introduced in Compose
+            // Foundation 1.12.0-alpha02 — this is a library version, unrelated
+            // to the Android API level. Cross-line selection is fully usable
             // within the viewport; to extend a selection past the edge the user
             // must scroll manually (then continue dragging). This is an
             // accepted platform trade-off (user decision: keep cross-line
@@ -342,6 +350,19 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
+                    // §row-text-cache: per-seq cache of the formatted row text.
+                    // Because the list is newest-first (§stable-seq-key), every
+                    // append shifts all following entries and forces their
+                    // recomposition — re-running sdf.format + string-template
+                    // for up to 3000 rows each time. Caching by entry.seq avoids
+                    // that: seq is monotonic and never reused (DebugLog's
+                    // AtomicLong), so the cache needs NO invalidation. Evicted
+                    // ring-buffer entries simply stop appearing in `filtered`
+                    // and are never read again; the map self-caps at <= 3000
+                    // entries (bounded, no cleanup logic needed). Only the pure
+                    // text is cached — levelColor stays recomposed per row
+                    // because it reads MaterialTheme.colorScheme (theme/reactive).
+                    val rowTextCache = remember { mutableMapOf<Long, String>() }
                     filtered.forEach { entry ->
                         val levelColor = when (entry.level) {
                             DebugLog.Level.DEBUG -> MaterialTheme.colorScheme.onSurfaceVariant
@@ -353,7 +374,9 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                         // node identity follows the Entry, not the list index.
                         key(entry.seq) {
                             Text(
-                                text = "[${sdf.format(entry.timeMs)}] ${entry.tag}/${entry.level}: ${entry.message}",
+                                text = rowTextCache.getOrPut(entry.seq) {
+                                    "[${sdf.format(entry.timeMs)}] ${entry.tag}/${entry.level}: ${entry.message}"
+                                },
                                 style = MaterialTheme.typography.labelSmall,
                                 fontFamily = BundledMonoFamily,
                                 color = levelColor
