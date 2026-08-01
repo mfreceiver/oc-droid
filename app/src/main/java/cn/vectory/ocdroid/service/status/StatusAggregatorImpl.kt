@@ -418,7 +418,18 @@ class StatusAggregatorImpl internal constructor(
                 store.dispatch(AppAction.AuthorityEvent(op))
                 publishFromState(store.stateFlow.value)
             },
-            onFailure = { markRequestFailedInternal(identity, snapshot, requestStartMs, token) },
+            onFailure = {
+                // §U-MN10 (分歧3): consistency assertion at the ONLY epoch-guarded
+                // failure path. The epoch guard at refresh():368 precedes this
+                // closure (no suspend between them), so identityStore.currentIdentity
+                // MUST equal the `identity` param here. markRequestFailedInternal's
+                // OTHER caller (public markRequestFailed) has NO epoch guard, so the
+                // assertion lives HERE, not inside the internal helper.
+                check(scopeKey == currentScope()) {
+                    "identity/scope divergence after epoch guard (failure path): param=$scopeKey bound=${currentScope()}"
+                }
+                markRequestFailedInternal(identity, snapshot, requestStartMs, token)
+            },
         )
     }
 
@@ -489,12 +500,14 @@ class StatusAggregatorImpl internal constructor(
         token: RequestToken,
     ) {
         val scopeKey = scopeKeyOf(identity.serverGroupFp, identity.endpointFp)
-        // §U-MN10 (分歧3): consistency assertion. After the epoch guard in
-        // refresh(), the identity param MUST equal the bound identity. This
-        // is the markRequestFailedInternal path called ONLY from refresh().
-        check(scopeKey == currentScope()) {
-            "identity/scope divergence in markRequestFailedInternal: param=$scopeKey bound=${currentScope()}"
-        }
+        // §U-MN10 (分歧3): NO consistency assertion here. This internal helper
+        // is reached from TWO callers: (1) refresh()'s onFailure (the epoch
+        // guard at refresh():368 precedes it — safe to assert there) and
+        // (2) the public markRequestFailed() entry (NO epoch guard — callers
+        // like ProcessStatusPoller.runRefresh:478 pass an identity captured at
+        // poll start, which may be stale after a reconfigure; asserting here
+        // would fire IllegalStateException across a legitimate reconfigure
+        // window). The assertion lives at the refresh() onFailure site only.
         val op = AuthorityOp.MarkSourceFailed(
             scopeKey = scopeKey,
             requestToken = token,
