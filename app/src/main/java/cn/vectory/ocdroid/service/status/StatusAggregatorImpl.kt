@@ -216,6 +216,15 @@ class StatusAggregatorImpl internal constructor(
      * production the per-call identity always matches it). Used both as the
      * composite-key [serverGroupFp] for derived entries and as the
      * [AuthorityState.coverage] lookup key.
+     *
+     * §U-MN10 (分歧3) rev-gpt gate r1: in STEADY STATE (no concurrent
+     * reconfigure), `scopeKeyOf(perCallIdentity.serverGroupFp, …)` MUST equal
+     * `currentScope()`. This invariant is NOT runtime-enforced — the reads of
+     * [currentEpoch] + [currentIdentity] are two independent lock-free reads,
+     * so a runtime check() could fire across a legitimate cross-thread
+     * reconfigure race (ProcessStatusPoller on Dispatchers.Default vs
+     * controller/UI-initiated beginReconfigure). The invariant is pinned at
+     * TEST level (StatusAggregatorImplTest `scope derivation is consistent`).
      */
     private fun currentScope(): ScopeKey {
         val id = identityStore.currentIdentity.value
@@ -367,14 +376,19 @@ class StatusAggregatorImpl internal constructor(
         // this request mid-flight (checked AFTER the suspend, BEFORE dispatch).
         if (identityStore.currentEpoch() != epochAtRequestStart) return
         val scopeKey = scopeKeyOf(identity.serverGroupFp, identity.endpointFp)
-        // §U-MN10 (分歧3): consistency assertion. After the epoch guard above,
-        // identityStore.currentIdentity MUST equal the per-call `identity` param
-        // (the epoch advanced iff identity moved). If the derived scopes diverge
-        // here, it's a real bug (stale identity param despite matching epoch).
-        // Safe: no suspend between the epoch check and here → no reconfigure window.
-        check(scopeKey == currentScope()) {
-            "identity/scope divergence after epoch guard: param=$scopeKey bound=${currentScope()}"
-        }
+        // §U-MN10 (分歧3) rev-gpt gate r1: NO runtime check() here. The
+        // currentEpoch() read above + currentScope()'s currentIdentity read are
+        // TWO independent lock-free reads (AtomicLong + AtomicReference-backed
+        // StateFlow). A concurrent beginReconfigure() on another thread
+        // (ProcessStatusPoller runs on Dispatchers.Default; reconfigure is
+        // initiated from controller/UI) can interleave: epoch reads X (guard
+        // passes) → other thread bumps to X+1 + nulls identity → currentScope()
+        // reads null → a check() would throw IllegalStateException across a
+        // LEGITIMATE reconfigure race, mis-routing a successful fetch as Unknown.
+        // The steady-state invariant (scopeKey == currentScope()) is pinned at
+        // TEST level (StatusAggregatorImplTest `scope derivation is consistent`).
+        // U-MN10's production value is the scopeKeyOf() SSOT convergence, not
+        // this assertion.
         val token = RequestToken(
             hostProfileId = hostAtStart,
             requestStartMs = requestStartMs,
@@ -419,15 +433,10 @@ class StatusAggregatorImpl internal constructor(
                 publishFromState(store.stateFlow.value)
             },
             onFailure = {
-                // §U-MN10 (分歧3): consistency assertion at the ONLY epoch-guarded
-                // failure path. The epoch guard at refresh():368 precedes this
-                // closure (no suspend between them), so identityStore.currentIdentity
-                // MUST equal the `identity` param here. markRequestFailedInternal's
-                // OTHER caller (public markRequestFailed) has NO epoch guard, so the
-                // assertion lives HERE, not inside the internal helper.
-                check(scopeKey == currentScope()) {
-                    "identity/scope divergence after epoch guard (failure path): param=$scopeKey bound=${currentScope()}"
-                }
+                // §U-MN10 rev-gpt gate r1: NO runtime check() here (same
+                // cross-thread non-atomic read hazard as the success path —
+                // see comment at the scopeKey derivation above). The steady-state
+                // invariant is pinned at TEST level.
                 markRequestFailedInternal(identity, snapshot, requestStartMs, token)
             },
         )
