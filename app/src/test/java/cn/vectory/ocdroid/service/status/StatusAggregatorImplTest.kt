@@ -1164,4 +1164,22 @@ class StatusAggregatorImplTest {
             aggregator.globalState.value,
         )
     }
+
+    @Test
+    fun `scope derivation is consistent between bound identity and per-call identity`() = runTest {
+        // §U-MN10: steady-state invariant — currentScope() (identityStore-sourced)
+        // equals scopeKeyOf(perCallIdentity). The runtime check() in refresh()
+        // enforces this; calling refresh() with a matching identity must not
+        // throw (the scopeKey == currentScope() invariant holds).
+        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+        val aggregator = newAggregator(repo)
+        // identity() matches the store's auto-bound identity (groupFp = "host-group-A")
+        aggregator.refresh(identity(), snapshot(emptyMap()))
+        // No exception thrown — the runtime check() inside refresh() passed.
+        assertTrue(
+            "after empty success, statusByKey should be empty (no sessions)",
+            aggregator.statusByKey.value.isEmpty(),
+        )
+    }
 }

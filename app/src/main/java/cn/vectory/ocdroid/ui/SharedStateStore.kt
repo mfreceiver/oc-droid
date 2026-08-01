@@ -166,9 +166,8 @@ class SharedStateStore @Inject constructor(
      * derivation — no second scope source. */
     internal fun authorityScope(): cn.vectory.ocdroid.data.state.ScopeKey {
         val id = identityStore.currentIdentity.value
-        return cn.vectory.ocdroid.data.state.ScopeKey(
-            serverGroupFp = id?.serverGroupFp ?: "",
-            endpointFp = id?.endpointFp ?: "",
+        return cn.vectory.ocdroid.data.state.scopeKeyOf(
+            id?.serverGroupFp, id?.endpointFp,
         )
     }
 

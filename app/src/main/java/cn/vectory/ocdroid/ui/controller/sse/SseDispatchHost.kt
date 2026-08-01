@@ -187,18 +187,16 @@ internal fun SseDispatchHost.applyStatusViaAuthority(
     val eventIdentity = currentEventIdentity()
     val (scopeKey, capturedIdentity, identityEpochAtCapture) = if (eventIdentity != null) {
         Triple(
-            cn.vectory.ocdroid.data.state.ScopeKey(
-                serverGroupFp = eventIdentity.serverGroupFp,
-                endpointFp = eventIdentity.endpointFp,
+            cn.vectory.ocdroid.data.state.scopeKeyOf(
+                eventIdentity.serverGroupFp, eventIdentity.endpointFp,
             ),
             eventIdentity,
             slices.store.captureIdentityEpoch(),
         )
     } else {
         Triple(
-            cn.vectory.ocdroid.data.state.ScopeKey(
-                serverGroupFp = serverGroupFp(),
-                endpointFp = "",
+            cn.vectory.ocdroid.data.state.scopeKeyOf(
+                serverGroupFp(), "",
             ),
             null,
             0L,

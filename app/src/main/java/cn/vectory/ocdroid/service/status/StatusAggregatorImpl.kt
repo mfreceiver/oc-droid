@@ -4,6 +4,7 @@ import cn.vectory.ocdroid.data.state.AuthorityOp
 import cn.vectory.ocdroid.data.state.EntryOrigin
 import cn.vectory.ocdroid.data.state.RequestToken
 import cn.vectory.ocdroid.data.state.ScopeKey
+import cn.vectory.ocdroid.data.state.scopeKeyOf
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
@@ -218,10 +219,7 @@ class StatusAggregatorImpl internal constructor(
      */
     private fun currentScope(): ScopeKey {
         val id = identityStore.currentIdentity.value
-        return ScopeKey(
-            serverGroupFp = id?.serverGroupFp ?: "",
-            endpointFp = id?.endpointFp ?: "",
-        )
+        return scopeKeyOf(id?.serverGroupFp, id?.endpointFp)
     }
 
     /**
@@ -368,10 +366,15 @@ class StatusAggregatorImpl internal constructor(
         // CP4 §2 epoch guard: drop the response if a reconfigure invalidated
         // this request mid-flight (checked AFTER the suspend, BEFORE dispatch).
         if (identityStore.currentEpoch() != epochAtRequestStart) return
-        val scopeKey = ScopeKey(
-            serverGroupFp = identity.serverGroupFp,
-            endpointFp = identity.endpointFp,
-        )
+        val scopeKey = scopeKeyOf(identity.serverGroupFp, identity.endpointFp)
+        // §U-MN10 (分歧3): consistency assertion. After the epoch guard above,
+        // identityStore.currentIdentity MUST equal the per-call `identity` param
+        // (the epoch advanced iff identity moved). If the derived scopes diverge
+        // here, it's a real bug (stale identity param despite matching epoch).
+        // Safe: no suspend between the epoch check and here → no reconfigure window.
+        check(scopeKey == currentScope()) {
+            "identity/scope divergence after epoch guard: param=$scopeKey bound=${currentScope()}"
+        }
         val token = RequestToken(
             hostProfileId = hostAtStart,
             requestStartMs = requestStartMs,
@@ -485,10 +488,13 @@ class StatusAggregatorImpl internal constructor(
         sourceTimeMs: Long,
         token: RequestToken,
     ) {
-        val scopeKey = ScopeKey(
-            serverGroupFp = identity.serverGroupFp,
-            endpointFp = identity.endpointFp,
-        )
+        val scopeKey = scopeKeyOf(identity.serverGroupFp, identity.endpointFp)
+        // §U-MN10 (分歧3): consistency assertion. After the epoch guard in
+        // refresh(), the identity param MUST equal the bound identity. This
+        // is the markRequestFailedInternal path called ONLY from refresh().
+        check(scopeKey == currentScope()) {
+            "identity/scope divergence in markRequestFailedInternal: param=$scopeKey bound=${currentScope()}"
+        }
         val op = AuthorityOp.MarkSourceFailed(
             scopeKey = scopeKey,
             requestToken = token,

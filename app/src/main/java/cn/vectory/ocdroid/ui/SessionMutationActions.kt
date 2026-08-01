@@ -409,9 +409,8 @@ internal fun launchSendMessage(
                 // fall back to current behavior (authorityScope(), null identity,
                 // epoch 0L — lenient, backward compat).
                 val scopeKey = if (identityAtDispatch != null) {
-                    cn.vectory.ocdroid.data.state.ScopeKey(
-                        serverGroupFp = identityAtDispatch.serverGroupFp,
-                        endpointFp = identityAtDispatch.endpointFp,
+                    cn.vectory.ocdroid.data.state.scopeKeyOf(
+                        identityAtDispatch.serverGroupFp, identityAtDispatch.endpointFp,
                     )
                 } else {
                     slices.store.authorityScope()
