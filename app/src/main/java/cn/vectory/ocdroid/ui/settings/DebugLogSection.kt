@@ -355,14 +355,18 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                     // append shifts all following entries and forces their
                     // recomposition — re-running sdf.format + string-template
                     // for up to 3000 rows each time. Caching by entry.seq avoids
-                    // that: seq is monotonic and never reused (DebugLog's
-                    // AtomicLong), so the cache needs NO invalidation. Evicted
-                    // ring-buffer entries simply stop appearing in `filtered`
-                    // and are never read again; the map self-caps at <= 3000
-                    // entries (bounded, no cleanup logic needed). Only the pure
-                    // text is cached — levelColor stays recomposed per row
-                    // because it reads MaterialTheme.colorScheme (theme/reactive).
-                    val rowTextCache = remember { mutableMapOf<Long, String>() }
+                    // re-running that work within a stable `filtered` window:
+                    // seq is monotonic and never reused (DebugLog's AtomicLong),
+                    // so getOrPut hits for entries still in the window and only
+                    // freshly-seen seqs format. The cache is keyed on `filtered`
+                    // itself: when the window changes (append / ring-buffer
+                    // eviction / level filter / clear) the map is rebuilt from
+                    // the new window — this bounds the map to the current
+                    // |filtered| (<= MAX_ENTRIES = 3000) and ensures DebugLog.clear()
+                    // also releases all cached strings (filtered -> emptyList ->
+                    // empty map). levelColor is NOT cached — it reads
+                    // MaterialTheme.colorScheme, so it stays recomposed per row.
+                    val rowTextCache = remember(filtered) { mutableMapOf<Long, String>() }
                     filtered.forEach { entry ->
                         val levelColor = when (entry.level) {
                             DebugLog.Level.DEBUG -> MaterialTheme.colorScheme.onSurfaceVariant
