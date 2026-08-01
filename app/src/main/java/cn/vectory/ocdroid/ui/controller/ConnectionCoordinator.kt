@@ -262,6 +262,21 @@ class ConnectionCoordinator(
     private var pendingReconfigureTeardown: Deferred<Result<Unit>>? = null
 
     /**
+     * §需求13 rev-7 #1: single-flight guard for the LoadProviders emit in
+     * [loadInitialData]. Closes the check-then-act race where multiple
+     * concurrent loadInitialData() calls at cold start
+     * (MainActivity.coldStartReconnect + ON_RESUME + health-probe recovery
+     * all firing before the first /config/providers fetch completes) each
+     * saw `providers == null` and each emitted LoadProviders → duplicate
+     * parallel fetches. The [compareAndSet] in loadInitialData arms the gate
+     * exactly once per providers-lifecycle; the gate is re-armed (set to
+     * false) at the top of [coldStartReconnect] so a hard-local-reset
+     * (HostProfileController.resetLocalDataAndResync nulls providers →
+     * emits ColdStartReconnect → this coordinator) re-fetches the catalog.
+     */
+    private val providersFirstFetchArmed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
      * @VisibleForTesting: seam fired inside [reconfigureLock] just before
      * the handoff-probe invocation. Tests use this to deterministically
      * trigger a REAL second thread to call [cancelSseForReconfigure] while
@@ -368,6 +383,21 @@ class ConnectionCoordinator(
      * `ConnectionViewModel.coldStartReconnect()`) see no change.
      */
     fun coldStartReconnect() {
+        // §需求13 rev-7 #1: re-arm the providers single-flight gate BEFORE
+        // the probe runs. The hard local reset
+        // (HostProfileController.resetLocalDataAndResync) nulls providers
+        // (writes a fresh SettingsState()) and then emits ColdStartReconnect
+        // → this method. Without this re-arm, a hard-reset BEFORE the first
+        // /config/providers fetch completes would leave the gate armed
+        // (true) with providers null → the CAS in loadInitialData would
+        // fail → the catalog would never auto-fetch. Resetting here is safe
+        // for ALL other callers:
+        //  - Normal cold start: gate is already false (new process) → no-op.
+        //  - Host switch: providers is preserved (non-null — the reducer
+        //    only clears availableCommands) → the providers==null check in
+        //    loadInitialData fails → no spurious re-fetch.
+        //  - Health-probe recovery: same as host switch (providers non-null).
+        providersFirstFetchArmed.set(false)
         scope.launch {
             // Result-aware barrier loop: joins the pending teardown [Deferred]
             // and checks its [Result]:
@@ -532,7 +562,19 @@ class ConnectionCoordinator(
         // all without per-button edits. `slices` is this controller's private
         // SliceFlows field (same accessor as the nearby `slices.chat.value`
         // reads + `slices.settings.value` projections).
-        if (slices.settings.value.providers == null) {
+        //
+        // §需求13 rev-7 #1: atomic single-flight — [providersFirstFetchArmed]
+        // .compareAndSet closes the check-then-act race where multiple
+        // concurrent loadInitialData() calls at cold start ALL saw
+        // providers==null and each emitted LoadProviders. CAS arms the gate
+        // exactly once per process lifetime; the gate is re-armed (set to
+        // false) at the top of [coldStartReconnect] so a hard-local-reset
+        // (the only path that nulls providers) re-fetches the catalog. A
+        // normal cross-host switch does NOT null providers (the reducer only
+        // clears availableCommands — see reduceHostStatePurged) so the gate
+        // stays armed and no re-fetch fires on switch (correct).
+        if (slices.settings.value.providers == null &&
+            providersFirstFetchArmed.compareAndSet(false, true)) {
             effects.tryEmitEffect(ControllerEffect.LoadProviders)
         }
         effects.tryEmitEffect(ControllerEffect.LoadPendingQuestions)

@@ -135,6 +135,11 @@ abstract class MainViewModelTestBase {
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
         coEvery { repository.getAgents() } returns Result.success(emptyList())
         coEvery { repository.getProviders() } returns Result.success(ProvidersResponse())
+        // §需求13 rev-7 #2: launchLoadProviders now calls getProvidersOrFailure
+        // (propagates real failures) instead of getProviders (masks as empty).
+        // The relaxed mock cannot auto-construct a Result<ProvidersResponse>
+        // for the new method → stub it the same as getProviders.
+        coEvery { repository.getProvidersOrFailure() } returns Result.success(ProvidersResponse())
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         coEvery { repository.getPendingQuestions(any()) } returns Result.success(emptyList())
     }

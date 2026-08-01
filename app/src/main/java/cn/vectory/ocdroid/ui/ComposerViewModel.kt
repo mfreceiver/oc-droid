@@ -58,6 +58,14 @@ class ComposerViewModel @Inject constructor(
     val composerFlow get() = store.composerFlow
     val settingsFlow get() = store.settingsFlow
     val chatFlow get() = store.chatFlow
+    /**
+     * §需求13 rev-7 #3: exposes the shared UiEvent bus so SettingsScreens'
+     * SettingsModelsRoute can collect UiEvent.Error emissions (the manual
+     * model-refresh failure snackbar) when ChatScaffold is NOT composed
+     * (the user navigated INTO the models sub-route). Mirrors
+     * [ChatViewModel.uiEvents] / [OrchestratorViewModel.uiEvents].
+     */
+    val uiEvents get() = effectBus.uiEventsConsumed
 
     fun setInputText(text: String) {
         composerController.setInputText(text)

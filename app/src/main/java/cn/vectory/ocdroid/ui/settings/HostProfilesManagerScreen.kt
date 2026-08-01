@@ -14,6 +14,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -26,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -35,6 +38,9 @@ import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.HostProfileSaveState
+import cn.vectory.ocdroid.ui.UiEvent
+import cn.vectory.ocdroid.ui.resolveMessage
+import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.Dimens
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -118,6 +124,25 @@ internal fun HostProfilesManagerScreen(
     val isLoadingProviders by remember { viewModel.settingsFlow.map { it.isLoadingProviders }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = false)
 
+    // §需求13 rev-7 #3: snackbar consumer for UiEvent.Error. ChatScaffold is
+    // the ONLY collector of the shared uiEvents bus — when the user navigates
+    // INTO this host-manager screen (different NavHost destination), a model-
+    // refresh failure would emit UiEvent.Error but nobody shows a snackbar →
+    // invisible failure. This collector mirrors ChatScaffold.kt:709's pattern
+    // so the model_management_refresh_failed error surfaces here too.
+    val context = LocalContext.current
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(Unit) {
+        viewModel.uiEvents.collect { event ->
+            if (event is UiEvent.Error) {
+                snackbarHostState.showTimed(
+                    message = event.resolveMessage(context),
+                    durationMillis = 3_000L,
+                )
+            }
+        }
+    }
+
     // §WT5: the host manager screen now uses the shared SettingsSubRouteScaffold
     // (same shell as every other settings sub-route) instead of a hand-rolled
     // Column+TopAppBar. The add-host IconButton is preserved via the scaffold's
@@ -127,6 +152,7 @@ internal fun HostProfilesManagerScreen(
         // 外观/通知/关于三项保持「入口名 = 页面名」一致。
         titleRes = R.string.setux_settings_hosts_entry,
         onBack = onBack,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         actions = {
             IconButton(onClick = { editingProfile = newDirectProfile() }) {
                 Icon(Icons.Default.Add, contentDescription = stringResource(R.string.host_profile_add))

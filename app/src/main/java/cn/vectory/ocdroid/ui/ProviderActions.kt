@@ -47,7 +47,14 @@ internal fun launchLoadProviders(
     slices.mutateSettings { it.copy(isLoadingProviders = true) }
     scope.launch {
         try {
-            repository.getProviders()
+            // §需求13 rev-7 #2: call getProvidersOrFailure (NOT getProviders)
+            // so real network/HTTP/parse failures propagate as
+            // Result.failure → .onFailure fires → UiEvent.Error snackbar.
+            // getProviders masks failures as empty-catalog success (last-mile
+            // defense for latent callers), which made the error-feedback
+            // feature dead. An empty catalog from a healthy server still
+            // returns Result.success(empty) — that is NOT an error.
+            repository.getProvidersOrFailure()
                 .onSuccess { providers ->
                     // §需求4 host/fp guard: if the user switched host during the
                     // REST call, expectedProfileId != currentProfileId() —

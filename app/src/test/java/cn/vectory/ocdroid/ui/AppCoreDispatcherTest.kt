@@ -300,7 +300,9 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
 
     @Test
     fun `dispatchConnectionEffect handles LoadProviders and fetches providers`() = runTest {
-        coEvery { repository.getProviders() } returns Result.success(
+        // §需求13 rev-7 #2: launchLoadProviders now calls getProvidersOrFailure
+        // (propagates real failures) instead of getProviders (masks as empty).
+        coEvery { repository.getProvidersOrFailure() } returns Result.success(
             cn.vectory.ocdroid.data.model.ProvidersResponse()
         )
         val core = newCore()
@@ -309,7 +311,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         assertTrue(handled)
-        coVerify { repository.getProviders() }
+        coVerify { repository.getProvidersOrFailure() }
     }
 
     @Test

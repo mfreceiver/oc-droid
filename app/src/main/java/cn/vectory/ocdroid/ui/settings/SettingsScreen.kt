@@ -37,11 +37,14 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -62,6 +65,9 @@ import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.SettingsViewModel
+import cn.vectory.ocdroid.ui.UiEvent
+import cn.vectory.ocdroid.ui.resolveMessage
+import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.SettingsManager
@@ -363,7 +369,30 @@ fun SettingsModelsRoute(
     val isLoadingProviders by remember { settingsVM.settingsFlow.map { it.isLoadingProviders }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = false)
 
-    SettingsSubRouteScaffold(titleRes = R.string.settings_section_models, onBack = onBack) { mod ->
+    // §需求13 rev-7 #3: snackbar consumer for UiEvent.Error. ChatScaffold is
+    // the ONLY collector of the shared uiEvents bus — when the user navigates
+    // INTO this sub-route (different NavHost destination), a refresh failure
+    // would emit UiEvent.Error but nobody shows a snackbar → invisible failure.
+    // This collector mirrors ChatScaffold.kt:709's pattern so the
+    // model_management_refresh_failed error surfaces here too.
+    val context = LocalContext.current
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(Unit) {
+        composerVM.uiEvents.collect { event ->
+            if (event is UiEvent.Error) {
+                snackbarHostState.showTimed(
+                    message = event.resolveMessage(context),
+                    durationMillis = 3_000L,
+                )
+            }
+        }
+    }
+
+    SettingsSubRouteScaffold(
+        titleRes = R.string.settings_section_models,
+        onBack = onBack,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+    ) { mod ->
         // §review-AB: no parent horizontal padding — ModelManagementSection's
         // AppSectionHeader + ListItem self-pad; its bare empty-state Text
         // already self-pads (`Modifier.padding(Dimens.spacing4)`).

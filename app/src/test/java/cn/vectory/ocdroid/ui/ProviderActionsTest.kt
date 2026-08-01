@@ -21,6 +21,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -89,7 +90,7 @@ class ProviderActionsTest {
                 ),
             ),
         )
-        coEvery { repository.getProviders() } returns Result.success(providers)
+        coEvery { repository.getProvidersOrFailure() } returns Result.success(providers)
         // §需求4: the inline read-compute-write is now atomic inside
         // [SettingsManager.reconcileModelData] (was: getDisabledModels +
         // setModelAvailability + setDisabledModels as 3 separate calls).
@@ -134,7 +135,7 @@ class ProviderActionsTest {
                 ),
             ),
         )
-        coEvery { repository.getProviders() } returns Result.success(providers)
+        coEvery { repository.getProvidersOrFailure() } returns Result.success(providers)
         // §需求4: relaxed mock returns emptySet from reconcileModelData →
         // slice.disabledModels ends up empty (the no-disabled-models case).
         every { settingsManager.reconcileModelData(any(), any()) } returns emptySet()
@@ -152,10 +153,17 @@ class ProviderActionsTest {
         assertTrue(slices.settings.value.disabledModels.isEmpty())
     }
 
+    /**
+     * §需求13 rev-7 #2: with the switch from getProviders →
+     * getProvidersOrFailure, REAL failures now propagate as
+     * Result.failure → .onFailure fires → onNonFatalError captures them.
+     * This test represents the REAL failure path (network/HTTP/parse error
+     * surfaced by getProvidersOrFailure, NOT masked as empty-catalog).
+     */
     @Test
     fun `launchLoadProviders failure routes to onNonFatalError`() = runTest {
         val error = IllegalStateException("500")
-        coEvery { repository.getProviders() } returns Result.failure(error)
+        coEvery { repository.getProvidersOrFailure() } returns Result.failure(error)
         var capturedMsg: String? = null
         var capturedErr: Throwable? = null
 
@@ -179,6 +187,38 @@ class ProviderActionsTest {
     }
 
     /**
+     * §需求13 rev-7 #2: an EMPTY catalog from a healthy server is NOT an
+     * error. getProvidersOrFailure returns Result.success(empty) for this
+     * case (only exceptions flip to Result.failure). The success path must
+     * fire — onNonFatalError must NOT be called. This is the key distinction
+     * from the old masked-failure behavior (where getProviders degraded
+     * real failures to empty-catalog success, hiding them from the user).
+     */
+    @Test
+    fun `launchLoadProviders empty catalog from server is NOT an error (需求13 rev-7 #2)`() = runTest {
+        val emptyCatalog = ProvidersResponse(providers = emptyList())
+        coEvery { repository.getProvidersOrFailure() } returns Result.success(emptyCatalog)
+        every { settingsManager.reconcileModelData(any(), any()) } returns emptySet()
+        var onErrorCalled = false
+
+        launchLoadProviders(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            settingsManager = settingsManager,
+            hostProfileStore = hostProfileStore,
+            onNonFatalError = { _, _ -> onErrorCalled = true },
+        )
+        advanceUntilIdle()
+
+        // Empty catalog is a legitimate server state — success path fires,
+        // onNonFatalError is NOT called.
+        assertFalse(onErrorCalled)
+        // The (empty) catalog IS written to the slice (success path).
+        assertEquals(emptyCatalog, slices.settings.value.providers)
+    }
+
+    /**
      * §需求13: the loading flag is the UI contract for the Model management
      * refresh IconButton's spinner + per-row Switch disabled state. It MUST
      * flip to true synchronously (before scope.launch — the UnconfinedTest-
@@ -193,7 +233,7 @@ class ProviderActionsTest {
                 ConfigProvider(id = "p", name = "P", models = mapOf("m" to ProviderModel(name = "M"))),
             ),
         )
-        coEvery { repository.getProviders() } returns Result.success(providers)
+        coEvery { repository.getProvidersOrFailure() } returns Result.success(providers)
         every { settingsManager.reconcileModelData(any(), any()) } returns emptySet()
 
         // Synchronous pre-state: the flag flips BEFORE the coroutine dispatches.
@@ -244,7 +284,7 @@ class ProviderActionsTest {
      */
     @Test
     fun `launchLoadProviders clears isLoadingProviders on failure`() = runTest {
-        coEvery { repository.getProviders() } returns Result.failure(IllegalStateException("500"))
+        coEvery { repository.getProvidersOrFailure() } returns Result.failure(IllegalStateException("500"))
 
         launchLoadProviders(
             scope = scope,

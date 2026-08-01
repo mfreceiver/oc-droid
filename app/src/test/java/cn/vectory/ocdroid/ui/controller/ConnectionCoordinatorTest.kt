@@ -598,6 +598,93 @@ class ConnectionCoordinatorTest {
         assertEquals(0, collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size)
     }
 
+    /**
+     * §需求13 rev-7 #1: the providers==null gate was a check-then-act race.
+     * Multiple concurrent loadInitialData() calls at cold start
+     * (MainActivity.coldStartReconnect + ON_RESUME + health-probe recovery)
+     * each saw providers==null and each emitted LoadProviders → duplicate
+     * parallel /config/providers fetches. The fix is an AtomicBoolean CAS
+     * (providersFirstFetchArmed) that arms exactly once per providers-
+     * lifecycle. This test drives loadInitialData() THREE times without
+     * resolving the fetch (providers stays null) and asserts LoadProviders
+     * fires EXACTLY ONCE.
+     */
+    @Test
+    fun `loadInitialData single-flight emits LoadProviders at most once across concurrent calls even when providers is null (需求13 rev-7 #1)`() {
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        every { settingsManager.currentWorkdir } returns null
+
+        // Drive loadInitialData 3 times rapidly — all see providers==null,
+        // but the CAS ensures only the FIRST emits LoadProviders.
+        coordinator.loadInitialData()
+        coordinator.loadInitialData()
+        coordinator.loadInitialData()
+        runPending()
+
+        // The other four fan-outs DO fire on every call (they are
+        // unconditional); only LoadProviders is single-flight.
+        assertEquals(3, collectedEffects.filterIsInstance<ControllerEffect.LoadSessions>().size)
+        assertEquals(3, collectedEffects.filterIsInstance<ControllerEffect.LoadAgents>().size)
+        assertEquals(3, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingQuestions>().size)
+        assertEquals(3, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingPermissions>().size)
+        // §需求13 rev-7 #1: LoadProviders emits EXACTLY ONCE despite 3
+        // concurrent calls all observing providers==null.
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size)
+    }
+
+    /**
+     * §需求13 rev-7 #1: the gate must RE-ARM after a hard-local-reset so a
+     * future first-launch re-fetches the catalog. The re-arm happens at the
+     * top of [coldStartReconnect] (the hard reset emits ColdStartReconnect
+     * → this method). This test simulates the lifecycle: first-launch emit
+     * → providers becomes non-null → hard reset (coldStartReconnect re-arms
+     * the gate + providers nulled) → second loadInitialData re-emits.
+     */
+    @Test
+    fun `loadInitialData re-arms LoadProviders after coldStartReconnect resets the gate (需求13 rev-7 #1 re-arm)`() {
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        every { settingsManager.currentWorkdir } returns null
+        // §需求13 rev-7 #1: stub checkHealth as UNHEALTHY so the probe launched
+        // by coldStartReconnect does NOT succeed and does NOT call
+        // loadInitialData on its own — this isolates the re-arm assertion to
+        // the EXPLICIT coordinator.loadInitialData() call below.
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = false, version = "1.0"))
+
+        // Phase 1: first launch — LoadProviders emits once.
+        coordinator.loadInitialData()
+        runPending()
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size)
+
+        // Simulate a successful fetch: providers becomes non-null.
+        slices.mutateSettings {
+            it.copy(providers = cn.vectory.ocdroid.data.model.ProvidersResponse(providers = emptyList()))
+        }
+        // Subsequent loadInitialData must NOT re-emit (providers non-null).
+        coordinator.loadInitialData()
+        runPending()
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size)
+
+        // Phase 2: hard-local-reset simulation — coldStartReconnect re-arms
+        // the gate (providersFirstFetchArmed.set(false) at the top of the
+        // method), then providers is nulled (mirrors HostProfileController's
+        // fresh SettingsState() write). The gate reset is synchronous (before
+        // the probe coroutine launches) so it takes effect immediately.
+        coordinator.coldStartReconnect()
+        slices.mutateSettings { cn.vectory.ocdroid.ui.SettingsState() }
+        collectedEffects.clear()
+        runPending()
+
+        // Phase 3: the next loadInitialData should re-emit LoadProviders
+        // (gate was re-armed by coldStartReconnect, providers is null again).
+        coordinator.loadInitialData()
+        runPending()
+        assertEquals(
+            "LoadProviders re-emitted after coldStartReconnect re-arm + providers nulled",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size,
+        )
+    }
+
     @Test
     fun `loadInitialData merges server commands with the client-side local commands`() {
         coEvery { repository.getCommands() } returns Result.success(

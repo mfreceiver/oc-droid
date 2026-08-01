@@ -102,6 +102,14 @@ class HostViewModel @Inject constructor(
     val hostFlow get() = store.hostFlow
     val connectionFlow get() = store.connectionFlow
     val settingsFlow get() = store.settingsFlow
+    /**
+     * §需求13 rev-7 #3: exposes the shared UiEvent bus so
+     * HostProfilesManagerScreen can collect UiEvent.Error emissions (the
+     * manual model-refresh failure snackbar) when ChatScaffold is NOT
+     * composed (the user navigated INTO the host manager). Mirrors
+     * [ChatViewModel.uiEvents] / [OrchestratorViewModel.uiEvents].
+     */
+    val uiEvents get() = effectBus.uiEventsConsumed
 
     /**
      * C-D3 rev-3 round-7 (review I5-R7): the save transaction's lifecycle

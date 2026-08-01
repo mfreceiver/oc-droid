@@ -1761,6 +1761,49 @@ class OpenCodeRepository @Inject constructor(
     }
 
     /**
+     * §需求13 rev-7 #2: failure-propagating variant of [getProviders]. Same
+     * fetch + filter logic, EXCEPT structural failures (HTTP error / non-
+     * decodable body / network) propagate as [Result.failure] instead of
+     * being masked as an empty-catalog success.
+     *
+     * **Why a separate method**: [getProviders] applies a "last-mile
+     * defense" (catch → Result.success(empty)) so a transient failure
+     * degrades to an empty picker. That defense makes the 需求13 error-
+     * feedback feature DEAD: launchLoadProviders' `.onFailure` (which
+     * emits UiEvent.Error for the manual-refresh snackbar) NEVER fires for
+     * real network/HTTP/parse failures — they're masked as success-with-
+     * empty-catalog. This method gives launchLoadProviders a way to detect
+     * REAL failures and surface them, while leaving [getProviders]'
+     * behavior unchanged for any latent caller that relies on the degrade-
+     * to-empty contract.
+     *
+     * **Empty-catalog is NOT an error**: a server that legitimately returns
+     * zero providers still returns [Result.success] with an empty list. Only
+     * exceptions (the catch block) flip to [Result.failure].
+     * [CancellationException] is rethrown for structured concurrency.
+     */
+    suspend fun getProvidersOrFailure(): Result<ProvidersResponse> {
+        val response: ProvidersResponse = try {
+            api.getProviders()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // §需求13 rev-7 #2: propagate the REAL failure — do NOT mask as
+            // empty-catalog success. launchLoadProviders' .onFailure will
+            // fire → UiEvent.Error → snackbar surfaces "Failed to refresh
+            // model list". Cancellation is rethrown for structured concurrency.
+            DebugLog.e("OpenCodeRepository", "catalog: /config/providers fetch failed (propagating as failure)", e)
+            return Result.failure(e)
+        }
+        val providers = response.providers.filter { it.models.isNotEmpty() }
+        val totalModels = providers.sumOf { it.models.size }
+        DebugLog.i("OpenCodeRepository", "catalog: ${providers.size} provider(s), $totalModels model(s) from /config/providers")
+        return Result.success(
+            ProvidersResponse(providers = providers, defaultByProvider = response.defaultByProvider)
+        )
+    }
+
+    /**
      * §model-selection: lists the server's available models via the v2
      * `GET /api/model` endpoint. Returns the `data` array (each entry carries
      * `id`, `providerID`, `name`, `enabled`, `limit`). NOTE: [getProviders]
