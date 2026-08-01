@@ -351,22 +351,40 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                         )
                     }
                     // §row-text-cache: per-seq cache of the formatted row text.
-                    // Because the list is newest-first (§stable-seq-key), every
-                    // append shifts all following entries and forces their
-                    // recomposition — re-running sdf.format + string-template
-                    // for up to 3000 rows each time. Caching by entry.seq avoids
-                    // re-running that work within a stable `filtered` window:
-                    // seq is monotonic and never reused (DebugLog's AtomicLong),
-                    // so getOrPut hits for entries still in the window and only
-                    // freshly-seen seqs format. The cache is keyed on `filtered`
-                    // itself: when the window changes (append / ring-buffer
-                    // eviction / level filter / clear) the map is rebuilt from
-                    // the new window — this bounds the map to the current
-                    // |filtered| (<= MAX_ENTRIES = 3000) and ensures DebugLog.clear()
-                    // also releases all cached strings (filtered -> emptyList ->
-                    // empty map). levelColor is NOT cached — it reads
-                    // MaterialTheme.colorScheme, so it stays recomposed per row.
-                    val rowTextCache = remember(filtered) { mutableMapOf<Long, String>() }
+                    // The log is newest-first (§stable-seq-key), so every append
+                    // shifts all following entries and forces their recomposition
+                    // — without a cache that re-runs sdf.format + string-template
+                    // for up to 3000 rows each time. Caching by entry.seq makes
+                    // the unavoidable recomposition cheap: seq is monotonic and
+                    // never reused (DebugLog's AtomicLong), so getOrPut hits for
+                    // any entry seen before (including the append-shift case —
+                    // append changes the filtered LIST, but old entries keep their
+                    // seq, so they still hit the SAME map instance across appends).
+                    //
+                    // Bounded reclamation: the cache has NO remember-key (a key on
+                    // `filtered` would rebuild the whole map on every append,
+                    // defeating the purpose). To prevent unbounded growth across
+                    // ring-buffer eviction, entries below the live window are
+                    // pruned. The watermark = the smallest seq currently in
+                    // `liveEntries` (the ring-buffer backing list): any cached seq
+                    // older than the watermark has been evicted from the ring buffer
+                    // and will never appear again, so it is removed. This is keyed
+                    // on `liveEntries` (not `filtered`) so that:
+                    //   - level-filter-hidden entries stay cached (their seq is in
+                    //     the live window; they may reappear when the filter relaxes);
+                    //   - clear() empties liveEntries → watermark = Long.MAX_VALUE →
+                    //     the whole map is pruned on the next composition, EVEN if
+                    //     the viewer is paused (paused freezes `displayed`/`filtered`
+                    //     but does not stop this reclamation, which reads liveEntries).
+                    // Bound: ≤ MAX_ENTRIES (3000) + brief stragglers pruned next frame.
+                    //
+                    // levelColor is NOT cached — it reads MaterialTheme.colorScheme,
+                    // so it stays recomposed per row.
+                    val rowTextCache = remember { mutableMapOf<Long, String>() }
+                    // Prune entries evicted from the ring buffer (see comment above).
+                    val watermark = if (liveEntries.isEmpty()) Long.MAX_VALUE
+                        else liveEntries.minOf { it.seq }
+                    rowTextCache.keys.retainAll { it >= watermark }
                     filtered.forEach { entry ->
                         val levelColor = when (entry.level) {
                             DebugLog.Level.DEBUG -> MaterialTheme.colorScheme.onSurfaceVariant
