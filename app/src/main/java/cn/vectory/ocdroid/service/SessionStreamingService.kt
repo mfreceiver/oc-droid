@@ -303,7 +303,15 @@ class SessionStreamingService : Service() {
             // §U-P2: start the independent watchdog alongside the poller
             // (same connection lifetime). The watchdog's own generation
             // fence makes a repeat start() safe.
-            watchdogCoordinator.start()
+            // §rev-gpt gate r1 BLOCKER #5: do NOT start the watchdog when the
+            // activation was Rejected (Superseded by a later StopPoller/EnsurePoller,
+            // StaleIdentity, etc.) — a late-returning superseded activation would
+            // otherwise re-arm the watchdog AFTER a stop() (e.g. the winning
+            // StopPoller already tore it down). Only a Ready activation owns the
+            // connection lifetime the watchdog must track.
+            if (activation is cn.vectory.ocdroid.service.streaming.SourceActivation.Ready) {
+                watchdogCoordinator.start()
+            }
             return activation
         }
         override fun stopPoller() {

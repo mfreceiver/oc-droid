@@ -203,6 +203,10 @@ object ProcessStatusPollerModule {
         authorityState = { sessionSyncCoordinator.currentAuthority() },
         identityStore = identityStore,
         clock = { System.currentTimeMillis() },
+        // §U-P2 SLA fix (rev-gpt gate r1 BLOCKER #2): tick STRICTLY SMALLER than
+        // OPTIMISTIC_CONFIRM_TIMEOUT_MS so worst-case detection ≈ timeout+tick
+        // (~6s) honors the ~7.5s self-heal SLA. tick==timeout gave ~10s worst case.
+        tickIntervalMs = cn.vectory.ocdroid.ui.OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
         // §U-P2: reconcile sink routes to the coordinator which queries the
         // repository per-sid and dispatches ApplyReconcileOutcome.
         staleClaimReconcileSink = { identity, claims ->

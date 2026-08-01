@@ -8,6 +8,7 @@ import cn.vectory.ocdroid.data.state.ScopeKey
 import cn.vectory.ocdroid.data.state.SessionEntry
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.ui.OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS
 import cn.vectory.ocdroid.ui.OPTIMISTIC_CONFIRM_TIMEOUT_MS
 import cn.vectory.ocdroid.ui.StaleClaim
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -86,7 +87,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
             identityStore = store,
             clock = { wallClock },
             staleClaimReconcileSink = { _, claims -> reconciled.addAll(claims) },
-            tickIntervalMs = OPTIMISTIC_CONFIRM_TIMEOUT_MS,
+            tickIntervalMs = OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
         )
 
         coordinator.start()
@@ -119,7 +120,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
             identityStore = store,
             clock = { wallClock },
             staleClaimReconcileSink = { _, claims -> reconciled.addAll(claims) },
-            tickIntervalMs = OPTIMISTIC_CONFIRM_TIMEOUT_MS,
+            tickIntervalMs = OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
         )
 
         coordinator.start()
@@ -147,19 +148,22 @@ class OptimisticClaimWatchdogCoordinatorTest {
             identityStore = store,
             clock = { wallClock },
             staleClaimReconcileSink = { _, _ -> sinkCount += 1 },
-            tickIntervalMs = OPTIMISTIC_CONFIRM_TIMEOUT_MS,
+            tickIntervalMs = OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
         )
 
         // Triple-start (single-flight: each start cancels the prior loop).
         coordinator.start()
         coordinator.start()
         coordinator.start()
+        // §rev-gpt gate r1 BLOCKER #2: tick is now < timeout (1s vs 5s). Advance
+        // exactly ONE tick + make the claim stale so exactly one sink fires
+        // (the test asserts idempotent start, not multi-tick accumulation).
         wallClock = OPTIMISTIC_CONFIRM_TIMEOUT_MS + 1L
-        advanceTimeBy(OPTIMISTIC_CONFIRM_TIMEOUT_MS)
+        advanceTimeBy(OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS)
         runCurrent()
 
         assertEquals(
-            "exactly ONE reconcile sink per tick despite repeated start()",
+            "exactly ONE reconcile sink on the first tick despite repeated start()",
             1,
             sinkCount,
         )
@@ -180,7 +184,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
             identityStore = store,
             clock = { wallClock },
             staleClaimReconcileSink = { _, _ -> sinkCount += 1 },
-            tickIntervalMs = OPTIMISTIC_CONFIRM_TIMEOUT_MS,
+            tickIntervalMs = OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
         )
 
         coordinator.start()
@@ -219,7 +223,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
             identityStore = store,
             clock = { wallClock },
             staleClaimReconcileSink = { _, _ -> sinkCount += 1 },
-            tickIntervalMs = OPTIMISTIC_CONFIRM_TIMEOUT_MS,
+            tickIntervalMs = OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
         )
 
         coordinator.start()
@@ -252,7 +256,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
             identityStore = store,
             clock = { wallClock },
             staleClaimReconcileSink = { _, _ -> sinkCount += 1 },
-            tickIntervalMs = OPTIMISTIC_CONFIRM_TIMEOUT_MS,
+            tickIntervalMs = OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
         )
 
         coordinator.start()
@@ -286,7 +290,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
             identityStore = store,
             clock = { wallClock },
             staleClaimReconcileSink = { _, _ -> sinkCount += 1 },
-            tickIntervalMs = OPTIMISTIC_CONFIRM_TIMEOUT_MS,
+            tickIntervalMs = OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
         )
 
         coordinator.start()
@@ -314,14 +318,16 @@ class OptimisticClaimWatchdogCoordinatorTest {
             identityStore = store,
             clock = { wallClock },
             staleClaimReconcileSink = { _, _ -> sinkCount += 1 },
-            tickIntervalMs = OPTIMISTIC_CONFIRM_TIMEOUT_MS,
+            tickIntervalMs = OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
         )
 
         coordinator.start()
         wallClock = OPTIMISTIC_CONFIRM_TIMEOUT_MS + 1L
-        // Advance the timer so the tick's delay has completed (continuation
-        // is ready to resume) but do NOT runCurrent yet.
-        advanceTimeBy(OPTIMISTIC_CONFIRM_TIMEOUT_MS)
+        // Advance the timer so ONE tick's delay has completed (continuation
+        // is ready to resume) but do NOT runCurrent yet. §rev-gpt gate r1 #2:
+        // tick is now < timeout (1s); advancing timeout (5s) would fire 4 ticks
+        // before stop, defeating the fence-under-test. Advance exactly one tick.
+        advanceTimeBy(OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS)
         // NOW stop() — generation bumped + job cancelled.
         coordinator.stop()
         // Run the scheduled continuation: the cancelled job resumes into a
@@ -352,7 +358,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
             identityStore = store,
             clock = { wallClock },
             staleClaimReconcileSink = { _, _ -> sinkCount += 1 },
-            tickIntervalMs = OPTIMISTIC_CONFIRM_TIMEOUT_MS,
+            tickIntervalMs = OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
         )
 
         coordinator.start()
@@ -379,6 +385,62 @@ class OptimisticClaimWatchdogCoordinatorTest {
                 "timer was NOT reset (S1 fix)",
             1,
             sinkCount,
+        )
+        coordinator.stop()
+    }
+
+    // ── SLA bound (rev-gpt gate r1 BLOCKER #2): worst-case detection phase ────
+    // tick == timeout gave a ~2×timeout (~10s) worst case because a claim
+    // stamped just AFTER a tick waits nearly a full tick to age past timeout,
+    // then ANOTHER tick for the detector to fire. With tick < timeout (now 1s
+    // tick, 5s timeout) the worst case is timeout + tick ≈ 6s, honoring the
+    // ~7.5s self-heal SLA. This test stamps the claim at the WORST phase
+    // (immediately after a tick fires) and asserts detection within one
+    // post-timeout tick.
+
+    @Test
+    fun `U-P2 SLA bound - worst-case-phase claim detected within timeout+tick`() = runTest {
+        var wallClock = 0L
+        val (store, _) = boundStore()
+
+        // Claim stamped at a FIXED monotonic (tick+1 = worst phase: just after a
+        // tick would have fired). The authority is STATIC — the watchdog re-reads
+        // it each tick, and age = wallClock - claimedAt grows over time.
+        val stampAt = OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS + 1L
+        val authority = AuthorityState(bySid = mapOf("A" to entry(claim(claimedAtMonotonic = stampAt))))
+
+        val detectedAt = java.util.concurrent.atomic.AtomicLong(-1L)
+        val coordinator = OptimisticClaimWatchdogCoordinator(
+            scope = backgroundScope,
+            authorityState = { authority },
+            identityStore = store,
+            clock = { wallClock },
+            staleClaimReconcileSink = { _, _ -> detectedAt.set(wallClock) },
+            tickIntervalMs = OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
+        )
+
+        coordinator.start()
+        // Drive ticks forward, advancing virtual time + wallClock in lockstep.
+        // Claim (stamped at ~1s) becomes stale when age > 5000 (at wallClock > 6001).
+        // Worst case: the tick just before that (wallClock=6001, age=5000, NOT stale)
+        // skips it; the NEXT tick (wallClock=7001, age=6000, stale) detects it.
+        val upperBound = OPTIMISTIC_CONFIRM_TIMEOUT_MS + OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS * 3L
+        while (detectedAt.get() < 0L && wallClock < upperBound) {
+            advanceTimeBy(OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS)
+            wallClock += OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS
+            runCurrent()
+        }
+
+        assertTrue(
+            "worst-case-phase claim IS detected (tick < timeout closes the window)",
+            detectedAt.get() >= 0L,
+        )
+        // Detection time from claim stamp ≤ timeout + tick (the worst-case bound
+        // with tick < timeout). Detected at wallClock≈7001, stamped at 1001 → 6000ms.
+        val detectionAge = detectedAt.get() - stampAt
+        assertTrue(
+            "detection within timeout+tick bound (≤ ${OPTIMISTIC_CONFIRM_TIMEOUT_MS + OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS}ms), was ${detectionAge}ms",
+            detectionAge <= OPTIMISTIC_CONFIRM_TIMEOUT_MS + OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
         )
         coordinator.stop()
     }

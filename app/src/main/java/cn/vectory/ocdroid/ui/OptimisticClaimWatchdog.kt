@@ -16,6 +16,21 @@ import cn.vectory.ocdroid.data.state.ScopeKey
 const val OPTIMISTIC_CONFIRM_TIMEOUT_MS = 5_000L
 
 /**
+ * §U-P2 SLA fix (rev-gpt gate r1 BLOCKER #2): the watchdog TICK interval.
+ *
+ * The tick MUST be STRICTLY SMALLER than [OPTIMISTIC_CONFIRM_TIMEOUT_MS] so
+ * that a claim stamped immediately AFTER one tick is still detected by the
+ * tick that falls JUST PAST the timeout — otherwise (tick == timeout) the
+ * worst-case detection is ~2×timeout (~10s), violating the ~7.5s self-heal SLA.
+ *
+ * 1s keeps worst-case detection ≤ timeout + tick ≈ 6s (well inside the 7.5s
+ * SLA = 5s timeout + ~2.5s GET RTT). The tick is a pure in-memory scan
+ * ([selectStaleClaimsForReconcile] over the authority map, O(sessions)); a GET
+ * fires ONLY when a claim is actually stale, so the higher cadence is cheap.
+ */
+const val OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS = 1_000L
+
+/**
  * A stale claim identified by the watchdog. Used to carry both the sid and its
  * scopeKey (so the reconcile sink does not need to re-lookup the entry).
  *

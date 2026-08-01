@@ -143,6 +143,12 @@ class ConnectionCoordinatorConcurrentTest {
         t1.start()
         t2.start()
         assertTrue("both cancellers done", doneLatch.await(10, TimeUnit.SECONDS))
+        // §flaky-fix: join() waits for full thread termination before the
+        // isAlive check — a thread that called countDown() can still be briefly
+        // alive while unwinding, and assertFalse(tN.isAlive) right after
+        // doneLatch.await() is inherently racy under load.
+        t1.join(2_000)
+        t2.join(2_000)
         assertFalse("t1 completed", t1.isAlive)
         assertFalse("t2 completed", t2.isAlive)
 
