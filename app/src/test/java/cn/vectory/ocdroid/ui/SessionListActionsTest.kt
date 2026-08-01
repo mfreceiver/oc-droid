@@ -721,10 +721,14 @@ class SessionListActionsTest {
     // ── §FIX-D (gpter #2) + §需求10 C3: single-flight + coalesce for launchLoadSessions ──
 
     @Test
-    fun `C3 second launchLoadSessions is coalesced when first is in-flight`() = runTest {
-        // With §需求10 C3 coalescing via the store's sessionListLoadInFlight
-        // flag, if a load is already in-flight, a second call returns
-        // immediately without launching a new coroutine.
+    fun `C3 second launchLoadSessions queues trailing rerun instead of concurrent call`() = runTest {
+        // §需求10 C3 (rev-3 🔴1+🔴2 fix): the single-flight gate is now an atomic
+        // acquire (slices.store.tryAcquireSessionListLoad). A second call while the
+        // first is in-flight does NOT fire a concurrent getSessions — it sets the
+        // trailing-rerun flag, and the FIRST call's finally re-triggers ONE load
+        // with the latest caller's closures. So at most one getSessions runs at a
+        // time, AND a fresh refresh intent arriving mid-flight is honored (the
+        // original FIX-D "newer supersedes older" semantic is preserved).
         val gate = CompletableDeferred<Unit>()
         var callCount = 0
         val sessions = listOf(Session(id = "s1", directory = "/x"))
@@ -738,15 +742,20 @@ class SessionListActionsTest {
         advanceUntilIdle() // first call suspended in gate
         assertEquals("first call started", 1, callCount)
 
-        // Second call should be coalesced (no-op since first is in-flight)
+        // Second call while first is in-flight: must NOT fire a concurrent network
+        // request, but MUST queue a trailing rerun (rev-3 🔴1: no silent drop).
         launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
         advanceUntilIdle()
-        assertEquals("second call must NOT fire another network request", 1, callCount)
+        assertEquals("second call must NOT fire concurrent network request", 1, callCount)
+        assertTrue("trailing rerun queued", slices.store.sessionListLoadPendingRerun)
 
         gate.complete(Unit)
         advanceUntilIdle()
 
-        assertEquals(listOf("s1"), slices.sessionList.value.sessions.map { it.id })
+        // After the first completes, its finally re-triggers the trailing load.
+        assertEquals("trailing rerun fired the second network call", 2, callCount)
+        assertFalse("trailing rerun flag cleared after rerun", slices.store.sessionListLoadPendingRerun)
+        assertEquals("second (latest) result is the one kept", listOf("s1"), slices.sessionList.value.sessions.map { it.id })
     }
 
     @Test

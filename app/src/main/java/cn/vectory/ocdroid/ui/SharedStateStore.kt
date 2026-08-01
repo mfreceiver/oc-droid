@@ -68,16 +68,49 @@ class SharedStateStore @Inject constructor(
         private set
 
     /**
-     * §需求10 C3: non-null when a session-list full refresh (launchLoadSessions)
-     * is in-flight. Set by [SessionListRefreshOrchestrator.launchLoadSessions]
-     * at entry, cleared in finally. Read by [SessionMetadataPoller.poll] to
-     * skip its own [repository.getSessions] call when a full refresh (triggered
-     * by ON_RESUME / foreground return / reconnect) is already running —
-     * preventing duplicate concurrent `getSessions` network calls.
+     * §需求10 C3 (rev-3 🔴1+🔴2 fix): atomic single-flight gate for the session-list
+     * full refresh. Replaces the previous `@Volatile Boolean` check-then-set (which
+     * was racy across dispatchers and let the poller + orchestrator both read false
+     * then both launch — the "poll-first concurrent getSessions" defect).
+     *
+     * [tryAcquireSessionListLoad] is the SINGLE atomic gate: it does a compare-and-set
+     * on an AtomicBoolean and returns true iff THIS caller won the race. Both
+     * [SessionListRefreshOrchestrator.launchLoadSessions] AND
+     * [SessionMetadataPoller.poll] go through it, so at most ONE caller can be running
+     * a full `getSessions` at a time across ON_RESUME / ForegroundCatchUp / reconnect
+     * / poller — regardless of who fires first.
+     *
+     * [sessionListLoadPendingRerun] is the trailing-rerun flag for rev-3 🔴1 (FIX-D
+     * supersession regression): a caller that LOSES the acquire race (a newer refresh
+     * intent arriving while an older one is in flight) sets this true. The winner
+     * checks it in its `finally` and, if set, the WINNER re-triggers one trailing
+     * load — so a fresh refresh intent arriving mid-flight is NOT silently dropped
+     * (the original FIX-D "newer request supersedes older" semantic is preserved)
+     * while still coalescing the network call to one at a time.
      */
+    private val sessionListLoadInFlightAtomic = java.util.concurrent.atomic.AtomicBoolean(false)
+    /** Convenience read of the atomic gate (for diagnostics / tests). */
+    val sessionListLoadInFlight: Boolean get() = sessionListLoadInFlightAtomic.get()
+
+    /** §rev-3 🔴1: set by a caller that loses the acquire race to request a trailing rerun. */
     @Volatile
-    var sessionListLoadInFlight: Boolean = false
+    var sessionListLoadPendingRerun: Boolean = false
         internal set
+
+    /**
+     * Atomically acquire the single-flight gate. Returns true iff THIS caller won
+     * (the gate transitioned false→true); the winner MUST call [releaseSessionListLoad]
+     * in a `finally`. Returns false if another caller holds the gate.
+     */
+    fun tryAcquireSessionListLoad(): Boolean = sessionListLoadInFlightAtomic.compareAndSet(false, true)
+
+    /**
+     * Release the gate (winner's finally). Does NOT clear [sessionListLoadPendingRerun]
+     * — the winner is responsible for checking that flag and re-triggering if set.
+     */
+    fun releaseSessionListLoad() {
+        sessionListLoadInFlightAtomic.set(false)
+    }
 
     /** Track the last identityStore epoch that triggered a store identityEpoch bump.
      *  One bump per unique identityStore epoch value avoids double-bumps when

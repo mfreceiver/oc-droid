@@ -39,12 +39,14 @@ internal class SessionListRefreshOrchestrator(
     /** FIX-D (gpter #2, review-blocker): single-flight epoch. Intentionally separate from P7's StatusPollOrchestrator status epoch. */
     private val sessionListLoadEpoch = AtomicLong(0)
 
-    /** §需求10 C3: non-null when a session-list full refresh is in-flight.
-     *  Used for coalescing concurrent [launchLoadSessions] calls — if a load
-     *  is already active, subsequent calls return early. Also drives the
-     *  [SharedStateStore.sessionListLoadInFlight] flag for cross-controller
-     *  coordination (e.g. [SessionMetadataPoller] skips its own poll when a
-     *  full refresh is running). */
+    /**
+     * §需求10 C3 (rev-3 🔴1+🔴2 fix): obsolete — kept only for the FIX-D stale-result
+     * fencing inside the in-flight body. The single-flight GATE is now the atomic
+     * [SharedStateStore.tryAcquireSessionListLoad] / [releaseSessionListLoad] pair
+     * on the store, shared atomically with [SessionMetadataPoller] so that
+     * regardless of who fires first (ON_RESUME / ForegroundCatchUp / reconnect /
+     * poller), at most ONE full `getSessions` runs concurrently.
+     */
     private var inFlightLoad: Job? = null
 
     /** Whether a session-list full refresh is currently in-flight. */
@@ -65,25 +67,36 @@ internal class SessionListRefreshOrchestrator(
         currentServerGroupFp: (() -> String)? = null,
         onArchivedSessionsDetected: ((mergedSessions: List<Session>, hasMoreSessions: Boolean, confirmedServerIds: Set<String>, sweepNow: Long) -> Unit)? = null,
     ) {
-        // §需求10 C3: coalesce — if a load is already in-flight (per the store's
-        // cross-controller flag), skip. Uses slices.store.sessionListLoadInFlight
-        // (per-store, test-safe) rather than inFlightLoad (singleton orchestrator
-        // field which would cause test isolation leakage).
-        if (slices.store.sessionListLoadInFlight) {
-            DebugLog.d("Sync", "launchLoadSessions: coalescing, in-flight load already active")
+        // §需求10 C3 (rev-3 🔴2 fix): atomic single-flight gate. Both this
+        // orchestrator AND SessionMetadataPoller.poll go through the SAME atomic
+        // CAS on slices.store — so whoever fires first wins, the other no-ops,
+        // regardless of dispatch order (closes the "poll-first concurrent
+        // getSessions" defect where the old read-then-set Boolean let both read
+        // false then both launch).
+        //
+        // §rev-3 🔴1 fix (FIX-D supersession regression): a caller that LOSES the
+        // acquire race sets sessionListLoadPendingRerun=true. The WINNER checks
+        // that flag in its `finally` and, if set, re-triggers ONE trailing load —
+        // so a fresh refresh intent arriving mid-flight is NOT silently dropped
+        // (preserves the original FIX-D "newer request supersedes older"
+        // semantic: the trailing rerun runs with the LATEST caller's closures).
+        if (!slices.store.tryAcquireSessionListLoad()) {
+            // Lost the race — request a trailing rerun so the newer intent is honored
+            // after the in-flight winner finishes (instead of being silently dropped).
+            slices.store.sessionListLoadPendingRerun = true
+            DebugLog.d("Sync", "launchLoadSessions: in-flight, queued trailing rerun")
             return
         }
         inFlightLoad = scope.launch {
             try {
-                // Signal cross-controller (e.g. SessionMetadataPoller) that a
-                // full refresh is in-flight so they can skip their own poll.
-                slices.store.sessionListLoadInFlight = true
-
                 fun staleHostAfterSuspend(): Boolean = expectedServerGroupFp != null &&
                     currentServerGroupFp != null &&
                     expectedServerGroupFp != currentServerGroupFp()
 
-                // FIX-D (gpter #2): capture this request's epoch.
+                // FIX-D (gpter #2): capture this request's epoch. Still bumped here
+                // (not at the old entry gate) so a trailing rerun's epoch supersedes
+                // an about-to-finish older request's epoch — stale-result fencing
+                // preserved.
                 val myEpoch = sessionListLoadEpoch.incrementAndGet()
 
             val limit = MainViewModelTimings.sessionFullLoadLimit
@@ -247,9 +260,32 @@ internal class SessionListRefreshOrchestrator(
                     emit.emit(UiEvent.Error(R.string.error_load_sessions_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
             } finally {
-                    inFlightLoad = null
-                    slices.store.sessionListLoadInFlight = false
+                inFlightLoad = null
+                // §rev-3 🔴1+🔴2: release the atomic single-flight gate. Check the
+                // trailing-rerun flag: if a newer caller lost the acquire race while
+                // this load was in flight, re-trigger ONE load with the latest
+                // caller's closures (honors the original FIX-D "newer supersedes
+                // older" semantic instead of silently dropping the newer intent).
+                // The rerun re-acquires the gate, so it serializes cleanly.
+                slices.store.releaseSessionListLoad()
+                if (slices.store.sessionListLoadPendingRerun) {
+                    slices.store.sessionListLoadPendingRerun = false
+                    DebugLog.d("Sync", "launchLoadSessions: trailing rerun queued")
+                    launchLoadSessions(
+                        scope = scope,
+                        repository = repository,
+                        slices = slices,
+                        settingsManager = settingsManager,
+                        onSelectSession = onSelectSession,
+                        onLoadSessionStatus = onLoadSessionStatus,
+                        onLoadMessages = onLoadMessages,
+                        emit = emit,
+                        expectedServerGroupFp = expectedServerGroupFp,
+                        currentServerGroupFp = currentServerGroupFp,
+                        onArchivedSessionsDetected = onArchivedSessionsDetected,
+                    )
                 }
+            }
         }
     }
 
