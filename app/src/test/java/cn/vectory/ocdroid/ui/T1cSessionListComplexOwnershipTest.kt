@@ -380,7 +380,7 @@ class T1cSessionListComplexOwnershipTest {
                 status = status,
                 origin = cn.vectory.ocdroid.data.state.EntryOrigin.OPTIMISTIC,
                 scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
-                connectionMonotonicMs = ts,
+                connectionTimeMs = ts,
                 optimisticBumpTimestamp = ts,
             ),
         )
@@ -404,7 +404,7 @@ class T1cSessionListComplexOwnershipTest {
                 status = SessionStatus(type = "idle"),
                 origin = cn.vectory.ocdroid.data.state.EntryOrigin.SSE_LEGACY,
                 scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
-                connectionMonotonicMs = 0L,
+                connectionTimeMs = 0L,
             ),
         ))
 

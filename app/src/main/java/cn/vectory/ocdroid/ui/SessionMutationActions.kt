@@ -425,7 +425,7 @@ internal fun launchSendMessage(
                             capturedIdentity = identityAtDispatch,
                             identityEpochAtCapture = identityEpochAtDispatch,
                             scopeKey = scopeKey,
-                            connectionMonotonicMs = updatedTimestamp,
+                            connectionTimeMs = updatedTimestamp,
                             optimisticBumpTimestamp = updatedTimestamp,
                         ),
                     ),

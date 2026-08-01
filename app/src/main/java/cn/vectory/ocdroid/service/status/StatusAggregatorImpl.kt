@@ -233,7 +233,7 @@ class StatusAggregatorImpl internal constructor(
      *    composite keys + the lifecycle projection).
      *  - `entries`: each `(sid, SessionEntry)` in `state.authority.bySid` →
      *    `SessionStatusKey(currentGroupFp, workdir ?: "", sid)` →
-     *    `Entry(status.toSessionBusyStatus(), sourceTimeMs = updatedMonotonic,
+     *    `Entry(status.toSessionBusyStatus(), sourceTimeMs = updatedAtMs,
      *    fresh = (origin == REST))`. The `origin == REST` ⇒ fresh rule matches
      *    the pre-Lane-2 success-fold `fresh = true` for REST entries (within
      *    TTL); SSE / optimistic / failure entries are `fresh = false`.
@@ -265,7 +265,7 @@ class StatusAggregatorImpl internal constructor(
             val key = SessionStatusKey(currentFp, e.workdir ?: "", sid)
             entries[key] = Entry(
                 status = e.status.toSessionBusyStatus(),
-                sourceTimeMs = e.updatedMonotonic,
+                sourceTimeMs = e.updatedAtMs,
                 fresh = e.origin == EntryOrigin.REST,
             )
         }
@@ -355,14 +355,14 @@ class StatusAggregatorImpl internal constructor(
         val identityEpochAtStart = stateAtStart.identityEpoch
         // §3.1 merge timing (B4-b adapter-side): localBefore captures the
         // projection of entries that are NOT fresher than the REST request
-        // start. Entries with `updatedMonotonic > requestStartMs` (a fresher
+        // start. Entries with `updatedAtMs > requestStartMs` (a fresher
         // SSE observation landed before this REST started) are EXCLUDED so the
         // reducer's REST in-flight protection (mergeStatusSnapshotInFlight)
         // treats them as "changed during the round-trip" → SSE-wins overrides
         // the stale REST snapshot.
         val authorityAtStart = stateAtStart.authority
         val localBefore = authorityAtStart.bySid
-            .filterValues { it.updatedMonotonic <= requestStartMs }
+            .filterValues { it.updatedAtMs <= requestStartMs }
             .mapValues { it.value.status }
         val result = statusFetchService.fetch(snapshot)
         // CP4 §2 epoch guard: drop the response if a reconfigure invalidated
@@ -424,7 +424,7 @@ class StatusAggregatorImpl internal constructor(
      * §3.1 merge timing). Same signature as pre-Lane-2 (call sites unchanged).
      *
      * §3.1 merge timing (adapter-side): a strictly-OLDER SSE frame
-     * (`sourceTimeMs < ` the current authority entry's `updatedMonotonic`) is
+     * (`sourceTimeMs < ` the current authority entry's `updatedAtMs`) is
      * DROPPED — defensive against out-of-order SSE replay during reconnect
      * (the pre-Lane-2 aggregator did the same `sourceTimeMs >= prev.sourceTimeMs`
      * gate). Equal timestamps overwrite (matches the legacy `>=` rule). The
@@ -439,13 +439,13 @@ class StatusAggregatorImpl internal constructor(
     override fun applySseStatus(key: SessionStatusKey, status: SessionBusyStatus, sourceTimeMs: Long) {
         // §3.1 merge timing: drop a strictly-older SSE frame (out-of-order replay).
         val current = store.stateFlow.value.authority.bySid[key.sessionId]
-        if (current != null && sourceTimeMs < current.updatedMonotonic) return
+        if (current != null && sourceTimeMs < current.updatedAtMs) return
         val op = AuthorityOp.ApplyEvent(
             sid = key.sessionId,
             status = status.toSessionStatus(),
             origin = EntryOrigin.SSE_LEGACY,
             scopeKey = currentScope(),
-            connectionMonotonicMs = sourceTimeMs,
+            connectionTimeMs = sourceTimeMs,
             workdir = key.workdir,
         )
         store.dispatch(AppAction.AuthorityEvent(op))

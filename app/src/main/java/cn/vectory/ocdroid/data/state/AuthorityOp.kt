@@ -26,12 +26,12 @@ sealed interface AuthorityOp {
      *   gates on it — when non-null, [opScopeValid] drops the op if
      *   [identityEpochAtCapture] != [cn.vectory.ocdroid.ui.StoreState.identityEpoch]
      *   (stale-identity defense-in-depth inside the pure CAS).
-     * - [connectionMonotonicMs]: TTL / equal-serverRound tie-break clock. NOT a
+     * - [connectionTimeMs]: TTL / equal-serverRound tie-break clock. NOT a
      *   causal fence by itself (v1 mis-used; v3 corrected — §3.1 line 324).
      *   §MN-P9 step 1 (U-MN9, 2026-07-31): "Monotonic" is a historical name —
      *   this is a WALL-CLOCK millisecond (System.currentTimeMillis() ← sseClock),
      *   NOT monotonic. Same single-clock-domain caveat as
-     *   [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic] (see its
+     *   [cn.vectory.ocdroid.data.state.SessionEntry.updatedAtMs] (see its
      *   kdoc + dev-plan §5 U-P3 risk). Rename is U-MN9 step 2 (Batch 3).
      * - [optimisticBumpTimestamp]: §B8 — when non-null, the reducer records it
      *   in [AuthorityState.pendingBumps] and applies `bumpSessionUpdated` in
@@ -52,7 +52,7 @@ sealed interface AuthorityOp {
          *  yet migrated (they pass capturedIdentity=null → lenient-pass). */
         val identityEpochAtCapture: Long = 0L,
         val scopeKey: ScopeKey,
-        val connectionMonotonicMs: Long,
+        val connectionTimeMs: Long,
         val workdir: String? = null,
         val optimisticBumpTimestamp: Long? = null,
     ) : AuthorityOp
@@ -109,7 +109,7 @@ sealed interface AuthorityOp {
      *  `markRequestFailed` adapter dispatches this op. The reducer applies
      *  MERGE TIMING — entries fresher than [monotonic] (the failure's effective
      *  time) survive (a prior SSE `Busy`/`Retry` is NOT clobbered by a stale
-     *  failure); entries with `updatedMonotonic <= monotonic` are REMOVED
+     *  failure); entries with `updatedAtMs <= monotonic` are REMOVED
      *  (absence ≡ unknown, fail-closed). [registeredWorkdirs] is carried so the
      *  coverage predicate can keep gating `AllIdleFresh` (registered set
      *  preserved, coveredWorkdirs emptied, lastSuccessTimeMs=-1 → cold-start /
@@ -118,7 +118,7 @@ sealed interface AuthorityOp {
      *  §MN-P9 step 1 (U-MN9, 2026-07-31): [monotonic] is a WALL-CLOCK
      *  millisecond (System.currentTimeMillis() ← sourceTimeMs), NOT monotonic —
      *  same single-clock-domain caveat as
-     *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic] (see its
+     *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedAtMs] (see its
      *  kdoc + dev-plan §5 U-P3 risk). Rename is U-MN9 step 2 (Batch 3). */
     data class MarkSourceFailed(
         val scopeKey: ScopeKey,
@@ -136,7 +136,7 @@ sealed interface AuthorityOp {
         /** §B7 reconcile effective time (merge-timing source). §MN-P9 step 1
          *  (U-MN9, 2026-07-31): WALL-CLOCK ms (System.currentTimeMillis() ←
          *  SessionSyncCoordinator.clock), NOT monotonic — same caveat as
-         *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic]. */
+         *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedAtMs]. */
         val monotonic: Long,
         /** §P0-B generation fence (ABA): the [OptimisticClaim.clientSeq] of the stale
          *  claim this reconcile was triggered for. The reducer DROPS the outcome unless
@@ -161,7 +161,7 @@ sealed interface AuthorityOp {
      * §P1-B/E: queue a session for bounded retry. The reducer records a
      * [RetryEntry] in [AuthorityState.retryQueue] keyed by [sid]. Pure state —
      * the reducer does NOT compute backoff or schedule the retry; [backoffMs] /
-     * [attempt] / [queuedMonotonic] are carried in the op so the reducer needs no
+     * [attempt] / [queuedAtMs] are carried in the op so the reducer needs no
      * injected clock or scheduler. The queue is bounded (LRU eviction when full);
      * the reducer enforces the cap.
      */
@@ -173,8 +173,8 @@ sealed interface AuthorityOp {
         /** §P1-B/E queue-time clock (observability). §MN-P9 step 1
          *  (U-MN9, 2026-07-31): WALL-CLOCK ms (System.currentTimeMillis()),
          *  NOT monotonic — same caveat as
-         *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic]. */
-        val queuedMonotonic: Long,
+         *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedAtMs]. */
+        val queuedAtMs: Long,
         /** §U-CQ5: [StoreState.identityEpoch] captured at dispatch time. The reducer's
          *  [cn.vectory.ocdroid.ui.opScopeValid] DROPs the op when this epoch does NOT
          *  match [StoreState.identityEpoch] (stale-identity guard — defense-in-depth
@@ -196,7 +196,7 @@ sealed interface AuthorityOp {
         /** §P1-B/E fired-time clock (observability). §MN-P9 step 1
          *  (U-MN9, 2026-07-31): WALL-CLOCK ms (System.currentTimeMillis()),
          *  NOT monotonic — same caveat as
-         *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedMonotonic]. */
+         *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedAtMs]. */
         val monotonic: Long,
         /** §U-CQ5: [StoreState.identityEpoch] captured at dispatch time. Same guard
          *  contract as [RetryQueued.identityEpochAtCapture]. Default 0L for
@@ -225,7 +225,7 @@ sealed interface AuthorityOp {
  *
  * §P0-A rev-gpt r2 #3: the dead `epoch` field (never read by the reducer —
  * it reads [identityEpoch]) was REMOVED. The [requestStartMs] is the
- * per-entry `updatedMonotonic` source.
+ * per-entry `updatedAtMs` source.
  */
 data class RequestToken(
     val hostProfileId: String?,

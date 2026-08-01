@@ -158,7 +158,7 @@ interface SseDispatchHost {
  * now gates on [AuthorityOp.ApplyEvent.identityEpochAtCapture] vs
  * [cn.vectory.ocdroid.ui.StoreState.identityEpoch] when [capturedIdentity] is
  * non-null (this extension derives scopeKey + capturedIdentity from the event's
- * captured identity, not the current host); connectionMonotonicMs = the host's
+ * captured identity, not the current host); connectionTimeMs = the host's
  * SSE clock (TTL/tie-break, non-causal).
  */
 internal fun SseDispatchHost.applyStatusViaAuthority(
@@ -217,7 +217,7 @@ internal fun SseDispatchHost.applyStatusViaAuthority(
                 capturedIdentity = capturedIdentity,
                 identityEpochAtCapture = identityEpochAtCapture,
                 scopeKey = scopeKey,
-                connectionMonotonicMs = sseClock(),
+                connectionTimeMs = sseClock(),
                 workdir = workdir,
             ),
         ),

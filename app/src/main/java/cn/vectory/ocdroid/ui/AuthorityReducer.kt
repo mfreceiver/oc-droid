@@ -30,7 +30,7 @@ private const val PENDING_ERROR_CHECK_MAX_SIZE = 128
  *  - No injected dependencies (no repository / identityStore / lock / logger
  *    that mutates). Inputs are ONLY [state] and [op].
  *  - No I/O, no clock reads. Every timestamp is carried in [op]
- *    ([AuthorityOp.ApplyEvent.connectionMonotonicMs] /
+ *    ([AuthorityOp.ApplyEvent.connectionTimeMs] /
  *    [AuthorityOp.ApplySnapshot.requestToken.requestStartMs] /
  *    [AuthorityOp.ApplyEvent.optimisticBumpTimestamp]) or already in [state].
  *  - No mutation of inputs — `data class copy(...)` builds fresh objects; the
@@ -263,7 +263,7 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
     if (op.serverRound != null && prev?.serverRound != null) {
         val cmp = op.serverRound.compareTo(prev.serverRound)
         if (cmp < 0) return cur // strictly older → DROP (§3.1 line 303)
-        if (cmp == 0 && op.connectionMonotonicMs < prev.updatedMonotonic) {
+        if (cmp == 0 && op.connectionTimeMs < prev.updatedAtMs) {
             // §U-P3 / §U-MN9: both timestamps are System.currentTimeMillis()
             // (single wall-clock domain — sseClock() ← clock() ← currentTimeMillis,
             // requestStartMs ← clock() ← currentTimeMillis). The pre-U-MN9 comment
@@ -357,7 +357,7 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
                 (prev.origin == EntryOrigin.SSE_LEGACY || prev.origin == EntryOrigin.SSE_SLIM)
             OptimisticClaim(
                 clientSeq = priorSeq + 1L,
-                claimedAtMonotonic = op.connectionMonotonicMs,
+                claimedAtMs = op.connectionTimeMs,
                 serverEchoed = echoedNow || (prev?.optimisticClaim?.serverEchoed ?: false),
                 // §P0-B final-fix #1: a NEW optimistic generation starts NOT
                 // reconcile-confirmed — never inherit reconcileConfirmed (prevents
@@ -394,7 +394,7 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
         serverRound = keepRound,
         optimisticClaim = nextOptimisticClaim,
         origin = op.origin,
-        updatedMonotonic = op.connectionMonotonicMs,
+        updatedAtMs = op.connectionTimeMs,
         workdir = op.workdir ?: prev?.workdir,
         scopeKey = op.scopeKey,
         serverRoundHighWater = nextHighWater,
@@ -430,7 +430,7 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
 
     // §P0-A rev-gpt #1 (no-change same-ref): if the recomputed entry equals
     // the prior entry (data-class equality: same status, serverRound, claim,
-    // origin, updatedMonotonic, workdir) AND pendingBumps is
+    // origin, updatedAtMs, workdir) AND pendingBumps is
     // unchanged (addPendingBump returned the same reference) → NO transition →
     // return cur (same ref). This makes an equal-value SSE re-delivery a true
     // CAS no-op (no emission), completing the B1 idempotency contract. (An
@@ -564,7 +564,7 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
                 serverRound = null,
                 optimisticClaim = preservedClaim,  // §U-P1: was `null`
                 origin = EntryOrigin.REST,
-                updatedMonotonic = op.requestToken.requestStartMs,
+                updatedAtMs = op.requestToken.requestStartMs,
                 workdir = op.sidToWorkdir[id],
                 scopeKey = op.scopeKey,
                 serverRoundHighWater = priorEntry?.serverRoundHighWater,
@@ -660,9 +660,9 @@ private fun applyPurge(cur: AuthorityState, op: AuthorityOp.PurgeHost): Authorit
  *
  * §P0-A Lane 2 (aggregator derivation): MERGE TIMING is applied — entries
  * FRESHER than the failure ([op.monotonic]) SURVIVE (a prior SSE `Busy` /
- * `Retry` whose `updatedMonotonic > monotonic` is NOT clobbered by a stale
+ * `Retry` whose `updatedAtMs > monotonic` is NOT clobbered by a stale
  * failure, matching the legacy `markRequestFailed` merge-timing rule). Entries
- * with `updatedMonotonic <= monotonic` are removed (absence ≡ unknown). This
+ * with `updatedAtMs <= monotonic` are removed (absence ≡ unknown). This
  * preserves the FGS-lifecycle guarantee that a failure never wrongly clears a
  * fresher busy observation.
  *
@@ -681,7 +681,7 @@ private fun applyPurge(cur: AuthorityState, op: AuthorityOp.PurgeHost): Authorit
 private fun applyMarkFailed(cur: AuthorityState, op: AuthorityOp.MarkSourceFailed): AuthorityState {
     // §P0-A r2 #4: scope-filtering by [scopeKey] (not workdir approximation).
     // Keep an entry if EITHER (a) it is FRESHER than the failure
-    // (updatedMonotonic > monotonic — a prior SSE Busy/Retry survives), OR
+    // (updatedAtMs > monotonic — a prior SSE Busy/Retry survives), OR
     // (b) it is OUT OF SCOPE (entry.scopeKey != null AND entry.scopeKey !=
     // op.scopeKey — a different scope's entry must NOT be swept by this
     // scope's failure, even if it happens to share a workdir). Remove only
@@ -689,7 +689,7 @@ private fun applyMarkFailed(cur: AuthorityState, op: AuthorityOp.MarkSourceFaile
     // fail-closed). Entries with null scopeKey (pre-field migration) are
     // conservatively treated as in-scope.
     val survivors = cur.bySid.filterValues { entry ->
-        entry.updatedMonotonic > op.monotonic ||
+        entry.updatedAtMs > op.monotonic ||
             (entry.scopeKey != null && entry.scopeKey != op.scopeKey)
     }
     val nextCoverage = cur.coverage + (op.scopeKey to Coverage(
@@ -733,7 +733,7 @@ private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOu
             val entry = prev.copy(
                 status = cn.vectory.ocdroid.data.model.SessionStatus(type = "idle"),
                 optimisticClaim = null,
-                updatedMonotonic = op.monotonic,
+                updatedAtMs = op.monotonic,
             )
             // §P0-A rev-gpt #1: no-change if the resulting entry equals prev.
             if (entry == prev && op.sid !in cur.retryQueue) {
@@ -756,7 +756,7 @@ private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOu
                 status = cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"),
                 serverRound = op.serverRound ?: prev.serverRound,
                 optimisticClaim = prev.optimisticClaim.copy(reconcileConfirmed = true),
-                updatedMonotonic = op.monotonic,
+                updatedAtMs = op.monotonic,
             )
             if (entry == prev) cur else cur.copy(bySid = cur.bySid + (op.sid to entry))
         }
@@ -830,7 +830,7 @@ private fun applyPrune(cur: AuthorityState, op: AuthorityOp.PruneSessions): Auth
 
 /**
  * §P1-B/E: enqueue a retry entry. BOUNDED: the queue is STRICTLY capped at
- * RETRY_QUEUE_MAX_SIZE — when full, entries with the smallest queuedMonotonic
+ * RETRY_QUEUE_MAX_SIZE — when full, entries with the smallest queuedAtMs
  * are evicted until at or under the cap (LRU-style). If [sid] is already
  * queued, it is OVERWRITTEN (refreshed); the overwrite counts as one removal
  * + one insert so capacity is preserved without extra eviction. Bumps
@@ -849,17 +849,17 @@ private fun applyPrune(cur: AuthorityState, op: AuthorityOp.PruneSessions): Auth
  * in spec §8.5.
  */
 private fun applyRetryQueued(cur: AuthorityState, op: AuthorityOp.RetryQueued): AuthorityState {
-    val entry = RetryEntry(attempt = op.attempt, backoffMs = op.backoffMs, queuedMonotonic = op.queuedMonotonic)
+    val entry = RetryEntry(attempt = op.attempt, backoffMs = op.backoffMs, queuedAtMs = op.queuedAtMs)
     val existing = cur.retryQueue[op.sid]
     return if (existing == entry) {
         cur  // same ref, no transition
     } else {
         val withInserted = cur.retryQueue + (op.sid to entry)
-        // rev-ogpt B1 / rev-gpt: STRICT cap — evict smallest-queuedMonotonic
+        // rev-ogpt B1 / rev-gpt: STRICT cap — evict smallest-queuedAtMs
         // entries until at or under RETRY_QUEUE_MAX_SIZE.
         var bounded = withInserted
         while (bounded.size > RETRY_QUEUE_MAX_SIZE) {
-            val oldestKey = bounded.minByOrNull { it.value.queuedMonotonic }?.key ?: break
+            val oldestKey = bounded.minByOrNull { it.value.queuedAtMs }?.key ?: break
             bounded = bounded - oldestKey
         }
         // rev-gpt 4: when the new entry self-evicts (was the oldest), the

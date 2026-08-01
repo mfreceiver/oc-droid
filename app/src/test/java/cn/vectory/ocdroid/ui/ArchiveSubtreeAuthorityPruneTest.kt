@@ -49,7 +49,7 @@ class ArchiveSubtreeAuthorityPruneTest {
         serverRound = null,
         optimisticClaim = null,
         origin = EntryOrigin.REST,
-        updatedMonotonic = 0L,
+        updatedAtMs = 0L,
         workdir = workdir,
     )
 
@@ -73,7 +73,7 @@ class ArchiveSubtreeAuthorityPruneTest {
                     otherSid to SessionEntry(
                         status = idle, serverRound = null, optimisticClaim = null,
                         origin = EntryOrigin.REST,
-                        updatedMonotonic = 0L, workdir = "/other",
+                        updatedAtMs = 0L, workdir = "/other",
                     ),
                 ),
             ),
@@ -121,7 +121,7 @@ class ArchiveSubtreeAuthorityPruneTest {
                     otherSid to SessionEntry(
                         status = idle, serverRound = null, optimisticClaim = null,
                         origin = EntryOrigin.REST,
-                        updatedMonotonic = 0L, workdir = "/other",
+                        updatedAtMs = 0L, workdir = "/other",
                     ),
                 ),
             ),
@@ -269,7 +269,7 @@ class ArchiveSubtreeAuthorityPruneTest {
                     otherSid to SessionEntry(
                         status = idle, serverRound = null, optimisticClaim = null,
                         origin = EntryOrigin.REST,
-                        updatedMonotonic = 0L, workdir = "/other",
+                        updatedAtMs = 0L, workdir = "/other",
                     ),
                 ),
             ),
@@ -312,7 +312,7 @@ class ArchiveSubtreeAuthorityPruneTest {
                     otherSid to SessionEntry(
                         status = idle, serverRound = null, optimisticClaim = null,
                         origin = EntryOrigin.REST,
-                        updatedMonotonic = 0L, workdir = "/other",
+                        updatedAtMs = 0L, workdir = "/other",
                     ),
                 ),
             ),

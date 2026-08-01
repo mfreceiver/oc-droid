@@ -71,14 +71,14 @@ data class SessionEntry(
      *  §MN-P9 step 1 (U-MN9, 2026-07-31): despite the "Monotonic" suffix
      *  (historical naming, retained for now), this value is a WALL-CLOCK
      *  millisecond (System.currentTimeMillis()), NOT a monotonic clock. Both
-     *  REST (requestStartMs) and SSE (connectionMonotonicMs ← sseClock() ←
+     *  REST (requestStartMs) and SSE (connectionTimeMs ← sseClock() ←
      *  currentTimeMillis) source the SAME wall clock — so cross-comparing these
      *  timestamps is single-clock-domain (NOT cross-clock-domain as spec §8.1
      *  claims; §8.1's premise is STALE/WRONG — Batch 4 MN-P2 阶段B corrects it,
      *  see dev-plan §5 U-P3 risk). Wall-clock comparison has known limits under
      *  device sleep / NTP skew. Renaming is U-MN9 step 2 (Batch 3); unifying to
      *  a true monotonic clock (elapsedRealtime) is backlog MN-P9. */
-    val updatedMonotonic: Long,
+    val updatedAtMs: Long,
     /** §B3 workdir attribution (filled/updated by ApplySnapshot.sidToWorkdir). */
     val workdir: String?,
     /** §P0-A rev-gpt r2 #6: the scope this entry was written under (ApplyEvent/
@@ -113,19 +113,19 @@ data class SessionEntry(
      *    ±20% jitter on top, so the real next-sweep delay may differ. Useful
      *    for diagnosing "how many times has this sid been retried" + "what is
      *    the theoretical backoff strategy", NOT for predicting the exact delay.
-     *  - [queuedMonotonic]: clock captured at RetryQueued dispatch (for
+     *  - [queuedAtMs]: clock captured at RetryQueued dispatch (for
      *    observability; the reducer needs no injected clock).
      *
      *    §MN-P9 step 1 (U-MN9, 2026-07-31): despite the "Monotonic" suffix
      *    (historical naming, retained for now), this value is a WALL-CLOCK
      *    millisecond (System.currentTimeMillis()), NOT a monotonic clock — same
-     *    single-clock-domain caveat as [SessionEntry.updatedMonotonic]
+     *    single-clock-domain caveat as [SessionEntry.updatedAtMs]
      *    (see its kdoc + dev-plan §5 U-P3 risk). Renaming is U-MN9 step 2 (Batch 3).
      */
 data class RetryEntry(
     val attempt: Int,
     val backoffMs: Long,
-    val queuedMonotonic: Long,
+    val queuedAtMs: Long,
 )
 
 /**
@@ -145,13 +145,13 @@ data class ServerRound(
  * §3.1 Tier-2 optimistic confirmation gate. [clientSeq] is the local optimistic
  * counter (NEVER compared to [ServerRound.turn]); [serverEchoed] resolves
  * cross-channel reorder (server busy lands before HTTP success); the watchdog
- * arms on [claimedAtMonotonic] + OPTIMISTIC_CONFIRM_TIMEOUT → reconcile.
+ * arms on [claimedAtMs] + OPTIMISTIC_CONFIRM_TIMEOUT → reconcile.
  *
  * §MN-P9 step 1 (U-MN9, 2026-07-31): despite the "Monotonic" suffix (historical
- * naming, retained for now), [claimedAtMonotonic] is a WALL-CLOCK millisecond
- * (System.currentTimeMillis(), sourced from connectionMonotonicMs), NOT a
+ * naming, retained for now), [claimedAtMs] is a WALL-CLOCK millisecond
+ * (System.currentTimeMillis(), sourced from connectionTimeMs), NOT a
  * monotonic clock — same single-clock-domain caveat as
- * [SessionEntry.updatedMonotonic] (see its kdoc + dev-plan §5 U-P3 risk).
+ * [SessionEntry.updatedAtMs] (see its kdoc + dev-plan §5 U-P3 risk).
  * Renaming is U-MN9 step 2 (Batch 3).
  *
  * §P0-B final-fix #1: two distinct confirmation signals:
@@ -168,7 +168,7 @@ data class ServerRound(
  */
 data class OptimisticClaim(
     val clientSeq: Long,
-    val claimedAtMonotonic: Long,
+    val claimedAtMs: Long,
     val serverEchoed: Boolean,
     /** §P0-B final-fix #1: set ONLY by a delayed reconcile BUSY_CONFIRMED (the
      *  watchdog's GET confirmed the server is busy). NOT inherited by a new
