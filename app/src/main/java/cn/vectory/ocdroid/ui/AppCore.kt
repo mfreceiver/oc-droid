@@ -856,9 +856,23 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.LoadProviders -> {
-            launchLoadProviders(appScope, repository, store.slices, settingsManager, hostProfileStore) { message, error ->
-                reportNonFatalIssue(TAG, message, error)
-            }
+            // §需求4 host/fp guard: capture fp at call time + pass the LIVE fp
+            // provider so the onSuccess guard can detect a mid-REST host switch
+            // and drop the stale response. Mirrors launchLoadMessages callers
+            // (AppCoreOrchestration:1815-1816). currentServerGroupFp is the
+            // @Named("currentServerGroupFp") provider — single source of truth
+            // for fp derivation (ControllerModule.provideCurrentServerGroupFp),
+            // equivalent to hostProfileStore.currentProfile().serverGroupFp.ifBlank { .id }.
+            launchLoadProviders(
+                scope = appScope,
+                repository = repository,
+                slices = store.slices,
+                settingsManager = settingsManager,
+                hostProfileStore = hostProfileStore,
+                expectedServerGroupFp = currentServerGroupFp(),
+                currentServerGroupFp = currentServerGroupFp,
+                onNonFatalError = { message, error -> reportNonFatalIssue(TAG, message, error) },
+            )
             true
         }
         is ControllerEffect.LoadPendingPermissions -> {

@@ -322,6 +322,17 @@ class SettingsManager @Inject constructor(
     fun clearModelDataForGroup(serverGroupFp: String) =
         modelPrefs.clearModelDataForGroup(serverGroupFp)
 
+    /**
+     * §需求4: atomic reconcile of the per-fp model data so a concurrent manual
+     * model toggle (setModelDisabled) cannot lose its update against this
+     * read-compute-write. Delegates to [modelPrefs.reconcileModelData] which
+     * holds the ModelPrefs monitor across the whole RMW.
+     * Returns the inherited (intersected) disabled set for the caller to mirror
+     * into the in-memory slice.
+     */
+    fun reconcileModelData(serverGroupFp: String, availableKeys: Set<String>): Set<String> =
+        modelPrefs.reconcileModelData(serverGroupFp, availableKeys)
+
     // ── Migration domain (MigrationHelper) ──────────────────────────────────
 
     fun migrateLegacyKeysToFp(serverGroupFp: String, legacyBaseUrl: String) =

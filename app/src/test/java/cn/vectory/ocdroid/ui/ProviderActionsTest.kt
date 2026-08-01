@@ -89,10 +89,14 @@ class ProviderActionsTest {
             ),
         )
         coEvery { repository.getProviders() } returns Result.success(providers)
-        // Persisted disabled set: one still-available + one removed-server-side.
+        // §需求4: the inline read-compute-write is now atomic inside
+        // [SettingsManager.reconcileModelData] (was: getDisabledModels +
+        // setModelAvailability + setDisabledModels as 3 separate calls).
         // R-20 Phase 5: keyed by serverGroupFp ("fp-h-test" — set in setUp).
-        every { settingsManager.getDisabledModels("fp-h-test") } returns
-            setOf("openai/gpt-4", "ghost/model")
+        // Stub returns the inherited (intersected) disabled set so the slice-
+        // mirror assertion below stays meaningful (relaxed mock would return
+        // emptySet → break the assertEquals).
+        every { settingsManager.reconcileModelData("fp-h-test", any()) } returns setOf("openai/gpt-4")
 
         launchLoadProviders(
             scope = scope,
@@ -104,16 +108,17 @@ class ProviderActionsTest {
         )
         advanceUntilIdle()
 
-        // Disabled set trimmed: only entries still on the server survive.
+        // Disabled set trimmed: only entries still on the server survive
+        // (mirrored from reconcileModelData's return into the slice).
         assertEquals(setOf("openai/gpt-4"), slices.settings.value.disabledModels)
-        // Availability set persisted.
+        // §需求4: availability + (trimmed) disabled persisted in a single
+        // atomic reconcile call (replaces the prior 2-step non-atomic write).
         verify {
-            settingsManager.setModelAvailability(
+            settingsManager.reconcileModelData(
                 "fp-h-test",
                 setOf("openai/gpt-4", "openai/gpt-3.5", "anthropic/claude"),
             )
         }
-        verify { settingsManager.setDisabledModels("fp-h-test", setOf("openai/gpt-4")) }
         assertEquals(providers, slices.settings.value.providers)
     }
 
@@ -129,9 +134,18 @@ class ProviderActionsTest {
             ),
         )
         coEvery { repository.getProviders() } returns Result.success(providers)
-        every { settingsManager.getDisabledModels(any()) } returns emptySet()
+        // §需求4: relaxed mock returns emptySet from reconcileModelData →
+        // slice.disabledModels ends up empty (the no-disabled-models case).
+        every { settingsManager.reconcileModelData(any(), any()) } returns emptySet()
 
-        launchLoadProviders(scope, repository, slices, settingsManager, hostProfileStore) { _, _ -> }
+        launchLoadProviders(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            settingsManager = settingsManager,
+            hostProfileStore = hostProfileStore,
+            onNonFatalError = { _, _ -> },
+        )
         advanceUntilIdle()
 
         assertTrue(slices.settings.value.disabledModels.isEmpty())
@@ -144,10 +158,17 @@ class ProviderActionsTest {
         var capturedMsg: String? = null
         var capturedErr: Throwable? = null
 
-        launchLoadProviders(scope, repository, slices, settingsManager, hostProfileStore) { msg, err ->
-            capturedMsg = msg
-            capturedErr = err
-        }
+        launchLoadProviders(
+            scope = scope,
+            repository = repository,
+            slices = slices,
+            settingsManager = settingsManager,
+            hostProfileStore = hostProfileStore,
+            onNonFatalError = { msg, err ->
+                capturedMsg = msg
+                capturedErr = err
+            },
+        )
         advanceUntilIdle()
 
         assertEquals("Failed to load providers", capturedMsg)

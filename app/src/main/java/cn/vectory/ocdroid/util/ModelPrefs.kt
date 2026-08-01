@@ -35,6 +35,7 @@ internal class ModelPrefs(
      * to `disabled_models_<fp>` once per fp by
      * [MigrationHelper.migrateLegacyKeysToFp] (idempotent).
      */
+    @Synchronized
     fun getDisabledModels(serverGroupFp: String): Set<String> {
         return encryptedPrefs.getStringSet(disabledModelsKey(serverGroupFp), emptySet()) ?: emptySet()
     }
@@ -44,6 +45,7 @@ internal class ModelPrefs(
      * [serverGroupFp]. [providerId]/[modelId] form the entry key
      * `"$providerId/$modelId"`.
      */
+    @Synchronized
     fun setModelDisabled(serverGroupFp: String, providerId: String, modelId: String, disabled: Boolean) {
         val key = disabledModelsKey(serverGroupFp)
         val current = (encryptedPrefs.getStringSet(key, emptySet()) ?: emptySet()).toMutableSet()
@@ -57,6 +59,7 @@ internal class ModelPrefs(
      * refresh inherit so we don't issue N incremental writes). Entries are
      * `"$providerId/$modelId"`.
      */
+    @Synchronized
     fun setDisabledModels(serverGroupFp: String, disabledKeys: Set<String>) {
         encryptedPrefs.edit().putStringSet(disabledModelsKey(serverGroupFp), disabledKeys).apply()
     }
@@ -64,10 +67,12 @@ internal class ModelPrefs(
     // §bug5: per-serverGroupFp model availability catalog (server-fetched full
     // set) so that manual refresh can inherit disable status only for models
     // still present.
+    @Synchronized
     fun getModelAvailability(serverGroupFp: String): Set<String> {
         return encryptedPrefs.getStringSet(modelAvailabilityKey(serverGroupFp), emptySet()) ?: emptySet()
     }
 
+    @Synchronized
     fun setModelAvailability(serverGroupFp: String, availableKeys: Set<String>) {
         encryptedPrefs.edit().putStringSet(modelAvailabilityKey(serverGroupFp), availableKeys).apply()
     }
@@ -79,11 +84,30 @@ internal class ModelPrefs(
      * `clearModelDataForUrl(baseUrl)` (URL was the wrong dimension: two
      * profiles with same URL but different group would clobber each other).
      */
+    @Synchronized
     fun clearModelDataForGroup(serverGroupFp: String) {
         encryptedPrefs.edit()
             .remove(modelAvailabilityKey(serverGroupFp))
             .remove(disabledModelsKey(serverGroupFp))
             .apply()
+    }
+
+    /**
+     * §需求4: atomic read-compute-write of per-fp model data. Holds the ModelPrefs
+     * monitor across getDisabledModels → intersect → setModelAvailability +
+     * setDisabledModels so a concurrent [setModelDisabled] manual toggle cannot
+     * interleave and lose its update. Returns the inherited (intersected) disabled
+     * set so the caller can mirror it into the in-memory settings slice.
+     *
+     * Mirrors the old inline logic in launchLoadProviders but serialized.
+     */
+    @Synchronized
+    fun reconcileModelData(serverGroupFp: String, availableKeys: Set<String>): Set<String> {
+        val oldDisabled = getDisabledModels(serverGroupFp)
+        val inheritedDisabled = oldDisabled.intersect(availableKeys)
+        setModelAvailability(serverGroupFp, availableKeys)
+        setDisabledModels(serverGroupFp, inheritedDisabled)
+        return inheritedDisabled
     }
 
     companion object {
