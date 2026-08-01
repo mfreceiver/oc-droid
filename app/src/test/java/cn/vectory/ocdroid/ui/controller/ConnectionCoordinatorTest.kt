@@ -633,53 +633,47 @@ class ConnectionCoordinatorTest {
     }
 
     /**
-     * §需求13 rev-7 #1: the gate must RE-ARM after a hard-local-reset so a
-     * future first-launch re-fetches the catalog. The re-arm happens at the
-     * top of [coldStartReconnect] (the hard reset emits ColdStartReconnect
-     * → this method). This test simulates the lifecycle: first-launch emit
-     * → providers becomes non-null → hard reset (coldStartReconnect re-arms
-     * the gate + providers nulled) → second loadInitialData re-emits.
+     * §需求13 rev-8 #1: the single-flight gate is now PROCESS-LIFETIME for the
+     * auto path — armed exactly once via the CAS in loadInitialData, NEVER reset
+     * (the earlier re-arm via coldStartReconnect was a bug: that method is shared
+     * by MainActivity cold-start and SessionsScreen force-refresh, so resetting
+     * it re-opened the gate during a normal cold start while the first fetch was
+     * still in flight → duplicate LoadProviders). After a hard local reset
+     * (rare, destructive) the auto-fetch stays suppressed and the user taps the
+     * Model management refresh IconButton once (that path emits LoadProviders
+     * DIRECTLY, bypassing this gate). This test pins the process-lifetime
+     * invariant: loadInitialData emits LoadProviders at most once per process,
+     * and a subsequent coldStartReconnect + providers-null does NOT re-emit.
      */
     @Test
-    fun `loadInitialData re-arms LoadProviders after coldStartReconnect resets the gate (需求13 rev-7 #1 re-arm)`() {
+    fun `loadInitialData single-flight gate is process-lifetime - no re-arm via coldStartReconnect (需求13 rev-8 #1)`() {
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         every { settingsManager.currentWorkdir } returns null
-        // §需求13 rev-7 #1: stub checkHealth as UNHEALTHY so the probe launched
-        // by coldStartReconnect does NOT succeed and does NOT call
-        // loadInitialData on its own — this isolates the re-arm assertion to
-        // the EXPLICIT coordinator.loadInitialData() call below.
+        // Stub checkHealth as UNHEALTHY so the probe launched by coldStartReconnect
+        // does NOT succeed and does NOT call loadInitialData on its own — this
+        // isolates the gate assertion to the EXPLICIT coordinator.loadInitialData()
+        // calls below.
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = false, version = "1.0"))
 
-        // Phase 1: first launch — LoadProviders emits once.
+        // Phase 1: first launch — LoadProviders emits once (CAS arms the gate).
         coordinator.loadInitialData()
         runPending()
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size)
 
-        // Simulate a successful fetch: providers becomes non-null.
-        slices.mutateSettings {
-            it.copy(providers = cn.vectory.ocdroid.data.model.ProvidersResponse(providers = emptyList()))
-        }
-        // Subsequent loadInitialData must NOT re-emit (providers non-null).
-        coordinator.loadInitialData()
-        runPending()
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size)
-
-        // Phase 2: hard-local-reset simulation — coldStartReconnect re-arms
-        // the gate (providersFirstFetchArmed.set(false) at the top of the
-        // method), then providers is nulled (mirrors HostProfileController's
-        // fresh SettingsState() write). The gate reset is synchronous (before
-        // the probe coroutine launches) so it takes effect immediately.
+        // Phase 2: simulate providers still null (first fetch in flight) + a
+        // coldStartReconnect call (the SHARED entry point — normal cold start /
+        // force-refresh / hard-reset all route here). rev-8 #1: the gate must NOT
+        // re-arm here, otherwise the in-flight first fetch + a second
+        // loadInitialData (e.g. from the probe's own recovery path) would emit a
+        // DUPLICATE LoadProviders.
         coordinator.coldStartReconnect()
-        slices.mutateSettings { cn.vectory.ocdroid.ui.SettingsState() }
-        collectedEffects.clear()
         runPending()
-
-        // Phase 3: the next loadInitialData should re-emit LoadProviders
-        // (gate was re-armed by coldStartReconnect, providers is null again).
+        // Providers is still null (first fetch unresolved). The next
+        // loadInitialData must NOT re-emit — the gate stayed armed.
         coordinator.loadInitialData()
         runPending()
         assertEquals(
-            "LoadProviders re-emitted after coldStartReconnect re-arm + providers nulled",
+            "LoadProviders must NOT re-emit: coldStartReconnect does not re-arm the gate (rev-8 #1)",
             1,
             collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size,
         )

@@ -383,21 +383,18 @@ class ConnectionCoordinator(
      * `ConnectionViewModel.coldStartReconnect()`) see no change.
      */
     fun coldStartReconnect() {
-        // §需求13 rev-7 #1: re-arm the providers single-flight gate BEFORE
-        // the probe runs. The hard local reset
-        // (HostProfileController.resetLocalDataAndResync) nulls providers
-        // (writes a fresh SettingsState()) and then emits ColdStartReconnect
-        // → this method. Without this re-arm, a hard-reset BEFORE the first
-        // /config/providers fetch completes would leave the gate armed
-        // (true) with providers null → the CAS in loadInitialData would
-        // fail → the catalog would never auto-fetch. Resetting here is safe
-        // for ALL other callers:
-        //  - Normal cold start: gate is already false (new process) → no-op.
-        //  - Host switch: providers is preserved (non-null — the reducer
-        //    only clears availableCommands) → the providers==null check in
-        //    loadInitialData fails → no spurious re-fetch.
-        //  - Health-probe recovery: same as host switch (providers non-null).
-        providersFirstFetchArmed.set(false)
+        // §需求13 rev-8 #1: NO re-arm here. coldStartReconnect() is a SHARED
+        // entry point (MainActivity cold-start LaunchedEffect,
+        // SessionsScreen force-refresh, resetLocalDataAndResync) — resetting
+        // providersFirstFetchArmed here would re-open the single-flight gate
+        // during a normal cold start / force-refresh while the first fetch is
+        // still in flight → duplicate LoadProviders (rev-7's original bug).
+        // The gate is now PROCESS-LIFETIME for the auto path: armed exactly
+        // once via the CAS in loadInitialData, never reset. After a hard
+        // local reset (rare, destructive) the auto-fetch stays suppressed and
+        // the user taps the Model management refresh IconButton once — that
+        // path (ComposerViewModel/HostViewModel.refreshProviders) emits
+        // LoadProviders DIRECTLY, bypassing this gate, so it always works.
         scope.launch {
             // Result-aware barrier loop: joins the pending teardown [Deferred]
             // and checks its [Result]:
