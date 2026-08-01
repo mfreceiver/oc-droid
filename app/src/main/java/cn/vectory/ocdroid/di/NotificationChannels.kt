@@ -125,7 +125,7 @@ internal object NotificationChannels {
                 CHANNEL_SESSION_STATUS_NAME,
                 NotificationManager.IMPORTANCE_MIN
             ).apply {
-                description = "Silent ongoing FGS notification. Shows only when shade expanded."
+                description = "静默的持续 FGS 通知。仅在通知栏展开时显示。"
                 setShowBadge(false)
             }
             manager.createNotificationChannels(listOf(decisions, idle, errors, sessionStatus, sessionStatusMin))
