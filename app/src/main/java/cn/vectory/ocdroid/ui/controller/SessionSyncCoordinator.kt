@@ -1574,6 +1574,11 @@ class SessionSyncCoordinator(
         val auth = currentAuthority()
         val scopeKey = slices.store.authorityScope()
         val now = clock()
+        // §U-CQ5 B1 fix (batch2-review): capture identity epoch from the store's
+        // stateFlow (not identityStore.currentEpoch) so the reducer's guard
+        // matches — consistent with reconcileStaleOptimisticClaims (:1497) and
+        // the SharedStateStore kdoc (:141-149).
+        val capturedEpoch = slices.store.stateFlow.value.identityEpoch
         for (sid in summary.perSid.keys) {
             if (sid in auth.retryQueue) {
                 slices.store.dispatch(
@@ -1587,10 +1592,14 @@ class SessionSyncCoordinator(
                             // op if the identity advanced (host switch)
                             // between fire + CAS — defense-in-depth inside
                             // the pure CAS on top of the poller's generation
-                            // guard. currentEpoch() reads
-                            // identityStore.currentEpoch() (0L when no store
-                            // wired — matches state.identityEpoch initial).
-                            identityEpochAtCapture = currentEpoch(),
+                            // guard. capturedEpoch reads the store's
+                            // stateFlow.identityEpoch (not identityStore)
+                            // so the guard matches the reducer's state space.
+                            //
+                            // §U-CQ5 B1 fix (batch2-review): replaced
+                            // currentEpoch() with capturedEpoch to avoid
+                            // epoch-source divergence after identity changes.
+                            identityEpochAtCapture = capturedEpoch,
                         ),
                     ),
                 )
@@ -1644,7 +1653,11 @@ class SessionSyncCoordinator(
                             // guard. (The reducer-side enforcement is Lane 1's
                             // responsibility; this dispatch site only carries
                             // the value.)
-                            identityEpochAtCapture = currentEpoch(),
+                            //
+                            // §U-CQ5 B1 fix (batch2-review): replaced
+                            // currentEpoch() with capturedEpoch to avoid
+                            // epoch-source divergence after identity changes.
+                            identityEpochAtCapture = capturedEpoch,
                         ),
                     ),
                 )

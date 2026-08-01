@@ -430,7 +430,7 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
 
     // §P0-A rev-gpt #1 (no-change same-ref): if the recomputed entry equals
     // the prior entry (data-class equality: same status, serverRound, claim,
-    // origin, freshness, updatedMonotonic, workdir) AND pendingBumps is
+    // origin, updatedMonotonic, workdir) AND pendingBumps is
     // unchanged (addPendingBump returned the same reference) → NO transition →
     // return cur (same ref). This makes an equal-value SSE re-delivery a true
     // CAS no-op (no emission), completing the B1 idempotency contract. (An
