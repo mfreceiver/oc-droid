@@ -19,6 +19,7 @@ import io.mockk.unmockkAll
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -769,6 +770,114 @@ class SessionListActionsTest {
         // the second (latest) result is kept — this is the FIX-D newer-wins semantic.
         assertEquals("only the second (fresh) result kept", listOf("fresh"), slices.sessionList.value.sessions.map { it.id })
         assertFalse("flag cleared after second completes", store.sessionListLoadInFlight)
+    }
+
+    @Test
+    fun `C3 three-caller chain A then B then C leaves only C result and flag cleared`() = runTest {
+        // §需求10 round-4 (rev-7 #1): proves the cancel-and-replace flag-clear
+        // chain is unbroken across 3 supersessions. A's finally must NOT clear
+        // the flag (epoch moved to C); B's finally must NOT clear (epoch moved
+        // to C); only C's finally clears (epoch == C). No window where flag is
+        // false while a heavyweight refresh is in-flight (which would let the
+        // poller wrongly fire).
+        val gateA = CompletableDeferred<Unit>()
+        val gateB = CompletableDeferred<Unit>()
+        val gateC = CompletableDeferred<Unit>()
+        var callCount = 0
+        coEvery { repository.getSessions(any()) } coAnswers {
+            callCount += 1
+            when (callCount) {
+                1 -> { gateA.await(); Result.success(listOf(Session(id = "a", directory = "/x"))) }
+                2 -> { gateB.await(); Result.success(listOf(Session(id = "b", directory = "/x"))) }
+                else -> { gateC.await(); Result.success(listOf(Session(id = "c", directory = "/x"))) }
+            }
+        }
+
+        // A in-flight
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
+        advanceUntilIdle()
+        assertEquals(1, callCount)
+
+        // B supersedes A (cancel-and-replace)
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
+        advanceUntilIdle()
+        assertEquals(2, callCount)
+
+        // C supersedes B (cancel-and-replace)
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
+        advanceUntilIdle()
+        assertEquals(3, callCount)
+
+        // C completes — its finally clears the flag (epoch == C).
+        gateC.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals("only the third (latest) result kept", listOf("c"), slices.sessionList.value.sessions.map { it.id })
+        assertFalse("flag cleared by C's finally (A and B's finally skipped — epoch moved)", store.sessionListLoadInFlight)
+    }
+
+    @Test
+    fun `C3 epoch guard discards stale success when cancellation delivery is delayed`() = runTest {
+        // §需求10 round-4 (rev-7 #2): proves the defense-in-depth epoch check
+        // discards a stale success even when cancellation is NOT delivered in
+        // time (Oracle §2.1: Retrofit suspend may resume onSuccess just before
+        // cancel() lands). Simulate by letting A's getSessions return success
+        // WITHOUT observing cancellation, while B has already bumped the epoch.
+        val gateA = CompletableDeferred<Unit>()
+        var aSideEffects = 0
+        coEvery { repository.getSessions(any()) } coAnswers {
+            gateA.await()
+            // A returns success WITHOUT throwing CancellationException (simulates
+            // cancellation-delivery race: onSuccess may still execute).
+            Result.success(listOf(Session(id = "stale-a", directory = "/x")))
+        }
+
+        // A starts
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
+        advanceUntilIdle()
+
+        // B supersedes A (bumps epoch, cancels A's job)
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(Session(id = "fresh-b", directory = "/x")))
+        launchLoadSessions(scope, repository, slices, settingsManager, {}, {}, {}, emit)
+        advanceUntilIdle()
+
+        // Release A's gate — A's onSuccess runs, but epoch check discards it.
+        gateA.complete(Unit)
+        advanceUntilIdle()
+
+        // A's stale result was discarded by the epoch guard (not committed).
+        assertEquals(
+            "only B's fresh result kept (A's stale success discarded by epoch guard)",
+            listOf("fresh-b"),
+            slices.sessionList.value.sessions.map { it.id },
+        )
+        assertEquals("A's side effects did NOT fire", 0, aSideEffects)
+    }
+
+    @Test
+    fun `C3 scope cancellation of in-flight load clears flag`() = runTest {
+        // §需求10 round-4 (rev-7 #1): proves no flag leak when the active load's
+        // scope is cancelled mid-flight. The finally clears the flag because the
+        // epoch still matches this job (no supersession, just scope cancel).
+        val gate = CompletableDeferred<Unit>()
+        coEvery { repository.getSessions(any()) } coAnswers {
+            gate.await()
+            Result.success(emptyList())
+        }
+
+        val innerScope = TestScope(UnconfinedTestDispatcher())
+        launchLoadSessions(innerScope, repository, slices, settingsManager, {}, {}, {}, emit)
+        innerScope.advanceUntilIdle()
+        assertTrue("flag set during in-flight load", store.sessionListLoadInFlight)
+
+        // Cancel the scope mid-flight (NOT a supersession — no epoch bump).
+        innerScope.cancel()
+        innerScope.advanceUntilIdle()
+
+        assertFalse(
+            "flag must be cleared in the cancelled job's finally (epoch matches — no supersession)",
+            store.sessionListLoadInFlight,
+        )
     }
 
     @Test

@@ -316,6 +316,15 @@ class SessionMetadataPollerTest {
         assertEquals("C and D arrived during request", setOf("A", "C", "D"), result.map { it.id }.toSet())
     }
 
+    // §需求10 round-4 (rev-7 #4): the poller's read-only skip of
+    // store.sessionListLoadInFlight is a 2-line guard verified by code review
+    // (rev-6/rev-7) — its concurrency correctness is established by the
+    // orchestrator's cancel-and-replace invariant (SharedStateStore KDoc).
+    // A behavioral poll-loop test would require synthesizing the full
+    // AppLifecycleMonitor + @UiApplicationScope + repository DI graph, which
+    // is disproportionate for a 2-line ambient skip; the poller's commit guard
+    // (commitIfCurrent + fresher-wins merge) independently bounds any overlap.
+
 }
 
 /**
