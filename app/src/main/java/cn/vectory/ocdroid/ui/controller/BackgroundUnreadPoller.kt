@@ -229,15 +229,17 @@ class BackgroundUnreadPoller internal constructor(
             val archivedTreeIds = roots.filter { it.isArchived }
                 .flatMap { treeIds(it.id, sessionsById) }
                 .toSet()
-            // §P0-A r2 #1: preserve authorityRevision from reduceAuthority's
-            // return value so the aggregator's distinctUntilChanged{authorityRevision}
-            // detects the transition and re-derives. The provisional copy MUST NOT
-            // drop the revision that reduceAuthority bumped.
-            val provisional = snapshot.copy(
-                authority = withStatus.authority,
-                authorityRevision = withStatus.authorityRevision,
+            // §U-MN6: derive provisional from the reducer's OUTPUT (withStatus) rather
+            // than re-assigning the authority slice via snapshot.copy(authority=...).
+            // withStatus already carries authority + authorityRevision (reducer-applied);
+            // we override sessionList (hydration-enriched) + unread, and explicitly keep
+            // chat from the PRE-reduce snapshot (matches the prior cherry-pick behavior —
+            // the reducer's chat.pendingErrorCheck update for this ApplySnapshot is
+            // intentionally NOT applied here; see batch3-design §A.1).
+            val provisional = withStatus.copy(
                 sessionList = nextSessionList,
                 unread = snapshot.unread.removeSessions(archivedTreeIds),
+                chat = snapshot.chat,
             )
             val (evaluatedUnread, result) = provisional.evaluateAndApplyUnread(now)
             // Background polling already committed an authoritative REST status
