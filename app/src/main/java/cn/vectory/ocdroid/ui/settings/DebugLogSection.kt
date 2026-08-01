@@ -358,19 +358,22 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                     // recomposition — without a cache that re-runs sdf.format +
                     // string-template for up to MAX_ENTRIES rows each time. seq is
                     // monotonic and never reused (DebugLog's AtomicLong), so a seq
-                    // key is stable: an entry formatted once is reused on every
-                    // subsequent recomposition. The cache has NO remember-key — a
-                    // key on `filtered`/`displayed` would rebuild the whole map on
-                    // every append and destroy the benefit (per fixup2 r2).
+                    // key is stable: an entry formatted once is reused on
+                    // subsequent recompositions as long as it stays in the cache
+                    // (see Concurrency caveat below for the rare case where a
+                    // still-visible entry is evicted early). The cache has NO
+                    // remember-key — a key on `filtered`/`displayed` would rebuild
+                    // the whole map on every append and destroy the benefit (per
+                    // fixup2 r2).
                     //
                     // WHY TREEMAP (not LinkedHashMap/LRU): the viewer iterates
                     // in the deque's publish order (typically newest-first). Under
-                    // that access pattern (on the common seq-ordered path) an
-                    // access-order LRU ends up making the oldest-seq entry the
-                    // LRU-eviction victim, so an LRU evicts the wrong end and a
+                    // that access pattern an access-order LRU evicts the wrong end
+                    // of the sequence (the end the viewer just visited), so a
                     // full-capacity append cascades into a full re-format (fixup2
                     // r4 regression). A seq-keyed TreeMap makes eviction
-                    // ORDER-INDEPENDENT: firstKey() is always the smallest seq,
+                    // ORDER-INDEPENDENT: firstKey() is always the smallest seq
+                    // (a TreeMap property, independent of any access order),
                     // which on the common path (seq published in allocation
                     // order) is the entry the ring buffer drops next.
                     //
