@@ -334,7 +334,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         // raw dispatch path runs.
         val identified = cn.vectory.ocdroid.service.events.IdentifiedSseEvent(
             cn.vectory.ocdroid.service.identity.ConnectionIdentity(
-                epoch = 0L, serverGroupFp = "", normalizedWorkdir = "", endpointFp = ""
+                epoch = 0L, profileId = "", normalizedWorkdir = "", endpointFp = ""
             ),
             event,
         )
@@ -491,7 +491,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             ControllerEffect.OnSseEvent(
                 cn.vectory.ocdroid.service.events.IdentifiedSseEvent(
                     cn.vectory.ocdroid.service.identity.ConnectionIdentity(
-                        epoch = 0L, serverGroupFp = "", normalizedWorkdir = "", endpointFp = ""
+                        epoch = 0L, profileId = "", normalizedWorkdir = "", endpointFp = ""
                     ),
                     SSEEvent(payload = SSEPayload(type = "server.connected")),
                 )
@@ -848,7 +848,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
     fun `VerifyAndHydrate post-peek re-check drops when serverGroupFp mismatched (Task2 C4)`() = runTest {
         // Defence-in-depth: the post-peek re-check of the composite key is
         // retained. peek is synchronous (no TOCTOU window), but if the effect
-        // carries an fp that no longer equals currentServerGroupFp() the
+        // carries an fp that no longer equals currentProfileId() the
         // injection is still dropped. Here the cache is keyed by the CURRENT
         // fp (test-fp) so peek hits, but the effect's fp is "mismatch-fp" →
         // the re-check drops.
@@ -893,7 +893,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         // the previously-captured createdAt / directorySessions lookup is
         // gone too.
         val c = newCore()
-        // Pin currentServerGroupFp() = "test-fp" so peekSessionWindow
+        // Pin currentProfileId() = "test-fp" so peekSessionWindow
         // resolves the same key the captured-fp hook writes under.
         io.mockk.every { hostProfileStore.currentProfile() } returns pinnedTestProfile()
         val window = CachedSessionWindow(
@@ -938,7 +938,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
 
         val handled = c.dispatchSessionEffect(
             ControllerEffect.AppendMessageToCache(
-                serverGroupFp = "test-fp",
+                profileId = "test-fp",
                 sessionId = "s-emit",
                 message = cn.vectory.ocdroid.data.model.Message(id = "m2", role = "assistant"),
                 parts = emptyList(),
@@ -967,12 +967,12 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         }
 
         // Capture current fp
-        val currentFp = core.currentServerGroupFp()
+        val currentFp = core.currentProfileId()
         // Use a DIFFERENT fp in the effect
         val oldFp = currentFp + "-old"
 
         val handled = core.dispatchHostEffect(
-            ControllerEffect.EvictSession(serverGroupFp = oldFp, sessionId = "s1")
+            ControllerEffect.EvictSession(profileId = oldFp, sessionId = "s1")
         )
         advanceUntilIdle()
 
@@ -990,10 +990,10 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             s.copy(abortPendingSessionIds = s.abortPendingSessionIds + ("s1" to 100L))
         }
 
-        val currentFp = core.currentServerGroupFp()
+        val currentFp = core.currentProfileId()
 
         val handled = core.dispatchHostEffect(
-            ControllerEffect.EvictSession(serverGroupFp = currentFp, sessionId = "s1")
+            ControllerEffect.EvictSession(profileId = currentFp, sessionId = "s1")
         )
         advanceUntilIdle()
 

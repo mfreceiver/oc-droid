@@ -444,7 +444,7 @@ class GapReconcileIntegrationTest {
         }
         coordinator = SessionSyncCoordinator(
             scope, slices, settingsManager, effects,
-            currentServerGroupFp = { "test-fp" },
+            currentProfileId = { "test-fp" },
             identityStore = identityStore,
         )
     }

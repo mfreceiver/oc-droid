@@ -92,7 +92,7 @@ class SlimV2WireRegressionTest {
         recordNonFatalCount = java.util.concurrent.atomic.AtomicInteger(0)
         coordinator = SessionSyncCoordinator(
             scope, slices, settingsManager, effects,
-            currentServerGroupFp = { "test-fp" },
+            currentProfileId = { "test-fp" },
             identityStore = identityStore,
             repository = repository,
         )

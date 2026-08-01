@@ -62,7 +62,7 @@ class SettingsViewModel @Inject constructor(
      * the Main thread). Same scope every controller uses.
      */
     @UiApplicationScope private val appScope: CoroutineScope,
-    @Named("currentServerGroupFp") private val currentServerGroupFpProvider: () -> String,
+    @Named("currentProfileId") private val currentProfileIdProvider: () -> String,
     /**
      * §P5a (Q5): application Context for [setLocaleMode] →
      * [AppLocaleController.apply] (needed to resolve the real system locale
@@ -86,7 +86,7 @@ class SettingsViewModel @Inject constructor(
         core.settingsManager,
         core.hostProfileStore,
         core.appScope,
-        core.currentServerGroupFp,
+        core.currentProfileId,
         core.appContext,
     )
 
@@ -97,7 +97,7 @@ class SettingsViewModel @Inject constructor(
     val settingsFlow get() = store.settingsFlow
 
     /** The group served by the currently-connected repository. */
-    val currentServerGroupFp: String get() = currentServerGroupFpProvider()
+    val currentProfileId: String get() = currentProfileIdProvider()
 
     /**
      * §vcs-section: read-only accessor for the current workdir (the absolute

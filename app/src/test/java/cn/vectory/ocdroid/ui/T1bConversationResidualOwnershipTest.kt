@@ -398,7 +398,7 @@ class T1bConversationResidualOwnershipTest {
         )
         val store = SharedStateStore().apply { mutateState { prior } }
 
-        store.dispatch(AppAction.HostStatePurged(preserveServerGroupData = false))
+        store.dispatch(AppAction.HostStatePurged)
 
         val out = store.stateFlow.value.chat
         // Every field :1062/:1117 clear is cleared by HostStatePurged.
@@ -436,7 +436,7 @@ class T1bConversationResidualOwnershipTest {
         )
         val store = SharedStateStore().apply { mutateState { prior } }
 
-        store.dispatch(AppAction.HostStatePurged(preserveServerGroupData = false))
+        store.dispatch(AppAction.HostStatePurged)
 
         val out = store.stateFlow.value.chat
         assertTrue("revertCutoffs cleared by HostStatePurged (fix-leak-window)", out.revertCutoffs.isEmpty())

@@ -695,7 +695,7 @@ class SessionMutationActionsTest {
         launchSetSessionArchived(
             scope, repository, slices, settingsManager,
             sessionId = "p", archived = true, emit = emit,
-            currentServerGroupFp = { "g-test" },
+            currentProfileId = { "g-test" },
             emitEffect = { emittedEffects.add(it) })
         advanceUntilIdle()
 
@@ -709,9 +709,9 @@ class SessionMutationActionsTest {
             setOf("p", "c1", "c2"),
             evictions.map { it.sessionId }.toSet())
         assertEquals(
-            "every EvictSession must carry the currentServerGroupFp",
+            "every EvictSession must carry the currentProfileId",
             setOf("g-test"),
-            evictions.map { it.serverGroupFp }.toSet())
+            evictions.map { it.profileId }.toSet())
     }
 
     @Test
@@ -727,7 +727,7 @@ class SessionMutationActionsTest {
         launchSetSessionArchived(
             scope, repository, slices, settingsManager,
             sessionId = "s1", archived = false, emit = emit,
-            currentServerGroupFp = { "g-test" },
+            currentProfileId = { "g-test" },
             emitEffect = { emittedEffects.add(it) })
         advanceUntilIdle()
 
@@ -739,7 +739,7 @@ class SessionMutationActionsTest {
     @Test
     fun `C3 launchSetSessionArchived skips EvictSession when providers are null - legacy caller`() = runTest {
         // Backward-compat: callers that haven't been migrated (no
-        // currentServerGroupFp / emitEffect) MUST behave as before (no
+        // currentProfileId / emitEffect) MUST behave as before (no
         // eviction). This protects any test/caller that hasn't been updated.
         val session = Session(id = "s1", directory = "/x")
         store.mutateSessionList { it.copy(sessions = listOf(session)) }
@@ -750,7 +750,7 @@ class SessionMutationActionsTest {
             scope, repository, slices, settingsManager,
             sessionId = "s1", archived = true, emit = emit,
             // Legacy caller: null providers → no EvictSession emission.
-            currentServerGroupFp = null,
+            currentProfileId = null,
             emitEffect = null)
         advanceUntilIdle()
 
@@ -771,7 +771,7 @@ class SessionMutationActionsTest {
         launchSetSessionArchived(
             scope, repository, slices, settingsManager,
             sessionId = "s1", archived = true, emit = emit,
-            currentServerGroupFp = { "g-test" },
+            currentProfileId = { "g-test" },
             emitEffect = { emittedEffects.add(it) })
         advanceUntilIdle()
 
@@ -791,14 +791,14 @@ class SessionMutationActionsTest {
             scope, repository, slices, settingsManager,
             sessionId = "s1", onSelectSession = {},
             emit = emit,
-            currentServerGroupFp = { "g-test" },
+            currentProfileId = { "g-test" },
             emitEffect = { emittedEffects.add(it) })
         advanceUntilIdle()
 
         val evictions = emittedEffects.filterIsInstance<cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession>()
         assertEquals("delete must emit exactly one EvictSession", 1, evictions.size)
         assertEquals("s1", evictions.single().sessionId)
-        assertEquals("g-test", evictions.single().serverGroupFp)
+        assertEquals("g-test", evictions.single().profileId)
     }
 
     @Test
@@ -814,7 +814,7 @@ class SessionMutationActionsTest {
             scope, repository, slices, settingsManager,
             sessionId = "s1", onSelectSession = {},
             emit = emit,
-            currentServerGroupFp = { "g-test" },
+            currentProfileId = { "g-test" },
             emitEffect = { emittedEffects.add(it) })
         advanceUntilIdle()
 

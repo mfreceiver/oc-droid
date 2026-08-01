@@ -1240,7 +1240,7 @@ class SseNotificationBridgeTest {
         private fun identified(event: SSEEvent): IdentifiedSseEvent = IdentifiedSseEvent(
             identity = ConnectionIdentity(
                 epoch = EPOCH,
-                serverGroupFp = "group-fp",
+                profileId = "group-fp",
                 normalizedWorkdir = "/work/dir",
                 endpointFp = "endpoint-fp",
             ),

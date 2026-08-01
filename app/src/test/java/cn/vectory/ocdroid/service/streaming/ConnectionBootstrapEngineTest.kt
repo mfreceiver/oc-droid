@@ -91,7 +91,7 @@ class ConnectionBootstrapEngineTest {
         }
         coVerify(exactly = 1) { f.repository.checkHealth() }
         assertEquals(result.identity, f.store.currentIdentity.value)
-        assertEquals("group", result.identity.serverGroupFp)
+        assertEquals("group", result.identity.profileId)
         assertEquals("/work", result.identity.normalizedWorkdir)
     }
 

@@ -86,12 +86,13 @@ sealed interface AppAction {
 
     /**
      * purgePerHostState (host switch / delete-active-host): the cross-slice
-     * purge. The [preserveServerGroupData] flag matches the call-site
-     * `sameGroup = previousFp == targetFp` decision — when true (same-group
-     * switch) sessions / unread / session-window cache are PRESERVED (server-
-     * identical data); when false (异组 switch / delete active host) the full
-     * reset runs. Per-profile UX (composer.draftWorkdir /
-     * settings.availableCommands / connection.serverVersion) is ALWAYS reset.
+     * full purge. §需求12阶段3 (oracle-assessed): under 需求12 profiles are
+     * fully independent (no groups), so the former same-group preserve branch
+     * is dead — `profileId == profile.id` always, and C-8 makes every switch
+     * emit RestartRequired so any preserved slices die with the process
+     * anyway. The reducer now ALWAYS runs the full reset. Per-profile UX
+     * (composer.draftWorkdir / settings.availableCommands /
+     * connection.serverVersion) is reset as part of the same full purge.
      *
      * What is NOT here (oracle): the SettingsManager writes
      * (`clearRecentWorkdirs` / `currentWorkdir` / `sessionCache`) and the
@@ -106,9 +107,7 @@ sealed interface AppAction {
      * refreshNonce) — it uses `.copy()` on the existing ChatState, never a
      * fresh `ChatState()`.
      */
-    data class HostStatePurged(
-        val preserveServerGroupData: Boolean,
-    ) : AppAction
+    data object HostStatePurged : AppAction
 
     /**
      * createSessionInWorkdirForEffect ("new session in workdir X" draft

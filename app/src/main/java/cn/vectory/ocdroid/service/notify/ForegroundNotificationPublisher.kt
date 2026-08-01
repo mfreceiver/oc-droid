@@ -131,7 +131,7 @@ class ForegroundNotificationPublisher(
             // since this notification was built).
             identityStore.currentIdentity.value?.let { id ->
                 putExtra(UserCloseRequestParser.EXTRA_EPOCH, id.epoch)
-                putExtra(UserCloseRequestParser.EXTRA_SERVER_GROUP_FP, id.serverGroupFp)
+                putExtra(UserCloseRequestParser.EXTRA_SERVER_GROUP_FP, id.profileId)
                 putExtra(UserCloseRequestParser.EXTRA_NORMALIZED_WORKDIR, id.normalizedWorkdir)
                 putExtra(UserCloseRequestParser.EXTRA_ENDPOINT_FP, id.endpointFp)
             }

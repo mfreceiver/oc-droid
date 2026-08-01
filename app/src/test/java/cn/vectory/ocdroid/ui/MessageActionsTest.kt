@@ -555,8 +555,8 @@ class MessageActionsTest {
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
 
-        // Launch with expectedServerGroupFp = "g1" (the old group).
-        // The currentServerGroupFp provider returns "g2" (the new group,
+        // Launch with expectedProfileId = "g1" (the old group).
+        // The currentProfileId provider returns "g2" (the new group,
         // simulating a host switch that happened during the REST call).
         launchLoadMessages(
             scope = scope,
@@ -565,8 +565,8 @@ class MessageActionsTest {
             sessionId = "s1",
             onCacheWindow = { _, _ -> },
             emit = emit,
-            expectedServerGroupFp = "g1",
-            currentServerGroupFp = { "g2" }, // simulate post-switch fp
+            expectedProfileId = "g1",
+            currentProfileId = { "g2" }, // simulate post-switch fp
         )
         advanceUntilIdle()
 
@@ -593,8 +593,8 @@ class MessageActionsTest {
             sessionId = "s1",
             onCacheWindow = { _, _ -> },
             emit = emit,
-            expectedServerGroupFp = "g1",
-            currentServerGroupFp = { "g1" }, // same fp → guard passes
+            expectedProfileId = "g1",
+            currentProfileId = { "g1" }, // same fp → guard passes
         )
         advanceUntilIdle()
 
@@ -641,8 +641,8 @@ class MessageActionsTest {
             repository = repository,
             slices = slices,
             sessionId = "s1",
-            expectedServerGroupFp = "g1",
-            currentServerGroupFp = { "g2" }, // simulate post-switch fp
+            expectedProfileId = "g1",
+            currentProfileId = { "g2" }, // simulate post-switch fp
             onCacheWindow = { _, _ -> },
         )
         advanceUntilIdle()
@@ -672,8 +672,8 @@ class MessageActionsTest {
             repository = repository,
             slices = slices,
             sessionId = "s1",
-            expectedServerGroupFp = "g1",
-            currentServerGroupFp = { "g1" },
+            expectedProfileId = "g1",
+            currentProfileId = { "g1" },
             onCacheWindow = { _, _ -> },
         )
         advanceUntilIdle()

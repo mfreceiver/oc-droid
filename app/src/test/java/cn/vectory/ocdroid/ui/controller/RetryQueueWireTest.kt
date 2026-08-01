@@ -63,7 +63,7 @@ class RetryQueueWireTest {
             slices = slices,
             settingsManager = mockk(relaxed = true),
             effects = effects,
-            currentServerGroupFp = { serverGroupFp },
+            currentProfileId = { serverGroupFp },
             identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore(),
             statusAggregatorInput = null,
             clock = { clockNow },

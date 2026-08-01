@@ -71,8 +71,9 @@ import javax.inject.Singleton
 object ControllerModule {
 
     /**
-     * R-20 Phase 1: zero-arg lambda returning the CURRENT host profile's
-     * serverGroupFp. Injected into every controller/helper that emits
+     * R-20 Phase 1 / §需求12阶段3: zero-arg lambda returning the CURRENT
+     * host profile's profileId (renamed from `currentServerGroupFp`).
+     * Injected into every controller/helper that emits
      * [cn.vectory.ocdroid.ui.controller.ControllerEffect.VerifyAndHydrate]
      * / [cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictSession]
      * / [cn.vectory.ocdroid.ui.controller.ControllerEffect.EvictGroup] so
@@ -86,14 +87,20 @@ object ControllerModule {
      * normalize step — legacy JSON that predates Phase 0 normalizes blank
      * → id on read, so this is belt-and-braces for a corrupt row that
      * skipped normalization).
+     *
+     * TODO §需求12阶段5: the body still reads `profile.serverGroupFp` —
+     * rename to `profile.profileId` once the HostProfile field is renamed.
+     * Under 需求12 the value is always `profile.id`, but the field read
+     * stays during the transition.
      */
     @Provides
     @Singleton
-    @Named("currentServerGroupFp")
-    fun provideCurrentServerGroupFp(
+    @Named("currentProfileId")
+    fun provideCurrentProfileId(
         hostProfileStore: HostProfileStore
     ): () -> String = {
         val profile = hostProfileStore.currentProfile()
+        // §需求12阶段3: field renamed in 阶段5; value unchanged.
         profile.serverGroupFp.ifBlank { profile.id }
     }
 
@@ -170,13 +177,13 @@ object ControllerModule {
         settingsManager: SettingsManager,
         repository: OpenCodeRepository,
         effectBus: SharedEffectBus,
-        @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
+        @Named("currentProfileId") currentProfileId: () -> String,
     ): SessionSwitcher = SessionSwitcher(
         store = store,
         settingsManager = settingsManager,
         repository = repository,
         effects = effectBus,
-        currentServerGroupFp = currentServerGroupFp,
+        currentProfileId = currentProfileId,
     )
 
     @Provides
@@ -189,7 +196,7 @@ object ControllerModule {
         settingsManager: SettingsManager,
         trafficTracker: TrafficTracker,
         effectBus: SharedEffectBus,
-        @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
+        @Named("currentProfileId") currentProfileId: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
         effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver,
         skeletonReloadCoordinator: cn.vectory.ocdroid.ui.SkeletonReloadCoordinator,
@@ -201,7 +208,7 @@ object ControllerModule {
         settingsManager = settingsManager,
         trafficTracker = trafficTracker,
         effects = effectBus,
-        currentServerGroupFp = currentServerGroupFp,
+        currentProfileId = currentProfileId,
         identityStore = identityStore,
         effectiveConnectionConfigResolver = effectiveConnectionConfigResolver,
         skeletonReloadCoordinator = skeletonReloadCoordinator,
@@ -214,7 +221,7 @@ object ControllerModule {
         store: SharedStateStore,
         settingsManager: SettingsManager,
         effectBus: SharedEffectBus,
-        @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
+        @Named("currentProfileId") currentProfileId: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
         statusAggregatorInput: cn.vectory.ocdroid.service.status.StatusAggregatorInput,
         repository: OpenCodeRepository,
@@ -224,7 +231,7 @@ object ControllerModule {
         slices = store.slices,
         settingsManager = settingsManager,
         effects = effectBus,
-        currentServerGroupFp = currentServerGroupFp,
+        currentProfileId = currentProfileId,
         // remove-message-persistence Task 6: the prior `cacheRepository`
         // argument (R-20 Phase 1 C4, wired for the message.updated
         // appendMessageIfSessionCached path) was deleted together with the
@@ -398,7 +405,7 @@ object ControllerModule {
         settingsManager: SettingsManager,
         effectBus: SharedEffectBus,
         serverCompatProfile: ServerCompatProfile,
-        @Named("currentServerGroupFp") currentServerGroupFp: () -> String,
+        @Named("currentProfileId") currentProfileId: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
         bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
         streamingServiceLauncher: cn.vectory.ocdroid.service.StreamingServiceLauncher,
@@ -416,7 +423,7 @@ object ControllerModule {
         settingsManager = settingsManager,
         effects = effectBus,
         serverCompatProfile = serverCompatProfile,
-        currentServerGroupFp = currentServerGroupFp,
+        currentProfileId = currentProfileId,
         identityStore = identityStore,
         // CP2 (notify Phase-0): delegate TOFU state to the shared bootstrap
         // coordinator (FGS spec §10). CC's public TOFU surface is unchanged.

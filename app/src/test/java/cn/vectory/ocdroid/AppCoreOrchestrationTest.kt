@@ -1174,13 +1174,13 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
     @Test
     fun `fix-2 catchUpAfterDisconnectOrForeground drops onSuccess merge when host switched during probe`() = runTest {
         // gpter 复审 #2 (glm-3 前次 #3 修复的实现错误): the previous code passed
-        // currentServerGroupFp = { fp } (captured lambda) into launchCatchUp,
-        // which made the onSuccess guard `currentServerGroupFp() !=
-        // expectedServerGroupFp` 恒等 (no-op): both sides read the SAME
+        // currentProfileId = { fp } (captured lambda) into launchCatchUp,
+        // which made the onSuccess guard `currentProfileId() !=
+        // expectedProfileId` 恒等 (no-op): both sides read the SAME
         // captured snapshot. A host switch during the probe REST was never
         // detected, and the stale fp-A tail was merged into fp-B's slice.
         // After the fix, the call passes the LIVE provider
-        // (core.currentServerGroupFp) so currentServerGroupFp() reads the
+        // (core.currentProfileId) so currentProfileId() reads the
         // current host's fp each call. A mid-probe host switch makes the guard
         // fire → onSuccess early-returns without merging.
         val originalProfile = cn.vectory.ocdroid.data.model.HostProfile(
@@ -1198,7 +1198,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
             cn.vectory.ocdroid.data.repository.ProbeResult(ok = true, messageID = "server-new", updatedAt = 200L)
         // The probe-page REST: simulate the host switch DURING the suspend.
         // Before the page returns, flip hostProfileStore so the live
-        // core.currentServerGroupFp() provider returns fp-B.
+        // core.currentProfileId() provider returns fp-B.
         val tail = listOf(MessageWithParts(info = Message(id = "stale-A", role = "user")))
         coEvery { repository.getMessagesPaged(any(), any(), any()) } answers {
             every { hostProfileStore.currentProfile() } returns switchedProfile
@@ -1930,8 +1930,8 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
             it.copy(sessions = listOf(Session(id = sid, directory = "/x")))
         }
 
-        val currentFp = core.currentServerGroupFp()
-        core.effectBus.emitEffect(ControllerEffect.EvictSession(serverGroupFp = currentFp, sessionId = sid))
+        val currentFp = core.currentProfileId()
+        core.effectBus.emitEffect(ControllerEffect.EvictSession(profileId = currentFp, sessionId = sid))
         advanceUntilIdle()
 
         assertFalse(
@@ -1950,7 +1950,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
             it.copy(sessions = listOf(Session(id = sid, directory = "/x")))
         }
 
-        core.effectBus.emitEffect(ControllerEffect.EvictSession(serverGroupFp = "stale-fp", sessionId = sid))
+        core.effectBus.emitEffect(ControllerEffect.EvictSession(profileId = "stale-fp", sessionId = sid))
         advanceUntilIdle()
 
         assertTrue(

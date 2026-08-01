@@ -68,7 +68,7 @@ class RevertConversation(private val core: AppCore) {
                 it.copy(inputText = draft, imageAttachments = emptyList(), fileReferences = emptyList())
             }
             runCatching {
-                core.settingsManager.setDraftText(core.currentServerGroupFp(), sessionId, draft)
+                core.settingsManager.setDraftText(core.currentProfileId(), sessionId, draft)
             }.onFailure { DebugLog.w("RevertConversation", "persist draft failed: ${it.message}") }
             reload(sessionId)
             core.loadSessionsForEffect()

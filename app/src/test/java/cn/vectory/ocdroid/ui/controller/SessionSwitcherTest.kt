@@ -105,7 +105,7 @@ class SessionSwitcherTest {
             settingsManager = settingsManager,
             repository = repository,
             effects = effects,
-            currentServerGroupFp = { "test-fp" },
+            currentProfileId = { "test-fp" },
             clock = { nowMs }
         )
     }
@@ -415,7 +415,7 @@ class SessionSwitcherTest {
         val verify = collectedEffects.filterIsInstance<ControllerEffect.VerifyAndHydrate>().singleOrNull()
         assertNotNull("VerifyAndHydrate must be emitted", verify)
         assertEquals("s1", verify!!.sessionId)
-        assertEquals("test-fp", verify.serverGroupFp)
+        assertEquals("test-fp", verify.profileId)
         assertEquals(created, verify.createdAt)
     }
 
@@ -890,7 +890,7 @@ class SessionSwitcherTest {
         val newPart = Part(id = "p-new", type = "text")
         val newMsg = Message(id = "m2", role = "assistant")
         switcher.appendMessageIfCached(
-            serverGroupFp = "test-fp",
+            profileId = "test-fp",
             sessionId = "s1",
             message = newMsg,
             parts = listOf(newPart))
@@ -918,7 +918,7 @@ class SessionSwitcherTest {
         assertEquals(0, beforeSize)
 
         switcher.appendMessageIfCached(
-            serverGroupFp = "test-fp",
+            profileId = "test-fp",
             sessionId = "s-cold",
             message = Message(id = "m-x", role = "assistant"),
             parts = emptyList())
@@ -943,13 +943,13 @@ class SessionSwitcherTest {
 
         // Append under a FOREIGN fp — there is no (other-fp, s-shared) entry.
         switcher.appendMessageIfCached(
-            serverGroupFp = "other-fp",
+            profileId = "other-fp",
             sessionId = "s-shared",
             message = Message(id = "m-foreign", role = "assistant"),
             parts = emptyList())
 
         val hit = switcher.peekSessionWindow("s-shared")
-        // peekSessionWindow reads under currentServerGroupFp() = "test-fp".
+        // peekSessionWindow reads under currentProfileId() = "test-fp".
         assertNotNull(hit)
         assertEquals(
             "test-fp window untouched by foreign-fp append",
@@ -984,7 +984,7 @@ class SessionSwitcherTest {
         // separate part event).
         val replayedMsg = Message(id = "m-dup", role = "user")
         switcher.appendMessageIfCached(
-            serverGroupFp = "test-fp",
+            profileId = "test-fp",
             sessionId = "s1",
             message = replayedMsg,
             parts = emptyList())
@@ -1006,9 +1006,9 @@ class SessionSwitcherTest {
     // ── R-20 Phase 1 review-fix #2: writeSessionWindow uses captured fp ────
 
     @Test
-    fun `review-fix 2 writeSessionWindow keys by explicit fp not currentServerGroupFp`() {
+    fun `review-fix 2 writeSessionWindow keys by explicit fp not currentProfileId`() {
         // The writeSessionWindow signature takes an explicit serverGroupFp
-        // (review-fix #2). The prior signature read currentServerGroupFp()
+        // (review-fix #2). The prior signature read currentProfileId()
         // internally — a host switch mid-flight would route the old fetch's
         // data into the NEW group's LRU slot. Now the caller passes the
         // CAPTURED fp so the write lands in the correct group.
@@ -1018,19 +1018,19 @@ class SessionSwitcherTest {
         )
         // Write under "old-fp" explicitly (captured at hook-factory time).
         switcher.writeSessionWindow("old-fp", "s1", window)
-        // Switch the currentServerGroupFp provider to "new-fp" (simulating a
+        // Switch the currentProfileId provider to "new-fp" (simulating a
         // host switch). The entry should still be under "old-fp", NOT "new-fp".
         val switcher2 = SessionSwitcher(
             store = store,
             settingsManager = settingsManager,
             repository = repository,
             effects = effects,
-            currentServerGroupFp = { "new-fp" })
+            currentProfileId = { "new-fp" })
         // switcher2 shares the same sessionWindowCache (same store/controller instance pair)?
         // No — each SessionSwitcher has its own LRU. So we verify on `switcher`:
         // the entry is under old-fp.
         assertEquals(1, switcher.sessionWindowCacheSize())
-        // peekSessionWindow reads under currentServerGroupFp() = "test-fp",
+        // peekSessionWindow reads under currentProfileId() = "test-fp",
         // so it won't find the "old-fp" entry. Verify the write went to old-fp
         // by checking cache size is 1 and a second write under new-fp creates
         // a separate entry.

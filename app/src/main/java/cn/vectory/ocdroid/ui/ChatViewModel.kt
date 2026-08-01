@@ -131,7 +131,7 @@ class ChatViewModel @Inject constructor(
         // [AppCore.loadMessagesForEffect] (the main production path) AND here
         // (side-door for retry / edit-and-rerun). Both gate via the shared
         // [shouldOpenTokenStream] predicate — see the open at line ~148.
-        val fp = core.currentServerGroupFp()
+        val fp = core.currentProfileId()
         launchLoadMessages(
             scope = core.appScope,
             repository = core.repository,
@@ -142,8 +142,8 @@ class ChatViewModel @Inject constructor(
             onCacheWindow = core.makeCacheHook(fp),
             emit = EventEmitter { event -> core.effectBus.tryEmitUiEvent(event) },
             // gpter 复审 final-fix: compound-key guard.
-            expectedServerGroupFp = fp,
-            currentServerGroupFp = core.currentServerGroupFp,
+            expectedProfileId = fp,
+            currentProfileId = core.currentProfileId,
             // The VM is also a live route-aware entry point (refresh/retry),
             // not only a legacy bare-chat caller. Capture the active minted
             // token here so its completion updates LoadedContent as well.
@@ -176,7 +176,7 @@ class ChatViewModel @Inject constructor(
         val sessionId = core.store.chatFlow.value.currentSessionId ?: return
         val routeInstance = core.store.slices.routeInstanceFor(sessionId)
         // glm-3 🟡#1 / gpter 复审 final-fix: single-read fp.
-        val fp = core.currentServerGroupFp()
+        val fp = core.currentProfileId()
         launchLoadMoreMessages(
             scope = core.appScope,
             repository = core.repository,
@@ -184,8 +184,8 @@ class ChatViewModel @Inject constructor(
             sessionId = sessionId,
             onCacheWindow = core.makeCacheHook(fp),
             // gpter 复审 final-fix: compound-key guard.
-            expectedServerGroupFp = fp,
-            currentServerGroupFp = core.currentServerGroupFp,
+            expectedProfileId = fp,
+            currentProfileId = core.currentProfileId,
             expectedRouteInstance = routeInstance,
         )
     }
@@ -622,7 +622,7 @@ class ChatViewModel @Inject constructor(
      */
     fun expandParts(sessionId: String, parts: List<cn.vectory.ocdroid.data.model.Part>) {
         // P4: capture host identity ONCE (no TOCTOU).
-        val capturedFp = core.currentServerGroupFp()
+        val capturedFp = core.currentProfileId()
         // Capture both freshness tokens at invocation time. Completion must
         // validate these captured values; re-reading either one would let an
         // old response be accepted under a newer host/client generation.
@@ -675,7 +675,7 @@ class ChatViewModel @Inject constructor(
             // P4: set Loading in one atomic commit — recheck each key in CAS.
             core.writeChat { current ->
                 if (current.currentSessionId != sessionId) return@writeChat current
-                if (core.currentServerGroupFp() != capturedFp) return@writeChat current
+                if (core.currentProfileId() != capturedFp) return@writeChat current
 
                 val loadingUpdates = keysToLoad
                     .filter { key ->
@@ -697,7 +697,7 @@ class ChatViewModel @Inject constructor(
 
             // P4: abort if identity changed during dispatch (before network call).
             if (core.store.chatFlow.value.currentSessionId != sessionId) return@launch
-            if (core.currentServerGroupFp() != capturedFp) return@launch
+            if (core.currentProfileId() != capturedFp) return@launch
             if (!core.repository.isSlimCommitTokenCurrent(capturedSlimToken)) return@launch
 
             // Step 8: invoke usecase (non-mutating, CE discipline).
@@ -724,7 +724,7 @@ class ChatViewModel @Inject constructor(
                 // P2: guard delayed failure — only mark keys still Loading.
                 core.writeChat { current ->
                     if (current.currentSessionId != sessionId) return@writeChat current
-                    if (core.currentServerGroupFp() != capturedFp) return@writeChat current
+                    if (core.currentProfileId() != capturedFp) return@writeChat current
                     if (!core.repository.isSlimCommitTokenCurrent(capturedSlimToken)) return@writeChat current
 
                     val updatedStates = current.partExpandStates.toMutableMap()
@@ -748,7 +748,7 @@ class ChatViewModel @Inject constructor(
             // ChatState.reconcileExpandedPartsContent against the LATEST chat
             // (state.update CAS loop), so concurrent SSE updates to other
             // owners are preserved — restores pre-Strategy-1 writeChat CAS.
-            if (core.currentServerGroupFp() != capturedFp) return@launch
+            if (core.currentProfileId() != capturedFp) return@launch
             if (!core.repository.isSlimCommitTokenCurrent(capturedSlimToken)) return@launch
             core.store.dispatch(
                 AppAction.ExpandedPartsContentCommitted(

@@ -50,7 +50,7 @@ object UserCloseRequestParser {
         ) {
             ConnectionIdentity(
                 epoch = epoch,
-                serverGroupFp = serverGroupFp,
+                profileId = serverGroupFp,
                 normalizedWorkdir = normalizedWorkdir,
                 endpointFp = endpointFp,
             )

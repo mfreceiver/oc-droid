@@ -41,7 +41,7 @@ class SessionStreamingControllerPollerTest {
 
     private val identity = ConnectionIdentity(
         epoch = 1L,
-        serverGroupFp = "group-fp",
+        profileId = "group-fp",
         normalizedWorkdir = "/work/dir",
         endpointFp = "endpoint-fp",
     )
@@ -63,7 +63,7 @@ class SessionStreamingControllerPollerTest {
         fixture.controller.start()
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )
@@ -92,7 +92,7 @@ class SessionStreamingControllerPollerTest {
         fixture.controller.start()
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )
@@ -127,7 +127,7 @@ class SessionStreamingControllerPollerTest {
         fixture.controller.start()
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )

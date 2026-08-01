@@ -162,7 +162,7 @@ class CatchUpActionsTest {
             repository = repository,
             slices = slices,
             sessionId = "s1",
-            currentServerGroupFp = { "fp1" },
+            currentProfileId = { "fp1" },
             onCacheWindow = { sid, w -> cachedWindows += sid to w },
         )
         advanceUntilIdle()

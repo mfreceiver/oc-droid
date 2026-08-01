@@ -119,11 +119,11 @@ class ConnectionCoordinator(
     private val serverCompatProfile: ServerCompatProfile,
     /**
      * R-20 Phase 3: provider for the current host's serverGroupFp. Same
-     * `@Named("currentServerGroupFp")` provider every other controller uses
+     * `@Named("currentProfileId")` provider every other controller uses
      * (ControllerModule.provideCurrentServerGroupFp) — single source of truth
      * so a profile switch races the same fp read as everyone else.
      */
-    private val currentServerGroupFp: () -> String = { "" },
+    private val currentProfileId: () -> String = { "" },
     // Injected clock so the 30s health-check throttle is deterministically
     // testable without depending on wall-clock latency. Defaults to
     // System::currentTimeMillis in production (preserves the exact pre-extraction
@@ -294,7 +294,7 @@ class ConnectionCoordinator(
         settingsManager = settingsManager,
         effects = effects,
         serverCompatProfile = serverCompatProfile,
-        currentServerGroupFp = currentServerGroupFp,
+        currentProfileId = currentProfileId,
         clock = clock,
         identityStore = identityStore,
         bootstrapCoordinator = bootstrapCoordinator,
@@ -556,7 +556,7 @@ class ConnectionCoordinator(
         // the right list for the active host. Same-group switches share the
         // list (correct — two entry points to the same server share project
         // memory); 异组 switches get their own list.
-        val currentFp = currentServerGroupFp()
+        val currentFp = currentProfileId()
         val restoreWorkdirs = (
             settingsManager.getRecentWorkdirs(currentFp) + listOfNotNull(settingsManager.currentWorkdir)
         ).distinct().filter { it.isNotBlank() }
@@ -615,7 +615,7 @@ class ConnectionCoordinator(
                             if (fetchIdentity != null && identityStore != null &&
                                 !identityStore.isCurrent(fetchIdentity)
                             ) return@launch
-                            val fp = currentServerGroupFp()
+                            val fp = currentProfileId()
                             if (fp.isBlank()) return@launch
                             val knownNorm = settingsManager
                                 .getRecentWorkdirs(fp)

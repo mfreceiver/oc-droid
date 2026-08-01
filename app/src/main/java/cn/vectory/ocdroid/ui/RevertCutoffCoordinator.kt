@@ -21,11 +21,11 @@ class RevertCutoffCoordinator(private val core: AppCore) {
         }
         if (!inFlight.add(sessionId)) return
 
-        val operationServerGroupFp = core.currentServerGroupFp()
+        val operationProfileId = core.currentProfileId()
         var terminalState: RevertCutoffState? = null
         try {
             // Publish the fail-closed state before any suspend point.
-            commitStateIfCurrent(sessionId, messageId, operationServerGroupFp, RevertCutoffState.PendingFetch) ?: return
+            commitStateIfCurrent(sessionId, messageId, operationProfileId, RevertCutoffState.PendingFetch) ?: return
             val local = core.store.chatFlow.value.messages.firstOrNull { it.id == messageId }
             if (local != null) {
                 terminalState = local.time?.created?.let(RevertCutoffState::Resolved)
@@ -75,8 +75,8 @@ class RevertCutoffCoordinator(private val core: AppCore) {
         }
 
         val state = terminalState ?: return
-        if (commitStateIfCurrent(sessionId, messageId, operationServerGroupFp, state) == null) return
-        if (state is RevertCutoffState.Resolved && core.currentServerGroupFp() == operationServerGroupFp) {
+        if (commitStateIfCurrent(sessionId, messageId, operationProfileId, state) == null) return
+        if (state is RevertCutoffState.Resolved && core.currentProfileId() == operationProfileId) {
             runCatching {
                 persistSessionCache(
                     settingsManager = core.settingsManager,
@@ -93,10 +93,10 @@ class RevertCutoffCoordinator(private val core: AppCore) {
     private fun commitStateIfCurrent(
         sessionId: String,
         messageId: String,
-        operationServerGroupFp: String,
+        operationProfileId: String,
         state: RevertCutoffState
     ): RevertCutoff? {
-        if (core.currentServerGroupFp() != operationServerGroupFp) return null
+        if (core.currentProfileId() != operationProfileId) return null
         val currentTarget = core.store.sessionListFlow.value.sessions
             .firstOrNull { it.id == sessionId }
             ?.revert?.messageId
@@ -107,7 +107,7 @@ class RevertCutoffCoordinator(private val core: AppCore) {
             val target = core.store.sessionListFlow.value.sessions
                 .firstOrNull { it.id == sessionId }
                 ?.revert?.messageId
-            if (core.currentServerGroupFp() == operationServerGroupFp && target == messageId) {
+            if (core.currentProfileId() == operationProfileId && target == messageId) {
                 current.copy(revertCutoffs = current.revertCutoffs + (sessionId to cutoff))
             } else current
         }

@@ -138,7 +138,7 @@ class SessionSyncCoordinator(
     /** R-20 Phase 1: provider for the current host's serverGroupFp. Used to
      *  key the [ControllerEffect.EvictSession] emission on the session.updated
      *  archived branch (plan §3 矩阵 "SSE 归档 session" 行). */
-    internal val currentServerGroupFp: () -> String,
+    internal val currentProfileId: () -> String,
     /**
      * CP1 (notify Phase-0): the single source of truth for the connection
      * epoch. Replaces the private [hostGeneration] AtomicLong — the epoch
@@ -969,7 +969,7 @@ class SessionSyncCoordinator(
     }
 
     // ── SseDispatchHost implementation ──────────────────────────────────────
-    override fun serverGroupFp(): String = currentServerGroupFp()
+    override fun profileId(): String = currentProfileId()
     override fun stripeFor(sid: String): Mutex = stripeForImpl(sid)
     override fun scheduleDeltaFlush(partId: String) { scheduleDeltaFlushImpl(partId) }
     override fun applySseSideEffects(sideEffects: List<SseSideEffect>) { applySseSideEffectsImpl(sideEffects) }
@@ -1071,7 +1071,7 @@ class SessionSyncCoordinator(
             skeletonReloadCoordinator?.let { skel ->
                 scope.launch { skel.onSessionClosed(sid) }
             }
-            emitCriticalEffect(scope, ControllerEffect.EvictSession(currentServerGroupFp(), sid))
+            emitCriticalEffect(scope, ControllerEffect.EvictSession(currentProfileId(), sid))
             return
         }
 
@@ -1347,7 +1347,7 @@ class SessionSyncCoordinator(
         scope.launch {
             try {
                 val currentWd = settingsManager.currentWorkdir
-                val recentWds = settingsManager.getRecentWorkdirs(currentServerGroupFp())
+                val recentWds = settingsManager.getRecentWorkdirs(currentProfileId())
                 val allDirs = (recentWds + listOfNotNull(currentWd))
                     .filter { it.isNotBlank() }
                     .distinct()
@@ -1572,7 +1572,7 @@ class SessionSyncCoordinator(
                 "(sweep epoch=${summary.sweepStartEpoch}, current=$currentEpoch)")
             return
         }
-        val fp = currentServerGroupFp()
+        val fp = currentProfileId()
         // T13-C3: missingSids → delete-session effect per sid. 404 and
         // fake-idle (T13-C5) both land here (folded by [foldStatusOutcomes]).
         // §critical-eviction-delivery: 关键驱逐不可丢弃 — 走可靠发送路径。

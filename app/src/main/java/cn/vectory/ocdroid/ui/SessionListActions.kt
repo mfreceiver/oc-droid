@@ -87,8 +87,8 @@ internal fun launchLoadSessions(
     onLoadSessionStatus: () -> Unit,
     onLoadMessages: (String) -> Unit,
     emit: EventEmitter = EventEmitter { },
-    expectedServerGroupFp: String? = null,
-    currentServerGroupFp: (() -> String)? = null,
+    expectedProfileId: String? = null,
+    currentProfileId: (() -> String)? = null,
     onArchivedSessionsDetected: ((mergedSessions: List<Session>, hasMoreSessions: Boolean, confirmedServerIds: Set<String>, sweepNow: Long) -> Unit)? = null,
 ) = sessionListRefreshOrchestrator.launchLoadSessions(
     scope = scope,
@@ -99,8 +99,8 @@ internal fun launchLoadSessions(
     onLoadSessionStatus = onLoadSessionStatus,
     onLoadMessages = onLoadMessages,
     emit = emit,
-    expectedServerGroupFp = expectedServerGroupFp,
-    currentServerGroupFp = currentServerGroupFp,
+    expectedProfileId = expectedProfileId,
+    currentProfileId = currentProfileId,
     onArchivedSessionsDetected = onArchivedSessionsDetected,
 )
 

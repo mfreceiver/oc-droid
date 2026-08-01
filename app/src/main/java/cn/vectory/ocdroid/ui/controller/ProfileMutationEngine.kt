@@ -9,7 +9,6 @@ import cn.vectory.ocdroid.ui.settings.CaStage
 import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
 import cn.vectory.ocdroid.ui.settings.resolveClientCert
 import cn.vectory.ocdroid.ui.settings.toMaterial
-import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.runSuspendCatching
 import kotlinx.coroutines.CoroutineScope
@@ -54,7 +53,7 @@ class ProfileMutationEngine internal constructor(
     ) -> Unit,
     private val configureRepositoryForProfile: (HostProfile) -> Unit,
     private val refreshHostProfileState: () -> Unit,
-    private val purgePerHostState: (preserveServerGroupData: Boolean) -> Unit,
+    private val purgePerHostState: () -> Unit,
 ) {
 
     /**
@@ -195,38 +194,32 @@ class ProfileMutationEngine internal constructor(
      * lite-v2: barrier path and ticket-based configure removed. Active
      * deletion persists + signals restart-required; non-current deletion
      * just persists.
+     *
+     * §需求12阶段3 (oracle-assessed): under 需求12 profiles are fully
+     * independent (no groups — a group can never have sibling profiles),
+     * so the former `remainingInGroup` reference-counting
+     * (`profilesInGroup`, conditional `clearModelDataForGroup`/`EvictGroup`)
+     * is dead logic. Simplified to unconditional clear + evict on active
+     * deletion.
      */
     fun deleteHostProfile(profileId: String) {
         val wasCurrent = profileId == slices.host.value.currentHostProfileId
         val deletedProfile = hostProfileStore.profiles().firstOrNull { it.id == profileId }
+        // TODO §需求12阶段5: rename deletedFp → deletedProfileId once
+        // HostProfile.serverGroupFp field is renamed.
         val deletedFp = deletedProfile?.serverGroupFp
-        val remainingInGroup = deletedFp?.let { fp ->
-            hostProfileStore.profilesInGroup(fp).filter { it.id != profileId }
-        } ?: emptyList()
         hostProfileStore.delete(profileId)
         deletedProfile?.clientCertId?.let { settingsManager.clearClientCert(it) }
         val current = hostProfileStore.currentProfile()
         if (wasCurrent) {
             // Active deletion: persist + signal restart-required.
             // Repository will reconfigure on restart with the new current profile.
-            if (remainingInGroup.isEmpty()) {
-                deletedFp?.let { settingsManager.clearModelDataForGroup(it) }
-            } else {
-                DebugLog.i(
-                    TAG,
-                    "deleteHostProfile: kept model data for fp=$deletedFp — ${remainingInGroup.size} sibling profile(s) still reference this group"
-                )
-            }
-            purgePerHostState(false)
-            if (remainingInGroup.isEmpty()) {
-                deletedFp?.let {
-                    effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
-                }
-            } else {
-                DebugLog.i(
-                    TAG,
-                    "deleteHostProfile: skipped EvictGroup for fp=$deletedFp — ${remainingInGroup.size} sibling profile(s) still reference this group"
-                )
+            // §需求12阶段3: unconditional clear + evict (no sibling profiles
+            // can reference the group under 需求12).
+            deletedFp?.let { settingsManager.clearModelDataForGroup(it) }
+            purgePerHostState()
+            deletedFp?.let {
+                effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
             }
             // lite-v2: RestartRequired supersedes runtime reconfigure.
             // No ForceReconnect/HostProfileSwitched — restart handles everything.
@@ -238,10 +231,9 @@ class ProfileMutationEngine internal constructor(
                 effects.emitEffect(ControllerEffect.RestartRequired)
             }
         } else {
-            if (remainingInGroup.isEmpty()) {
-                deletedFp?.let {
-                    effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
-                }
+            // Non-active deletion: still evict the deleted profile's cache.
+            deletedFp?.let {
+                effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
             }
         }
     }

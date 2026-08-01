@@ -22,30 +22,30 @@ internal fun launchLoadProviders(
     hostProfileStore: HostProfileStore,
     onNonFatalError: (String, Throwable?) -> Unit,
     /**
-     * §需求4 host/fp guard (mirrors launchLoadMessages expectedServerGroupFp):
+     * §需求4 host/fp guard (mirrors launchLoadMessages expectedProfileId):
      * the serverGroupFp captured AT CALL TIME (when the REST request was
-     * initiated). Compared against [currentServerGroupFp] at onSuccess — a
+     * initiated). Compared against [currentProfileId] at onSuccess — a
      * mismatch means the user switched host during the async REST call, so
      * the stale response from the OLD host must NOT be written into the NEW
      * host's persisted state (lost/cross data). Default "" → guard is a
      * no-op (both sides "" → equal), preserving backward compat for tests /
      * legacy callers.
      */
-    expectedServerGroupFp: String = "",
+    expectedProfileId: String = "",
     /**
      * §需求4 host/fp guard: provider for the CURRENT host's serverGroupFp,
-     * read at onSuccess time. See [expectedServerGroupFp].
+     * read at onSuccess time. See [expectedProfileId].
      */
-    currentServerGroupFp: () -> String = { "" },
+    currentProfileId: () -> String = { "" },
 ) {
     scope.launch {
         repository.getProviders()
             .onSuccess { providers ->
                 // §需求4 host/fp guard: if the user switched host during the
-                // REST call, expectedServerGroupFp != currentServerGroupFp() —
+                // REST call, expectedProfileId != currentProfileId() —
                 // stale host response dropped (no write to the new host's
                 // persisted state).
-                if (expectedServerGroupFp != currentServerGroupFp()) return@onSuccess
+                if (expectedProfileId != currentProfileId()) return@onSuccess
                 // §R-17 M3 / batch2 step d: providers lives on the settings
                 // slice — written directly via thread-safe update.
                 //

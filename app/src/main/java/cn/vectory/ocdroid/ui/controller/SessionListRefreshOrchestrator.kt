@@ -67,8 +67,8 @@ internal class SessionListRefreshOrchestrator(
         onLoadSessionStatus: () -> Unit,
         onLoadMessages: (String) -> Unit,
         emit: EventEmitter,
-        expectedServerGroupFp: String? = null,
-        currentServerGroupFp: (() -> String)? = null,
+        expectedProfileId: String? = null,
+        currentProfileId: (() -> String)? = null,
         onArchivedSessionsDetected: ((mergedSessions: List<Session>, hasMoreSessions: Boolean, confirmedServerIds: Set<String>, sweepNow: Long) -> Unit)? = null,
     ) {
         // §需求10 C3 (round-4, oracle cancel-and-replace): newer intent supersedes
@@ -91,9 +91,9 @@ internal class SessionListRefreshOrchestrator(
                 // never runs).
                 slices.store.sessionListLoadInFlight = true
 
-                fun staleHostAfterSuspend(): Boolean = expectedServerGroupFp != null &&
-                    currentServerGroupFp != null &&
-                    expectedServerGroupFp != currentServerGroupFp()
+                fun staleHostAfterSuspend(): Boolean = expectedProfileId != null &&
+                    currentProfileId != null &&
+                    expectedProfileId != currentProfileId()
 
             val limit = MainViewModelTimings.sessionFullLoadLimit
             slices.mutateSessionList {
@@ -184,7 +184,7 @@ internal class SessionListRefreshOrchestrator(
                         currentWorkdir = settingsManager.currentWorkdir,
                         revertCutoffs = slices.chat.value.revertCutoffs,
                     )
-                    val discoveryFp = currentServerGroupFp?.invoke()
+                    val discoveryFp = currentProfileId?.invoke()
                     if (!discoveryFp.isNullOrEmpty()) {
                         val knownWorkdirs = settingsManager
                             .getRecentWorkdirs(discoveryFp)
@@ -207,7 +207,7 @@ internal class SessionListRefreshOrchestrator(
                                     repository.getSessionsForDirectory(rawWorkdir)
                                         .onSuccess { dirSessions ->
                                             if (staleHostAfterSuspend()) return@launch
-                                            if (currentServerGroupFp?.invoke() != discoveryFp) return@launch
+                                            if (currentProfileId?.invoke() != discoveryFp) return@launch
                                             slices.mutateSessionList { slice ->
                                                 slice.copy(
                                                     directorySessions = slice.directorySessions + (rawWorkdir to dirSessions)

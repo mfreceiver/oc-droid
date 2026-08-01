@@ -183,10 +183,10 @@ data class OptimisticClaim(
 /**
  * §B6 scope key: the count-space boundary. Execution-generation counters
  * (`ServerRound.incarnation`) are per-scope — counters across different
- * server groups / endpoints / slimapi instances are NOT comparable.
+ * profiles / endpoints / slimapi instances are NOT comparable.
  */
 data class ScopeKey(
-    val serverGroupFp: String,
+    val profileId: String,
     val endpointFp: String,
     // §U-MN10 (分歧3): always null in production today. Retained for future
     // multi-slimapi-instance scope extension. scopeKeyOf() does NOT populate it.
@@ -199,7 +199,7 @@ data class ScopeKey(
  * diverge across the historical formulas.
  *
  * NOTE: this unifies only the CONSTRUCTION tail. The SOURCE of
- * (serverGroupFp, endpointFp) is caller-specific and intentionally NOT
+ * (profileId, endpointFp) is caller-specific and intentionally NOT
  * unified here — identityStore-sourced (authorityScope/currentScope) vs
  * host-profile-sourced (resolveScopeKey) differ during the reconfigure window
  * (see maintainability-fix-plan §P10 分歧3 conservative ruling). The
@@ -208,9 +208,9 @@ data class ScopeKey(
  * [ScopeKey.slimapiInstanceFp] is kept (default null) — always null in
  * production today, retained for future multi-instance scope extension.
  */
-internal fun scopeKeyOf(serverGroupFp: String?, endpointFp: String?): ScopeKey =
+internal fun scopeKeyOf(profileId: String?, endpointFp: String?): ScopeKey =
     ScopeKey(
-        serverGroupFp = serverGroupFp ?: "",
+        profileId = profileId ?: "",
         endpointFp = endpointFp ?: "",
     )
 

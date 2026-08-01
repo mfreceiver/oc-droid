@@ -70,7 +70,7 @@ class NotifySwitchoverGateIntegrationTest {
 
     private val identity = ConnectionIdentity(
         epoch = 7L,
-        serverGroupFp = "group-fp",
+        profileId = "group-fp",
         normalizedWorkdir = "/work",
         endpointFp = "endpoint-fp",
     )
@@ -273,7 +273,7 @@ class NotifySwitchoverGateIntegrationTest {
         try {
             val identityStore = ConnectionIdentityStore()
             val bound = identityStore.bind(
-                serverGroupFp = identity.serverGroupFp,
+                profileId = identity.profileId,
                 normalizedWorkdir = identity.normalizedWorkdir,
                 endpointFp = identity.endpointFp,
             )
@@ -419,7 +419,7 @@ class NotifySwitchoverGateIntegrationTest {
         fixture.controller.start()
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )
@@ -453,7 +453,7 @@ class NotifySwitchoverGateIntegrationTest {
         fixture.controller.start()
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )
@@ -478,7 +478,7 @@ class NotifySwitchoverGateIntegrationTest {
         fixture.controller.start()
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )
@@ -540,7 +540,7 @@ class NotifySwitchoverGateIntegrationTest {
         )
         controller.start()
         val bound = store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )

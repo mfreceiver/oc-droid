@@ -494,7 +494,7 @@ class AppActionReducerTest {
                 compactStartedAt = 42L,
                 refreshNonce = 7L))
 
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+        val out = reduce(prior, AppAction.HostStatePurged)
 
         // Cleared (AppState-represented chat fields):
         assertNull(out.chat.currentSessionId)
@@ -557,7 +557,7 @@ class AppActionReducerTest {
             settings = SettingsState(availableCommands = listOf(CommandInfo("cmd"))),
             connection = ConnectionState(serverVersion = "1.2.3"))
 
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+        val out = reduce(prior, AppAction.HostStatePurged)
 
         // sessionList fully cleared.
         assertTrue(out.sessionList.sessions.isEmpty())
@@ -592,7 +592,7 @@ class AppActionReducerTest {
                 completeRootIds = setOf("s1"),
                 completenessEpoch = 9L))
 
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+        val out = reduce(prior, AppAction.HostStatePurged)
 
         assertTrue(
             "childSessions cleared cross-host",
@@ -614,89 +614,19 @@ class AppActionReducerTest {
             ),
         )
 
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+        val out = reduce(prior, AppAction.HostStatePurged)
 
         assertTrue("abortPendingSessionIds cleared cross-group",
             out.sessionList.abortPendingSessionIds.isEmpty())
     }
 
-    @Test
-    fun `P0-F reduce HostStatePurged same-group preserves abortPendingSessionIds`() {
-        val prior = StoreState.initial().copy(
-            sessionList = SessionListState(
-                abortPendingSessionIds = mapOf("s1" to 100L),
-            ),
-        )
-
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
-
-        // Same-group switch: sessions are still valid → pending survives
-        assertEquals(mapOf("s1" to 100L), out.sessionList.abortPendingSessionIds)
-    }
-
-    // ── HostStatePurged (same-group = preserve server data) ────────────────
-
-    @Test
-    fun `reduce HostStatePurged same-group preserves sessions + unread + directorySessions`() {
-        val session = Session(id = "s1", directory = "/p")
-        val prior = StoreState.initial().copy(
-            sessionList = SessionListState(
-                sessions = listOf(session),
-                directorySessions = mapOf("/p" to listOf(session)),
-                sessionTodos = mapOf("s1" to listOf(TodoItem(content = "t", status = "pending", priority = "normal", id = "t1"))),
-                sessionDiffs = mapOf("s1" to emptyList()),
-                pendingCreateIds = setOf("s1"),
-                pendingCreatedAt = mapOf("s1" to 123L)).withProjection(mapOf("s1" to cn.vectory.ocdroid.data.model.SessionStatus("idle"))),
-            unread = UnreadState(
-                unreadSessions = setOf("s1"),
-                lastViewedTime = mapOf("s1" to 1L)))
-
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
-
-        // Server data PRESERVED (same-group = same server = identical data).
-        assertEquals(listOf(session), out.sessionList.sessions)
-        assertEquals(mapOf("/p" to listOf(session)), out.sessionList.directorySessions)
-        assertEquals(1, out.sessionList.sessionStatuses.size)
-        assertEquals(1, out.sessionList.sessionTodos.size)
-        assertEquals(1, out.sessionList.sessionDiffs.size)
-        assertTrue("pendingCreateIds cleared on same-group host switch", out.sessionList.pendingCreateIds.isEmpty())
-        assertTrue("pendingCreatedAt cleared on same-group host switch", out.sessionList.pendingCreatedAt.isEmpty())
-        assertEquals(setOf("s1"), out.unread.unreadSessions)
-        assertEquals(mapOf("s1" to 1L), out.unread.lastViewedTime)
-    }
-
-    @Test
-    fun `reduce HostStatePurged same-group clears only chat streaming fields and per-profile UX`() {
-        val prior = StoreState.initial().copy(
-            chat = ChatState(
-                currentSessionId = "sess-keep",  // PRESERVED (current session window valid same-group)
-                messages = listOf(Message(id = "m1", role = "user")),  // PRESERVED
-                partsByMessage = mapOf("m1" to emptyList()),  // PRESERVED
-                streamingPartTexts = mapOf("p1" to "delta"),  // CLEARED
-                streamingReasoningPart = Part(id = "p1", type = "reasoning", text = "r"),  // CLEARED
-                isCompacting = true,  // chat-only field — PRESERVED
-            ),
-            composer = ComposerState(draftWorkdir = "/old/proj"),  // per-profile — CLEARED
-            settings = SettingsState(availableCommands = listOf(CommandInfo("cmd"))),  // CLEARED
-            connection = ConnectionState(serverVersion = "1.2.3"),  // CLEARED
-        )
-
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
-
-        // Streaming-only fields cleared.
-        assertTrue(out.chat.streamingPartTexts.isEmpty())
-        assertNull(out.chat.streamingReasoningPart)
-        // chat content + current session PRESERVED.
-        assertEquals("sess-keep", out.chat.currentSessionId)
-        assertEquals(1, out.chat.messages.size)
-        assertEquals(1, out.chat.partsByMessage.size)
-        // chat-only field preserved.
-        assertTrue(out.chat.isCompacting)
-        // per-profile UX always reset (regardless of group).
-        assertNull(out.composer.draftWorkdir)
-        assertTrue(out.settings.availableCommands.isEmpty())
-        assertNull(out.connection.serverVersion)
-    }
+    // §需求12阶段3 (oracle-assessed): the same-group preserve branch +
+    // `preserveServerGroupData` flag were DELETED — under 需求12 profiles are
+    // independent (no groups; profileId == profile.id always) and C-8 restart
+    // kills preserved slices anyway. The 3 former same-group tests
+    // (preserves abortPendingSessionIds / preserves sessions+unread /
+    // clears only chat streaming fields) asserted the deleted preserve
+    // behavior and were removed.
 
     // ── WorkdirDraftStarted ────────────────────────────────────────────────
 
@@ -845,7 +775,7 @@ class AppActionReducerTest {
         advanceUntilIdle()
         assertEquals(1, seen.size)
 
-        store.dispatch(AppAction.HostStatePurged(preserveServerGroupData = false))
+        store.dispatch(AppAction.HostStatePurged)
         advanceUntilIdle()
 
         // Exactly ONE new aggregate emission for the action.
@@ -1000,8 +930,7 @@ class AppActionReducerTest {
 
         reduce(prior, AppAction.DraftSessionMaterialized(Session(id = "x", directory = "/x"), viewedAt = 0L))
         reduce(prior, AppAction.SessionArchived(Session(id = "x", directory = "/x", time = Session.TimeInfo(archived = 1L))))
-        reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
-        reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
+        reduce(prior, AppAction.HostStatePurged)
         reduce(prior, AppAction.WorkdirDraftStarted(workdir = "/w"))
         // §Wave5b-Q13: the four new actions replace the pre-Wave5b
         // PendingJumpToLatestSet pair (set + clear). All four are exercised so
@@ -1143,40 +1072,19 @@ class AppActionReducerTest {
             chat = ChatState(
                 pendingScrollRequest = staleReq))
 
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+        val out = reduce(prior, AppAction.HostStatePurged)
 
         assertNull(
             "cross-group host purge must wipe a stale scroll intent",
             out.chat.pendingScrollRequest)
     }
 
-    @Test
-    fun `reduce HostStatePurged same-group clears pendingScrollRequest`() {
-        // §Wave5b-Q13 oracle ruling: same-group host purge keeps chat content
-        // (messages / currentSessionId) but INVALIDATES the scroll slot —
-        // the scroll slot references a session the user is navigating away
-        // from.
-        // §chat-list-detail §11 / G6 (B5): parentReturnCheckpoints map is
-        // gone (per-entry SavedStateHandle); only the pendingScrollRequest
-        // sweep is asserted here.
-        val liveReq = PendingScrollRequest(
-            requestId = 11L,
-            targetSessionId = "still-valid",
-            behavior = ScrollBehavior.Latest)
-        val prior = StoreState.initial().copy(
-            chat = ChatState(
-                currentSessionId = "still-valid",  // PRESERVED (same-group)
-                messages = listOf(Message(id = "m1", role = "user")),  // PRESERVED
-                pendingScrollRequest = liveReq))
-
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
-
-        // Content preserved.
-        assertEquals("still-valid", out.chat.currentSessionId)
-        assertEquals(1, out.chat.messages.size)
-        // Slot cleared.
-        assertNull("same-group host purge wipes the scroll slot", out.chat.pendingScrollRequest)
-    }
+    // §需求12阶段3: the former `reduce HostStatePurged same-group clears
+    // pendingScrollRequest` test was removed — it asserted the deleted
+    // same-group preserve behavior (content preserved, only scroll slot
+    // cleared). The cross-group pendingScrollRequest clear is covered by
+    // `reduce HostStatePurged cross-group clears stale pendingScrollRequest
+    // via clearSessionData` above; under 需求12 every purge is the full reset.
 
     // ── BulkSessionsRefreshed (FIX-A/C: atomic bulk-archive commit) ────────
 
@@ -1517,7 +1425,7 @@ class AppActionReducerTest {
                     "sid1" to SlimSessionLastError(name = "upstream_error", message = "old host err 1"),
                     "sid2" to SlimSessionLastError(name = "session_not_found", message = "old host err 2"))))
 
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+        val out = reduce(prior, AppAction.HostStatePurged)
 
         assertTrue(
             "cross-group HostStatePurged must clear sessionErrorsById (pre-fix leaked old host errors)",
@@ -1539,7 +1447,7 @@ class AppActionReducerTest {
                     failedSources = listOf(
                         SlimAggregationFailedSource(directory = "/a", code = "timeout")))))
 
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+        val out = reduce(prior, AppAction.HostStatePurged)
 
         assertEquals(
             SlimAggregationCompleteness.COMPLETE,
@@ -1551,27 +1459,11 @@ class AppActionReducerTest {
         assertTrue(out.sessionList.permissionAggregationSignal.failedSources.isEmpty())
     }
 
-    @Test
-    fun `final-gate I-3 - HostStatePurged same-group preserves sessionErrorsById`() {
-        // Symmetric boundary: a SAME-group switch preserves server-identical
-        // data (the server is the same, so the sid→error mapping is still
-        // authoritative). Only cross-group purges drop the map. This test
-        // pins that the cleanup is correctly scoped to cross-group only —
-        // a future "always clear" regression would fail it.
-        val errors = mapOf(
-            "sid1" to SlimSessionLastError(name = "upstream_error", message = "live err"))
-        val prior = StoreState.initial().copy(
-            sessionList = SessionListState(
-                sessions = listOf(Session(id = "sid1", directory = "/p")),
-                sessionErrorsById = errors))
-
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = true))
-
-        assertEquals(
-            "same-group HostStatePurged MUST preserve sessionErrorsById (server-identical data)",
-            errors,
-            out.sessionList.sessionErrorsById)
-    }
+    // §需求12阶段3: the former `final-gate I-3 - HostStatePurged same-group
+    // preserves sessionErrorsById` test was removed — it asserted the deleted
+    // same-group preserve behavior. Under 需求12 every purge is the full reset
+    // (sessionErrorsById always cleared); the cross-group clear is pinned by
+    // `final-gate I-3 - HostStatePurged cross-group clears sessionErrorsById`.
 
     @Test
     fun `final-gate I-3 - SessionArchived removes archived subtree from sessionErrorsById`() {

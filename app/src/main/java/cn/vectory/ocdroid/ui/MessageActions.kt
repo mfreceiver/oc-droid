@@ -56,14 +56,14 @@ internal fun launchLoadMessages(
      * collide). Default "" → fp guard is a no-op (both sides "" → equal),
      * preserving backward compat for tests/legacy callers.
      */
-    expectedServerGroupFp: String = "",
+    expectedProfileId: String = "",
     /**
      * R-20 Phase 1 (gpter 复审 final-fix): provider for the CURRENT host's
      * serverGroupFp, read at onSuccess time. Compared against
-     * [expectedServerGroupFp] — a mismatch means the user switched host
+     * [expectedProfileId] — a mismatch means the user switched host
      * group during the REST call; the stale response must NOT be written.
      */
-    currentServerGroupFp: () -> String = { "" },
+    currentProfileId: () -> String = { "" },
     /**
      * §empty-window-fix: when `true`, the slim fetch is UNANCHORED — calls
      * [OpenCodeRepository.getMessagesPagedUnanchored] (forces `since=0L`,
@@ -203,7 +203,7 @@ internal fun launchLoadMessages(
                 // G1 REST response write into G2's chat slice. Adding the fp
                 // re-check closes the last downstream TOCTOU: if the user
                 // switched host group during the REST call,
-                // expectedServerGroupFp != currentServerGroupFp() → drop.
+                // expectedProfileId != currentProfileId() → drop.
                 // Default "" for both → equal → no-op (backward compat).
                 // §history-load-fix: serialize the read-compute-write of the chat
                 // slice per-session so a concurrent launchLoadMoreMessages prepend
@@ -225,7 +225,7 @@ internal fun launchLoadMessages(
                     val routeTokenValid = expectedRouteInstance == 0L ||
                         expectedRouteInstance == slices.store.stateFlow.value.chatRouteInstance
                     if (sessionId == slices.chat.value.currentSessionId &&
-                        expectedServerGroupFp == currentServerGroupFp() &&
+                        expectedProfileId == currentProfileId() &&
                         routeTokenValid
                     ) {
                         // §preserveUnfetched (mirrors opencode-web reconcileFetched):
@@ -528,7 +528,7 @@ internal fun launchLoadMessages(
                             repository = repository,
                             store = slices.store,
                             sessionId = sessionId,
-                            currentServerGroupFp = currentServerGroupFp,
+                            currentProfileId = currentProfileId,
                             expectedRouteInstance = expectedRouteInstance,
                         )
                         // §chat-ux-batch T8 (B3): the legacy global←per-session
@@ -660,12 +660,12 @@ internal fun launchLoadMoreMessages(
      * R-20 Phase 1 (gpter 复审 final-fix): captured fp for compound-key
      * guard. See [launchLoadMessages] doc. Default "" → no-op.
      */
-    expectedServerGroupFp: String = "",
+    expectedProfileId: String = "",
     /**
      * R-20 Phase 1 (gpter 复审 final-fix): current fp provider for the
      * onSuccess re-check. See [launchLoadMessages] doc.
      */
-    currentServerGroupFp: () -> String = { "" },
+    currentProfileId: () -> String = { "" },
     onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> },
     expectedRouteInstance: Long = 0L,
 ) {
@@ -735,7 +735,7 @@ internal fun launchLoadMoreMessages(
                     val routeTokenValid = expectedRouteInstance == 0L ||
                         expectedRouteInstance == slices.store.stateFlow.value.chatRouteInstance
                     if (sessionId == slices.chat.value.currentSessionId &&
-                        expectedServerGroupFp == currentServerGroupFp() &&
+                        expectedProfileId == currentProfileId() &&
                         routeTokenValid
                     ) {
                         // Capture current chat-domain values from the slice so we
@@ -883,8 +883,8 @@ internal fun launchLoadMoreMessages(
     repository = repository,
     slices = slices,
     sessionId = sessionId,
-    expectedServerGroupFp = "",
-    currentServerGroupFp = { "" },
+    expectedProfileId = "",
+    currentProfileId = { "" },
     onCacheWindow = onCacheWindow,
     expectedRouteInstance = 0L,
 )
@@ -899,7 +899,7 @@ internal fun launchLoadMoreMessages(
 //
 // 实现严格照抄 plan §4.3.6 完整伪代码（v2.7-final），适配到 MessageActions.kt
 // 顶层函数语境：状态 + 行为收敛进 SkeletonReloadCoordinator 类，构造期注入
-// scope / repository / slices / currentServerGroupFp。锁序、原子提交事务、
+// scope / repository / slices / currentProfileId。锁序、原子提交事务、
 // 身份校验、历史守卫、空页早退、补集分区、deadMsgIds 黑名单、watchdog 退避
 // 等细节全部保留——见伪代码注释（被原样保留以便后续 review 比对）。
 // ─────────────────────────────────────────────────────────────────────────────

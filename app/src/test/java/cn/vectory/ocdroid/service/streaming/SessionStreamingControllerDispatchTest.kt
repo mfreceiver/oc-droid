@@ -42,7 +42,7 @@ class SessionStreamingControllerDispatchTest {
 
     private val identity = ConnectionIdentity(
         epoch = 7L,
-        serverGroupFp = "group-fp",
+        profileId = "group-fp",
         normalizedWorkdir = "/work/dir",
         endpointFp = "endpoint-fp",
     )
@@ -355,7 +355,7 @@ class SessionStreamingControllerDispatchTest {
         fun bootstrapSucceed(id: ConnectionIdentity) {
             bootstrapRunner.enqueue(BootstrapResult.Success(id))
             store.bind(
-                serverGroupFp = id.serverGroupFp,
+                profileId = id.profileId,
                 normalizedWorkdir = id.normalizedWorkdir,
                 endpointFp = id.endpointFp,
             )
@@ -426,7 +426,7 @@ class SessionStreamingControllerDispatchTest {
             sourceTimeMs: Long,
         ) {
             val failed = snapshot.sessionsById.values.associate {
-                SessionStatusKey(identity.serverGroupFp, it.directory, it.id) to SessionBusyStatus.Unknown
+                SessionStatusKey(identity.profileId, it.directory, it.id) to SessionBusyStatus.Unknown
             }
             _statusByKey.value = failed
             _globalState.value = GlobalBusyState.Unknown

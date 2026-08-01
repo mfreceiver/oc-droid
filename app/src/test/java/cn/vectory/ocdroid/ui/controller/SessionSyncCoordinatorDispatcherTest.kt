@@ -75,7 +75,7 @@ class SessionSyncCoordinatorDispatcherTest {
             slices = slices,
             settingsManager = mockk(relaxed = true),
             effects = SharedEffectBus(),
-            currentServerGroupFp = { "test-fp" },
+            currentProfileId = { "test-fp" },
             identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore(),
             repository = repository,
         )
@@ -137,8 +137,8 @@ class SessionSyncCoordinatorDispatcherTest {
             slices = cn.vectory.ocdroid.ui.SharedStateStore().slices,
             settingsManager = mockk(relaxed = true),
             effects = SharedEffectBus(),
-            currentServerGroupFp = { "fp" },
+            currentProfileId = { "fp" },
         )
-        assertEquals("fp", c.serverGroupFp())
+        assertEquals("fp", c.profileId())
     }
 }

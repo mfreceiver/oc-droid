@@ -125,7 +125,7 @@ class SessionSyncCoordinatorTest {
         scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { effects.uiEventsConsumed.toList(recordedUiEvents) }
         coordinator = SessionSyncCoordinator(
             scope, slices, settingsManager, effects,
-            currentServerGroupFp = { "test-fp" },
+            currentProfileId = { "test-fp" },
             identityStore = identityStore,
             repository = repository)
     }
@@ -713,7 +713,7 @@ class SessionSyncCoordinatorTest {
             .filterIsInstance<ControllerEffect.AppendMessageToCache>()
         assertEquals("exactly one append effect emitted", 1, appends.size)
         val append = appends.single()
-        assertEquals("test-fp", append.serverGroupFp)
+        assertEquals("test-fp", append.profileId)
         assertEquals("session-1", append.sessionId)
         assertEquals("m2", append.message.id)
         assertTrue(

@@ -62,7 +62,7 @@ class StatusAggregatorImplTest {
     private fun identity(epoch: Long = 1L, groupFp: String = fp): ConnectionIdentity =
         ConnectionIdentity(
             epoch = epoch,
-            serverGroupFp = groupFp,
+            profileId = groupFp,
             normalizedWorkdir = "/work",
             endpointFp = "endpoint-A",
         )
@@ -71,7 +71,7 @@ class StatusAggregatorImplTest {
         Session(id = id, directory = directory)
 
     private fun key(sessionId: String, workdir: String, groupFp: String = fp): SessionStatusKey =
-        SessionStatusKey(serverGroupFp = groupFp, workdir = workdir, sessionId = sessionId)
+        SessionStatusKey(profileId = groupFp, workdir = workdir, sessionId = sessionId)
 
     private fun newAggregator(
         repository: OpenCodeRepository,

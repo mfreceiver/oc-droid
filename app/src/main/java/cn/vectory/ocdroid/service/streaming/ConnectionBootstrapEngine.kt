@@ -110,7 +110,7 @@ class ConnectionBootstrapEngine internal constructor(
         }
         val expected = identityStore.currentIdentity.value
         val expectedEpoch = identityStore.currentEpoch()
-        val matchingIdentity = expected?.serverGroupFp == key.serverGroupFp &&
+        val matchingIdentity = expected?.profileId == key.serverGroupFp &&
             expected.normalizedWorkdir == key.workdir && expected.endpointFp == key.url
         if (configuredKey != key || !matchingIdentity) {
             repository.configure(
@@ -142,7 +142,7 @@ class ConnectionBootstrapEngine internal constructor(
                 val finalIdentity = identityStore.currentIdentity.value
                 if (finalKey != key ||
                     identityStore.currentEpoch() != expectedEpoch ||
-                    (finalIdentity != null && (finalIdentity.serverGroupFp != key.serverGroupFp ||
+                    (finalIdentity != null && (finalIdentity.profileId != key.serverGroupFp ||
                         finalIdentity.normalizedWorkdir != key.workdir || finalIdentity.endpointFp != key.url))
                 ) {
                     return ConnectionBootstrapOutcome.Failed(IllegalStateException("Config or identity changed"))

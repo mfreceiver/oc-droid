@@ -40,7 +40,7 @@ class SessionMetadataPollerTest {
     fun `commitIfCurrent returns true when identity unchanged`() {
         val store = ConnectionIdentityStore()
         store.bind(
-            serverGroupFp = "fp-a",
+            profileId = "fp-a",
             normalizedWorkdir = "/workdir",
             endpointFp = "ep-a",
         )
@@ -59,7 +59,7 @@ class SessionMetadataPollerTest {
     fun `commitIfCurrent returns false and does not run commit when epoch bumped`() {
         val store = ConnectionIdentityStore()
         store.bind(
-            serverGroupFp = "fp-a",
+            profileId = "fp-a",
             normalizedWorkdir = "/workdir",
             endpointFp = "ep-a",
         )
@@ -81,7 +81,7 @@ class SessionMetadataPollerTest {
     fun `commitIfCurrent returns false and does not run commit when identity changed`() {
         val store = ConnectionIdentityStore()
         store.bind(
-            serverGroupFp = "fp-a",
+            profileId = "fp-a",
             normalizedWorkdir = "/workdir",
             endpointFp = "ep-a",
         )
@@ -89,7 +89,7 @@ class SessionMetadataPollerTest {
 
         // New bind with different identity fields (same epoch implicitly through bind)
         store.bind(
-            serverGroupFp = "fp-b",
+            profileId = "fp-b",
             normalizedWorkdir = "/other",
             endpointFp = "ep-b",
         )
@@ -109,7 +109,7 @@ class SessionMetadataPollerTest {
         // switch → commitIfCurrent should reject the stale snapshot.
         val store = ConnectionIdentityStore()
         store.bind(
-            serverGroupFp = "fp-a",
+            profileId = "fp-a",
             normalizedWorkdir = "/wd",
             endpointFp = "ep-a",
         )
@@ -118,7 +118,7 @@ class SessionMetadataPollerTest {
         // host switches while network call is in-flight
         store.beginReconfigure()
         store.bind(
-            serverGroupFp = "fp-b",
+            profileId = "fp-b",
             normalizedWorkdir = "/wd2",
             endpointFp = "ep-b",
         )

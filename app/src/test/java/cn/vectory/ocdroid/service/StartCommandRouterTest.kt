@@ -35,7 +35,7 @@ class StartCommandRouterTest {
         val identity = ConnectionIdentity(9L, "group", "/work", "endpoint")
         val request = UserCloseRequestParser.parse(
             epoch = identity.epoch,
-            serverGroupFp = identity.serverGroupFp,
+            serverGroupFp = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )

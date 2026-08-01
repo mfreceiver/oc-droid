@@ -43,7 +43,7 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class OptimisticClaimWatchdogCoordinatorTest {
 
-    private val scope = ScopeKey(serverGroupFp = "grp", endpointFp = "ep")
+    private val scope = ScopeKey(profileId = "grp", endpointFp = "ep")
 
     private fun entry(claim: OptimisticClaim?): SessionEntry = SessionEntry(
         status = SessionStatus(type = "busy"),

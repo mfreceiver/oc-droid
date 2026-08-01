@@ -73,9 +73,10 @@ class HostProfileController(
     private val settingsManager: SettingsManager,
     private val trafficTracker: TrafficTracker,
     private val effects: SharedEffectBus,
-    /** R-20 Phase 1: provider for the current host's serverGroupFp. Used by
-     *  [selectHostProfile] (4-step previous/target fp compare). */
-    internal val currentServerGroupFp: () -> String,
+    /** R-20 Phase 1 / §需求12阶段3: provider for the current profile's id
+     *  (renamed from `currentServerGroupFp`). Used by [configureServerRaw]
+     *  (clearModelDataForGroup on URL change). */
+    internal val currentProfileId: () -> String,
     /**
      * CP1 (notify Phase-0): the single connection-identity store. The
      * reconfigure barrier origin — [configureServer] /
@@ -119,7 +120,7 @@ class HostProfileController(
             configureRepositoryForProfileRaw = { profile -> configureRepositoryForProfileRaw(profile) },
             configureRepositoryForProfile = { configureRepositoryForProfile(it) },
             refreshHostProfileState = { refreshHostProfileState() },
-            purgePerHostState = { purgePerHostState(it) },
+            purgePerHostState = { purgePerHostState() },
         )
     }
 
@@ -280,19 +281,31 @@ class HostProfileController(
      * The app must restart to apply the new host; no runtime reconfigure /
      * ForceReconnect / HostProfileSwitched (restart supersedes them).
      *
+     * §需求12阶段3 (oracle-assessed): under 需12 profiles are fully
+     * independent (no groups; `profileId == profile.id` always), so the
+     * former `sameGroup = previousFp == targetFp` decision + same-group
+     * preserve branch is dead. C-8 makes every switch emit RestartRequired,
+     * so preserved slices die with the process anyway. The purge + EvictGroup
+     * are now UNCONDITIONAL (always full purge; always evict the prior
+     * profile's cache). The only short-circuit is the no-op re-select guard
+     * (re-selecting the already-current profile returns early — avoids a
+     * needless full purge + restart).
+     *
      * The purge + select sequence (no runtime reconfigure):
-     *  1. Snapshot `previousFp = hostProfileStore.currentProfile().serverGroupFp`
+     *  1. **Early-return guard**: if [profileId] == the already-current
+     *     profile, return — nothing to do (the gentle former same-group path).
+     *  2. Snapshot `previousFp = hostProfileStore.currentProfile().serverGroupFp`
      *     BEFORE [HostProfileStore.select] (select has a side effect — it
      *     bumps lastUsedAt + sets currentHostProfileId, so reading
-     *     currentProfile() AFTER would return the new profile's fp).
-     *  2. Inside the `withHostReconfiguration(needsReconfigure = true)` body:
+     *     currentProfile() AFTER would return the new profile's fp). Used
+     *     for the unconditional `EvictGroup(previousFp)` emission.
+     *  3. Inside the `withHostReconfiguration(needsReconfigure = true)` body:
      *     a. `activateProfile(profileId)` / `select(profileId)` — mutates the store.
-     *     b. `purgePerHostState` — clears per-profile UX state; preserves
-     *        per-server data iff same group.
-     *     c. Emit `EvictGroup(previousFp)` if cross-group.
+     *     b. `purgePerHostState` — clears per-profile + per-server state (full purge).
+     *     c. Emit `EvictGroup(previousFp)` (unconditional).
      *     d. `refreshHostProfileState()`.
      *     e. **NO** `configureRepositoryForProfileRaw` — restart handles it.
-     *  3. After the block, `RestartRequired` is emitted by `withHostReconfiguration`.
+     *  4. After the block, `RestartRequired` is emitted by `withHostReconfiguration`.
      *     No `ForceReconnect`/`HostProfileSwitched`.
      *
      * **C-8 full matrix (frozen):**
@@ -303,17 +316,19 @@ class HostProfileController(
      *  - non-active CRUD → persist only (no restart)
      */
     fun selectHostProfile(profileId: String) {
+        // §需求12阶段3 (oracle-assessed risk note): early-return guard —
+        // re-selecting the already-current profile is a no-op. Previously
+        // the gentle same-group path handled this; now that the same-group
+        // branch is deleted, this guard avoids a needless full purge +
+        // RestartRequired when the user re-taps the current profile.
+        if (profileId == slices.host.value.currentHostProfileId) return
         scope.launch {
             // Step 1: snapshot previousFp BEFORE select (select's side effect
-            // makes post-select currentProfile() read the NEW profile).
+            // makes post-select currentProfile() read the NEW profile). Used
+            // for the unconditional EvictGroup(previousFp) below.
+            // TODO §需求12阶段5: rename previousFp → previousProfileId once
+            // HostProfile.serverGroupFp field is renamed.
             val previousFp = hostProfileStore.currentProfile().serverGroupFp
-            // C-D3 rev-3 round-5 (oracle §4.1): read-only target lookup BEFORE
-            // the boundary (so we know sameGroup without performing any
-            // mutation outside it). The ACTIVATE/SELECT mutations move inside
-            // the boundary below.
-            val targetBeforeMutation =
-                hostProfileStore.profiles().firstOrNull { it.id == profileId } ?: return@launch
-            val sameGroup = previousFp == targetBeforeMutation.serverGroupFp
             // C-8: host switch = restart. withHostReconfiguration(needsReconfigure=true)
             // persists selection + purges per-host state + emits RestartRequired.
             // No runtime reconfigure (configureRepositoryForProfileRaw removed),
@@ -325,10 +340,11 @@ class HostProfileController(
                 } else {
                     hostProfileStore.select(profileId)
                 }
-                purgePerHostState(preserveServerGroupData = sameGroup)
-                if (!sameGroup) {
-                    effects.emitEffect(ControllerEffect.EvictGroup(previousFp))
-                }
+                purgePerHostState()
+                // §需求12阶段3: EvictGroup is now UNCONDITIONAL (under 需求12
+                // the former same-group branch is dead — every switch is to
+                // an independent profile). Evicts the prior profile's cache.
+                effects.emitEffect(ControllerEffect.EvictGroup(previousFp))
                 refreshHostProfileState()
             }
             // RestartRequired is emitted by withHostReconfiguration inside the block.
@@ -340,24 +356,17 @@ class HostProfileController(
      * Shared helper: purges ALL per-host session/message/unread/draft/cache
      * state. Used by both selectHostProfile and deleteHostProfile(wasCurrent).
      *
-     * **R-20 Phase 1 group-isolated field classification** (plan §3 v4
-     * glmer I2 — same-server vs per-profile UX):
+     * §需求12阶段3 (oracle-assessed): under 需求12 profiles are fully
+     * independent (no groups), so the former `preserveServerGroupData` flag
+     * + same-group preserve branch is dead (C-8 restart kills preserved
+     * slices anyway). purgePerHostState now ALWAYS runs the full reset.
      *
-     *  - **per-profile UX (ALWAYS reset)**: draft,
-     *    currentWorkdir, composer draftWorkdir, availableCommands,
-     *    serverVersion. These describe "what the user was doing on this
-     *    profile" — they would leak across profiles in the same group.
-     *  - **per-server data (preserve iff [preserveServerGroupData])**:
-     *    sessions, directorySessions, unread markers, recentWorkdirs,
-     *    disabled_models, session-window cache. Two profiles in the same
-     *    group reach the same server, so the server's data is identical —
-     *    preserving it avoids a flicker + re-fetch on a same-group switch.
-     *
-     * @param preserveServerGroupData true iff previousFp == targetFp (a
-     *   same-group switch). When false (异组切换 / delete active host), the
-     *   full reset runs as before.
+     *  - **full reset (always)**: sessions, directorySessions, unread
+     *    markers, recentWorkdirs, disabled_models, session-window cache,
+     *    draft, currentWorkdir, composer draftWorkdir, availableCommands,
+     *    serverVersion. All per-host / per-profile state is cleared.
      */
-    private fun purgePerHostState(preserveServerGroupData: Boolean = false) {
+    private fun purgePerHostState() {
         // §slice-only-preserve (glm-1 / gpt-1): ChatState carries three fields
         // that are NOT mirrored to AppState (isCompacting, compactStartedAt,
         // refreshNonce). Use .copy() on the existing slice value so those are
@@ -365,14 +374,12 @@ class HostProfileController(
         // represented chat fields are reset here.
         //
         // §A5-3 Phase B2: the pre-B2 scattered mutateChat + mutateSessionList
-        // + mutateUnread (cross-group) / mutateChat-streaming-only (same-
-        // group) + unconditional mutateComposer / mutateSettings /
+        // + mutateUnread + unconditional mutateComposer / mutateSettings /
         // mutateConnection sequence is collapsed into ONE atomic dispatch.
-        // The reducer ([AppAction.HostStatePurged]) derives the cross-vs-same-
-        // group field set from [preserveServerGroupData] and PRESERVES the
-        // three chat-only fields via .copy() (never a fresh ChatState()). ONE
-        // committed aggregate state → no torn intermediates for stateFlow
-        // collectors.
+        // The reducer ([AppAction.HostStatePurged]) derives the full-purge
+        // field set and PRESERVES the three chat-only fields via .copy()
+        // (never a fresh ChatState()). ONE committed aggregate state → no
+        // torn intermediates for stateFlow collectors.
         //
         // What stays OUTSIDE the dispatch (oracle: not state): the
         // settingsManager writes (clearRecentWorkdirs / currentWorkdir /
@@ -380,51 +387,41 @@ class HostProfileController(
         // (EvictGroup / ForceReconnect / HostProfileSwitched) below — they
         // are side-effects, run at the call site.
         slices.store.dispatch(
-            cn.vectory.ocdroid.ui.AppAction.HostStatePurged(
-                preserveServerGroupData = preserveServerGroupData,
-            )
+            cn.vectory.ocdroid.ui.AppAction.HostStatePurged
         )
-        if (!preserveServerGroupData) {
-            // §H3: clear persisted workdir — a path from host A is meaningless
-            // on host B. configureRepositoryForProfile re-scopes to the (now-
-            // null) workdir, which is correct for a fresh host.
-            settingsManager.currentWorkdir = null
-            // §review-fix #5 (gpter #4): the prior code emitted
-            // ClearSessionWindowCache (NUKES the entire memory LRU across ALL
-            // groups) here. But selectHostProfile's 异组 branch already emits
-            // EvictGroup(previousFp) — the EvictGroup handler in AppCore calls
-            // clearMemoryForGroup(previousFp) which is GROUP-SCOPED. The
-            // nuke-all here was redundant (EvictGroup already handles it) AND
-            // over-broad (it would evict OTHER groups' hot caches too — e.g.
-            // a third group the user switches between frequently). Removed;
-            // rely on the EvictGroup effect for the group-scoped clear.
-            // (deleteHostProfile(wasCurrent) below also emits EvictGroup, so
-            // its purgePerHostState(preserveServerGroupData=false) call no
-            // longer nukes-all either — correct: the deleted host's group is
-            // evicted group-scoped, other groups keep their caches.)
-            //
-            // §R18 Phase 2-F + §B4: currentSessionId cleared by HostStatePurged
-            // reducer; wipe persisted current + sessionCache. open-tabs-list
-            // no longer exists (list-detail).
-            settingsManager.currentSessionId = null
-            settingsManager.sessionCache = emptyList()
-            // §B4 / §10 host switch 异组: force popToSessions so the detail
-            // pane cannot stay on a prior host's chat/{id}.
-            settingsManager.lastRoute = NavRoute.Sessions.route
-            slices.store.mutateNav {
-                it.copy(
-                    lastRoute = NavRoute.Sessions.route,
-                    navEpoch = it.navEpoch + 1L,
-                )
-            }
-            slices.store.dispatch(AppAction.CloseDetail)
-        } else {
-            // §review-fix #5 (glm-3 ⚠️ per-profile UX): plan §3 glmer I2
-            // classifies currentWorkdir as per-profile UX. Same-group switches
-            // MUST reset currentWorkdir so the new profile starts fresh.
-            settingsManager.currentWorkdir = null
-            // §B4: open-tabs-list removed — no same-group tab-sharing concern.
+        // §H3: clear persisted workdir — a path from host A is meaningless
+        // on host B. configureRepositoryForProfile re-scopes to the (now-
+        // null) workdir, which is correct for a fresh host.
+        settingsManager.currentWorkdir = null
+        // §review-fix #5 (gpter #4): the prior code emitted
+        // ClearSessionWindowCache (NUKES the entire memory LRU across ALL
+        // groups) here. But selectHostProfile's branch already emits
+        // EvictGroup(previousFp) — the EvictGroup handler in AppCore calls
+        // clearMemoryForGroup(previousFp) which is GROUP-SCOPED. The
+        // nuke-all here was redundant (EvictGroup already handles it) AND
+        // over-broad (it would evict OTHER groups' hot caches too — e.g.
+        // a third group the user switches between frequently). Removed;
+        // rely on the EvictGroup effect for the group-scoped clear.
+        // (deleteHostProfile(wasCurrent) below also emits EvictGroup, so
+        // its purgePerHostState() call no longer nukes-all either — correct:
+        // the deleted host's group is evicted group-scoped, other groups
+        // keep their caches.)
+        //
+        // §R18 Phase 2-F + §B4: currentSessionId cleared by HostStatePurged
+        // reducer; wipe persisted current + sessionCache. open-tabs-list
+        // no longer exists (list-detail).
+        settingsManager.currentSessionId = null
+        settingsManager.sessionCache = emptyList()
+        // §B4 / §10 host switch: force popToSessions so the detail pane
+        // cannot stay on a prior host's chat/{id}.
+        settingsManager.lastRoute = NavRoute.Sessions.route
+        slices.store.mutateNav {
+            it.copy(
+                lastRoute = NavRoute.Sessions.route,
+                navEpoch = it.navEpoch + 1L,
+            )
         }
+        slices.store.dispatch(AppAction.CloseDetail)
     }
 
     // ── Repository reconfiguration ────────────────────────────────────────
@@ -475,7 +472,7 @@ class HostProfileController(
             // across URL edits, so we drop the fp slot to give the new server
             // a fresh start). HostProfileSwitched below reloads the (now-
             // empty) set.
-            settingsManager.clearModelDataForGroup(currentServerGroupFp())
+            settingsManager.clearModelDataForGroup(currentProfileId())
         }
         effectiveConnectionConfigResolver?.activateManual(url, username, password) ?: run {
             settingsManager.serverUrl = url
@@ -677,9 +674,7 @@ class HostProfileController(
         // (HostStatePurged, mutateXxx) are synchronous BEFORE the launch so
         // collectors see the clean state before effects are dispatched.
         slices.store.dispatch(
-            cn.vectory.ocdroid.ui.AppAction.HostStatePurged(
-                preserveServerGroupData = false,
-            )
+            cn.vectory.ocdroid.ui.AppAction.HostStatePurged
         )
         slices.mutateConnection {
             ConnectionState(

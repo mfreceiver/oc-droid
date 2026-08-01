@@ -194,7 +194,7 @@ class SharedStateStore @Inject constructor(
 
     /**
      * §P0-A rev-gpt #5: the REAL authority [ScopeKey] for the current identity
-     * (serverGroupFp + endpointFp). Used by the non-aggregator snapshot sites
+     * (profileId + endpointFp). Used by the non-aggregator snapshot sites
      * so coverage is written under the SAME key the aggregator reads
      * ([StatusAggregatorImpl.currentScope] derives identically from
      * `identityStore.currentIdentity.value`). MUST match the aggregator's
@@ -202,7 +202,7 @@ class SharedStateStore @Inject constructor(
     internal fun authorityScope(): cn.vectory.ocdroid.data.state.ScopeKey {
         val id = identityStore.currentIdentity.value
         return cn.vectory.ocdroid.data.state.scopeKeyOf(
-            id?.serverGroupFp, id?.endpointFp,
+            id?.profileId, id?.endpointFp,
         )
     }
 

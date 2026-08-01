@@ -104,7 +104,7 @@ internal data class DraftRouteOrigin(
     val requestedRoute: String,
     val requestedNavEpoch: Long,
     val routeInstance: Long,
-    val serverGroupFp: String,
+    val profileId: String,
     /** §blocker2: the host profile id at send-click; compared inside the CAS. */
     val hostProfileId: String?,
 ) {
@@ -538,7 +538,7 @@ internal fun AppCore.materializeDraftSession(
                     // changing means the host identity changed mid-create → do
                     // NOT send to the wrong host.
                     val hostChanged = store.hostFlow.value.currentHostProfileId != origin.hostProfileId ||
-                        currentServerGroupFp() != origin.serverGroupFp
+                        currentProfileId() != origin.profileId
                     if (hostChanged) {
                         DebugLog.w(
                             "Materialize",
@@ -592,7 +592,7 @@ private fun AppCore.captureDraftRouteOrigin(): DraftRouteOrigin {
         requestedRoute = nav.lastRoute,
         requestedNavEpoch = nav.navEpoch,
         routeInstance = store.stateFlow.value.chatRouteInstance,
-        serverGroupFp = currentServerGroupFp(),
+        profileId = currentProfileId(),
         // §blocker2: capture the host profile id so the CAS can detect a
         // mid-create host switch (host.currentHostProfileId changes on
         // selectHostProfile / connect).
@@ -740,7 +740,7 @@ internal fun AppCore.dispatchCapturedSend(
     // the user's newer text is still in the composer and the normal draft
     // debounce will persist it).
     if (textMatches) {
-        settingsManager.setDraftText(currentServerGroupFp(), sessionId, "")
+        settingsManager.setDraftText(currentProfileId(), sessionId, "")
         settingsManager.flushDraftText()
     }
 
@@ -960,7 +960,7 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
     writeComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds + sessionId) }
     // §streaming-state-sync-diag: optimistic sendingSessionIds set at send time.
     DebugLog.i("SendDiag", "optimistic sendingSessionIds set sid=$sessionId")
-    settingsManager.setDraftText(currentServerGroupFp(), sessionId, "")
+    settingsManager.setDraftText(currentProfileId(), sessionId, "")
     // §C1: flush the draft clear so it is durable BEFORE the send launches —
     // a crash / background right after Send must not leave the now-empty
     // composer's cleared draft unwritten (the debounce could otherwise keep
@@ -1027,7 +1027,7 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
             // reload). The slash path (executeCommand) never had this call and
             // relied on SSE + the targeted message reload — same shape now.
             onSuccess = {
-                settingsManager.setDraftText(currentServerGroupFp(), sessionId, "")
+                settingsManager.setDraftText(currentProfileId(), sessionId, "")
                 // §C1: flush the durable clear now that the send succeeded —
                 // the composer is confirmed empty for this session and any
                 // pending debounced clear must land on disk immediately.
@@ -1067,7 +1067,7 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
                 .onFailure { error ->
                     val currentInput = store.composerFlow.value.inputText
                     val restored = if (currentInput.isBlank()) text else currentInput
-                    if (restored != currentInput) settingsManager.setDraftText(currentServerGroupFp(), sessionId, restored)
+                    if (restored != currentInput) settingsManager.setDraftText(currentProfileId(), sessionId, restored)
                     effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_restore_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                     writeComposer { c ->
                         c.copy(sendingSessionIds = c.sendingSessionIds - sessionId, inputText = restored)
@@ -1719,20 +1719,20 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
         settingsManager = settingsManager,
         onCacheWindow = makeCacheHook(fp),
         // §fix-#2 (gpter 复审 #2 — glm-3 前次 #3 修复的实现错误): pass the
-        // LIVE fp provider (the injected @Named("currentServerGroupFp")
+        // LIVE fp provider (the injected @Named("currentProfileId")
         // reference on AppCore), NOT `{ fp }`. The previous `{ fp }` captured
-        // the same snapshot as `expectedServerGroupFp = fp` below → the onSuccess
-        // guard `currentServerGroupFp() != expectedServerGroupFp` was恒等
+        // the same snapshot as `expectedProfileId = fp` below → the onSuccess
+        // guard `currentProfileId() != expectedProfileId` was恒等
         // (no-op): a host switch during the probe REST was never detected, and
         // the stale response was merged into the new group's slice. With the
-        // live provider, currentServerGroupFp() reads the current host's fp
+        // live provider, currentProfileId() reads the current host's fp
         // each call, so a mid-probe host switch makes the guard fire.
-        currentServerGroupFp = currentServerGroupFp,
+        currentProfileId = currentProfileId,
         // §fix-#3 (gpter #3): the fp captured AT CALL TIME (initiation
         // snapshot). The onSuccess guard compares this vs the live
-        // currentServerGroupFp() — a mismatch means the user switched host
+        // currentProfileId() — a mismatch means the user switched host
         // group during the probe; the stale response must NOT be merged.
-        expectedServerGroupFp = fp,
+        expectedProfileId = fp,
         sseCurrentWorkdir = sseWorkdir,
         sessionsEverColdSnapshotted = sseSnap.sessionsEverColdSnapshotted,
         onColdSnapshot = { sid -> sessionSyncCoordinator.markSessionColdSnapshotted(sid) },
@@ -1748,7 +1748,7 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
     val catchUpWorkdirs = computeQuestionFanOutWorkdirs(
         directorySessionKeys = store.sessionListFlow.value.directorySessions.keys,
         currentWorkdir = settingsManager.currentWorkdir,
-        recentWorkdirs = settingsManager.getRecentWorkdirs(currentServerGroupFp()),
+        recentWorkdirs = settingsManager.getRecentWorkdirs(currentProfileId()),
     )
     foregroundCatchUpController.catchUpPendingQuestionsAllWorkdirs(
         repository = repository,
@@ -1796,10 +1796,10 @@ internal fun shouldOpenTokenStream(
  * cannot re-key a write to the wrong group (plan §3 closure-capture rule).
  *
  * gpter 复审 final-fix: passes the compound-key guard params
- * ([AppCore.currentServerGroupFp] captured + provider) so the REST onSuccess
+ * ([AppCore.currentProfileId] captured + provider) so the REST onSuccess
  * re-checks the fp after the async fetch. The VerifyAndHydrate handler
  * calls this AFTER its own 二次 guard confirmed fp match, so
- * `currentServerGroupFp()` here equals `effect.serverGroupFp`.
+ * `currentProfileId()` here equals `effect.profileId`.
  */
 internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolean, forceInitialWindow: Boolean = false, expectedRouteInstance: Long = 0L) {
     launchLoadMessages(
@@ -1809,11 +1809,11 @@ internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolea
         sessionId = sessionId,
         resetLimit = resetLimit,
         settingsManager = settingsManager,
-        onCacheWindow = makeCacheHook(currentServerGroupFp()),
+        onCacheWindow = makeCacheHook(currentProfileId()),
         emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
         // gpter 复审 final-fix: compound-key guard (captured fp + provider).
-        expectedServerGroupFp = currentServerGroupFp(),
-        currentServerGroupFp = currentServerGroupFp,
+        expectedProfileId = currentProfileId(),
+        currentProfileId = currentProfileId,
         // §empty-window-fix: forwarded ONLY by the VerifyAndHydrate cold-load
         // branch (resident-but-empty window OR genuine cache miss) so the slim
         // fetch bypasses a stale watermark. All other callers keep the default
@@ -1873,8 +1873,8 @@ internal fun AppCore.loadSessionsForEffect() {
         // `cacheRepository = cacheRepository` argument (R-20 Phase 1 C7
         // currentSessionId fingerprint self-check) was deleted together
         // with the CacheRepository surface.
-        expectedServerGroupFp = currentServerGroupFp(),
-        currentServerGroupFp = currentServerGroupFp,
+        expectedProfileId = currentProfileId(),
+        currentProfileId = currentProfileId,
         // §grouping-rewrite Round-2 #5: the hostProfileStore arg that R-20
         // Phase 5 wired here (for cross-group merge of LAN + tunnel same-server
         // profiles) is removed — attemptCrossGroupMerge was deleted by item 1
@@ -1941,7 +1941,7 @@ private fun AppCore.dispatchBulkArchivedSessions(
     }
     if (currentWasArchived && previousCurrentId != null) {
         effectBus.tryEmitEffect(
-            ControllerEffect.EvictSession(currentServerGroupFp(), previousCurrentId)
+            ControllerEffect.EvictSession(currentProfileId(), previousCurrentId)
         )
     }
 }
@@ -1973,7 +1973,7 @@ private fun AppCore.createSessionInWorkdirForEffect(workdir: String) {
     // state → no torn intermediates for stateFlow collectors.
     store.dispatch(AppAction.WorkdirDraftStarted(workdir = workdir))
     settingsManager.currentWorkdir = workdir
-    settingsManager.addRecentWorkdir(currentServerGroupFp(), workdir)
+    settingsManager.addRecentWorkdir(currentProfileId(), workdir)
     appScope.launch {
         repository.getSessionsForDirectory(workdir)
             .onSuccess { sessions ->

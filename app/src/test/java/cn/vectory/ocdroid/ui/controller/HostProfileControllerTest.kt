@@ -163,7 +163,7 @@ class HostProfileControllerTest {
             settingsManager = settingsManager,
             trafficTracker = trafficTracker,
             effects = effects,
-            currentServerGroupFp = { "test-fp" })
+            currentProfileId = { "test-fp" })
         // Default store seeding; tests re-stub as needed (last stub wins).
         seedStore(listOf(profileA, profileB), currentId = "p-A")
         // #12: HttpImageHolder 是 object 单例，跨单测会残留 allowInsecure 状态——
@@ -331,7 +331,7 @@ class HostProfileControllerTest {
             settingsManager = settingsManager,
             trafficTracker = trafficTracker,
             effects = effects,
-            currentServerGroupFp = { "test-fp" },
+            currentProfileId = { "test-fp" },
             effectiveConnectionConfigResolver = resolver)
 
         val settings = controllerWithResolver.getSavedConnectionSettings()
@@ -357,7 +357,7 @@ class HostProfileControllerTest {
             settingsManager = settingsManager,
             trafficTracker = trafficTracker,
             effects = effects,
-            currentServerGroupFp = { "test-fp" },
+            currentProfileId = { "test-fp" },
             effectiveConnectionConfigResolver = resolver)
         every { settingsManager.serverUrl } returns "http://stale-should-not-leak:4096"
 
@@ -648,7 +648,7 @@ class HostProfileControllerTest {
             "EvictGroup(g-A) replaces ClearSessionWindowCache",
             1,
             collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
-        assertEquals("g-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().serverGroupFp)
+        assertEquals("g-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().profileId)
         // ClearSessionWindowCache is no longer emitted here.
         assertTrue(
             "ClearSessionWindowCache must NOT fire (EvictGroup handles group-scoped clear)",
@@ -661,7 +661,7 @@ class HostProfileControllerTest {
         verify { settingsManager.sessionCache = emptyList() }
         verify { settingsManager.currentWorkdir = null }
         // §recent-workdirs fix: clearRecentWorkdirs was REMOVED from
-        // purgePerHostState (cross-group branch). currentServerGroupFp() reads
+        // purgePerHostState (cross-group branch). currentProfileId() reads
         // the NEW (target) fp after select(), so the call cleared the target
         // profile's history — switching back lost its recent projects. Now
         // recentWorkdirs are isolated per fp (getRecentWorkdirs(fp)) and never
@@ -669,29 +669,10 @@ class HostProfileControllerTest {
         verify(exactly = 0) { settingsManager.clearRecentWorkdirs(any()) }
     }
 
-    @Test
-    fun `selectHostProfile same-group preserves recentWorkdirs (per-fp semantics)`() {
-        // R-20 Phase 5 (plan §3 glmer I2 字段分类): same-group switches preserve
-        // per-server data (sessions / unread / cache / recentWorkdirs /
-        // disabled_models). purgePerHostState(preserveServerGroupData=true) MUST
-        // NOT call clearRecentWorkdirs — the new profile reaches the same
-        // server, same workdirs, so its per-fp recentWorkdirs slot stays valid.
-        // Construct a sibling profile in the SAME group as profileA (g-A).
-        val profileASibling = profileA.copy(id = "p-A-sibling", name = "Host A Sibling")
-        seedStore(listOf(profileA, profileASibling, profileB), currentId = "p-A")
-        every { store.select("p-A-sibling") } returns profileASibling
-
-        controller.selectHostProfile("p-A-sibling")
-        runPending()
-
-        // Same-group → EvictGroup MUST NOT fire (only异组 emits it).
-        assertTrue(
-            "same-group switch must NOT emit EvictGroup",
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().isEmpty())
-        // Same-group → clearRecentWorkdirs MUST NOT be called (per-fp slot
-        // belongs to the same server group, data is still valid).
-        verify(exactly = 0) { settingsManager.clearRecentWorkdirs(any()) }
-    }
+    // §需求12阶段3: the former `selectHostProfile same-group preserves
+    // recentWorkdirs` test was removed — under 需求12 profiles are independent
+    // (no groups) and EvictGroup is unconditional, so the same-group preserve
+    // branch + its "no EvictGroup" assertion are dead.
 
     // ── configureServer (direct connection form) ───────────────────────────
 
@@ -832,21 +813,11 @@ class HostProfileControllerTest {
 
     // ── saveHostProfile (S-1: live reconfigure when active host serverUrl changes) ─
 
-    @Test
-    fun `deleteHostProfile of current profile keeps model data when sibling remains in group`() {
-        val sibling = profileA.copy(id = "p-A2", name = "Host A sibling")
-        seedStore(listOf(profileA, sibling, profileB), currentId = "p-A")
-        seed { it.copy(currentHostProfileId = "p-A") }
-        every { store.profilesInGroup("g-A") } returns listOf(profileA, sibling)
-        every { store.currentProfile() } returns profileB
-
-        controller.deleteHostProfile("p-A")
-        scope.testScheduler.advanceUntilIdle()
-
-        verify(exactly = 0) { settingsManager.clearModelDataForGroup("g-A") }
-        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().isEmpty())
-        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.RestartRequired>().size)
-    }
+    // §需求12阶段3: the former `deleteHostProfile of current profile keeps
+    // model data when sibling remains in group` test was removed — under 需求12
+    // the reference-counting is dead (a group can never have sibling profiles),
+    // so clearModelDataForGroup + EvictGroup are both unconditional on active
+    // deletion.
 
     // ── configureServer (URL-unchanged branch) ─────────────────────────────
 
@@ -870,48 +841,22 @@ class HostProfileControllerTest {
     }
 
     @Test
-    fun `review-fix 6 deleteHostProfile skips EvictGroup when sibling profile remains in group`() {
-        // §review-fix #6 (gpter #5): reference-counted EvictGroup. profileA
-        // and profileASibling share g-A. Deleting profileA leaves the sibling
-        // → group still referenced → EvictGroup must NOT fire (would orphan
-        // the sibling's hot cache).
-        val profileASibling = HostProfile(
-            id = "p-A2",
-            name = "Sibling",
-            serverUrl = "http://a:4096",
-            serverGroupFp = "g-A" // same group as profileA
-        )
-        seed { it.copy(currentHostProfileId = "p-A") }
-        // profiles() returns [profileA, profileASibling, profileB]; current → profileB (replacement)
-        every { store.profiles() } returns listOf(profileA, profileASibling, profileB)
-        every { store.currentProfile() } returns profileB
-        // profilesInGroup("g-A") returns the two siblings (NOT including the deleted profileA).
-        every { store.profilesInGroup("g-A") } returns listOf(profileA, profileASibling)
-
-        controller.deleteHostProfile("p-A")
-        scope.testScheduler.advanceUntilIdle()
-
-        assertTrue(
-            "EvictGroup must NOT fire when a sibling profile still references the group",
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().isEmpty())
-    }
-
-    @Test
-    fun `review-fix 6 deleteHostProfile emits EvictGroup when no sibling remains in group`() {
-        // Counterpart: no siblings → group is orphaned → EvictGroup fires.
+    fun `deleteHostProfile emits EvictGroup unconditionally (§需求12阶段3)`() {
+        // §需求12阶段3 (oracle-assessed): the former reference-counting
+        // (`remainingInGroup` / conditional EvictGroup) is dead under 需求12 —
+        // a group can never have sibling profiles. EvictGroup is now
+        // UNCONDITIONAL on active deletion.
         seed { it.copy(currentHostProfileId = "p-A") }
         every { store.currentProfile() } returns profileB
-        // profilesInGroup returns only profileA (will be deleted → no remaining).
-        every { store.profilesInGroup("g-A") } returns listOf(profileA)
 
         controller.deleteHostProfile("p-A")
         scope.testScheduler.advanceUntilIdle()
 
         assertEquals(
-            "EvictGroup(g-A) fires when no sibling remains",
+            "EvictGroup(g-A) fires unconditionally on active deletion",
             1,
             collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
-        assertEquals("g-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().serverGroupFp)
+        assertEquals("g-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().profileId)
     }
 
     // ── §fix-3 gro-1/gpt-2/glm-2: saveHostProfile mTLS live-reconfigure ──────

@@ -244,68 +244,11 @@ class HostViewModelTest : MainViewModelTestBase() {
         )
     }
 
-    @Test
-    fun `selectHostProfile preserves the per-session message cache on same-group switch`() = runTest {
-        // R-20 Phase 1 (same-group counterpart of the test above): when two
-        // profiles share a serverGroupFp (sibling entry points to the same
-        // server), selectHostProfile keeps the cached message windows — the
-        // server data is identical, so dropping the cache would just cause a
-        // flicker + re-fetch. purgePerHostState runs with
-        // preserveServerGroupData=true; no EvictGroup effect fires.
-        val profileA = HostProfile(
-            id = "pa",
-            name = "Profile A",
-            serverUrl = "http://server.test",
-            serverGroupFp = "shared-group"
-        )
-        val profileB = HostProfile(
-            id = "pb",
-            name = "Profile B",
-            serverUrl = "http://server.test",
-            serverGroupFp = "shared-group" // same group
-        )
-        val currentProfileHolder = mutableListOf(profileA)
-        every { hostProfileStore.currentProfile() } answers { currentProfileHolder.first() }
-        every { hostProfileStore.profiles() } returns listOf(profileA, profileB)
-        every { hostProfileStore.select("pb") } answers {
-            currentProfileHolder[0] = profileB
-            profileB
-        }
-        coEvery { repository.checkHealth() } returns Result.failure(IllegalStateException("offline"))
-
-        coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
-            Result.success(
-                MessagesPage(
-                    listOf(MessageWithParts(info = Message(id = "m_a1", role = "user"))),
-                    null
-                )
-            )
-
-        val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
-        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
-        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
-        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
-        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
-        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
-        val viewModel = HostViewModel(core)  // primary VM under test
-        core.writeChat { it.copy(currentSessionId = "session-A") }
-        core.writeSessionList {
-            it.copy(sessions = listOf(Session(id = "session-A", directory = "/tmp/a")))
-        }
-        chatVM.loadMessages("session-A")
-        advanceUntilIdle()
-        assertEquals(1, core.sessionWindowCacheSize())
-
-        hostVM.selectHostProfile("pb")
-        advanceUntilIdle()
-
-        assertEquals(
-            "Same-group host switch must preserve the per-session message cache",
-            1,
-            core.sessionWindowCacheSize()
-        )
-    }
+    // §需求12阶段3: the former `selectHostProfile preserves the per-session
+    // message cache on same-group switch` test was removed — under 需求12
+    // profiles are independent (no groups) and every switch is a full purge
+    // (C-8 restart kills preserved slices anyway). The cross-group clear test
+    // above covers the unconditional purge.
 
     // --------------------------------------------- caSummary / clientCertSummary
     // §mtls-clipboard coverage: the new pure-read summary helpers in

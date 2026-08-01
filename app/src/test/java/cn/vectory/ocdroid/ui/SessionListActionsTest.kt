@@ -92,7 +92,7 @@ class SessionListActionsTest {
             sid = sid,
             status = status,
             origin = cn.vectory.ocdroid.data.state.EntryOrigin.SSE_LEGACY,
-            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(profileId = "", endpointFp = ""),
             connectionTimeMs = 0L,
         ),
     )
@@ -962,8 +962,8 @@ class SessionListActionsTest {
             onLoadSessionStatus = {},
             onLoadMessages = {},
             emit = emit,
-            expectedServerGroupFp = "g1",
-            currentServerGroupFp = { currentFp },
+            expectedProfileId = "g1",
+            currentProfileId = { currentFp },
             // §grouping-rewrite Round-2 #5: hostProfileStore arg removed.
         )
         advanceUntilIdle()

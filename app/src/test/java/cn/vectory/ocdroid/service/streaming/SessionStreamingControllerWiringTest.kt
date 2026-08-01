@@ -42,7 +42,7 @@ class SessionStreamingControllerWiringTest {
 
     private val identity = ConnectionIdentity(
         epoch = 9L,
-        serverGroupFp = "group-fp",
+        profileId = "group-fp",
         normalizedWorkdir = "/work/dir",
         endpointFp = "endpoint-fp",
     )
@@ -64,7 +64,7 @@ class SessionStreamingControllerWiringTest {
         fixture.controller.start()
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )
@@ -98,7 +98,7 @@ class SessionStreamingControllerWiringTest {
         fixture.controller.start()
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         val bound = fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )
@@ -164,7 +164,7 @@ class SessionStreamingControllerWiringTest {
         fixture.controller.start()
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         val bound = fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )
@@ -194,7 +194,7 @@ class SessionStreamingControllerWiringTest {
         fixture.controller.start()
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         val bound = fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )
@@ -222,7 +222,7 @@ class SessionStreamingControllerWiringTest {
         fixture.controller.start()
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         val bound = fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )
@@ -250,7 +250,7 @@ class SessionStreamingControllerWiringTest {
         fixture.controller.start()
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         val bound = fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )
@@ -285,7 +285,7 @@ class SessionStreamingControllerWiringTest {
         fixture.controller.start()
         fixture.bootstrapRunner.enqueue(BootstrapResult.Success(identity))
         val bound = fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )

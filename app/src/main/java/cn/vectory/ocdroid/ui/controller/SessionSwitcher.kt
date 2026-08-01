@@ -27,7 +27,7 @@ import cn.vectory.ocdroid.util.SettingsManager
  * `data class` so equality + hashCode are structural (serverGroupFp+sessionId
  * together), letting LinkedHashMap promote entries correctly on `get`.
  */
-internal data class CacheWindowKey(val serverGroupFp: String, val sessionId: String)
+internal data class CacheWindowKey(val profileId: String, val sessionId: String)
 
 /**
  * R-16 M2b → R-17 batch3b: owns the session-switching state machine — the
@@ -69,7 +69,7 @@ class SessionSwitcher(
     private val effects: SharedEffectBus,
     /** R-20 Phase 1: provider for the current host's serverGroupFp. Used to
      *  key the LRU and to emit VerifyAndHydrate. */
-    internal val currentServerGroupFp: () -> String,
+    internal val currentProfileId: () -> String,
     // Injectable clock so lastViewedTime is deterministically testable.
     private val clock: () -> Long = { System.currentTimeMillis() }
 ) {
@@ -159,7 +159,7 @@ class SessionSwitcher(
      * rarely-used session would keep it resident and evict a hotter one.
      */
     internal fun peekSessionWindow(sessionId: String): CachedSessionWindow? {
-        val fp = currentServerGroupFp()
+        val fp = currentProfileId()
         return sessionWindowCache.entries.firstOrNull { it.key == CacheWindowKey(fp, sessionId) }?.value
     }
 
@@ -171,24 +171,24 @@ class SessionSwitcher(
      *
      * §review-fix #2 (gpter #2 + glm-3 🟠#3): the [serverGroupFp] parameter
      * is the CAPTURED fp from hook-factory time (makeCacheHook(fp)). The
-     * PRIOR signature read `currentServerGroupFp()` at write time — a host
+     * PRIOR signature read `currentProfileId()` at write time — a host
      * switch mid-flight would write the old request's data into the NEW
      * group's LRU slot, polluting it. The captured fp guarantees the write
      * lands in the group that owned the fetch.
      */
-    internal fun writeSessionWindow(serverGroupFp: String, sessionId: String, window: CachedSessionWindow) {
-        sessionWindowCache[CacheWindowKey(serverGroupFp, sessionId)] = window
+    internal fun writeSessionWindow(profileId: String, sessionId: String, window: CachedSessionWindow) {
+        sessionWindowCache[CacheWindowKey(profileId, sessionId)] = window
     }
 
     /**
      * Captures the CURRENT message state into the cache under
-     * `(currentServerGroupFp(), sessionId)`. Used by [switchTo] to write-back
+     * `(currentProfileId(), sessionId)`. Used by [switchTo] to write-back
      * the outgoing session's latest view before switching away. Reads only;
      * never mutates [state].
      */
     private fun captureCurrentSessionWindow(sessionId: String) {
         val current = slices.chat.value
-        sessionWindowCache[CacheWindowKey(currentServerGroupFp(), sessionId)] = CachedSessionWindow(
+        sessionWindowCache[CacheWindowKey(currentProfileId(), sessionId)] = CachedSessionWindow(
             messages = current.messages,
             partsByMessage = current.partsByMessage,
             olderMessagesCursor = current.olderMessagesCursor,
@@ -212,8 +212,8 @@ class SessionSwitcher(
      * exists. remove-message-persistence: there is no persistent counterpart;
      * the in-memory LRU is the sole cache layer.
      */
-    internal fun evictSession(serverGroupFp: String, sessionId: String) {
-        sessionWindowCache.remove(CacheWindowKey(serverGroupFp, sessionId))
+    internal fun evictSession(profileId: String, sessionId: String) {
+        sessionWindowCache.remove(CacheWindowKey(profileId, sessionId))
     }
 
     /**
@@ -222,8 +222,8 @@ class SessionSwitcher(
      * remove-message-persistence: there is no persistent counterpart; the
      * in-memory LRU is the sole cache layer.
      */
-    internal fun clearMemoryForGroup(serverGroupFp: String) {
-        sessionWindowCache.entries.removeAll { it.key.serverGroupFp == serverGroupFp }
+    internal fun clearMemoryForGroup(profileId: String) {
+        sessionWindowCache.entries.removeAll { it.key.profileId == profileId }
     }
 
     /**
@@ -266,12 +266,12 @@ class SessionSwitcher(
      *    is non-empty, merge under [message.id] as before.
      */
     internal fun appendMessageIfCached(
-        serverGroupFp: String,
+        profileId: String,
         sessionId: String,
         message: Message,
         parts: List<Part>,
     ) {
-        val key = CacheWindowKey(serverGroupFp, sessionId)
+        val key = CacheWindowKey(profileId, sessionId)
         val existing = sessionWindowCache[key] ?: return
         val updatedMessages = if (existing.messages.any { it.id == message.id }) {
             // ID already resident (a concurrent write-back / fetch completion
@@ -418,7 +418,7 @@ class SessionSwitcher(
         // restore incoming) MUST use the same fp so they land in / read from
         // the same per-(fp, sessionId) slot. A re-read between them could race
         // a host switch.
-        val fp = currentServerGroupFp()
+        val fp = currentProfileId()
         if (oldSessionId != null) {
             settingsManager.setDraftText(fp, oldSessionId, currentInputText)
             // §C1: flush the outgoing session's draft IMMEDIATELY so it is
@@ -508,7 +508,7 @@ class SessionSwitcher(
             .firstOrNull { it.id == sessionId }
         effects.tryEmitEffect(
             ControllerEffect.VerifyAndHydrate(
-                serverGroupFp = currentServerGroupFp(),
+                profileId = currentProfileId(),
                 sessionId = sessionId,
                 createdAt = targetSession?.time?.created,
                 // §chat-list-detail §7.2 B0.5-rework: thread the route-instance

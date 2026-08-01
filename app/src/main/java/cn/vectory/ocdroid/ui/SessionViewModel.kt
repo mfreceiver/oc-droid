@@ -382,7 +382,7 @@ class SessionViewModel @Inject constructor(
             EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
             // R-20 Phase 1 (C3): emit EvictSession per archived subtree id so
             // the cache (memory + persistent) is cleared for dismissed sessions.
-            currentServerGroupFp = { fp },
+            currentProfileId = { fp },
             emitEffect = { effect -> effectBus.tryEmitEffect(effect) },
         )
     }
@@ -396,7 +396,7 @@ class SessionViewModel @Inject constructor(
             // C3: restore does not emit EvictSession (gated on isArchive inside
             // launchSetSessionArchived); pass the providers anyway for symmetry
             // so a future restore-also-evicts change is a one-liner.
-            currentServerGroupFp = { fp },
+            currentProfileId = { fp },
             emitEffect = { effect -> effectBus.tryEmitEffect(effect) },
         )
     }
@@ -432,7 +432,7 @@ class SessionViewModel @Inject constructor(
             EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
             // R-20 Phase 1 (C3): emit EvictSession on delete so the cache is
             // cleared for the removed session (privacy + storage hygiene).
-            currentServerGroupFp = { fp },
+            currentProfileId = { fp },
             emitEffect = { effect -> effectBus.tryEmitEffect(effect) },
         )
     }

@@ -144,7 +144,7 @@ class AppCore @Inject constructor(
     internal val errorRecoveryCoordinator: ErrorRecoveryCoordinator,
     /**
      * R-20 Phase 1 (review-fix #1): provider for the current host's
-     * serverGroupFp. Injected via the SAME `@Named("currentServerGroupFp")`
+     * profileId. Injected via the SAME `@Named("currentProfileId")`
      * @Provides that every controller uses (ControllerModule), so AppCore's
      * fp derivation never drifts from the controllers'. Used by the
      * VerifyAndHydrate handler's post-peek 二次重检 (the in-memory
@@ -153,7 +153,7 @@ class AppCore @Inject constructor(
      * to lock the composite-key (fp + sessionId) invariant at the handler
      * boundary and stays robust if a dispatcher hop is ever reintroduced).
      */
-    @Named("currentServerGroupFp") internal val currentServerGroupFp: () -> String,
+    @Named("currentProfileId") internal val currentProfileId: () -> String,
     /** R-19 P2-5: the app-lifetime scope is now Hilt-provided
      *  ([cn.vectory.ocdroid.di.UiApplicationScopeModule], Main.immediate) so
      *  the migrated ViewModels inject the SAME singleton scope AppCore and
@@ -236,8 +236,8 @@ class AppCore @Inject constructor(
     internal fun writeSessionList(transform: (SessionListState) -> SessionListState) = store.mutateSessionList(transform)
     internal fun writeUnread(transform: (UnreadState) -> UnreadState) = store.mutateUnread(transform)
     internal fun writeHost(transform: (HostState) -> HostState) = store.mutateHost(transform)
-    internal fun writeSessionWindow(serverGroupFp: String, sessionId: String, window: CachedSessionWindow) {
-        sessionSwitcher.writeSessionWindow(serverGroupFp, sessionId, window)
+    internal fun writeSessionWindow(profileId: String, sessionId: String, window: CachedSessionWindow) {
+        sessionSwitcher.writeSessionWindow(profileId, sessionId, window)
     }
 
     /**
@@ -257,7 +257,7 @@ class AppCore @Inject constructor(
      * write (it existed only to feed putSessionWindow's metadata columns).
      *
      * §review-fix #2 (gpter #2): the memory LRU write uses the CAPTURED
-     * [fp] (not a re-read of currentServerGroupFp). A host switch
+     * [fp] (not a re-read of currentProfileId). A host switch
      * mid-flight would otherwise route the old fetch's data into the new
      * group's LRU slot.
      */
@@ -616,16 +616,16 @@ class AppCore @Inject constructor(
                 val cached = sessionSwitcher.peekSessionWindow(effect.sessionId)
                 // 二次重检 (review-fix #1, retained): peek 后复合键未变才注入。
                 // peek 本身同步不 suspend，但保留重检作为 defence-in-depth 并
-                // 固化不变量；fp 用注入的 currentServerGroupFp provider（与
+                // 固化不变量；fp 用注入的 currentProfileId provider（与
                 // ControllerModule 同源），不重读 hostProfileStore（已在 DI 层
                 // 统一 ifBlank 兜底）。
-                if (effect.serverGroupFp != currentServerGroupFp() ||
+                if (effect.profileId != currentProfileId() ||
                     effect.sessionId != store.chatFlow.value.currentSessionId
                 ) {
                     DebugLog.d(
                         TAG,
                         "VerifyAndHydrate dropped: fp or session changed during peek " +
-                            "(effect.fp=${effect.serverGroupFp} current.fp=${currentServerGroupFp()} " +
+                            "(effect.fp=${effect.profileId} current.fp=${currentProfileId()} " +
                             "effect.sid=${effect.sessionId} current.sid=${store.chatFlow.value.currentSessionId})"
                     )
                     return@launch
@@ -689,7 +689,7 @@ class AppCore @Inject constructor(
             // already runs on appScope = Dispatchers.Main.immediate, which
             // is the same dispatcher sessionWindowCache is confined to.
             sessionSwitcher.appendMessageIfCached(
-                effect.serverGroupFp, effect.sessionId, effect.message, effect.parts
+                effect.profileId, effect.sessionId, effect.message, effect.parts
             )
             true
         }
@@ -699,7 +699,7 @@ class AppCore @Inject constructor(
             // the refreshed window without a re-fetch. Synchronous (same
             // dispatcher-discipline rationale as AppendMessageToCache).
             sessionSwitcher.writeSessionWindow(
-                effect.serverGroupFp,
+                effect.profileId,
                 effect.sessionId,
                 CachedSessionWindow(
                     messages = effect.messages,
@@ -760,10 +760,10 @@ class AppCore @Inject constructor(
             // effect must NOT close the new group's tokenStream, clear its
             // overlay, or release its abort-pending lock for the same sid
             // (cross-host pollution via same-sid UUID collision across server
-            // groups). The cache eviction below stays keyed by effect.serverGroupFp
+            // groups). The cache eviction below stays keyed by effect.profileId
             // (old group's LRU is cleared by its own fp — safe).
             // §known-gap: full identity (BundleStamp/connection epoch) deferred to P0-A.
-            if (effect.serverGroupFp == currentServerGroupFp()) {
+            if (effect.profileId == currentProfileId()) {
                 tokenStreamCoordinator.close(effect.sessionId)
                 // §Stage-D2 (gate r1 S1): if the evicted session was the CURRENT
                 // chat, clear the token-stream overlay from ChatState too. close()
@@ -790,7 +790,7 @@ class AppCore @Inject constructor(
             }
             // R-20 Phase 1: synchronous memory clear keyed by effect fp (old
             // group's LRU cleared by its own fp — safe regardless of current host).
-            sessionSwitcher.evictSession(effect.serverGroupFp, effect.sessionId)
+            sessionSwitcher.evictSession(effect.profileId, effect.sessionId)
             // §slim-storm P2 (Bug B self-heal): the cache/token cleanup above does NOT
             // remove the session from sessionList, so the snapshot the status poller
             // iterates never shrank → infinite re-eviction loop. Dispatch a subtree-
@@ -803,7 +803,7 @@ class AppCore @Inject constructor(
             // a cross-group EvictSession (stale fp) must NOT mutate it. Cache/token
             // cleanup above is fp-scoped via the CacheWindowKey and stays unconditional.
             // Mirrors the VerifyAndHydrate fp gate (AppCore :611).
-            if (effect.serverGroupFp == currentServerGroupFp()) {
+            if (effect.profileId == currentProfileId()) {
                 val sl = store.stateFlow.value.sessionList
                 val removedIds = subtreeIds(
                     effect.sessionId,
@@ -824,7 +824,7 @@ class AppCore @Inject constructor(
             // remove-message-persistence Task 6: the prior async
             // `cacheRepository.evictGroup` fire-and-forget persistent evict
             // was deleted together with the CacheRepository surface.
-            sessionSwitcher.clearMemoryForGroup(effect.serverGroupFp)
+            sessionSwitcher.clearMemoryForGroup(effect.profileId)
             true
         }
         is ControllerEffect.RestartRequired -> {
@@ -859,9 +859,9 @@ class AppCore @Inject constructor(
             // §需求4 host/fp guard: capture fp at call time + pass the LIVE fp
             // provider so the onSuccess guard can detect a mid-REST host switch
             // and drop the stale response. Mirrors launchLoadMessages callers
-            // (AppCoreOrchestration:1815-1816). currentServerGroupFp is the
-            // @Named("currentServerGroupFp") provider — single source of truth
-            // for fp derivation (ControllerModule.provideCurrentServerGroupFp),
+            // (AppCoreOrchestration:1815-1816). currentProfileId is the
+            // @Named("currentProfileId") provider — single source of truth
+            // for fp derivation (ControllerModule.provideCurrentProfileId),
             // equivalent to hostProfileStore.currentProfile().serverGroupFp.ifBlank { .id }.
             launchLoadProviders(
                 scope = appScope,
@@ -869,8 +869,8 @@ class AppCore @Inject constructor(
                 slices = store.slices,
                 settingsManager = settingsManager,
                 hostProfileStore = hostProfileStore,
-                expectedServerGroupFp = currentServerGroupFp(),
-                currentServerGroupFp = currentServerGroupFp,
+                expectedProfileId = currentProfileId(),
+                currentProfileId = currentProfileId,
                 onNonFatalError = { message, error -> reportNonFatalIssue(TAG, message, error) },
             )
             true

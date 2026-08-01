@@ -221,7 +221,7 @@ abstract class MainViewModelTestBase {
             settingsManager = settingsManager,
             repository = repository,
             effects = effectBus,
-            currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
+            currentProfileId = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
         )
         val hostProfileController = cn.vectory.ocdroid.ui.controller.HostProfileController(
             scope = appScope,
@@ -231,7 +231,7 @@ abstract class MainViewModelTestBase {
             settingsManager = settingsManager,
             trafficTracker = trafficTracker,
             effects = effectBus,
-            currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
+            currentProfileId = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
             identityStore = identityStore,
         )
         val sessionSyncCoordinator = cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator(
@@ -239,7 +239,7 @@ abstract class MainViewModelTestBase {
             slices = store.slices,
             settingsManager = settingsManager,
             effects = effectBus,
-            currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
+            currentProfileId = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
             // CP1 (notify Phase-0): single connection-identity store.
             identityStore = identityStore,
             repository = repository,

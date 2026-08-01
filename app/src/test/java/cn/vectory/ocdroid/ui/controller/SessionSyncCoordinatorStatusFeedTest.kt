@@ -76,7 +76,7 @@ class SessionSyncCoordinatorStatusFeedTest {
             slices = slices,
             settingsManager = mockk(relaxed = true),
             effects = effects,
-            currentServerGroupFp = { serverGroupFp },
+            currentProfileId = { serverGroupFp },
             identityStore = identityStore,
             statusAggregatorInput = aggregatorInput,
             clock = { clockNow })
@@ -247,7 +247,7 @@ class SessionSyncCoordinatorStatusFeedTest {
             slices = slices,
             settingsManager = mockk(relaxed = true),
             effects = effects,
-            currentServerGroupFp = { serverGroupFp },
+            currentProfileId = { serverGroupFp },
             identityStore = identityStore,
             statusAggregatorInput = null,
             clock = { clockNow })

@@ -66,7 +66,7 @@ class SlimFanOutPollerWiringTest {
 
     private val identity = ConnectionIdentity(
         epoch = 1L,
-        serverGroupFp = "group-fp",
+        profileId = "group-fp",
         normalizedWorkdir = "/work/dir",
         endpointFp = "endpoint-fp",
     )
@@ -550,7 +550,7 @@ class SlimFanOutPollerWiringTest {
 
     private fun bindIdentity(store: ConnectionIdentityStore) {
         store.beginReconfigure()
-        store.bind(identity.serverGroupFp, identity.normalizedWorkdir, identity.endpointFp)
+        store.bind(identity.profileId, identity.normalizedWorkdir, identity.endpointFp)
     }
 
     private class RecordingStatusInput(initial: GlobalBusyState) : StatusAggregator,
