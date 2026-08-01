@@ -350,41 +350,50 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
-                    // §row-text-cache: per-seq cache of the formatted row text.
+                    // §row-text-cache: bounded cache of formatted row text.
                     // The log is newest-first (§stable-seq-key), so every append
                     // shifts all following entries and forces their recomposition
                     // — without a cache that re-runs sdf.format + string-template
-                    // for up to 3000 rows each time. Caching by entry.seq makes
-                    // the unavoidable recomposition cheap: seq is monotonic and
-                    // never reused (DebugLog's AtomicLong), so getOrPut hits for
-                    // any entry seen before (including the append-shift case —
-                    // append changes the filtered LIST, but old entries keep their
-                    // seq, so they still hit the SAME map instance across appends).
+                    // for up to MAX_ENTRIES rows each time. Caching by entry.seq
+                    // makes that unavoidable recomposition cheap: seq is monotonic
+                    // and never reused (DebugLog's AtomicLong), so getOrPut hits
+                    // for any entry seen before — INCLUDING across appends, since
+                    // the cache has NO remember-key (a key on `filtered`/`displayed`
+                    // would rebuild the whole map on every append and destroy the
+                    // benefit, per fixup2 history).
                     //
-                    // Bounded reclamation: the cache has NO remember-key (a key on
-                    // `filtered` would rebuild the whole map on every append,
-                    // defeating the purpose). To prevent unbounded growth across
-                    // ring-buffer eviction, entries below the live window are
-                    // pruned. The watermark = the smallest seq currently in
-                    // `liveEntries` (the ring-buffer backing list): any cached seq
-                    // older than the watermark has been evicted from the ring buffer
-                    // and will never appear again, so it is removed. This is keyed
-                    // on `liveEntries` (not `filtered`) so that:
-                    //   - level-filter-hidden entries stay cached (their seq is in
-                    //     the live window; they may reappear when the filter relaxes);
-                    //   - clear() empties liveEntries → watermark = Long.MAX_VALUE →
-                    //     the whole map is pruned on the next composition, EVEN if
-                    //     the viewer is paused (paused freezes `displayed`/`filtered`
-                    //     but does not stop this reclamation, which reads liveEntries).
-                    // Bound: ≤ MAX_ENTRIES (3000) + brief stragglers pruned next frame.
+                    // Bounding — a hard insertion-order cap mirrors the ring
+                    // buffer's OWN eviction: eldest = oldest seq (smallest, since
+                    // seq is monotonic) = exactly the entry the ring buffer will
+                    // drop next. So the cache can never hold more than the data
+                    // source itself, regardless of state (running / paused /
+                    // post-clear). This is structural, NOT event-driven: there is
+                    // no watermark, no retainAll, no per-frame O(n) scan. The cap
+                    // = DebugLog.MAX_ENTRIES (single source of truth), so it stays
+                    // in sync if the ring buffer is ever resized.
+                    //
+                    // clear() semantics: DebugLog.clear() publishes emptyList →
+                    // displayed/filtered empty → forEach adds nothing → the cache
+                    // stops growing; existing entries age out as the new live log
+                    // repopulates (each new put evicts the eldest). While PAUSED
+                    // the frozen snapshot keeps forEach repopulating frozen rows,
+                    // so the cache retains up to MAX_ENTRIES frozen strings until
+                    // the user resumes — which is ACCEPTABLE because the cap is
+                    // structural: it can never exceed the ring buffer's own bound.
+                    // (Earlier fixup rounds chased "release immediately on paused
+                    // clear" and each created a worse edge case; a structural cap
+                    // is provably bounded in ALL states — see b1-fixup2-r4.)
                     //
                     // levelColor is NOT cached — it reads MaterialTheme.colorScheme,
                     // so it stays recomposed per row.
-                    val rowTextCache = remember { mutableMapOf<Long, String>() }
-                    // Prune entries evicted from the ring buffer (see comment above).
-                    val watermark = if (liveEntries.isEmpty()) Long.MAX_VALUE
-                        else liveEntries.minOf { it.seq }
-                    rowTextCache.keys.retainAll { it >= watermark }
+                    @Suppress("UnusedPrivateProperty") // cacheCapacity only documents the cap
+                    val rowTextCache = remember {
+                        object : LinkedHashMap<Long, String>(64, 0.75f, true) {
+                            private val cacheCapacity = DebugLog.MAX_ENTRIES
+                            override fun removeEldestEntry(eldest: Map.Entry<Long, String>): Boolean =
+                                size > cacheCapacity
+                        }
+                    }
                     filtered.forEach { entry ->
                         val levelColor = when (entry.level) {
                             DebugLog.Level.DEBUG -> MaterialTheme.colorScheme.onSurfaceVariant

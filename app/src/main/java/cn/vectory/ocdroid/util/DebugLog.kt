@@ -63,7 +63,11 @@ object DebugLog {
     // per-byte cost; the previous 1000-entry cap evicted in ~2s under the
     // unscoped verbose flood. With scoping + 1Hz delta coalesce, 3000 covers
     // ~5–10 minutes of signal-rich activity.
-    private const val MAX_ENTRIES = 3000
+    //
+    // §row-text-cache (需求5): exposed `internal` so the in-app log viewer
+    // (DebugLogSection) can size its formatted-text cache to match this ring
+    // buffer's cap exactly — single source of truth, see removeEldestEntry.
+    internal const val MAX_ENTRIES = 3000
 
     /** Monotonic per-entry sequence — a stable, collision-free LazyColumn key
      *  (unlike hashCode, which collides when identical log lines land in the
