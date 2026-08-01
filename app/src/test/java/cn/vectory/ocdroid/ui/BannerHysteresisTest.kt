@@ -305,12 +305,19 @@ class BannerHysteresisTest {
     }
 
     @Test
-    fun `deadline is null for Showing`() {
+    fun `deadline is at sinceMs plus minDisplay for Showing`() {
+        // §b4-rev2 🔴1: Showing MUST schedule a re-evaluation at sinceMs+minDisplayMs.
+        // Without it, a recovery landing inside the min-display window leaves the banner
+        // stuck in Showing forever (no category event fires while healthy). The deadline
+        // is the min-display expiry that drives Showing→PendingHide once it elapses.
         val state = BannerHysteresisState(
-            visibility = BannerVisibility.Showing(outageCat, null, 0L),
-            phase = BannerHysteresisPhase.Showing(outageCat, null, 0L),
+            visibility = BannerVisibility.Showing(outageCat, null, 1_000L),
+            phase = BannerHysteresisPhase.Showing(outageCat, null, 1_000L),
         )
-        assertNull(computeHysteresisDeadlineMs(state, now = 10_000L, config = cfg))
+        val deadline = computeHysteresisDeadlineMs(state, now = 500L, config = cfg)
+        assertNotNull(deadline)
+        // sinceMs(1_000) + minDisplayMs(3_000) = 4_000
+        assertEquals(4_000L, deadline)
     }
 
     @Test

@@ -1490,10 +1490,18 @@ internal fun computeHysteresisDeadlineMs(
     now: Long,
     config: BannerHysteresisConfig = BannerHysteresisConfig(),
 ): Long? {
+    // §b4-rev2 🔴1 fix: Showing MUST schedule a re-evaluation at sinceMs+minDisplayMs.
+    // The reducer holds the banner in Showing while category==null but now<since+minDisplay
+    // (min-display not yet met — anti one-frame flash). Without a deadline here, a recovery
+    // that lands inside the min-display window would leave the banner stuck in Showing
+    // forever: no category event fires (connection is healthy), no ticker drives the
+    // reducer, so the since+minDisplay transition to PendingHide never triggers.
+    // The deadline is the min-display expiry; when it fires, the owner re-runs the reducer
+    // with a fresh `now` that (now ≥ since+minDisplay) drives Showing→PendingHide.
     return when (val p = state.phase) {
         is BannerHysteresisPhase.PendingShow -> p.atMs + config.showGraceMs
         is BannerHysteresisPhase.PendingHide -> p.atMs + config.recoverHideDelayMs
-        is BannerHysteresisPhase.Showing -> null
+        is BannerHysteresisPhase.Showing -> p.sinceMs + config.minDisplayMs
         is BannerHysteresisPhase.Hidden -> null
     }
 }
@@ -1543,17 +1551,6 @@ internal fun SseConnectionFeedback.bannerCategory(
     is SseConnectionFeedback.AwaitingTofuTrust -> null
     is SseConnectionFeedback.Idle -> null
 }
-
-/**
- * §sse-feedback-ux: elapsed ms since the terminal disconnect was stamped, or
- * null when the feed is not in a banner-worthy disconnect. Computed from the
- * derivation clock ([Disconnected.now]) captured at emit time so the label is
- * consistent with the value the banner received (not a fresh re-read that
- * could drift past the last tick). Coerced to ≥0 so a clock skew can never
- * render a negative duration.
- */
-internal fun SseConnectionFeedback.disconnectDurationMs(): Long? =
-    (this as? SseConnectionFeedback.Disconnected)?.let { (it.now - it.sinceMs).coerceAtLeast(0L) }
 
 /**
  * Returns `true` iff the clear+reload actually ran; `false` iff the isLoading

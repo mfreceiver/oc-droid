@@ -128,37 +128,6 @@ class SseConnectionFeedbackTest {
     }
 
     @Test
-    fun `disconnectDurationMs derives from the stamped transition time`() {
-        assertEquals(
-            4_000L,
-            SseConnectionFeedback.Disconnected(sinceMs = 1_000L, now = 5_000L).disconnectDurationMs(),
-        )
-        // Exactly at the stamp → zero (not negative).
-        assertEquals(
-            0L,
-            SseConnectionFeedback.Disconnected(sinceMs = 5_000L, now = 5_000L).disconnectDurationMs(),
-        )
-    }
-
-    @Test
-    fun `disconnectDurationMs coerces clock skew to zero`() {
-        // A monotonic-clock skew (now observed BEFORE the stamp) must never
-        // render a negative elapsed time.
-        assertEquals(
-            0L,
-            SseConnectionFeedback.Disconnected(sinceMs = 5_000L, now = 1_000L).disconnectDurationMs(),
-        )
-    }
-
-    @Test
-    fun `disconnectDurationMs is null off the disconnected path`() {
-        assertNull(SseConnectionFeedback.Live.disconnectDurationMs())
-        assertNull(SseConnectionFeedback.Idle.disconnectDurationMs())
-        assertNull(SseConnectionFeedback.Disabled.disconnectDurationMs())
-        assertNull(SseConnectionFeedback.Reconnecting(1, 3).disconnectDurationMs())
-    }
-
-    @Test
     fun `resolveDisconnectDurationLabel buckets at the documented boundaries`() {
         val justNow = "just now"
         val minutes = "%d min ago"

@@ -17,14 +17,6 @@ import java.net.SocketTimeoutException
 import javax.inject.Inject
 
 /**
- * §sse-feedback-ux (P2-1): WhileSubscribed stop timeout for
- * [ChatViewModel.sseConnectionFeedback]. Keeps the ticker + upstream alive
- * briefly across a config-change recomposition so the disconnect label does
- * not blink, then tears down to zero overhead on the happy path.
- */
-private const val STOP_TIMEOUT_MS = 5_000L
-
-/**
  * * R-17 batch3 → batch3d: Chat-domain ViewModel. Owns the chat slice + the
  * message-window lifecycle (load / page / gap-close / streaming overlay),
  * plus the abort / compact / edit / refresh operations.
