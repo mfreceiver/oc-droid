@@ -25,32 +25,43 @@ import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
  * Service-side writer (`PendingIntent` extras) and reader (`Intent.get*Extra`)
  * reference — single source of truth. They live on the parser (pure JVM)
  * so the test fixture can use them without depending on the Android Service.
+ *
+ * §需求12 阶段6: the identity field carried by [EXTRA_PROFILE_ID] is exactly
+ * the bound [ConnectionIdentity.profileId] (== the active HostProfile's `id`,
+ * or `"manual:$url"` for a manual connection with no profile). The legacy
+ * `serverGroupFp` extra name was renamed because (a) the server-group concept
+ * is gone (需求12 阶段3) and (b) every send/receive site is internal self-send
+ * to this app's `SessionStreamingService` (`exported="false"`, explicit
+ * component Intent), so there is no external IPC consumer to break.
  */
 object UserCloseRequestParser {
 
     const val EXTRA_EPOCH = "cn.vectory.ocdroid.extra.close.epoch"
-    const val EXTRA_SERVER_GROUP_FP = "cn.vectory.ocdroid.extra.close.serverGroupFp"
+    const val EXTRA_PROFILE_ID = "cn.vectory.ocdroid.extra.close.profileId"
     const val EXTRA_NORMALIZED_WORKDIR = "cn.vectory.ocdroid.extra.close.normalizedWorkdir"
     const val EXTRA_ENDPOINT_FP = "cn.vectory.ocdroid.extra.close.endpointFp"
 
     /**
      * Builds [UserCloseRequest] from the four identity fields the Service
      * extracted from the `Intent` extras. Pure JVM — no Android deps.
+     *
+     * The [profileId] argument is the value of [EXTRA_PROFILE_ID]: the active
+     * profile's `id` (or `"manual:$url"` for a profile-less manual connection).
      */
     fun parse(
         epoch: Long?,
-        serverGroupFp: String?,
+        profileId: String?,
         normalizedWorkdir: String?,
         endpointFp: String?,
     ): UserCloseRequest {
         val identity = if (epoch != null &&
-            serverGroupFp != null &&
+            profileId != null &&
             normalizedWorkdir != null &&
             endpointFp != null
         ) {
             ConnectionIdentity(
                 epoch = epoch,
-                profileId = serverGroupFp,
+                profileId = profileId,
                 normalizedWorkdir = normalizedWorkdir,
                 endpointFp = endpointFp,
             )

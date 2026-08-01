@@ -333,7 +333,7 @@ class ConnectionCoordinatorTest {
         every { resolver.resolve() } returns cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfig(
             source = cn.vectory.ocdroid.service.streaming.EffectiveConnectionSource.Manual,
             profileId = null,
-            serverGroupFp = "test-fp",
+            connectionKey = "test-fp",
             url = "http://resolver-authority:1234",
             username = null,
             password = null,
@@ -411,7 +411,7 @@ class ConnectionCoordinatorTest {
         every { resolver.resolve() } returns cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfig(
             source = cn.vectory.ocdroid.service.streaming.EffectiveConnectionSource.Manual,
             profileId = null,
-            serverGroupFp = "test-fp",
+            connectionKey = "test-fp",
             url = "http://obsolete-host:1234",
             username = null,
             password = null,
@@ -486,7 +486,7 @@ class ConnectionCoordinatorTest {
             cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfig(
                 source = cn.vectory.ocdroid.service.streaming.EffectiveConnectionSource.Manual,
                 profileId = null,
-                serverGroupFp = "test-fp",
+                connectionKey = "test-fp",
                 url = "http://stale-snapshot:9999",
                 username = null,
                 password = null,

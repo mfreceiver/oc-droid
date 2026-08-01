@@ -145,7 +145,7 @@ class AndroidStreamingServiceLauncher @Inject constructor(
                 val intent = Intent(context, SessionStreamingService::class.java).apply {
                     action = SessionStreamingService.ACTION_BOOTSTRAP
                     putExtra(OwnershipRequestParser.EXTRA_EPOCH, identity.epoch)
-                    putExtra(OwnershipRequestParser.EXTRA_SERVER_GROUP_FP, identity.profileId)
+                    putExtra(OwnershipRequestParser.EXTRA_PROFILE_ID, identity.profileId)
                     putExtra(OwnershipRequestParser.EXTRA_WORKDIR, identity.normalizedWorkdir)
                     putExtra(OwnershipRequestParser.EXTRA_ENDPOINT_FP, identity.endpointFp)
                     putExtra(OwnershipRequestParser.EXTRA_ATTEMPT_ID, attempt.attemptId)

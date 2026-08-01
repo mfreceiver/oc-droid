@@ -161,7 +161,7 @@ class OwnershipAckPolicy @Inject constructor() {
 
 object OwnershipRequestParser {
     const val EXTRA_EPOCH = "cn.vectory.ocdroid.extra.ownership.epoch"
-    const val EXTRA_SERVER_GROUP_FP = "cn.vectory.ocdroid.extra.ownership.serverGroupFp"
+    const val EXTRA_PROFILE_ID = "cn.vectory.ocdroid.extra.ownership.profileId"
     const val EXTRA_WORKDIR = "cn.vectory.ocdroid.extra.ownership.workdir"
     const val EXTRA_ENDPOINT_FP = "cn.vectory.ocdroid.extra.ownership.endpointFp"
 
@@ -174,15 +174,21 @@ object OwnershipRequestParser {
      */
     const val EXTRA_ATTEMPT_ID = "cn.vectory.ocdroid.extra.ownership.attemptId"
 
+    /**
+     * §需求12 阶段6: the [profileId] argument is the bound
+     * [ConnectionIdentity.profileId] (== active HostProfile's `id`). Internal
+     * self-send to this app's `SessionStreamingService` (explicit-component
+     * Intent, `exported="false"`), so no external IPC consumer to break.
+     */
     fun parse(
         epoch: Long?,
-        serverGroupFp: String?,
+        profileId: String?,
         workdir: String?,
         endpointFp: String?,
     ): ConnectionIdentity? = if (
-        epoch != null && serverGroupFp != null && workdir != null && endpointFp != null
+        epoch != null && profileId != null && workdir != null && endpointFp != null
     ) {
-        ConnectionIdentity(epoch, serverGroupFp, workdir, endpointFp)
+        ConnectionIdentity(epoch, profileId, workdir, endpointFp)
     } else {
         null
     }

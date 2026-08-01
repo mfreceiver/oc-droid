@@ -51,7 +51,7 @@ class ConnectionBootstrapEngineTest {
         every { resolver.resolve() } returns EffectiveConnectionConfig(
             source = EffectiveConnectionSource.Profile,
             profileId = profile.id,
-            serverGroupFp = profile.id,
+            connectionKey = profile.id,
             url = profile.serverUrl,
             username = null,
             password = null,
@@ -100,7 +100,7 @@ class ConnectionBootstrapEngineTest {
         every { resolver.resolve() } returns EffectiveConnectionConfig(
             source = EffectiveConnectionSource.Manual,
             profileId = "profile",
-            serverGroupFp = "group",
+            connectionKey = "group",
             url = "https://manual.example:8443",
             username = "manual-user",
             password = "manual-pass",

@@ -311,7 +311,7 @@ class HostProfileControllerTest {
         every { resolver.resolve() } returns cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfig(
             source = cn.vectory.ocdroid.service.streaming.EffectiveConnectionSource.Profile,
             profileId = "p-A",
-            serverGroupFp = "g-A",
+            connectionKey = "g-A",
             url = "https://profile.example",
             username = "alice",
             password = "secret",
