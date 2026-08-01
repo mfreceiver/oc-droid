@@ -168,6 +168,17 @@ class StatusAggregatorImpl internal constructor(
      */
     private var freshnessJob: Job? = null
 
+    /** §U-PUBLISH: serialization lock for [publishFromState]. Guards against
+     *  concurrent Main/Default dispatcher races. */
+    private val publishLock = Any()
+
+    /** §U-PUBLISH: the [StoreState.authorityRevision] of the last published
+     *  state. A call with a strictly LOWER revision is a no-op (stale publish
+     *  suppressed). A call with an EQUAL revision is allowed (re-derive with
+     *  fresh clock). [Long.MIN_VALUE] ensures the first publish always proceeds. */
+    @Volatile
+    private var maxPublishedRevision: Long = Long.MIN_VALUE
+
     init {
         // §P0-A rev-gpt #4 (incremental derivation): collect ONLY when
         // authorityRevision changes (distinctUntilChanged) — chat/composer/
@@ -176,12 +187,15 @@ class StatusAggregatorImpl internal constructor(
         // (post-change state). Declared AFTER all mutable properties above
         // (Kotlin initializes top-to-bottom; the collect on Dispatchers.Unconfined
         // runs eagerly during construction so [_globalState] / [_globalBusy] /
-        // [_statusByKey] etc. MUST be initialized first). Handles SSE / other-
-        // driven authority changes (SseDispatchHost applies SSE status via
-        // dispatch directly, NOT through this adapter). The adapter methods ALSO
-        // call publishFromState synchronously after their own dispatch so the
-        // B4-b synchronous read sees the fresh verdict before this collect
-        // observes the emission.
+        // [_statusByKey] / [publishLock] / [maxPublishedRevision] etc. MUST be
+        // initialized first). Handles SSE / other-driven authority changes
+        // (SseDispatchHost applies SSE status via dispatch directly, NOT through
+        // this adapter). The adapter methods ALSO call publishFromState
+        // synchronously after their own dispatch so the B4-b synchronous read
+        // sees the fresh verdict before this collect observes the emission.
+        // §U-PUBLISH: [publishFromState] is serialized by [publishLock] with
+        // a [maxPublishedRevision] guard, so concurrent collect + adapter
+        // publish races are resolved deterministically.
         scope.launch {
             store.stateFlow
                 .map { it.authorityRevision }
@@ -270,26 +284,30 @@ class StatusAggregatorImpl internal constructor(
     }
 
     /**
-     * §P0-A Lane 2, P1-A: re-derive the [Aggregate] from [state] and feed it
-     * into the [publishLocked] / [rescheduleFreshnessLocked] pipeline.
+     * §U-PUBLISH: re-derive the [Aggregate] from [state] and feed it into the
+     * [publishLocked] / [rescheduleFreshnessLocked] pipeline. Serialized by
+     * [publishLock] so that concurrent Main/Default dispatcher calls produce
+     * a consistent sequence.
+     *
+     * The [maxPublishedRevision] guard suppresses a stale publish whose
+     * [StoreState.authorityRevision] is STRICTLY less than the latest already
+     * published. An EQUAL revision is allowed (same authority, fresh clock for
+     * the [project] TTL verdict — needed by the [freshnessJob] TTL wake-up and
+     * synchronous adapter reads that may observe the same revision with a
+     * later clock). The first publish always proceeds ([Long.MIN_VALUE]).
+     *
      * Called by BOTH the `init` collect (async authority changes) AND each
      * adapter method (synchronous B4-b read) AND the [freshnessJob] TTL
      * wake-up.
-     *
-     * §P1-A: no internal synchronization. Callers run on BOTH [Dispatchers.Main]
-     * (init-collect, freshnessJob, SessionStreamingController adapters) AND
-     * [Dispatchers.Default] ([ProcessStatusPoller]'s refresh/markRequestFailed
-     * paths). The removed [commitPublishLock] previously serialized them; its
-     * removal introduces a transient lost-update race (see [publishLocked] kdoc).
-     *
-     * Pure re-derive-and-publish helper (no lock, no cache). R5 is structurally
-     * impossible because every publish derives directly from the [state] arg;
-     * [store.state] is the single CAS source of truth and the init-collect
-     * reads the current value at emission time.
      */
     private fun publishFromState(state: StoreState) {
-        val agg = authorityToAggregate(state)
-        publishLocked(agg, clock())
+        synchronized(publishLock) {
+            val rev = state.authorityRevision
+            if (rev < maxPublishedRevision) return
+            maxPublishedRevision = rev
+            val agg = authorityToAggregate(state)
+            publishLocked(agg, clock())
+        }
     }
 
     // ── StatusAggregator.stateAtNow (D1 gate #1) ───────────────────────────
@@ -484,39 +502,15 @@ class StatusAggregatorImpl internal constructor(
 
     /**
      * D5 (#5) — derives + publishes the three projected [StateFlow]s for the
-     * committed [Aggregate]. Called from [publishFromState].
-     *
-     * ## Threading model (post-P1-A, no [commitPublishLock])
-     *
-     * Callers come from two dispatch domains:
-     *  - **Main.immediate** (implicit, from `store.stateFlow` collect on
-     *    [Dispatchers.Main] / the [freshnessJob] coroutine launched in the
-     *    [UiApplicationScope] scope / [SessionStreamingController] adapter calls
-     *    made on the Main thread). These serialize among themselves on Main.
-     *  - **Dispatchers.Default** ([ProcessStatusPoller] runs on Default and
-     *    calls [StatusAggregatorInput.refresh] / [markRequestFailed], which
-     *    synchronously invoke [publishFromState] → this method — see
-     *    `ProcessStatusPoller.kt:3,37`).
-     *
-     * Therefore [publishLocked] CAN run concurrently across Main vs Default
-     * threads. The pre-P1-A [commitPublishLock] previously serialized these
-     * writes; its removal introduces a transient lost-update window: a
-     * Default-thread publish may compute from a slightly older
-     * `store.stateFlow.value` snapshot and overwrite a Main-thread publish
-     * that landed milliseconds earlier. This is SELF-CORRECTING: the next
-     * [StoreState.authorityRevision] emission (from the init-collect on Main,
-     * or the next adapter publish) re-derives from the current CAS state, so
-     * a stale verdict persists for **at most milliseconds**. The OLD R5
-     * (persistent stale verdict from cached-aggregate lag) remains
-     * structurally impossible because there is no cache — every publish
-     * derives directly from the live [state] argument.
+     * committed [Aggregate]. Called from [publishFromState] under [publishLock]
+     * (§U-PUBLISH), so callers are serialized — no concurrent races.
      *
      * ## Publication-order invariant
      *
      * The write order `_statusByKey` → `_globalBusy` → `_globalState` ensures
-     * that within a SINGLE thread, verdict observers cannot pair a new
-     * [globalState] with the previous commit's status map. Across threads this
-     * ordering is best-effort (concurrent writes are unsynchronized).
+     * that verdict observers cannot pair a new [globalState] with the previous
+     * commit's status map. Serialized by [publishFromState]'s [publishLock],
+     * so cross-thread ordering is guaranteed.
      *
      * After publishing, [rescheduleFreshnessLocked] arms the next TTL deadline.
      */
@@ -585,18 +579,8 @@ class StatusAggregatorImpl internal constructor(
      * at `sourceTimeMs + STATUS_TTL_MS + 1`; the coverage marker's own TTL is a
      * deadline source).
      *
-     * ## Threading model (post-P1-A, no [commitPublishLock])
-     *
-     * Called from [publishLocked], which runs on multiple dispatch domains
-     * (see [publishLocked] kdoc for the full analysis). The `freshnessJob?.cancel()`
-     * + reassignment is NOT atomic against a concurrent Default-thread publish
-     * that enters [rescheduleFreshnessLocked] simultaneously. The worst-case
-     * outcomes are benign:
-     *  - A soon-to-be-cancelled job's continuation runs one extra time (it
-     *    re-derives from live state — harmless).
-     *  - A freshly-armed job is immediately cancelled by the concurrent call's
-     *    `freshnessJob?.cancel()` → re-armed on the next publish (correct
-     *    deadline, no leak).
+     * Called under [publishLock] (from [publishFromState] → [publishLocked]), so
+     * serialized — no concurrent [freshnessJob] races.
      *
      * §P0-A Lane 2: the wake-up coroutine calls [publishFromState] (re-derive
      * from the LIVE authority + clock) so a TTL expiry re-derives the freshest
