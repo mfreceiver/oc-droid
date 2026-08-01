@@ -141,7 +141,7 @@ internal fun reduceHostStatePurged(state: StoreState, action: AppAction.HostStat
     // the correct authority + projection for the branch below.
     val baseState = if (!action.preserveServerGroupData) {
         reduceAuthority(state, cn.vectory.ocdroid.data.state.AuthorityOp.PurgeHost(
-            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey("", ""),
+            scopeKey = cn.vectory.ocdroid.data.state.scopeKeyOf("", ""),
             preserveServerGroup = false,
         ))
     } else {
@@ -659,9 +659,8 @@ internal fun StoreState.resolveScopeKey(): cn.vectory.ocdroid.data.state.ScopeKe
         // Normalize blank to the profile id (mirrors HostProfile.ensureServerGroupFp()).
         if (currentProfile.serverGroupFp.isBlank()) currentProfile.id else currentProfile.serverGroupFp
     } else ""
-    return cn.vectory.ocdroid.data.state.ScopeKey(
-        serverGroupFp = serverGroupFp,
-        endpointFp = liveEndpointFp,
+    return cn.vectory.ocdroid.data.state.scopeKeyOf(
+        serverGroupFp, liveEndpointFp,
     )
 }
 

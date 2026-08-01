@@ -50,15 +50,15 @@ class OptimisticClaimWatchdogCoordinatorTest {
         serverRound = null,
         optimisticClaim = claim,
         origin = EntryOrigin.OPTIMISTIC,
-        updatedMonotonic = 0L,
+        updatedAtMs = 0L,
         workdir = null,
         scopeKey = scope,
     )
 
-    /** An unconfirmed optimistic claim stamped at [claimedAtMonotonic]. */
-    private fun claim(claimedAtMonotonic: Long, clientSeq: Long = 1L) = OptimisticClaim(
+    /** An unconfirmed optimistic claim stamped at [claimedAtMs]. */
+    private fun claim(claimedAtMs: Long, clientSeq: Long = 1L) = OptimisticClaim(
         clientSeq = clientSeq,
-        claimedAtMonotonic = claimedAtMonotonic,
+        claimedAtMs = claimedAtMs,
         serverEchoed = false,
         guardedIdleDrop = false,
     )
@@ -75,8 +75,8 @@ class OptimisticClaimWatchdogCoordinatorTest {
     fun `U-P2 SLA - stale unconfirmed claim is reconciled within one tick of timeout`() = runTest {
         // Wall-clock for the age comparison (independent of virtual time).
         var wallClock = 0L
-        // Claim stamped at POST success (claimedAtMonotonic=0), unconfirmed.
-        val staleClaim = claim(claimedAtMonotonic = 0L)
+        // Claim stamped at POST success (claimedAtMs=0), unconfirmed.
+        val staleClaim = claim(claimedAtMs = 0L)
         val authority = AuthorityState(bySid = mapOf("A" to entry(staleClaim)))
         val (store, _) = boundStore()
 
@@ -109,7 +109,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
     fun `U-P2 SLA - claim NOT stale yet is not reconciled at the first tick`() = runTest {
         var wallClock = 0L
         // Claim stamped at wall-clock 4000 → at tick time age = 4001 < 5000.
-        val freshClaim = claim(claimedAtMonotonic = 4000L)
+        val freshClaim = claim(claimedAtMs = 4000L)
         val authority = AuthorityState(bySid = mapOf("A" to entry(freshClaim)))
         val (store, _) = boundStore()
 
@@ -137,7 +137,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
     @Test
     fun `U-P2 - repeat start does not stack reconcile sinks per tick`() = runTest {
         var wallClock = 0L
-        val staleClaim = claim(claimedAtMonotonic = 0L)
+        val staleClaim = claim(claimedAtMs = 0L)
         val authority = AuthorityState(bySid = mapOf("A" to entry(staleClaim)))
         val (store, _) = boundStore()
 
@@ -173,7 +173,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
     @Test
     fun `U-P2 - stop leaves no residual tick`() = runTest {
         var wallClock = 0L
-        val staleClaim = claim(claimedAtMonotonic = 0L)
+        val staleClaim = claim(claimedAtMs = 0L)
         val authority = AuthorityState(bySid = mapOf("A" to entry(staleClaim)))
         val (store, _) = boundStore()
 
@@ -212,7 +212,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
     @Test
     fun `U-P2 - host switch between ticks prevents the reconcile sink`() = runTest {
         var wallClock = 0L
-        val staleClaim = claim(claimedAtMonotonic = 0L)
+        val staleClaim = claim(claimedAtMs = 0L)
         val authority = AuthorityState(bySid = mapOf("A" to entry(staleClaim)))
         val (store, _) = boundStore()
 
@@ -276,7 +276,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
         // serverEchoed = true → selectStaleClaimsForReconcile skips it.
         val echoedClaim = OptimisticClaim(
             clientSeq = 1L,
-            claimedAtMonotonic = 0L,
+            claimedAtMs = 0L,
             serverEchoed = true,
             guardedIdleDrop = false,
         )
@@ -307,7 +307,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
     @Test
     fun `U-P2 generation fence - stop invalidates a scheduled tick before it sinks`() = runTest {
         var wallClock = 0L
-        val staleClaim = claim(claimedAtMonotonic = 0L)
+        val staleClaim = claim(claimedAtMs = 0L)
         val authority = AuthorityState(bySid = mapOf("A" to entry(staleClaim)))
         val (store, _) = boundStore()
 
@@ -347,7 +347,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
     @Test
     fun `U-P2 S1 - mid-window start does not reset the tick timer`() = runTest {
         var wallClock = 0L
-        val staleClaim = claim(claimedAtMonotonic = 0L)
+        val staleClaim = claim(claimedAtMs = 0L)
         val authority = AuthorityState(bySid = mapOf("A" to entry(staleClaim)))
         val (store, _) = boundStore()
 
@@ -407,7 +407,7 @@ class OptimisticClaimWatchdogCoordinatorTest {
         // tick would have fired). The authority is STATIC — the watchdog re-reads
         // it each tick, and age = wallClock - claimedAt grows over time.
         val stampAt = OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS + 1L
-        val authority = AuthorityState(bySid = mapOf("A" to entry(claim(claimedAtMonotonic = stampAt))))
+        val authority = AuthorityState(bySid = mapOf("A" to entry(claim(claimedAtMs = stampAt))))
 
         val detectedAt = java.util.concurrent.atomic.AtomicLong(-1L)
         val coordinator = OptimisticClaimWatchdogCoordinator(

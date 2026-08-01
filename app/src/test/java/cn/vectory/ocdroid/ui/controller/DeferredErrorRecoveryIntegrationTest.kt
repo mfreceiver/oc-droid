@@ -99,7 +99,7 @@ class DeferredErrorRecoveryIntegrationTest {
                         serverRound = null,
                         optimisticClaim = null,
                         origin = EntryOrigin.SSE_SLIM,
-                        updatedMonotonic = 0L,
+                        updatedAtMs = 0L,
                         workdir = null,
                         scopeKey = scope,
                     )),
@@ -116,7 +116,7 @@ class DeferredErrorRecoveryIntegrationTest {
                 status = SessionStatus("idle"),
                 origin = EntryOrigin.SSE_SLIM,
                 scopeKey = scope,
-                connectionMonotonicMs = 1000L,
+                connectionTimeMs = 1000L,
             ),
         ))
     }

@@ -96,7 +96,7 @@ class RetryQueueWireTest {
         val e1 = q["s1"]
         assertNotNull(e1)
         assertEquals(1, e1!!.attempt)
-        assertEquals(5_000L, e1.queuedMonotonic)
+        assertEquals(5_000L, e1.queuedAtMs)
         // attempt 0 → exponentialBackoffMs = BASE * 2^0 = 200
         assertEquals(200L, e1.backoffMs)
         val e2 = q["s2"]
@@ -172,7 +172,7 @@ class RetryQueueWireTest {
         assertEquals(2, entry!!.attempt)
         // attempt 1 → exponentialBackoffMs = BASE * 2^1 = 400
         assertEquals(400L, entry.backoffMs)
-        assertEquals(6_000L, entry.queuedMonotonic)
+        assertEquals(6_000L, entry.queuedAtMs)
     }
 
     @Test

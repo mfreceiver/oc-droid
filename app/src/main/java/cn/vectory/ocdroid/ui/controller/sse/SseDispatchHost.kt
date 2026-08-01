@@ -158,7 +158,7 @@ interface SseDispatchHost {
  * now gates on [AuthorityOp.ApplyEvent.identityEpochAtCapture] vs
  * [cn.vectory.ocdroid.ui.StoreState.identityEpoch] when [capturedIdentity] is
  * non-null (this extension derives scopeKey + capturedIdentity from the event's
- * captured identity, not the current host); connectionMonotonicMs = the host's
+ * captured identity, not the current host); connectionTimeMs = the host's
  * SSE clock (TTL/tie-break, non-causal).
  */
 internal fun SseDispatchHost.applyStatusViaAuthority(
@@ -187,18 +187,16 @@ internal fun SseDispatchHost.applyStatusViaAuthority(
     val eventIdentity = currentEventIdentity()
     val (scopeKey, capturedIdentity, identityEpochAtCapture) = if (eventIdentity != null) {
         Triple(
-            cn.vectory.ocdroid.data.state.ScopeKey(
-                serverGroupFp = eventIdentity.serverGroupFp,
-                endpointFp = eventIdentity.endpointFp,
+            cn.vectory.ocdroid.data.state.scopeKeyOf(
+                eventIdentity.serverGroupFp, eventIdentity.endpointFp,
             ),
             eventIdentity,
             slices.store.captureIdentityEpoch(),
         )
     } else {
         Triple(
-            cn.vectory.ocdroid.data.state.ScopeKey(
-                serverGroupFp = serverGroupFp(),
-                endpointFp = "",
+            cn.vectory.ocdroid.data.state.scopeKeyOf(
+                serverGroupFp(), "",
             ),
             null,
             0L,
@@ -217,7 +215,7 @@ internal fun SseDispatchHost.applyStatusViaAuthority(
                 capturedIdentity = capturedIdentity,
                 identityEpochAtCapture = identityEpochAtCapture,
                 scopeKey = scopeKey,
-                connectionMonotonicMs = sseClock(),
+                connectionTimeMs = sseClock(),
                 workdir = workdir,
             ),
         ),

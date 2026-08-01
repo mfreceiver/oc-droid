@@ -177,7 +177,7 @@ internal object StatusPollOrchestrator {
                 // re-reads sessionStatuses to merge — it uses op.localBefore.
                 val localBefore = slices.sessionList.value.sessionStatuses
                 // §P0-A: requestStartMs captured at the caller (carried into the op
-                // as the entries' updatedMonotonic + coverage.lastSuccessTimeMs —
+                // as the entries' updatedAtMs + coverage.lastSuccessTimeMs —
                 // the reducer itself reads NO clock, staying pure).
                 val requestStartMs = System.currentTimeMillis()
                 // §verbose-diag-flood: capture the current-session id + its prior

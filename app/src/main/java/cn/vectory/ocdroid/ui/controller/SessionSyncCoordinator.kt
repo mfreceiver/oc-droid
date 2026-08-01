@@ -1644,7 +1644,7 @@ class SessionSyncCoordinator(
                             scopeKey = scopeKey,
                             attempt = prevAttempt + 1,
                             backoffMs = nominalBackoffMs,
-                            queuedMonotonic = now,
+                            queuedAtMs = now,
                             // §U-CQ5: capture the identity epoch at queue
                             // dispatch. The reducer's opScopeValid DROPS the
                             // op if the identity advanced (host switch)

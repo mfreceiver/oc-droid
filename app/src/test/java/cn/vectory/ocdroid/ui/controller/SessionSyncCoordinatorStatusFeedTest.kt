@@ -127,7 +127,7 @@ class SessionSyncCoordinatorStatusFeedTest {
         assertNotNull("authority entry must be written for the SSE status", entry)
         assertEquals("/work-a", entry!!.workdir)
         assertEquals("busy", entry.status.type)
-        assertEquals(1_000L, entry.updatedMonotonic)
+        assertEquals(1_000L, entry.updatedAtMs)
     }
 
     @Test
@@ -221,7 +221,7 @@ class SessionSyncCoordinatorStatusFeedTest {
         val entry = slices.store.stateFlow.value.authority.bySid["s1"]
         assertNotNull("authority entry written", entry)
         assertEquals("idle", entry!!.status.type)
-        assertEquals(6_000L, entry.updatedMonotonic)
+        assertEquals(6_000L, entry.updatedAtMs)
     }
 
     @Test
