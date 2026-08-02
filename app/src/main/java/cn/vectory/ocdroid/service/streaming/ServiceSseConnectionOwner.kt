@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.service.streaming
 
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.data.model.SlimapiResyncReason
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.service.LeaseToken
 import cn.vectory.ocdroid.service.StreamingOwnershipGate
@@ -19,7 +20,25 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * Callback for unexpected transport drops. Implemented by
+ * [ForegroundTransportDropHandler].
+ */
+interface UnexpectedTransportDropHandler {
+    fun onUnexpectedDrop(attempt: TransportAttemptToken, reason: TransportDropReason)
+}
+
+/** Shared monitor/fence for owner supersession and unexpected-drop routing. */
+internal interface FencedUnexpectedTransportDropHandler : UnexpectedTransportDropHandler {
+    fun onUnexpectedDropIfCurrent(
+        attempt: TransportAttemptToken,
+        reason: TransportDropReason,
+    ): Boolean
+}
 
 /**
  * L2: single-attempt SSE collector host.
@@ -91,7 +110,7 @@ class ServiceSseConnectionOwner(
     val isSseConnected: StateFlow<Boolean>
         get() = sharedStateStore.sseConnectedFlow
 
-    private val connectMutex = kotlinx.coroutines.sync.Mutex()
+    private val connectMutex = Mutex()
 
     // ── public API ────────────────────────────────────────────────────
 
@@ -250,7 +269,15 @@ class ServiceSseConnectionOwner(
 
         val error = failure ?: java.io.IOException("SSE flow completed without an explicit error")
         onCollectionException(identity, generation, attempt, error)
-        // After handling failure: route the drop exactly once.
+        // Re-check canonical AFTER onCollectionException: a concurrent path may
+        // have terminalized the token within the same generation (e.g. another
+        // thread called markStopped). The canonical check in onCollectionException
+        // suppresses error/gap side effects for a stale token, but the drop
+        // routing below runs unconditionally — re-check here so a stale token
+        // does NOT route a drop for a superseding generation.
+        val canonicalAfter = runtimeStore.currentAttempt(identity)
+        if (canonicalAfter == null || canonicalAfter.attemptId != attempt.attemptId) return@launch
+        // Route the drop exactly once.
         if (!routeUnexpectedDrop(attempt, TransportDropReason.RETRY_EXHAUSTED)) return@launch
 
         setSseConnected(false, generation)
@@ -281,9 +308,19 @@ class ServiceSseConnectionOwner(
         sseEventStream.emit(Result.success(IdentifiedSseEvent(identity, event)))
 
         // Handle resync (first-frame cold-start OR explicit resync frame).
-        val isFirstFrameOfGen = !readiness.isCompleted
         val type = event.payload.type
         val isResync = type == "resync"
+        val isFirstFrameOfGen = !readiness.isCompleted
+        val serverReasonRaw: String? =
+            if (isResync) event.payload.getString("reason") else null
+        if (isResync) {
+            val serverReasonTyped: SlimapiResyncReason? =
+                SlimapiResyncReason.fromRaw(serverReasonRaw)
+            DebugLog.i(
+                TAG,
+                "slim resync reason: raw=$serverReasonRaw typed=$serverReasonTyped gen=$generation",
+            )
+        }
         if (isFirstFrameOfGen || isResync) {
             triggerResync(
                 reason = if (isFirstFrameOfGen) "first-frame type=$type" else "explicit-resync type=$type",
