@@ -15,10 +15,10 @@ interface DegradedBootstrapTerminator {
 class AndroidDegradedBootstrapTerminator @Inject constructor(
     @param:ApplicationContext private val context: Context,
 ) : DegradedBootstrapTerminator {
+    // SessionStreamingService deleted in L1 Commit 2 — terminated path is
+    // a no-op. The interface is kept for the probe flow pending further
+    // refactoring.
     override fun terminate() {
-        val intent = Intent(context, SessionStreamingService::class.java).apply {
-            action = SessionStreamingService.ACTION_CLOSE_BACKGROUND
-        }
-        context.startService(intent)
+        // No-op: the FGS was deleted in L1.
     }
 }

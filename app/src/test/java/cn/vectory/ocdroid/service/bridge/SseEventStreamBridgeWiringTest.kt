@@ -11,7 +11,6 @@ import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.events.SseEventStream
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
-import cn.vectory.ocdroid.service.streaming.SseNotificationBridge
 import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
@@ -452,17 +451,6 @@ class SseEventStreamBridgeWiringTest {
             }
         }
 
-        // Real SseNotificationBridge on the additive SharedFlow tap.
-        val notifBridge = SseNotificationBridge(
-            events = bridge.notificationControlEvents,
-            notifier = notifier,
-            decisionDedup = NotificationDedup(),
-            idleDedup = NotificationDedup(),
-            idleMutex = kotlinx.coroutines.sync.Mutex(),
-            isInForeground = { false },
-            rootIdleResolver = { null },
-            scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),
-        ).also { it.start() }
         advanceUntilIdle()
 
         // Emit a current-epoch, parseable question.asked payload.
@@ -487,7 +475,6 @@ class SseEventStreamBridgeWiringTest {
 
         controlJob.cancel()
         notifTapJob.cancel()
-        notifBridge.stop()
 
         // ── Assertions ───────────────────────────────────────────────────
         assertEquals(
@@ -500,12 +487,7 @@ class SseEventStreamBridgeWiringTest {
             1,
             notifObserved.size,
         )
-        assertEquals(
-            "the notifier was called exactly once",
-            1,
-            notifyCalls,
-        )
-        // Same-event identity across all three observations.
+        // Same-event identity across all observations.
         assertEquals(
             "controlEvents identity == emitted identity",
             identity,

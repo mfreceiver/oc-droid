@@ -60,14 +60,6 @@ abstract class MainViewModelTestBase {
     protected lateinit var appLifecycleMonitor: AppLifecycleMonitor
     protected lateinit var identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
     protected lateinit var core: AppCore
-    /**
-     * CP9 (notify Phase-0 switchover): the recording launcher wired into the
-     * core's ConnectionCoordinator. Tests assert on [RecordingStreamingServiceLauncher.callCount]
-     * instead of `repository.connectSSE` after the switchover (the SSE
-     * collector moved to the Service; CC's startSSE now calls the launcher).
-     */
-    protected var streamingServiceLauncher: RecordingStreamingServiceLauncher = RecordingStreamingServiceLauncher()
-        private set
 
     /**
      * T13 (round-2 review fix): the relaxed-mock poller wired into the core.
@@ -157,8 +149,6 @@ abstract class MainViewModelTestBase {
         // resolved text is unused; a relaxed Context mock satisfies the
         // constructor without dragging Robolectric into every test.
         val appContext = mockk<Context>(relaxed = true)
-        // CP9: each test gets a fresh recording launcher.
-        streamingServiceLauncher = RecordingStreamingServiceLauncher()
         // §R-19 Sprint 3 P2-5: AppCore's 5 controllers + the @UiApplicationScope
         // CoroutineScope are now Hilt @Provides-bound in production. In unit
         // tests (no Hilt container) we still construct AppCore directly, so
@@ -249,6 +239,8 @@ abstract class MainViewModelTestBase {
             identityStore = identityStore,
             repository = repository,
         )
+        val sseOwner = io.mockk.mockk<cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner>(relaxed = true)
+        val ownershipGate = io.mockk.mockk<cn.vectory.ocdroid.service.StreamingOwnershipGate>(relaxed = true)
         val connectionCoordinator = cn.vectory.ocdroid.ui.controller.ConnectionCoordinator(
             scope = appScope,
             slices = store.slices,
@@ -257,16 +249,11 @@ abstract class MainViewModelTestBase {
             effects = effectBus,
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
-            // CP9 (notify Phase-0 switchover): CC's startSSE now delegates to
-            // a fake launcher (records ensureStarted calls; tests assert on
-            // the call count instead of repository.connectSSE). The real
-            // Android impl is Hilt-bound in production.
-            streamingServiceLauncher = streamingServiceLauncher,
-            // CP9: cancelSse / cancelSseForReconfigure route through the
-            // lifecycle coordinator; pass null here (CC's delegates are
-            // no-ops without it). Tests that exercise the teardown path
-            // construct their own coordinator with a real coordinator.
-            streamingLifecycleCoordinator = null,
+            // L1 FGS commit 3: sseOwner + ownershipGate mandatory (mocked).
+            // Launcher + lifecycle coordinator removed. L7: bootstrapCoordinator
+            // (TOFU) removed — per-server trust-all toggle.
+            sseOwner = sseOwner,
+            ownershipGate = ownershipGate,
         )
         val fpProvider: () -> String = { hostProfileStore.currentProfile().id }
         val core = AppCore(

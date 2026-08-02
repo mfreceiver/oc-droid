@@ -395,14 +395,17 @@ object ControllerModule {
         serverCompatProfile: ServerCompatProfile,
         @Named("currentProfileId") currentProfileId: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
-        streamingServiceLauncher: cn.vectory.ocdroid.service.StreamingServiceLauncher,
-        streamingLifecycleCoordinator: cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator,
         connectionBootstrapEngine: cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine,
         bootstrapRetryPolicy: cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy,
         appLifecycleMonitor: AppLifecycleMonitor,
         degradedBootstrapTerminator: cn.vectory.ocdroid.service.DegradedBootstrapTerminator,
         tokenStreamCoordinator: TokenStreamCoordinator,
         effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver,
+        // L1 FGS commit 1: new params for post-FGS architecture.
+        sseOwner: cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner,
+        processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller,
+        sessionSnapshotProvider: cn.vectory.ocdroid.service.streaming.SessionSnapshotProvider,
+        ownershipGate: cn.vectory.ocdroid.service.StreamingOwnershipGate,
     ): ConnectionCoordinator = ConnectionCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -412,16 +415,13 @@ object ControllerModule {
         serverCompatProfile = serverCompatProfile,
         currentProfileId = currentProfileId,
         identityStore = identityStore,
-        // CP9 (notify Phase-0 switchover): CC's startSSE now calls the
-        // streaming Service launcher (the atomic ownership switch); the
-        // Service runs the §5 bootstrap + the SSE collector lives in
-        // ServiceSseConnectionOwner. CC NEVER calls repository.connectSSE.
-        streamingServiceLauncher = streamingServiceLauncher,
-        // CP9 (notify Phase-0 switchover): CC's cancelSse /
-        // cancelSseForReconfigure now route through the lifecycle
-        // coordinator's onDisconnect (§4.1 disconnect → L3 teardown); the
-        // Service observes the commands and disconnects its owner.
-        streamingLifecycleCoordinator = streamingLifecycleCoordinator,
+        // L1 FGS commit 3: lifecycle coordinator + launcher removed.
+        // sseOwner+ownershipGate sole path. L7: bootstrapCoordinator (TOFU)
+        // also removed — per-server trust-all toggle replaces it.
+        sseOwner = sseOwner,
+        processStatusPoller = processStatusPoller,
+        sessionSnapshotProvider = sessionSnapshotProvider,
+        ownershipGate = ownershipGate,
         connectionBootstrapEngine = connectionBootstrapEngine,
         bootstrapRetryPolicy = bootstrapRetryPolicy,
         appLifecycleMonitor = appLifecycleMonitor,

@@ -12,7 +12,6 @@ import cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy
 import cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine
 import cn.vectory.ocdroid.service.streaming.ConnectionBootstrapOutcome
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
-import cn.vectory.ocdroid.service.StreamingServiceLauncher
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
@@ -77,7 +76,14 @@ internal class ConnectionHealthProbe(
     private val identityStore: ConnectionIdentityStore?,
     private val connectionBootstrapEngine: ConnectionBootstrapEngine?,
     private val bootstrapRetryPolicy: BootstrapRetryPolicy,
-    private val streamingServiceLauncher: StreamingServiceLauncher?,
+    /**
+     * L1 FGS commit 1: replaces the old [StreamingServiceLauncher] for the
+     * probe's engine path. The probe calls this lambda to directly connect
+     * the SSE owner instead of going through the Service launcher.
+     *
+     * Default `{ null }` preserves legacy/test construction.
+     */
+    private val connectSseAndAwait: suspend (cn.vectory.ocdroid.service.identity.ConnectionIdentity) -> cn.vectory.ocdroid.service.streaming.SourceActivation? = { _ -> null },
     private val degradedBootstrapTerminator: DegradedBootstrapTerminator?,
     private val appLifecycleMonitor: AppLifecycleMonitor?,
     // Callbacks back into [ConnectionCoordinator] for operations that remain
@@ -486,16 +492,20 @@ internal class ConnectionHealthProbe(
                     when (val outcome = engine.bootstrap()) {
                         is ConnectionBootstrapOutcome.Success -> {
                             loadInitialData()
-                            // D5-2 (#4): CC state during the ownership window —
-                            // from engine success until the terminal ownership
-                            // result, stay Connecting (do NOT enter Connected or
-                            // Disconnected mid-window). `ensureStarted` is
-                            // suspend; CC is parked here while the launcher
-                            // awaits Stage 1 acceptance (5s) + Stage 2 terminal.
-                            val ownership = streamingServiceLauncher?.ensureStarted(outcome.identity)
-                                ?: OwnershipStartResult.Refused(
-                                    cn.vectory.ocdroid.service.OwnershipRefusal.ServiceStopped,
-                                )
+                            // L1 FGS commit 1: connect the SSE owner directly
+                            // (the launcher path was removed in Commit 2).
+                            val ownership = connectSseAndAwait(outcome.identity)?.let { activation ->
+                                when (activation) {
+                                    is cn.vectory.ocdroid.service.streaming.SourceActivation.Ready ->
+                                        cn.vectory.ocdroid.service.OwnershipStartResult.Ready(outcome.identity)
+                                    else ->
+                                        cn.vectory.ocdroid.service.OwnershipStartResult.Refused(
+                                            cn.vectory.ocdroid.service.OwnershipRefusal.BootstrapFailed,
+                                        )
+                                }
+                            } ?: cn.vectory.ocdroid.service.OwnershipStartResult.Refused(
+                                cn.vectory.ocdroid.service.OwnershipRefusal.ServiceStopped,
+                            )
                             // D5-2 (#4): identity recheck BEFORE writing Connected.
                             // A newer epoch may have started during the (possibly
                             // long) ownership wait — this stale-result branch

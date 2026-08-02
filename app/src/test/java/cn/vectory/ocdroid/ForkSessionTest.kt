@@ -159,6 +159,8 @@ class ForkSessionTest {
             currentProfileId = { "test-fp" },
             identityStore = identityStore,
         )
+        val sseOwner = io.mockk.mockk<cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner>(relaxed = true)
+        val ownershipGate = io.mockk.mockk<cn.vectory.ocdroid.service.StreamingOwnershipGate>(relaxed = true)
         val connectionCoordinator = cn.vectory.ocdroid.ui.controller.ConnectionCoordinator(
             scope = appScope,
             slices = store.slices,
@@ -167,9 +169,10 @@ class ForkSessionTest {
             effects = effectBus,
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
-            // CP9 (notify Phase-0 switchover): CC's startSSE now calls the
-            // streaming Service launcher (no more repository.connectSSE).
-            streamingServiceLauncher = cn.vectory.ocdroid.RecordingStreamingServiceLauncher(),
+            // L1 FGS: sseOwner + ownershipGate sole path (launcher + lifecycle
+            // coordinator removed). L7: bootstrapCoordinator (TOFU) removed.
+            sseOwner = sseOwner,
+            ownershipGate = ownershipGate,
         )
         // §unread-soak: real controller for parity with MainViewModelTestBase.
         val unreadSoakController = cn.vectory.ocdroid.ui.controller.UnreadSoakController(

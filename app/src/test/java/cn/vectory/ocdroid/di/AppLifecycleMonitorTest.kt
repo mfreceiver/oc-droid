@@ -56,9 +56,10 @@ import org.robolectric.annotation.Config
  *     default caused the §4.3 bug. The 0→1 `onActivityStarted` transition
  *     still flips it to `true` on the first real Activity start; only the
  *     "no Activity yet" window is now correctly background.
- *  2. **§7 channel matrix**: `createChannels` now registers
- *     `ocdroid.session_status` (IMPORTANCE_LOW) alongside the two existing
- *     channels (`ocdroid.decisions` HIGH / `ocdroid.errors` DEFAULT).
+ *  2. **Channel matrix**: `createChannels` registers the user-facing
+ *     channels `ocdroid.decisions` (HIGH), `ocdroid.idle` (HIGH),
+ *     `ocdroid.errors` (DEFAULT). The former `ocdroid.session_status`
+ *     FGS-ongoing channels were removed in L1 FGS deletion.
  *  3. **D1 (gate #2) 700ms background-confirmation**: the synchronous 1→0
  *     flip was replaced with a delayed confirmation (matching AndroidX
  *     `ProcessLifecycleOwner`). Tests use virtual time via [TestScope] to
@@ -690,37 +691,36 @@ class AppLifecycleMonitorTest {
             )
         }
 
-    // ── §7 channel matrix ─────────────────────────────────────────────────
+    // ── channel matrix ────────────────────────────────────────────────────
+    // L1 FGS deletion: the former CHANNEL_SESSION_STATUS / _MIN channels
+    // (ongoing FGS notification surface) were removed with SessionStreamingService.
+    // Only DECISIONS / IDLE / ERRORS remain (AppLifecycleMonitor notifier path).
     @Test
-    fun `createChannels registers all three channels - decisions HIGH, errors DEFAULT, session_status LOW`() {
+    fun `createChannels registers decisions idle and errors channels`() {
         NotificationChannels.createChannels(app)
 
         val manager = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channels = manager.notificationChannels.associateBy { it.id }
 
         assertNotNull("ocdroid.decisions registered", channels[NotificationChannels.CHANNEL_DECISIONS])
+        assertNotNull("ocdroid.idle registered", channels[NotificationChannels.CHANNEL_IDLE])
         assertNotNull("ocdroid.errors registered", channels[NotificationChannels.CHANNEL_ERRORS])
-        val session = channels[NotificationChannels.CHANNEL_SESSION_STATUS]
-        assertNotNull("ocdroid.session_status registered (CP8)", session)
-        assertEquals(
-            "§7 channel matrix: session_status is IMPORTANCE_LOW",
-            android.app.NotificationManager.IMPORTANCE_LOW,
-            session!!.importance,
-        )
         // Descriptions are non-null (the production code always sets one).
-        assertNotNull("session_status has a description", session.description)
+        channels.values.forEach {
+            assertNotNull("${it.id} has a description", it.description)
+        }
     }
 
     @Test
-    fun `createChannels is idempotent - re-invocation does not duplicate session_status`() {
+    fun `createChannels is idempotent - re-invocation does not duplicate channels`() {
         NotificationChannels.createChannels(app)
         NotificationChannels.createChannels(app) // idempotent per platform contract.
 
         val manager = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val sessionCount = manager.notificationChannels.count {
-            it.id == NotificationChannels.CHANNEL_SESSION_STATUS
+        val decisionsCount = manager.notificationChannels.count {
+            it.id == NotificationChannels.CHANNEL_DECISIONS
         }
-        assertEquals("re-create is a no-op (single channel)", 1, sessionCount)
+        assertEquals("re-create is a no-op (single decisions channel)", 1, decisionsCount)
     }
 
     // ── C-D3 rev-3 round-5 background poller host-switch (REAL pollPendingItems) ─
