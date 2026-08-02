@@ -34,31 +34,37 @@ import kotlinx.coroutines.launch
  * and the engine-driven bootstrap path ([testConnectionWithEngine]).
  *
  * **Behavior-preserving extraction.** Every state-machine transition,
- * `writeConnection` ordering, TOFU call sequence
- * ([OpenCodeRepository.captureServerCert] /
- * [OpenCodeRepository.applyTofuDecision]), SSE-test connect timing
+ * `writeConnection` ordering, SSL resolution sequence
+ * ([OpenCodeRepository.captureServerCert]), SSE-test connect timing
  * (`startSSE` callback), `onSettled` exactly-once contract, and log string
  * is byte-identical to the pre-extraction coordinator. The `TAG` is
  * intentionally still `"ConnectionCoordinator"` so logcat filters/greps that
  * keyed on the old tag keep resolving.
  *
+ * §review-blocker-#4 (L7 TOFU removal): the pre-L7 TOFU trust machinery
+ * (`applyTofuDecision`, `promoteDegradedTofuIfNeeded`,
+ * `hasPendingTofuDecision`) was DELETED in L7. Trust is resolved purely from
+ * the active HostProfile's [cn.vectory.ocdroid.data.repository.http.SslConfig]
+ * at configure time. The historical extraction notes that referenced those
+ * symbols are updated below; `captureServerCert` is retained only as the
+ * mTLS client-cert probe for the host:port authority.
+ *
  * **Extraction boundary:**
  *  - Probe entry points ([testConnection] / [coldStartReconnect]) +
- *    [testConnectionWithEngine] (private) + [promoteDegradedTofuIfNeeded]
- *    + the foreground-monitor `init` hook + the TOFU `tofu` delegate +
- *    `hasPendingTofuDecision` live HERE.
+ *    [testConnectionWithEngine] (private) + the foreground-monitor `init`
+ *    hook live HERE.
  *  - [ConnectionCoordinator] keeps thin public delegates
  *    ([ConnectionCoordinator.testConnection] /
- *    [ConnectionCoordinator.coldStartReconnect] /
- *    [ConnectionCoordinator.resolveTofuTrust]) so all existing call sites
+ *    [ConnectionCoordinator.coldStartReconnect]) so all existing call sites
  *    resolve unchanged, plus the operations the probe calls back into
  *    ([ConnectionCoordinator.loadInitialData] /
  *    [ConnectionCoordinator.startSSE] — both public, both with external
  *    callers, so they could not move).
  *  - [ConnectionCoordinator.startSSE] stays on the coordinator (it is the
- *    CP9 `ensureStarted` adapter); its TOFU-frozen guard now reads
- *    [hasPendingTofuDecision] / [pendingTofuHostPort] from this probe so the
- *    shared TOFU state has a single owner.
+ *    CP9 `ensureStarted` adapter). §review-blocker-#4 (L7): the pre-L7
+ *    TOFU-frozen guard (`hasPendingTofuDecision` / `pendingTofuHostPort`)
+ *    was DELETED in L7 — TLS trust resolves from the HostProfile's
+ *    [cn.vectory.ocdroid.data.repository.http.SslConfig] at configure time.
  *
  * **No new subpackages, no public-API change.** `internal` visibility; same
  * package `cn.vectory.ocdroid.ui.controller`.
@@ -646,10 +652,11 @@ internal class ConnectionHealthProbe(
      * `ConnectionViewModel.coldStartReconnect()` ←
      * `SessionsScreen.onRefresh`).
      *
-     * §tofu R2: FROZEN while a TOFU trust dialog is pending — a reconnect
-     * race against the in-flight decision would either burn retries or fork
-     * two capture probes. The user's [resolveTofuTrust] clears the pending
-     * state and the loop re-probes; cold-start then proceeds naturally.
+     * §review-blocker-#4 (L7): the pre-L7 "FROZEN while a TOFU trust dialog
+     * is pending" guard was DELETED in L7 — TLS trust resolves from the
+     * HostProfile's SslConfig at configure time, so there is no in-flight
+     * trust decision to freeze on. The exponential-backoff retry below
+     * proceeds unconditionally on cold start.
      */
     fun coldStartReconnect() {
         testConnection(force = true, retries = 3)

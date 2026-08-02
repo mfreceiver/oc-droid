@@ -45,9 +45,15 @@ sealed interface SslConfig {
     /**
      * L7: per-server trust-all (Decision 4): trusts ALL server certificates
      * (self-signed, forged, intercepted) for this host. NO MITM protection.
-     * XOR with MutualTLS: trustAll ON disables server verification even if
-     * mTLS client cert is presented (mTLS authenticates the CLIENT, not the
-     * server — P1-4). Hostname verifier is permissive.
+     *
+     * §review-blocker-#4 (copy corrected): **mTLS takes priority — when an
+     * mTLS client cert is presented, trust-all is IGNORED** (see
+     * [SslConfigFactory.sslConfigFor] + [OpenCodeRepository.resolveCandidateSsl]:
+     * both route `MutualTLS` first, fall back to `TrustAll` only when
+     * `clientCert == null`). So the practical combination is "mTLS when
+     * configured, else trust-all, else system CA" — NOT "trust-all bypasses
+     * mTLS server verification". Hostname verifier is permissive when this
+     * branch is selected.
      */
     data object TrustAll : SslConfig
 }

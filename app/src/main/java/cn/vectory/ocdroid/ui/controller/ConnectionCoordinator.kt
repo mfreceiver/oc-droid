@@ -40,17 +40,24 @@ import java.util.Locale
  *
  * **L4c (Wave ζ): the health-probe concern has been EXTRACTED into
  * [ConnectionHealthProbe]** ([healthProbe]). The multi-state connect flow
- * (`testConnection` / `testConnectionWithEngine` / `coldStartReconnect`),
- * the TOFU delegation (`tofu` / `hasPendingTofuDecision` /
- * `promoteDegradedTofuIfNeeded`), and the foreground-monitor `init` hook now
- * live there verbatim. This coordinator keeps thin public delegates
- * ([testConnection] / [coldStartReconnect] / [resolveTofuTrust]) so every
- * existing call site (ConnectionViewModel / AppCore / ChatViewModel / tests)
- * resolves unchanged. The probe calls back into [loadInitialData] /
+ * (`testConnection` / `testConnectionWithEngine` / `coldStartReconnect`)
+ * and the foreground-monitor `init` hook now live there verbatim. This
+ * coordinator keeps thin public delegates
+ * ([testConnection] / [coldStartReconnect]) so every existing call site
+ * (ConnectionViewModel / AppCore / ChatViewModel / tests) resolves
+ * unchanged. The probe calls back into [loadInitialData] /
  * [startSSE] (both public, both with external callers — they could not move).
  * Extraction is behavior-preserving: identical state-machine transitions,
- * TOFU call order, SSE lifecycle timing, and `onSettled` exactly-once
- * contract.
+ * SSE lifecycle timing, and `onSettled` exactly-once contract.
+ *
+ * §review-blocker-#4 (L7 TOFU removal): the pre-L7 TOFU trust-decision
+ * machinery (`hasPendingTofuDecision` / `resolveTofuTrust` /
+ * `pendingTofuHostPort` / `promoteDegradedTofuIfNeeded`) was DELETED in L7.
+ * The historical extraction notes below are kept for archaeology but the
+ * TOFU-specific symbols they referenced no longer exist; trust is now
+ * per-server via [cn.vectory.ocdroid.data.repository.http.SslConfig] (SystemDefault /
+ * MutualTLS / TrustAll), resolved purely from the active HostProfile at
+ * configure time.
  *
  * **CP9 switchover**: the SSE feed ownership (sseJob + launchSseCollection)
  * has been DELETED from this coordinator and moved into the Service-owned
@@ -90,8 +97,11 @@ import java.util.Locale
  *    directory-sessions re-fetch for the restored workdir.
  *  - `loadCommands()` + `localCommands()` + `mergeCommands()` — slash-command
  *    merge (server list + client-side /clear /compact /undo /redo).
-     *  - `startSSE()` — thin delegate to sseOwner.connect(); its
-     *    TOFU-frozen guard now reads [ConnectionHealthProbe.hasPendingTofuDecision].
+     *  - `startSSE()` — thin delegate to sseOwner.connect(); the L7 TOFU
+     *    removal eliminated the pre-L7 TOFU-frozen guard (the symbols it
+     *    consulted, `hasPendingTofuDecision` / `pendingTofuHostPort`, no
+     *    longer exist). See [UnexpectedTransportDropHandler] kdoc for the
+     *    current teardown linearization contract.
  *  - `cancelSse()` / `cancelSseForReconfigure()` — coordinator teardown
  *    delegates, deduped via [cancelSseInternal].
  *
@@ -855,14 +865,14 @@ class ConnectionCoordinator(
      * Preserved as a compatibility delegate (VMs, [ControllerEffect.StartSse],
      * and tests expose it; deleting adds rollback churn).
      *
-     * The shared TOFU-frozen guard is preserved verbatim — while a TOFU trust
-     * dialog is pending the owner must NOT be invoked (the resulting
-     * bootstrap would try the same unpinned TLS handshake and fail the same
-     * way; the user's [resolveTofuTrust] unfreezes the retry loop which
-     * re-calls startSSE). L4c: the guard now reads
-     * [ConnectionHealthProbe.hasPendingTofuDecision] / [pendingTofuHostPort]
-     * from [healthProbe] (the single TOFU-state owner post-extraction);
-     * behavior is identical.
+     * §review-blocker-#4 (L7 TOFU removal): the pre-L7 "TOFU-frozen guard"
+     * and the `resolveTofuTrust` / `hasPendingTofuDecision` /
+     * `pendingTofuHostPort` symbols it consulted were DELETED in L7. TLS
+     * trust is now resolved purely from the active HostProfile's
+     * [cn.vectory.ocdroid.data.repository.http.SslConfig] at configure time
+     * (SystemDefault / MutualTLS / TrustAll); there is no runtime trust
+     * dialog to freeze on. See [UnexpectedTransportDropHandler] kdoc for the
+     * current teardown linearization contract.
      */
     fun startSSE() {
         val identity = identityStore?.currentIdentity?.value ?: return
