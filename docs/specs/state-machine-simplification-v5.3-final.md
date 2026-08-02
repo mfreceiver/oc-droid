@@ -152,6 +152,18 @@ L1 同时删 Launcher + Service 后，**无任何组件创建 pendingAttempt 或
 | 最终保留 | ~3500-4000 | **~5300**（核心 FSM） | ~5372（窄基线复算，与本版收敛） |
 | 削减率 | ~67-71% | **~63%**（9244/14553） | 收敛 |
 
+> **§2.6 实施后实测回写（v5.3-final post-impl · §review-blocker-#5）**：
+>
+> 以下三项在实施落地后与 §2.6 估算产生偏差，回写实测值并记录保守保留理由。**未达 §2.6 估算目标不视为回归**——估算在决策期是基于「删除某概念块」的量级判断，实施期逐守卫/逐路径验证后保留的部分为正确性必需。
+>
+> | 组件 | §2.6 估算目标 | 实施后实测 (`wc -l`) | 保守保留理由 |
+> |---|---|---|---|
+> | **TokenStreamCoordinator** | ~800 | **1465** | 实施期 oracle 逐守卫验证：4 守卫（epoch/generation/dedupPartRevision/bundleStamp）+ watchdog + reconnect 窗口 fencing 均被证明为重连场景正确性必需（跨代 stale frame 防护；§7.6 已记「不预设 generation/bundleStamp 可删」）。删 foreground/route 门控 ~450 行已落实，但聚合层 + 守卫链保留。**L17 simplify pass 范畴**：stale kdoc + highWater 近冗余可再削，但非 v5.3-final 阻塞项。 |
+> | **ProcessStatusPoller** | ~150 | **488** | §7.7 要求保留 slim fan-out（否则 slimapi 订阅者收不到 status 更新）。实施落地为 `TimedRefreshWithSlimFanOut`：定时刷新骨架 + slim 扇出扇入 + backoff 机制，三者皆必需。 |
+> | **AuthorityReducer** | ~600 | **860** | 实施期 `§review-blocker-#3` 修复 in-flight SSE 元数据保留（inFlightWin 路径保留 prior.origin + prior.updatedAtMs，不回退到 REST 值），新增约 12 行正确性保护。纯函数架构保留（Decision 6）。**L17 simplify pass 范畴**：stale kdoc + highWater 近冗余可再削。 |
+>
+> **结论**：三项偏差均为正确性/安全性保守保留，非伪装削减。v5.3-final 净削减总量仍真实（137 files +2766/−26904，净减 ~24138，三评审员共识）。L17 simplify pass 可在不触及正确性的前提下进一步精简 stale kdoc / highWater 近冗余，但属后续优化范畴，不阻塞 v5.3-final 发版。
+
 > **v5.2 → v5.3 行数更正要点（P0-2）**：
 > 1. v5.2 baseline ~12000 漏计了被计入删除收益的 `BootstrapCoord(240)` + TOFU 切片(595→实测 730) + multi-host UI(444)，以及完全漏列的 `DefaultSseReconnectSupervisor(631)` + `ConnectionBootstrapEngine(201)` + `ConnectionBootstrapRunner(50)`。
 > 2. v5.2 把"删除收益"加进了分母但没把这些组件加进 baseline 分子，导致削减率虚高（67-71%）。
