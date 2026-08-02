@@ -1789,9 +1789,9 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
  * place ([cn.vectory.ocdroid.ui.TokenStreamWiringTest]).
  *
  * NOT used for [cn.vectory.ocdroid.ui.controller.ConnectionCoordinator]'s
- * `resetDegraded` gate (that gates a DIFFERENT action — re-arming the
- * capability-degrade state — and does not check the foreground-session
- * condition).
+ * per-session token-stream re-arm (that gates a DIFFERENT action — re-arming
+ * the capability-degrade state was removed in L4 — and does not check the
+ * foreground-session condition).
  */
 internal fun shouldOpenTokenStream(
     tokenStreamEnabled: Boolean,

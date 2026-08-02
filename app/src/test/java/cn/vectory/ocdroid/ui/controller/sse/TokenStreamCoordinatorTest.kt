@@ -43,7 +43,6 @@ import java.util.concurrent.atomic.AtomicReference
  *  - watchdog timeout → ClearPartState + TriggerSinceFetch(auth) + Reconnect
  *  - watchdog fires BEFORE first frame (NO eventCount==0 skip)
  *  - generation-guard rejects stale clear (newer gen owns the partId)
- *  - 503 sse_token_subscriber_limit → degrade after N consecutive failures
  *  - reducer-effect → dispatch bridging (ClearPartState / TriggerSinceFetch / Reconnect)
  *  - ChatState.streamOwned / streamingPartTexts updated on STREAMING/DONE/buffer
  *  - S2: resync frame with sessionId==null → infer from the open connection's sid
@@ -88,8 +87,6 @@ class TokenStreamCoordinatorTest {
         currentBundleProvider: () -> cn.vectory.ocdroid.data.repository.ClientBundle? = { bundleRepository.currentClientBundle() },
         triggerSinceFetch: (String, Boolean) -> Unit = { sid, auth -> sinceFetchCalls += SinceFetchCall(sid, auth) },
         initialBackoffMs: Long = 50L,
-        retryAfter503Ms: Long = 20L,
-        maxConsecutive503: Int = 3,
         sseDisabled: () -> Boolean = { false },
     ): TokenStreamCoordinator = TokenStreamCoordinator(
         scope = scope,
@@ -104,8 +101,6 @@ class TokenStreamCoordinatorTest {
         watchdogMs = watchdogMs,
         initialBackoffMs = initialBackoffMs,
         maxBackoffMs = 200L,
-        retryAfter503Ms = retryAfter503Ms,
-        maxConsecutive503 = maxConsecutive503,
         clock = { scope.testScheduler.currentTime },
         sseDisabled = sseDisabled,
     )
@@ -625,81 +620,6 @@ class TokenStreamCoordinatorTest {
     }
 
     @Test
-    fun `open during 503-retry backoff is idempotent — no double subscription (Fix①)`() {
-        // §T1.1 Fix①: open(same sid+dir) during 503-retry backoff is
-        // idempotent-skipped; the pending retry survives and fires after Retry-After.
-        val fifty = FiftyProvider()
-        val c = buildCoordinator(
-            streamProvider = fifty.provider,
-            triggerSinceFetch = { _, _ -> },
-            retryAfter503Ms = 200L,
-            maxConsecutive503 = 10,
-        )
-        c.open("s1")
-        scope.advanceTimeBy(10L)
-        runPending()
-        val countAfterFirstFailure = fifty.openCount.get()
-        assertTrue("at least one provider call from initial open", countAfterFirstFailure >= 1)
-
-        val retryJob = c.currentStreamJobSnapshot()
-        assertTrue("503-retry job is active in backoff", retryJob!!.isActive)
-
-        // open(same sid, same dir=null) during Retry-After → Fix① skip.
-        c.open("s1")
-        scope.advanceTimeBy(10L)
-        runPending()
-        assertEquals("idempotent skip — openCount unchanged", countAfterFirstFailure, fifty.openCount.get())
-        assertSame("currentStreamJob unchanged (retry NOT superseded)", retryJob, c.currentStreamJobSnapshot())
-
-        // Advance past Retry-After → retry fires → provider called.
-        scope.advanceTimeBy(300L)
-        runPending()
-        assertTrue("retry fires after backoff — openCount increased", fifty.openCount.get() > countAfterFirstFailure)
-        // The reopen's own 503 failure may schedule another retry, but the
-        // ORPHANED retry (from the first failure) must NOT have fired. We
-        // verify by checking that the count didn't jump by more than the
-        // reopen's retry chain (which is itself bounded by the re-open's
-        // own 503 handling). The key invariant: no MORE than one provider
-        // call per backoff cycle. We assert the count is stable across a
-        // short window after the reopen's immediate retry.
-        val stable = fifty.openCount.get()
-        scope.advanceTimeBy(10L)
-        runPending()
-        assertEquals("no orphan retry within the immediate window", stable, fifty.openCount.get())
-        c.close("s1")
-        runPending()
-    }
-
-    // ── MF-2 (gate r1): streak reset on successful traffic ───────────────
-
-    @Test
-    fun `successful frame resets the consecutive-503 streak to zero`() {
-        coordinator.open("s1")
-        runPending()
-        // Build a partial 503 streak directly via the test seam.
-        coordinator.increment503ForTest("s1")
-        coordinator.increment503ForTest("s1")
-        assertEquals(2, coordinator.consecutive503Of("s1"))
-        // A successful frame (any type — even ServerConnected) proves the
-        // admission gate let us in; the streak is broken.
-        coordinator.dispatchEpochFrame(
-            "s1",
-            coordinator.epochOf("s1"),
-            coordinator.genOf("s1"),
-            TokenStreamFrame.ServerConnected("s1"),
-            0L,
-            bundleRepository.currentClientBundle()!!,
-        )
-        assertEquals(
-            "successful frame must reset the consecutive-503 streak",
-            0,
-            coordinator.consecutive503Of("s1"),
-        )
-        coordinator.close("s1")
-        runPending()
-    }
-
-    @Test
     fun `resync token_memory_limit clears and re-anchors on the SAME connection, no reconnect (D-MB-P)`() {
         // D-MB-P: token_memory_limit no longer triggers a reconnect. The server
         // (MB-P-S1, slimapi 3e4b3b7) keeps the stream alive AND re-emits
@@ -859,56 +779,6 @@ class TokenStreamCoordinatorTest {
         assertEquals(StreamOwnedState.DONE, stateStore.chatFlow.value.streamOwned["p1"])
     }
 
-    // ── 503 subscriber-limit → degrade after N ────────────────────────────
-
-    @Test
-    fun `three consecutive 503 failures degrade the sid`() {
-        // Wire a provider that fails immediately with a 503-shaped exception.
-        val fifty = FiftyProvider()
-        val c = buildCoordinator(
-            streamProvider = fifty.provider,
-            triggerSinceFetch = { _, _ -> },
-            retryAfter503Ms = 5L,
-            maxConsecutive503 = 3,
-        )
-        c.open("s1")
-        // Run the retry ladder: each failure bumps consecutive503BySid until
-        // it hits the cap (3). Each retry is scheduled at +retryAfter503Ms
-        // (5ms); advancing the clock past 3 hops lands all 3 attempts +
-        // the degrade decision.
-        scope.advanceTimeBy(100L)
-        assertTrue("sid should be degraded after 3 consecutive 503s", c.isDegraded("s1"))
-        // No further attempts — the provider's openCount should stabilise.
-        val stableCount = fifty.openCount.get()
-        scope.advanceTimeBy(500L)
-        assertEquals("no further attempts after degrade", stableCount, fifty.openCount.get())
-    }
-
-    @Test
-    fun `degraded sid open is a no-op`() {
-        // Pre-degrade by exhausting 503 retries.
-        val fifty = FiftyProvider()
-        val c = buildCoordinator(
-            streamProvider = fifty.provider,
-            triggerSinceFetch = { _, _ -> },
-            retryAfter503Ms = 5L,
-            maxConsecutive503 = 3,
-        )
-        c.open("s1")
-        scope.advanceTimeBy(100L)
-        assertTrue(c.isDegraded("s1"))
-        val countAfterDegrade = fifty.openCount.get()
-        // resetDegraded re-arms; without it, a fresh open is a no-op.
-        c.open("s1")
-        scope.advanceTimeBy(100L)
-        assertEquals(countAfterDegrade, fifty.openCount.get())
-        // resetDegraded allows a new attempt.
-        c.resetDegraded("s1")
-        c.open("s1")
-        scope.advanceTimeBy(100L)
-        assertTrue("re-open after reset should call provider again", fifty.openCount.get() > countAfterDegrade)
-    }
-
     /** Backing data for assertion on TriggerSinceFetch callback arguments. */
     private data class SinceFetchCall(val sid: String, val auth: Boolean)
 
@@ -964,14 +834,4 @@ class TokenStreamCoordinatorTest {
         }
     }
 
-    /** Fake provider whose flow throws a 503-subscriber-limit exception. */
-    private class FiftyProvider {
-        val openCount = AtomicInteger(0)
-        val provider: (String, String?) -> Flow<TokenStreamFrame> = { _, _ ->
-            openCount.incrementAndGet()
-            flow<TokenStreamFrame> {
-                throw RuntimeException("HTTP 503 sse_token_subscriber_limit")
-            }
-        }
-    }
 }

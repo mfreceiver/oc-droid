@@ -45,10 +45,6 @@ import java.util.concurrent.atomic.AtomicReference
  *    `eventCount==0` early-skip — that pattern would hang forever if the
  *    server never emits a first frame (half-open TCP, silent sidecar boot).
  *  - **reconnect backoff** (exponential, bounded) on failure / Reconnect effect.
- *  - **503 `sse_token_subscriber_limit`** (bounded Retry-After backoff; after
- *    N consecutive failures → capability-degrade: stop attempting the token
- *    stream for that sid until [resetDegraded] is called by the next health
- *    re-check).
  *  - **generation guard** (bgpt MF-3): per-sid generation + per-partId owner
  *    tag. Stale clears (from an old session/generation) do NOT wipe a newer
  *    session's same-partId overlay — extends epoch protection to clear-effects.
@@ -161,25 +157,8 @@ class TokenStreamCoordinator(
     private val maxBackoffMs: Long = MAX_BACKOFF_MS,
     /** Backoff growth factor. */
     private val backoffMultiplier: Double = BACKOFF_MULTIPLIER,
-    /**
-     * Consecutive 503 `sse_token_subscriber_limit` failures before
-     * capability-degrade kicks in (stop attempting the token stream for the
-     * sid until [resetDegraded]).
-     */
-    private val maxConsecutive503: Int = MAX_CONSECUTIVE_503,
-    /** Retry-After honour for 503 (sidecar advertises 5s). */
-    private val retryAfter503Ms: Long = RETRY_AFTER_503_MS,
     /** Injectable clock for deterministic watchdog tests. */
     private val clock: () -> Long = { System.currentTimeMillis() },
-    /**
-     * Classifies a flow-completion throwable into the recovery class the
-     * coordinator should follow. Default inspects the message for 503 +
-     * subscriber-limit markers (TokenStreamClient closes with
-     * `Exception("token stream failed (code=503)")` when OkHttp's onFailure
-     * had no throwable but a 503 response). Tests override to classify
-     * crafted exceptions deterministically.
-     */
-    private val classifyFailure: (Throwable?) -> TokenStreamFailure = ::defaultClassifyFailure,
     /**
      * §sse-disabled-debug-toggle: when true, [open] short-circuits WITHOUT
      * touching [streamProvider] — NO per-session `/slimapi/sessions/{sid}/stream`
@@ -362,14 +341,6 @@ class TokenStreamCoordinator(
     private val reducerStateBySid = ConcurrentHashMap<String, TokenStreamReducerState>()
     /** Per-sid consecutive reconnect attempts (drives backoff growth). */
     private val attemptBySid = ConcurrentHashMap<String, AtomicInteger>()
-    /** Per-sid consecutive 503 subscriber-limit failures (drives capability-degrade). */
-    private val consecutive503BySid = ConcurrentHashMap<String, AtomicInteger>()
-    /**
-     * Capability-degraded sids — the sidecar's per-instance token-stream
-     * admission cap has been hit repeatedly; the coordinator stops attempting
-     * the stream until [resetDegraded] (called by D2's next health re-check).
-     */
-    private val degradedSids: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     private fun dispatchBound(boundBundle: ClientBundle, action: AppAction) {
         synchronized(bundleCommitLock) {
@@ -589,10 +560,6 @@ class TokenStreamCoordinator(
                 DebugLog.d(TAG, "open($capturedSid) superseded during debounce — skipping")
                 return@launchStreamLifecycle
             }
-            if (capturedSid in degradedSids) {
-                DebugLog.i(TAG, "open($capturedSid) skipped — degraded (503 cap reached)")
-                return@launchStreamLifecycle
-            }
             val (epoch, gen) = beginStreamIncarnation(capturedSid)
             try {
                 runStream(capturedSid, capturedDir, epoch, gen, isReconnect = false, capturedRouteInstance)
@@ -616,8 +583,6 @@ class TokenStreamCoordinator(
      * caller (D2 / ChatViewModel) owns the UX decision of when to wipe the
      * streaming overlay (e.g. on session switch the existing reducer paths
      * already clear it via [AppAction.SessionSelected]).
-     *
-     * Does NOT reset capability-degrade state (use [resetDegraded] for that).
      */
     fun close(sid: String) {
         synchronized(bundleCommitLock) {
@@ -644,23 +609,8 @@ class TokenStreamCoordinator(
         // growth + provides epoch isolation).
         clearSessionRevisions(sid)
         attemptBySid.remove(sid)
-        consecutive503BySid.remove(sid)
         }
     }
-
-    /**
-     * D2 hook: clears the capability-degrade flag for [sid] (the next health
-     * re-check that re-confirms `SlimapiFeatures.tokenStream == true` should
-     * invoke this so a transient sidecap-full state does not permanently
-     * disable the token stream for the session).
-     */
-    fun resetDegraded(sid: String) {
-        degradedSids.remove(sid)
-        consecutive503BySid.remove(sid)
-    }
-
-    /** Test/diagnostic read. */
-    internal fun isDegraded(sid: String): Boolean = sid in degradedSids
 
     /** Test/diagnostic read: the current stream Job (or null when idle). */
     internal fun currentStreamJobSnapshot(): Job? = currentLifecycle.get()?.job
@@ -693,22 +643,6 @@ class TokenStreamCoordinator(
 
     /** §MF-1 (gate r2) test seam: reads the current sentinel value. */
     internal fun reconnectRequestedSnapshot(): String? = reconnectRequested.get()
-
-    /**
-     * §MF-2 test seam: the current consecutive-503 streak for [sid] (0 when
-     * none recorded). Used by the streak-reset test to assert a successful
-     * frame zeroes the counter.
-     */
-    internal fun consecutive503Of(sid: String): Int =
-        consecutive503BySid[sid]?.get() ?: 0
-
-    /**
-     * §MF-2 test seam: directly increments the consecutive-503 streak (tests
-     * build a partial streak WITHOUT having to wire a 503-throwing provider
-     * + then switch to a succeeding one).
-     */
-    internal fun increment503ForTest(sid: String): Int =
-        consecutive503BySid.computeIfAbsent(sid) { AtomicInteger(0) }.incrementAndGet()
 
     /** Test/diagnostic read: the partIds currently owned by the active stream for [sid]. */
     internal fun ownedPartsForSid(sid: String): Set<String> =
@@ -836,13 +770,6 @@ class TokenStreamCoordinator(
         // Reset reconnect-attempt counter on any successful frame — the link
         // is alive, the next failure should start a fresh backoff ladder.
         attemptBySid[sid]?.set(0)
-        // §MF-2 (gate r1): reset the consecutive-503 streak on any successful
-        // frame. The "consecutive failures" contract for capability-degrade
-        // means N 503s IN A ROW with no successful traffic between them —
-        // intermittent 503s over a long session must NOT accumulate to a
-        // permanent degrade. A frame proves the stream is alive (the 503
-        // admission gate let us in), so the streak is broken.
-        consecutive503BySid[sid]?.set(0)
 
         // §Stage-B C3 (CRITICAL): capture the route + bundle context ONCE
         // inside the epoch+bundle critical section (after both guards have
@@ -1166,9 +1093,8 @@ class TokenStreamCoordinator(
      *  - [TokenStreamWatchdogTimeout] → watchdog tripped; clear sid's parts +
      *    TriggerSinceFetch(auth) + schedule reconnect.
      *  - [CancellationException] → re-thrown (structured concurrency).
-     *  - any other [Throwable] → classified via [classifyFailure]; transient
-     *    → reconnect backoff, 503 subscriber-limit → bounded Retry-After then
-     *    degrade after N, normal (server clean close) → stop.
+     *  - any other [Throwable] → if null (server clean close) reset attempts,
+     *    otherwise schedule reconnect with exponential backoff.
      */
     private suspend fun runStream(
         sid: String,
@@ -1178,7 +1104,6 @@ class TokenStreamCoordinator(
         isReconnect: Boolean,
         capturedRouteInstance: Long,
     ) {
-        if (isReconnect && sid in degradedSids) return
         val connection = try {
             streamConnectionProvider?.invoke(sid, directory) ?: run {
                 val bundle = currentBundleProvider() ?: return
@@ -1321,59 +1246,18 @@ class TokenStreamCoordinator(
     }
 
     /**
-     * Flow failed (or provider threw). Classify and route to the matching
-     * recovery class.
+     * Flow failed (or provider threw). Schedule a reconnect with exponential
+     * backoff — 503 `sse_token_subscriber_limit` falls into this bucket,
+     * where bounded exponential backoff up to [maxBackoffMs] is graceful
+     * degradation.
      *
-     * §MF-1 (gate r1): the 503-retry path goes through [launchStreamLifecycle]
-     * (same as open + scheduleReconnect) so the retry is tracked in
-     * [currentStreamJob] and supersedes any prior lifecycle job. This closes
-     * the "orphan 503-retry in delay + user open(A) → second concurrent
-     * collector" race.
+     * Note: server clean close (flow completing without an exception) is
+     * handled by the normal-completion path in [runStream] (resets the
+     * attempt counter) and does NOT enter this method.
      */
     private fun onStreamFailure(sid: String, directory: String?, t: Throwable) {
-        when (val cls = classifyFailure(t)) {
-            TokenStreamFailure.Normal -> {
-                // Server clean close — no reconnect, reset attempts.
-                attemptBySid[sid]?.set(0)
-            }
-            TokenStreamFailure.Transient -> {
-                scheduleReconnect(sid, directory)
-            }
-            TokenStreamFailure.SubscriberLimit503 -> {
-                val n = consecutive503BySid.computeIfAbsent(sid) { AtomicInteger(0) }.incrementAndGet()
-                DebugLog.w(TAG, "503 sse_token_subscriber_limit sid=$sid consecutive=$n/$maxConsecutive503")
-                if (n >= maxConsecutive503) {
-                    DebugLog.w(TAG, "503 cap reached sid=$sid — degrading (next health re-check re-arms via resetDegraded)")
-                    degradedSids.add(sid)
-                    // Stop attempting — do NOT schedule reconnect.
-                } else {
-                    // §MF-1 (gate r1): bounded Retry-After backoff via the
-                    // lifecycle-tracked launch helper (NOT a bare scope.launch)
-                    // so the retry is supervised under currentStreamJob.
-                    // §B4 lifecycle capture at 503-retry: snapshot the route
-                    // token NOW and thread it verbatim through runStream →
-                    // dispatchEpochFrame (rev-gpt C2 — no shared field).
-                    // §B4 rev-gpt round3 MAJOR: also publish into
-                    // lifecycleRouteInstance so the open() guard recognizes
-                    // this retry as the in-flight lifecycle (a same-session
-                    // open during the Retry-After delay absorbs instead of
-                    // superseding a perfectly-good retry).
-                    val retryRouteInstance = slices.routeInstanceFor(sid)
-                    lifecycleRouteInstance.set(retryRouteInstance)
-                    launchStreamLifecycle(sid, "503-retry") {
-                        delay(retryAfter503Ms)
-                        if (currentSid.get() != sid) return@launchStreamLifecycle
-                        if (sid in degradedSids) return@launchStreamLifecycle
-                        val (epoch, gen) = beginStreamIncarnation(sid)
-                        try {
-                            runStream(sid, directory, epoch, gen, isReconnect = true, retryRouteInstance)
-                        } catch (ce: CancellationException) {
-                            throw ce
-                        }
-                    }
-                }
-            }
-        }
+        DebugLog.w(TAG, "stream failure sid=$sid — scheduling reconnect: ${t.message}")
+        scheduleReconnect(sid, directory)
     }
 
     // ── Reconnect backoff ────────────────────────────────────────────────────
@@ -1381,7 +1265,7 @@ class TokenStreamCoordinator(
     /**
      * Schedules a reconnect for [sid] under the captured [directory] with
      * exponential backoff (seed [initialBackoffMs] × [backoffMultiplier]^attempt,
-     * capped at [maxBackoffMs]). Skipped if [sid] is capability-degraded.
+     * capped at [maxBackoffMs]).
      *
      * §MF-1 (gate r1): the reconnect job goes through [launchStreamLifecycle]
      * which superseded the prior [currentStreamJob]. This is the ONLY re-entry
@@ -1393,10 +1277,6 @@ class TokenStreamCoordinator(
      * sole tracked lifecycle job.
      */
     private fun scheduleReconnect(sid: String, directory: String?) {
-        if (sid in degradedSids) {
-            DebugLog.i(TAG, "scheduleReconnect sid=$sid skipped — degraded")
-            return
-        }
         val attempt = attemptBySid.computeIfAbsent(sid) { AtomicInteger(0) }.getAndIncrement()
         val backoff = nextBackoffMs(attempt)
         DebugLog.i(TAG, "scheduleReconnect sid=$sid attempt=$attempt backoff=${backoff}ms")
@@ -1420,7 +1300,6 @@ class TokenStreamCoordinator(
             // moved on OR superseded this job (in which case the delay threw
             // CancellationException and we never reach here).
             if (currentSid.get() != sid) return@launchStreamLifecycle
-            if (sid in degradedSids) return@launchStreamLifecycle
             val (epoch, gen) = beginStreamIncarnation(sid)
             try {
                 runStream(sid, directory, epoch, gen, isReconnect = true, reconnectRouteInstance)
@@ -1473,7 +1352,7 @@ class TokenStreamCoordinator(
 
     /**
      * §MF-1 (gate r1): the SINGLE launch point for every stream lifecycle job
-     * (open + reconnect + 503-retry). Atomically supersedes the prior
+     * (open + reconnect). Atomically supersedes the prior
      * [currentStreamJob] (getAndSet + cancel) so there is at most ONE tracked
      * lifecycle job at any time — closing the "orphan reconnect in delay +
      * user open → second concurrent collector" race that a bare `scope.launch`
@@ -1553,10 +1432,6 @@ class TokenStreamCoordinator(
         internal const val INITIAL_BACKOFF_MS = 1_000L
         internal const val MAX_BACKOFF_MS = 30_000L
         internal const val BACKOFF_MULTIPLIER = 2.0
-
-        // §3.10 Stage-D: 503 sse_token_subscriber_limit handling.
-        internal const val MAX_CONSECUTIVE_503 = 3
-        internal const val RETRY_AFTER_503_MS = 5_000L
     }
 }
 
@@ -1565,54 +1440,6 @@ class TokenStreamCoordinator(
  * `[OwnerTag] == OwnerTag(sid, gen)` is the equality check [clearPart] uses.
  */
 internal data class OwnerTag(val sid: String, val gen: Long)
-
-/**
- * Recovery class for a token-stream flow completion. Routed by
- * [TokenStreamCoordinator.onStreamFailure] via the injected [classifyFailure].
- *
- * Public (not internal) so the public coordinator constructor parameter
- * `classifyFailure: (Throwable?) -> TokenStreamFailure` does not expose an
- * internal type (Kotlin: "public function exposes internal parameter type").
- */
-sealed interface TokenStreamFailure {
-    /** Server closed cleanly (no throwable); do NOT reconnect. */
-    object Normal : TokenStreamFailure
-    /** Transient network blip / unknown failure; reconnect with backoff. */
-    object Transient : TokenStreamFailure
-    /** 503 `sse_token_subscriber_limit` — bounded Retry-After, then degrade. */
-    object SubscriberLimit503 : TokenStreamFailure
-}
-
-/**
- * Default failure classifier. TokenStreamClient.onFailure closes the flow with
- * `t ?: Exception("token stream failed (code=${response?.code})")`. The
- * subscriber-limit failure surfaces as either:
- *  - a throwable whose message carries `503` + a `subscriber`/`token_subscriber`
- *    marker (when the sidecar's JSON error body was threaded through), OR
- *  - the bare `"token stream failed (code=503)"` exception (when OkHttp had
- *    no throwable, only the HTTP 503 response).
- *
- * The second case is ambiguous with any other 503; the coordinator treats it
- * as SubscriberLimit503 anyway because the token-stream endpoint's only
- * advertised 503 reason IS the subscriber cap (the sidecar's
- * `sse_token_subscriber_limit` admission gate). A genuine upstream 503 would
- * not reach this SSE endpoint (the sidecar returns 502/504 for upstream
- * failures).
- */
-internal fun defaultClassifyFailure(t: Throwable?): TokenStreamFailure {
-    if (t == null) return TokenStreamFailure.Normal
-    val msg = t.message.orEmpty()
-    return when {
-        msg.contains("503") &&
-            (msg.contains("subscriber", ignoreCase = true) ||
-                msg.contains("token_subscriber", ignoreCase = true)) ->
-            TokenStreamFailure.SubscriberLimit503
-        // Bare "code=503" from TokenStreamClient's fallback exception — treat
-        // as subscriber-limit per the comment above.
-        msg.contains("code=503") -> TokenStreamFailure.SubscriberLimit503
-        else -> TokenStreamFailure.Transient
-    }
-}
 
 /**
  * Watchdog timeout sentinel — thrown by the watchdog coroutine to break the
