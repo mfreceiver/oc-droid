@@ -23,9 +23,8 @@ import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
  *
  * §tofu R2: the boolean `allowInsecure` field was REPLACED by
  * `hostPort: String?` (host:port authority of `_baseUrl`, derived in
- * [configure]). The TOFU pin store is keyed by this authority (known_hosts
- * model), so every code path that previously read `allowInsecure` to
- * downgrade TLS now reads `hostPort` to look up a pinned SPKI instead.
+ * [configure]). The trust store (SystemDefault / TrustAll / mTLS) is keyed
+ * by the authority for routing, not for TOFU pin lookup.
  */
 class HostConfig {
 
@@ -40,8 +39,8 @@ class HostConfig {
 
     /**
      * §tofu R2: `host:port` authority of [_baseUrl] (derived once per
-     * [configure] via [hostPortFromUrl]). The TOFU pin store is keyed by
-     * this authority. null for non-authority URLs (e.g. content providers).
+     * [configure] via [hostPortFromUrl]). Used as routing key for
+     * SSL resolution. null for non-authority URLs.
      */
     @Volatile private var _hostPort: String? = null
 
@@ -58,6 +57,9 @@ class HostConfig {
      */
     @Volatile private var _slim: Boolean = false
 
+    /** L7 trust-all flag (per-server, XOR with mTLS). */
+    @Volatile private var _trustAll: Boolean = false
+
     val baseUrl: String get() = _baseUrl
     val username: String? get() = _username
     val password: String? get() = _password
@@ -67,6 +69,9 @@ class HostConfig {
     /** R8 slim-mode foundation: 当前 server 的 slimapi 路由属性。 */
     val slim: Boolean get() = _slim
 
+    /** L7 trust-all flag (per-server, XOR with mTLS). */
+    val trustAll: Boolean get() = _trustAll
+
     /** Capture all fields under the same monitor for graph compatibility/tests. */
     @Synchronized
     internal fun snapshot(): HostSnapshot = HostSnapshot(
@@ -75,6 +80,7 @@ class HostConfig {
         username = _username,
         password = _password,
         slimHost = _slim,
+        trustAllHost = _trustAll,
     )
 
     /** True iff a complete Basic Auth credential pair is configured. */
@@ -83,9 +89,8 @@ class HostConfig {
     /**
      * Atomic host switch. See class kdoc for the synchronization rationale.
      *
-     * §tofu R2: takes [hostPort] (derived by the caller via [hostPortFromUrl])
-     * instead of the legacy `allowInsecure` boolean — TLS trust is now
-     * TOFU-pinned per host:port, not blanket-allowed per profile.
+     * L7: takes [hostPort] (derived by the caller via [hostPortFromUrl])
+     * for SSL routing. [trustAll] controls per-server certificate skipping.
      *
      * R8 slim-mode foundation: [slim] 由所选 HostProfile 透传——true 时
      * `SlimapiVersionInterceptor` 注入版本头、health 探针改走 `/slimapi/health`。
@@ -97,13 +102,15 @@ class HostConfig {
         username: String?,
         password: String?,
         hostPort: String?,
-        slim: Boolean = false
+        slim: Boolean = false,
+        trustAll: Boolean = false,
     ) {
         _baseUrl = baseUrl
         _username = username
         _password = password
         _hostPort = hostPort ?: hostPortFromUrl(baseUrl)
         _slim = slim
+        _trustAll = trustAll
     }
 
     companion object {

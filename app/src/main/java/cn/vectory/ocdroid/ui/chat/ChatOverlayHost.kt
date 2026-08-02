@@ -37,9 +37,6 @@ import cn.vectory.ocdroid.ui.ContextUsage
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.data.model.SlimSessionLastError
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.data.repository.http.TofuDecision
-import cn.vectory.ocdroid.ui.settings.TofuTrustDialog
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.util.workdirBasename
 
@@ -69,7 +66,6 @@ fun ChatOverlayHost(
     onDismissWorkdirPick: () -> Unit,
     onPickWorkdir: (workdir: String) -> Unit,
     onDismissError: () -> Unit,
-    onTofuDecision: (decision: TofuDecision) -> Unit,
     // ── Derived slice values (what each overlay reads) ──────────────────
     agents: List<AgentInfo>,
     currentAgentName: String?,
@@ -84,7 +80,6 @@ fun ChatOverlayHost(
     todos: List<TodoItem>,
     cachedContextUsage: ContextUsage?,
     recentWorkdirs: List<String>,
-    pendingTofuCapture: OpenCodeRepository.TofuCaptureResult?,
     questionSessionIds: Set<String>,
     permissionSessionIds: Set<String> = emptySet(),
     sessionErrorsById: Map<String, SlimSessionLastError> = emptyMap(),
@@ -244,11 +239,4 @@ fun ChatOverlayHost(
         )
     }
 
-    // ── TofuTrustDialog ────────────────────────────────────────────────
-    pendingTofuCapture?.let { capture ->
-        TofuTrustDialog(
-            capture = capture,
-            onDecision = { decision -> onTofuDecision(decision) },
-        )
-    }
 }

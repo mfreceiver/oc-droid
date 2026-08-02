@@ -1,7 +1,6 @@
 package cn.vectory.ocdroid.data.repository
 
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
-import cn.vectory.ocdroid.data.repository.http.InMemoryTofuPinStore
 import cn.vectory.ocdroid.data.repository.http.SslConfig
 import cn.vectory.ocdroid.data.repository.http.SslConfigFactory
 import cn.vectory.ocdroid.util.TrafficLogger
@@ -146,7 +145,7 @@ class OpenCodeRepositoryTokenStreamMtlsTest {
             "repository currentSslConfig is MutualTLS after configure(clientCert)",
             repo.currentSslConfig() is SslConfig.MutualTLS,
         )
-        val independentFactory = SslConfigFactory(InMemoryTofuPinStore())
+        val independentFactory = SslConfigFactory()
         assertTrue(
             "an independent (Hilt-singleton-style) SslConfigFactory is still SystemDefault — the pre-fix bug",
             independentFactory.sslConfigFor(hostPort) is SslConfig.SystemDefault,

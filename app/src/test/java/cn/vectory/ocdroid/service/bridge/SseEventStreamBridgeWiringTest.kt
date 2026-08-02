@@ -123,7 +123,6 @@ class SseEventStreamBridgeWiringTest {
             ),
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator(),
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,

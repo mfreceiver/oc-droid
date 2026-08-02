@@ -234,7 +234,6 @@ object ConnectionBootstrapEngineModule {
         settingsManager: cn.vectory.ocdroid.util.SettingsManager,
         repository: cn.vectory.ocdroid.data.repository.OpenCodeRepository,
         identityStore: ConnectionIdentityStore,
-        bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
         serverCompatProfile: cn.vectory.ocdroid.data.repository.ServerCompatProfile,
         appLifecycleMonitor: cn.vectory.ocdroid.di.AppLifecycleMonitor,
     ): ConnectionBootstrapEngine = ConnectionBootstrapEngine(
@@ -242,7 +241,6 @@ object ConnectionBootstrapEngineModule {
         settingsManager = settingsManager,
         repository = repository,
         identityStore = identityStore,
-        bootstrapCoordinator = bootstrapCoordinator,
         serverCompatProfile = serverCompatProfile,
         hasActivity = { appLifecycleMonitor.isInForeground.value },
     )

@@ -71,7 +71,6 @@ class ServiceSseConnectionOwnerResyncTest {
     private lateinit var scope: TestScope
     private lateinit var repository: OpenCodeRepository
     private lateinit var identityStore: ConnectionIdentityStore
-    private lateinit var bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
     private lateinit var stream: SseEventStream
     private lateinit var store: SharedStateStore
     private lateinit var effects: SharedEffectBus
@@ -99,7 +98,6 @@ class ServiceSseConnectionOwnerResyncTest {
         scope = TestScope(UnconfinedTestDispatcher())
         repository = mockk(relaxed = true)
         identityStore = ConnectionIdentityStore()
-        bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator()
         stream = SseEventStream()
         store = SharedStateStore()
         effects = SharedEffectBus()
@@ -115,7 +113,6 @@ class ServiceSseConnectionOwnerResyncTest {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
@@ -349,7 +346,6 @@ class ServiceSseConnectionOwnerResyncTest {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
@@ -443,7 +439,6 @@ class ServiceSseConnectionOwnerResyncTest {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
@@ -529,7 +524,6 @@ class ServiceSseConnectionOwnerResyncTest {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
@@ -581,7 +575,6 @@ class ServiceSseConnectionOwnerResyncTest {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,

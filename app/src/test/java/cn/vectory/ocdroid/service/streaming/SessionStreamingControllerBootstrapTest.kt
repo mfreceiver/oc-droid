@@ -34,9 +34,6 @@ import org.junit.Test
  *    called with the bootstrapped identity, then
  *    [StreamingLifecycleCoordinator.onBootstrapResult] fed the post-refresh
  *    globalState;
- *  - TOFU degraded → [StatusAggregatorInput.markRequestFailed] called +
- *    [ServiceShell.updateNotification] called with `degraded=true` (NO
- *    teardown — Unknown keeps the source alive per CP4);
  *  - Failed → bounded retry with backoff; if exhausted,
  *    [StreamingLifecycleCoordinator.onDisconnect] is invoked.
  */
@@ -95,39 +92,6 @@ class SessionStreamingControllerBootstrapTest {
         // §5 step 5: foreground + AllIdleFresh → L1-idle (SSE on, FGS downgraded).
         assertEquals(Layer.L1(busy = false), fixture.coordinator.layer.value)
         assertEquals(1, fixture.aggregator.refreshArgs.size)
-    }
-
-    @Test
-    fun `bootstrap TOFU degraded calls markRequestFailed and surfaces degraded notification without teardown`() = runTest {
-        val fixture = newFixture(backgroundScope, inForeground = false)
-        // Bind identity so markRequestFailed has a target. The bound identity
-        // carries the store's epoch (= 0 at start); we compare against this
-        // bound value below.
-        val boundIdentity = fixture.store.bind(
-            profileId = identity.profileId,
-            normalizedWorkdir = identity.normalizedWorkdir,
-            endpointFp = identity.endpointFp,
-        )
-        fixture.controller.start()
-        fixture.bootstrapRunner.enqueue(
-            BootstrapResult.TofuNeedsActivity(hostPort = "example.com:443"),
-        )
-
-        fixture.controller.bootstrapAsync()
-        runCurrent()
-
-        // §5 degraded: markRequestFailed invoked once with the bound identity.
-        assertEquals(1, fixture.aggregator.markFailedArgs.size)
-        val failed = fixture.aggregator.markFailedArgs.single()
-        assertEquals(boundIdentity, failed.identity)
-        // §5 degraded: NO teardown — layer stays L3 (initial) but no further
-        // command flow was triggered by bootstrapAsync (no onBootstrapResult).
-        assertEquals(Layer.L3, fixture.coordinator.layer.value)
-        // §5 degraded: shell.updateNotification called with degraded=true.
-        val updateSpec = fixture.shell.lastUpdateNotificationSpec
-        assertNotNull("updateNotification must be called for degraded", updateSpec)
-        assertTrue("degraded flag carried through to spec", updateSpec!!.degraded)
-        assertEquals("Server trust required", updateSpec.title)
     }
 
     @Test

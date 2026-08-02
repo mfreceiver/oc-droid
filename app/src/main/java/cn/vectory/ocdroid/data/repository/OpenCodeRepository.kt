@@ -12,14 +12,8 @@ import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
 import cn.vectory.ocdroid.data.repository.http.SlimapiContract
 import cn.vectory.ocdroid.data.repository.http.SlimapiErrorCodes
 import cn.vectory.ocdroid.data.repository.http.SslConfig
-import cn.vectory.ocdroid.data.repository.http.TofuDecision
-import cn.vectory.ocdroid.data.repository.http.TofuFailureReason
-import cn.vectory.ocdroid.data.repository.http.TofuPinStore
-import cn.vectory.ocdroid.data.repository.http.TofuValidation
-import cn.vectory.ocdroid.data.repository.http.InMemoryTofuPinStore
 import cn.vectory.ocdroid.data.repository.http.applyClientIdentityHeaders
 import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
-import cn.vectory.ocdroid.data.repository.http.buildTofuPinnedConfig
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.TrafficLogger
@@ -47,7 +41,6 @@ import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFact
 import retrofit2.Retrofit
 import java.io.IOException
 import java.util.Base64
-import java.security.cert.X509Certificate
 import javax.inject.Inject
 import javax.inject.Singleton
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
@@ -77,18 +70,6 @@ class OpenCodeRepository @Inject constructor(
     private val trafficTracker: TrafficTracker,
     private val trafficLogger: TrafficLogger,
     /**
-     * §tofu R2: the TOFU pin store (persistent ESP-backed in production via
-     * [cn.vectory.ocdroid.di.TofuModule]; [InMemoryTofuPinStore] in unit tests).
-     * Held so [applyTofuDecision] can write Accept-once / Trust decisions and
-     * [captureServerCert] / [checkHealthFor] can read pinned state via the
-     * shared [networkGraph.sslConfigFactory]. Defaults to [InMemoryTofuPinStore] so the
-     * test-locked 2-arg `OpenCodeRepository(mockk(), mockk())` construction
-     * keeps compiling (Hilt ignores Kotlin defaults and injects the bound
-     * [EspTofuPinStore][cn.vectory.ocdroid.data.repository.http.EspTofuPinStore]
-     * in production).
-     */
-    private val tofuStore: TofuPinStore = InMemoryTofuPinStore(),
-    /**
      * §slim-reconcile-lane-repo (B3 T5): the shared [ServerCompatProfile].
      * Used by [checkHealth]'s slim branch to feed
      * [ServerCompatProfile.updateSlimapi] from the parsed
@@ -100,7 +81,7 @@ class OpenCodeRepository @Inject constructor(
      * `OpenCodeRepository(mockk(), mockk())` keeps compiling; Hilt injects
      * the bound `@Singleton` instance in production so writes from this
      * repository and reads from ConnectionBootstrapEngine hit the SAME
-     * profile (the M2 invariant). Same pattern as [tofuStore].
+     * profile (the M2 invariant).
      */
     private val serverCompatProfile: ServerCompatProfile = ServerCompatProfile(),
 ) {
@@ -131,7 +112,6 @@ class OpenCodeRepository @Inject constructor(
     private val networkGraph = RepositoryNetworkGraph(
         trafficTracker,
         trafficLogger,
-        tofuStore,
         serverCompatProfile,
         // §B (slimapi-v2-adapt-traffic-plan §B): lazy device-id provider for
         // ClientIdentityInterceptor. Resolves from the Hilt field-injected
@@ -421,17 +401,28 @@ class OpenCodeRepository @Inject constructor(
         val clientCertError: String?,
     )
 
-    /** Resolve candidate TLS without mutating the factory used by the live bundle. */
+    /**
+     * Resolve candidate TLS purely from the candidate inputs — does NOT read
+     * the held [SslConfigFactory] mTLS cache (which may be stale from a prior
+     * configure). This mirrors the original pre-L7 semantic (which read the
+     * TOFU pin store directly, never [sslConfigFor]) and preserves the
+     * "clear clientCert → SystemDefault" invariant: a null [clientCert] with
+     * no pin must yield SystemDefault even if a prior configure loaded mTLS
+     * material into the factory (that stale cache is cleared only later, in
+     * [publishClientBundle] via [configureClientCert]).
+     *
+     * L7: [trustAll] routes to [SslConfig.TrustAll] when [clientCert] is null.
+     */
     private fun resolveCandidateSsl(
         hostPort: String?,
         clientCert: ClientCertMaterial?,
+        trustAll: Boolean,
     ): CandidateSsl {
         val preparedClientCert = clientCert?.let { material ->
             runCatching { buildMutualTlsConfig(material) }
         }
         val config = preparedClientCert?.getOrNull()
-            ?: hostPort?.let { tofuStore.pinnedSpki(it) }?.let(::buildTofuPinnedConfig)
-            ?: SslConfig.SystemDefault
+            ?: if (trustAll) SslConfig.TrustAll else SslConfig.SystemDefault
         return CandidateSsl(
             config = config,
             clientCertError = preparedClientCert?.exceptionOrNull()?.message,
@@ -505,6 +496,8 @@ class OpenCodeRepository @Inject constructor(
         hostSnapshot: HostSnapshot,
         clientCert: ClientCertMaterial? = null,
         updateClientCert: Boolean = false,
+        trustAll: Boolean = false,
+        updateTrustAll: Boolean = false,
     ) {
         val previous = currentClientBundle
         // This is the sole client-generation publication write.
@@ -519,11 +512,15 @@ class OpenCodeRepository @Inject constructor(
             password = hostSnapshot.password,
             hostPort = hostSnapshot.hostPort,
             slim = hostSnapshot.slimHost,
+            trustAll = trustAll,
         )
         // This mirror is updated only after the immutable bundle is published;
         // active clients and getters use the bundle's effective SSL value.
         if (updateClientCert) {
             networkGraph.sslConfigFactory.configureClientCert(clientCert)
+        }
+        if (updateTrustAll) {
+            networkGraph.sslConfigFactory.configureTrustAll(trustAll)
         }
         previous?.retire()
     }
@@ -566,12 +563,8 @@ class OpenCodeRepository @Inject constructor(
     }
 
     /**
-     * §tofu R2: configure the live host. [hostPort] (the host:port authority
-     * of [baseUrl]) replaces the legacy `allowInsecureConnections: Boolean`;
-     * it keys the TOFU pin lookup so a previously-trusted endpoint's
-     * TofuPinned config is applied to the rebuilt REST/SSE/command clients.
-     * The caller may derive it via [hostPortFromUrl] (a null [hostPort] is
-     * also resolved from [baseUrl] inside [HostConfig.configure]).
+     * L7: configure the live host. [trustAll] enables per-server trust-all;
+     * when enabled, skips server certificate verification entirely.
      *
      * §2.4: [clientCert] is the optional mTLS client certificate material
      * (PKCS12 + password + optional private CA). Loaded by the caller from
@@ -594,14 +587,23 @@ class OpenCodeRepository @Inject constructor(
         /**
          * R8 slim-mode foundation: 当前 profile 是否启用省流模式（指向 oc-slimapi
          * sidecar）。透传给 [networkGraph.hostConfig.slim]，由 [SlimapiVersionInterceptor] 与
-         * [checkHealth] / [checkHealthFor] / [captureServerCert] 路由使用。
+         * [checkHealth] / [checkHealthFor] 路由使用。
          *
          * 默认 false（legacy 直连 opencode）——保持现有调用方（ui / service）行为
          * 完全不变；待 EffectiveConnectionConfig / 上游 controller 接入 slim 字段后
          * 端到端生效。
          */
         slim: Boolean = false,
+        /**
+         * L7: per-server trust-all flag. XOR with mTLS (see HostProfile.trustAll).
+         * Set on [SslConfigFactory] BEFORE [resolveCandidateSsl] so the
+         * candidate SSL config reflects trust-all when no mTLS is active.
+         */
+        trustAll: Boolean = false,
     ) {
+        // L7: set trustAll on the factory BEFORE resolveCandidateSsl so the
+        // candidate SSL config (built via sslConfigFor) reflects the flag.
+        networkGraph.sslConfigFactory.configureTrustAll(trustAll)
         // P11: build every component from one immutable candidate snapshot.
         // Neither HostConfig nor the held SSL certificate state is changed
         // until this complete build succeeds.
@@ -611,8 +613,9 @@ class OpenCodeRepository @Inject constructor(
             password = password,
             hostPort = hostPort,
             slimHost = slim,
+            trustAllHost = trustAll,
         )
-        val candidateSsl = resolveCandidateSsl(candidateSnapshot.hostPort, clientCert)
+        val candidateSsl = resolveCandidateSsl(candidateSnapshot.hostPort, clientCert, trustAll)
         val current = requireClientBundle()
         val candidate = buildClientBundle(
             hostSnapshot = candidateSnapshot,
@@ -627,6 +630,8 @@ class OpenCodeRepository @Inject constructor(
             hostSnapshot = candidateSnapshot,
             clientCert = clientCert,
             updateClientCert = true,
+            trustAll = trustAll,
+            updateTrustAll = true,
         )
         // ι-P1: rebuild session source to match the new connection mode.
         // lite-v2-dev: SlimSessionSource retained (skeleton list endpoint still exists);
@@ -653,23 +658,18 @@ class OpenCodeRepository @Inject constructor(
 
     /**
      * §2.4: the current effective [SslConfig] for the live host (mTLS priority
-     * over TOFU pin, SystemDefault safe fallback). Callers
+     * over trust-all, SystemDefault safe fallback). Callers
      * ([HttpImageHolder] / cold-start image sync) use this to mirror the same
      * trust policy onto the markdown image client. `@Synchronized` because it
      * reads the mutable [networkGraph.sslConfigFactory] state that [configure] writes under
      * the same monitor (v3-glmer R2).
-     *
-     * §tofu R2: resolves via [SslConfigFactory.sslConfigFor] keyed by the
-     * current [HostConfig.hostPort] (was `allowInsecure`).
      */
     @Synchronized
     fun currentSslConfig(): SslConfig = requireClientBundle().effectiveSslConfig
 
     /**
-     * §tofu fix: 当前 live SSL 配置是否走 mTLS 路径（客户端证书已配置并加载）。
-     * TOFU 触发须跳过 mTLS 主机——mTLS 优先级会忽略 TOFU pin，弹"信任"是无效的
-     * 误导；mTLS 服务器证书失败应直接作连接错误呈现。镜像 [sslConfigFor] 的
-     * mTLS-priority 路由（SslConfig.kt sslConfigFor: mutualTlsConfig != null → MutualTLS）。
+     * 当前 live SSL 配置是否走 mTLS 路径（客户端证书已配置并加载）。
+     * Mirror of [SslConfigFactory.sslConfigFor]'s mTLS-priority routing.
      */
     fun isMutualTlsActive(): Boolean = currentSslConfig() is SslConfig.MutualTLS
 
@@ -717,45 +717,6 @@ class OpenCodeRepository @Inject constructor(
      */
     val lastClientCertError: String? get() = requireClientBundle().clientCertError
 
-    /**
-     * §L4a1 (plan v3, Wave ζ): the extracted TOFU concern (capture probe +
-     * decision application + pin read/clear), behavior-preserving extraction
-     * out of this repository. The four public TOFU methods below are now thin
-     * delegates to this instance so every existing caller
-     * (ConnectionCoordinator / ConnectionBootstrapEngine / all tests)
-     * resolves unchanged.
-     *
-     * **I4** — constructed with the SAME [tofuStore] passed to
-     * [networkGraph.sslConfigFactory], so pin writes here are immediately visible to the
-     * pin lookup in `SslConfigFactory.sslConfigFor`.
-     *
-     * **I9 / I7** — [TofuRepository] receives an [TofuRepository]`-wired`
-     * `onTofuApplied` callback that calls this class's `@Synchronized`
-     * [rebuildClients] **synchronously** (no coroutine dispatch) guarded by
-     * `networkGraph.hostConfig.hostPort == hostPort` (original L857 semantics), so the pin
-     * takes effect on the next SSL handshake and the rebuild stays serialized
-     * with [configure]. [applyTofuDecision] is also `@Synchronized` on this
-     * monitor — the delegate holds this monitor across write+rebuild, fully
-     * preserving the original mutual exclusion with [configure] /
-     * [currentSslConfig] (reentrant into [rebuildClients]).
-     */
-    private val tofuRepository = TofuRepository(
-        tofuStore = tofuStore,
-        onTofuApplied = { hostPort ->
-            // §I9: synchronous rebuild ONLY for the currently-configured host
-            // (original OCR L857 guard). rebuildClients() is itself
-            // @Synchronized on this monitor; since applyTofuDecision's
-            // delegate is also @Synchronized on this monitor, the call is
-            // reentrant and pin-then-rebuild is atomic w.r.t. configure().
-            if (currentClientBundle()?.hostSnapshot?.hostPort == hostPort) {
-                rebuildClients()
-            }
-        },
-        // §B: lazy device-id provider for captureServerCert's slim branch
-        // (it adds identity headers manually, same as the version header).
-        clientIdProvider = { clientIdStoreOrFallback().getDeviceId() },
-    )
-
     // ── lite-v2-dev (plan §4.1): ExpandBatchEngine + SlimSyncEngine + ────────
     // authoritative commit stores RETIRED. The slim state machine, sync engine,
     // and authoritative committer have been deleted. expandMessagesFullBatch
@@ -788,69 +749,6 @@ class OpenCodeRepository @Inject constructor(
      */
     @Volatile
     private var messageSource: MessageSource = StandardMessageSource({ api })
-
-    // ── §tofu R2: capture probe + decision application ──────────────────────
-
-    /**
-     * §tofu R2: a captured leaf cert + its SPKI + the system-validation
-     * classification. Surfaced to the UI as the trust-prompt payload; the UI's
-     * [TofuDecision] is fed back via [applyTofuDecision].
-     */
-    data class TofuCaptureResult(
-        val hostPort: String,
-        val leaf: X509Certificate,
-        val spkiHex: String,
-        val validation: TofuValidation
-    )
-
-    /**
-     * §tofu R2 / §L4a1: one-shot TLS handshake probe — DELEGATES to
-     * [tofuRepository.captureServerCert] (extracted verbatim, including its
-     * OWN one-shot OkHttpClient that is side-effect-free w.r.t. the live
-     * REST/SSE/command clients — I3 holds). Kept on OCR's public surface so
-     * every existing caller (ConnectionCoordinator /
-     * ConnectionBootstrapEngine / tests) resolves unchanged — the compat
-     * layer L4a3 will later formalize.
-     *
-     * Result type [TofuCaptureResult] STAYS nested here (I20: ~10 callers
-     * reference `OpenCodeRepository.TofuCaptureResult`; Kotlin forbids member
-     * typealiases, so the nested type is kept verbatim).
-     */
-    suspend fun captureServerCert(
-        baseUrl: String,
-        hostPort: String,
-        clientCert: ClientCertMaterial? = null,
-        slim: Boolean = false
-    ): TofuCaptureResult? =
-        tofuRepository.captureServerCert(baseUrl, hostPort, clientCert, slim)
-
-    /**
-     * §tofu R2 / §L4a1: applies the UI's [TofuDecision] — DELEGATES to
-     * [tofuRepository.applyTofuDecision]. `@Synchronized` on THIS monitor is
-     * RETAINED so the pin-then-rebuild sequence stays mutually exclusive with
-     * [configure] / [currentSslConfig] / [rebuildClients] (I7 — full original
-     * OCR-level serialization preserved, not merely the callback path). The
-     * synchronous rebuild (I9) fires inside the delegate via the
-     * `onTofuApplied` callback wired into [tofuRepository], which re-checks
-     * `networkGraph.hostConfig.hostPort == hostPort` (original L857 guard) and calls this
-     * class's [rebuildClients] — reentrant under this same held monitor.
-     */
-    @Synchronized
-    fun applyTofuDecision(hostPort: String, decision: TofuDecision) =
-        tofuRepository.applyTofuDecision(hostPort, decision)
-
-    /**
-     * §tofu R2 / §L4a1: query the current pinned SPKI for [hostPort] —
-     * DELEGATES to [tofuRepository.pinnedSpkiFor] (reads the SAME shared
-     * [tofuStore] that [networkGraph.sslConfigFactory] reads during SSL negotiation — I4).
-     */
-    fun pinnedSpkiFor(hostPort: String): String? = tofuRepository.pinnedSpkiFor(hostPort)
-
-    /**
-     * §tofu R2 / §L4a1: forget the pin for [hostPort] — DELEGATES to
-     * [tofuRepository.clearTofuPin].
-     */
-    fun clearTofuPin(hostPort: String) = tofuRepository.clearTofuPin(hostPort)
 
     // §R18 Phase 2-E step 2: the deprecated setCurrentDirectory /
     // getCurrentDirectory forwarding helpers were removed. Non-file routes
@@ -1034,9 +932,7 @@ class OpenCodeRepository @Inject constructor(
      * mutating this repository's current configuration. Used by the host list's
      * per-row "test" action so a profile can be probed without switching hosts.
      *
-     * §tofu R2: [hostPort] (host:port authority of [baseUrl]) replaces the
-     * legacy `allowInsecure: Boolean`. It keys the TOFU pin lookup so a
-     * previously-trusted endpoint's pin is honored during the probe.
+     * L7: [trustAll] skips server certificate verification for this probe.
      *
      * Builds a throwaway OkHttp client via [OkHttpClientFactory.healthClient]
      * (the SSL-trust shared entry point) and parses the same [HealthResponse]
@@ -1055,16 +951,14 @@ class OpenCodeRepository @Inject constructor(
         password: String? = null,
         hostPort: String? = null,
         clientCert: ClientCertMaterial? = null,
-        slim: Boolean = false
+        slim: Boolean = false,
+        trustAll: Boolean = false,
     ): Result<HealthResponse> = withContext(Dispatchers.IO) {
         runSuspendCatching {
-            // v3-gpter R2#1 阻断修复：用 [SslConfigFactory.resolveProbe] 纯参数解析
-            // （hostPort + clientCert），**禁止**用 sslConfigFor——后者会读 held
-            // mTLS 状态，于是测他 profile（clientCert=null）时会复用当前 mTLS profile
-            // 的缓存，误出示其客户端证书 / 只信其私有 CA，甚至泄漏客户端身份给无关 host。
-            // §tofu R2: hostPort 替代 allowInsecure，探测也走 TOFU pin 查询。
+            // L7: pure parameter routing — mTLS > trustAll > SystemDefault.
+            // Never reads held mTLS cache (v3-gpter R2#1).
             val resolvedHostPort = hostPort ?: hostPortFromUrl(baseUrl)
-            val cfg: SslConfig = networkGraph.sslConfigFactory.resolveProbe(resolvedHostPort, clientCert)
+            val cfg: SslConfig = networkGraph.sslConfigFactory.resolveProbe(resolvedHostPort, clientCert, trustAll)
             val client = networkGraph.clientFactory.healthClient(cfg)
             // R8 slim-mode foundation / C3: slim=true → /slimapi/health（带版本头）;
             // slim=false → /global/health（行为字节级不变）。

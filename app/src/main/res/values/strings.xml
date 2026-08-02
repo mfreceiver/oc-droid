@@ -272,21 +272,10 @@
     <string name="host_profile_name">Profile name</string>
     <string name="host_profile_basic_auth_username">Basic Auth username (optional)</string>
     <string name="host_profile_basic_auth_password">Basic Auth password (optional)</string>
-    <!-- §tofu R2: SSH-style trust-on-first-use cert fingerprint pinning. The
-         legacy host_allow_insecure_title / host_allow_insecure_summary strings
-         are REMOVED — self-signed endpoints now surface the TOFU trust dialog
-         at first connect instead of a per-profile trust-all toggle. -->
-    <string name="tofu_dialog_title">Server certificate</string>
-    <string name="tofu_cert_subject">Subject</string>
-    <string name="tofu_cert_issuer">Issuer</string>
-    <string name="tofu_cert_expiry">Expires</string>
-    <string name="tofu_cert_fingerprint">SHA-256 fingerprint</string>
-    <string name="tofu_cert_reason_unknown_issuer">This certificate is not signed by a known authority. Verify the fingerprint with the server administrator before trusting.</string>
-    <string name="tofu_cert_reason_expired">This certificate has expired or is not yet valid.</string>
-    <string name="tofu_cert_reason_hostname">This certificate does not cover the hostname you connected to.</string>
-    <string name="tofu_accept_once">Accept once</string>
-    <string name="tofu_trust">Trust permanently</string>
-    <string name="tofu_cancel">Cancel</string>
+    <!-- §L7 trust-all: per-server certificate verification skip (XOR with mTLS). -->
+    <string name="host_trust_all_title">Trust all certificates</string>
+    <string name="host_trust_all_subtitle">Skip server certificate verification (no MITM protection)</string>
+    <string name="host_trust_all_mtls_conflict">Conflicts with mTLS — trust-all disables server verification</string>
     <!-- §2.7 mTLS client certificate (stunnel + shared PKCS12) -->
     <string name="host_mtls_title">mTLS connection</string>
     <string name="host_mtls_summary">Mutually exclusive with insecure HTTPS.</string>

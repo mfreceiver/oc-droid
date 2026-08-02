@@ -257,9 +257,6 @@ abstract class MainViewModelTestBase {
             effects = effectBus,
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
-            // CP2 (notify Phase-0): delegate TOFU state to the shared bootstrap
-            // coordinator so the delegation is exercised in tests too.
-            bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator(),
             // CP9 (notify Phase-0 switchover): CC's startSSE now delegates to
             // a fake launcher (records ensureStarted calls; tests assert on
             // the call count instead of repository.connectSSE). The real

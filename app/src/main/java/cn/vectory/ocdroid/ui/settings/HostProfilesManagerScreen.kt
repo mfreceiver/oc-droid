@@ -298,7 +298,7 @@ internal fun HostProfilesManagerScreen(
             // success + profileId match, error on failure) and gates the Save
             // button via isSaving (single-flight — double-submit ignored).
             onSave = { saved, basicAuthPassword, basicAuthEdited,
-                       mtlsEnabled, slimEnabled, stagedP12, caStage, p12Password, p12PasswordEdited, hasImportedP12 ->
+                       mtlsEnabled, slimEnabled, trustAllEnabled, stagedP12, caStage, p12Password, p12PasswordEdited, hasImportedP12 ->
                 val clientCertEdit = if (mtlsEnabled) {
                     ClientCertEditIntent.Update(stagedP12, caStage, p12Password, p12PasswordEdited, hasImportedP12)
                 } else {
@@ -321,15 +321,14 @@ internal fun HostProfilesManagerScreen(
             // 回退查已保存密码。用户主动清空/改密码（passwordEdited=true）则按表单值测，
             // 不回退旧凭据（安全）。§2.7: mTLS 字段透传给 VM，由 VM 构造 ClientCertMaterial
             // （Dialog 无 settingsManager）→ checkHealthFor(..., clientCert)。
-            // §tofu R2: allowInsecure 不再透传——TOFU 取代 trust-all 降级；self-signed
-            // endpoint 在 checkHealthFor 失败时由 coordinator 捕获 leaf 证书并弹 TOFU 对话框。
+            // §L7: trust-all 透传至 testConnectionForm。
             onTestConnection = { url, user, pass, profileId, passwordEdited,
-                                 mtlsEnabled, stagedP12, hasImportedP12, caStage, p12Password, p12PasswordEdited,
+                                 mtlsEnabled, trustAllEnabled, stagedP12, hasImportedP12, caStage, p12Password, p12PasswordEdited,
                                  clientCertId, callback ->
                 connectionVM.testConnectionForm(
                     url, user, pass, profileId, passwordEdited,
                     mtlsEnabled, stagedP12, hasImportedP12, caStage, p12Password, p12PasswordEdited,
-                    clientCertId, slim = profile.slim, onResult = callback,
+                    clientCertId, slim = profile.slim, trustAll = trustAllEnabled, onResult = callback,
                 )
             },
             // §reconcile: 从函数级 connectionState 注入 slimapi 版本自检三元组

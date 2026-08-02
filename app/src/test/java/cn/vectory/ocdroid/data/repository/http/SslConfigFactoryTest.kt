@@ -185,53 +185,13 @@ class SslConfigFactoryTest {
         }
     }
 
-    // ── SslConfigFactory: mTLS priority over TOFU pin ───────────────────────
-
-    @Test
-    fun `sslConfigFor returns MutualTLS with priority over TOFU pin`() {
-        val store = InMemoryTofuPinStore()
-        val factory = SslConfigFactory(store)
-        val ca = newRootCa()
-        val client = newSigned(ca)
-        val material = ClientCertMaterial(
-            p12(client, listOf(client.certificate, ca.certificate)),
-            pw.toCharArray(),
-            null,
-        )
-
-        factory.configureClientCert(material)
-        // Plant a TOFU pin too — mTLS must still win.
-        store.trustPersistent("example.com:443", "ab".repeat(32))
-
-        // mTLS 已配置 → 即使 hostPort 有 pin 仍返回 MutualTLS（mTLS 优先）。
-        assertTrue("mTLS priority over TOFU", factory.sslConfigFor("example.com:443") is SslConfig.MutualTLS)
-        assertTrue(factory.sslConfigFor(null) is SslConfig.MutualTLS)
-    }
-
-    @Test
-    fun `sslConfigFor without mTLS returns TofuPinned when a pin exists, else SystemDefault`() {
-        val store = InMemoryTofuPinStore()
-        val factory = SslConfigFactory(store)
-        // 未配置 mTLS，未种 pin → SystemDefault（公网证书静默放行；握手失败才触发捕获）。
-        assertEquals(SslConfig.SystemDefault, factory.sslConfigFor(null))
-        assertEquals(SslConfig.SystemDefault, factory.sslConfigFor("unpinned.example:443"))
-
-        // 种一个 session pin → TofuPinned（PinningTrustManager 校验 SPKI 匹配）。
-        store.acceptSession("pinned.example:443", "ab".repeat(32))
-        val pinned = factory.sslConfigFor("pinned.example:443")
-        assertTrue("pin present → TofuPinned", pinned is SslConfig.TofuPinned)
-
-        // 不同 host:port → 仍 SystemDefault（pin 是 per-endpoint，不串）。
-        assertEquals(SslConfig.SystemDefault, factory.sslConfigFor("other.example:443"))
-    }
-
     // ── configureClientCert runCatching degradation ──────────────────────────
 
     @Test
     fun `configureClientCert with corrupted p12 degrades and sets lastClientCertError`() {
         // v3-glmer R2：p12 损坏时不抛穿栈（防冷启崩溃），而是降级 mutualTlsConfig=null +
         // 记 lastClientCertError 供 UI 诊断。
-        val factory = SslConfigFactory(InMemoryTofuPinStore())
+        val factory = SslConfigFactory()
         val corrupted = ClientCertMaterial(ByteArray(32) { it.toByte() }, pw.toCharArray(), null)
 
         factory.configureClientCert(corrupted)
@@ -243,7 +203,7 @@ class SslConfigFactoryTest {
 
     @Test
     fun `configureClientCert null clears lastClientCertError`() {
-        val factory = SslConfigFactory(InMemoryTofuPinStore())
+        val factory = SslConfigFactory()
         factory.configureClientCert(ClientCertMaterial(ByteArray(8), pw.toCharArray(), null))
         assertNotNull(factory.lastClientCertError)
 
@@ -258,7 +218,7 @@ class SslConfigFactoryTest {
     @Test
     fun `resolveProbe ignores held mTLS and returns based purely on params`() {
         // 先 configureClientCert 一个有效 mTLS（held 状态非空）。
-        val factory = SslConfigFactory(InMemoryTofuPinStore())
+        val factory = SslConfigFactory()
         val ca = newRootCa()
         val client = newSigned(ca)
         factory.configureClientCert(
@@ -272,29 +232,16 @@ class SslConfigFactoryTest {
 
         // resolveProbe(hostPort, clientCert=null) 必须不读 held mTLS——
         // 否则测他 profile 会复用当前 mTLS 缓存，误出示证书 / 泄漏身份。
-        // §tofu R2: 不再返回 TrustAll——未配 pin 时回 SystemDefault。
         assertEquals(
-            "resolveProbe with no clientCert + unpinned hostPort → SystemDefault (NOT held MutualTLS)",
+            "resolveProbe with no clientCert → SystemDefault (NOT held MutualTLS)",
             SslConfig.SystemDefault,
-            factory.resolveProbe(hostPort = "unrelated.example:443", clientCert = null),
+            factory.resolveProbe(hostPort = "unrelated.example:443", clientCert = null, trustAll = false),
         )
     }
 
     @Test
-    fun `resolveProbe honors a TOFU pin for the supplied hostPort`() {
-        val store = InMemoryTofuPinStore()
-        val factory = SslConfigFactory(store)
-        store.trustPersistent("pinned.example:443", "cd".repeat(32))
-
-        val probe = factory.resolveProbe("pinned.example:443", null)
-        assertTrue("resolveProbe honors TOFU pin for supplied hostPort", probe is SslConfig.TofuPinned)
-        // Different hostPort on the same call → no pin → SystemDefault.
-        assertEquals(SslConfig.SystemDefault, factory.resolveProbe("other.example:443", null))
-    }
-
-    @Test
     fun `resolveProbe builds a fresh MutualTLS from the supplied clientCert`() {
-        val factory = SslConfigFactory(InMemoryTofuPinStore())
+        val factory = SslConfigFactory()
         // held = CA-a 的 mTLS。
         val caA = newRootCa(cn = "ca-a")
         val clientA = newSigned(caA)
@@ -314,6 +261,7 @@ class SslConfigFactoryTest {
                 p12(clientB, listOf(clientB.certificate, caB.certificate)),
                 pw.toCharArray(), null,
             ),
+            trustAll = false,
         )
         assertTrue("resolveProbe builds MutualTLS from supplied clientCert", probe is SslConfig.MutualTLS)
         // 与 held 不是同一实例（每次 buildMutualTlsConfig 新建）。

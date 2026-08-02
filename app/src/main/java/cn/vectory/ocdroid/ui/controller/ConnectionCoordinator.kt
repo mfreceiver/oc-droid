@@ -4,8 +4,6 @@ import cn.vectory.ocdroid.data.api.CommandInfo
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
-import cn.vectory.ocdroid.data.repository.http.TofuDecision
-import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
 import cn.vectory.ocdroid.service.StreamingServiceLauncher
 import cn.vectory.ocdroid.service.OwnershipStartResult
 import cn.vectory.ocdroid.service.OwnershipRefusal
@@ -140,22 +138,6 @@ class ConnectionCoordinator(
      * coordinator falls back to unconditional forwarding (no identity gate).
      */
     private val identityStore: ConnectionIdentityStore? = null,
-    /**
-     * CP2 (notify Phase-0): the application-level shared TOFU bootstrap
-     * coordinator. CC DELEGATES its TOFU state here (FGS spec §10 — TOFU
-     * state is extracted so the SessionStreamingService shares the
-     * same single source and the bootstrap cannot fork into two TLS/SSE
-     * state machines). CC's public TOFU surface ([resolveTofuTrust] + the
-     * freeze guards on testConnection/coldStartReconnect/startSSE) is
-     * preserved verbatim — callers (ConnectionViewModel) see no change.
-     *
-     * L4c: forwarded to [healthProbe], which now owns the `tofu` delegate +
-     * the TOFU capture/decision flow. `null` for legacy/test construction
-     * that doesn't exercise the TOFU path — the probe constructs a private
-     * fallback so the guards work even without Hilt wiring (mirrors the
-     * pre-extraction private fields).
-     */
-    private val bootstrapCoordinator: ConnectionBootstrapCoordinator? = null,
     /**
      * CP9 (notify Phase-0 switchover): the trigger that promotes the live
      * SSE connection ownership into [cn.vectory.ocdroid.service.SessionStreamingService].
@@ -336,7 +318,6 @@ class ConnectionCoordinator(
         currentProfileId = currentProfileId,
         clock = clock,
         identityStore = identityStore,
-        bootstrapCoordinator = bootstrapCoordinator,
         connectionBootstrapEngine = connectionBootstrapEngine,
         bootstrapRetryPolicy = bootstrapRetryPolicy,
         streamingServiceLauncher = streamingServiceLauncher,
@@ -871,17 +852,6 @@ class ConnectionCoordinator(
      * connected-without-SSE path.
      */
     fun startSSE() {
-        // §tofu R2: FROZEN while a TOFU trust dialog is pending — the SSE
-        // feed would try the same unpinned TLS handshake and fail the same
-        // way (the pin isn't written until the user decides). Wait for
-        // [resolveTofuTrust]; the connect retry loop calls startSSE itself
-        // once the pin is in place.
-        // CP2 / L4c: TOFU state delegated to [healthProbe]
-        // (ConnectionHealthProbe owns the tofu delegate post-extraction).
-        if (healthProbe.hasPendingTofuDecision()) {
-            DebugLog.i(TAG, "startSSE: frozen — TOFU trust pending for ${healthProbe.pendingTofuHostPort()}")
-            return
-        }
         val identity = identityStore?.currentIdentity?.value ?: return
         DebugLog.i("SSE", "startSSE → launcher.ensureStarted(identity=${identity.epoch})")
         scope.launch {
@@ -931,23 +901,6 @@ class ConnectionCoordinator(
                 }
             }
         }
-    }
-
-    /**
-     * §tofu R2: applies the user's TOFU trust decision for the pending
-     * endpoint. Called by the UI (via [cn.vectory.ocdroid.ui.ConnectionViewModel])
-     * when the user taps Accept once / Trust / Cancel in [cn.vectory.ocdroid.ui.settings.TofuTrustDialog].
-     * Completes the deferred the [testConnection] retry loop is awaiting; the
-     * loop then writes the pin (Accept/Trust) and re-probes, or settles false
-     * (Cancel). No-op when no TOFU prompt is pending.
-     *
-     * CP2 (notify Phase-0): delegates to [ConnectionBootstrapCoordinator.
-     * resolveTofuTrust] (FGS spec §10). L4c: forwards to [healthProbe], which
-     * owns the `tofu` delegate. CC's public surface is unchanged —
-     * ConnectionViewModel / external callers see the same signature + behavior.
-     */
-    fun resolveTofuTrust(decision: TofuDecision) {
-        healthProbe.resolveTofuTrust(decision)
     }
 
     /**

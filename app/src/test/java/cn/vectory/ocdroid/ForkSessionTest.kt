@@ -167,8 +167,6 @@ class ForkSessionTest {
             effects = effectBus,
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
-            // CP2 (notify Phase-0): delegate TOFU state.
-            bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator(),
             // CP9 (notify Phase-0 switchover): CC's startSSE now calls the
             // streaming Service launcher (no more repository.connectSSE).
             streamingServiceLauncher = cn.vectory.ocdroid.RecordingStreamingServiceLauncher(),

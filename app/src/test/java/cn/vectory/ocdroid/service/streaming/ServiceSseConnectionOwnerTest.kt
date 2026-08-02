@@ -66,7 +66,6 @@ class ServiceSseConnectionOwnerTest {
     private lateinit var scope: TestScope
     private lateinit var repository: OpenCodeRepository
     private lateinit var identityStore: ConnectionIdentityStore
-    private lateinit var bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
     private lateinit var stream: SseEventStream
     private lateinit var store: SharedStateStore
     private lateinit var effects: SharedEffectBus
@@ -101,7 +100,6 @@ class ServiceSseConnectionOwnerTest {
         scope = TestScope(UnconfinedTestDispatcher())
         repository = mockk(relaxed = true)
         identityStore = ConnectionIdentityStore()
-        bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator()
         stream = SseEventStream()
         store = SharedStateStore()
         effects = SharedEffectBus()
@@ -117,7 +115,6 @@ class ServiceSseConnectionOwnerTest {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
@@ -220,20 +217,6 @@ class ServiceSseConnectionOwnerTest {
 
         verify(exactly = 0) { repository.connectSSE(any()) }
         assertEquals(SourceActivation.Rejected.StaleIdentity, result)
-    }
-
-    // (3) TOFU-pending prevents repository connection + returns TofuPending
-    @Test
-    fun `TOFU pending returns TofuPending and prevents repository connection`() = runTest {
-        val identity = bindIdentity("/proj")
-        bootstrapCoordinator.setPendingTofu("example.com:443")
-
-        var result: SourceActivation? = null
-        scope.launch { result = owner.connect(identity) }
-        runPending()
-
-        verify(exactly = 0) { repository.connectSSE(any()) }
-        assertEquals(SourceActivation.Rejected.TofuPending, result)
     }
 
     // (4) D5 (#3): a successful frame does NOT publish terminal Connected
@@ -610,7 +593,6 @@ class ServiceSseConnectionOwnerTest {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
@@ -906,7 +888,6 @@ class ServiceSseConnectionOwnerTest {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
@@ -1082,7 +1063,6 @@ class ServiceSseConnectionOwnerTest {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
@@ -1125,7 +1105,6 @@ class ServiceSseConnectionOwnerTest {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
@@ -1338,7 +1317,6 @@ class ServiceSseConnectionOwnerTest {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
@@ -1405,7 +1383,6 @@ class ServiceSseConnectionOwnerTest {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
@@ -1498,7 +1475,6 @@ class ServiceSseConnectionOwnerTest {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
@@ -1692,7 +1668,6 @@ class ServiceSseConnectionOwnerTest {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,

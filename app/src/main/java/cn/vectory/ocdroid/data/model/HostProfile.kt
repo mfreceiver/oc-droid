@@ -72,6 +72,19 @@ data class HostProfile(
     @SerialName("slim")
     val slim: Boolean = false,
     /**
+     * P1-3: per-server trust-all — trusts ALL server certificates for this
+     * host (self-signed, forged, intercepted). NO MITM protection.
+     *
+     * P1-4: XOR with [mtlsEnabled] — trust-all disables server verification
+     * even if mTLS client cert is presented (mTLS authenticates the CLIENT,
+     * not the server).
+     *
+     * NOT exported with [HostProfileExportPayload] / [HostProfileImportPayload]
+     * (same as [clientCertId] / [mtlsEnabled]).
+     */
+    @SerialName("trustAll")
+    val trustAll: Boolean = false,
+    /**
      * §2.2: 客户端 PKCS12（+密码+可选 CA）在 EncryptedSharedPreferences 的
      * key 后缀（`client_cert_p12_<id>` / `client_cert_pw_<id>` /
      * `client_cert_ca_<id>`）。null ⇒ 无材料。

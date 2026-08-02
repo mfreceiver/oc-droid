@@ -564,7 +564,6 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         val repo = OpenCodeRepository(
             mockk(relaxed = true),
             mockk(relaxed = true),
-            mockk(relaxed = true),
             compatProfile,
         )
         repo.configure(baseUrl = server.url("/").toString().trimEnd('/'), slim = true)
@@ -604,7 +603,6 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         // real range) but the probe surfaces failure (fail-closed transport).
         val compatProfile = ServerCompatProfile()
         val repo = OpenCodeRepository(
-            mockk(relaxed = true),
             mockk(relaxed = true),
             mockk(relaxed = true),
             compatProfile,

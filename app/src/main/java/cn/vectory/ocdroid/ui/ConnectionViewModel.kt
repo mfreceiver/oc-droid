@@ -6,7 +6,6 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
 import cn.vectory.ocdroid.data.repository.http.SlimapiContract
-import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.data.repository.http.buildMutualTlsConfig
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
@@ -111,13 +110,14 @@ class ConnectionViewModel @Inject constructor(
         profileId: String?,
         passwordEdited: Boolean,
         slim: Boolean = false,
+        trustAll: Boolean = false,
         onResult: (success: Boolean, message: String) -> Unit,
     ) = testConnectionForm(
         baseUrl, username, password, profileId, passwordEdited,
         // §2.7 默认无 mTLS（兼容既有 6-arg 调用方 / 旧测试）：
         mtlsEnabled = false, stagedP12 = null, hasImportedP12 = false,
         caStage = CaStage.Unchanged, p12Password = null, p12PasswordEdited = false,
-        clientCertId = null, slim = slim, onResult = onResult,
+        clientCertId = null, slim = slim, trustAll = trustAll, onResult = onResult,
     )
 
     /**
@@ -134,8 +134,7 @@ class ConnectionViewModel @Inject constructor(
      * 当前 host 的 held mTLS 状态），否则 mTLS host 测试必被 stunnel 拒（gpter#3/
      * glmer I6）。
      *
-     * §tofu R2: `allowInsecure` 参数已删——self-signed / unknown-issuer 证书由首次
-     * 连接时的 TOFU 信任对话框处理（host:port 经 [hostPortFromUrl] 解析）。
+     * §L7: trust-all 通过 checkHealthFor 透传至 SslConfigFactory 的 TrustAll 分支。
      */
     fun testConnectionForm(
         baseUrl: String,
@@ -151,6 +150,7 @@ class ConnectionViewModel @Inject constructor(
         p12PasswordEdited: Boolean,
         clientCertId: String?,
         slim: Boolean = false,
+        trustAll: Boolean = false,
         onResult: (success: Boolean, message: String) -> Unit,
     ) {
         viewModelScope.launch {
@@ -189,6 +189,7 @@ class ConnectionViewModel @Inject constructor(
                 hostPort = hostPortFromUrl(baseUrl),
                 clientCert = clientCert,
                 slim = slim,
+                trustAll = trustAll,
             )
             // §slim-reconcile-lane-repo (Phase 3a / Lane-B3-Dialog): M2 自检
             // 闭环——checkHealthFor 的 slim 分支已把 sidecar 公告的版本契约喂
@@ -269,16 +270,6 @@ class ConnectionViewModel @Inject constructor(
     fun cancelSse() { connectionCoordinator.cancelSse() }
 
     fun cancelSseForReconfigure() { connectionCoordinator.cancelSseForReconfigure() }
-
-    /**
-     * §tofu R2: feeds the user's trust decision for the currently-pending
-     * TOFU capture into the connection coordinator. The coordinator unblocks
-     * the [testConnection] retry loop, writes the pin (Accept/Trust) or
-     * settles false (Cancel), and either re-probes or terminates.
-     */
-    fun resolveTofuTrust(decision: TofuDecision) {
-        connectionCoordinator.resolveTofuTrust(decision)
-    }
 
     /** Connection-driven initial data fetch (sessions/agents/providers/...).
      *  Routes through the connection coordinator which owns the fan-out. */

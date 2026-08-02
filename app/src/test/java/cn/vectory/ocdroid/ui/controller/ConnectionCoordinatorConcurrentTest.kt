@@ -26,7 +26,6 @@ import java.util.concurrent.atomic.AtomicInteger
 import cn.vectory.ocdroid.data.model.HealthResponse
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
-import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.controller.sse.TokenStreamCoordinator
@@ -66,7 +65,6 @@ class ConnectionCoordinatorConcurrentTest {
     private lateinit var effects: SharedEffectBus
     private var now: Long = 100_000L
     private lateinit var identityStore: ConnectionIdentityStore
-    private lateinit var bootstrapCoordinator: ConnectionBootstrapCoordinator
     private lateinit var launcher: RecordingStreamingServiceLauncher
 
     @Before
@@ -77,7 +75,6 @@ class ConnectionCoordinatorConcurrentTest {
         settingsManager = mockk(relaxed = true)
         effects = SharedEffectBus()
         identityStore = ConnectionIdentityStore()
-        bootstrapCoordinator = ConnectionBootstrapCoordinator()
         launcher = RecordingStreamingServiceLauncher()
         every { settingsManager.currentWorkdir } returns null
         coEvery { repository.getSessionsForDirectory(any()) } returns Result.success(emptyList())
@@ -121,7 +118,6 @@ class ConnectionCoordinatorConcurrentTest {
             serverCompatProfile = ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
@@ -205,7 +201,6 @@ class ConnectionCoordinatorConcurrentTest {
             serverCompatProfile = ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
@@ -264,7 +259,6 @@ class ConnectionCoordinatorConcurrentTest {
             serverCompatProfile = ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
@@ -345,7 +339,6 @@ class ConnectionCoordinatorConcurrentTest {
             serverCompatProfile = ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
@@ -421,7 +414,6 @@ class ConnectionCoordinatorConcurrentTest {
             serverCompatProfile = ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
@@ -500,7 +492,6 @@ class ConnectionCoordinatorConcurrentTest {
             serverCompatProfile = ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
             tokenStreamCoordinator = tokenStream,
@@ -583,7 +574,6 @@ class ConnectionCoordinatorConcurrentTest {
             serverCompatProfile = ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
             tokenStreamCoordinator = tokenStream,
@@ -640,7 +630,6 @@ class ConnectionCoordinatorConcurrentTest {
             serverCompatProfile = ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
@@ -702,7 +691,6 @@ class ConnectionCoordinatorConcurrentTest {
             serverCompatProfile = ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
             tokenStreamCoordinator = tokenStream,
@@ -789,7 +777,6 @@ class ConnectionCoordinatorConcurrentTest {
             serverCompatProfile = ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
@@ -901,7 +888,6 @@ class ConnectionCoordinatorConcurrentTest {
             serverCompatProfile = ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
@@ -1004,7 +990,6 @@ class ConnectionCoordinatorConcurrentTest {
             serverCompatProfile = ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
             connectionBootstrapEngine = engine,
@@ -1090,7 +1075,6 @@ class ConnectionCoordinatorConcurrentTest {
             serverCompatProfile = ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )

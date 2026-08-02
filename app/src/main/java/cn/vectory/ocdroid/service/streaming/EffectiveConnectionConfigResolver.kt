@@ -72,6 +72,7 @@ data class EffectiveConnectionConfig(
     val clientCertId: String?,
     val mtlsEnabled: Boolean,
     val slim: Boolean = false,
+    val trustAll: Boolean = false,
 )
 
 interface EffectiveConnectionConfigResolver {
@@ -153,6 +154,7 @@ class DefaultEffectiveConnectionConfigResolver @Inject constructor(
             // 标志（与 mtlsEnabled 同模式）——手动输入通常是同 server 的另一端点，
             // slim 路由属性延续符合用户预期。无 profile → false（legacy 直连）。
             slim = profile?.slim == true,
+            trustAll = profile?.trustAll == true,
         )
     }
 
@@ -174,6 +176,7 @@ class DefaultEffectiveConnectionConfigResolver @Inject constructor(
             // engine 喂给 repository.configure → hostConfig.slim，供
             // SlimapiVersionInterceptor + SSEClient 路由使用。
             slim = profile.slim,
+            trustAll = profile.trustAll,
         )
     }
 }
