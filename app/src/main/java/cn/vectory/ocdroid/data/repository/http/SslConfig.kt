@@ -24,7 +24,9 @@ import javax.net.ssl.X509TrustManager
  * CN/SAN check against the stunnel server cert).
  *
  * L7: [TrustAll] — per-server trust-all. Skips server certificate verification
- * entirely. XOR with mTLS. NO MITM protection.
+ * entirely. mTLS takes priority (see [SslConfig.TrustAll] detail kdoc +
+ * [SslConfigFactory.sslConfigFor]: when a client cert is presented, TrustAll
+ * is ignored). NO MITM protection.
  */
 sealed interface SslConfig {
 

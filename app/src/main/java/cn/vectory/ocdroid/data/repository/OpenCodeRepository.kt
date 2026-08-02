@@ -564,7 +564,8 @@ class OpenCodeRepository @Inject constructor(
 
     /**
      * L7: configure the live host. [trustAll] enables per-server trust-all;
-     * when enabled, skips server certificate verification entirely.
+     * mTLS takes priority — when an mTLS client cert is presented, trust-all
+     * is ignored (see [SslConfigFactory.sslConfigFor]).
      *
      * §2.4: [clientCert] is the optional mTLS client certificate material
      * (PKCS12 + password + optional private CA). Loaded by the caller from
@@ -595,7 +596,7 @@ class OpenCodeRepository @Inject constructor(
          */
         slim: Boolean = false,
         /**
-         * L7: per-server trust-all flag. XOR with mTLS (see HostProfile.trustAll).
+         * L7: per-server trust-all flag. mTLS takes priority (see HostProfile.trustAll).
          * Set on [SslConfigFactory] BEFORE [resolveCandidateSsl] so the
          * candidate SSL config reflects trust-all when no mTLS is active.
          */

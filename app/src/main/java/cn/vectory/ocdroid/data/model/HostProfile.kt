@@ -75,9 +75,13 @@ data class HostProfile(
      * P1-3: per-server trust-all — trusts ALL server certificates for this
      * host (self-signed, forged, intercepted). NO MITM protection.
      *
-     * P1-4: XOR with [mtlsEnabled] — trust-all disables server verification
-     * even if mTLS client cert is presented (mTLS authenticates the CLIENT,
-     * not the server).
+     * P1-4: mTLS takes priority — when an mTLS client cert is presented,
+     * trust-all is IGNORED (see [SslConfigFactory.sslConfigFor] and
+     * [cn.vectory.ocdroid.data.repository.OpenCodeRepository.resolveCandidateSsl]:
+     * both route `MutualTLS` first and fall back to `TrustAll` only when
+     * `clientCert == null`). So the practical combination is "mTLS when
+     * configured, else trust-all, else system CA" — NOT "trust-all bypasses
+     * mTLS server verification".
      *
      * NOT exported with [HostProfileExportPayload] / [HostProfileImportPayload]
      * (same as [clientCertId] / [mtlsEnabled]).
