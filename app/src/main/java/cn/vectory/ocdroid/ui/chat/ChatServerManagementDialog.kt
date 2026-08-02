@@ -1,6 +1,6 @@
-// ChatServerManagementDialog.kt — server management popup (host profile list,
-// refresh, settings entry). Pure relocation from ChatTopBar.kt
-// with no behaviour change.
+// ChatServerManagementDialog.kt — server management popup (single host
+// profile display, refresh, settings entry). §L8: collapsed from multi-host
+// list to single-host display; host-switch UI removed.
 
 package cn.vectory.ocdroid.ui.chat
 
@@ -26,7 +26,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -36,10 +35,8 @@ import cn.vectory.ocdroid.data.model.HostProfile
 
 @Composable
 internal fun ServerManagementDialog(
-    hostProfiles: List<HostProfile>,
-    currentHostProfileId: String?,
+    currentHost: HostProfile?,
     serverVersion: String?,
-    onSelectHost: (String) -> Unit,
     onRefresh: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onDismiss: () -> Unit
@@ -54,68 +51,38 @@ internal fun ServerManagementDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                // --- Host profiles ---
-                if (hostProfiles.isEmpty()) {
+                // --- Host profile ---
+                if (currentHost == null) {
                     Text(
                         stringResource(R.string.server_dialog_no_hosts),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else {
-                    hostProfiles.forEach { profile ->
-                        val isSelected = profile.id == currentHostProfileId
-                        if (isSelected) {
-                            // Current host: non-clickable display only
-                            Surface(
-                                shape = RectangleShape,
-                                color = MaterialTheme.colorScheme.surfaceContainerLow,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = profile.name,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    serverVersion?.let { version ->
-                                        Text(
-                                            text = "v$version",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                            }
-                        } else {
-                            // Other hosts: tappable to switch
-                            Surface(
-                                onClick = { onSelectHost(profile.id) },
-                                shape = RectangleShape,
-                                color = Color.Transparent,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                                ) {
-                                    Text(
-                                        text = profile.name,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    // Version is shown ONLY on the selected (current/connected)
-                                    // host row — it's a single global value for the connected
-                                    // server, so rendering it under non-current profiles would
-                                    // be misleading (would show the connected host's version
-                                    // for hosts we haven't probed).
-                                }
+                    Surface(
+                        shape = RectangleShape,
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = currentHost.name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.weight(1f)
+                            )
+                            serverVersion?.let { version ->
+                                Text(
+                                    text = "v$version",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                         }
                     }

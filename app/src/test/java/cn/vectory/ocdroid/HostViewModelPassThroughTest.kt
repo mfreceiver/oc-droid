@@ -19,11 +19,10 @@ import org.junit.Test
 /**
  * R18 Phase 5++ coverage: thin pass-through methods on [HostViewModel] that
  * simply delegate to [HostProfileController]. Coverage gap before this file:
- * 5/18 methods (40% line) — the existing suite covers save/activate paths;
- * the simple delegators (selectHostProfile, duplicateHostProfile,
- * deleteHostProfile, importHostProfile, exportHostProfile, getHostProfiles,
- * currentHostProfile, configureServer, getSavedConnectionSettings,
- * resetLocalDataAndResync) were never invoked.
+ * L8: selectHostProfile/duplicateHostProfile/deleteHostProfile removed
+ * (single-host mode). Remaining delegators (importHostProfile,
+ * exportHostProfile, getHostProfiles, currentHostProfile, configureServer,
+ * getSavedConnectionSettings, resetLocalDataAndResync) are covered here.
  *
  * This suite drives each delegator and verifies the controller received the
  * call. The VM bodies are 1-line forwards; the controller side-effects are
@@ -31,52 +30,6 @@ import org.junit.Test
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class HostViewModelPassThroughTest : MainViewModelTestBase() {
-
-    @Test
-    fun `selectHostProfile delegates to controller`() = runTest {
-        every { hostProfileStore.currentProfile() } returns HostProfile.defaultDirect("http://x")
-        every { hostProfileStore.profiles() } returns listOf(HostProfile(id = "p1", serverUrl = "http://x", name = "P1"))
-        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = true, version = "1.0"))
-        every { repository.connectSSE(any()) } returns kotlinx.coroutines.flow.emptyFlow()
-        coEvery { repository.getCommands() } returns Result.success(emptyList())
-
-        val core = createCore()
-        val vm = HostViewModel(core)
-
-        vm.selectHostProfile("p1")
-        advanceUntilIdle()
-
-        // Profile switched (hostFlow updates). No further assertion beyond the
-        // body executing — the goal is covering the 1-line delegator.
-    }
-
-    @Test
-    fun `duplicateHostProfile delegates to controller`() = runTest {
-        val core = createCore()
-        val vm = HostViewModel(core)
-        every { hostProfileStore.currentProfile() } returns HostProfile.defaultDirect("http://x")
-        every { hostProfileStore.profiles() } returns listOf(
-            HostProfile(id = "p1", serverUrl = "http://x", name = "P1"),
-            HostProfile(id = "p1-copy", serverUrl = "http://x", name = "P1 (copy)"),
-        )
-
-        vm.duplicateHostProfile("p1")
-        advanceUntilIdle()
-
-        // Body executed; the controller's persistence + slice write is verified
-        // in its own dedicated controller test.
-    }
-
-    @Test
-    fun `deleteHostProfile delegates to controller`() = runTest {
-        val core = createCore()
-        val vm = HostViewModel(core)
-        every { hostProfileStore.currentProfile() } returns HostProfile.defaultDirect("http://x")
-        every { hostProfileStore.profiles() } returns emptyList()
-
-        vm.deleteHostProfile("p1")
-        advanceUntilIdle()
-    }
 
     @Test
     fun `importHostProfile returns controller result`() = runTest {

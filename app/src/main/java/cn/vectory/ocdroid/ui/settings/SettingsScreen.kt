@@ -291,11 +291,13 @@ fun SettingsHostsRoute(
     onBack: () -> Unit,
 ) {
     val host by viewModel.hostFlow.collectAsStateWithLifecycle()
+    // §L8: single-host — resolve the current (only) profile instead of passing a list.
+    val currentProfile = host.hostProfiles.firstOrNull { it.id == host.currentHostProfileId }
+        ?: host.hostProfiles.firstOrNull()
     HostProfilesManagerScreen(
         viewModel = viewModel,
         connectionVM = connectionVM,
-        profiles = host.hostProfiles,
-        currentProfileId = host.currentHostProfileId,
+        currentProfile = currentProfile,
         onBack = onBack,
     )
 }

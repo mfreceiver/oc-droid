@@ -44,7 +44,24 @@ class HostProfileStore @Inject constructor(
                 emptyList()
             }
             is DecodeOutcome.Decoded -> {
-                if (decoded.profiles.isNotEmpty()) return decoded.profiles
+                val profiles = decoded.profiles
+                if (profiles.isNotEmpty()) {
+                    // L8: trim legacy multi-host storage to single host.
+                    // Keep the profile matching currentHostProfileId (or first).
+                    if (profiles.size > 1) {
+                        val currentId = settingsManager.currentHostProfileId
+                        val kept = currentId?.let { id ->
+                            profiles.firstOrNull { it.id == id }
+                        } ?: profiles.first()
+                        saveProfiles(listOf(kept), kept.id)
+                        Log.w(
+                            TAG,
+                            "L8: trimmed ${profiles.size} legacy profiles to single-host; multi-host removed"
+                        )
+                        return listOf(kept)
+                    }
+                    return profiles
+                }
                 migrateLegacySettings()
             }
         }
@@ -73,55 +90,19 @@ class HostProfileStore @Inject constructor(
 
     @Synchronized
     fun save(profile: HostProfile) {
-        // §需求12: the serverGroupFp nonblank invariant is gone (field deleted;
-        // fp == id implicitly). save() is now a plain upsert.
-        val all = profiles().toMutableList()
-        val index = all.indexOfFirst { it.id == profile.id }
-        if (index >= 0) all[index] = profile else all.add(profile)
-        val currentId = settingsManager.currentHostProfileId ?: profile.id
-        saveProfiles(all, currentId)
+        // L8: single-host replace — there is always exactly one profile.
+        saveProfiles(listOf(profile), profile.id)
     }
 
     @Synchronized
     fun select(profileId: String): HostProfile {
-        val all = profiles()
-        val selected = all.firstOrNull { it.id == profileId } ?: error("Host profile not found")
-        val updated = selected.copy(lastUsedAt = System.currentTimeMillis())
+        require(profileId == currentProfile().id) {
+            "Single-host mode: cannot select a different profile"
+        }
+        val profile = currentProfile()
+        val updated = profile.copy(lastUsedAt = System.currentTimeMillis())
         save(updated)
-        settingsManager.currentHostProfileId = selected.id
         return updated
-    }
-
-    @Synchronized
-    fun duplicate(profileId: String): HostProfile {
-        val source = profiles().firstOrNull { it.id == profileId } ?: error("Host profile not found")
-        // §需求12: duplicate clones configuration into an independent
-        // connection point (fp == its own fresh id; no grouping to inherit).
-        val newId = java.util.UUID.randomUUID().toString()
-        val copy = source.copy(
-            id = newId,
-            name = "${source.displayName} Copy",
-            lastUsedAt = null,
-            // §2.2/§2.7: 绝不继承源 profile 的 mTLS 客户端证书引用——clientCertId 是
-            // 源 profile 私有的 ESP key 后缀，复制后两个 profile 共享同一证书 id 会在
-            // 删除其一时 clearClientCert 把另一个也孤儿化。证书材料是设备本地敏感数据，
-            // 复制配置 ≠ 复制证书；用户需在新 profile 上重新导入 p12（与导出不带 mTLS
-            // 字段同语义）。
-            mtlsEnabled = false,
-            clientCertId = null
-        )
-        save(copy)
-        return copy
-    }
-
-    @Synchronized
-    fun delete(profileId: String) {
-        val all = profiles()
-        require(all.size > 1) { "Keep at least one profile" }
-        val remaining = all.filterNot { it.id == profileId }
-        require(remaining.size != all.size) { "Host profile not found" }
-        val nextCurrent = if (settingsManager.currentHostProfileId == profileId) remaining.first().id else settingsManager.currentHostProfileId
-        saveProfiles(remaining, nextCurrent)
     }
 
     fun exportJson(profile: HostProfile): String {

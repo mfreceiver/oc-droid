@@ -88,10 +88,8 @@ import cn.vectory.ocdroid.ui.theme.SseBreathSpec
  *                              Drives the breathing pulse on the connected
  *                              dot. INDEPENDENT of [isConnected] (which is
  *                              health-settle); the two can differ transiently.
- * @param hostProfiles         configured host profiles (dialog list).
- * @param currentHostProfileId the active host profile id (dialog highlight).
+ * @param currentHost          the single active host profile (dialog display).
  * @param serverVersion        connected server version (dialog display).
- * @param onSelectHost         switch host profile (dialog row tap).
  * @param onRefresh            refresh messages (dialog refresh button).
  * @param onNavigateToSettings open the Settings tab (dialog settings button).
  * @param onLongClickServer    navigate to the debug settings page (long-press).
@@ -105,10 +103,8 @@ internal fun ServerStatusIconButton(
     isConnecting: Boolean,
     isIdle: Boolean,
     isSseConnected: Boolean,
-    hostProfiles: List<HostProfile>,
-    currentHostProfileId: String?,
+    currentHost: HostProfile?,
     serverVersion: String?,
-    onSelectHost: (String) -> Unit,
     onRefresh: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onLongClickServer: () -> Unit = {},
@@ -224,10 +220,8 @@ internal fun ServerStatusIconButton(
 
     if (showDialog) {
         ServerManagementDialog(
-            hostProfiles = hostProfiles,
-            currentHostProfileId = currentHostProfileId,
+            currentHost = currentHost,
             serverVersion = serverVersion,
-            onSelectHost = onSelectHost,
             onRefresh = onRefresh,
             onNavigateToSettings = onNavigateToSettings,
             onDismiss = { showDialog = false },

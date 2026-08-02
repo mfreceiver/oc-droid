@@ -56,7 +56,7 @@ import java.security.KeyStore
  * R-16 M3 → R-17 batch3b: independent unit test for [HostProfileController].
  *
  * Zero reflection — the controller is driven entirely through its public API
- * (saveHostProfile / duplicateHostProfile / deleteHostProfile / selectHostProfile /
+ * (saveHostProfile / importHostProfile / exportHostProfile /
  * configureServer / configureRepositoryForProfile /
  * resetLocalDataAndResync / accessors) and asserted via:
  *  - the emitted [ControllerEffect]s on a real [SharedEffectBus] (a coroutine
@@ -485,64 +485,7 @@ class HostProfileControllerTest {
         verify { settingsManager.setBasicAuthPassword("p-B", "new-secret") }
     }
 
-    // ── C-D3 rev-3 round-7 (review I5-R7): CancellationException discipline ──
-
-    /**
-     * C-D3 rev-3 round-7: `saveHostProfile` is wrapped in `runSuspendCatching`
-     * (NOT plain `runCatching`) so a [kotlinx.coroutines.CancellationException]
-     * thrown inside the boundary (e.g. viewModelScope cancelled on VM clear)
-     * PROPAGATES instead of being collapsed to `Result.failure`. Swallowing CE
-     * breaks structured concurrency; this matches the project's established
-     * discipline (`cn.vectory.ocdroid.util.runSuspendCatching`).
-     *
-     * Test pattern mirrors `RunSuspendCatchingTest.rethrowsCancellationException`:
-     * inject a CE via a fake barrier whose suspend `reconfigure` throws, then
-     * assert the controller rethrows (not Result.failure).
-     */
-    @Test
-    fun `selectHostProfile does NOT propagate SSL to HttpImageHolder (no runtime reconfigure)`() {
-        // lite-v2: selectHostProfile does NOT call configureRepositoryForProfileRaw
-        // — SSL propagation happens on restart's configure path, NOT on select.
-        // HttpImageHolder must NOT be touched by selectHostProfile.
-        every { store.select("p-B") } returns profileB
-
-        controller.selectHostProfile("p-B")
-        runPending()
-
-        // HttpImageHolder.updateSsl is NOT called (no configureRepositoryForProfileRaw).
-        assertNull(HttpImageHolder.lastUpdateSslMode)
-    }
-
-    @Test
-    fun `selectHostProfile does NOT mirror profile serverUrl into settingsManager (no runtime reconfigure)`() {
-        // lite-v2: selectHostProfile does NOT call configureRepositoryForProfileRaw,
-        // so settingsManager.serverUrl is NOT updated here. The mirror happens
-        // on restart's configure path, not on select. The resolver
-        // (EffectiveConnectionConfigResolver) is the single source of truth.
-        every { store.select("p-B") } returns profileB
-
-        controller.selectHostProfile("p-B")
-        runPending()
-
-        // configureRepositoryForProfileRaw is never called — settingsManager.serverUrl
-        // is NOT written by selectHostProfile.
-        verify(exactly = 0) { settingsManager.serverUrl = any() }
-    }
-
-    // ── duplicateHostProfile ───────────────────────────────────────────────
-
-    @Test
-    fun `duplicateHostProfile delegates to store and refreshes state`() {
-        every { store.duplicate("p-A") } returns profileB
-
-        controller.duplicateHostProfile("p-A")
-
-        verify { store.duplicate("p-A") }
-        // refreshHostProfileState runs, re-reading profiles
-        verify(atLeast = 1) { store.profiles() }
-    }
-
-    // ── deleteHostProfile ──────────────────────────────────────────────────
+    // ── importHostProfile / exportHostProfile ──────────────────────────────
 
     @Test
     fun `importHostProfile on success delegates to store and refreshes state`() {
@@ -575,93 +518,9 @@ class HostProfileControllerTest {
         verify { store.exportJson(profileB) }
     }
 
-    // ── selectHostProfile (host switch) ────────────────────────────────────
-
-    @Test
-    fun `selectHostProfile purges per-host session, message, and draft state`() {
-        seed {
-            it.copy(
-            currentSessionId = "sess-old",
-            messages = listOf(cn.vectory.ocdroid.data.model.Message(id = "m1", role = "user")),
-            unreadSessions = setOf("sess-old"),
-            draftWorkdir = "/old/proj",
-            availableCommands = listOf(cn.vectory.ocdroid.data.api.CommandInfo("cmd"))
-            )
-        }
-        every { store.select("p-B") } returns profileB
-
-        controller.selectHostProfile("p-B")
-        runPending()
-
-        assertNull("currentSessionId purged", slices.chat.value.currentSessionId)
-        assertTrue("messages purged", slices.chat.value.messages.isEmpty())
-        assertTrue("unread purged", slices.unread.value.unreadSessions.isEmpty())
-        assertNull("draftWorkdir purged", slices.composer.value.draftWorkdir)
-        assertTrue("availableCommands purged", slices.settings.value.availableCommands.isEmpty())
-    }
-
-    @Test
-    fun `selectHostProfile persists selection and emits RestartRequired (no runtime reconfigure)`() {
-        // lite-v2: selectHostProfile must NOT call configureRepositoryForProfileRaw
-        // (no runtime reconfigure — restart handles it). Instead it emits
-        // RestartRequired via withHostReconfiguration(needsReconfigure=true).
-        // No ForceReconnect / HostProfileSwitched.
-        every { store.select("p-B") } returns profileB
-
-        controller.selectHostProfile("p-B")
-        runPending()
-
-        // Repository is NOT reconfigured at select time (restart handles it).
-        verify(exactly = 0) { repository.configure(any(), any(), any(), any(), any(), any()) }
-        // RestartRequired is emitted (via withHostReconfiguration).
-        assertEquals(
-            "selectHostProfile emits exactly one RestartRequired",
-            1,
-            collectedEffects.filterIsInstance<ControllerEffect.RestartRequired>().size)
-        // No runtime reconnect / switch signals (restart supersedes them).
-        assertTrue(
-            "ForceReconnect must NOT be emitted (restart supersedes)",
-            collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().isEmpty())
-        assertTrue(
-            "HostProfileSwitched must NOT be emitted (restart supersedes)",
-            collectedEffects.filterIsInstance<ControllerEffect.HostProfileSwitched>().isEmpty())
-    }
-
-    @Test
-    fun `selectHostProfile drops session window cache and persisted session settings`() {
-        every { store.select("p-B") } returns profileB
-
-        controller.selectHostProfile("p-B")
-        runPending()
-
-        // §review-fix #5: ClearSessionWindowCache was removed from
-        // purgePerHostState (over-broad nuke replaced by group-scoped
-        // EvictGroup). §需求12: switching profileA (p-A) → profileB (p-B)
-        // fires EvictGroup(p-A) — the previous profile's id.
-        assertEquals(
-            "EvictGroup(p-A) replaces ClearSessionWindowCache",
-            1,
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
-        assertEquals("p-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().profileId)
-        // ClearSessionWindowCache is no longer emitted here.
-        assertTrue(
-            "ClearSessionWindowCache must NOT fire (EvictGroup handles group-scoped clear)",
-            collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().isEmpty())
-        // §R18 Phase 2-F: currentSessionId is no longer written to
-        // SettingsManager here (purgePerHostState clears it on the chat slice,
-        // asserted below); the AppCore collector persists non-null changes only.
-        assertNull("currentSessionId purged on chat slice", slices.chat.value.currentSessionId)
-        // §B4: open-tabs-list removed — no openSessionIds verify.
-        verify { settingsManager.sessionCache = emptyList() }
-        verify { settingsManager.currentWorkdir = null }
-        // §recent-workdirs fix: clearRecentWorkdirs was REMOVED from
-        // purgePerHostState (cross-group branch). currentProfileId() reads
-        // the NEW (target) fp after select(), so the call cleared the target
-        // profile's history — switching back lost its recent projects. Now
-        // recentWorkdirs are isolated per fp (getRecentWorkdirs(fp)) and never
-        // actively cleared on switch.
-        verify(exactly = 0) { settingsManager.clearRecentWorkdirs(any()) }
-    }
+    // ── deleteHostProfile tests REMOVED in L8 (single-host mode) ───────────
+    // selectHostProfile tests REMOVED in L8 (single-host mode).
+    // All host-switching / delete-profile tests were deleted.
 
     // §需求12阶段3: the former `selectHostProfile same-group preserves
     // recentWorkdirs` test was removed — under 需求12 profiles are independent
@@ -805,89 +664,7 @@ class HostProfileControllerTest {
         assertTrue(collectedEffects.filterIsInstance<ControllerEffect.ForceReconnect>().isEmpty())
     }
 
-    // ── saveHostProfile (S-1: live reconfigure when active host serverUrl changes) ─
-
-    // §需求12阶段3: the former `deleteHostProfile of current profile keeps
-    // model data when sibling remains in group` test was removed — under 需求12
-    // the reference-counting is dead (a group can never have sibling profiles),
-    // so clearModelDataForGroup + EvictGroup are both unconditional on active
-    // deletion.
-
-    // ── configureServer (URL-unchanged branch) ─────────────────────────────
-
-    @Test
-    fun `review-fix 5 selectHostProfile cross-group does NOT emit ClearSessionWindowCache nuke-all`() {
-        // §review-fix #5: the prior code emitted ClearSessionWindowCache
-        // (nukes ALL groups' memory LRU). The fix removes it; EvictGroup
-        // (group-scoped) replaces it. Assert ClearSessionWindowCache is absent.
-        every { store.select("p-B") } returns profileB
-
-        controller.selectHostProfile("p-B")
-        runPending()
-
-        assertTrue(
-            "ClearSessionWindowCache (nuke-all) must NOT fire on cross-group switch — EvictGroup (group-scoped) handles it",
-            collectedEffects.filterIsInstance<ControllerEffect.ClearSessionWindowCache>().isEmpty())
-        assertEquals(
-            "EvictGroup(p-A) fires for the previous profile only",
-            1,
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
-    }
-
-    @Test
-    fun `deleteHostProfile emits EvictGroup unconditionally (§需求12阶段3)`() {
-        // §需求12阶段3 (oracle-assessed): the former reference-counting
-        // (`remainingInGroup` / conditional EvictGroup) is dead under 需求12 —
-        // a group can never have sibling profiles. EvictGroup is now
-        // UNCONDITIONAL on active deletion.
-        // §需求12 rev-4 blocker B: active deletion clears the COMPLETE
-        // per-profile ESP lifecycle (clearAllForProfile), not just the model
-        // data — drafts, recent workdirs, basic-auth password too.
-        seed { it.copy(currentHostProfileId = "p-A") }
-        every { store.currentProfile() } returns profileB
-
-        controller.deleteHostProfile("p-A")
-        scope.testScheduler.advanceUntilIdle()
-
-        assertEquals(
-            "EvictGroup(p-A) fires unconditionally on active deletion",
-            1,
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
-        assertEquals("p-A", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().profileId)
-        // §需求12 rev-4 blocker B: full per-profile ESP lifecycle cleared.
-        verify(exactly = 1) { settingsManager.clearAllForProfile("p-A") }
-    }
-
-    @Test
-    fun `deleteHostProfile of non-current profile also clears its persisted model data (rev-3 blocker #2)`() {
-        // §需求12阶段3 rev-3 blocker #2: under 需求12 profiles are fully
-        // independent — a group can never have sibling profiles. The
-        // per-profile-id model availability/disabled ESP keys are orphans
-        // the instant their owning profile is deleted. Non-active deletion
-        // MUST also call clearAllForProfile(deletedId), not just emit
-        // EvictGroup — otherwise the ESP keys leak forever (UUID-suffixed
-        // keys are never swept by clearOrphanGroupKeys, which only purges
-        // non-UUID A/B/C/D suffixes).
-        // §需求12 rev-4 blocker B: clearAllForProfile now covers the COMPLETE
-        // per-profile ESP lifecycle (model data + drafts + recent workdirs +
-        // basic-auth password).
-        seed { it.copy(currentHostProfileId = "p-A") }
-
-        controller.deleteHostProfile("p-B")
-        scope.testScheduler.advanceUntilIdle()
-
-        // Persisted per-profile ESP data for the deleted non-current profile
-        // is cleared (full lifecycle: model + drafts + workdirs + basic-auth).
-        verify(exactly = 1) { settingsManager.clearAllForProfile("p-B") }
-        // EvictGroup still fires (in-memory authority/session eviction).
-        assertEquals(
-            "EvictGroup(p-B) fires for the deleted non-current profile",
-            1,
-            collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().size)
-        assertEquals("p-B", collectedEffects.filterIsInstance<ControllerEffect.EvictGroup>().single().profileId)
-        // Non-active deletion does NOT purge the active host's state or restart.
-        assertTrue(collectedEffects.filterIsInstance<ControllerEffect.RestartRequired>().isEmpty())
-    }
+    // ── L8: selectHostProfile / deleteHostProfile tests removed (single-host mode) ─
 
     // ── §fix-3 gro-1/gpt-2/glm-2: saveHostProfile mTLS live-reconfigure ──────
 
@@ -1080,26 +857,6 @@ class HostProfileControllerTest {
 
         assertNull(slices.connection.value.mtlsDegradedError)
         assertTrue(recordedEvents.filterIsInstance<UiEvent.Error>().isEmpty())
-    }
-
-    // ── §emitEffect reliability (must not use tryEmitEffect for critical effects) ──
-
-    @Test
-    fun `deleteHostProfile of current profile emits RestartRequired through suspend emitEffect not tryEmit`() {
-        // Regression: RestartRequired must use emitEffect (suspend-on-full) not
-        // tryEmitEffect (can drop silently). The test asserts the effect appears
-        // after runPending (scope.launch { emitEffect(...) }).
-        seed { it.copy(currentHostProfileId = "p-A") }
-        every { store.currentProfile() } returns profileB
-
-        controller.deleteHostProfile("p-A")
-        scope.testScheduler.advanceUntilIdle()
-
-        assertEquals(
-            "RestartRequired must be emitted (suspend emitEffect, not dropped tryEmit)",
-            1,
-            collectedEffects.filterIsInstance<ControllerEffect.RestartRequired>().size,
-        )
     }
 
     @Test

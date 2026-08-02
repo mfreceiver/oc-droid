@@ -5,10 +5,8 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
-import androidx.test.platform.app.InstrumentationRegistry
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.settings.AboutSection
-import cn.vectory.ocdroid.ui.settings.HostProfileDetailDialog
 import cn.vectory.ocdroid.ui.settings.HostProfileEditorDialog
 import org.junit.Rule
 import org.junit.Test
@@ -26,40 +24,16 @@ class SettingsSectionsInstrumentedTest {
                 HostProfileEditorDialog(
                     initial = profile,
                     onDismiss = {},
-                    // onSave arity is Function10 (profile, basicAuthPassword,
-                    // basicAuthEdited, mtlsEnabled, slimEnabled, stagedP12,
-                    // caStage, p12Password, p12PasswordEdited, hasImportedP12).
-                    onSave = { _, _, _, _, _, _, _, _, _, _ -> },
+                    // onSave arity is Function11 (profile, basicAuthPassword,
+                    // basicAuthEdited, mtlsEnabled, slimEnabled, trustAllEnabled,
+                    // stagedP12, caStage, p12Password, p12PasswordEdited,
+                    // hasImportedP12).
+                    onSave = { _, _, _, _, _, _, _, _, _, _, _ -> },
                 )
             }
         }
 
         composeRule.onNodeWithText("Server URL").assertIsDisplayed()
-    }
-
-    @Test
-    fun hostProfileDetailShowsUseActionForProfile() {
-        val profile = HostProfile(
-            id = "p1",
-            name = "OpenCode Server",
-            serverUrl = "https://opencode.example.com"
-        )
-
-        composeRule.setContent {
-            MaterialTheme {
-                HostProfileDetailDialog(
-                    profile = profile,
-                    isCurrent = false,
-                    onDismiss = {},
-                    onUse = {},
-                    onEdit = {}
-                )
-            }
-        }
-
-        val useCurrentServerLabel = InstrumentationRegistry.getInstrumentation()
-            .targetContext.getString(R.string.host_profile_use_this_host)
-        composeRule.onNodeWithText(useCurrentServerLabel).assertIsDisplayed()
     }
 
     @Test
@@ -89,10 +63,11 @@ class SettingsSectionsInstrumentedTest {
                 HostProfileEditorDialog(
                     initial = profile,
                     onDismiss = {},
-                    // onSave arity is Function10 (profile, basicAuthPassword,
-                    // basicAuthEdited, mtlsEnabled, slimEnabled, stagedP12,
-                    // caStage, p12Password, p12PasswordEdited, hasImportedP12).
-                    onSave = { _, _, _, _, _, _, _, _, _, _ -> },
+                    // onSave arity is Function11 (profile, basicAuthPassword,
+                    // basicAuthEdited, mtlsEnabled, slimEnabled, trustAllEnabled,
+                    // stagedP12, caStage, p12Password, p12PasswordEdited,
+                    // hasImportedP12).
+                    onSave = { _, _, _, _, _, _, _, _, _, _, _ -> },
                     initialHasCa = true,
                     initialClientSummary = "CN=client" to 1234,
                     initialCaSummary = "CN=opencode CA" to 5678,
@@ -124,8 +99,8 @@ class SettingsSectionsInstrumentedTest {
                 HostProfileEditorDialog(
                     initial = profile,
                     onDismiss = {},
-                    // onSave arity is Function10 (see test above).
-                    onSave = { _, _, _, _, _, _, _, _, _, _ -> },
+                    // onSave arity is Function11 (see test above).
+                    onSave = { _, _, _, _, _, _, _, _, _, _, _ -> },
                     initialHasCa = true,
                     initialClientSummary = null,
                     initialCaSummary = "CN=opencode CA" to 5678,
