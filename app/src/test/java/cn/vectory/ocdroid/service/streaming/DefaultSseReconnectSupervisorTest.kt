@@ -716,7 +716,7 @@ class DefaultSseReconnectSupervisorTest {
         val launcher = FakeLauncher()
         val supervisor = DefaultSseReconnectSupervisor(
             runtimeStore = runtime,
-            launcher = launcher,
+            launcher = launcher.ensureStarted,
             ownershipGate = gate,
             identityStore = identityStore,
             appLifecycleMonitor = monitor,
@@ -748,7 +748,7 @@ class DefaultSseReconnectSupervisorTest {
         val identity: ConnectionIdentity,
     )
 
-    private class FakeLauncher : cn.vectory.ocdroid.service.StreamingServiceLauncher {
+    private class FakeLauncher {
         private val calls = AtomicInteger(0)
         private val requested = mutableListOf<ConnectionIdentity>()
         private val queue = ConcurrentLinkedQueue<OwnershipStartResult>()
@@ -764,7 +764,7 @@ class DefaultSseReconnectSupervisorTest {
         @Volatile
         var defaultResult: OwnershipStartResult? = null
 
-        /** When true, each [ensureStarted] suspends until [pause] completes. */
+        /** When true, each call suspends until [pause] completes. */
         @Volatile
         var paused: Boolean = false
         val pause = CompletableDeferred<Unit>()
@@ -773,7 +773,8 @@ class DefaultSseReconnectSupervisorTest {
         @Volatile
         var throwOnce: Boolean = false
 
-        override suspend fun ensureStarted(identity: ConnectionIdentity): OwnershipStartResult {
+        /** Lambda matching the supervisor's launcher param. */
+        val ensureStarted: suspend (ConnectionIdentity) -> OwnershipStartResult = { identity ->
             calls.incrementAndGet()
             synchronized(requested) { requested += identity }
             if (paused) pause.await()
@@ -781,7 +782,7 @@ class DefaultSseReconnectSupervisorTest {
                 throwOnce = false
                 throw IllegalStateException("simulated launcher failure")
             }
-            return queue.poll() ?: defaultResult ?: OwnershipStartResult.Ready(identity)
+            queue.poll() ?: defaultResult ?: OwnershipStartResult.Ready(identity)
         }
     }
 

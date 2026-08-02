@@ -6,9 +6,6 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
-import cn.vectory.ocdroid.service.StreamingServiceLauncher
-import cn.vectory.ocdroid.service.OwnershipStartResult
-import cn.vectory.ocdroid.service.OwnershipRefusal
 import cn.vectory.ocdroid.service.TeardownReason
 import cn.vectory.ocdroid.service.DegradedBootstrapTerminator
 import cn.vectory.ocdroid.service.StreamingOwnershipGate
@@ -64,7 +61,7 @@ import java.util.Locale
  * [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner]. The
  * thin [startSSE] delegate is preserved (ConnectionViewModel /
  * ControllerEffect.StartSse / tests expose it; deleting adds rollback churn)
- * — it now calls [streamingServiceLauncher].ensureStarted() so a successful
+     * — it now calls sseOwner.connect() so a successful
  * foreground health probe synchronously requests the Service before
  * reporting success. The no-zero-time-gap guarantee (FGS spec §1) is
  * preserved: there is NO terminal connected-without-SSE path.
@@ -99,8 +96,8 @@ import java.util.Locale
  *    directory-sessions re-fetch for the restored workdir.
  *  - `loadCommands()` + `localCommands()` + `mergeCommands()` — slash-command
  *    merge (server list + client-side /clear /compact /undo /redo).
- *  - `startSSE()` — thin delegate to [streamingServiceLauncher]; its
- *    TOFU-frozen guard now reads [ConnectionHealthProbe.hasPendingTofuDecision].
+     *  - `startSSE()` — thin delegate to sseOwner.connect(); its
+     *    TOFU-frozen guard now reads [ConnectionHealthProbe.hasPendingTofuDecision].
  *  - `cancelSse()` / `cancelSseForReconfigure()` — coordinator teardown
  *    delegates, deduped via [cancelSseInternal].
  *
@@ -162,18 +159,6 @@ class ConnectionCoordinator(
      * pre-extraction private fields).
      */
     private val bootstrapCoordinator: ConnectionBootstrapCoordinator? = null,
-    /**
-     * CP9 (notify Phase-0 switchover): the trigger that promotes the live
-     * SSE connection ownership into [cn.vectory.ocdroid.service.SessionStreamingService].
-     * CC's [startSSE] delegate now calls [StreamingServiceLauncher.ensureStarted]
-     * instead of `repository.connectSSE(...)`; the Service runs the §5
-     * bootstrap and the coordinator's decision matrix drives StartSse /
-     * StopSse into the new owner.
-     *
-     * `null` for legacy/test construction — CC falls back to a no-op so
-     * tests that drive health probes without the launcher keep compiling.
-     */
-    private val streamingServiceLauncher: StreamingServiceLauncher? = null,
     /**
      * CP9 (notify Phase-0 switchover): the lifecycle coordinator that
      * drives the L1/L2/L3 state machine inside the Service. CC's
@@ -353,14 +338,6 @@ class ConnectionCoordinator(
      */
     internal var onProbeCoroutineStarted: (() -> Unit)? = null
 
-    /**
-     * L1 FGS commit 1: when the new SSE owner is wired (production), null out
-     * the launcher so the probe uses [connectSseAndAwait]. When the owner is
-     * absent (test/legacy path), preserve the launcher fallback.
-     */
-    private val probeStreamingServiceLauncher: StreamingServiceLauncher? =
-        if (sseOwner != null) null else streamingServiceLauncher
-
     private val healthProbe = ConnectionHealthProbe(
         scope = scope,
         slices = slices,
@@ -374,7 +351,6 @@ class ConnectionCoordinator(
         bootstrapCoordinator = bootstrapCoordinator,
         connectionBootstrapEngine = connectionBootstrapEngine,
         bootstrapRetryPolicy = bootstrapRetryPolicy,
-        streamingServiceLauncher = probeStreamingServiceLauncher,
         connectSseAndAwait = ::connectSseAndAwait,
         degradedBootstrapTerminator = degradedBootstrapTerminator,
         appLifecycleMonitor = appLifecycleMonitor,
@@ -916,9 +892,10 @@ class ConnectionCoordinator(
     }
 
     /**
-     * L1 FGS commit 1: new internal seam for [ConnectionHealthProbe] to
-     * call the owner directly instead of going through the Service launcher.
-     * Returns [SourceActivation] so the probe can map the result.
+     * L1 FGS commit 1: internal seam for [ConnectionHealthProbe] to
+     * call the owner directly. Returns [SourceActivation] so the probe can
+     * map the result. Falls back to [SourceActivation.Rejected.StaleIdentity]
+     * when sseOwner is absent (legacy/test construction).
      */
     internal suspend fun connectSseAndAwait(
         identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
@@ -929,10 +906,10 @@ class ConnectionCoordinator(
     // ── SSE lifecycle ───────────────────────────────────────────────────────
 
     /**
-     * CP9 switchover / L1 FGS commit 1: the SSE feed collector has been moved
-     * into the new [ServiceSseConnectionOwner]. This method is preserved as a
-     * thin compatibility delegate (VMs, [ControllerEffect.StartSse], and tests
-     * expose it; deleting adds rollback churn).
+     * L1 FGS commit 2: thin delegate that calls sseOwner.connect() directly
+     * (the old Service launcher path was removed in Commit 2).
+     * Preserved as a compatibility delegate (VMs, [ControllerEffect.StartSse],
+     * and tests expose it; deleting adds rollback churn).
      *
      * The shared TOFU-frozen guard is preserved verbatim — while a TOFU trust
      * dialog is pending the owner must NOT be invoked (the resulting
@@ -958,67 +935,37 @@ class ConnectionCoordinator(
         val identity = identityStore?.currentIdentity?.value ?: return
         DebugLog.i("SSE", "startSSE → sseOwner.connect(identity=${identity.epoch})")
         scope.launch {
-            // L1 FGS commit 1: replaced streamingServiceLauncher?.ensureStarted
-            // with sseOwner.connect. Fall back to launcher when sseOwner is
-            // absent (tests mock the launcher directly). The launcher param
-            // stays in the constructor (unused in production) — removed in
-            // Commit 2.
-            if (sseOwner != null) {
-                val activation = sseOwner.connect(identity)
-                // §sse-zombie-fix (v3 Bug B / Kimi N1): the await below may
-                // resolve long after the user switched host. Re-check identity
-                // currency BEFORE writing.
-                if (identityStore?.isCurrent(identity) == false) {
-                    DebugLog.i("SSE", "startSSE: identity no longer current — drop stale result")
-                    return@launch
+            // L1 FGS commit 2: sseOwner.connect is the sole path (launcher
+            // removed). sseOwner is null only in legacy/test construction
+            // that doesn't wire the owner — treat as no-op.
+            val activation = sseOwner?.connect(identity) ?: return@launch
+            // §sse-zombie-fix (v3 Bug B / Kimi N1): the await below may
+            // resolve long after the user switched host. Re-check identity
+            // currency BEFORE writing.
+            if (identityStore?.isCurrent(identity) == false) {
+                DebugLog.i("SSE", "startSSE: identity no longer current — drop stale result")
+                return@launch
+            }
+            when (activation) {
+                is SourceActivation.Ready -> {
+                    DebugLog.i("SSE", "startSSE: sseOwner.connect returned Ready")
                 }
-                when (activation) {
-                    is SourceActivation.Ready -> {
-                        DebugLog.i("SSE", "startSSE: sseOwner.connect returned Ready")
-                    }
-                    is SourceActivation.Rejected.StaleIdentity -> {
-                        DebugLog.i("SSE", "startSSE: sseOwner.connect returned StaleIdentity — drop")
-                    }
-                    is SourceActivation.Rejected.TofuPending -> {
-                        DebugLog.i("SSE", "startSSE: sseOwner.connect returned TofuPending — no-op")
-                    }
-                    is SourceActivation.Rejected.Superseded -> {
-                        DebugLog.i("SSE", "startSSE: sseOwner.connect returned Superseded — no-op")
-                    }
-                    is SourceActivation.Rejected.TransportTimeout,
-                    is SourceActivation.Rejected.Exhausted -> {
-                        writeConnection {
-                            it.copy(
-                                isConnected = true,
-                                isConnecting = false,
-                                connectionPhase = ConnectionPhase.SseBootstrapFailed,
-                                authFailureReason = null,
-                            )
-                        }
-                    }
+                is SourceActivation.Rejected.StaleIdentity -> {
+                    DebugLog.i("SSE", "startSSE: sseOwner.connect returned StaleIdentity — drop")
                 }
-            } else {
-                // Legacy path: streamingServiceLauncher (used by tests).
-                val result = streamingServiceLauncher?.ensureStarted(identity)
-                if (identityStore?.isCurrent(identity) == false) {
-                    DebugLog.i("SSE", "startSSE: identity no longer current — drop stale result")
-                    return@launch
+                is SourceActivation.Rejected.TofuPending -> {
+                    DebugLog.i("SSE", "startSSE: sseOwner.connect returned TofuPending — no-op")
                 }
-                if (result !is OwnershipStartResult.Ready || result.identity != identity) {
-                    val phase = when {
-                        result is OwnershipStartResult.Refused &&
-                            result.reason is OwnershipRefusal.SseDisabled ->
-                            ConnectionPhase.SseDisabled
-                        result is OwnershipStartResult.Refused &&
-                            result.reason is OwnershipRefusal.BootstrapFailed ->
-                            ConnectionPhase.SseBootstrapFailed
-                        else -> ConnectionPhase.Disconnected
-                    }
+                is SourceActivation.Rejected.Superseded -> {
+                    DebugLog.i("SSE", "startSSE: sseOwner.connect returned Superseded — no-op")
+                }
+                is SourceActivation.Rejected.TransportTimeout,
+                is SourceActivation.Rejected.Exhausted -> {
                     writeConnection {
                         it.copy(
                             isConnected = true,
                             isConnecting = false,
-                            connectionPhase = phase,
+                            connectionPhase = ConnectionPhase.SseBootstrapFailed,
                             authFailureReason = null,
                         )
                     }

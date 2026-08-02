@@ -204,26 +204,18 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
     // ═══════════════════════════════════════════════════════════════════════
 
     @Test
-    fun `dispatchHostEffect handles StartSse and opens the SSE feed`() = runTest {
-        // CP9 (notify Phase-0 switchover): CC's startSSE now calls
-        // StreamingServiceLauncher.ensureStarted() instead of
-        // repository.connectSSE. The SSE collector moved to the
-        // Service-owned ServiceSseConnectionOwner; the launcher is the
-        // atomic trigger that promotes the Service to foreground.
+    fun `dispatchHostEffect handles StartSse`() = runTest {
+        // L1 FGS commit 2: startSSE now calls sseOwner.connect directly
+        // (the Service launcher was deleted). The SSE collector lives in
+        // ServiceSseConnectionOwner.
         io.mockk.every { settingsManager.currentWorkdir } returns "/proj"
         val core = newCore()
         identityStore.bind("test-fp", "/proj", "test-endpoint")
-        val callsBefore = streamingServiceLauncher.callCount
 
         val handled = core.dispatchHostEffect(ControllerEffect.StartSse)
         advanceUntilIdle()
 
         assertTrue(handled)
-        assertEquals(
-            "StartSse dispatches through the launcher, not repository.connectSSE",
-            callsBefore + 1,
-            streamingServiceLauncher.callCount,
-        )
         io.mockk.verify(exactly = 0) { repository.connectSSE(any()) }
     }
 

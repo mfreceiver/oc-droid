@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.controller
 
-import cn.vectory.ocdroid.RecordingStreamingServiceLauncher
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -67,8 +66,6 @@ class ConnectionCoordinatorConcurrentTest {
     private var now: Long = 100_000L
     private lateinit var identityStore: ConnectionIdentityStore
     private lateinit var bootstrapCoordinator: ConnectionBootstrapCoordinator
-    private lateinit var launcher: RecordingStreamingServiceLauncher
-
     @Before
     fun setUp() {
         val stateStore = SharedStateStore()
@@ -78,7 +75,6 @@ class ConnectionCoordinatorConcurrentTest {
         effects = SharedEffectBus()
         identityStore = ConnectionIdentityStore()
         bootstrapCoordinator = ConnectionBootstrapCoordinator()
-        launcher = RecordingStreamingServiceLauncher()
         every { settingsManager.currentWorkdir } returns null
         coEvery { repository.getSessionsForDirectory(any()) } returns Result.success(emptyList())
     }
@@ -122,7 +118,6 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
 
@@ -206,7 +201,6 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
 
@@ -265,7 +259,6 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
 
@@ -346,7 +339,6 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
 
@@ -422,7 +414,6 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
 
@@ -501,7 +492,6 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
             tokenStreamCoordinator = tokenStream,
         )
@@ -584,7 +574,6 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
             tokenStreamCoordinator = tokenStream,
         )
@@ -641,7 +630,6 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
 
@@ -703,7 +691,6 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
             tokenStreamCoordinator = tokenStream,
         )
@@ -790,7 +777,6 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
 
@@ -902,7 +888,6 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
 
@@ -1005,7 +990,6 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
             connectionBootstrapEngine = engine,
         )
@@ -1091,7 +1075,6 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = lifecycleCoordinator,
         )
 

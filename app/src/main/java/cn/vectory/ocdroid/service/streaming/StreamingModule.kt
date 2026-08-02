@@ -1,12 +1,9 @@
 package cn.vectory.ocdroid.service.streaming
 
 import cn.vectory.ocdroid.di.ApplicationScope
-import cn.vectory.ocdroid.service.AndroidStreamingServiceLauncher
-import cn.vectory.ocdroid.service.StreamingServiceLauncher
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
-import cn.vectory.ocdroid.data.state.AuthorityState
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -44,17 +41,6 @@ abstract class StreamingModule {
     @Binds
     @Singleton
     abstract fun bindSessionSnapshotProvider(impl: SharedStateStoreSessionSnapshotProvider): SessionSnapshotProvider
-
-    /**
-     * CP9 (notify Phase-0 switchover): binds the Android launcher impl so
-     * [cn.vectory.ocdroid.ui.controller.ConnectionCoordinator] can inject
-     * [StreamingServiceLauncher] by interface. Tests inject a fake launcher
-     * directly (no Hilt container) — see [cn.vectory.ocdroid.ui.controller.
-     * ConnectionCoordinatorTest].
-     */
-    @Binds
-    @Singleton
-    abstract fun bindStreamingServiceLauncher(impl: AndroidStreamingServiceLauncher): StreamingServiceLauncher
 
     @Binds
     @Singleton
@@ -185,43 +171,6 @@ object ProcessStatusPollerModule {
         )
     }
 
-    /**
-     * §U-P2 (Batch 2): provides the process-level
-     * [OptimisticClaimWatchdogCoordinator] singleton. Extracted as a
-     * `@Provides` so the function-typed deps (`() -> AuthorityState`,
-     * `() -> Long`, the suspend sink) can be filled without Hilt bindings
-     * for the function types (mirrors [provideProcessStatusPoller]'s pattern).
-     *
-     * The coordinator runs its OWN 5s timer (`tickIntervalMs` default =
-     * [cn.vectory.ocdroid.ui.OPTIMISTIC_CONFIRM_TIMEOUT_MS]) on
-     * `@ApplicationScope`, independent of the 30s bulk poller. The
-     * connection lifecycle (ServiceShell startPoller / ensurePoller /
-     * stopPoller / enterNoSourceTerminal) calls [OptimisticClaimWatchdogCoordinator.start]
-     * / [OptimisticClaimWatchdogCoordinator.stop] so the watchdog is bound
-     * to the SAME connection lifetime as the poller.
-     */
-    @Provides
-    @Singleton
-    fun provideWatchdogCoordinator(
-        @ApplicationScope scope: CoroutineScope,
-        sessionSyncCoordinator:
-            cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator,
-        identityStore: ConnectionIdentityStore,
-    ): OptimisticClaimWatchdogCoordinator = OptimisticClaimWatchdogCoordinator(
-        scope = scope,
-        authorityState = { sessionSyncCoordinator.currentAuthority() },
-        identityStore = identityStore,
-        clock = { System.currentTimeMillis() },
-        // §U-P2 SLA fix (rev-gpt gate r1 BLOCKER #2): tick STRICTLY SMALLER than
-        // OPTIMISTIC_CONFIRM_TIMEOUT_MS so worst-case detection ≈ timeout+tick
-        // (~6s) honors the ~7.5s self-heal SLA. tick==timeout gave ~10s worst case.
-        tickIntervalMs = cn.vectory.ocdroid.ui.OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
-        // §U-P2: reconcile sink routes to the coordinator which queries the
-        // repository per-sid and dispatches ApplyReconcileOutcome.
-        staleClaimReconcileSink = { identity, claims ->
-            sessionSyncCoordinator.reconcileStaleOptimisticClaims(identity, claims)
-        },
-    )
 }
 
 /**

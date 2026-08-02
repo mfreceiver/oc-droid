@@ -49,7 +49,7 @@ sealed interface OwnershipRefusal {
  *
  * The launcher calls [StreamingOwnershipGate.prepareAttempt] BEFORE issuing
  * `startForegroundService`. The gate allocates a monotonic [attemptId] that
- * travels in the Service Intent ([OwnershipRequestParser.EXTRA_ATTEMPT_ID])
+ * travels in the Service Intent as EXTRA_ATTEMPT_ID
  * and is validated when the Service's `onStartCommand` calls
  * [StreamingOwnershipGate.registerStarting]. If the launcher's 5s
  * Starting-acceptance window elapses, [StreamingOwnershipGate.expireAttempt]
@@ -157,41 +157,6 @@ sealed interface OwnershipState {
 @Singleton
 class OwnershipAckPolicy @Inject constructor() {
     val timeoutMs: Long = 5_000L
-}
-
-object OwnershipRequestParser {
-    const val EXTRA_EPOCH = "cn.vectory.ocdroid.extra.ownership.epoch"
-    const val EXTRA_PROFILE_ID = "cn.vectory.ocdroid.extra.ownership.profileId"
-    const val EXTRA_WORKDIR = "cn.vectory.ocdroid.extra.ownership.workdir"
-    const val EXTRA_ENDPOINT_FP = "cn.vectory.ocdroid.extra.ownership.endpointFp"
-
-    /**
-     * D5-2 (#4) — carries the gate's monotonic attempt ID. The launcher
-     * stamps this so the late-arriving Service `onStartCommand` can pass it
-     * to [StreamingOwnershipGate.registerStarting]; if the launcher has
-     * already expired the attempt (5s AckTimeout), the gate returns Expired
-     * and the Service aborts (orphan-owner closure).
-     */
-    const val EXTRA_ATTEMPT_ID = "cn.vectory.ocdroid.extra.ownership.attemptId"
-
-    /**
-     * §需求12 阶段6: the [profileId] argument is the bound
-     * [ConnectionIdentity.profileId] (== active HostProfile's `id`). Internal
-     * self-send to this app's `SessionStreamingService` (explicit-component
-     * Intent, `exported="false"`), so no external IPC consumer to break.
-     */
-    fun parse(
-        epoch: Long?,
-        profileId: String?,
-        workdir: String?,
-        endpointFp: String?,
-    ): ConnectionIdentity? = if (
-        epoch != null && profileId != null && workdir != null && endpointFp != null
-    ) {
-        ConnectionIdentity(epoch, profileId, workdir, endpointFp)
-    } else {
-        null
-    }
 }
 
 /**

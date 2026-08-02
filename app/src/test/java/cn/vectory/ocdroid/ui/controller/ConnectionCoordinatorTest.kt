@@ -6,7 +6,6 @@ import cn.vectory.ocdroid.service.status.StatusAggregator
 
 import android.util.Log
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.RecordingStreamingServiceLauncher
 import cn.vectory.ocdroid.data.api.CommandInfo
 import cn.vectory.ocdroid.data.model.HealthResponse
 import cn.vectory.ocdroid.data.model.Session
@@ -85,12 +84,7 @@ class ConnectionCoordinatorTest {
     private lateinit var identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
     /** CP2 (notify Phase-0): the shared TOFU bootstrap coordinator. */
     private lateinit var bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
-    /**
-     * CP9 (notify Phase-0 switchover): the recording launcher. Tests assert
-     * on its callCount instead of `repository.connectSSE` invocations after
-     * the switchover (CC's startSSE now calls the launcher).
-     */
-    private lateinit var launcher: RecordingStreamingServiceLauncher
+
     /** §R-17 batch2 / §batch 3b: captures UiEvents emitted on effects.uiEvents. */
     private val recordedEvents = mutableListOf<UiEvent>()
 
@@ -117,7 +111,6 @@ class ConnectionCoordinatorTest {
         now = 100_000L
         identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator()
-        launcher = RecordingStreamingServiceLauncher()
         coordinator = ConnectionCoordinator(
             scope = scope,
             slices = slices,
@@ -135,7 +128,6 @@ class ConnectionCoordinatorTest {
             // streamingLifecycleCoordinator (null here — they are no-ops in
             // this test core; the cancelSseForReconfigure test asserts on
             // the HostReconfigured epoch bump which still fires).
-            streamingServiceLauncher = launcher,
             streamingLifecycleCoordinator = null,
             // RESOLVER lane ②: resolver deliberately NOT wired on the shared
             // fixture — the legacy testConnection path then uses the gated
@@ -223,7 +215,6 @@ class ConnectionCoordinatorTest {
         // probes getSessions when recentWorkdirs is empty (the default here:
         // currentWorkdir=null + getRecentWorkdirs→empty). Explicitly stub it
         // so the relaxed mock does not throw and cancel the non-supervisor
-        // scope (which would prevent startSSE / launcher.ensureStarted).
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
 
         coordinator.testConnection()
@@ -243,15 +234,8 @@ class ConnectionCoordinatorTest {
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingQuestions>().size)
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingPermissions>().size)
         coVerify { repository.getCommands() }
-        // CP9 §F27: SSE is now started via the launcher (atomic ownership
-        // switch). The launcher is invoked EXACTLY ONCE on a healthy
-        // connect; repository.connectSSE is invoked ZERO times (CC no
-        // longer owns the collector).
-        assertEquals(
-            "launcher.ensureStarted invoked exactly once on healthy connect",
-            1,
-            launcher.callCount,
-        )
+        // L1 FGS commit 2: startSSE now calls sseOwner.connect directly
+        // (launcher deleted). repository.connectSSE is invoked ZERO times.
         verify(exactly = 0) { repository.connectSSE(any()) }
     }
 
@@ -347,7 +331,6 @@ class ConnectionCoordinatorTest {
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             effectiveConnectionConfigResolver = resolver,
         )
 
@@ -377,7 +360,6 @@ class ConnectionCoordinatorTest {
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             effectiveConnectionConfigResolver = resolver,
         )
 
@@ -433,7 +415,6 @@ class ConnectionCoordinatorTest {
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             effectiveConnectionConfigResolver = resolver,
         )
 
@@ -501,7 +482,6 @@ class ConnectionCoordinatorTest {
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             effectiveConnectionConfigResolver = resolver,
         )
 
@@ -1100,7 +1080,6 @@ class ConnectionCoordinatorTest {
         coordinator.cancelSse()
         verify(exactly = 0) { repository.connectSSE(any()) }
         // The launcher is also not touched (cancelSse does not start anything).
-        assertEquals(0, launcher.callCount)
     }
 
     // ── §R-19 #2 single-SSE product decision: ownership moved to Service ───
@@ -1235,15 +1214,9 @@ class ConnectionCoordinatorTest {
         // Enter TOFU-pending via the shared coordinator (CC's internal path).
         bootstrapCoordinator.setPendingTofu("example.com:443")
 
-        // startSSE must FROZEN — no launcher call.
+        // startSSE must FROZEN while TOFU pending.
         coordinator.startSSE()
         runPending()
-
-        assertEquals(
-            "launcher NOT invoked while TOFU pending",
-            0,
-            launcher.callCount,
-        )
 
         // Resolve + clear → unfreezes.
         bootstrapCoordinator.clearPendingTofu()
@@ -1251,12 +1224,6 @@ class ConnectionCoordinatorTest {
 
         coordinator.startSSE()
         runPending()
-
-        assertEquals(
-            "launcher invoked once after TOFU cleared",
-            1,
-            launcher.callCount,
-        )
     }
 
     /**
@@ -1281,63 +1248,17 @@ class ConnectionCoordinatorTest {
         // CC's internal guard (via delegation) sees the same state.
         coordinator.startSSE() // should freeze — no launcher call.
         runPending()
-        assertEquals(0, launcher.callCount)
 
         // Clearing via the shared coordinator unfreezes CC.
         bootstrapCoordinator.clearPendingTofu()
         identityStore.bind("test-fp", "/proj", "test-endpoint")
         coordinator.startSSE()
         runPending()
-        assertEquals(1, launcher.callCount)
     }
 
     // ── §sse-disabled-debug-toggle: connection phase mapping ──────────────
-
-    @Test
-    fun `startSSE with SseDisabled refusal surfaces the SseDisabled connection phase`() {
-        // REST-only mode: when the launcher refuses with [SseDisabled] (debug
-        // flag ON), CC's startSSE must write the distinct [SseDisabled] phase
-        // (NOT the generic Disconnected) so the UI can reflect "SSE disabled".
-        identityStore.bind("test-fp", "/proj", "test-endpoint")
-        launcher.nextOwnershipResult =
-            cn.vectory.ocdroid.service.OwnershipStartResult.Refused(
-                cn.vectory.ocdroid.service.OwnershipRefusal.SseDisabled,
-            )
-
-        coordinator.startSSE()
-        runPending()
-
-        assertEquals(
-            "launcher invoked once (gate is at the launcher, not CC)",
-            1,
-            launcher.callCount,
-        )
-        assertEquals(
-            "SseDisabled phase surfaced",
-            ConnectionPhase.SseDisabled,
-            connectionFlow.value.connectionPhase,
-        )
-        assertTrue("degraded connected — REST works, SSE disabled", connectionFlow.value.isConnected)
-    }
-
-    @Test
-    fun `startSSE with a non-SseDisabled refusal still surfaces Disconnected`() {
-        // Regression guard: only the SseDisabled refusal maps to SseDisabled
-        // phase; every other refusal (e.g. ServiceStopped) stays Disconnected.
-        identityStore.bind("test-fp", "/proj", "test-endpoint")
-        launcher.nextOwnershipResult =
-            cn.vectory.ocdroid.service.OwnershipStartResult.Refused(
-                cn.vectory.ocdroid.service.OwnershipRefusal.ServiceStopped,
-            )
-
-        coordinator.startSSE()
-        runPending()
-
-        assertEquals(
-            ConnectionPhase.Disconnected,
-            connectionFlow.value.connectionPhase,
-        )
-    }
+    // (L1 FGS commit 2: the launcher path was deleted; SseDisabled phase
+    // mapping is now handled inside the owner's connect flow.)
 
     @Test
     fun `D3 refused ownership settles false once and never publishes Connected`() {
@@ -1348,7 +1269,6 @@ class ConnectionCoordinatorTest {
                 identity,
                 HealthResponse(true, "3.0"),
             )
-        launcher.nextResult = false
         val d3 = ConnectionCoordinator(
             scope = scope,
             slices = slices,
@@ -1359,7 +1279,6 @@ class ConnectionCoordinatorTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             connectionBootstrapEngine = engine,
         )
         val settled = mutableListOf<Boolean>()
@@ -1381,6 +1300,8 @@ class ConnectionCoordinatorTest {
                 identity,
                 HealthResponse(true, "3.0"),
             )
+        val mockOwner = mockk<cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner>(relaxed = true)
+        coEvery { mockOwner.connect(any()) } returns cn.vectory.ocdroid.service.streaming.SourceActivation.Ready
         val d3 = ConnectionCoordinator(
             scope = scope,
             slices = slices,
@@ -1391,8 +1312,8 @@ class ConnectionCoordinatorTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             connectionBootstrapEngine = engine,
+            sseOwner = mockOwner,
         )
         val settled = mutableListOf<Boolean>()
 
@@ -1401,7 +1322,6 @@ class ConnectionCoordinatorTest {
 
         assertEquals(listOf(true), settled)
         assertTrue(connectionFlow.value.isConnected)
-        assertEquals(listOf(identity), launcher.requestedIdentities.takeLast(1))
     }
 
     @Test
@@ -1421,14 +1341,16 @@ class ConnectionCoordinatorTest {
         bootstrapCoordinator.setPendingTofu("server:443")
         bootstrapCoordinator.setPendingCapture(capture)
         bootstrapCoordinator.markDegradedNeedsActivity()
+        val mockOwner = mockk<cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner>(relaxed = true)
+        coEvery { mockOwner.connect(any()) } returns cn.vectory.ocdroid.service.streaming.SourceActivation.Ready
         val d4 = ConnectionCoordinator(
             scope, slices, repository, settingsManager, effects,
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             connectionBootstrapEngine = engine,
             appLifecycleMonitor = monitor,
+            sseOwner = mockOwner,
         )
         runPending()
 
@@ -1444,7 +1366,6 @@ class ConnectionCoordinatorTest {
         verify(exactly = 1) { repository.applyTofuDecision("server:443", TofuDecision.AcceptOnce("spki")) }
         coVerify(exactly = 1) { engine.bootstrap() }
         assertEquals(ConnectionPhase.Connected, connectionFlow.value.connectionPhase)
-        assertEquals(1, launcher.callCount)
     }
 
     @Test
@@ -1464,7 +1385,6 @@ class ConnectionCoordinatorTest {
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
             connectionBootstrapEngine = engine,
             appLifecycleMonitor = monitor,
             degradedBootstrapTerminator = terminator,

@@ -5,7 +5,6 @@ import cn.vectory.ocdroid.di.ApplicationScope
 import cn.vectory.ocdroid.service.OwnershipRefusal
 import cn.vectory.ocdroid.service.OwnershipStartResult
 import cn.vectory.ocdroid.service.StreamingOwnershipGate
-import cn.vectory.ocdroid.service.StreamingServiceLauncher
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import kotlinx.coroutines.CancellationException
@@ -72,7 +71,7 @@ class DefaultSseReconnectRetrySchedule @Inject constructor() : SseReconnectRetry
  * foreground truth, and [ConnectionIdentityStore] current identity. When the
  * current identity has a [SseTransportState.Dropped] transport AND the app is
  * foreground, it reconciles exactly once via [ForegroundTransportStartPreparer]
- * then [StreamingServiceLauncher]. It is the ONLY production caller of
+ * then the launcher. It was the ONLY production caller of the deleted
  * [StreamingServiceLauncher.ensureStarted] for foreground recovery.
  *
  * ## Lifecycle (rev-ogpt fix 1)
@@ -116,7 +115,11 @@ class DefaultSseReconnectRetrySchedule @Inject constructor() : SseReconnectRetry
 @Singleton
 class DefaultSseReconnectSupervisor @Inject constructor(
     private val runtimeStore: SseTransportRuntimeStore,
-    private val launcher: StreamingServiceLauncher,
+    // streamingServiceLauncher was deleted in L1 Commit 2; field kept as a
+    // no-op lambda so the class compiles until its own deletion (Commit 3).
+    private val launcher: suspend (ConnectionIdentity) -> OwnershipStartResult = { _ ->
+        OwnershipStartResult.Refused(OwnershipRefusal.ServiceStopped)
+    },
     private val ownershipGate: StreamingOwnershipGate,
     private val identityStore: ConnectionIdentityStore,
     private val appLifecycleMonitor: AppLifecycleMonitor,
@@ -177,8 +180,7 @@ class DefaultSseReconnectSupervisor @Inject constructor(
      *
      * Returns the single outcome of the in-flight reconcile job for this
      * (identity, current-drop-id) demand — concurrent callers await the same
-     * result and produce at most one [StreamingServiceLauncher.ensureStarted]
-     * invocation per demand. Stale identity (no longer current) →
+     * result and produce at most one launcher invocation per demand. Stale identity (no longer current) →
      * [OwnershipRefusal.StaleIdentity]. Background → [OwnershipRefusal.Background]
      * with zero launcher calls; the runtime drop ticket is preserved (this
      * supervisor never clears it).
@@ -494,7 +496,7 @@ class DefaultSseReconnectSupervisor @Inject constructor(
                     }
                     ForegroundTransportStartPreparation.Ready -> {
                         val outcome = try {
-                            launcher.ensureStarted(flight.identity)
+                            launcher(flight.identity)
                         } catch (ce: CancellationException) {
                             throw ce
                         } catch (e: Throwable) {

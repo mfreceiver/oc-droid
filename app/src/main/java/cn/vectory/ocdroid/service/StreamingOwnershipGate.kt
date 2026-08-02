@@ -54,7 +54,7 @@ class StreamingOwnershipGate @Inject constructor() {
     /**
      * D5-2 (#4) — monotonic attempt ID counter. Every [prepareAttempt] that
      * requires a launch allocates a fresh ID; it travels in the Service Intent
-     * ([OwnershipRequestParser.EXTRA_ATTEMPT_ID]) and is validated by
+     * (as EXTRA_ATTEMPT_ID in the legacy Service Intent) and is validated by
      * [registerStarting].
      */
     private var attemptIdCounter: Long = 0L

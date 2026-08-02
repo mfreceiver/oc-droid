@@ -604,13 +604,6 @@
          copy is the differentiator across L1-busy / L2-active / L2-idle /
          degraded sub-states. English is the source; values-zh holds the
          zh-CN translation. -->
-    <string name="notify_session_restoring">Restoring connection…</string>
-    <string name="notify_session_busy_singular">1 task running</string>
-    <string name="notify_session_busy_plural">%1$d tasks running</string>
-    <string name="notify_session_connected">Connected</string>
-    <string name="notify_session_idle_monitoring">Idle monitoring</string>
-    <string name="notify_session_degraded_title">Server trust required</string>
-    <string name="notify_session_degraded_content">Open the app to confirm server trust</string>
 
     <!-- §FGS-notify CP8 (§16-U1): ongoing FGS notifications cannot be swiped
          by the user (Android硬性), so the ongoing notification carries a
