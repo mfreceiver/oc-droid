@@ -14,6 +14,7 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -94,7 +95,7 @@ class ProviderActionsTest {
         // §需求4: the inline read-compute-write is now atomic inside
         // [SettingsManager.reconcileModelData] (was: getDisabledModels +
         // setModelAvailability + setDisabledModels as 3 separate calls).
-        // R-20 Phase 5: keyed by serverGroupFp ("fp-h-test" — set in setUp).
+        // R-20 Phase 5: keyed by profileId ("fp-h-test" — set in setUp).
         // Stub returns the inherited (intersected) disabled set so the slice-
         // mirror assertion below stays meaningful (relaxed mock would return
         // emptySet → break the assertEquals).
@@ -300,4 +301,156 @@ class ProviderActionsTest {
         // providers untouched on failure.
         assertNull(slices.settings.value.providers)
     }
+
+    /**
+     * §ABA-triple-guard (F1): the profileId-only guard left an ABA window
+     * open — a stale in-flight `/config/providers` response from the SAME
+     * profile but a DIFFERENT URL (user edited the same profile's serverUrl
+     * mid-flight → new ClientBundle with new endpointFp) could穿透 and write
+     * stale catalog/model data into the new URL's persisted state. The triple
+     * guard must drop it.
+     *
+     * Test scaffolding: gate `getProvidersOrFailure` on a
+     * [CompletableDeferred] so we can mutate the live `endpointFp` source
+     * BETWEEN request-start (expectedEndpointFp captured) and onSuccess
+     * (currentEndpointFp read). UnconfinedTestDispatcher runs the body up to
+     * the first suspension, so control returns to the test after
+     * `launchLoadProviders(...)` with the request parked on the gate.
+     */
+    @Test
+    fun `launchLoadProviders ABA guard drops stale response when endpointFp changed mid-flight (same profileId)`() =
+        runTest {
+            val providers = ProvidersResponse(
+                providers = listOf(
+                    ConfigProvider(id = "p", name = "P", models = mapOf("m" to ProviderModel(name = "M"))),
+                ),
+            )
+            val gate = CompletableDeferred<Unit>()
+            coEvery { repository.getProvidersOrFailure() } coAnswers {
+                gate.await()
+                Result.success(providers)
+            }
+            every { settingsManager.reconcileModelData(any(), any()) } returns emptySet()
+
+            // Live endpointFp source — captured at call time, switched before
+            // onSuccess. profileId stays "" on both sides (default) to ISOLATE
+            // the endpointFp component of the triple.
+            var liveEndpointFp = "https://a.test"
+            launchLoadProviders(
+                scope = scope,
+                repository = repository,
+                slices = slices,
+                settingsManager = settingsManager,
+                hostProfileStore = hostProfileStore,
+                onNonFatalError = { _, _ -> },
+                expectedEndpointFp = liveEndpointFp,
+                currentEndpointFp = { liveEndpointFp },
+            )
+            // Flip endpoint BEFORE unblocking the gate — simulates the user
+            // editing the same profile's serverUrl → new ClientBundle published
+            // with endpointFp="https://b.test" while the old request is parked.
+            liveEndpointFp = "https://b.test"
+            gate.complete(Unit)
+            advanceUntilIdle()
+
+            // Stale response dropped — providers slice untouched (no write to
+            // the new URL's persisted state).
+            assertNull(slices.settings.value.providers)
+            // Loading flag still cleared by the outer `finally`.
+            assertEquals(false, slices.settings.value.isLoadingProviders)
+        }
+
+    /**
+     * §ABA-triple-guard (F1): same profileId + same endpointFp but the
+     * connection generation bumped mid-flight (e.g. user triggered
+     * resetLocalDataAndResync, which bumps generation +1 and republishes the
+     * bundle, OR any full reconfigure that re-points at the same URL). The
+     * stale response captured under the older generation must be discarded —
+     * generation is the only signal that distinguishes "same endpoint, fresh
+     * state" from "same endpoint, stale in-flight response pre-reset".
+     */
+    @Test
+    fun `launchLoadProviders ABA guard drops stale response when generation bumped mid-flight (same profileId and endpointFp)`() =
+        runTest {
+            val providers = ProvidersResponse(
+                providers = listOf(
+                    ConfigProvider(id = "p", name = "P", models = mapOf("m" to ProviderModel(name = "M"))),
+                ),
+            )
+            val gate = CompletableDeferred<Unit>()
+            coEvery { repository.getProvidersOrFailure() } coAnswers {
+                gate.await()
+                Result.success(providers)
+            }
+            every { settingsManager.reconcileModelData(any(), any()) } returns emptySet()
+
+            var liveGeneration = 1L
+            launchLoadProviders(
+                scope = scope,
+                repository = repository,
+                slices = slices,
+                settingsManager = settingsManager,
+                hostProfileStore = hostProfileStore,
+                onNonFatalError = { _, _ -> },
+                expectedGeneration = liveGeneration,
+                currentGeneration = { liveGeneration },
+            )
+            // Bump generation BEFORE unblocking — simulates resetLocalDataAndResync
+            // (which bumps +1) firing while the old request is parked.
+            liveGeneration = 2L
+            gate.complete(Unit)
+            advanceUntilIdle()
+
+            assertNull(slices.settings.value.providers)
+            assertEquals(false, slices.settings.value.isLoadingProviders)
+        }
+
+    /**
+     * §ABA-triple-guard (F1): no-FALSE-positive case. A transient reconnect
+     * that republishes a bundle with the SAME triple (profileId, endpointFp,
+     * generation) — or simply no mid-flight change at all — must NOT trigger
+     * the guard. The response goes through and providers are written. This
+     * pins that the guard is sound (drops stale, keeps fresh) and doesn't
+     * regress the happy path now that the triple is checked.
+     */
+    @Test
+    fun `launchLoadProviders ABA guard keeps response when triple unchanged (no false positive on transient reconnect)`() =
+        runTest {
+            val providers = ProvidersResponse(
+                providers = listOf(
+                    ConfigProvider(id = "p", name = "P", models = mapOf("m" to ProviderModel(name = "M"))),
+                ),
+            )
+            val gate = CompletableDeferred<Unit>()
+            coEvery { repository.getProvidersOrFailure() } coAnswers {
+                gate.await()
+                Result.success(providers)
+            }
+            every { settingsManager.reconcileModelData(any(), any()) } returns emptySet()
+
+            // Live sources — captured at call time, NOT mutated before onSuccess.
+            var liveEndpointFp = "https://a.test"
+            var liveGeneration = 1L
+            launchLoadProviders(
+                scope = scope,
+                repository = repository,
+                slices = slices,
+                settingsManager = settingsManager,
+                hostProfileStore = hostProfileStore,
+                onNonFatalError = { _, _ -> },
+                expectedEndpointFp = liveEndpointFp,
+                currentEndpointFp = { liveEndpointFp },
+                expectedGeneration = liveGeneration,
+                currentGeneration = { liveGeneration },
+            )
+            // NO mutation — triple observed at onSuccess equals the captured
+            // triple. Even if a "reconnect" happened, the new bundle carries
+            // the same identity triple → guard must NOT fire.
+            gate.complete(Unit)
+            advanceUntilIdle()
+
+            // Response written — no false-positive drop.
+            assertEquals(providers, slices.settings.value.providers)
+            assertEquals(false, slices.settings.value.isLoadingProviders)
+        }
 }

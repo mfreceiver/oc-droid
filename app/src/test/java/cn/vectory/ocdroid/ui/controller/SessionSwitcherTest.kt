@@ -933,7 +933,7 @@ class SessionSwitcherTest {
     }
 
     @Test
-    fun `appendMessageIfCached is scoped by serverGroupFp - foreign fp does not touch this group's window`() {
+    fun `appendMessageIfCached is scoped by profileId - foreign fp does not touch this group's window`() {
         // Seed (test-fp, s-shared) only.
         switcher.writeSessionWindow("test-fp", "s-shared", CachedSessionWindow(
             messages = listOf(Message(id = "m1", role = "user")),
@@ -1007,7 +1007,7 @@ class SessionSwitcherTest {
 
     @Test
     fun `review-fix 2 writeSessionWindow keys by explicit fp not currentProfileId`() {
-        // The writeSessionWindow signature takes an explicit serverGroupFp
+        // The writeSessionWindow signature takes an explicit profileId
         // (review-fix #2). The prior signature read currentProfileId()
         // internally — a host switch mid-flight would route the old fetch's
         // data into the NEW group's LRU slot. Now the caller passes the

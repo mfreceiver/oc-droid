@@ -39,7 +39,7 @@ import org.junit.Test
  *  - the sessionId is resolved to its workdir via `SessionTree.allSessionsById`
  *    (sessions + directorySessions + childSessions);
  *  - the composite [SessionStatusKey] is built with the current host's
- *    `serverGroupFp` (the provider) and that workdir;
+ *    `profileId` (the provider) and that workdir;
  *  - the SSE status is mapped to [SessionBusyStatus] via
  *    `SessionBusyStatusMapping.toSessionBusyStatus`;
  *  - `applySseStatus` is called with the resolved key + the clock's arrival time;
@@ -51,7 +51,7 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class SessionSyncCoordinatorStatusFeedTest {
 
-    private val serverGroupFp = "test-fp"
+    private val profileId = "test-fp"
     private lateinit var slices: SliceFlows
     private lateinit var effects: SharedEffectBus
     private lateinit var scope: TestScope
@@ -76,7 +76,7 @@ class SessionSyncCoordinatorStatusFeedTest {
             slices = slices,
             settingsManager = mockk(relaxed = true),
             effects = effects,
-            currentProfileId = { serverGroupFp },
+            currentProfileId = { profileId },
             identityStore = identityStore,
             statusAggregatorInput = aggregatorInput,
             clock = { clockNow })
@@ -247,7 +247,7 @@ class SessionSyncCoordinatorStatusFeedTest {
             slices = slices,
             settingsManager = mockk(relaxed = true),
             effects = effects,
-            currentProfileId = { serverGroupFp },
+            currentProfileId = { profileId },
             identityStore = identityStore,
             statusAggregatorInput = null,
             clock = { clockNow })

@@ -546,7 +546,7 @@ class MessageActionsTest {
     @Test
     fun `gpter-final-fix launchLoadMessages drops stale REST response when host group changed during fetch`() = runTest {
         // gpter scenario: G1/s1 REST in-flight → user switches to G2/s1
-        // (collision: same sessionId, different serverGroupFp). The REST
+        // (collision: same sessionId, different profileId). The REST
         // response from G1 must NOT write G1's messages into G2's chat slice.
         // sessionId guard alone passes (s1==s1); the fp guard catches the
         // cross-group collision.

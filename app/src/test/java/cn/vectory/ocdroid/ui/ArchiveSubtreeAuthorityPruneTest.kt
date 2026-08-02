@@ -285,7 +285,7 @@ class ArchiveSubtreeAuthorityPruneTest {
         )
 
         // Smoke: scope is non-empty when host is configured.
-        assertTrue("scope has non-empty serverGroupFp", prior.resolveScopeKey().profileId.isNotEmpty())
+        assertTrue("scope has non-empty profileId", prior.resolveScopeKey().profileId.isNotEmpty())
         assertTrue("scope has non-empty endpointFp", prior.resolveScopeKey().endpointFp.isNotEmpty())
 
         val out = reduce(prior, AppAction.SessionArchived(parentSes))
@@ -327,7 +327,7 @@ class ArchiveSubtreeAuthorityPruneTest {
             ).withProjection(mapOf(parentSid to busy, childSid to busy, otherSid to idle)),
         )
 
-        assertTrue("scope has non-empty serverGroupFp", prior.resolveScopeKey().profileId.isNotEmpty())
+        assertTrue("scope has non-empty profileId", prior.resolveScopeKey().profileId.isNotEmpty())
         assertTrue("scope has non-empty endpointFp", prior.resolveScopeKey().endpointFp.isNotEmpty())
 
         val out = reduce(

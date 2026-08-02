@@ -165,7 +165,7 @@ class SettingsManagerTest {
     }
 
     // ───── recentWorkdirs：项目记忆与冷启动恢复（§recent-workdirs）─────
-    // R-20 Phase 5: per-serverGroupFp storage. Tests pass a fixed fp ("g1")
+    // R-20 Phase 5: per-profileId storage. Tests pass a fixed fp ("g1")
     // so the per-fp slot is exercised the same way the legacy global slot was.
 
     private val rwFp = "g1"

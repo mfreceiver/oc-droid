@@ -887,6 +887,21 @@ class AppCore @Inject constructor(
                 // for fp derivation (ControllerModule.provideCurrentProfileId),
                 // equivalent to hostProfileStore.currentProfile().serverGroupFp.ifBlank { .id }.
                 //
+                // §ABA-triple-guard (F1): also capture `(endpointFp, generation)`
+                // from the CURRENT [ClientBundle] (the sole volatile publication
+                // point, `repository.currentClientBundle()`) alongside the
+                // profileId, and pass live suppliers that re-read the same
+                // bundle at onSuccess. This closes the ABA window the profileId-
+                // only guard left open: a stale in-flight `/config/providers`
+                // response from the SAME profile but a DIFFERENT URL (or published
+                // under an older generation — e.g. resetLocalDataAndResync bumped
+                // it +1) is now correctly discarded. Supplier pattern mirrors
+                // currentProfileId — read on demand at onSuccess, NOT cached at
+                // call site (so a mid-REST bundle publication is observable).
+                // Null-safe: if the bundle is momentarily absent (test seam /
+                // shutdown race), the suppliers return "" / 0L → guard degenerates
+                // to a profileId-only check (no false drop).
+                //
                 // §需求13: previously the failure path was SILENT —
                 // onNonFatalError → reportNonFatalIssue → Log.w only. The user
                 // tapping the new manual refresh IconButton saw the spinner clear
@@ -895,6 +910,7 @@ class AppCore @Inject constructor(
                 // is kept for the structured log trail; the UiEvent is the
                 // user-facing channel. Mirrors the ConnectionHealthProbe:622 +
                 // SessionListRefreshOrchestrator:256 pattern.
+                val bundleAtCall = repository.currentClientBundle()
                 launchLoadProviders(
                     scope = appScope,
                     repository = repository,
@@ -903,6 +919,10 @@ class AppCore @Inject constructor(
                     hostProfileStore = hostProfileStore,
                     expectedProfileId = currentProfileId(),
                     currentProfileId = currentProfileId,
+                    expectedEndpointFp = bundleAtCall?.endpointFp ?: "",
+                    currentEndpointFp = { repository.currentClientBundle()?.endpointFp ?: "" },
+                    expectedGeneration = bundleAtCall?.generation ?: 0L,
+                    currentGeneration = { repository.currentClientBundle()?.generation ?: 0L },
                     onNonFatalError = { message, error ->
                         reportNonFatalIssue(TAG, message, error)
                         effectBus.tryEmitUiEvent(UiEvent.Error(R.string.model_management_refresh_failed))

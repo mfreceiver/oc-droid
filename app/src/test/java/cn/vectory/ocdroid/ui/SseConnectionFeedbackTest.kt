@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui
 
+import cn.vectory.ocdroid.data.repository.http.AuthFailureReason
 import cn.vectory.ocdroid.ui.chat.resolveDisconnectDurationLabel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -125,6 +126,53 @@ class SseConnectionFeedbackTest {
         // Idle → null
         assertNull(SseConnectionFeedback.Idle.bannerCategory(null))
         assertNull(SseConnectionFeedback.Idle.bannerCategory("err"))
+    }
+
+    // ── §F2: AuthFailureReason-driven AUTH_FAILURE classification ────────────
+
+    @Test
+    fun `bannerCategory treats HttpAuth AuthFailureReason as AUTH_FAILURE`() {
+        // Upstream 401 via sidecar envelope → AUTH_FAILURE even with no mtlsDegradedError.
+        assertEquals(
+            BannerCategory.AUTH_FAILURE,
+            SseConnectionFeedback.Disconnected(1_000L, 5_000L)
+                .bannerCategory(mtlsDegradedError = null, authFailureReason = AuthFailureReason.HttpAuth(401, null)),
+        )
+        assertEquals(
+            BannerCategory.AUTH_FAILURE,
+            SseConnectionFeedback.Disconnected(1_000L, 5_000L)
+                .bannerCategory(mtlsDegradedError = null, authFailureReason = AuthFailureReason.HttpAuth(403, null)),
+        )
+    }
+
+    @Test
+    fun `bannerCategory treats MtlsDegraded AuthFailureReason as AUTH_FAILURE`() {
+        // Backward-compat: the MtlsDegraded variant also maps to AUTH_FAILURE.
+        assertEquals(
+            BannerCategory.AUTH_FAILURE,
+            SseConnectionFeedback.Disconnected(1_000L, 5_000L)
+                .bannerCategory(mtlsDegradedError = null, authFailureReason = AuthFailureReason.MtlsDegraded("cert missing")),
+        )
+    }
+
+    @Test
+    fun `bannerCategory falls back to REST_OUTAGE when both auth signals are null`() {
+        // Disconnected + mtlsDegradedError=null + authFailureReason=null → REST_OUTAGE.
+        assertEquals(
+            BannerCategory.REST_OUTAGE,
+            SseConnectionFeedback.Disconnected(1_000L, 5_000L)
+                .bannerCategory(mtlsDegradedError = null, authFailureReason = null),
+        )
+    }
+
+    @Test
+    fun `bannerCategory authFailureReason takes priority alongside mtlsDegradedError`() {
+        // Both non-null → still AUTH_FAILURE (no conflict; unified category).
+        assertEquals(
+            BannerCategory.AUTH_FAILURE,
+            SseConnectionFeedback.Disconnected(1_000L, 5_000L)
+                .bannerCategory(mtlsDegradedError = "cert", authFailureReason = AuthFailureReason.HttpAuth(401, null)),
+        )
     }
 
     @Test

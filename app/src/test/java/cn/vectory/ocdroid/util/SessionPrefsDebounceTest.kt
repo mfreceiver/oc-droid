@@ -30,7 +30,7 @@ import org.robolectric.annotation.Config
  *  1. Single-key contract: coalescing / timer-restart / immediate-flush /
  *     blank-removal.
  *  2. **Cross-key isolation** (the P1-gate defect): rapid writes to
- *     DIFFERENT `(serverGroupFp, sessionId)` composite keys must NEVER
+ *     DIFFERENT `(profileId, sessionId)` composite keys must NEVER
  *     clobber each other. The prior single-slot debounce (one global
  *     AtomicReference + one Job) lost key A when key B was written before
  *     A's timer fired; the per-key refactor keys pending state by
