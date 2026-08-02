@@ -716,4 +716,158 @@ class ServiceSseConnectionOwnerTest {
     // ── Helper data ─────────────────────────────────────────────────────────
 
     private data class DropCall(val attempt: TransportAttemptToken, val reason: TransportDropReason)
+
+    // ── §review-blocker-#2: Gate↔Runtime teardown linearization ─────────────
+    //
+    // These tests wire the REAL ForegroundTransportDropHandler (not the
+    // unfenced `recordingHandler`) as `dropHandler` so the production monitor
+    // fence is exercised. They pin the two boundary orderings of the
+    // release-now/mark-stopped atomic block:
+    //   G6: disconnect commits first → Stopped wins, in-flight drop fenced.
+    //   G7: drop commits first → Dropped kept, disconnect's markStopped no-op.
+
+    /** Constructs a fresh owner wired with the real [ForegroundTransportDropHandler]. */
+    private fun ownerWithRealHandler(
+        runtimeStore: SseTransportRuntimeStore,
+        gate: cn.vectory.ocdroid.service.StreamingOwnershipGate,
+        handler: ForegroundTransportDropHandler,
+        terminalDropCounter: () -> Unit,
+    ): ServiceSseConnectionOwner = ServiceSseConnectionOwner(
+        scope = scope,
+        repository = repository,
+        identityStore = identityStore,
+        sseEventStream = stream,
+        sharedStateStore = store,
+        sharedEffectBus = effects,
+        ownershipGate = gate,
+        runtimeStore = runtimeStore,
+        dropHandler = handler,
+        onTerminalDrop = terminalDropCounter,
+    )
+
+    /**
+     * §review-blocker-#2 G6: the exact reported race — disconnect releases the
+     * lease then marks Stopped, with a drop landing "in between". Pre-fix the
+     * drop saw gate-empty + store-Live and published a spurious Dropped.
+     * Post-fix (atomic under the handler monitor): the drop arrives AFTER the
+     * commit and is fenced out (currentAttempt == null). Verdict: Stopped,
+     * no spurious ticket, exactly one CancelSse (from disconnect's markGap).
+     */
+    @Test
+    fun `G6 - disconnect committing suppresses in-flight drop (Stopped wins, no spurious ticket)`() = runTest {
+        val identity = bindIdentity("/proj")
+        val realStore = SseTransportRuntimeStore()
+        val realGate = cn.vectory.ocdroid.service.StreamingOwnershipGate()
+        val realHandler = ForegroundTransportDropHandler(realStore, realGate)
+        var realTerminalDrops = 0
+        val realOwner = ownerWithRealHandler(realStore, realGate, realHandler) { realTerminalDrops++ }
+
+        // Flow: emit first (→ Live), then block on a gate until the test
+        // releases it AFTER disconnect has committed. The collector body
+        // resumes post-cancel and tries to routeUnexpectedDrop.
+        val dropGate = CompletableDeferred<Unit>()
+        every { repository.connectSSE(any()) } returns flow<Result<SSEEvent>> {
+            emit(Result.success(sseEvent("first")))
+            dropGate.await()
+            throw IOException("post-disconnect outage")
+        }
+
+        scope.launch { realOwner.connect(identity) }
+        runPending()
+        assertTrue("Live before disconnect", realStore.state.value is SseTransportState.Live)
+        val liveAttempt = (realStore.state.value as SseTransportState.Live).attempt
+        assertNotNull("gate holds the live lease", realGate.currentToken())
+
+        // disconnect commits atomically (release + markStopped under the
+        // handler monitor). cancelAndJoin waits for the collector to unwind.
+        val cancelEffectsBefore = collectedEffects.filterIsInstance<ControllerEffect.CancelSse>().size
+        scope.launch { realOwner.disconnect(markGap = true) }
+        runPending()
+
+        // After disconnect's atomic block: gate empty, store Stopped.
+        assertEquals("disconnect transitioned runtime to Stopped",
+            SseTransportState.Stopped, realStore.state.value)
+        assertNull("gate lease released by disconnect", realGate.currentToken())
+
+        // Now release the collector — it throws and routes the drop. The fence
+        // (real handler) sees currentAttempt(attempt) == null (Stopped cleared
+        // the canonical attempt) → suppresses publishDropped.
+        dropGate.complete(Unit)
+        runPending()
+
+        assertEquals("runtime stays Stopped (drop fenced out)",
+            SseTransportState.Stopped, realStore.state.value)
+        assertNull("no spurious recovery ticket published",
+            realStore.currentDropTicket(identity))
+        assertEquals("no terminal drop callback from fenced drop", 0, realTerminalDrops)
+        // Exactly one new CancelSse from disconnect's markGap=true (none from the drop path).
+        val cancelEffectsAfter = collectedEffects.filterIsInstance<ControllerEffect.CancelSse>().size
+        assertEquals("exactly one CancelSse (disconnect's markGap; none from fenced drop)",
+            cancelEffectsBefore + 1, cancelEffectsAfter)
+        // The live attempt's recovery ticket was null (fresh Live, no prior drop) —
+        // confirming no Dropped was ever committed.
+        assertNull("live attempt had no recovery ticket", liveAttempt.recoveryTicket)
+    }
+
+    /**
+     * §review-blocker-#2 G7: the other boundary ordering — the drop handler
+     * legitimately enters the monitor BEFORE disconnect starts its atomic
+     * block. Dropped stands; the later disconnect's markStopped is correctly
+     * rejected (canonical attempt already cleared by Dropped). No new ticket,
+     * no clobbering of recovery demand. This pins that the fix doesn't
+     * overcorrect into "disconnect always wins".
+     */
+    @Test
+    fun `G7 - drop linearizing before disconnect wins (Dropped kept, disconnect no-op, ticket stable)`() = runTest {
+        val identity = bindIdentity("/proj")
+        val realStore = SseTransportRuntimeStore()
+        val realGate = cn.vectory.ocdroid.service.StreamingOwnershipGate()
+        val realHandler = ForegroundTransportDropHandler(realStore, realGate)
+        var realTerminalDrops = 0
+        val realOwner = ownerWithRealHandler(realStore, realGate, realHandler) { realTerminalDrops++ }
+
+        // Flow: emit first (→ Live), then block until released.
+        val dropGate = CompletableDeferred<Unit>()
+        every { repository.connectSSE(any()) } returns flow<Result<SSEEvent>> {
+            emit(Result.success(sseEvent("first")))
+            dropGate.await()
+            throw IOException("in-flight outage")
+        }
+
+        scope.launch { realOwner.connect(identity) }
+        runPending()
+        assertTrue("Live before drop", realStore.state.value is SseTransportState.Live)
+        val cancelEffectsBefore = collectedEffects.filterIsInstance<ControllerEffect.CancelSse>().size
+
+        // Release the collector FIRST — it throws and routes the drop. The
+        // handler fence wins: gate released by handler, store Dropped(ticket1),
+        // onTerminalDrop invoked once.
+        dropGate.complete(Unit)
+        runPending()
+
+        assertTrue("runtime is Dropped after handler won",
+            realStore.state.value is SseTransportState.Dropped)
+        val ticket1 = (realStore.state.value as SseTransportState.Dropped).ticket
+        assertNull("gate lease released by drop handler", realGate.currentToken())
+        assertEquals("onTerminalDrop invoked once by drop path", 1, realTerminalDrops)
+        val cancelEffectsAfterDrop = collectedEffects.filterIsInstance<ControllerEffect.CancelSse>().size
+        assertTrue("drop path emitted at least one CancelSse",
+            cancelEffectsAfterDrop > cancelEffectsBefore)
+
+        // Now disconnect arrives. Its markStopped is rejected (canonical
+        // attempt already cleared by Dropped → no-op). markGap still emits
+        // CancelSse (pre-existing behavior; activeIdentity was still set).
+        scope.launch { realOwner.disconnect(markGap = true) }
+        runPending()
+
+        // State unchanged: still Dropped with the SAME ticket (I4 — recovery
+        // demand preserved, no new ticket minted, no clobbering).
+        assertTrue("runtime still Dropped after disconnect no-op",
+            realStore.state.value is SseTransportState.Dropped)
+        val ticketAfter = (realStore.state.value as SseTransportState.Dropped).ticket
+        assertEquals("Dropped ticket unchanged (I4 stable)", ticket1, ticketAfter)
+        assertEquals("no additional terminal callback from disconnect's rejected markStopped",
+            1, realTerminalDrops)
+        assertNull("gate still empty", realGate.currentToken())
+    }
 }

@@ -28,6 +28,14 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * Callback for unexpected transport drops. Implemented by
  * [ForegroundTransportDropHandler].
+ *
+ * §review-blocker-#2 (monitor contract): the owner and the handler
+ * synchronize on the handler instance — the owner wraps every (gate-release +
+ * store-terminalize) pair in `synchronized(dropHandler)`, and the production
+ * [ForegroundTransportDropHandler] fence locks the same `synchronized(this)`.
+ * Production wiring injects the same `@Singleton` handler instance into both
+ * sites, so no observer can ever see gate-released + store-Live. Any
+ * decorator/wrapper around the handler would silently break this fence.
  */
 interface UnexpectedTransportDropHandler {
     fun onUnexpectedDrop(attempt: TransportAttemptToken, reason: TransportDropReason)
@@ -55,7 +63,11 @@ internal interface FencedUnexpectedTransportDropHandler : UnexpectedTransportDro
  *
  * **CRITICAL**: [disconnectLocked] self-releases the lease via
  * [StreamingOwnershipGate.releaseNow] BEFORE marking the runtime Stopped
- * (Gate-first destroy order).
+ * (Gate-first destroy order). §review-blocker-#2: the release + store-commit
+ * pair is atomic under `synchronized(dropHandler)` — the same monitor the
+ * [ForegroundTransportDropHandler] fence locks — so no observer can see
+ * gate-released + store-Live (which would otherwise let the drop handler
+ * publish a spurious `Dropped` mid-teardown).
  *
  * @param ownershipGate the singleton ownership lease authority. Used by
  *   [disconnectLocked] / [cancelForShutdown] to release the lease (Gate-first
@@ -132,12 +144,15 @@ class ServiceSseConnectionOwner(
     fun cancelForShutdown() {
         if (!connectMutex.tryLock()) {
             // Another thread holds the lock — another disconnect is in
-            // progress. Release the lease here (Gate-first) since we cannot
-            // enter disconnectLocked.
+            // progress. Release the lease + terminalize the store ATOMICALLY
+            // (§review-blocker-#2: same monitor as the drop handler fence) so
+            // the drop handler cannot publish a spurious Dropped mid-teardown.
             val attempt = activeAttempt
             if (attempt != null) {
-                ownershipGate.releaseNow(LeaseToken(attempt.attemptId, attempt.identity))
-                synchronized(dropHandler) { runtimeStore.markStopped(attempt) }
+                synchronized(dropHandler) {
+                    ownershipGate.releaseNow(LeaseToken(attempt.attemptId, attempt.identity))
+                    runtimeStore.markStopped(attempt)
+                }
             }
             setSseConnected(false)
             activeAttempt = null
@@ -153,10 +168,14 @@ class ServiceSseConnectionOwner(
             val job = sseJob; sseJob = null
             val readiness = pendingReadiness; pendingReadiness = null
             job?.cancel(); readiness?.cancel()
-            // Gate-first destroy order.
+            // §review-blocker-#2: Gate-first destroy order, committed ATOMICALLY
+            // under the drop-handler monitor (see UnexpectedTransportDropHandler
+            // kdoc) — the fenced drop handler cannot publish Dropped mid-teardown.
             activeAttempt?.let { attempt ->
-                ownershipGate.releaseNow(LeaseToken(attempt.attemptId, attempt.identity))
-                synchronized(dropHandler) { runtimeStore.markStopped(attempt) }
+                synchronized(dropHandler) {
+                    ownershipGate.releaseNow(LeaseToken(attempt.attemptId, attempt.identity))
+                    runtimeStore.markStopped(attempt)
+                }
             }
             activeAttempt = null
             activeIdentity = null
@@ -261,10 +280,14 @@ class ServiceSseConnectionOwner(
                 onTerminalDrop()
             }
         } else {
-            // Pre-Ready failure: single attempt rejected, NO retry. Gate-first destroy order.
+            // Pre-Ready failure: single attempt rejected, NO retry. Gate-first
+            // destroy order, committed ATOMICALLY under the drop-handler monitor
+            // (§review-blocker-#2): no observer can see gate-released + store-Live.
             setSseConnected(false)
-            ownershipGate.releaseNow(LeaseToken(attempt.attemptId, attempt.identity))
-            synchronized(dropHandler) { runtimeStore.rollbackAttempt(attempt) }
+            synchronized(dropHandler) {
+                ownershipGate.releaseNow(LeaseToken(attempt.attemptId, attempt.identity))
+                runtimeStore.rollbackAttempt(attempt)
+            }
             readiness.complete(SourceActivation.Rejected.Exhausted)
         }
     }
@@ -337,6 +360,11 @@ class ServiceSseConnectionOwner(
     /**
      * L2: mutex-held disconnect body. Releases the lease via the Gate FIRST,
      * then marks the runtime Stopped (Gate-first destroy order).
+     *
+     * §review-blocker-#2: the release + store-commit pair is atomic under
+     * `synchronized(dropHandler)` (the same monitor the fenced drop handler
+     * locks), so a drop arriving in the torn window sees gate-released +
+     * store-Stopped (and is fenced out) — never gate-released + store-Live.
      */
     private suspend fun disconnectLocked(markGap: Boolean): Job? {
         setSseConnected(false)
@@ -344,10 +372,14 @@ class ServiceSseConnectionOwner(
         val readiness = pendingReadiness; pendingReadiness = null
         job?.cancel(); readiness?.cancel()
         val identity = activeIdentity
-        // Gate-first: release lease, then terminalize the store attempt.
+        // §review-blocker-#2: Gate-first destroy order, committed ATOMICALLY
+        // under the drop-handler monitor — the fenced drop handler cannot
+        // publish a spurious Dropped mid-teardown.
         activeAttempt?.let { attempt ->
-            ownershipGate.releaseNow(LeaseToken(attempt.attemptId, attempt.identity))
-            synchronized(dropHandler) { runtimeStore.markStopped(attempt) }
+            synchronized(dropHandler) {
+                ownershipGate.releaseNow(LeaseToken(attempt.attemptId, attempt.identity))
+                runtimeStore.markStopped(attempt)
+            }
         }
         if (markGap && identity != null) sharedEffectBus.emitEffect(ControllerEffect.CancelSse)
         activeAttempt = null; activeIdentity = null
