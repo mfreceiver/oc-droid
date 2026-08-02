@@ -433,8 +433,11 @@ class StreamingOwnershipGate @Inject constructor() {
         // callback outside the gate lock. The normal late-delivery path still
         // aborts in SessionStreamingService when registerStarting returns
         // Expired; this handles only the already-registered race.
-        extracted?.disconnectAndJoin?.invoke(false)
-        extracted?.abortStartup?.invoke()
+        //
+        // §sse-zombie-fix (v4 R5): route through [runTeardown] — the single
+        // legal teardown helper (try/finally guarantees abort even if
+        // disconnect throws / coroutine is cancelled).
+        extracted?.runTeardown(markGap = false)
     }
 
     /**
@@ -571,6 +574,40 @@ class StreamingOwnershipGate @Inject constructor() {
             starting
         }
         return extracted
+    }
+
+    /**
+     * §sse-zombie-fix (v3): terminal-matched Starting extraction for the
+     * launcher's Stage-2 timeout cleanup. Clears the owner ONLY if it is a
+     * Starting whose terminal is REFERENTIALLY the caller's own deferred. A
+     * replacement attempt with the SAME [ConnectionIdentity] holds a different
+     * terminal instance (allocated fresh in [registerStarting]) and is
+     * therefore never cleared by a stale caller — identity-ABA is impossible.
+     *
+     * Same discipline as [failStarting]: mutation under the lock, the extracted
+     * callbacks ([OwnershipState.disconnectAndJoin] / [OwnershipState.Starting.abortStartup])
+     * MUST be invoked by the caller OUTSIDE the lock (no suspension under the
+     * lock).
+     *
+     * Returns the extracted Starting, or null when nothing matched (owner gone,
+     * already Ready, or replaced — in all cases there is nothing for THIS
+     * caller to clean up).
+     */
+    fun failStartingIfTerminal(
+        identity: ConnectionIdentity,
+        expectedTerminal: Deferred<OwnershipStartResult>,
+        reason: OwnershipRefusal,
+    ): OwnershipState.Starting? = synchronized(lock) {
+        val current = owner
+        if (current !is OwnershipState.Starting) return@synchronized null
+        if (current.identity != identity) return@synchronized null
+        if (current.terminal !== expectedTerminal) return@synchronized null
+        current.terminal.complete(OwnershipStartResult.Refused(reason))
+        waiters.remove(current.identity)?.forEach {
+            it.complete(OwnershipStartResult.Refused(reason))
+        }
+        owner = null
+        current
     }
 
     /**

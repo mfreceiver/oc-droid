@@ -1325,46 +1325,78 @@ class ServiceSseConnectionOwner(
      * Cancels [pendingReadiness] so a suspended [connect] await throws
      * CancellationException (the controller's launch dies without acking).
      */
-    suspend fun disconnect(markGap: Boolean = true) {
+    suspend fun disconnect(markGap: Boolean = true) = disconnectWithGuard(markGap) { true }
+
+    /**
+     * §sse-zombie-fix (v3): guarded disconnect. [guard] is evaluated UNDER
+     * [connectMutex], so guard-check + collector cancellation are ATOMIC w.r.t.
+     * any concurrent [connect] setup (which runs under the same mutex, :420).
+     * A stale teardown whose guard observes a newer attempt is a strict no-op;
+     * a teardown that wins the mutex before the newer attempt's setup completes
+     * runs fully, and the newer [setupConnectLocked] then starts fresh on clean
+     * state. No window exists in which the disconnect kills the new generation.
+     *
+     * Returns true iff the disconnect actually ran.
+     */
+    suspend fun disconnectWithGuard(markGap: Boolean, guard: () -> Boolean): Boolean {
+        var ran = false
         val job = connectMutex.withLock {
-            // D5 (#1): mark the current generation as closing BEFORE the
-            // cancel so the collector's post-flow-break exit is silent
-            // (disconnect is an intentional closing path — gap is emitted
-            // explicitly below via emitGapOnce when markGap=true, NOT via
-            // the collector's outage path).
-            val closingGen = transportGenerationCounter
-            markClosing(closingGen)
-            // §breathing-indicator (TOCTOU fix): stamp the NEW generation
-            // (`closingGen + 1` == the post-bump value `transportGenerationCounter
-            // += 1` produces below) so a stale gen-closingGen collector's
-            // setSseConnected(true, closingGen) loses the monotonic CAS and
-            // cannot resurrect `true` after an intentional disconnect. The CAS
-            // commits atomically — no check-then-write window.
-            setSseConnected(false, closingGen + 1)
-            val job = sseJob
-            sseJob = null
-            transportTimeoutJob?.cancel()
-            transportTimeoutJob = null
-            val readiness = pendingReadiness
-            pendingReadiness = null
-            val generation = transportGenerationCounter
-            job?.cancel()
-            readiness?.cancel()
-            val identity = activeIdentity
-            if (markGap && identity != null) {
-                emitGapOnce(identity = identity, generation = generation)
-            }
-            transportGenerationCounter += 1
-            // L4 §3 (M1A): intentional disconnect → markStopped (never Dropped).
-            // Idempotent: a no-op if the attempt already dropped (no revive; I6).
-            synchronized(dropHandler) {
-                activeAttempt?.let { runtimeStore.markStopped(it) }
-            }
-            activeAttempt = null
-            activeIdentity = null
-            job
+            if (!guard()) return@withLock null
+            ran = true
+            disconnectLocked(markGap)
         }
         job?.cancelAndJoin()
+        return ran
+    }
+
+    /**
+     * §sse-zombie-fix (v3): the mutex-held body of [disconnect] / [disconnectWithGuard].
+     * Cancels collector + readiness, emits gap, marks attempt stopped, bumps
+     * generation. Returns the cancelled SSE job so the caller can join it
+     * OUTSIDE the mutex (cancelAndJoin suspends — never under connectMutex).
+     *
+     * §fix: marked `suspend` because [emitGapOnce] (invoked when markGap=true)
+     * is itself a suspend function (it writes to a MutableSharedFlow). The
+     * enclosing [disconnectWithGuard] already runs this under [connectMutex]
+     * via `withLock` (a suspend block), so the suspension propagates correctly.
+     */
+    private suspend fun disconnectLocked(markGap: Boolean): Job? {
+        // D5 (#1): mark the current generation as closing BEFORE the
+        // cancel so the collector's post-flow-break exit is silent
+        // (disconnect is an intentional closing path — gap is emitted
+        // explicitly below via emitGapOnce when markGap=true, NOT via
+        // the collector's outage path).
+        val closingGen = transportGenerationCounter
+        markClosing(closingGen)
+        // §breathing-indicator (TOCTOU fix): stamp the NEW generation
+        // (`closingGen + 1` == the post-bump value `transportGenerationCounter
+        // += 1` produces below) so a stale gen-closingGen collector's
+        // setSseConnected(true, closingGen) loses the monotonic CAS and
+        // cannot resurrect `true` after an intentional disconnect. The CAS
+        // commits atomically — no check-then-write window.
+        setSseConnected(false, closingGen + 1)
+        val job = sseJob
+        sseJob = null
+        transportTimeoutJob?.cancel()
+        transportTimeoutJob = null
+        val readiness = pendingReadiness
+        pendingReadiness = null
+        val generation = transportGenerationCounter
+        job?.cancel()
+        readiness?.cancel()
+        val identity = activeIdentity
+        if (markGap && identity != null) {
+            emitGapOnce(identity = identity, generation = generation)
+        }
+        transportGenerationCounter += 1
+        // L4 §3 (M1A): intentional disconnect → markStopped (never Dropped).
+        // Idempotent: a no-op if the attempt already dropped (no revive; I6).
+        synchronized(dropHandler) {
+            activeAttempt?.let { runtimeStore.markStopped(it) }
+        }
+        activeAttempt = null
+        activeIdentity = null
+        return job
     }
 
     suspend fun disconnectAndJoin(markGap: Boolean = true) = disconnect(markGap)

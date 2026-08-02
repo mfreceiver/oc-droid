@@ -886,16 +886,30 @@ class ConnectionCoordinator(
         DebugLog.i("SSE", "startSSE → launcher.ensureStarted(identity=${identity.epoch})")
         scope.launch {
             val result = streamingServiceLauncher?.ensureStarted(identity)
+            // §sse-zombie-fix (v3 Bug B / Kimi N1): the await below may resolve
+            // long after the user switched host. Re-check identity currency
+            // BEFORE writing, so a stale old-host Refused cannot resurrect
+            // isConnected=true or clobber a healthy new-host Connected state.
+            if (identityStore?.isCurrent(identity) == false) {
+                DebugLog.i("SSE", "startSSE: identity no longer current (host switched) — drop stale result")
+                return@launch
+            }
             if (result !is OwnershipStartResult.Ready || result.identity != identity) {
                 // §sse-disabled-debug-toggle: surface the distinct SseDisabled
                 // phase when the launcher refused because the debug flag is ON
                 // (REST-only); otherwise the generic Disconnected phase.
-                val phase = if (result is OwnershipStartResult.Refused &&
-                    result.reason is OwnershipRefusal.SseDisabled
-                ) {
-                    ConnectionPhase.SseDisabled
-                } else {
-                    ConnectionPhase.Disconnected
+                val phase = when {
+                    result is OwnershipStartResult.Refused &&
+                        result.reason is OwnershipRefusal.SseDisabled ->
+                        ConnectionPhase.SseDisabled
+                    // §sse-zombie-fix (v3 Bug B): only BootstrapFailed (SSE
+                    // transport failed while REST is healthy) maps to the new
+                    // SseBootstrapFailed phase. Other genuine refusals
+                    // (ServiceStopped, PlatformRejected, …) stay Disconnected.
+                    result is OwnershipStartResult.Refused &&
+                        result.reason is OwnershipRefusal.BootstrapFailed ->
+                        ConnectionPhase.SseBootstrapFailed
+                    else -> ConnectionPhase.Disconnected
                 }
                 writeConnection {
                     // §degraded-connected-fix (2026-07-26): same fix as
@@ -903,10 +917,16 @@ class ConnectionCoordinator(
                     // through the connection flow), only SSE failed. Write
                     // isConnected=true (green dot, non-breathing) instead of
                     // false (red dot) so the user knows the server is reachable.
+                    //
+                    // §sse-zombie-fix-impl-rev1 (GPT impl-review concern #2):
+                    // REST connection implies auth is valid — clear a stale
+                    // authFailureReason so the banner does not keep showing an
+                    // auth error after the server accepted the request.
                     it.copy(
                         isConnected = true,
                         isConnecting = false,
                         connectionPhase = phase,
+                        authFailureReason = null,
                     )
                 }
             }

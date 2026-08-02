@@ -5,6 +5,7 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.SessionStatusLoadTrigger
 import cn.vectory.ocdroid.ui.SliceFlows
+import cn.vectory.ocdroid.ui.isSseDown
 import cn.vectory.ocdroid.ui.reportNonFatalIssue
 import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.CoroutineScope
@@ -85,9 +86,9 @@ internal object StatusPollOrchestrator {
     private fun sseDigestRelayEffective(slices: SliceFlows): Boolean {
         if (!slices.sseConnected) return false
         val phase = slices.connection.value.connectionPhase
-        return phase !is ConnectionPhase.SseDisabled &&
-            phase !is ConnectionPhase.Disconnected
+        return phase !is ConnectionPhase.SseDisabled && !phase.isSseDown
     }
+
 
     internal fun launchLoadSessionStatus(
         scope: CoroutineScope,

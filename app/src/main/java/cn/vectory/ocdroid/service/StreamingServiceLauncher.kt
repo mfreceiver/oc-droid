@@ -201,17 +201,51 @@ class AndroidStreamingServiceLauncher @Inject constructor(
                 // Refused(...) returns above and below.
                 val stage2ElapsedMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000L
                 val terminal = withTimeoutOrNull(STAGE2_TIMEOUT_MS) { attempt.terminal.await() }
-                if (terminal == null) {
+                if (terminal != null) return@ensureStarted terminal
+                // §sse-zombie-fix (v3) settle grace — markReady swaps owner
+                // Starting→Ready UNDER the gate lock (StreamingOwnershipGate.kt
+                // :489-497) but completes the terminal OUTSIDE the lock
+                // (:506-508). A Stage-2 timeout firing inside that window
+                // would otherwise misdiagnose a healthy owner as a zombie
+                // (issue #10). Re-await briefly: if a completion was in
+                // flight, it lands here.
+                DebugLog.w(
+                    TAG,
+                    "ensureStarted: Stage-2 timed out after ${STAGE2_TIMEOUT_MS}ms " +
+                        "(attemptId=${attempt.attemptId}, elapsedMs=$stage2ElapsedMs) " +
+                        "→ ${STAGE2_SETTLE_GRACE_MS}ms settle grace before zombie reap",
+                )
+                val settled = withTimeoutOrNull(STAGE2_SETTLE_GRACE_MS) { attempt.terminal.await() }
+                if (settled != null) return@ensureStarted settled
+                // Genuine zombie: clear ONLY our own Starting (terminal-ref
+                // match — identity-ABA-safe, issue #3) and run the extracted
+                // teardown callbacks OUTSIDE the gate lock (issue #1 —
+                // failStartingIfTerminal never invokes callbacks itself;
+                // mirrors expireAttempt :428-437 and the rollbackBootstrap
+                // Failed branch :883-886).
+                val reapElapsedMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000L
+                val extracted = ownershipGate.failStartingIfTerminal(
+                    identity,
+                    attempt.terminal,
+                    OwnershipRefusal.BootstrapFailed,
+                )
+                if (extracted != null) {
                     DebugLog.w(
                         TAG,
-                        "ensureStarted: Stage-2 timed out after ${STAGE2_TIMEOUT_MS}ms " +
-                            "(attemptId=${attempt.attemptId}, elapsedMs=$stage2ElapsedMs) " +
-                            "→ BootstrapFailed (CC will write Disconnected)",
+                        "ensureStarted: reaped zombie Starting (attemptId=${attempt.attemptId}, " +
+                            "elapsedMs=$reapElapsedMs) → BootstrapFailed (CC will write SseBootstrapFailed)",
                     )
-                    OwnershipStartResult.Refused(OwnershipRefusal.BootstrapFailed)
+                    // §sse-zombie-fix (v4 R5): route through [runTeardown].
+                    extracted.runTeardown(markGap = false)
                 } else {
-                    terminal
+                    DebugLog.w(
+                        TAG,
+                        "ensureStarted: Stage-2 cleanup found no terminal-matching Starting " +
+                            "(attemptId=${attempt.attemptId}, elapsedMs=$reapElapsedMs) " +
+                            "→ BootstrapFailed (owner gone/replaced/Ready)",
+                    )
                 }
+                OwnershipStartResult.Refused(OwnershipRefusal.BootstrapFailed)
             }
             is StartingAck.Refused -> OwnershipStartResult.Refused(ack.reason)
             null -> {
@@ -232,9 +266,17 @@ class AndroidStreamingServiceLauncher @Inject constructor(
         // Stage-2 wall-clock guard: if the Service's Starting owner never
         // promotes to Ready nor refuses (e.g. an OwnershipGate Case 2
         // leftover), give up after 45s and return BootstrapFailed so CC
-        // writes Disconnected instead of hanging the capsule at "连接中"
+        // writes the failure phase instead of hanging the capsule at "连接中"
         // forever. 45s comfortably exceeds the Service's internal 30s
         // transport timeout + the 5s Stage-1 ack window.
         private const val STAGE2_TIMEOUT_MS = 45_000L
+
+        // §sse-zombie-fix (v3): grace re-await after a Stage-2 timeout before
+        // declaring the owner a zombie. Covers the markReady lock-swap /
+        // terminal-complete window (gate :489 vs :506). 1s is orders of
+        // magnitude beyond the real window (sub-millisecond, same call stack,
+        // no suspension between swap and complete) yet negligible against the
+        // 45s Stage-2 timeout.
+        private const val STAGE2_SETTLE_GRACE_MS = 1_000L
     }
 }

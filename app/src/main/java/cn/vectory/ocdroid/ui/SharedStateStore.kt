@@ -514,8 +514,8 @@ internal fun stampDisconnectedSince(
     requested: ConnectionState,
     now: Long,
 ): ConnectionState {
-    val wasDisconnected = previous.connectionPhase is ConnectionPhase.Disconnected
-    val isDisconnected = requested.connectionPhase is ConnectionPhase.Disconnected
+    val wasDisconnected = previous.connectionPhase.isSseDown
+    val isDisconnected = requested.connectionPhase.isSseDown
     return when {
         // Transition INTO Disconnected: stamp unless the caller already did.
         !wasDisconnected && isDisconnected && requested.disconnectedSince == null ->

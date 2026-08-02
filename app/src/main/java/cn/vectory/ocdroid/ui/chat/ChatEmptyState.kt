@@ -150,5 +150,6 @@ private fun ConnectionPhase.displayTextForEmptyState(): String? = when (this) {
     is ConnectionPhase.ReconnectingAttempt -> stringResource(R.string.chat_phase_reconnecting_attempt, attempt, maxAttempts)
     is ConnectionPhase.Disconnected -> stringResource(R.string.chat_phase_disconnected)
     is ConnectionPhase.SseDisabled -> stringResource(R.string.chat_phase_sse_disabled) // §sse-disabled-debug-toggle: REST-only (debug flag).
+    is ConnectionPhase.SseBootstrapFailed -> stringResource(R.string.chat_phase_sse_bootstrap_failed) // §sse-zombie-fix (v3 Bug B): REST ok, SSE bootstrap failed.
     is ConnectionPhase.AwaitingTofuTrust -> null  // §tofu R2: the TOFU dialog overlays; empty-state stays quiet.
 }

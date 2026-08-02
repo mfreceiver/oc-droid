@@ -476,6 +476,8 @@
     <string name="chat_phase_disconnected">已断开</string>
     <!-- §sse-disabled-debug-toggle：仅 REST 降级模式（调试开关 sse_disabled=true）。 -->
     <string name="chat_phase_sse_disabled">SSE 已禁用（仅 REST）</string>
+    <!-- §sse-zombie-fix (v3 Bug B)：REST 正常但 SSE 事件流启动失败。 -->
+    <string name="chat_phase_sse_bootstrap_failed">实时更新中断</string>
 
     <!-- §sse-feedback-ux (§1.x batch4)：聊天内断连横幅，4 类语义。
          REST_OUTAGE / AUTH_FAILURE = 错误（红）；SSE_STALLED / USER_DISABLED = 提示。
@@ -490,6 +492,9 @@
     <string name="sse_feedback_disabled_title">实时更新已关闭</string>
     <string name="sse_feedback_disabled_subtitle">仅 REST 模式（调试开关）</string>
     <string name="sse_feedback_auth_failure_subtitle">无法加载证书或凭据</string>
+    <!-- §sse-zombie-fix (v3 Bug B)：SSE 启动失败但服务器（REST）可达。 -->
+    <string name="sse_feedback_sse_bootstrap_failed_title">实时更新中断</string>
+    <string name="sse_feedback_sse_bootstrap_failed_subtitle">服务器可达，但实时流未能启动。消息收发仍正常。</string>
 
     <string name="chat_jump_to_latest">跳到最新</string>
 

@@ -122,7 +122,39 @@ sealed class ConnectionPhase {
      * returns [cn.vectory.ocdroid.service.OwnershipRefusal.SseDisabled].
      */
     data object SseDisabled : ConnectionPhase()
+
+    /**
+     * §sse-zombie-fix (v3 Bug B): REST is healthy (ping succeeded, auth OK)
+     * but the SSE event stream bootstrap failed (launcher returned
+     * [cn.vectory.ocdroid.service.OwnershipRefusal.BootstrapFailed] / the
+     * zombie reap path). Distinct from [Disconnected] (which pairs with
+     * `isConnected=false` and a genuine REST/auth outage) so the banner can
+     * honestly say "live updates interrupted — messaging still works" instead
+     * of the misleading "服务器连接不上".
+     *
+     * All "SSE terminally down" behavioral consumers route through
+     * [ConnectionPhase.isSseDown] (canonical classifier — issue #7 structural
+     * fix), which covers both [Disconnected] and [SseBootstrapFailed].
+     * `SseDisabled` is intentionally OUT of `isSseDown` (REST-only debug
+     * toggle is a deliberate user mode, not an outage).
+     */
+    data object SseBootstrapFailed : ConnectionPhase()
 }
+
+/**
+ * §sse-zombie-fix (v3 Bug B / issue #7): canonical "SSE event stream is
+ * terminally down" classifier. All behavioral consumers (foreground catch-up,
+ * digest-relay gating, metadata-poller fallback, disconnectedSince stamping,
+ * 90s auto-unanchor) read THIS instead of ad-hoc `phase is Disconnected`
+ * checks, so [SseBootstrapFailed] is uniformly treated as "SSE down, REST
+ * still serving" across the codebase.
+ *
+ * [SseDisabled] is NOT included: the debug toggle is a deliberate REST-only
+ * mode, not an outage — those consumers intentionally skip catch-up / fallback
+ * shaping under `SseDisabled`.
+ */
+val ConnectionPhase.isSseDown: Boolean
+    get() = this is ConnectionPhase.Disconnected || this is ConnectionPhase.SseBootstrapFailed
 
 /**
  * §R-17 batch2: connection-domain state slice. Authoritative storage; no

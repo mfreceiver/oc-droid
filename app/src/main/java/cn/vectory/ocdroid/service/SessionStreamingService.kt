@@ -21,6 +21,7 @@ import cn.vectory.ocdroid.service.notify.ForegroundNotificationPublisher
 import cn.vectory.ocdroid.service.notify.NotificationSpec
 import cn.vectory.ocdroid.service.notify.NotificationStrings
 import cn.vectory.ocdroid.service.notify.SessionStatusNotifier
+import cn.vectory.ocdroid.service.streaming.BootstrapJobHolder
 import cn.vectory.ocdroid.service.streaming.BootstrapRunner
 import cn.vectory.ocdroid.service.streaming.ServiceShell
 import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
@@ -50,6 +51,7 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
 /**
@@ -244,10 +246,34 @@ class SessionStreamingService : Service() {
      * coordinator's `onBootstrapResult()` remains the only legal L3→running
      * entry.
      */
-    private var bootstrapJob: Job? = null
-    /** D5-3: prevents duplicate terminal teardown from expiry/abort races. */
-    private var bootstrapAbortIssued = false
+    /**
+     * §sse-zombie-fix (v4 R2/R3): the in-flight bootstrap job, held by a
+     * thread-safe [BootstrapJobHolder] instead of a plain var. Install =
+     * single atomic swap; invalidate = CAS on the exact expected reference —
+     * a stale teardown can NEVER null/cancel a replacement attempt's job,
+     * and the Dispatchers.Default registration coroutine gets proper
+     * cross-thread visibility (AtomicReference happens-before).
+     */
+    private val bootstrapJobHolder = BootstrapJobHolder()
+    /**
+     * D5-3: prevents duplicate terminal teardown from expiry/abort races.
+     * §sse-zombie-fix (v4): AtomicBoolean (was plain Boolean) to close the
+     * check-then-set data race between the launcher-side Timeout callback and
+     * onStartCommand's reset.
+     */
+    private val bootstrapAbortIssued = java.util.concurrent.atomic.AtomicBoolean(false)
     private var acceptedOwnershipIdentity: ConnectionIdentity? = null
+
+    /**
+     * §sse-zombie-fix (v3): per-Service bootstrap generation counter. Each
+     * [registerStartingOwnership] call captures the post-increment value into
+     * the disconnect/abort lambdas, so a stale teardown whose generation no
+     * longer matches the current [bootstrapEpoch] becomes a strict no-op
+     * (guard evaluated under [ServiceSseConnectionOwner.connectMutex] /
+     * reference-checked before touching [bootstrapJob]). Closes the
+     * check-then-suspend window an AtomicLong-only fence cannot (issue #2).
+     */
+    private val bootstrapEpoch = AtomicLong(0L)
 
     /**
      * T5-C4: the SSE → temp-notification bridge. Built in [onCreate] after
@@ -533,7 +559,19 @@ class SessionStreamingService : Service() {
             scope = scope,
             bootstrapRetryPolicy = bootstrapRetryPolicy,
             onBootstrapIdentity = { identity ->
-                registerStartingOwnership(identity, StreamingOwnershipGate.NO_ATTEMPT_ID)
+                // §sse-zombie-fix (v4): sticky path re-reads the CURRENT job
+                // via the thread-safe holder. This lambda runs on the
+                // controller's Main.immediate scope — single-threaded with
+                // onStartCommand's install — so the read is deterministic.
+                // The gate idempotent-Accepts this same-identity registration
+                // and RETAINS the original launcher-path callbacks; these
+                // captures never fire as gate callbacks.
+                registerStartingOwnership(
+                    identity,
+                    StreamingOwnershipGate.NO_ATTEMPT_ID,
+                    bootstrapJobHolder.current(),
+                    requireNotNull(sseOwner) { "sseOwner constructed in onCreate before any bootstrap" },
+                )
             },
             onBootstrapFailure = { identity -> failStarting(identity) },
             silentNotifications = { !settingsManager.persistentNotificationEnabled },
@@ -687,12 +725,18 @@ class SessionStreamingService : Service() {
         // instance latch). Single-flight preserved (one active bootstrap at a
         // time); coordinator.onBootstrapResult() remains the only legal
         // L3→running entry.
-        bootstrapJob?.cancel()
+        // §sse-zombie-fix (v4 R3): single atomic swap replaces the old
+        // `bootstrapJob?.cancel(); bootstrapJob = installedJob` two-step,
+        // which left a window in which a stale teardown could null/cancel a
+        // REPLACEMENT attempt's job. getAndSet is atomic — a stale
+        // removeIfCurrent either wins BEFORE this swap (cancels the old job,
+        // which we then harmlessly re-cancel below) or loses (observes the
+        // new reference and no-ops). No interleaving can strand either job.
         val installedJob = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             controller?.bootstrapAsync()
         }
-        bootstrapAbortIssued = false
-        bootstrapJob = installedJob
+        bootstrapAbortIssued.set(false)
+        bootstrapJobHolder.install(installedJob)?.cancel()
         if (requestedOwnership != null) {
             // SSE-cold-start-fix (root cause A — main-thread starvation): run
             // the Stage-1 ownership registration on Dispatchers.Default so the
@@ -710,6 +754,16 @@ class SessionStreamingService : Service() {
             // The [queueDelayMs] diagnostic is KEPT so the next run can read
             // the value and confirm it is now small (Default-dispatcher
             // latency) rather than ~5000ms (Main-queue starvation).
+            // §sse-zombie-fix (v4 R1/R2): capture immutable per-invocation
+            // handles on the MAIN thread, BEFORE the registration coroutine
+            // hops to Dispatchers.Default. registerStartingOwnership and the
+            // gate callbacks it installs may reference ONLY these captures —
+            // never the mutable Service fields. sseOwner is write-once after
+            // onCreate (onDestroy does not null it either), so this capture is
+            // a stable per-Service-instance reference.
+            val sse = requireNotNull(sseOwner) {
+                "onCreate constructs sseOwner before any onStartCommand"
+            }
             scope.launch(kotlinx.coroutines.Dispatchers.Default) {
                 // DIAGNOSTIC TIMING (KEY MEASUREMENT): how long did the
                 // dispatcher sit on this coroutine before running it? Post-fix
@@ -723,7 +777,12 @@ class SessionStreamingService : Service() {
                     // total elapsed since onStartCommand entry.
                     val preRegNs = SystemClock.elapsedRealtimeNanos()
                     DebugLog.i(TAG, "onStartCommand: registerStarting pre (attemptId=$requestedAttemptId, sinceEntryMs=${(preRegNs - onStartEntryNs) / 1_000_000L})")
-                    val outcome = registerStartingOwnership(requestedOwnership, requestedAttemptId)
+                    val outcome = registerStartingOwnership(
+                        requestedOwnership,
+                        requestedAttemptId,
+                        installedJob,
+                        sse,
+                    )
                     DebugLog.i(TAG, "onStartCommand: registerStarting outcome=$outcome (elapsedSinceEntryMs=${(SystemClock.elapsedRealtimeNanos() - onStartEntryNs) / 1_000_000L})")
                     if (outcome is RegisterStartingOutcome.Accepted) {
                         // Stage 1 ownership recorded — proceed with the §5 bootstrap.
@@ -739,11 +798,11 @@ class SessionStreamingService : Service() {
                         // newer attempt has taken over the gate (see
                         // [abortExpiredStartup] teardown-scope guard).
                         DebugLog.w(TAG, "onStartCommand: registerStarting outcome=$outcome → abort bootstrap (elapsedSinceEntryMs=${(SystemClock.elapsedRealtimeNanos() - onStartEntryNs) / 1_000_000L})")
-                        abortExpiredStartup(requestedAttemptId)
+                        abortExpiredStartup(requestedAttemptId, expectedJob = installedJob)
                     }
                 } else {
                     ownershipGate.refuse(requestedOwnership, OwnershipRefusal.StaleIdentity)
-                    abortExpiredStartup(requestedAttemptId)
+                    abortExpiredStartup(requestedAttemptId, expectedJob = installedJob)
                 }
             }
         } else {
@@ -769,15 +828,48 @@ class SessionStreamingService : Service() {
     private suspend fun registerStartingOwnership(
         identity: ConnectionIdentity,
         attemptId: Long,
+        // §sse-zombie-fix (v4 R1/R2): immutable per-invocation handles passed
+        // by the caller. The gate callbacks capture ONLY these (and
+        // myEpoch/attemptId/bootstrapEpoch/bootstrapJobHolder.current()) —
+        // NEVER the Service's mutable fields. This makes R1/R2 structurally
+        // impossible (the closures literally cannot name this.sseOwner or a
+        // mutable bootstrapJob var).
+        job: Job?,
+        sse: ServiceSseConnectionOwner,
     ): RegisterStartingOutcome {
         if (!identityStore.isCurrent(identity)) {
             ownershipGate.refuse(identity, OwnershipRefusal.StaleIdentity)
             return RegisterStartingOutcome.Expired
         }
+        // §sse-zombie-fix (v3/v4): epoch fence for the SSE-side guard inside
+        // disconnectWithGuard (evaluated under connectMutex). The launcher
+        // path increments; the sticky path (NO_ATTEMPT_ID) does NOT — see
+        // comment below (R4).
+        //
+        // §sse-zombie-fix-impl-rev1 (GPT impl-review critical #1): the sticky
+        // registration path MUST NOT increment the epoch. The gate treats this
+        // as same-identity idempotent Accepted (:300) and deliberately RETAINS
+        // the ORIGINAL callbacks — which captured epoch N. If the sticky path
+        // increments to N+1, those retained callbacks now permanently fail the
+        // N-vs-N+1 guard, defeating the entire fence for all subsequent
+        // teardowns. Only the launcher path (validated attemptId) increments;
+        // the sticky path reads the current value (the launcher's epoch).
+        val myEpoch = if (attemptId != StreamingOwnershipGate.NO_ATTEMPT_ID) {
+            bootstrapEpoch.incrementAndGet()
+        } else {
+            bootstrapEpoch.get()
+        }
         val outcome = ownershipGate.registerStarting(
             identity = identity,
             attemptId = attemptId,
-            disconnectAndJoin = { markGap -> sseOwner?.disconnectAndJoin(markGap) },
+            disconnectAndJoin = { markGap ->
+                // §sse-zombie-fix (v4 R1): references ONLY the immutable [sse]
+                // capture + the AtomicLong epoch guard (evaluated under
+                // connectMutex inside disconnectWithGuard). No Service mutable
+                // field appears in this closure — by construction. A stale
+                // teardown whose epoch no longer matches is a strict no-op.
+                sse.disconnectWithGuard(markGap) { bootstrapEpoch.get() == myEpoch }
+            },
             // D5-3 (#4 seam): expire-after-Accept can extract this Starting
             // owner before the Service reaches Ready. The abort callback must
             // be symmetric with the late-Expired onStartCommand branch:
@@ -787,7 +879,24 @@ class SessionStreamingService : Service() {
             // abort (expire-after-Accept) scopes the teardown-scope guard to
             // THIS attempt — a NEWER attempt that took over the gate must NOT
             // be destroyed by this expiry teardown.
-            abortStartup = { abortExpiredStartup(attemptId) },
+            //
+            // §sse-zombie-fix (v4 R2/R3): fence on epoch + the caller-supplied
+            // [job] reference (threaded into abortExpiredStartup →
+            // removeIfCurrent CAS). A stale abort that fires AFTER a newer
+            // attempt has taken over neither cancels the newer job nor
+            // triggers a Service-wide teardown.
+            abortStartup = {
+                val current = bootstrapJobHolder.current()
+                if (bootstrapEpoch.get() == myEpoch && (job == null || current === job)) {
+                    abortExpiredStartup(attemptId, expectedJob = job)
+                } else {
+                    DebugLog.i(
+                        TAG,
+                        "abortStartup: skipped — epoch mine=$myEpoch current=${bootstrapEpoch.get()}, " +
+                            "job superseded=${current !== job}; newer attempt owns the Service",
+                    )
+                }
+            },
         )
         if (outcome is RegisterStartingOutcome.Accepted) {
             acceptedOwnershipIdentity = identity
@@ -821,11 +930,26 @@ class SessionStreamingService : Service() {
         kind: BootstrapRollbackKind,
         identity: ConnectionIdentity?,
         attemptId: Long = StreamingOwnershipGate.NO_ATTEMPT_ID,
+        // §sse-zombie-fix (v4 R3): the caller's own job reference, threaded
+        // into the BootstrapJobHolder CAS. A stale teardown whose expected
+        // reference was superseded by a replacement is a strict no-op (CAS
+        // fails, slot untouched). Defaults to null (sticky/internal callers
+        // that have no per-invocation job identity).
+        expectedJob: Job? = null,
     ) {
         // M4: bootstrap rollback (timeout / failed) is an intentional teardown
         // that leads to stopSelf — mark the disposition so onDestroy does not
         // publish a spurious SERVICE_DESTROYED drop.
-        shutdownSeal.markIntentional()
+        //
+        // §sse-zombie-fix-impl-rev2 (rev-gpt v4-impl-review critical C5):
+        // markIntentional MUST be deferred until AFTER this rollback has
+        // confirmed it will actually tear down the Service. The Timeout branch
+        // has two early-returns that cancel ONLY this attempt's job without a
+        // service teardown (newer-attempt guard + CAS-abort-issued guard); a
+        // stale rollback that enters, marks intentional, then early-returns
+        // would corrupt the shutdown disposition of the (still-running)
+        // replacement's Service — onDestroy would later suppress the required
+        // SERVICE_DESTROYED drop. Each teardown-committing branch marks below.
         when (kind) {
             BootstrapRollbackKind.Timeout -> {
                 // D5-3 (#4 seam) — terminal abort for a launcher attempt that
@@ -837,17 +961,19 @@ class SessionStreamingService : Service() {
                 // failure race. NO ownership rollback here (CRITICAL invariant:
                 // the Timeout branch MUST NOT call failStarting / ownership
                 // rollback).
-                bootstrapJob?.cancel()
-                bootstrapJob = null
-                if (bootstrapAbortIssued) return
+                //
+                // §sse-zombie-fix (v4): [bootstrapAbortIssued] is now an
+                // AtomicBoolean — atomic check-and-set (was plain-var
+                // check-then-set race between launcher Timeout callback and
+                // onStartCommand reset).
+                //
                 // SSE-cold-start-fix (root cause B — teardown scope by
                 // attemptId): before tearing down the shared Service component,
                 // verify the gate has NOT been taken over by a NEWER attempt.
                 // If it has, a full teardown (StopForeground + StopSelf) would
                 // destroy that newer attempt's bootstrap too — exactly the
-                // dual-fire kill seen in the bug logs (attempt1 Expired →
-                // teardown nuked the attempt2-owned Service). In that case
-                // cancel ONLY this job; the newer attempt owns the service.
+                // dual-fire kill seen in the bug logs. In that case cancel
+                // ONLY this job; the newer attempt owns the service.
                 // The check is attemptId-scoped (NOT identity — the bug is two
                 // attempts for the SAME identity). [NO_ATTEMPT_ID] (sticky /
                 // controller-internal registration, no launcher deadline) skips
@@ -860,9 +986,29 @@ class SessionStreamingService : Service() {
                         "rollbackBootstrap(Timeout): newer attempt holds the gate " +
                             "(expiredAttemptId=$attemptId) → cancel job only, skip service teardown",
                     )
+                    // §sse-zombie-fix (v4 R3): CAS — null + cancel ONLY if the
+                    // slot still holds THIS attempt's own job. A replacement
+                    // installed in the window makes removeIfCurrent return null:
+                    // strict no-op (the slot then still holds the replacement's
+                    // job, untouched).
+                    if (expectedJob != null) {
+                        bootstrapJobHolder.removeIfCurrent(expectedJob)?.cancel()
+                    }
+                    // C5: NO markIntentional here — this path does NOT tear
+                    // down the Service; the newer attempt still owns it.
                     return
                 }
-                bootstrapAbortIssued = true
+                // §sse-zombie-fix (v4): atomic check-and-set (was plain-var
+                // check-then-set race).
+                if (!bootstrapAbortIssued.compareAndSet(false, true)) return
+                // C5: this branch commits to a full Service teardown → mark.
+                shutdownSeal.markIntentional()
+                // §sse-zombie-fix (v4 R3): same CAS discipline — cancel the
+                // caller's own job if supplied, else whatever is current.
+                val jobToCancel = expectedJob ?: bootstrapJobHolder.current()
+                if (jobToCancel != null) {
+                    bootstrapJobHolder.removeIfCurrent(jobToCancel)?.cancel()
+                }
                 scope.launch {
                     coordinator.teardownAndAwait(TeardownReason.BootstrapFailure)
                 }
@@ -875,14 +1021,17 @@ class SessionStreamingService : Service() {
                 // (4) cancel/join any SSE attempt, (5) stop foreground + StopSelf
                 // via the coordinator's BootstrapFailure teardown, (6) `stopSelf()`.
                 // Does NOT touch bootstrapAbortIssued (preserve prior behavior).
+                // C5: this branch always commits to a full Service teardown → mark.
+                shutdownSeal.markIntentional()
                 scope.launch {
                     val extracted = ownershipGate.failStarting(
                         identity,
                         OwnershipRefusal.BootstrapFailed,
                     )
-                    // (4) cancel/join any SSE attempt via the extracted owner callback.
-                    extracted?.disconnectAndJoin?.invoke(false)
-                    extracted?.abortStartup?.invoke()
+                    // §sse-zombie-fix (v4 R5): route through [runTeardown] — the
+                    // single legal teardown helper (try/finally guarantees abort
+                    // even if disconnect throws / coroutine is cancelled).
+                    extracted?.runTeardown(markGap = false)
                     // (3) write shared connection state Disconnected.
                     // §red-dot-trace: surface the silent B1 bootstrap-failure
                     // disconnect so the red indicator is traceable.
@@ -911,10 +1060,14 @@ class SessionStreamingService : Service() {
      * [rollbackBootstrap] so a superseded attempt does not teardown a newer
      * attempt's Service. Defaults to [StreamingOwnershipGate.NO_ATTEMPT_ID]
      * (sticky / internal) → no guard, teardown as before.
+     *
+     * §sse-zombie-fix (v4 R3): [expectedJob] threads the caller's own job
+     * reference into the BootstrapJobHolder CAS.
      */
     private fun abortExpiredStartup(
         attemptId: Long = StreamingOwnershipGate.NO_ATTEMPT_ID,
-    ) = rollbackBootstrap(BootstrapRollbackKind.Timeout, null, attemptId)
+        expectedJob: Job? = null,
+    ) = rollbackBootstrap(BootstrapRollbackKind.Timeout, null, attemptId, expectedJob)
 
     /**
      * Failed-path rollback: bootstrap exhaustion / transport rejection /

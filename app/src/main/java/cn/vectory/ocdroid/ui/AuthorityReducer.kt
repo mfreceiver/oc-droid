@@ -19,6 +19,25 @@ private const val RETRY_QUEUE_MAX_SIZE = 256
 private const val PENDING_ERROR_CHECK_MAX_SIZE = 128
 
 /**
+ * §sse-zombie-fix (v3 Bug C / issue #4+6): time window during which an
+ * UNCONFIRMED optimistic claim (serverEchoed=false && reconcileConfirmed=false)
+ * is protected from being resolved-to-idle by a REST snapshot or a watchdog
+ * reconcile. Rationale: when the SSE event stream is terminally down (Fix A
+ * stops the service → watchdog is lifecycle-bound to the poller and dies),
+ * REST snapshots/reconciles become the only status source — and early in
+ * request/response they can be stale-idle while the server genuinely has
+ * the request pending. This window gives the server a grace period to echo
+ * the optimistic busy before REST idle is allowed to resolve the claim.
+ *
+ * Tuned to 7_000ms: watchdog SLA is ~5s (OPTIMISTIC_CLAIM_TIMEOUT_MS) with
+ * up to ~2s tick jitter, so a 7s window comfortably covers the worst-case
+ * watchdog reconcile arrival while still bounding the protection (after the
+ * window, REST idle wins — eventual consistency is preserved). Uses wall-clock
+ * ms (claimedAtMs / requestStartMs / op.monotonic are all System.currentTimeMillis).
+ */
+private const val OPTIMISTIC_CLAIM_PROTECTION_WINDOW_MS = 7_000L
+
+/**
  * §P0-A (B1 option 1): the PURE authority reducer — the SINGLE writer of
  * [StoreState.sessionList.sessionStatuses]. All status mutations funnel here
  * via `dispatch(AppAction.AuthorityEvent(op))`, landing in the single CAS
@@ -538,38 +557,100 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
     // Out-of-scope entries with no collision were already preserved above.
     for ((id, status) in merged) {
         val priorEntry = cur.bySid[id]
-        nextById[id] = if (id in failedSids && priorEntry != null) {
-            // Failed-dir: keep prior entry (claim/round/workdir), update status only.
-            // Stamp the real scopeKey from the op for applyMarkFailed filtering.
-            priorEntry.copy(status = status, scopeKey = op.scopeKey)
-        } else {
-            // REST authoritative for this scope: clear claim + serverRound (§3.1:320).
-            // §3.1 BLK-2: PRESERVE the per-sid serverRound high-water across the REST
-            // baseline clear so a stale low-turn Tier-1 slim digest arriving after
-            // this snapshot is still fenced (the live baseline is gone, but the
-            // persistent watermark remembers the max turn seen for this incarnation).
-            //
-            // §U-P1: preserve an SSE-active UNCONFIRMED optimistic claim across the
-            // REST snapshot. A claim is "active" when it exists AND is unconfirmed
-            // by BOTH signals (!serverEchoed && !reconcileConfirmed) — the watchdog
-            // will reconcile it. A confirmed claim (serverEchoed || reconcileConfirmed)
-            // means the server acknowledged busy → REST snapshot legitimately resolves
-            // it (clear). Mirrors the :309-319 guardedIdleDrop protection at the
-            // applySnapshot level.
-            val preservedClaim = priorEntry?.optimisticClaim?.let { claim ->
-                if (!claim.serverEchoed && !claim.reconcileConfirmed) claim else null
+            nextById[id] = if (id in failedSids && priorEntry != null) {
+                // Failed-dir: keep prior entry (claim/round/workdir), update status only.
+                // Stamp the real scopeKey from the op for applyMarkFailed filtering.
+                // §sse-zombie-fix-impl-rev1 (GPT impl-review critical #3c): do NOT
+                // preserve a claim across a scope mismatch — a cross-scope failed-dir
+                // entry keeps the prior status/round but the claim must not migrate
+                // onto the current scope.
+                val scopeOk = priorEntry.scopeKey == null || priorEntry.scopeKey == op.scopeKey
+                priorEntry.copy(
+                    status = status,
+                    scopeKey = op.scopeKey,
+                    optimisticClaim = if (scopeOk) priorEntry.optimisticClaim else null,
+                )
+            } else {
+                // REST authoritative for this scope: clear claim + serverRound (§3.1:320).
+                // §3.1 BLK-2: PRESERVE the per-sid serverRound high-water across the REST
+                // baseline clear so a stale low-turn Tier-1 slim digest arriving after
+                // this snapshot is still fenced (the live baseline is gone, but the
+                // persistent watermark remembers the max turn seen for this incarnation).
+                //
+                // §sse-zombie-fix (v3 Bug C / issue #4+6) + §sse-zombie-fix-impl-rev1
+                // (GPT impl-review critical #3a/#3b): full decision matrix keyed on the
+                // RAW REST status (not the in-flight-merged value, which can be
+                // contaminated by optimistic local overlays). A genuine REST busy/retry
+                // CONFIRMS the claim (reconcileConfirmed=true) and the watchdog no longer
+                // selects it; a REST idle within the protection window PRESERVES the
+                // prior entry as a true no-op (same ref — no provenance rewrite, no
+                // freshness churn). A REST idle OUTSIDE the window resolves the claim
+                // normally.
+                val rawRestStatus = op.snapshot[id]
+                val rawRestIsNonIdle = rawRestStatus != null &&
+                    rawRestStatus.type != "idle" &&
+                    rawRestStatus.type != "dead"
+                val preservedClaim = priorEntry?.optimisticClaim?.let { claim ->
+                    if (!claim.serverEchoed && !claim.reconcileConfirmed) claim else null
+                }
+                val isUnconfirmedFreshClaim = preservedClaim != null &&
+                    preservedClaim.claimedAtMs > 0L &&
+                    op.requestToken.requestStartMs - preservedClaim.claimedAtMs < OPTIMISTIC_CLAIM_PROTECTION_WINDOW_MS
+                val scopeMatches = priorEntry == null ||
+                    priorEntry.scopeKey == null ||
+                    priorEntry.scopeKey == op.scopeKey
+                when {
+                    // §sse-zombie-fix-impl-rev1 (#3c): never preserve a claim across a
+                    // scope mismatch — a cross-scope prior entry must not migrate its
+                    // claim onto the current scope.
+                    !scopeMatches -> {
+                        SessionEntry(
+                            status = status,
+                            serverRound = null,
+                            optimisticClaim = null,
+                            origin = EntryOrigin.REST,
+                            updatedAtMs = op.requestToken.requestStartMs,
+                            workdir = op.sidToWorkdir[id],
+                            scopeKey = op.scopeKey,
+                            serverRoundHighWater = priorEntry?.serverRoundHighWater,
+                        )
+                    }
+                    // §sse-zombie-fix-impl-rev1 (#3b): raw REST busy/retry CONFIRMS the
+                    // claim — the server genuinely acknowledged busy via this REST
+                    // snapshot, so the watchdog should no longer select it. Write the
+                    // confirmed busy/retry status as REST authoritative.
+                    isUnconfirmedFreshClaim && rawRestIsNonIdle && preservedClaim != null -> {
+                        SessionEntry(
+                            status = status,
+                            serverRound = null,
+                            optimisticClaim = preservedClaim.copy(reconcileConfirmed = true),
+                            origin = EntryOrigin.REST,
+                            updatedAtMs = op.requestToken.requestStartMs,
+                            workdir = op.sidToWorkdir[id],
+                            scopeKey = op.scopeKey,
+                            serverRoundHighWater = priorEntry?.serverRoundHighWater,
+                        )
+                    }
+                    // §sse-zombie-fix (v3 Bug C): only PROTECT against a raw REST idle
+                    // within the window. A raw REST idle outside the window resolves the
+                    // claim; a non-idle within the window was handled above (confirmed).
+                    isUnconfirmedFreshClaim && priorEntry != null -> {
+                        priorEntry  // true no-op
+                    }
+                    else -> {
+                        SessionEntry(
+                            status = status,
+                            serverRound = null,
+                            optimisticClaim = preservedClaim,
+                            origin = EntryOrigin.REST,
+                            updatedAtMs = op.requestToken.requestStartMs,
+                            workdir = op.sidToWorkdir[id],
+                            scopeKey = op.scopeKey,
+                            serverRoundHighWater = priorEntry?.serverRoundHighWater,
+                        )
+                    }
+                }
             }
-            SessionEntry(
-                status = status,
-                serverRound = null,
-                optimisticClaim = preservedClaim,  // §U-P1: was `null`
-                origin = EntryOrigin.REST,
-                updatedAtMs = op.requestToken.requestStartMs,
-                workdir = op.sidToWorkdir[id],
-                scopeKey = op.scopeKey,
-                serverRoundHighWater = priorEntry?.serverRoundHighWater,
-            )
-        }
     }
 
     val nextCoverage = cur.coverage + (op.scopeKey to Coverage(
@@ -732,20 +813,38 @@ private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOu
     // After the fence, prev is guaranteed non-null with a matching claim.
     return when (op.outcome) {
         ReconcileOutcome.IDLE_CONFIRMED -> {
-            val entry = prev.copy(
-                status = cn.vectory.ocdroid.data.model.SessionStatus(type = "idle"),
-                optimisticClaim = null,
-                updatedAtMs = op.monotonic,
-            )
-            // §P0-A rev-gpt #1: no-change if the resulting entry equals prev.
-            if (entry == prev && op.sid !in cur.retryQueue) {
-                cur
+            // §sse-zombie-fix (v3 Bug C / issue #4 — Kimi C1): this is the MAIN
+            // clobber path for Bug C. The watchdog (OptimisticClaimWatchdogCoordinator,
+            // 5s timeout / 1s tick) fires reconcileStaleOptimisticClaims →
+            // ApplyReconcileOutcome(IDLE_CONFIRMED) → here. Without this guard,
+            // a claim gets cleared at T+5~7.5s — exactly when the SSE event
+            // stream is down and the user is staring at "已中断". Apply the SAME
+            // time-window guard as applySnapshot: if the claim is younger than
+            // OPTIMISTIC_CLAIM_PROTECTION_WINDOW_MS, DROP the reconcile (return
+            // cur) so the optimistic busy survives until the window elapses.
+            // op.monotonic is wall-clock (SessionSyncCoordinator.kt:173), same
+            // domain as claimedAtMs. After the window, the reconcile proceeds
+            // normally (or the next REST snapshot resolves it).
+            val withinProtectionWindow = claim.claimedAtMs > 0L &&
+                op.monotonic - claim.claimedAtMs < OPTIMISTIC_CLAIM_PROTECTION_WINDOW_MS
+            if (withinProtectionWindow) {
+                cur  // drop — claim preserved, no state change
             } else {
-                cur.copy(
-                    bySid = cur.bySid + (op.sid to entry),
-                    // rev-ogpt B4: idle is terminal → clean retry entry.
-                    retryQueue = cur.retryQueue - op.sid,
+                val entry = prev.copy(
+                    status = cn.vectory.ocdroid.data.model.SessionStatus(type = "idle"),
+                    optimisticClaim = null,
+                    updatedAtMs = op.monotonic,
                 )
+                // §P0-A rev-gpt #1: no-change if the resulting entry equals prev.
+                if (entry == prev && op.sid !in cur.retryQueue) {
+                    cur
+                } else {
+                    cur.copy(
+                        bySid = cur.bySid + (op.sid to entry),
+                        // rev-ogpt B4: idle is terminal → clean retry entry.
+                        retryQueue = cur.retryQueue - op.sid,
+                    )
+                }
             }
         }
         ReconcileOutcome.BUSY_CONFIRMED -> {

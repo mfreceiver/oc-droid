@@ -1688,14 +1688,19 @@ class AuthorityReducerTest {
         ))
         assertNotNull("claim present", store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim)
 
-        // ApplyReconcileOutcome IDLE_CONFIRMED
+        // §sse-zombie-fix (v3 Bug C): advance monotonic past the 7s
+        // OPTIMISTIC_CLAIM_PROTECTION_WINDOW_MS so the unconfirmed-claim
+        // time-window guard in applyReconcile allows the idle to clear.
+        // (At monotonic=500L the guard would preserve the claim, which is
+        // the new correct behavior — but this test verifies the post-window
+        // clear path, so we use a value safely beyond the window.)
         store.dispatch(AppAction.AuthorityEvent(
             AuthorityOp.ApplyReconcileOutcome(
                 sid = "s1",
                 scopeKey = scope,
                 outcome = cn.vectory.ocdroid.data.state.ReconcileOutcome.IDLE_CONFIRMED,
                 serverRound = null,
-                monotonic = 500L,
+                monotonic = 8000L,
                 claimClientSeq = store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim?.clientSeq ?: 0L,
                 hostProfileId = store.stateFlow.value.host.currentHostProfileId,
                 identityEpochAtCapture = store.stateFlow.value.identityEpoch,
@@ -1703,7 +1708,7 @@ class AuthorityReducerTest {
         ))
         val entry = store.stateFlow.value.authority.bySid["s1"]!!
         assertEquals("status idle after reconcile", SessionStatus(type = "idle"), entry.status)
-        assertNull("claim cleared by reconcile", entry.optimisticClaim)
+        assertNull("claim cleared by reconcile (post-window)", entry.optimisticClaim)
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -2706,18 +2711,19 @@ class AuthorityReducerTest {
         // Queue s1 (busy → B3 fence does NOT trigger).
         store.dispatch(AppAction.AuthorityEvent(retryQueued("s1")))
         assertTrue("s1 queued", "s1" in store.stateFlow.value.authority.retryQueue)
-        // Reconcile confirms idle (terminal).
+        // §sse-zombie-fix (v3 Bug C): advance past the 7s protection window
+        // so the reconcile idle can clean the retryQueue.
         store.dispatch(AppAction.AuthorityEvent(
             AuthorityOp.ApplyReconcileOutcome(
                 sid = "s1", scopeKey = scope,
                 outcome = ReconcileOutcome.IDLE_CONFIRMED,
-                serverRound = null, monotonic = 200L,
+                serverRound = null, monotonic = 8000L,
                 claimClientSeq = claimClientSeq,
                 hostProfileId = store.stateFlow.value.host.currentHostProfileId,
                 identityEpochAtCapture = 0L,
             ),
         ))
-        assertFalse("retry entry cleaned on reconcile IDLE_CONFIRMED",
+        assertFalse("retry entry cleaned on reconcile IDLE_CONFIRMED (post-window)",
             "s1" in store.stateFlow.value.authority.retryQueue)
     }
 
@@ -3075,7 +3081,12 @@ class AuthorityReducerTest {
         )
         assertFalse("claim still unconfirmed after snapshot",
             after?.optimisticClaim?.serverEchoed == true)
-        assertEquals("entry origin is REST", EntryOrigin.REST, after?.origin)
+        // §sse-zombie-fix (v3 Bug C): the time-window guard preserves the
+        // prior entry as a true no-op (same object ref) when the claim is
+        // unconfirmed and within the protection window. The entry origin
+        // stays OPTIMISTIC (not REST) because the REST idle was rejected.
+        assertEquals("entry origin preserved as OPTIMISTIC (idle rejected by guard)",
+            EntryOrigin.OPTIMISTIC, after?.origin)
     }
 
     @Test

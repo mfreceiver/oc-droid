@@ -193,3 +193,26 @@ object OwnershipRequestParser {
         null
     }
 }
+
+/**
+ * sse-zombie-fix (v4 R5): the ONLY legal way to run an extracted Starting
+ * owner's teardown. Both callbacks fire outside any gate lock, in a fixed
+ * order (transport cancel/join FIRST, then the shell abort). Callers of
+ * [StreamingOwnershipGate.expireAttempt] / [failStarting] /
+ * [failStartingIfTerminal] MUST route through this — invoking the two
+ * callbacks by hand is forbidden (three call sites, one helper → the
+ * "forgot the second callback" class is mechanically impossible).
+ *
+ * §sse-zombie-fix-impl-rev2 (rev-gpt v4-review critical C5): wrap
+ * disconnectAndJoin in try/finally so [abortStartup] still runs if the
+ * transport disconnect throws or the calling coroutine is cancelled during
+ * the suspend cancel/join. Without this, a thrown disconnect would leave an
+ * ownerless foreground Service / bootstrap shell.
+ */
+suspend fun OwnershipState.Starting.runTeardown(markGap: Boolean = false) {
+    try {
+        disconnectAndJoin(markGap)
+    } finally {
+        abortStartup()
+    }
+}

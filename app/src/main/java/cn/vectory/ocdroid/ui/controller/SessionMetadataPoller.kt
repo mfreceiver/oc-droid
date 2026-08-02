@@ -7,6 +7,7 @@ import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.MainViewModelTimings
 import cn.vectory.ocdroid.ui.SharedStateStore
+import cn.vectory.ocdroid.ui.isSseDown
 import cn.vectory.ocdroid.ui.mergeRefreshedSessionsPreservingLocalActivity
 import cn.vectory.ocdroid.ui.preserveSessionsAddedDuringRequest
 import cn.vectory.ocdroid.util.DebugLog
@@ -59,7 +60,7 @@ class SessionMetadataPoller @Inject constructor(
             else {
                 val sseEffectivelyDown =
                     (conn.connectionPhase is ConnectionPhase.Connected && !sseConnected) ||
-                    conn.connectionPhase is ConnectionPhase.Disconnected
+                    conn.connectionPhase.isSseDown
                 when {
                     conn.isConnected && !sseEffectivelyDown -> PollMode.BASELINE
                     sseEffectivelyDown -> PollMode.FALLBACK

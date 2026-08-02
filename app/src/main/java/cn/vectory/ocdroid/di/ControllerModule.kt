@@ -9,6 +9,7 @@ import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.ConnectionPhase
+import cn.vectory.ocdroid.ui.isSseDown
 import cn.vectory.ocdroid.ui.routeChatSessionId
 import cn.vectory.ocdroid.ui.controller.ComposerController
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
@@ -112,7 +113,7 @@ object ControllerModule {
             // deliver server.connected soon, so they are NOT "off".
             settingsManager.sseDisabled || run {
                 val phase = store.connectionFlow.value.connectionPhase
-                phase is ConnectionPhase.SseDisabled || phase is ConnectionPhase.Disconnected
+                phase is ConnectionPhase.SseDisabled || phase.isSseDown
             }
         },
     )

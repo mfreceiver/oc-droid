@@ -53,6 +53,16 @@ internal fun SseDisconnectBanner(
             },
             showRefresh = true,
         )
+        // §sse-zombie-fix (v3 Bug B): SSE bootstrap failed but REST is healthy —
+        // surface as a warning (not error) with a refresh action so the user
+        // can retry the SSE bootstrap without it looking like the server died.
+        BannerCategory.SSE_BOOTSTRAP_FAILED -> CategoryVisuals(
+            color = MaterialTheme.colorScheme.errorContainer,
+            border = MaterialTheme.colorScheme.error,
+            tint = MaterialTheme.colorScheme.onErrorContainer,
+            icon = Icons.Default.Sync,
+            showRefresh = true,
+        )
         BannerCategory.SSE_STALLED, BannerCategory.USER_DISABLED -> CategoryVisuals(
             color = MaterialTheme.colorScheme.surfaceVariant,
             border = MaterialTheme.colorScheme.outline,
@@ -71,6 +81,7 @@ internal fun SseDisconnectBanner(
             BannerCategory.REST_OUTAGE -> R.string.sse_feedback_rest_outage_title
             BannerCategory.AUTH_FAILURE -> R.string.sse_feedback_auth_failure_title
             BannerCategory.SSE_STALLED -> R.string.sse_feedback_sse_stalled_title
+            BannerCategory.SSE_BOOTSTRAP_FAILED -> R.string.sse_feedback_sse_bootstrap_failed_title
             BannerCategory.USER_DISABLED -> R.string.sse_feedback_disabled_title
         }
     )
@@ -98,6 +109,8 @@ internal fun SseDisconnectBanner(
             showing.authReason ?: stringResource(R.string.sse_feedback_auth_failure_subtitle)
         BannerCategory.SSE_STALLED ->
             stringResource(R.string.sse_feedback_sse_stalled_subtitle)
+        BannerCategory.SSE_BOOTSTRAP_FAILED ->
+            stringResource(R.string.sse_feedback_sse_bootstrap_failed_subtitle)
         BannerCategory.USER_DISABLED ->
             stringResource(R.string.sse_feedback_disabled_subtitle)
     }

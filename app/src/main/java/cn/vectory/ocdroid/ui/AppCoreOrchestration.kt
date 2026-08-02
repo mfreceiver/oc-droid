@@ -1123,7 +1123,7 @@ internal fun shouldAutoUnanchorOnColdStart(
     disconnectedSince: Long?,
     now: Long,
     thresholdMs: Long = SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS,
-): Boolean = phase is ConnectionPhase.Disconnected &&
+): Boolean = phase.isSseDown &&
     disconnectedSince != null &&
     (now - disconnectedSince) >= thresholdMs
 
@@ -1195,7 +1195,7 @@ internal const val SSE_FEEDBACK_TICK_MS = 30_000L
  * [ConnectionState.authFailureReason] is non-null (upstream 401/403 via sidecar
  * envelope, or mTLS cert degradation).
  */
-internal enum class BannerCategory { REST_OUTAGE, AUTH_FAILURE, SSE_STALLED, USER_DISABLED }
+internal enum class BannerCategory { REST_OUTAGE, AUTH_FAILURE, SSE_STALLED, SSE_BOOTSTRAP_FAILED, USER_DISABLED }
 
 sealed interface SseConnectionFeedback {
     data object Live : SseConnectionFeedback
@@ -1206,6 +1206,8 @@ sealed interface SseConnectionFeedback {
     data class Disconnected(val sinceMs: Long, val now: Long) : SseConnectionFeedback
     data object Disabled : SseConnectionFeedback
     data object Idle : SseConnectionFeedback
+    /** §sse-zombie-fix (v3 Bug B): SSE bootstrap failed but REST is healthy. */
+    data class SseBootstrapFailed(val sinceMs: Long) : SseConnectionFeedback
 }
 
 /**
@@ -1246,6 +1248,8 @@ internal fun deriveSseConnectionFeedback(
     ConnectionPhase.AwaitingTofuTrust -> SseConnectionFeedback.AwaitingTofuTrust
     ConnectionPhase.Disconnected ->
         SseConnectionFeedback.Disconnected(sinceMs = disconnectedSince ?: now, now = now)
+    ConnectionPhase.SseBootstrapFailed ->
+        SseConnectionFeedback.SseBootstrapFailed(sinceMs = disconnectedSince ?: now)
     ConnectionPhase.SseDisabled -> SseConnectionFeedback.Disabled
 }
 
@@ -1532,7 +1536,8 @@ internal fun computeHysteresisDeadlineMs(
 internal val SseConnectionFeedback.showBanner: Boolean
     get() = this is SseConnectionFeedback.Disconnected ||
         this is SseConnectionFeedback.Disabled ||
-        this is SseConnectionFeedback.WaitingForStream
+        this is SseConnectionFeedback.WaitingForStream ||
+        this is SseConnectionFeedback.SseBootstrapFailed
 
 /**
  * §sse-feedback-ux (§1.1): what semantic category does this feedback represent?
@@ -1553,9 +1558,10 @@ internal fun SseConnectionFeedback.bannerCategory(
 ): BannerCategory? = when (this) {
     is SseConnectionFeedback.Disabled -> BannerCategory.USER_DISABLED
     is SseConnectionFeedback.WaitingForStream -> BannerCategory.SSE_STALLED
+    is SseConnectionFeedback.SseBootstrapFailed -> BannerCategory.SSE_BOOTSTRAP_FAILED
     is SseConnectionFeedback.Disconnected ->
         if (authFailureReason != null || mtlsDegradedError != null) BannerCategory.AUTH_FAILURE else BannerCategory.REST_OUTAGE
-    // Live / Connecting / Reconnecting / ReconnectingAttempt / AwaitingTofuTrust / Idle → no banner
+    // Live / Connecting / Reconnecting / AwaitingTofuTrust / Idle → no banner
     is SseConnectionFeedback.Live -> null
     is SseConnectionFeedback.Connecting -> null
     is SseConnectionFeedback.Reconnecting -> null

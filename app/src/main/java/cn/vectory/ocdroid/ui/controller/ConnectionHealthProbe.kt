@@ -781,14 +781,34 @@ internal class ConnectionHealthProbe(
                                 return@launch
                             }
                             writeConnection {
-                                // §sse-disabled-debug-toggle: surface SseDisabled when
-                                // the launcher refused because the debug flag is ON
-                                // (REST-only); otherwise the generic Disconnected phase.
-                                val phase = if (ownership is cn.vectory.ocdroid.service.OwnershipStartResult.Refused &&
-                                    ownership.reason is cn.vectory.ocdroid.service.OwnershipRefusal.SseDisabled
-                                ) {
-                                    ConnectionPhase.SseDisabled
+                                // §sse-zombie-fix (v3 Bug B) + §sse-zombie-fix-impl-rev1
+                                // (GPT impl-review concern #1): reason-specific phase
+                                // mapping. We are in the engine.bootstrap() Success
+                                // branch — REST is healthy (catalog/sessions/children
+                                // all 200). The phase depends on WHY the SSE transport
+                                // (Stage 2) refused:
+                                //  - SseDisabled (debug toggle) → SseDisabled
+                                //  - BootstrapFailed (Stage-2 timeout/stale-owner) →
+                                //    SseBootstrapFailed (banner: "live updates interrupted")
+                                //  - ServiceStopped / PlatformRejected / other →
+                                //    Disconnected (genuine service/platform failure; NOT
+                                //    a mere bootstrap timeout — the banner honestly says
+                                //    "server unreachable" because the service itself failed).
+                                val phase = if (ownership is cn.vectory.ocdroid.service.OwnershipStartResult.Refused) {
+                                    when (ownership.reason) {
+                                        is cn.vectory.ocdroid.service.OwnershipRefusal.SseDisabled ->
+                                            ConnectionPhase.SseDisabled
+                                        is cn.vectory.ocdroid.service.OwnershipRefusal.BootstrapFailed ->
+                                            ConnectionPhase.SseBootstrapFailed
+                                        else ->
+                                            // ServiceStopped, PlatformRejected, future
+                                            // reasons — genuine failure, not bootstrap.
+                                            ConnectionPhase.Disconnected
+                                    }
                                 } else {
+                                    // Defensive: non-Refused result in this branch should
+                                    // not happen (Success → ownership is Refused or
+                                    // Accepted). Fall back to Disconnected.
                                     ConnectionPhase.Disconnected
                                 }
                                 // §degraded-connected-fix (2026-07-26): we are in the
@@ -805,13 +825,20 @@ internal class ConnectionHealthProbe(
                                 // isConnected=true → green dot (non-breathing, since
                                 // isSseConnected stays false — no live streaming, but
                                 // REST polling + send still work). The phase (SseDisabled
-                                // / Disconnected) signals SSE status for diagnostics.
-                                // SSE reconnection continues in the background via the
-                                // SessionStreamingService's internal watchdog/heartbeat.
+                                // / SseBootstrapFailed / Disconnected) signals SSE status
+                                // for diagnostics. SSE reconnection continues in the
+                                // background via the SessionStreamingService's internal
+                                // watchdog/heartbeat.
+                                //
+                                // §sse-zombie-fix-impl-rev1 (concern #2): REST success
+                                // clears a stale authFailureReason — the server just
+                                // proved it accepts our credentials, so any prior auth
+                                // failure banner is obsolete.
                                 it.copy(
                                     isConnected = true,
                                     isConnecting = false,
                                     connectionPhase = phase,
+                                    authFailureReason = null,
                                 )
                             }
                             settled = true

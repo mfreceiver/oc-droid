@@ -513,6 +513,8 @@
     <string name="chat_phase_disconnected">disconnected</string>
     <!-- §sse-disabled-debug-toggle: REST-only degraded mode (debug flag sse_disabled=true). -->
     <string name="chat_phase_sse_disabled">SSE disabled (REST-only)</string>
+    <!-- §sse-zombie-fix (v3 Bug B): REST ok but SSE event stream bootstrap failed. -->
+    <string name="chat_phase_sse_bootstrap_failed">Live updates interrupted</string>
 
     <!-- §sse-feedback-ux (§1.x batch4): in-chat disconnect banner with 4
          semantic categories. REST_OUTAGE / AUTH_FAILURE = error (red);
@@ -529,6 +531,9 @@
     <string name="sse_feedback_disabled_title">Live updates off</string>
     <string name="sse_feedback_disabled_subtitle">REST-only mode (debug toggle)</string>
     <string name="sse_feedback_auth_failure_subtitle">Certificate or credential could not be loaded</string>
+    <!-- §sse-zombie-fix (v3 Bug B): SSE bootstrap failed but server (REST) is reachable. -->
+    <string name="sse_feedback_sse_bootstrap_failed_title">Live updates interrupted</string>
+    <string name="sse_feedback_sse_bootstrap_failed_subtitle">Server is reachable, but real-time streaming failed to start. Messaging still works.</string>
 
     <string name="chat_jump_to_latest">Jump to latest</string>
 
