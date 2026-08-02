@@ -2611,6 +2611,126 @@ class AuthorityReducerTest {
         assertEquals(2000L, entry.updatedAtMs)
     }
 
+    /**
+     * §review-blocker-#3 (rev-gpt P0-C partial-close): inFlightWin tear-test.
+     *
+     * Counterexample to the old buggy branch, which always stamped
+     * origin=REST + updatedAtMs=requestStartMs even when SSE won in-flight.
+     *
+     * Setup (REST 1000ms + SSE 2000ms tear):
+     *   - REST request captured localBefore["A"] = busy at requestStartMs=1000.
+     *   - SSE landed mid-REST at 2000ms: store now has prior.status=idle,
+     *     prior.origin=SSE_SLIM, prior.updatedAtMs=2000, prior.round=(1,7).
+     *   - REST response returns at 2000ms with idle, round R=(1,7) (same).
+     *   - currentProjection["A"] = idle (from prior); localBefore["A"] = busy
+     *     → DIFFERS → inFlightWin = TRUE.
+     *
+     * Without the fix: entry stamps origin=REST, updatedAtMs=1000 (regressed
+     * from 2000). A subsequent late same-round SSE at 1500ms then passes the
+     * equal-round tie-break (1500 < 1000 is FALSE) and corrupts state.
+     *
+     * With the fix: prior.origin + prior.updatedAtMs are preserved. A late SSE
+     * at 1500ms is correctly fenced (1500 < 2000 is TRUE).
+     */
+    @Test
+    fun `T4-C1 inFlightWin tear — SSE causal metadata preserved (no REST regression)`() {
+        // prior reflects the SSE win: idle, SSE origin, updatedAtMs=2000, round (1,7)
+        val prior = SessionEntry(
+            status = SessionStatus(type = "idle"),
+            serverRound = ServerRound(1, 7),
+            origin = EntryOrigin.SSE_SLIM,
+            updatedAtMs = 2000L,
+            workdir = "/x",
+            scopeKey = scope,
+            serverRoundHighWater = ServerRound(1, 7),
+        )
+        val state = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(bySid = mapOf("A" to prior)),
+        )
+        // localBefore is what REST captured at request start (stale — before SSE landed)
+        val localBefore = mapOf("A" to SessionStatus(type = "busy"))
+        // REST returns: idle, round (1,7) [same as SSE], requestStartMs=1000
+        val op = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf("A" to SessionStatus(type = "idle", turnIncarnation = 1, turn = 7)),
+            sidToWorkdir = mapOf("A" to "/x"),
+            authoritativeNodeIds = setOf("A"),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 2000L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 1000L),
+            localBefore = localBefore,
+        )
+        val result = reduceAuthority(state, op)
+        val entry = result.authority.bySid["A"]!!
+
+        // status: idle (both SSE and REST agree)
+        assertEquals("idle preserved", "idle", entry.status.type)
+        // round: (1,7) — same round, lex-max fold
+        assertEquals("round preserved at (1,7)", ServerRound(1, 7), entry.serverRound)
+        assertEquals("hw at (1,7)", ServerRound(1, 7), entry.serverRoundHighWater)
+        // METADATA PRESERVED (the fix): origin stays SSE_SLIM, NOT regressed to REST
+        assertEquals("origin preserved as SSE_SLIM (not regressed to REST)",
+            EntryOrigin.SSE_SLIM, entry.origin)
+        // METADATA PRESERVED: updatedAtMs stays 2000, NOT regressed to requestStartMs 1000
+        assertEquals("updatedAtMs preserved at 2000 (not regressed to REST requestStart 1000)",
+            2000L, entry.updatedAtMs)
+    }
+
+    /**
+     * §review-blocker-#3 follow-up: the late same-round SSE at 1500ms must be
+     * fenced because preserved updatedAtMs=2000 > 1500. Demonstrates the fix
+     * closes the equal-round tie-break corruption that the old regression
+     * (updatedAtMs=1000) would have allowed through.
+     *
+     * Builds on T4-C1's resulting entry: after the tear, a late SSE (1,7)
+     * arrives at 1500ms. With preserved updatedAtMs=2000, the tie-break is
+     * `1500 < 2000` → TRUE → fenced → entry stays at the fresher SSE state.
+     */
+    @Test
+    fun `T4-C2 late same-round SSE fenced after inFlightWin tear (tie-break correctness)`() {
+        // Resulting entry from T4-C1 (SSE won in-flight, metadata preserved)
+        val afterTear = SessionEntry(
+            status = SessionStatus(type = "idle"),
+            serverRound = ServerRound(1, 7),
+            origin = EntryOrigin.SSE_SLIM,
+            updatedAtMs = 2000L,  // preserved by #3 fix
+            workdir = "/x",
+            scopeKey = scope,
+            serverRoundHighWater = ServerRound(1, 7),
+        )
+        val state = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(bySid = mapOf("A" to afterTear)),
+        )
+        // REST snapshot returns LATE with same round (1,7) at requestStartMs=1500
+        val op = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf("A" to SessionStatus(type = "idle", turnIncarnation = 1, turn = 7)),
+            sidToWorkdir = mapOf("A" to "/x"),
+            authoritativeNodeIds = setOf("A"),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 2500L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 1500L),
+            // localBefore == currentProjection (no new in-flight tear) → inFlightWin=false
+            localBefore = mapOf("A" to SessionStatus(type = "idle")),
+        )
+        val result = reduceAuthority(state, op)
+        val entry = result.authority.bySid["A"]!!
+
+        // equal-round tie-break: requestStartMs(1500) < prior.updatedAtMs(2000) → TRUE → FENCED.
+        // Entry stays verbatim at the fresher SSE state (preserved updatedAtMs=2000, SSE origin).
+        assertEquals("late same-round REST fenced (entry verbatim)", afterTear, entry)
+        assertEquals("origin still SSE_SLIM", EntryOrigin.SSE_SLIM, entry.origin)
+        assertEquals("updatedAtMs still 2000", 2000L, entry.updatedAtMs)
+    }
+
     /** T5a — bad shape degrade (null round). Catches constructing a round from a half-pair. */
     @Test
     fun `T5a bad shape degrade — half-pair R is null, baseline preserved`() {

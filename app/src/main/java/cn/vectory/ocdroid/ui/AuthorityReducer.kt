@@ -470,11 +470,23 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
         if (fenced) {
             nextById[id] = prior!!  // verbatim — fresher causal knowledge wins
         } else {
+            // §review-blocker-#3 (correctness): when SSE won in-flight
+            // (inFlightWin=true), the mergedStatus content already came from
+            // the SSE projection (mergeStatusSnapshotInFlight restored it).
+            // The causal metadata MUST also stay SSE — writing origin=REST +
+            // updatedAtMs=requestStartMs would regress the timestamp to the
+            // REST request's start (e.g. 1000ms when SSE landed at 2000ms).
+            // A subsequent same-round late SSE (1500ms) would then pass the
+            // equal-round tie-break (1500 < 1000 is false) and corrupt state.
+            // Preserve prior.origin + prior.updatedAtMs on inFlightWin; only
+            // the pure REST path (no concurrent SSE update) stamps REST.
+            val effectiveOrigin = if (inFlightWin && prior != null) prior.origin else EntryOrigin.REST
+            val effectiveUpdatedAt = if (inFlightWin && prior != null) prior.updatedAtMs else op.requestToken.requestStartMs
             nextById[id] = SessionEntry(
                 status = cleanStatus,
                 serverRound = lexMaxNull(live0, R),  // preserve on null R — NO clear
-                origin = EntryOrigin.REST,
-                updatedAtMs = op.requestToken.requestStartMs,
+                origin = effectiveOrigin,
+                updatedAtMs = effectiveUpdatedAt,
                 workdir = op.sidToWorkdir[id],
                 scopeKey = op.scopeKey,
                 serverRoundHighWater = lexMaxNull(hw0, R),
