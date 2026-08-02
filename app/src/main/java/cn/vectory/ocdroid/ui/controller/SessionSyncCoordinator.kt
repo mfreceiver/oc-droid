@@ -1470,94 +1470,6 @@ class SessionSyncCoordinator(
      *  same-source (B1 fix discipline). */
     internal fun captureStoreIdentityEpoch(): Long = slices.store.captureIdentityEpoch()
 
-    /**
-     * §P0-B ITEM 4: reconcile stale optimistic claims detected by the
-     * watchdog. For each stale (unconfirmed, timed-out) claim, queries the
-     * repository for the session's current status and dispatches an
-     * [cn.vectory.ocdroid.data.state.AuthorityOp.ApplyReconcileOutcome]
-     * to clear / maintain the entry.
-     *
-     * Each sid is independently identity-checked (stale identity → skip).
-     * Network errors are caught per-sid (FETCH_FAILED removes the entry).
-     *
-     * @param identity the [ConnectionIdentity] that was current at the tick.
-     * @param claims the stale claims detected by [OptimisticClaimWatchdog.selectStaleClaimsForReconcile].
-     */
-    suspend fun reconcileStaleOptimisticClaims(
-        identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
-        claims: List<cn.vectory.ocdroid.ui.StaleClaim>,
-    ) {
-        if (claims.isEmpty()) return
-        // Re-check identity. If the identity changed between tick and this
-        // invocation, skip the entire batch (stale outcomes).
-        val idStore = identityStore ?: return
-        if (!idStore.isCurrent(identity)) return
-        // §P0-B observability: log only AFTER the guards so "dispatching" is
-        // always paired with a "done" (no orphan dispatch line on early-return).
-        DebugLog.i(TAG, "reconcile: dispatching ${claims.size} stale optimistic claim(s)")
-
-        // §P0-A scope guard + §P0-C identity-epoch guard: capture host + epoch
-        // ONCE from the store's stateFlow (matching the reducer's state space)
-        // so every ApplyReconcileOutcome in this batch carries the same guard values.
-        val capturedHost = slices.store.stateFlow.value.host.currentHostProfileId
-        val capturedEpoch = slices.store.stateFlow.value.identityEpoch
-
-        for (claim in claims) {
-            // Per-sid identity re-check inside the loop (defense-in-depth).
-            if (!idStore.isCurrent(identity)) break
-            val outcome = reconcileSingleStaleClaim(claim, idStore, identity)
-            slices.store.dispatch(
-                cn.vectory.ocdroid.ui.AppAction.AuthorityEvent(
-                    cn.vectory.ocdroid.data.state.AuthorityOp.ApplyReconcileOutcome(
-                        sid = claim.sid,
-                        scopeKey = claim.scopeKey,
-                        outcome = outcome,
-                        serverRound = null,
-                        monotonic = clock(),
-                        claimClientSeq = claim.clientSeq,
-                        hostProfileId = capturedHost,
-                        identityEpochAtCapture = capturedEpoch,
-                    ),
-                ),
-            )
-        }
-        DebugLog.i(TAG, "reconcile: done (${claims.size} claim(s) processed)")
-    }
-
-    /** §P0-B ITEM 4: reconcile a single stale claim — fetch status + map to [ReconcileOutcome]. */
-    private suspend fun reconcileSingleStaleClaim(
-        claim: cn.vectory.ocdroid.ui.StaleClaim,
-        idStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
-        identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
-    ): cn.vectory.ocdroid.data.state.ReconcileOutcome {
-        val repo = repository ?: return cn.vectory.ocdroid.data.state.ReconcileOutcome.FETCH_FAILED
-        if (!idStore.isCurrent(identity)) return cn.vectory.ocdroid.data.state.ReconcileOutcome.FETCH_FAILED
-        return try {
-            val fetched = repo.getSlimapiSessionStatusOutcome(claim.sid)
-            if (!idStore.isCurrent(identity)) return cn.vectory.ocdroid.data.state.ReconcileOutcome.FETCH_FAILED
-            when (fetched) {
-                is cn.vectory.ocdroid.data.repository.StatusOutcome.Success -> {
-                    if (fetched.status.isIdle) cn.vectory.ocdroid.data.state.ReconcileOutcome.IDLE_CONFIRMED
-                    else cn.vectory.ocdroid.data.state.ReconcileOutcome.BUSY_CONFIRMED
-                }
-                is cn.vectory.ocdroid.data.repository.StatusOutcome.SessionMissing -> {
-                    cn.vectory.ocdroid.data.state.ReconcileOutcome.IDLE_CONFIRMED // session gone → idle
-                }
-                is cn.vectory.ocdroid.data.repository.StatusOutcome.Retry -> {
-                    cn.vectory.ocdroid.data.state.ReconcileOutcome.FETCH_FAILED
-                }
-                is cn.vectory.ocdroid.data.repository.StatusOutcome.DirectoryError,
-                is cn.vectory.ocdroid.data.repository.StatusOutcome.UpstreamWarn -> {
-                    cn.vectory.ocdroid.data.state.ReconcileOutcome.FETCH_FAILED
-                }
-            }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (_: Throwable) {
-            cn.vectory.ocdroid.data.state.ReconcileOutcome.FETCH_FAILED
-        }
-    }
-
     fun applySlimStatusFanOutSummary(summary: cn.vectory.ocdroid.service.status.StatusFanOutSummary) {
         // §U-CQ5 sweep-start identity causal fence (backlog-cleanup): DROP the
         // entire summary if the identity advanced between sweep-start and now.
@@ -1594,9 +1506,7 @@ class SessionSyncCoordinator(
         val scopeKey = slices.store.authorityScope()
         val now = clock()
         // §U-CQ5 B1 fix (batch2-review): capture identity epoch from the store's
-        // stateFlow (not identityStore.currentEpoch) so the reducer's guard
-        // matches — consistent with reconcileStaleOptimisticClaims (:1497) and
-        // the SharedStateStore kdoc (:141-149).
+        // stateFlow (not identityStore.currentEpoch) so the reducer's guard matches.
         val capturedEpoch = slices.store.stateFlow.value.identityEpoch
         for (sid in summary.perSid.keys) {
             if (sid in auth.retryQueue) {

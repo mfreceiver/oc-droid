@@ -47,7 +47,7 @@ class ArchiveSubtreeAuthorityPruneTest {
     private fun busyEntry(workdir: String? = null) = SessionEntry(
         status = busy,
         serverRound = null,
-        optimisticClaim = null,
+        
         origin = EntryOrigin.REST,
         updatedAtMs = 0L,
         workdir = workdir,
@@ -71,7 +71,7 @@ class ArchiveSubtreeAuthorityPruneTest {
                     parentSid to busyEntry("/parent"),
                     childSid to busyEntry("/child"),
                     otherSid to SessionEntry(
-                        status = idle, serverRound = null, optimisticClaim = null,
+                        status = idle, serverRound = null, 
                         origin = EntryOrigin.REST,
                         updatedAtMs = 0L, workdir = "/other",
                     ),
@@ -119,7 +119,7 @@ class ArchiveSubtreeAuthorityPruneTest {
                     parentSid to busyEntry("/parent"),
                     childSid to busyEntry("/child"),
                     otherSid to SessionEntry(
-                        status = idle, serverRound = null, optimisticClaim = null,
+                        status = idle, serverRound = null, 
                         origin = EntryOrigin.REST,
                         updatedAtMs = 0L, workdir = "/other",
                     ),
@@ -272,7 +272,7 @@ class ArchiveSubtreeAuthorityPruneTest {
                     parentSid to busyEntry("/parent"),
                     childSid to busyEntry("/child"),
                     otherSid to SessionEntry(
-                        status = idle, serverRound = null, optimisticClaim = null,
+                        status = idle, serverRound = null, 
                         origin = EntryOrigin.REST,
                         updatedAtMs = 0L, workdir = "/other",
                     ),
@@ -315,7 +315,7 @@ class ArchiveSubtreeAuthorityPruneTest {
                     parentSid to busyEntry("/parent"),
                     childSid to busyEntry("/child"),
                     otherSid to SessionEntry(
-                        status = idle, serverRound = null, optimisticClaim = null,
+                        status = idle, serverRound = null, 
                         origin = EntryOrigin.REST,
                         updatedAtMs = 0L, workdir = "/other",
                     ),

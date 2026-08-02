@@ -128,30 +128,6 @@ sealed interface AuthorityOp {
         val registeredWorkdirs: Set<String>,
     ) : AuthorityOp
 
-    /** §B7 REST reconcile terminal outcome (watchdog / explicit reconcile). */
-    data class ApplyReconcileOutcome(
-        val sid: String,
-        val scopeKey: ScopeKey,
-        val outcome: ReconcileOutcome,
-        val serverRound: ServerRound?,
-        /** §B7 reconcile effective time (merge-timing source). §MN-P9 step 1
-         *  (U-MN9, 2026-07-31): WALL-CLOCK ms (System.currentTimeMillis() ←
-         *  SessionSyncCoordinator.clock), NOT monotonic — same caveat as
-         *  [cn.vectory.ocdroid.data.state.SessionEntry.updatedAtMs]. */
-        val monotonic: Long,
-        /** §P0-B generation fence (ABA): the [OptimisticClaim.clientSeq] of the stale
-         *  claim this reconcile was triggered for. The reducer DROPS the outcome unless
-         *  the current claim's clientSeq still equals this (defense against ABA /
-         *  superseded claims). */
-        val claimClientSeq: Long,
-        /** §P0-A scope guard (defense-in-depth inside the CAS): host captured at reconcile
-         *  dispatch. The reducer checks it against state.host.currentHostProfileId. */
-        val hostProfileId: String?,
-        /** §P0-C identity-epoch guard: [StoreState.identityEpoch] captured at reconcile
-         *  dispatch (before the GET). The reducer checks it against [StoreState.identityEpoch]. */
-        val identityEpochAtCapture: Long,
-    ) : AuthorityOp
-
     /** §B5 prune: drop [sids] from bySid (delete / archive lifecycle). */
     data class PruneSessions(
         val sids: Set<String>,
@@ -234,9 +210,4 @@ data class RequestToken(
     val requestStartMs: Long,
 )
 
-/** §B7 REST reconcile outcome classification. */
-enum class ReconcileOutcome {
-    IDLE_CONFIRMED,
-    BUSY_CONFIRMED,
-    FETCH_FAILED,
-}
+

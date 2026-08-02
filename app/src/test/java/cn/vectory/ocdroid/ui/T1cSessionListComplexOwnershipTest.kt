@@ -433,7 +433,7 @@ class T1cSessionListComplexOwnershipTest {
         assertNotNull("authority.bySid populated for optimistic sid", entry)
         assertEquals("authority origin OPTIMISTIC",
             cn.vectory.ocdroid.data.state.EntryOrigin.OPTIMISTIC, entry?.origin)
-        assertNotNull("authority optimisticClaim set", entry?.optimisticClaim)
+        assertNotNull("authority entry present", entry)
         // pendingBumps consumed in the same CAS.
         assertTrue("pendingBumps consumed", newStore.stateFlow.value.authority.pendingBumps.isEmpty())
     }

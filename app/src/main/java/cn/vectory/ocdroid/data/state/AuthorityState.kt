@@ -54,16 +54,14 @@ data class AuthorityState(
 
 /**
  * A single sid's authority entry. The [status] is the projection source;
- * the rest are fence/coverage metadata (causal fence, optimistic claim,
- * origin classification, freshness) that the (P0-B+) reducers consult but
- * that the UI projection ignores.
+ * the rest are fence/coverage metadata (causal fence, origin classification,
+ * freshness) that the (P0-B+) reducers consult but that the UI projection
+ * ignores.
  */
 data class SessionEntry(
     val status: SessionStatus,
     /** §3.1 slimapi `(incarnation, turn)` strong fence; null for legacy/optimistic/REST. */
     val serverRound: ServerRound?,
-    /** §3.1 Tier-2 optimistic confirmation gate (POST success before SSE busy echo). */
-    val optimisticClaim: OptimisticClaim?,
     /** How this entry's value arrived — drives §B9 ServerBusy classification. */
     val origin: EntryOrigin,
     /** TTL / equal-serverRound tie-break clock (NOT a causal fence). Carried in the op.
@@ -132,9 +130,9 @@ data class RetryEntry(
 
 /**
  * §3.1 slimapi per-`(serverGroupFp, sid)` monotonic execution-generation token.
- * Lexicographic compareBy(incarnation, turn). NEVER compared against
- * [OptimisticClaim.clientSeq] (separate count spaces — M1 root cause).
+ * Lexicographic compareBy(incarnation, turn).
  */
+@kotlinx.serialization.Serializable
 data class ServerRound(
     val incarnation: Long,
     val turn: Long,
@@ -143,42 +141,13 @@ data class ServerRound(
         compareValuesBy(this, other, { it.incarnation }, { it.turn })
 }
 
-/**
- * §3.1 Tier-2 optimistic confirmation gate. [clientSeq] is the local optimistic
- * counter (NEVER compared to [ServerRound.turn]); [serverEchoed] resolves
- * cross-channel reorder (server busy lands before HTTP success); the watchdog
- * arms on [claimedAtMs] + OPTIMISTIC_CONFIRM_TIMEOUT → reconcile.
- *
- * §MN-P9 step 1 (U-MN9, 2026-07-31): despite the "Monotonic" suffix (historical
- * naming, retained for now), [claimedAtMs] is a WALL-CLOCK millisecond
- * (System.currentTimeMillis(), sourced from connectionTimeMs), NOT a
- * monotonic clock — same single-clock-domain caveat as
- * [SessionEntry.updatedAtMs] (see its kdoc + dev-plan §5 U-P3 risk).
- * Renaming is U-MN9 step 2 (Batch 3).
- *
- * §P0-B final-fix #1: two distinct confirmation signals:
- *  - [serverEchoed] — set ONLY by real-time SSE busy/retry echo (cross-channel
- *    reorder: server confirms via SSE before the HTTP response). NEVER set by
- *    the delayed reconcile.
- *  - [reconcileConfirmed] — set ONLY by the delayed reconcile BUSY_CONFIRMED
- *    (the watchdog's GET confirmed the server is busy). NEVER set by the
- *    real-time SSE.
- * A claim is treated as confirmed (gate released, watchdog skips) iff
- * `serverEchoed || reconcileConfirmed`. A new optimistic generation starts
- * with BOTH false (never inherits reconcileConfirmed — prevents cross-generation
- * pollution).
- */
-data class OptimisticClaim(
-    val clientSeq: Long,
-    val claimedAtMs: Long,
-    val serverEchoed: Boolean,
-    /** §P0-B final-fix #1: set ONLY by a delayed reconcile BUSY_CONFIRMED (the
-     *  watchdog's GET confirmed the server is busy). NOT inherited by a new
-     *  optimistic generation (cross-generation pollution prevention). Default
-     *  false for backward compat with in-memory state at upgrade. */
-    val reconcileConfirmed: Boolean = false,
-    val guardedIdleDrop: Boolean,
-)
+/** §Plan-A (P0-C): pair-rule — both flat fields present → ServerRound; either
+ *  missing (old sidecar / unwired registry / bad shape) → null (Tier degrade). */
+internal fun SessionStatus.serverRoundOrNull(): ServerRound? {
+    val inc = turnIncarnation
+    val t = turn
+    return if (inc != null && t != null) ServerRound(inc, t) else null
+}
 
 /**
  * §B6 scope key: the count-space boundary. Execution-generation counters

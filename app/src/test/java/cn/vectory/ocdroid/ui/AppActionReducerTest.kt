@@ -547,7 +547,6 @@ class AppActionReducerTest {
                 bySid = mapOf("s1" to cn.vectory.ocdroid.data.state.SessionEntry(
                     status = cn.vectory.ocdroid.data.model.SessionStatus("idle"),
                     serverRound = null,
-                    optimisticClaim = null,
                     origin = cn.vectory.ocdroid.data.state.EntryOrigin.REST,
                     updatedAtMs = 0L,
                     workdir = "/p",

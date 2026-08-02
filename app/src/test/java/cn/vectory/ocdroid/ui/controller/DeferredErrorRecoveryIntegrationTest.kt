@@ -97,7 +97,6 @@ class DeferredErrorRecoveryIntegrationTest {
                     bySid = mapOf(sid to SessionEntry(
                         status = SessionStatus("busy"),
                         serverRound = null,
-                        optimisticClaim = null,
                         origin = EntryOrigin.SSE_SLIM,
                         updatedAtMs = 0L,
                         workdir = null,
