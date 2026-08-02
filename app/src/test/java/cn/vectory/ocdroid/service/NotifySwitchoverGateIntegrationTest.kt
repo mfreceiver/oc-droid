@@ -309,7 +309,6 @@ class NotifySwitchoverGateIntegrationTest {
             }
             val repository = mockk<OpenCodeRepository>(relaxed = true)
             every { repository.connectSSE(any()) } returnsMany flows
-            val bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator()
             val streamFrames = mutableListOf<SSEEvent>()
             val scope = this
             // Use backgroundScope for the stream collector so runTest cleans
@@ -322,7 +321,6 @@ class NotifySwitchoverGateIntegrationTest {
                 scope = scope,
                 repository = repository,
                 identityStore = identityStore,
-                bootstrapCoordinator = bootstrapCoordinator,
                 sseEventStream = stream,
                 sharedStateStore = store,
                 sharedEffectBus = effects,

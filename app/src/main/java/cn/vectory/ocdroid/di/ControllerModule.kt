@@ -395,7 +395,6 @@ object ControllerModule {
         serverCompatProfile: ServerCompatProfile,
         @Named("currentProfileId") currentProfileId: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
-        bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
         streamingServiceLauncher: cn.vectory.ocdroid.service.StreamingServiceLauncher,
         streamingLifecycleCoordinator: cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator,
         connectionBootstrapEngine: cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine,
@@ -413,9 +412,6 @@ object ControllerModule {
         serverCompatProfile = serverCompatProfile,
         currentProfileId = currentProfileId,
         identityStore = identityStore,
-        // CP2 (notify Phase-0): delegate TOFU state to the shared bootstrap
-        // coordinator (FGS spec §10). CC's public TOFU surface is unchanged.
-        bootstrapCoordinator = bootstrapCoordinator,
         // CP9 (notify Phase-0 switchover): CC's startSSE now calls the
         // streaming Service launcher (the atomic ownership switch); the
         // Service runs the §5 bootstrap + the SSE collector lives in
@@ -435,9 +431,8 @@ object ControllerModule {
         // Busy-open is hooked in ChatViewModel.loadMessages.
         tokenStreamCoordinator = tokenStreamCoordinator,
         // RESOLVER lane ②: forwarded to ConnectionHealthProbe so its legacy
-        // testConnection path (identity endpointFp + TOFU host:port) resolves
-        // the URL through the single authority, matching the engine + token-
-        // stream factory.
+        // testConnection path resolves the URL through the single authority,
+        // matching the engine + token-stream factory.
         effectiveConnectionConfigResolver = effectiveConnectionConfigResolver,
     )
 

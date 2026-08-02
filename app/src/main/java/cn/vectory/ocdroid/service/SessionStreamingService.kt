@@ -66,7 +66,6 @@ import javax.inject.Inject
  *  - [SessionStreamingController] — the pure-JVM orchestrator that consumes
  *    [StreamingLifecycleCoordinator.commands] → [ServiceShell] side-effects,
  *    runs the §6 background poller, and drives the §5 START_STICKY bootstrap;
- *  - `ConnectionBootstrapCoordinator` — cold-start bootstrap / TOFU gate;
  *  - [StatusAggregator] — authoritative busy;
  *  - [cn.vectory.ocdroid.service.bridge.SseEventBridge] — events → identity
  *    validation → `ControllerEffect.OnSseEvent`.
@@ -150,7 +149,6 @@ class SessionStreamingService : Service() {
     // ── CP9: Hilt-injected collaborators for [sseOwner] (the SSE collector). ──
 
     @Inject lateinit var repository: OpenCodeRepository
-    @Inject lateinit var bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
     @Inject lateinit var sharedStateStore: SharedStateStore
     @Inject lateinit var sharedEffectBus: SharedEffectBus
     /**
@@ -425,7 +423,6 @@ class SessionStreamingService : Service() {
             scope = scope,
             repository = repository,
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             sseEventStream = sseEventStream,
             sharedStateStore = sharedStateStore,
             sharedEffectBus = sharedEffectBus,

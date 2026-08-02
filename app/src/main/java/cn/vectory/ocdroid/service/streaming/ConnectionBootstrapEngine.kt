@@ -3,21 +3,17 @@ package cn.vectory.ocdroid.service.streaming
 import cn.vectory.ocdroid.data.model.HealthResponse
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
-import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
-import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.DebugLog
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.security.cert.CertificateException
-import javax.net.ssl.SSLException
 import javax.inject.Singleton
 import javax.inject.Inject
 
@@ -26,13 +22,6 @@ sealed interface ConnectionBootstrapOutcome {
         val identity: ConnectionIdentity,
         val health: HealthResponse,
     ) : ConnectionBootstrapOutcome
-
-    data class TofuNeedsActivity(
-        val hostPort: String,
-        val capture: OpenCodeRepository.TofuCaptureResult,
-    ) : ConnectionBootstrapOutcome
-
-
 
     data class Failed(val error: Throwable) : ConnectionBootstrapOutcome
 }
@@ -43,7 +32,6 @@ class ConnectionBootstrapEngine internal constructor(
     private val settingsManager: SettingsManager,
     private val repository: OpenCodeRepository,
     private val identityStore: ConnectionIdentityStore,
-    private val bootstrapCoordinator: ConnectionBootstrapCoordinator,
     private val serverCompatProfile: ServerCompatProfile,
     private val hasActivity: () -> Boolean,
 ) {
@@ -120,6 +108,7 @@ class ConnectionBootstrapEngine internal constructor(
                 hostPort = hostPortFromUrl(key.url),
                 clientCert = clientCert,
                 slim = key.slim,
+                trustAll = key.trustAll,
             )
             val currentKey = configResolver.resolve()
             if (currentKey == key) configuredKey = key else return ConnectionBootstrapOutcome.Failed(
@@ -154,43 +143,11 @@ class ConnectionBootstrapEngine internal constructor(
                     key.url,
                     expectedEpoch,
                 ) ?: return ConnectionBootstrapOutcome.Failed(IllegalStateException("Identity bind failed"))
-                bootstrapCoordinator.clearPendingTofu()
                 return ConnectionBootstrapOutcome.Success(identity, health)
             }
             val error = healthResult.exceptionOrNull()
                 ?: IllegalStateException("Server reported unhealthy${health?.version?.let { " ($it)" }.orEmpty()}")
-            val tlsFailure = generateSequence(error) { it.cause }
-                .any { it is SSLException || it is CertificateException }
-            val hostPort = hostPortFromUrl(key.url)
-            if (!tlsFailure || hostPort == null || repository.pinnedSpkiFor(hostPort) != null ||
-                repository.isMutualTlsActive()
-            ) {
-                return ConnectionBootstrapOutcome.Failed(error)
-            }
-            bootstrapCoordinator.setPendingTofu(hostPort)
-            val capture = repository.captureServerCert(key.url, hostPort, clientCert)
-                ?: run {
-                    bootstrapCoordinator.clearPendingTofu()
-                    return ConnectionBootstrapOutcome.Failed(error)
-                }
-            bootstrapCoordinator.setPendingCapture(capture)
-            if (!hasActivity()) {
-                bootstrapCoordinator.markDegradedNeedsActivity()
-                return ConnectionBootstrapOutcome.TofuNeedsActivity(hostPort, capture)
-            }
-            val decision = CompletableDeferred<TofuDecision>()
-            bootstrapCoordinator.setTofuDecision(decision)
-            val selected = try {
-                decision.await()
-            } finally {
-                bootstrapCoordinator.setTofuDecision(null)
-            }
-            if (selected is TofuDecision.Cancel) {
-                bootstrapCoordinator.clearPendingTofu()
-                return ConnectionBootstrapOutcome.Failed(IllegalStateException("Server trust declined"))
-            }
-            repository.applyTofuDecision(hostPort, selected)
-            bootstrapCoordinator.clearPendingTofu()
+            return ConnectionBootstrapOutcome.Failed(error)
         }
     }
 }

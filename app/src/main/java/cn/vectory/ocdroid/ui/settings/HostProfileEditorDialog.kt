@@ -66,6 +66,8 @@ internal fun HostProfileEditorDialog(
         // §2.7 mTLS 编辑意图（VM 据此写 ESP，原子提交；Dialog 不碰 ESP）：
         mtlsEnabled: Boolean,
         slimEnabled: Boolean,
+        // §L7 trust-all: 跳过服务器证书验证（无 MITM 保护）。与 mTLS XOR 警告。
+        trustAllEnabled: Boolean,
         stagedP12: ByteArray?,
         caStage: CaStage,
         p12Password: String?,
@@ -96,6 +98,8 @@ internal fun HostProfileEditorDialog(
         passwordEdited: Boolean,
         // §2.7 mTLS 透传字段：
         mtlsEnabled: Boolean,
+        // §L7 trust-all: 跳过服务器证书验证。
+        trustAllEnabled: Boolean,
         stagedP12: ByteArray?,
         hasImportedP12: Boolean,
         caStage: CaStage,
@@ -103,7 +107,7 @@ internal fun HostProfileEditorDialog(
         p12PasswordEdited: Boolean,
         clientCertId: String?,
         onResult: (Boolean, String) -> Unit
-    ) -> Unit = { _, _, _, _, _, _, _, _, _, _, _, _, _ -> },
+    ) -> Unit = { _, _, _, _, _, _, _, _, _, _, _, _, _, _ -> },
     // §fix-3 (gro-1#2/gpt-2#2/max-1 M1): 当前 host 的 mTLS 降级错误（缺失/损坏），
     // 由调用方从 ConnectionState.mtlsDegradedError 注入；非 null 时在 mTLS 区块顶部
     // 显示红色 banner，让用户看到「证书加载失败」而非泛化连接失败。
@@ -128,11 +132,7 @@ internal fun HostProfileEditorDialog(
     var passwordEdited by remember(initial.id) { mutableStateOf(false) }
     var showBasicPassword by remember(initial.id) { mutableStateOf(false) }
     var showDeleteConfirm by remember(initial.id) { mutableStateOf(false) }
-    // §tofu R2: the legacy `allowInsecure` toggle (per-host trust-all) is
-    // GONE — self-signed / unknown-issuer endpoints now surface a TOFU trust
-    // dialog at first connect (the connection coordinator captures the leaf
-    // cert and asks the user to Accept once / Trust / Cancel). No editor
-    // state needed.
+    // §L7 trust-all: per-server 跳过服务器证书验证（无 MITM 保护）。
     // §mtls-clipboard: 折叠区开关——新 profile 全 false（§design E），既有 profile
     // 按是否配置了对应凭据种子。两个区（Basic Auth / mTLS）共用
     // [CollapsibleSection] 容器，关则隐藏内容并在保存时清空对应凭据。
@@ -140,6 +140,8 @@ internal fun HostProfileEditorDialog(
     var mtlsEnabled by remember(initial.id) { mutableStateOf(initial.mtlsEnabled) }
     // §R8 slim-mode UI: 省流模式开关——与 mTLS 正交，形成四配置组合。
     var slimEnabled by remember(initial.id) { mutableStateOf(initial.slim) }
+    // §L7 trust-all: per-server 跳过服务器证书验证（无 MITM 防护）。与 mTLS XOR 警告。
+    var trustAllEnabled by remember(initial.id) { mutableStateOf(initial.trustAll) }
     // §mtls-clipboard: 客户端 p12 直接以已校验 ByteArray 暂存（剪贴板粘贴→
     // decodeBase64OrNull→loadClientP12OrNull 验证后写入）。null=未重导（沿用已存）。
     var stagedP12: ByteArray? by remember(initial.id) { mutableStateOf<ByteArray?>(null) }
@@ -327,7 +329,7 @@ internal fun HostProfileEditorDialog(
         testStatus = null
         // §2.7: 透传 mTLS 编辑意图（不在此构造 ClientCertMaterial——Dialog 无
         // settingsManager；由回调接收方 VM 构造）。onTestConnection 内部走 viewModelScope。
-        // §tofu R2: allowInsecure 不再透传——TOFU 取代 trust-all 降级。
+        // §L7: trust-all 透传至 testConnectionForm。
         onTestConnection(
             testResult.url,
             testResult.userSnap,
@@ -335,6 +337,7 @@ internal fun HostProfileEditorDialog(
             testResult.profileIdSnap,
             testResult.pwEditedSnap,
             testResult.mtlsOn,
+            trustAllEnabled,
             testResult.p12Snap,
             testResult.hasMaterial,
             testResult.caSnap,
@@ -446,11 +449,12 @@ internal fun HostProfileEditorDialog(
                             // onSave is a function-type parameter, Kotlin 禁止具名实参
                             // (position order matches the lambda signature).
                             onSave(
-                                saveResult.saved,
+                                saveResult.saved.copy(trustAll = trustAllEnabled),
                                 saveResult.authPw,
                                 saveResult.effectivePasswordEdited,
                                 saveResult.mtlsOn,
                                 saveResult.slimOn,
+                                trustAllEnabled,
                                 saveResult.stagedP12,
                                 saveResult.caStage,
                                 saveResult.p12Password,
@@ -615,6 +619,32 @@ internal fun HostProfileEditorDialog(
             ) {
                 Text(stringResource(R.string.host_slim_title), style = MaterialTheme.typography.titleSmall)
                 Switch(checked = slimEnabled, onCheckedChange = { slimEnabled = it })
+            }
+            // §L7 trust-all toggle (per-server certificate skipping, XOR with mTLS).
+            Spacer(modifier = Modifier.height(Dimens.spacing2))
+            Row(
+                modifier = Modifier.fillMaxWidth().heightIn(min = Dimens.touchTargetMin).padding(vertical = Dimens.spacing1),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(stringResource(R.string.host_trust_all_title), style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        stringResource(R.string.host_trust_all_subtitle),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = trustAllEnabled, onCheckedChange = { trustAllEnabled = it })
+            }
+            // §L7 mTLS XOR warning: trust-all + mTLS both ON → informational warning.
+            if (trustAllEnabled && mtlsEnabled) {
+                Text(
+                    stringResource(R.string.host_trust_all_mtls_conflict),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = Dimens.spacing1),
+                )
             }
             } // Column (fix-advanced-overlap)
         }

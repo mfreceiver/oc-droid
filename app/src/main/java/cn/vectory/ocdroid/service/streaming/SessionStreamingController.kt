@@ -59,8 +59,6 @@ import kotlinx.coroutines.launch
  *  - on success → refresh the global status snapshot →
  *    [StreamingLifecycleCoordinator.onBootstrapResult] with the post-refresh
  *    [StatusAggregator.globalState];
- *  - on TOFU degraded → [StatusAggregatorInput.markRequestFailed] (Unknown
- *    keeps the source alive per CP4) + degraded notification (NO teardown);
  *  - on Failed → bounded retry with backoff; if exhausted →
  *    [StreamingLifecycleCoordinator.onDisconnect] (§5 step 6 long-retry
  *    fallback).
@@ -122,9 +120,8 @@ class SessionStreamingController(
     private var busySinceMs: Long? = null
 
     /**
-     * §5 degraded state flag — true after a [BootstrapResult.TofuNeedsActivity]
-     * until a subsequent successful bootstrap clears it. Drives the
-     * [SessionStatusNotifier] degraded cell.
+     * §5 degraded state flag — retains the historical degraded-cell in
+     * [SessionStatusNotifier]; always false after TOFU removal (L7).
      */
     private var degraded = false
 
@@ -181,29 +178,6 @@ class SessionStreamingController(
                     val snapshot = sessionSnapshotProvider.current()
                     statusAggregatorInput.refresh(identity, snapshot)
                     coordinator.onBootstrapResult(identity, statusAggregator.globalState.value)
-                    return
-                }
-                is BootstrapResult.TofuNeedsActivity -> {
-                    degraded = true
-                    DebugLog.w(TAG, "bootstrapAsync: TOFU degraded for ${result.hostPort}")
-                    val identity = identityStore.currentIdentity.value
-                    val snapshot = sessionSnapshotProvider.current()
-                    if (identity != null) {
-                        statusAggregatorInput.markRequestFailed(
-                            identity = identity,
-                            snapshot = snapshot,
-                            sourceTimeMs = clock(),
-                        )
-                    }
-                    val spec = SessionStatusNotifier.build(
-                        layer = coordinator.layer.value,
-                        busyCount = currentBusyCount(),
-                        strings = strings,
-                        busySinceMs = null,
-                        degraded = true,
-                        silent = silentNotifications(),
-                    )
-                    shell.updateNotification(spec)
                     return
                 }
                 BootstrapResult.Failed -> {

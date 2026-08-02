@@ -52,13 +52,6 @@ internal interface FencedUnexpectedTransportDropHandler : UnexpectedTransportDro
  * side effect — its host/workdir belongs to a reconfigure epoch that has
  * since been invalidated. Returns [SourceActivation.Rejected.StaleIdentity].
  *
- * **TOFU freeze**: while [ConnectionBootstrapCoordinator] holds a pending
- * TOFU trust prompt ([pendingTofuHostPort][ConnectionBootstrapCoordinator.pendingTofuHostPort]
- * != null), [connect] is a no-op collector-wise. The TLS handshake would
- * fail the same way (the pin is not written until the user decides); resuming
- * the bootstrap retry loop after the user's decision re-issues `StartSse`.
- * Returns [SourceActivation.Rejected.TofuPending].
- *
  * **D2 gate #4 — acknowledgeable activation** → **D4-B M3 (transport-only
  * readiness)**: [connect] is a `suspend fun` returning [SourceActivation]:
  *  - [SourceActivation.Ready] — ONLY AFTER the first successful current-
@@ -72,8 +65,7 @@ internal interface FencedUnexpectedTransportDropHandler : UnexpectedTransportDro
  *    frame arrived within [TRANSPORT_READY_TIMEOUT_MS] (30s). The attempted
  *    collector is cancelled; the handoff commit routes through
  *    [StreamingOwnershipGate.failStarting] → full B1 rollback.
- *  - [SourceActivation.Rejected.StaleIdentity] / [SourceActivation.Rejected.TofuPending]
- *    — no network retry consumed.
+ *  - [SourceActivation.Rejected.StaleIdentity] — no network retry consumed.
  *  - [SourceActivation.Rejected.Exhausted] — §5 step 6 service-level retry
  *    budget spent; [onTerminalExhaustion] invoked exactly once.
  *
@@ -91,8 +83,6 @@ internal interface FencedUnexpectedTransportDropHandler : UnexpectedTransportDro
  *   ordering + identity-check reads stay single-threaded).
  * @param repository SSE producer (FGS spec §15.1: `connectSSE(workdir)`).
  * @param identityStore the single process-level identity store (CP1).
- * @param bootstrapCoordinator the shared TOFU state (CP2); its
- *   `pendingTofuHostPort()` gates [connect] (TOFU freeze).
  * @param sseEventStream the process-wide stream the collector publishes to
  *   (CP3+). The bridge + downstream fold stay unchanged.
  * @param sharedStateStore SSE liveness writes (green-icon) land on
@@ -118,7 +108,6 @@ class ServiceSseConnectionOwner(
     private val scope: CoroutineScope,
     private val repository: OpenCodeRepository,
     private val identityStore: ConnectionIdentityStore,
-    private val bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
     private val sseEventStream: SseEventStream,
     private val sharedStateStore: SharedStateStore,
     private val sharedEffectBus: SharedEffectBus,
@@ -438,20 +427,11 @@ class ServiceSseConnectionOwner(
 
     /**
      * The connect setup body — MUST be called under [connectMutex]. Performs
-     * the TOFU / stale rejections synchronously (no collector started) +
+     * stale-identity rejection synchronously (no collector started) +
      * otherwise launches the collector + returns the [ConnectSetup.Started]
      * carrying the in-flight readiness deferred.
      */
     private fun setupConnectLocked(identity: ConnectionIdentity): ConnectSetup {
-        // §A3.1 — TOFU freeze.
-        if (bootstrapCoordinator.pendingTofuHostPort() != null) {
-            DebugLog.i(
-                TAG,
-                "connect: frozen — TOFU trust pending for " +
-                    "${bootstrapCoordinator.pendingTofuHostPort()} (identity epoch=${identity.epoch})"
-            )
-            return ConnectSetup.Rejected(SourceActivation.Rejected.TofuPending)
-        }
         // §A3.2 — stale-identity drop.
         if (!identityStore.isCurrent(identity)) {
             DebugLog.i(

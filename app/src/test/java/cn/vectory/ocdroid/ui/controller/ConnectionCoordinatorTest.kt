@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.ui.controller
 
-import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
 import cn.vectory.ocdroid.service.status.StatusAggregator
 
@@ -83,8 +82,6 @@ class ConnectionCoordinatorTest {
     private lateinit var coordinator: ConnectionCoordinator
     /** CP1 (notify Phase-0): the single connection-identity store. */
     private lateinit var identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
-    /** CP2 (notify Phase-0): the shared TOFU bootstrap coordinator. */
-    private lateinit var bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
     /**
      * CP9 (notify Phase-0 switchover): the recording launcher. Tests assert
      * on its callCount instead of `repository.connectSSE` invocations after
@@ -116,7 +113,6 @@ class ConnectionCoordinatorTest {
         // first probe always proceeds (mirrors production's wall-clock ms).
         now = 100_000L
         identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
-        bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator()
         launcher = RecordingStreamingServiceLauncher()
         coordinator = ConnectionCoordinator(
             scope = scope,
@@ -127,9 +123,6 @@ class ConnectionCoordinatorTest {
             serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             clock = { now },
             identityStore = identityStore,
-            // CP2: delegate TOFU state to the shared coordinator so the
-            // delegation test can assert on bootstrapCoordinator.tofuState.
-            bootstrapCoordinator = bootstrapCoordinator,
             // CP9: CC's startSSE now calls the launcher (atomic ownership
             // switch). cancelSse / cancelSseForReconfigure route through
             // streamingLifecycleCoordinator (null here — they are no-ops in
@@ -346,7 +339,6 @@ class ConnectionCoordinatorTest {
             scope, slices, repository, settingsManager, effects,
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             effectiveConnectionConfigResolver = resolver,
         )
@@ -376,7 +368,6 @@ class ConnectionCoordinatorTest {
             scope, slices, repository, settingsManager, effects,
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             effectiveConnectionConfigResolver = resolver,
         )
@@ -432,7 +423,6 @@ class ConnectionCoordinatorTest {
             scope, slices, repository, settingsManager, effects,
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             effectiveConnectionConfigResolver = resolver,
         )
@@ -500,7 +490,6 @@ class ConnectionCoordinatorTest {
             scope, slices, repository, settingsManager, effects,
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
             streamingServiceLauncher = launcher,
             effectiveConnectionConfigResolver = resolver,
         )
@@ -1167,322 +1156,6 @@ class ConnectionCoordinatorTest {
         )
     }
 
-    // ── CP2 (notify Phase-0): CC delegates TOFU state to bootstrap coordinator ──
-
-    /**
-     * CP2 spec test: when CC enters the TOFU-pending path via its public
-     * [ConnectionCoordinator.resolveTofuTrust] surface, the shared
-     * [ConnectionBootstrapCoordinator.tofuState] reflects the transition.
-     * This proves the delegation — CC has NO private TOFU state of its own
-     * (the old `pendingTofuHostPort` / `pendingTofuDecision` fields are gone).
-     *
-     * We exercise the delegation directly: setPendingTofu through the shared
-     * coordinator (which is what CC does internally on the SSL/cert-failure
-     * path), then resolveTofuTrust through CC's public wrapper, and observe
-     * the state on the shared coordinator.
-     */
-    @Test
-    fun `CP2 CC delegates TOFU state to bootstrap coordinator`() {
-        // Initially Idle.
-        assertEquals(
-            cn.vectory.ocdroid.service.bootstrap.TofuState.Idle,
-            bootstrapCoordinator.tofuState.value,
-        )
-
-        // CC's internal TOFU path sets pending via the shared coordinator.
-        bootstrapCoordinator.setPendingTofu("example.com:443")
-        bootstrapCoordinator.setTofuDecision(
-            kotlinx.coroutines.CompletableDeferred<cn.vectory.ocdroid.data.repository.http.TofuDecision>()
-        )
-        assertEquals(
-            cn.vectory.ocdroid.service.bootstrap.TofuState.TrustPending("example.com:443"),
-            bootstrapCoordinator.tofuState.value,
-        )
-
-        // CC's public resolveTofuTrust delegates to the shared coordinator.
-        coordinator.resolveTofuTrust(
-            cn.vectory.ocdroid.data.repository.http.TofuDecision.Cancel
-        )
-        // resolveTofuTrust completes the deferred but does NOT clear the
-        // pending state (mirrors CC's original semantics — the retry loop's
-        // finally block calls clearPendingTofu). The state is still
-        // TrustPending until clearPendingTofu runs.
-        assertEquals(
-            "resolveTofuTrust does not clear tofuState (the retry loop finally does)",
-            cn.vectory.ocdroid.service.bootstrap.TofuState.TrustPending("example.com:443"),
-            bootstrapCoordinator.tofuState.value,
-        )
-
-        // The retry loop's finally block clears the state.
-        bootstrapCoordinator.clearPendingTofu()
-        identityStore.bind("test-fp", "/proj", "test-endpoint")
-        assertEquals(
-            cn.vectory.ocdroid.service.bootstrap.TofuState.Idle,
-            bootstrapCoordinator.tofuState.value,
-        )
-    }
-
-    /**
-     * CP2 / CP9 spec test: the freeze semantics are preserved through
-     * delegation — while TOFU is pending, testConnection / coldStartReconnect
-     * / startSSE short-circuit (the guards read through
-     * `tofu.pendingTofuHostPort()` which returns non-null for TrustPending).
-     * CP9: startSSE now delegates to the launcher; the freeze assertion is
-     * "launcher NOT invoked while frozen" + "launcher invoked once after clear".
-     */
-    @Test
-    fun `CP2 freeze semantics preserved - startSSE short-circuits while TOFU pending`() {
-        // Enter TOFU-pending via the shared coordinator (CC's internal path).
-        bootstrapCoordinator.setPendingTofu("example.com:443")
-
-        // startSSE must FROZEN — no launcher call.
-        coordinator.startSSE()
-        runPending()
-
-        assertEquals(
-            "launcher NOT invoked while TOFU pending",
-            0,
-            launcher.callCount,
-        )
-
-        // Resolve + clear → unfreezes.
-        bootstrapCoordinator.clearPendingTofu()
-        identityStore.bind("test-fp", "/proj", "test-endpoint")
-
-        coordinator.startSSE()
-        runPending()
-
-        assertEquals(
-            "launcher invoked once after TOFU cleared",
-            1,
-            launcher.callCount,
-        )
-    }
-
-    /**
-     * CP2 / CP9 spec test: CC has NO private TOFU fields (grep-verifiable:
-     * the old `pendingTofuHostPort` / `pendingTofuDecision` private vars are
-     * gone). This test exercises the public surface end-to-end to prove no
-     * duplicate state — the shared coordinator is the single source.
-     */
-    @Test
-    fun `CP2 CC has no private TOFU state - single source in bootstrap coordinator`() {
-        // If CC held a PRIVATE copy of the TOFU state (the old fields), this
-        // test would fail: setting state via the shared coordinator would
-        // not be visible to CC's guards, and vice versa. The fact that CC's
-        // startSSE guard reads the shared coordinator's state proves no
-        // private duplicate exists.
-        bootstrapCoordinator.setPendingTofu("frozen.example.com:443")
-        assertEquals(
-            "frozen.example.com:443",
-            bootstrapCoordinator.pendingTofuHostPort(),
-        )
-
-        // CC's internal guard (via delegation) sees the same state.
-        coordinator.startSSE() // should freeze — no launcher call.
-        runPending()
-        assertEquals(0, launcher.callCount)
-
-        // Clearing via the shared coordinator unfreezes CC.
-        bootstrapCoordinator.clearPendingTofu()
-        identityStore.bind("test-fp", "/proj", "test-endpoint")
-        coordinator.startSSE()
-        runPending()
-        assertEquals(1, launcher.callCount)
-    }
-
-    // ── §sse-disabled-debug-toggle: connection phase mapping ──────────────
-
-    @Test
-    fun `startSSE with SseDisabled refusal surfaces the SseDisabled connection phase`() {
-        // REST-only mode: when the launcher refuses with [SseDisabled] (debug
-        // flag ON), CC's startSSE must write the distinct [SseDisabled] phase
-        // (NOT the generic Disconnected) so the UI can reflect "SSE disabled".
-        identityStore.bind("test-fp", "/proj", "test-endpoint")
-        launcher.nextOwnershipResult =
-            cn.vectory.ocdroid.service.OwnershipStartResult.Refused(
-                cn.vectory.ocdroid.service.OwnershipRefusal.SseDisabled,
-            )
-
-        coordinator.startSSE()
-        runPending()
-
-        assertEquals(
-            "launcher invoked once (gate is at the launcher, not CC)",
-            1,
-            launcher.callCount,
-        )
-        assertEquals(
-            "SseDisabled phase surfaced",
-            ConnectionPhase.SseDisabled,
-            connectionFlow.value.connectionPhase,
-        )
-        assertTrue("degraded connected — REST works, SSE disabled", connectionFlow.value.isConnected)
-    }
-
-    @Test
-    fun `startSSE with a non-SseDisabled refusal still surfaces Disconnected`() {
-        // Regression guard: only the SseDisabled refusal maps to SseDisabled
-        // phase; every other refusal (e.g. ServiceStopped) stays Disconnected.
-        identityStore.bind("test-fp", "/proj", "test-endpoint")
-        launcher.nextOwnershipResult =
-            cn.vectory.ocdroid.service.OwnershipStartResult.Refused(
-                cn.vectory.ocdroid.service.OwnershipRefusal.ServiceStopped,
-            )
-
-        coordinator.startSSE()
-        runPending()
-
-        assertEquals(
-            ConnectionPhase.Disconnected,
-            connectionFlow.value.connectionPhase,
-        )
-    }
-
-    @Test
-    fun `D3 refused ownership settles false once and never publishes Connected`() {
-        val engine = mockk<cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine>()
-        val identity = identityStore.bind("group", "/work", "endpoint")
-        coEvery { engine.bootstrap() } returns
-            cn.vectory.ocdroid.service.streaming.ConnectionBootstrapOutcome.Success(
-                identity,
-                HealthResponse(true, "3.0"),
-            )
-        launcher.nextResult = false
-        val d3 = ConnectionCoordinator(
-            scope = scope,
-            slices = slices,
-            repository = repository,
-            settingsManager = settingsManager,
-            effects = effects,
-            serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
-            clock = { now },
-            identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
-            connectionBootstrapEngine = engine,
-        )
-        val settled = mutableListOf<Boolean>()
-
-        d3.testConnection(force = true, onSettled = settled::add)
-        runPending()
-
-        assertEquals(listOf(false), settled)
-        assertTrue("degraded connected — REST works, SSE refused", connectionFlow.value.isConnected)
-        assertFalse(connectionFlow.value.connectionPhase is ConnectionPhase.Connected)
-    }
-
-    @Test
-    fun `D3 exact accepted identity is the only healthy settlement`() {
-        val engine = mockk<cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine>()
-        val identity = identityStore.bind("group", "/work", "endpoint")
-        coEvery { engine.bootstrap() } returns
-            cn.vectory.ocdroid.service.streaming.ConnectionBootstrapOutcome.Success(
-                identity,
-                HealthResponse(true, "3.0"),
-            )
-        val d3 = ConnectionCoordinator(
-            scope = scope,
-            slices = slices,
-            repository = repository,
-            settingsManager = settingsManager,
-            effects = effects,
-            serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
-            clock = { now },
-            identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
-            connectionBootstrapEngine = engine,
-        )
-        val settled = mutableListOf<Boolean>()
-
-        d3.testConnection(force = true, onSettled = settled::add)
-        runPending()
-
-        assertEquals(listOf(true), settled)
-        assertTrue(connectionFlow.value.isConnected)
-        assertEquals(listOf(identity), launcher.requestedIdentities.takeLast(1))
-    }
-
-    @Test
-    fun `B2 foreground promotes degraded capture once and Accept reruns engine to ownership Ready`() {
-        val foreground = kotlinx.coroutines.flow.MutableStateFlow(false)
-        val monitor = mockk<cn.vectory.ocdroid.di.AppLifecycleMonitor>(relaxed = true)
-        every { monitor.isInForeground } returns foreground
-        val engine = mockk<cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine>()
-        val identity = identityStore.bind("group", "/work", "endpoint")
-        coEvery { engine.bootstrap() } returns
-            cn.vectory.ocdroid.service.streaming.ConnectionBootstrapOutcome.Success(
-                identity,
-                HealthResponse(true, "4.0"),
-            )
-        val capture = mockk<OpenCodeRepository.TofuCaptureResult>()
-        every { capture.hostPort } returns "server:443"
-        bootstrapCoordinator.setPendingTofu("server:443")
-        bootstrapCoordinator.setPendingCapture(capture)
-        bootstrapCoordinator.markDegradedNeedsActivity()
-        val d4 = ConnectionCoordinator(
-            scope, slices, repository, settingsManager, effects,
-            cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
-            identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
-            connectionBootstrapEngine = engine,
-            appLifecycleMonitor = monitor,
-        )
-        runPending()
-
-        foreground.value = true
-        runPending()
-        assertTrue(bootstrapCoordinator.tofuState.value is cn.vectory.ocdroid.service.bootstrap.TofuState.TrustPending)
-        assertEquals(capture, connectionFlow.value.pendingTofuCapture)
-        assertEquals(ConnectionPhase.AwaitingTofuTrust, connectionFlow.value.connectionPhase)
-
-        d4.resolveTofuTrust(TofuDecision.AcceptOnce("spki"))
-        runPending()
-
-        verify(exactly = 1) { repository.applyTofuDecision("server:443", TofuDecision.AcceptOnce("spki")) }
-        coVerify(exactly = 1) { engine.bootstrap() }
-        assertEquals(ConnectionPhase.Connected, connectionFlow.value.connectionPhase)
-        assertEquals(1, launcher.callCount)
-    }
-
-    @Test
-    fun `B2 duplicate foreground emits one challenge and Cancel clears degraded without retry`() {
-        val foreground = kotlinx.coroutines.flow.MutableStateFlow(false)
-        val monitor = mockk<cn.vectory.ocdroid.di.AppLifecycleMonitor>(relaxed = true)
-        every { monitor.isInForeground } returns foreground
-        val engine = mockk<cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine>(relaxed = true)
-        val terminator = mockk<cn.vectory.ocdroid.service.DegradedBootstrapTerminator>(relaxed = true)
-        val capture = mockk<OpenCodeRepository.TofuCaptureResult>()
-        every { capture.hostPort } returns "server:443"
-        bootstrapCoordinator.setPendingTofu("server:443")
-        bootstrapCoordinator.setPendingCapture(capture)
-        bootstrapCoordinator.markDegradedNeedsActivity()
-        val d4 = ConnectionCoordinator(
-            scope, slices, repository, settingsManager, effects,
-            cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
-            identityStore = identityStore,
-            bootstrapCoordinator = bootstrapCoordinator,
-            streamingServiceLauncher = launcher,
-            connectionBootstrapEngine = engine,
-            appLifecycleMonitor = monitor,
-            degradedBootstrapTerminator = terminator,
-        )
-        runPending()
-
-        foreground.value = true
-        foreground.value = true
-        runPending()
-        d4.resolveTofuTrust(TofuDecision.Cancel)
-        runPending()
-
-        assertEquals(cn.vectory.ocdroid.service.bootstrap.TofuState.Idle, bootstrapCoordinator.tofuState.value)
-        assertEquals(null, connectionFlow.value.pendingTofuCapture)
-        assertEquals(ConnectionPhase.Disconnected, connectionFlow.value.connectionPhase)
-        coVerify(exactly = 0) { engine.bootstrap() }
-        verify(exactly = 1) { terminator.terminate() }
-    }
 
     // ── RecordingConnectionCoordinatorCallbacks (removed in batch 3b) ──────
     // The handwritten spy was replaced by direct filtering on

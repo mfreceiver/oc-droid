@@ -115,9 +115,7 @@ class HostProfileControllerTest {
      * constructed with an [InMemoryTofuPinStore] (the test fake); production
      * wiring via [cn.vectory.ocdroid.di.TofuModule] is covered separately.
      */
-    private val sslConfigFactory = cn.vectory.ocdroid.data.repository.http.SslConfigFactory(
-        cn.vectory.ocdroid.data.repository.http.InMemoryTofuPinStore()
-    )
+    private val sslConfigFactory = cn.vectory.ocdroid.data.repository.http.SslConfigFactory()
 
     @Before
     fun setUp() {

@@ -95,7 +95,6 @@ import cn.vectory.ocdroid.ui.performForceRefresh
 import cn.vectory.ocdroid.ui.resolveMessage
 import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.visibleMessages
-import cn.vectory.ocdroid.ui.settings.TofuTrustDialog
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.theme.StatusBanner
@@ -1367,7 +1366,6 @@ fun ChatScaffold(
             sessionVM.createSessionInWorkdir(workdir)
         },
         onDismissError = { errorDetail = null },
-        onTofuDecision = { decision -> connectionVM.resolveTofuTrust(decision) },
         // Derived slice values
         agents = settings.agents.filter { it.isVisible },
         currentAgentName = effectiveAgent,
@@ -1395,7 +1393,6 @@ fun ChatScaffold(
         todos = sessionList.sessionTodos[chromeSessionId ?: ""] ?: emptyList(),
         cachedContextUsage = cachedContextUsage,
         recentWorkdirs = recentWorkdirs,
-        pendingTofuCapture = connection.pendingTofuCapture,
         questionSessionIds = questionRootIds(sessionList.pendingQuestions, sessionsById),
         permissionSessionIds = sessionList.pendingPermissions.map { it.sessionId }.toSet(),
         sessionErrorsById = sessionList.sessionErrorsById,

@@ -16,13 +16,13 @@ package cn.vectory.ocdroid.data.repository
  * Host-dependent interceptors capture this value when a candidate
  * `ClientBundle` is built; they never retain the mutable [HostConfig] mirror.
  *
- * Field semantics mirror the four [HostConfig] readable properties + the
- * derived `host:port` authority used by the TOFU pin store:
+ * Field semantics mirror the [HostConfig] readable properties:
  *  - [baseUrl]            ← `HostConfig.baseUrl`
  *  - [hostPort]           ← `HostConfig.hostPort` (String? authority)
  *  - [username]/[password]← `HostConfig.username` / `password`
  *  - [slimHost]           ← `HostConfig.slim` (renamed to distance it from
  *                            the legacy `slimMode` parameter name; §R3)
+ *  - [trustAllHost]       ← `HostConfig.trustAll` (L7 trust-all flag)
  */
 internal data class HostSnapshot(
     val baseUrl: String,
@@ -34,6 +34,9 @@ internal data class HostSnapshot(
      * UI / service / DI business code MUST NOT branch on it.
      */
     val slimHost: Boolean,
+
+    /** L7: per-server trust-all flag. XOR with mTLS (see HostProfile.trustAll). */
+    val trustAllHost: Boolean,
 ) {
     val hasBasicAuth: Boolean get() = username != null && password != null
 
@@ -44,12 +47,14 @@ internal data class HostSnapshot(
             password: String?,
             hostPort: String?,
             slimHost: Boolean,
+            trustAllHost: Boolean = false,
         ): HostSnapshot = HostSnapshot(
             baseUrl = baseUrl,
             hostPort = hostPort ?: cn.vectory.ocdroid.data.repository.http.hostPortFromUrl(baseUrl),
             username = username,
             password = password,
             slimHost = slimHost,
+            trustAllHost = trustAllHost,
         )
     }
 }

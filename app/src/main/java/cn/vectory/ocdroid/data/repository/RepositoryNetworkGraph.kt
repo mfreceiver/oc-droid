@@ -10,7 +10,6 @@ import cn.vectory.ocdroid.data.repository.http.ResponseSizeGuardInterceptor
 import cn.vectory.ocdroid.data.repository.http.SlimapiDebugInterceptor
 import cn.vectory.ocdroid.data.repository.http.SlimapiVersionInterceptor
 import cn.vectory.ocdroid.data.repository.http.SslConfigFactory
-import cn.vectory.ocdroid.data.repository.http.TofuPinStore
 import cn.vectory.ocdroid.data.repository.http.TrafficCountingInterceptor
 import cn.vectory.ocdroid.util.TrafficLogger
 import cn.vectory.ocdroid.util.TrafficTracker
@@ -23,9 +22,9 @@ import cn.vectory.ocdroid.util.TrafficTracker
  * **What lives here (T2A.2 scope — behavior-preserving)**:
  *  - The mutable [HostConfig] compatibility mirror (published bundles never
  *    use it as an interceptor dependency).
- *  - The single shared [SslConfigFactory] (mTLS cache + TOFU pin lookups via
- *    [TofuPinStore]) — held so the live clients built by [clientFactory] and
- *    the health/probe paths in [OpenCodeRepository] share ONE SSL resolver.
+ *  - The single shared [SslConfigFactory] (mTLS cache + trust-all flag) —
+ *    held so the live clients built by [clientFactory] and the health/probe
+ *    paths in [OpenCodeRepository] share ONE SSL resolver.
  *  - Shared host-independent interceptor collaborators and the graph-owned
  *    cache. Host-dependent interceptors are created per [HostSnapshot].
  *  - The [OkHttpClientFactory] itself — exposes the rest/sse/command/
@@ -54,7 +53,6 @@ import cn.vectory.ocdroid.util.TrafficTracker
 internal class RepositoryNetworkGraph(
     trafficTracker: TrafficTracker,
     trafficLogger: TrafficLogger,
-    tofuStore: TofuPinStore,
     @Suppress("UNUSED_PARAMETER")
     serverCompatProfile: ServerCompatProfile,
     /**
@@ -112,9 +110,9 @@ internal class RepositoryNetworkGraph(
     /**
      * §2.4: the SINGLE shared SSL resolver/factory. Held here so the live
      * clients built by [clientFactory] and the health/probe paths on
-     * [OpenCodeRepository] share the same mTLS cache + TOFU pin view.
+     * [OpenCodeRepository] share the same mTLS cache + trust-all flag.
      */
-    val sslConfigFactory: SslConfigFactory = SslConfigFactory(tofuStore)
+    val sslConfigFactory: SslConfigFactory = SslConfigFactory()
 
     /**
      * OkHttp client factory — composes [sslConfigFactory] + the

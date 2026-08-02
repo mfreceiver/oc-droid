@@ -20,7 +20,6 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.TodoItem
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
-import cn.vectory.ocdroid.data.repository.http.spkiSha256Hex
 import cn.vectory.ocdroid.util.TrafficTracker
 import cn.vectory.ocdroid.util.TrafficLogger
 import io.mockk.mockk
@@ -1138,21 +1137,24 @@ class OpenCodeRepositoryTest {
         }
     }
 
+    // §L7 (Decision 4): TOFU pinning was replaced by a per-server trust-all
+    // toggle. The two former TOFU tests (self-signed cert accepted via SPKI pin)
+    // are collapsed into one trust-all coverage test below — it exercises the
+    // same self-signed-cert-over-HTTPS path but via the new trustAll flag.
     @Test
-    fun `checkHealth succeeds over HTTPS with self-signed cert when a TOFU pin matches`() = runBlocking {
+    fun `checkHealth succeeds over HTTPS with self-signed cert when trustAll is enabled`() = runBlocking {
         val (httpsServer, heldCertificate) = startHttpsMockServer()
         try {
-            // §tofu R2: 预先把 server leaf 的 SPKI 信任进 tofuStore，然后 configure
-            // 时 sslConfigFor(hostPort) 解析为 TofuPinned → 握手按 SPKI 匹配通过。
             val baseUrl = httpsServer.url("/").toString().trimEnd('/')
             val hostPort = cn.vectory.ocdroid.data.repository.http.hostPortFromUrl(baseUrl)
                 ?: error("test baseUrl must yield a hostPort")
-            val spki = heldCertificate.certificate.spkiSha256Hex()
-            repository.applyTofuDecision(
-                hostPort,
-                cn.vectory.ocdroid.data.repository.http.TofuDecision.Trust(spki),
-            )
-            repository.configure(baseUrl = baseUrl, hostPort = hostPort)
+            // hold the reference so the cert isn't GC'd (heldCertificate keeps
+            // the mock server's TLS material alive for the handshake).
+            checkNotNull(heldCertificate) { "mock server must provide a held certificate" }
+
+            // §L7: trustAll=true → SslConfig.TrustAll (permissive trust manager
+            // + hostname verifier). Self-signed cert handshake passes.
+            repository.configure(baseUrl = baseUrl, hostPort = hostPort, trustAll = true)
             httpsServer.enqueue(
                 MockResponse()
                     .setBody("""{"healthy": true, "version": "1.0.0"}""")
@@ -1162,7 +1164,7 @@ class OpenCodeRepositoryTest {
             val result = repository.checkHealth()
 
             assertTrue(
-                "TOFU pin match must accept self-signed cert, got $result",
+                "trustAll must accept self-signed cert, got $result",
                 result.isSuccess
             )
             val health = result.getOrThrow()
@@ -1172,50 +1174,6 @@ class OpenCodeRepositoryTest {
             // 验证确实走了 HTTPS（而非被降级到 HTTP）。
             val request = httpsServer.takeRequest()
             assertEquals("GET /global/health HTTP/1.1", request.requestLine)
-        } finally {
-            httpsServer.shutdown()
-        }
-    }
-
-    // §tofu R2 round-1 B1 regression (cgpt/opuser/groker): 真实冷启顺序是 configure()
-    // 在先（无 pin → SystemDefault），trust 在握手失败【之后】。live OkHttp 客户端在
-    // configure() 时按 SystemDefault 快照构建，socket factory 构建后不可变——故
-    // applyTofuDecision 必须重建，否则重试仍 SystemDefault 持续失败（上面的预种测试靠
-    // configure 前写 pin 掩盖了这点）。本测试在未重建的版本上失败、修复后通过。
-    @Test
-    fun `checkHealth recovers after TOFU trust applied POST-configure rebuild regression`() = runBlocking {
-        val (httpsServer, heldCertificate) = startHttpsMockServer()
-        try {
-            val baseUrl = httpsServer.url("/").toString().trimEnd('/')
-            val hostPort = cn.vectory.ocdroid.data.repository.http.hostPortFromUrl(baseUrl)
-                ?: error("test baseUrl must yield a hostPort")
-            val spki = heldCertificate.certificate.spkiSha256Hex()
-
-            // 1. configure 在先——无 pin → SystemDefault，live 客户端按（不可变）系统信任
-            //    socket factory 构建。
-            repository.configure(baseUrl = baseUrl, hostPort = hostPort)
-
-            // 2. 无 pin → 自签名握手失败。
-            val before = repository.checkHealth()
-            assertTrue("pre-trust checkHealth must fail on self-signed (SystemDefault), got $before", before.isFailure)
-
-            // 3. configure 之【后】信任该 endpoint 的 SPKI（镜像真实 capture→accept 流）。
-            repository.applyTofuDecision(
-                hostPort,
-                cn.vectory.ocdroid.data.repository.http.TofuDecision.Trust(spki),
-            )
-
-            // 4. 此时 checkHealth 必须成功——applyTofuDecision 已用 TofuPinned 重建 live
-            //    客户端。未重建则失败（回归）：客户端仍 SystemDefault，握手失败，而 pin 已
-            //    存不再弹窗 → 终态失败。
-            httpsServer.enqueue(
-                MockResponse()
-                    .setBody("""{"healthy": true, "version": "1.0.0"}""")
-                    .setHeader("Content-Type", "application/json")
-            )
-            val after = repository.checkHealth()
-            assertTrue("post-trust checkHealth must succeed (TofuPinned rebuilt live client), got $after", after.isSuccess)
-            assertTrue(after.getOrThrow().healthy)
         } finally {
             httpsServer.shutdown()
         }
