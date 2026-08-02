@@ -1,172 +1,100 @@
 package cn.vectory.ocdroid.service
 
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
+import cn.vectory.ocdroid.service.streaming.TransportAttemptToken
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
+import kotlinx.coroutines.joinAll
+import org.junit.Assert.*
 import org.junit.Test
+import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
- * L2 §7: tests for the simplified [StreamingOwnershipGate] — single-slot
- * identity lease.
+ * L2 §7: tests for the [StreamingOwnershipGate] — single-slot ABA-safe
+ * identity lease arbiter.
  *
  * Scenarios G1–G5 per oracle §7:
- *  - G1: claim + release cycle.
- *  - G2: claim same identity returns a fresh token.
- *  - G3: claim different identity returns null.
- *  - G4: releaseNow with non-matching token identity is a no-op.
- *  - G5: readyIdentity and disconnectAndRelease.
+ *  - G1: ABA — same-identity reconnect, late old-token release rejected.
+ *  - G2: max-1 invariant under concurrent competing claims.
+ *  - G3: disconnectAndRelease extracts + invokes teardown exactly once.
+ *  - G4: transfer precondition rules.
+ *  - G5: different-identity claim blocked while held; succeeds after release.
  */
 class StreamingOwnershipGateTest {
 
-    private fun identity(workdir: String = "/proj"): ConnectionIdentity =
-        ConnectionIdentity(epoch = 1L, profileId = "fp", normalizedWorkdir = workdir, endpointFp = "ep")
+    private fun id(epoch: Long = 1, workdir: String = "/proj"): ConnectionIdentity =
+        ConnectionIdentity(epoch = epoch, profileId = "fp", normalizedWorkdir = workdir, endpointFp = "ep")
 
-    // ── G1: claim + release cycle ──────────────────────────────────────────
+    private fun tok(attemptId: Long, identity: ConnectionIdentity): TransportAttemptToken =
+        TransportAttemptToken(attemptId = attemptId, identity = identity, recoveryTicket = null)
 
+    // G1 — MANDATORY ABA: same-identity reconnect, late release of the old token.
     @Test
-    fun `G1 - claim returns a token and releaseNow clears the lease`() {
+    fun `G1 - same-identity reconnect late release of old token rejected, new lease unaffected`() {
         val gate = StreamingOwnershipGate()
-        val id = identity()
-
-        assertNull("no lease before claim", gate.readyIdentity())
-
-        val token = gate.claim(id)
-        assertNotNull("claim returns token", token)
-        assertEquals("leased identity matches", id, gate.readyIdentity())
-
-        gate.releaseNow(token!!)
-        assertNull("lease released after releaseNow", gate.readyIdentity())
+        val identity = id(epoch = 1)
+        val attemptA = tok(1, identity)
+        val attemptB = tok(2, identity)
+        val tokenA = gate.claim(attemptA) {}!!
+        // Reconnect: takeover claim (same identity, strictly newer attemptId).
+        val tokenB = gate.claim(attemptB) {}!!
+        assertTrue(gate.isCurrent(tokenB))
+        // The dying old connection's late release MUST NOT release the new lease.
+        assertFalse("late release(oldToken) MUST be rejected (ABA guard)", gate.releaseNow(tokenA))
+        assertTrue("new lease still current after late old release", gate.isCurrent(tokenB))
+        assertEquals(tokenB, gate.currentToken())
     }
 
-    // ── G1b: claim returns a token and suspended release clears the lease ───
-
+    // G2 — max-1 invariant under concurrent competing claims.
     @Test
-    fun `G1b - suspended release clears the lease`() = runTest {
+    fun `G2 - concurrent claims exactly one primary, different identities`() = runTest {
         val gate = StreamingOwnershipGate()
-        val id = identity()
-        val token = gate.claim(id)
-        assertNotNull("claim returns token", token)
-        assertEquals("leased", id, gate.readyIdentity())
-
-        gate.release(token!!)
-        assertNull("lease released after suspended release", gate.readyIdentity())
+        val winners = ConcurrentLinkedQueue<LeaseToken>()
+        val jobs = (1..32).map { n ->
+            launch(Dispatchers.Default) {
+                val identity = id(epoch = n.toLong(), workdir = "/p$n")   // distinct identities
+                gate.claim(tok(n.toLong(), identity)) {}?.let { winners += it }
+            }
+        }
+        jobs.joinAll()
+        assertEquals("exactly one claim granted (max-1 invariant)", 1, winners.size)
+        assertEquals(winners.single(), gate.currentToken())
     }
 
-    // ── G2: claim same identity returns a fresh token ───────────────────────
-
+    // G3 — disconnectAndRelease extracts + invokes teardown exactly once; second call no-ops.
     @Test
-    fun `G2 - claim same identity returns a token and keeps the lease`() {
+    fun `G3 - disconnectAndRelease teardown invoked once, re-entrant call no-op`() = runTest {
         val gate = StreamingOwnershipGate()
-        val id = identity()
-        val token1 = gate.claim(id)
-        assertNotNull("first claim token", token1)
-
-        // Claim same identity again.
-        val token2 = gate.claim(id)
-        assertNotNull("second claim same identity returns token", token2)
-        assertTrue("second token has different leaseId", token2!!.leaseId != token1!!.leaseId)
-        assertEquals("identity still held", id, gate.readyIdentity())
-
-        // Releasing with either token clears the lease.
-        gate.releaseNow(token2)
-        assertNull("lease released after second token release", gate.readyIdentity())
-    }
-
-    // ── G3: claim different identity returns null ───────────────────────────
-
-    @Test
-    fun `G3 - claim different identity returns null`() {
-        val gate = StreamingOwnershipGate()
-        val idA = identity("/a")
-        val idB = identity("/b")
-
-        val tokenA = gate.claim(idA)
-        assertNotNull("first claim succeeds", tokenA)
-        assertEquals("identity A holds the lease", idA, gate.readyIdentity())
-
-        val tokenB = gate.claim(idB)
-        assertNull("claim different identity returns null", tokenB)
-        assertEquals("identity A still holds the lease", idA, gate.readyIdentity())
-    }
-
-    // ── G4: releaseNow with non-matching identity is no-op ──────────────────
-
-    @Test
-    fun `G4 - releaseNow with non-matching token identity is a no-op`() {
-        val gate = StreamingOwnershipGate()
-        val idA = identity("/a")
-        val idB = identity("/b")
-
-        val tokenA = gate.claim(idA)
-        assertNotNull("claim succeeds", tokenA)
-        assertEquals("identity A holds the lease", idA, gate.readyIdentity())
-
-        // Attempt to release with a LeaseToken for identity B. Since A holds
-        // the lease, this should be a no-op.
-        gate.releaseNow(LeaseToken(leaseId = 999L, identity = idB))
-        assertEquals("lease still held by A after mismatched release", idA, gate.readyIdentity())
-
-        // Correct release with identity A's token succeeds.
-        gate.releaseNow(tokenA!!)
-        assertNull("lease released with matching token", gate.readyIdentity())
-    }
-
-    // ── G5: readyIdentity and disconnectAndRelease ──────────────────────────
-
-    @Test
-    fun `G5a - readyIdentity returns current identity`() {
-        val gate = StreamingOwnershipGate()
-        assertNull("readyIdentity null when no lease", gate.readyIdentity())
-
-        val id = identity()
-        gate.claim(id)
-        assertEquals("readyIdentity returns leased identity", id, gate.readyIdentity())
-    }
-
-    @Test
-    fun `G5b - disconnectAndRelease clears the lease`() = runTest {
-        val gate = StreamingOwnershipGate()
-        val id = identity()
-        gate.claim(id)
-        assertEquals("lease held before disconnectAndRelease", id, gate.readyIdentity())
-
+        var teardownCalls = 0
+        gate.claim(tok(1, id(1))) { teardownCalls++ }
         gate.disconnectAndRelease(markGap = true)
-        assertNull("lease cleared after disconnectAndRelease", gate.readyIdentity())
+        gate.disconnectAndRelease(markGap = true)
+        assertEquals(1, teardownCalls)
+        assertNull(gate.currentToken())
     }
 
+    // G4 — transfer precondition: stale holder cannot transfer; current holder can.
     @Test
-    fun `G5c - disconnectAndRelease with markGap false also clears`() = runTest {
+    fun `G4 - transfer requires current holdership, same identity, newer attemptId`() {
         val gate = StreamingOwnershipGate()
-        val id = identity()
-        gate.claim(id)
-        assertEquals("lease held", id, gate.readyIdentity())
-
-        gate.disconnectAndRelease(markGap = false)
-        assertNull("lease cleared after disconnectAndRelease(markGap=false)", gate.readyIdentity())
+        val identity = id(1)
+        val a = tok(1, identity); val b = tok(2, identity); val c = tok(3, identity)
+        val tokenA = gate.claim(a) {}!!
+        assertNull("non-holder transfer rejected", gate.transfer(LeaseToken(999, identity), b) {})
+        assertNull("non-increasing attemptId rejected", gate.transfer(tokenA, a) {})
+        val tokenB = gate.transfer(tokenA, b) {}!!
+        assertTrue(gate.isCurrent(tokenB))
+        assertNull("stale oldToken after transfer rejected", gate.transfer(tokenA, c) {})
     }
 
+    // G5 — different-identity claim rejected while lease live; succeeds after release.
     @Test
-    fun `G5d - releaseNow with ConnectionIdentity overload releases`() {
+    fun `G5 - competing identity reject while held, grant after release`() {
         val gate = StreamingOwnershipGate()
-        val id = identity()
-        gate.claim(id)
-        assertEquals("lease held", id, gate.readyIdentity())
-
-        gate.releaseNow(id)
-        assertNull("lease cleared after releaseNow(identity)", gate.readyIdentity())
-    }
-
-    @Test
-    fun `G5e - releaseNow with wrong identity overload is a no-op`() {
-        val gate = StreamingOwnershipGate()
-        val idA = identity("/a")
-        val idB = identity("/b")
-        gate.claim(idA)
-
-        gate.releaseNow(idB)
-        assertEquals("lease still held by A", idA, gate.readyIdentity())
+        val tokenA = gate.claim(tok(1, id(1, "/a"))) {}!!
+        assertNull("different-identity claim rejected while held", gate.claim(tok(2, id(2, "/b"))) {})
+        assertTrue(gate.releaseNow(tokenA))
+        assertNotNull("claim succeeds after release", gate.claim(tok(3, id(2, "/b"))) {})
     }
 }

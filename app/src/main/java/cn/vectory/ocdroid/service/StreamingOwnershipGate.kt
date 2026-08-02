@@ -6,148 +6,126 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * L2: simplified ownership gate — a single-slot identity lease.
+ * L2 (v5.3 Decision 5): ABA-safe max-1 ownership arbiter for the foreground
+ * SSE connection. Replaces the deleted two-stage Starting/Ready + attemptId
+ * model (its Launcher→Service driver chain died in L1).
  *
- * Replaces the D5-2 two-stage Starting→Ready ownership machine with a
- * straightforward lease model. The gate owns exactly one lease at a time
- * (identity-scoped). A caller acquires the lease via [claim]; releases it
- * via [releaseNow] / [release]. The gate provides no waiters, no prepared
- * attempts, no split deferreds, no Starting/Ready promotion.
+ * INVARIANT: at most ONE lease is live at any instant.
  *
- * ## Entry points
- *  - **CC** calls [readyIdentity] (non-suspending) and [disconnectAndRelease]
- *    (suspending, same signature as D4-B B1).
- *  - **Owner** calls [claim] in [setupConnectLocked] and [releaseNow] in
- *    [disconnectLocked] / [cancelForShutdown].
- *  - **DropHandler** calls [releaseNow] after routing an unexpected drop.
+ * ABA GUARD: a lease is identified by [LeaseToken] = (attemptId, identity),
+ * where attemptId is minted by [SseTransportRuntimeStore.beginAttempt]'s
+ * monotonic counter. A same-identity reconnect mints a NEW attemptId, so a
+ * LATE release(oldToken) from the dying old connection fails the token
+ * match and cannot release the new connection's lease.
  *
- * ## Thread safety
- * All mutable state is guarded by a plain `synchronized(lock)` section —
- * none of the in-lock mutations suspend. [disconnectAndRelease] is the only
- * suspend entry; it clears the lease under the lock (non-suspending work)
- * and returns.
+ * THREAD SAFETY: all state is guarded by `synchronized(lock)`; no in-lock
+ * mutation suspends. [disconnectAndRelease] extracts the holder under the
+ * lock and invokes its suspend teardown OUTSIDE the lock.
  *
- * ## L2 removals (vs D5-2)
- *  - [prepareAttempt] / [prepare] / [registerStarting] / [expireAttempt] /
- *    [failStarting] / [failStartingIfTerminal] / [refuse] / [cancelWaiter] /
- *    [markReady] / [hasLiveAttemptOtherThan]
- *  - [PreparedOwnershipAttempt] / [StartingAck] / [RegisterStartingOutcome] /
- *    [OwnershipState] / [OwnershipAckPolicy] / [runTeardown]
- *  - `kotlinx.coroutines.CompletableDeferred` / `Deferred` usage
- *  - The waiter set, pending attempt slot, split-deferred model
- *
- * @see LeaseToken
- * @see OwnershipStartResult
- * @see OwnershipRefusal
+ * COMMIT ORDERING (single rule):
+ *  - Connect:  Store FIRST (beginAttempt), THEN Gate (claim).
+ *  - Destroy:  Gate FIRST (release), THEN Store (markStopped/publishDropped).
  */
 @Singleton
 class StreamingOwnershipGate @Inject constructor() {
 
     private val lock = Any()
 
-    /** The identity currently holding the lease, or null when unleased. */
-    @Volatile
-    private var leasedIdentity: ConnectionIdentity? = null
+    /** The single live lease, or null. THE only mutable field. */
+    private var holder: LeaseHolder? = null
 
-    /**
-     * Monotonic lease-ID counter. Every successful [claim] allocates a fresh
-     * ID so the returned [LeaseToken] is unique across the lifetime of this
-     * gate (no ABA on token identity).
-     */
-    private var leaseCounter: Long = 0L
-
-    /**
-     * Returns the identity of the lease holder, or null when no lease is
-     * held. Non-suspending — CC calls this on the main thread to decide
-     * whether a bootstrap is already live.
-     */
-    fun readyIdentity(): ConnectionIdentity? = synchronized(lock) { leasedIdentity }
-
-    /**
-     * Acquires the lease for [identity].
-     *
-     * ## Cases
-     *  1. **No lease held** → allocated a fresh [LeaseToken], records
-     *     [identity] as the lease holder, returns the token.
-     *  2. **Same identity already holds the lease** → returns a new
-     *     [LeaseToken] for the same identity (idempotent; the caller can
-     *     safely release with either the old or new token).
-     *  3. **Different identity holds the lease** → returns `null`.
-     *     The caller must NOT start a collector — a different identity owns
-     *     the transport slot.
-     *
-     * @return a [LeaseToken] on success, `null` when a different identity
-     *   already holds the lease.
-     */
-    fun claim(identity: ConnectionIdentity): LeaseToken? = synchronized(lock) {
-        val current = leasedIdentity
-        if (current != null && current != identity) return@synchronized null
-        leasedIdentity = identity
-        LeaseToken(leaseId = ++leaseCounter, identity = identity)
+    private data class LeaseHolder(
+        val attempt: TransportAttemptToken,
+        val teardown: suspend (Boolean) -> Unit,
+    ) {
+        val token: LeaseToken get() = LeaseToken(attempt.attemptId, attempt.identity)
     }
 
     /**
-     * Releases the lease identified by [token]. A no-op when the token's
-     * identity does not match the current lease holder (the lease was already
-     * released or superseded by a different-identity claim).
-     *
-     * Non-suspending — safe to call from [ForegroundTransportDropHandler]
-     * (which runs under its own monitor) and from [ServiceSseConnectionOwner.disconnectLocked]
-     * / [cancelForShutdown].
+     * Acquire-or-takeover. Grants a new lease iff:
+     *  - no live lease exists, OR
+     *  - the live lease has the SAME identity AND a STRICTLY OLDER attemptId
+     *    (same-identity reconnect takeover — the atomic transfer primitive
+     *    for the supersession path; the old lease's teardown is NOT invoked,
+     *    the caller cancels the old collector directly).
+     * Returns null (rejected) when a live lease exists for a DIFFERENT
+     * identity, or for the same identity with attemptId >= the new one
+     * (stale duplicate claim — defensive; attemptIds are monotonic).
      */
-    fun releaseNow(token: LeaseToken) {
-        synchronized(lock) {
-            if (leasedIdentity == token.identity) {
-                leasedIdentity = null
+    fun claim(
+        attempt: TransportAttemptToken,
+        teardown: suspend (Boolean) -> Unit,
+    ): LeaseToken? = synchronized(lock) {
+        val current = holder
+        when {
+            current == null -> {
+                holder = LeaseHolder(attempt, teardown)
+                LeaseToken(attempt.attemptId, attempt.identity)
             }
+            current.attempt.identity == attempt.identity &&
+                current.attempt.attemptId < attempt.attemptId -> {
+                holder = LeaseHolder(attempt, teardown)
+                LeaseToken(attempt.attemptId, attempt.identity)
+            }
+            else -> null
         }
     }
 
     /**
-     * Suspend alias for [releaseNow]. Exists for callers that prefer a
-     * suspend signature (e.g. [ServiceSseConnectionOwner.disconnectLocked]
-     * is already a suspend function).
+     * Explicit precondition-checked handoff. Legal ONLY when the caller
+     * still holds [oldToken] (current holder matches exactly) and the new
+     * attempt has the same identity + a newer attemptId. Returns the new
+     * token, or null if the precondition fails (oldToken already released
+     * or superseded — nothing to transfer).
      */
-    suspend fun release(token: LeaseToken) {
-        releaseNow(token)
+    fun transfer(
+        oldToken: LeaseToken,
+        newAttempt: TransportAttemptToken,
+        teardown: suspend (Boolean) -> Unit,
+    ): LeaseToken? = synchronized(lock) {
+        val current = holder ?: return@synchronized null
+        if (current.token != oldToken) return@synchronized null
+        if (newAttempt.identity != oldToken.identity) return@synchronized null
+        if (newAttempt.attemptId <= oldToken.leaseId) return@synchronized null
+        holder = LeaseHolder(newAttempt, teardown)
+        LeaseToken(newAttempt.attemptId, newAttempt.identity)
     }
 
     /**
-     * Clears the current lease unconditionally. Suspending entry for CC's
-     * teardown paths (reconfigure / disconnect / timeout / user-close).
-     *
-     * [markGap] is accepted for signature compatibility with the D4-B API
-     * (CC passes it unchanged). In L2 the gap signal is emitted by the
-     * Owner's [ServiceSseConnectionOwner.disconnectLocked], NOT by the
-     * Gate — this parameter is ignored.
+     * ABA-safe release. Releases the current lease IFF [token] matches the
+     * holder exactly; a mismatched (stale/old-connection) token is REJECTED
+     * and the live lease is untouched. Returns true iff a release happened.
+     * Non-suspend; never invokes teardown.
      */
-    suspend fun disconnectAndRelease(markGap: Boolean = true) {
-        synchronized(lock) { leasedIdentity = null }
+    fun releaseNow(token: LeaseToken): Boolean = synchronized(lock) {
+        if (holder?.token == token) {
+            holder = null
+            true
+        } else false
     }
 
+    /** Query: is [token] the current holder? */
+    fun isCurrent(token: LeaseToken): Boolean = synchronized(lock) {
+        holder?.token == token
+    }
+
+    /** Diagnostics/tests: the current holder's token, or null. */
+    fun currentToken(): LeaseToken? = synchronized(lock) { holder?.token }
+
     /**
-     * Non-suspend alias for identity-scoped release (convenience for
-     * callers that hold a [TransportAttemptToken] and want to release
-     * by identity without constructing a [LeaseToken]).
-     *
-     * Releases the lease if [identity] matches the current holder; no-op
-     * otherwise.
+     * CC teardown entry (the 3 ConnectionCoordinator sites). Extracts +
+     * clears the current holder under the lock, then invokes its
+     * token-guarded teardown suspend callback OUTSIDE the lock. The
+     * teardown lambda the Owner registers is guarded by attemptId, so if a
+     * NEW lease was claimed between extraction and invocation, the stale
+     * teardown no-ops (ABA-safe). No-op when no lease is held.
      */
-    fun releaseNow(identity: ConnectionIdentity) {
-        synchronized(lock) {
-            if (leasedIdentity == identity) {
-                leasedIdentity = null
-            }
+    suspend fun disconnectAndRelease(markGap: Boolean) {
+        val extracted = synchronized(lock) {
+            val h = holder
+            holder = null
+            h
         }
-    }
-
-    companion object {
-        /**
-         * Sentinels are no longer required in L2 — kept as reference for
-         * any legacy code that may reference [StreamingOwnershipGate.NO_ATTEMPT_ID].
-         * The constant is unused internally.
-         */
-        @Deprecated("L2: no attempt-ID model; kept for binary compatibility")
-        const val NO_ATTEMPT_ID: Long = -1L
+        extracted?.teardown?.invoke(markGap)
     }
 }

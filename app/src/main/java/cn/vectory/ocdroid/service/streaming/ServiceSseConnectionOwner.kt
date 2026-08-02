@@ -18,6 +18,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -56,25 +57,12 @@ internal interface FencedUnexpectedTransportDropHandler : UnexpectedTransportDro
  * [StreamingOwnershipGate.releaseNow] BEFORE marking the runtime Stopped
  * (Gate-first destroy order).
  *
- * L2 removals (vs D5-2 Owner):
- *  - Service-level retry loop (30s/2m/5m — dead; each attempt is single-shot)
- *  - [closingGeneration] / [markClosing] / [isClosing] — dead; no closing path
- *    races post-flow-break (no retry loop to guard).
- *  - [resyncMutex] / [resyncDirtyForGen] / [resyncInFlightForGen] /
- *    [isColdStartTrigger] / [scheduleResync] — replaced by 12-line
- *    [triggerResync].
- *  - [transportTimeoutJob] / [launchTransportTimeout] — dead; there is no
- *    transport-readiness timeout in L2 (the controller owns timeout decisions).
- *  - [beforeMarkRetrying] / [markRetrying] / [exhaustedReportedForGen] — dead.
- *  - [reconnectAllowed] / [SseRecoveryPolicy] / [jitterSource] — dead params.
- *  - [disconnectWithGuard] — dead; [disconnect] runs directly.
- *
  * @param ownershipGate the singleton ownership lease authority. Used by
  *   [disconnectLocked] / [cancelForShutdown] to release the lease (Gate-first
  *   destroy order).
  * @param onTerminalDrop invoked once when the single attempt ends in a
  *   terminal drop (unexpected transport failure after Live). Replaces
- *   [onTerminalExhaustion] — the "exhaustion" concept died with the retry loop.
+ *   onTerminalExhaustion.
  */
 class ServiceSseConnectionOwner(
     private val scope: CoroutineScope,
@@ -91,14 +79,11 @@ class ServiceSseConnectionOwner(
 ) {
     // ── fields ────────────────────────────────────────────────────────
 
-    private var sseJob: Job? = null
-    private var activeIdentity: ConnectionIdentity? = null
-    private var activeAttempt: TransportAttemptToken? = null
-    private var pendingReadiness: CompletableDeferred<SourceActivation>? = null
-    private var gapEmittedForGen: Long = -1L
-
-    @Volatile
-    private var transportGenerationCounter: Long = sharedStateStore.sseConnectedGeneration
+    private val connectMutex = Mutex()
+    private var sseJob: Job? = null                       // under connectMutex
+    private var pendingReadiness: CompletableDeferred<SourceActivation>? = null  // under connectMutex
+    private var activeIdentity: ConnectionIdentity? = null // under connectMutex
+    private var activeAttempt: TransportAttemptToken? = null  // under connectMutex; also read by cancelForShutdown
 
     /**
      * §breathing-indicator: monotonic write-stamp preventing stale-collector
@@ -109,8 +94,6 @@ class ServiceSseConnectionOwner(
 
     val isSseConnected: StateFlow<Boolean>
         get() = sharedStateStore.sseConnectedFlow
-
-    private val connectMutex = Mutex()
 
     // ── public API ────────────────────────────────────────────────────
 
@@ -147,22 +130,39 @@ class ServiceSseConnectionOwner(
 
     /** Synchronous Service-destruction fallback. */
     fun cancelForShutdown() {
-        val gen = transportGenerationCounter
-        val attempt = activeAttempt
-        val identity = activeIdentity
-        if (attempt != null) {
-            // Gate-first destroy order
-            ownershipGate.releaseNow(LeaseToken(attempt.attemptId, attempt.identity))
-            synchronized(dropHandler) { runtimeStore.markStopped(attempt) }
+        if (!connectMutex.tryLock()) {
+            // Another thread holds the lock — another disconnect is in
+            // progress. Release the lease here (Gate-first) since we cannot
+            // enter disconnectLocked.
+            val attempt = activeAttempt
+            if (attempt != null) {
+                ownershipGate.releaseNow(LeaseToken(attempt.attemptId, attempt.identity))
+                synchronized(dropHandler) { runtimeStore.markStopped(attempt) }
+            }
+            setSseConnected(false)
+            activeAttempt = null
+            activeIdentity = null
+            sseJob?.cancel()
+            sseJob = null
+            pendingReadiness?.cancel()
+            pendingReadiness = null
+            return
         }
-        setSseConnected(false, gen + 1)
-        transportGenerationCounter = gen + 1
-        activeAttempt = null
-        activeIdentity = null
-        sseJob?.cancel()
-        sseJob = null
-        pendingReadiness?.cancel()
-        pendingReadiness = null
+        try {
+            setSseConnected(false)
+            val job = sseJob; sseJob = null
+            val readiness = pendingReadiness; pendingReadiness = null
+            job?.cancel(); readiness?.cancel()
+            // Gate-first destroy order.
+            activeAttempt?.let { attempt ->
+                ownershipGate.releaseNow(LeaseToken(attempt.attemptId, attempt.identity))
+                synchronized(dropHandler) { runtimeStore.markStopped(attempt) }
+            }
+            activeAttempt = null
+            activeIdentity = null
+        } finally {
+            connectMutex.unlock()
+        }
     }
 
     // ── internal ──────────────────────────────────────────────────────
@@ -173,60 +173,53 @@ class ServiceSseConnectionOwner(
     }
 
     private fun setupConnectLocked(identity: ConnectionIdentity): ConnectSetup {
-        // Stale-identity rejection.
-        if (!identityStore.isCurrent(identity)) {
-            DebugLog.i(TAG, "connect: stale identity epoch=${identity.epoch}")
+        if (!identityStore.isCurrent(identity))
             return ConnectSetup.Rejected(SourceActivation.Rejected.StaleIdentity)
-        }
 
-        // Claim the lease.
-        val lease = ownershipGate.claim(identity)
-        if (lease == null) {
-            DebugLog.w(TAG, "connect: lease claim rejected (different owner) epoch=${identity.epoch}")
-            return ConnectSetup.Rejected(SourceActivation.Rejected.Exhausted)
-        }
-
-        // Terminalize the PRIOR runtime attempt.
-        synchronized(dropHandler) {
+        // Store-first: terminalize OUR prior attempt, then mint the new one.
+        val attempt = synchronized(dropHandler) {
             activeAttempt?.let { prev ->
                 if (prev.identity == identity) runtimeStore.rollbackAttempt(prev)
                 else runtimeStore.markStopped(prev)
             }
+            runtimeStore.beginAttempt(identity)
+        } ?: return ConnectSetup.Rejected(SourceActivation.Rejected.TransportTimeout)
+
+        // Gate-second: claim with token-guarded teardown. Takeover handles the
+        // same-identity reconnect atomically; rejection → compensate the store.
+        val lease = ownershipGate.claim(attempt) { markGap ->
+            disconnectWithGuard(markGap) { activeAttempt?.attemptId == attempt.attemptId }
+        } ?: run {
+            synchronized(dropHandler) { runtimeStore.rollbackAttempt(attempt) }
+            return ConnectSetup.Rejected(SourceActivation.Rejected.Superseded)
         }
 
-        // Begin a fresh runtime attempt.
-        val attempt = synchronized(dropHandler) { runtimeStore.beginAttempt(identity) }
-        if (attempt == null) {
-            ownershipGate.releaseNow(lease)
-            DebugLog.w(TAG, "connect: runtime beginAttempt rejected epoch=${identity.epoch}")
-            return ConnectSetup.Rejected(SourceActivation.Rejected.TransportTimeout)
-        }
-
-        // Re-seed generation counter if external purge advanced the store.
-        if (transportGenerationCounter < sharedStateStore.sseConnectedGeneration) {
-            transportGenerationCounter = sharedStateStore.sseConnectedGeneration
-        }
-
-        // Mark prior sseConnected false with a bumped generation stamp so
-        // a stale prior-gen write loses the CAS.
-        setSseConnected(false, transportGenerationCounter + 1)
-
-        // Cancel prior collector + readiness.
-        sseJob?.cancel()
-        sseJob = null
+        // Cancel + supersede the prior collector.
+        setSseConnected(false)
+        sseJob?.cancel(); sseJob = null
         activeIdentity = identity
         pendingReadiness?.cancel()
         val readiness = CompletableDeferred<SourceActivation>()
         pendingReadiness = readiness
-
-        // Bump generation, reset per-generation gap.
-        val generation = ++transportGenerationCounter
-        gapEmittedForGen = -1L
         activeAttempt = attempt
-
-        // Launch one single-attempt collector.
-        sseJob = scope.launchSseCollector(identity, generation, attempt, readiness)
+        sseJob = scope.launchSseCollector(identity, attempt, readiness)
         return ConnectSetup.Started(readiness)
+    }
+
+    /**
+     * ABA-safe teardown callback: the guard (evaluated under connectMutex)
+     * compares attempt IDs so a late [disconnectAndRelease]-extracted teardown
+     * cannot kill a newer generation's collector.
+     */
+    private suspend fun disconnectWithGuard(markGap: Boolean, guard: () -> Boolean): Boolean {
+        var ran = false
+        val job = connectMutex.withLock {
+            if (!guard()) return@withLock null
+            ran = true
+            disconnectLocked(markGap)
+        }
+        job?.cancelAndJoin()
+        return ran
     }
 
     /**
@@ -235,161 +228,92 @@ class ServiceSseConnectionOwner(
      */
     private fun CoroutineScope.launchSseCollector(
         identity: ConnectionIdentity,
-        generation: Long,
         attempt: TransportAttemptToken,
         readiness: CompletableDeferred<SourceActivation>,
     ): Job = launch {
-        if (!isCurrentTransport(identity, generation)) return@launch
-
         val workdirArg: String? = identity.normalizedWorkdir.ifBlank { null }
         var failure: Throwable? = null
 
         try {
             repository.connectSSE(workdirArg).collect { result ->
-                if (!isCurrentTransport(identity, generation)) {
-                    throw CancellationException("stale SSE transport generation")
-                }
-                result.onSuccess { event ->
-                    onSuccessfulFrame(identity, generation, attempt, event, readiness)
-                }.onFailure { error ->
-                    Log_e(TAG, "SSE event failed", error)
-                    sharedEffectBus.tryEmitUiEvent(
-                        UiEvent.Error(R.string.error_sse_failed, listOf(error.message ?: "unknown error"))
-                    )
-                }
+                if (!identityStore.isCurrent(identity))
+                    throw CancellationException("stale SSE identity")
+                result.onSuccess { onSuccessfulFrame(identity, attempt, it, readiness) }
+                    .onFailure { error ->
+                        Log_e(TAG, "SSE event failed", error)
+                        sharedEffectBus.tryEmitUiEvent(
+                            UiEvent.Error(R.string.error_sse_failed, listOf(error.message ?: "unknown error")))
+                    }
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Throwable) {
-            failure = e
-        }
+        } catch (e: CancellationException) { throw e }
+          catch (e: Throwable) { failure = e }
 
-        // Flow break/completion — terminal for this attempt.
-        if (!isCurrentTransport(identity, generation)) return@launch
-
-        val error = failure ?: java.io.IOException("SSE flow completed without an explicit error")
-        onCollectionException(identity, generation, attempt, error)
-        // Re-check canonical AFTER onCollectionException: a concurrent path may
-        // have terminalized the token within the same generation (e.g. another
-        // thread called markStopped). The canonical check in onCollectionException
-        // suppresses error/gap side effects for a stale token, but the drop
-        // routing below runs unconditionally — re-check here so a stale token
-        // does NOT route a drop for a superseding generation.
+        // Flow broke/completed — terminal for THIS attempt (no retry).
+        if (!identityStore.isCurrent(identity)) return@launch
+        if (runtimeStore.currentAttempt(identity)?.attemptId != attempt.attemptId) return@launch // stale
         val canonicalAfter = runtimeStore.currentAttempt(identity)
         if (canonicalAfter == null || canonicalAfter.attemptId != attempt.attemptId) return@launch
-        // Route the drop exactly once.
-        if (!routeUnexpectedDrop(attempt, TransportDropReason.RETRY_EXHAUSTED)) return@launch
-
-        setSseConnected(false, generation)
-        readiness.complete(SourceActivation.Rejected.Exhausted)
-        onTerminalDrop()
+        if (readiness.isCompleted) {
+            // Post-Ready drop. Fenced exactly-once drop route.
+            setSseConnected(false)
+            if (routeUnexpectedDrop(attempt, TransportDropReason.RETRY_EXHAUSTED)) {
+                sharedEffectBus.emitEffect(ControllerEffect.CancelSse)
+                onTerminalDrop()
+            }
+        } else {
+            // Pre-Ready failure: single attempt rejected, NO retry. Gate-first destroy order.
+            setSseConnected(false)
+            ownershipGate.releaseNow(LeaseToken(attempt.attemptId, attempt.identity))
+            synchronized(dropHandler) { runtimeStore.rollbackAttempt(attempt) }
+            readiness.complete(SourceActivation.Rejected.Exhausted)
+        }
     }
 
     private suspend fun onSuccessfulFrame(
         identity: ConnectionIdentity,
-        generation: Long,
         attempt: TransportAttemptToken,
         event: cn.vectory.ocdroid.data.model.SSEEvent,
         readiness: CompletableDeferred<SourceActivation>,
     ) {
-        // Generation guard (cheap early return for stale collector).
-        if (!isCurrentTransport(identity, generation)) return
+        if (!identityStore.isCurrent(identity)) return
+        if (!runtimeStore.markLive(attempt)) return   // stale → suppress ALL side effects
 
-        // Canonical runtime validation (authoritative staleness gate).
-        if (!runtimeStore.markLive(attempt)) {
-            DebugLog.i(TAG, "markLive rejected stale token (gen=$generation) — frame suppressed")
-            return
-        }
-
-        // §breathing-indicator: valid frame → SSE connected.
-        setSseConnected(true, generation)
-
-        // Publish into the process-wide stream.
+        setSseConnected(true)
         sseEventStream.emit(Result.success(IdentifiedSseEvent(identity, event)))
 
-        // Handle resync (first-frame cold-start OR explicit resync frame).
         val type = event.payload.type
         val isResync = type == "resync"
         val isFirstFrameOfGen = !readiness.isCompleted
-        val serverReasonRaw: String? =
-            if (isResync) event.payload.getString("reason") else null
+        val serverReasonRaw: String? = if (isResync) event.payload.getString("reason") else null
         if (isResync) {
-            val serverReasonTyped: SlimapiResyncReason? =
-                SlimapiResyncReason.fromRaw(serverReasonRaw)
-            DebugLog.i(
-                TAG,
-                "slim resync reason: raw=$serverReasonRaw typed=$serverReasonTyped gen=$generation",
-            )
+            val serverReasonTyped = SlimapiResyncReason.fromRaw(serverReasonRaw)
+            DebugLog.i(TAG, "slim resync reason: raw=$serverReasonRaw typed=$serverReasonTyped")
         }
         if (isFirstFrameOfGen || isResync) {
             triggerResync(
                 reason = if (isFirstFrameOfGen) "first-frame type=$type" else "explicit-resync type=$type",
-                generation = generation,
                 attempt = attempt,
             )
         }
-
-        // Complete readiness on the first valid frame.
-        if (!readiness.isCompleted) {
-            readiness.complete(SourceActivation.Ready)
-        }
-
-        // Reset gap flag so a new outage can begin.
-        gapEmittedForGen = -1L
-    }
-
-    private suspend fun onCollectionException(
-        identity: ConnectionIdentity,
-        generation: Long,
-        attempt: TransportAttemptToken,
-        error: Throwable,
-    ) {
-        Log_e(TAG, "SSE collection failed (gen=$generation)", error)
-        if (!isCurrentTransport(identity, generation)) return
-
-        // Canonical-token validation.
-        val canonical = runtimeStore.currentAttempt(identity)
-        if (canonical == null || canonical.attemptId != attempt.attemptId) {
-            DebugLog.i(TAG, "onCollectionException: stale token (gen=$generation) — suppressed")
-            return
-        }
-
-        // §breathing-indicator: transport gap.
-        setSseConnected(false, generation)
-        sharedEffectBus.tryEmitUiEvent(
-            UiEvent.Error(R.string.error_sse_failed, listOf(error.message ?: "unknown error"))
-        )
-        emitGapOnce(identity, generation)
-    }
-
-    private suspend fun emitGapOnce(identity: ConnectionIdentity, generation: Long) {
-        if (!isCurrentTransport(identity, generation)) return
-        if (gapEmittedForGen == generation) return
-        gapEmittedForGen = generation
-        sharedEffectBus.emitEffect(ControllerEffect.CancelSse)
+        if (!readiness.isCompleted) readiness.complete(SourceActivation.Ready)
     }
 
     /**
-     * L2: 12-line replacement for the entire [resyncMutex]/[resyncDirtyForGen]/
-     * [resyncInFlightForGen]/[isColdStartTrigger]/[scheduleResync] cluster.
+     * L2: 12-line replacement for the entire resyncMutex / resyncDirtyForGen /
+     * resyncInFlightForGen / isColdStartTrigger / scheduleResync cluster.
      *
      * Off-frame launch so SSE delivery is not blocked. The [isStillCurrent]
      * callback the [onResync] lambda receives queries
      * [SseTransportRuntimeStore.currentAttempt] for canonical-token freshness.
      */
-    private fun triggerResync(reason: String, generation: Long, attempt: TransportAttemptToken) {
+    private fun triggerResync(reason: String, attempt: TransportAttemptToken) {
         scope.launch {
-            if (!isCurrentTransport(generation)) return@launch
-            DebugLog.i(TAG, "resync $reason gen=$generation")
+            if (runtimeStore.currentAttempt(attempt.identity)?.attemptId != attempt.attemptId) return@launch
+            DebugLog.i(TAG, "resync $reason")
             try {
-                onResync {
-                    runtimeStore.currentAttempt(attempt.identity)?.attemptId == attempt.attemptId
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                DebugLog.w(TAG, "resync failed: ${e.message}")
-            }
+                onResync { runtimeStore.currentAttempt(attempt.identity)?.attemptId == attempt.attemptId }
+            } catch (e: CancellationException) { throw e }
+              catch (e: Throwable) { DebugLog.w(TAG, "resync failed: ${e.message}") }
         }
     }
 
@@ -399,11 +323,12 @@ class ServiceSseConnectionOwner(
      * A stale collector whose generation is ≤ the current stamp loses the CAS
      * and cannot resurrect `true` after teardown.
      */
-    private fun setSseConnected(value: Boolean, generation: Long) {
-        val prev = sseWriteStamp.get()
-        if (generation < prev) return // stale write, will never win
-        if (sseWriteStamp.compareAndSet(prev, generation)) {
-            sharedStateStore.mutateSseConnected(value, generation)
+    private fun setSseConnected(value: Boolean) {
+        while (true) {
+            val stamp = sseWriteStamp.updateAndGet {
+                maxOf(it, sharedStateStore.sseConnectedGeneration) + 1
+            }
+            if (sharedStateStore.mutateSseConnected(value, stamp)) return
         }
     }
 
@@ -414,37 +339,18 @@ class ServiceSseConnectionOwner(
      * then marks the runtime Stopped (Gate-first destroy order).
      */
     private suspend fun disconnectLocked(markGap: Boolean): Job? {
-        val gen = transportGenerationCounter
-        val attempt = activeAttempt
+        setSseConnected(false)
+        val job = sseJob; sseJob = null
+        val readiness = pendingReadiness; pendingReadiness = null
+        job?.cancel(); readiness?.cancel()
         val identity = activeIdentity
-
-        // Gate-first: release the lease.
-        if (attempt != null) {
+        // Gate-first: release lease, then terminalize the store attempt.
+        activeAttempt?.let { attempt ->
             ownershipGate.releaseNow(LeaseToken(attempt.attemptId, attempt.identity))
+            synchronized(dropHandler) { runtimeStore.markStopped(attempt) }
         }
-
-        // Mark the runtime Stopped.
-        synchronized(dropHandler) {
-            attempt?.let { runtimeStore.markStopped(it) }
-        }
-
-        // §breathing-indicator: stamp the bumped generation so a stale
-        // prior-gen write loses the CAS.
-        setSseConnected(false, gen + 1)
-
-        val job = sseJob
-        sseJob = null
-        val readiness = pendingReadiness
-        pendingReadiness = null
-        job?.cancel()
-        readiness?.cancel()
-
-        if (markGap && identity != null) {
-            emitGapOnce(identity = identity, generation = gen)
-        }
-        transportGenerationCounter = gen + 1
-        activeAttempt = null
-        activeIdentity = null
+        if (markGap && identity != null) sharedEffectBus.emitEffect(ControllerEffect.CancelSse)
+        activeAttempt = null; activeIdentity = null
         return job
     }
 
@@ -458,17 +364,6 @@ class ServiceSseConnectionOwner(
             handler.onUnexpectedDrop(attempt, reason)
             true
         }
-    }
-
-    private fun isCurrentTransport(identity: ConnectionIdentity, generation: Long): Boolean =
-        generation == transportGenerationCounter && identityStore.isCurrent(identity)
-
-    private fun isCurrentTransport(generation: Long): Boolean =
-        generation == transportGenerationCounter
-
-    private suspend fun Job.cancelAndJoin() {
-        cancel()
-        try { join() } catch (_: CancellationException) { /* joined */ }
     }
 
     private companion object {

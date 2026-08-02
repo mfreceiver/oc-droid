@@ -314,21 +314,27 @@ class ServiceSseConnectionOwnerTest {
         assertEquals("onTerminalDrop NOT invoked on clean cancellation", 0, terminalDropCalls)
     }
 
-    // ── stale-identity termination mid-collection ──────────────────────────
+    // ── pre-ready failure (no frame at all) ────────────────────────────
 
     @Test
-    fun `stale-identity termination - no retry, drop occurs`() = runTest {
+    fun `pre-ready flow throw rejects Exhausted, no gap, no terminal callback`() = runTest {
         val identity = bindIdentity("/proj")
         every { repository.connectSSE(any()) } returns flow { throw IOException("boom") }
 
-        launchConnect(identity)
+        var result: SourceActivation? = null
+        scope.launch { result = owner.connect(identity) }
         runPending()
 
-        // In L2 single-attempt: flow throws → onCollectionException → gap →
-        // route drop → onTerminalDrop. The drop is routed (RETRY_EXHAUSTED).
-        assertTrue("gap emitted", collectedEffects.filterIsInstance<ControllerEffect.CancelSse>().size >= 1)
+        // Pre-ready: the throw happens before any frame — single-attempt
+        // post-flow body takes the pre-Ready path: release lease + rollback
+        // attempt (Exhausted), but NO gap emission and NO onTerminalDrop.
+        assertEquals("pre-ready failure returns Exhausted", SourceActivation.Rejected.Exhausted, result)
         verify(exactly = 1) { repository.connectSSE(any()) }
-        assertEquals("onTerminalDrop invoked after single failure", 1, terminalDropCalls)
+        assertEquals("pre-ready failure does NOT invoke onTerminalDrop", 0, terminalDropCalls)
+        assertTrue(
+            "pre-ready failure does NOT emit a CancelSse gap",
+            collectedEffects.filterIsInstance<ControllerEffect.CancelSse>().isEmpty(),
+        )
     }
 
     // ── workdir from identity ──────────────────────────────────────────────
@@ -680,18 +686,19 @@ class ServiceSseConnectionOwnerTest {
         // Single-attempt: the flow throws before any frame → Exhausted.
         assertEquals("pre-ready failure returns Exhausted", SourceActivation.Rejected.Exhausted, result)
 
-        // The runtime ends Dropped after the unexpected drop is routed.
-        assertTrue("runtime ended Dropped after pre-ready failure", runtimeState() is SseTransportState.Dropped)
+        // The runtime ends Stopped after rollbackAttempt (fresh attempt with
+        // no recovery ticket → I6 intentional teardown → Stopped, not Dropped).
+        assertTrue("runtime ended Stopped after pre-ready failure", runtimeState() is SseTransportState.Stopped)
 
-        // Verify one terminal callback fired.
-        assertEquals("onTerminalDrop invoked exactly once", 1, terminalDropCalls)
+        // Pre-ready path does NOT invoke onTerminalDrop.
+        assertEquals("pre-ready failure does NOT invoke onTerminalDrop", 0, terminalDropCalls)
         verify(exactly = 1) { repository.connectSSE(any()) }
 
-        // The lease was released by the drop handler — ownershipGate should
-        // allow a fresh claim (no stale lease blocking reconnect).
+        // The lease was released by the pre-ready path (ownershipGate.releaseNow)
+        // — ownershipGate should allow a fresh claim (no stale lease blocking reconnect).
         assertNull(
             "ownership lease released after pre-ready failure — no stale lease",
-            ownershipGate.readyIdentity(),
+            ownershipGate.currentToken(),
         )
 
         // A fresh connect should succeed (clean slate).
