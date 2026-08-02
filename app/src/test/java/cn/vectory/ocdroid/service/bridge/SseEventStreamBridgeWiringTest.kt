@@ -125,7 +125,7 @@ class SseEventStreamBridgeWiringTest {
             sseEventStream = stream,
             sharedStateStore = store,
             sharedEffectBus = effects,
-            recoveryPolicy = cn.vectory.ocdroid.service.streaming.SseRecoveryPolicy(),
+            ownershipGate = cn.vectory.ocdroid.service.StreamingOwnershipGate(),
             runtimeStore = runtimeStore,
             dropHandler = object : cn.vectory.ocdroid.service.streaming.UnexpectedTransportDropHandler {
                 override fun onUnexpectedDrop(
@@ -135,7 +135,7 @@ class SseEventStreamBridgeWiringTest {
                     runtimeStore.publishDropped(attempt, reason)
                 }
             },
-            onTerminalExhaustion = {},
+            onTerminalDrop = {},
         )
         sessionSyncCoordinator = SessionSyncCoordinator(
             scope = kotlinx.coroutines.CoroutineScope(

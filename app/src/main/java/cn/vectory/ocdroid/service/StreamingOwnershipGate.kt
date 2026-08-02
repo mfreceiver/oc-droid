@@ -1,664 +1,131 @@
 package cn.vectory.ocdroid.service
 
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Deferred
+import cn.vectory.ocdroid.service.streaming.TransportAttemptToken
 import javax.inject.Inject
 import javax.inject.Singleton
 
-
 /**
- * CP9 §A6 + D3 (gate #3) → **D4-B B1 (two-stage Starting→Ready ownership)** +
- * **D4-B (runBlocking removal / synchronized refactor)** → **D5-2 (#4)
- * prepared-attempt + split-deferred + attempt-ID abort (orphan-owner closure)**.
+ * L2 (v5.3 Decision 5): ABA-safe max-1 ownership arbiter for the foreground
+ * SSE connection. Replaces the deleted two-stage Starting/Ready + attemptId
+ * model (its Launcher→Service driver chain died in L1).
  *
- * The single chokepoint that records which [ConnectionIdentity] the live
- * [SessionStreamingService] owns. The launcher ([StreamingServiceLauncher])
- * awaits ownership via [prepareAttempt]; the Service registers ownership in
- * two stages:
- *  1. [registerStarting] — Stage 1: claims the bootstrap/recovery ownership
- *     (closes the unowned window) but does NOT complete the launcher's
- *     terminal deferred. The launcher's [PreparedOwnershipAttempt.starting]
- *     deferred completes with [StartingAck.Accepted].
- *  2. [markReady] — Stage 2: the SSE transport proved readiness + the
- *     coordinator committed; completes the launcher's terminal deferred with
- *     [OwnershipStartResult.Ready].
+ * INVARIANT: at most ONE lease is live at any instant.
  *
- * **D5-2 (#4) — orphan-owner closure**: the launcher's 5s Starting-acceptance
- * window is enforced by [expireAttempt]. When the launcher gives up, it
- * expires the attempt ID at the gate; a LATE Service `registerStarting` for
- * that expired ID returns [RegisterStartingOutcome.Expired] so the Service
- * runs its abort path instead of recording an owner that would later promote
- * to an orphan Ready owner with a live SSE while CC is terminal Disconnected.
+ * ABA GUARD: a lease is identified by [LeaseToken] = (attemptId, identity),
+ * where attemptId is minted by [SseTransportRuntimeStore.beginAttempt]'s
+ * monotonic counter. A same-identity reconnect mints a NEW attemptId, so a
+ * LATE release(oldToken) from the dying old connection fails the token
+ * match and cannot release the new connection's lease.
  *
- * **Mandatory rollback** — [failStarting] is the full B1 rollback entry:
- * completes the launcher's terminal deferred with refusal, releases the
- * Starting owner, and returns the extracted [OwnershipState.Starting] so the
- * caller can invoke its [OwnershipState.Starting.abortStartup] +
- * [OwnershipState.disconnectAndJoin] outside the lock.
+ * THREAD SAFETY: all state is guarded by `synchronized(lock)`; no in-lock
+ * mutation suspends. [disconnectAndRelease] extracts the holder under the
+ * lock and invokes its suspend teardown OUTSIDE the lock.
  *
- * **Thread safety (D4-B)**: all mutable state is guarded by a plain
- * `synchronized(lock)` section — NONE of the in-lock mutations suspend.
- * [disconnectAndRelease] / [failStarting] extract the owner under the lock
- * and invoke the suspend callback OUTSIDE the lock. [releaseNow] is a
- * non-suspend entry for [SessionStreamingService.onDestroy] (no main-thread
- * blocking).
+ * COMMIT ORDERING (single rule):
+ *  - Connect:  Store FIRST (beginAttempt), THEN Gate (claim).
+ *  - Destroy:  Gate FIRST (release), THEN Store (markStopped/publishDropped).
  */
 @Singleton
 class StreamingOwnershipGate @Inject constructor() {
+
     private val lock = Any()
-    private var owner: OwnershipState? = null
-    private val waiters =
-        mutableMapOf<ConnectionIdentity, MutableSet<CompletableDeferred<OwnershipStartResult>>>()
 
-    /**
-     * D5-2 (#4) — monotonic attempt ID counter. Every [prepareAttempt] that
-     * requires a launch allocates a fresh ID; it travels in the Service Intent
-     * (as EXTRA_ATTEMPT_ID in the legacy Service Intent) and is validated by
-     * [registerStarting].
-     */
-    private var attemptIdCounter: Long = 0L
+    /** The single live lease, or null. THE only mutable field. */
+    private var holder: LeaseHolder? = null
 
-    /**
-     * D5-2 (#4) — the live prepared attempt awaiting Stage 1 acceptance. At
-     * most one is alive at a time (the launcher is the only preparer, and a
-     * new [prepareAttempt] for the same identity short-circuits with the
-     * existing [OwnershipState.terminal]). Cleared atomically either by
-     * [registerStarting] (on acceptance) or by [expireAttempt] (on launcher
-     * timeout). Null when no launcher attempt is in flight.
-     */
-    private var pendingAttempt: PreparedAttemptState? = null
-
-    /**
-     * D5-2 (#4) — internal mutable state for a prepared attempt. Exposed to
-     * the launcher as an immutable [PreparedOwnershipAttempt] view.
-     */
-    private data class PreparedAttemptState(
-        val attemptId: Long,
-        val identity: ConnectionIdentity,
-        val starting: CompletableDeferred<StartingAck>,
-        val terminal: CompletableDeferred<OwnershipStartResult>,
+    private data class LeaseHolder(
+        val attempt: TransportAttemptToken,
+        val teardown: suspend (Boolean) -> Unit,
     ) {
-        fun toPublic(launchRequired: Boolean): PreparedOwnershipAttempt =
-            PreparedOwnershipAttempt(
-                attemptId = attemptId,
-                launchRequired = launchRequired,
-                starting = starting,
-                terminal = terminal,
-            )
+        val token: LeaseToken get() = LeaseToken(attempt.attemptId, attempt.identity)
     }
 
     /**
-     * Returns the Ready owner's identity, or null when no Ready ownership
-     * is held (Starting ownership does NOT count — the launcher must await
-     * [markReady], not short-circuit on Starting).
+     * Acquire-or-takeover. Grants a new lease iff:
+     *  - no live lease exists, OR
+     *  - the live lease has the SAME identity AND a STRICTLY OLDER attemptId
+     *    (same-identity reconnect takeover — the atomic transfer primitive
+     *    for the supersession path; the old lease's teardown is NOT invoked,
+     *    the caller cancels the old collector directly).
+     * Returns null (rejected) when a live lease exists for a DIFFERENT
+     * identity, or for the same identity with attemptId >= the new one
+     * (stale duplicate claim — defensive; attemptIds are monotonic).
      */
-    fun readyIdentity(): ConnectionIdentity? = synchronized(lock) {
-        (owner as? OwnershipState.Ready)?.identity
-    }
-
-    /**
-     * D5-2 (#4) — REPLACES the prior `prepare(identity)` as the launcher's
-     * entry. Allocates a [PreparedOwnershipAttempt] for [identity] that the
-     * launcher uses to drive the split-deferred Starting/terminal flow.
-     *
-     * Four cases (oracle D5 spec):
-     *  1. **Ready same identity** → [PreparedOwnershipAttempt.starting]
-     *     pre-completed with [StartingAck.Accepted], [PreparedOwnershipAttempt.terminal]
-     *     pre-completed with [OwnershipStartResult.Ready], [PreparedOwnershipAttempt.launchRequired]
-     *     = false. The launcher short-circuits with Ready.
-     *  2. **Starting same identity** → starting pre-completed with Accepted,
-     *     terminal = the existing owner's terminal deferred (join the in-
-     *     flight Stage 2 wait), launchRequired = false.
-     *  3. **No owner** → two sub-cases (SSE-cold-start-fix):
-     *     a. **Live pending, same identity** → JOIN: return the SAME attemptId
-     *        + shared starting/terminal deferreds, launchRequired = false. A
-     *        concurrent second ensureStarted collapses into the in-flight
-     *        attempt instead of overwriting the single pending slot.
-     *     b. **Live pending, different identity** → REFUSE with AlreadyOwned
-     *        (both deferreds completed immediately), launchRequired = false.
-     *        Never silently overwrites a live pending (would strand its waiter).
-     *     c. **No live pending** → allocate a fresh attemptId, create both
-     *        deferreds (neither completed), store [pendingAttempt],
-     *        launchRequired = true.
-     *  4. **Different owner** → both deferreds pre-completed with Refused(
-     *     AlreadyOwned), launchRequired = false.
-     */
-    fun prepareAttempt(identity: ConnectionIdentity): PreparedOwnershipAttempt = synchronized(lock) {
-        val ready = owner as? OwnershipState.Ready
-        if (ready != null) {
-            return@synchronized if (ready.identity == identity) {
-                // Case 1: Ready same identity — synthesize a completed attempt.
-                PreparedAttemptState(
-                    attemptId = ++attemptIdCounter,
-                    identity = identity,
-                    starting = CompletableDeferred<StartingAck>().apply {
-                        complete(StartingAck.Accepted(identity))
-                    },
-                    terminal = ready.terminal.also {
-                        // Owner's terminal should already be completed with Ready;
-                        // ensure it for safety.
-                        it.complete(OwnershipStartResult.Ready(identity))
-                    },
-                ).toPublic(launchRequired = false)
-            } else {
-                // Case 4: different Ready owner.
-                PreparedAttemptState(
-                    attemptId = ++attemptIdCounter,
-                    identity = identity,
-                    starting = CompletableDeferred<StartingAck>().apply {
-                        complete(StartingAck.Refused(OwnershipRefusal.AlreadyOwned(ready.identity)))
-                    },
-                    terminal = CompletableDeferred<OwnershipStartResult>().apply {
-                        complete(OwnershipStartResult.Refused(OwnershipRefusal.AlreadyOwned(ready.identity)))
-                    },
-                ).toPublic(launchRequired = false)
+    fun claim(
+        attempt: TransportAttemptToken,
+        teardown: suspend (Boolean) -> Unit,
+    ): LeaseToken? = synchronized(lock) {
+        val current = holder
+        when {
+            current == null -> {
+                holder = LeaseHolder(attempt, teardown)
+                LeaseToken(attempt.attemptId, attempt.identity)
             }
-        }
-        val starting = owner as? OwnershipState.Starting
-        if (starting != null) {
-            return@synchronized if (starting.identity == identity) {
-                // Case 2: Starting same identity — join the in-flight terminal.
-                PreparedAttemptState(
-                    attemptId = ++attemptIdCounter,
-                    identity = identity,
-                    starting = CompletableDeferred<StartingAck>().apply {
-                        complete(StartingAck.Accepted(identity))
-                    },
-                    terminal = starting.terminal,
-                ).toPublic(launchRequired = false)
-            } else {
-                // Case 4: different Starting owner.
-                PreparedAttemptState(
-                    attemptId = ++attemptIdCounter,
-                    identity = identity,
-                    starting = CompletableDeferred<StartingAck>().apply {
-                        complete(StartingAck.Refused(OwnershipRefusal.AlreadyOwned(starting.identity)))
-                    },
-                    terminal = CompletableDeferred<OwnershipStartResult>().apply {
-                        complete(OwnershipStartResult.Refused(OwnershipRefusal.AlreadyOwned(starting.identity)))
-                    },
-                ).toPublic(launchRequired = false)
+            current.attempt.identity == attempt.identity &&
+                current.attempt.attemptId < attempt.attemptId -> {
+                holder = LeaseHolder(attempt, teardown)
+                LeaseToken(attempt.attemptId, attempt.identity)
             }
-        }
-        // Case 3: no Ready/Starting owner. A prior prepareAttempt may have left
-        // a LIVE pending attempt (Stage 1 not yet accepted by the Service). The
-        // old code UNCONDITIONALLY overwrote [pendingAttempt], which was the
-        // SSE-cold-start double-fire root cause: a second ensureStarted (e.g.
-        // foreground-return + health-probe overlap) clobbered the single slot,
-        // the first attempt's late Service invocation then read Expired and
-        // tore down the whole (now attempt-2-owned) Service. Two sub-cases now:
-        val pending = pendingAttempt
-        if (pending != null) {
-            return@synchronized if (pending.identity == identity) {
-                // Same-identity JOIN: return the SAME [attemptId] + the SHARED
-                // [starting]/[terminal] deferreds. [launchRequired] = false →
-                // the second caller issues NO second startForegroundService.
-                // Both launchers await the identical Stage-1/Stage-2 outcome,
-                // collapsing a cold-start double-fire into a single Service
-                // invocation + single attemptId.
-                pending.toPublic(launchRequired = false)
-            } else {
-                // Different-identity pending: a bootstrap for another identity
-                // is in flight. Do NOT overwrite the live pending (would strand
-                // the in-flight waiter AND issue a second FGS start). REFUSE the
-                // new call — complete its deferreds immediately with
-                // [AlreadyOwned] so its launcher resolves (no hang) and retries
-                // on the next foreground return / health probe.
-                val refusal = OwnershipRefusal.AlreadyOwned(pending.identity)
-                PreparedAttemptState(
-                    attemptId = ++attemptIdCounter,
-                    identity = identity,
-                    starting = CompletableDeferred<StartingAck>().apply {
-                        complete(StartingAck.Refused(refusal))
-                    },
-                    terminal = CompletableDeferred<OwnershipStartResult>().apply {
-                        complete(OwnershipStartResult.Refused(refusal))
-                    },
-                ).toPublic(launchRequired = false)
-            }
-        }
-        // No owner, no live pending → allocate a fresh attempt.
-        val state = PreparedAttemptState(
-            attemptId = ++attemptIdCounter,
-            identity = identity,
-            starting = CompletableDeferred(),
-            terminal = CompletableDeferred(),
-        )
-        pendingAttempt = state
-        state.toPublic(launchRequired = true)
-    }
-
-    /**
-     * D5-2 (#4) — back-compat shim for legacy callers (D4-B integration tests).
-     * Returns the [PreparedOwnershipAttempt.terminal] deferred of a fresh
-     * [prepareAttempt]; behaves like the prior `prepare(identity)` waiter
-     * (completes on Ready/Refused, NOT on Starting acceptance).
-     */
-    fun prepare(identity: ConnectionIdentity): CompletableDeferred<OwnershipStartResult> =
-        prepareAttempt(identity).terminal as CompletableDeferred<OwnershipStartResult>
-
-    fun cancelWaiter(identity: ConnectionIdentity, waiter: CompletableDeferred<OwnershipStartResult>) {
-        synchronized(lock) {
-            waiters[identity]?.let { set ->
-                set.remove(waiter)
-                if (set.isEmpty()) waiters.remove(identity)
-            }
+            else -> null
         }
     }
 
     /**
-     * D5-2 (#4) — the validated Stage 1 registration. The Service MUST pass
-     * the [attemptId] it received from the launcher Intent so the gate can
-     * verify the attempt is still live (launcher has not yet timed out).
-     *
-     * Outcomes:
-     *  - [RegisterStartingOutcome.Accepted] — Starting owner recorded, the
-     *    matching [PreparedOwnershipAttempt.starting] deferred completed with
-     *    Accepted. The Service proceeds with its bootstrap.
-     *  - [RegisterStartingOutcome.Expired] — the [attemptId] does not match
-     *    the live prepared attempt (launcher already expired it via
-     *    [expireAttempt] after the 5s Starting-acceptance window). The late
-     *    Service invocation MUST abort: stopForeground + stopSelf + cancel
-     *    any SSE, so it does NOT record an owner that would later promote to
-     *    an orphan Ready owner.
-     *  - [RegisterStartingOutcome.Conflict] — a different-identity owner
-     *    already holds the gate. The Service should refuse and abort.
-     *
-     * [attemptId] == [NO_ATTEMPT_ID] is the legacy / sticky-bootstrap path
-     * (no launcher deadline). Skips the attempt validation; records the owner
-     * carrying a fresh terminal deferred if no prepared attempt matches.
+     * Explicit precondition-checked handoff. Legal ONLY when the caller
+     * still holds [oldToken] (current holder matches exactly) and the new
+     * attempt has the same identity + a newer attemptId. Returns the new
+     * token, or null if the precondition fails (oldToken already released
+     * or superseded — nothing to transfer).
      */
-    fun registerStarting(
-        identity: ConnectionIdentity,
-        attemptId: Long,
-        disconnectAndJoin: suspend (Boolean) -> Unit,
-        abortStartup: () -> Unit,
-    ): RegisterStartingOutcome {
-        val toRefuseWaiters = mutableMapOf<ConnectionIdentity, List<CompletableDeferred<OwnershipStartResult>>>()
-        val outcome: RegisterStartingOutcome = synchronized(lock) {
-            // Validate a launcher-issued ID BEFORE the same-identity
-            // idempotence check below. A late delivery from an expired attempt
-            // must be rejected even if a newer attempt for the same identity
-            // has already become Starting/Ready; otherwise the old Service
-            // could be mistaken for the current owner.
-            if (attemptId != NO_ATTEMPT_ID) {
-                val pending = pendingAttempt
-                if (pending == null || pending.attemptId != attemptId || pending.identity != identity) {
-                    return@synchronized RegisterStartingOutcome.Expired
-                }
-            }
-            val current = owner
-            if (current != null) {
-                if (current.identity == identity) {
-                    // D5-2 (#4): idempotent — an owner for this identity is
-                    // already recorded (e.g. onStartCommand registered via the
-                    // launcher attemptId, then the controller's bootstrap
-                    // success invoked onBootstrapIdentity). Return Accepted
-                    // WITHOUT replacing the owner or its terminal deferred
-                    // (the launcher still awaits the original terminal).
-                    return@synchronized RegisterStartingOutcome.Accepted
-                }
-                // Different identity owns — Conflict. Also drop waiters for [identity].
-                val pending = pendingAttempt
-                if (pending != null && pending.identity == identity &&
-                    (attemptId == NO_ATTEMPT_ID || pending.attemptId == attemptId)
-                ) {
-                    pendingAttempt = null
-                    val refusal = OwnershipRefusal.AlreadyOwned(current.identity)
-                    pending.starting.complete(StartingAck.Refused(refusal))
-                    pending.terminal.complete(OwnershipStartResult.Refused(refusal))
-                }
-                waiters.remove(identity)?.forEach {
-                    it.complete(OwnershipStartResult.Refused(OwnershipRefusal.AlreadyOwned(current.identity)))
-                }
-                return@synchronized RegisterStartingOutcome.Conflict(current.identity)
-            }
-            val terminal: CompletableDeferred<OwnershipStartResult> =
-                if (attemptId == NO_ATTEMPT_ID) {
-                    // Back-compat / sticky path. Use pendingAttempt if it matches
-                    // identity; else create a standalone terminal deferred.
-                    val pending = pendingAttempt
-                    if (pending != null && pending.identity == identity) {
-                        pending.starting.complete(StartingAck.Accepted(identity))
-                        pendingAttempt = null
-                        pending.terminal
-                    } else {
-                        CompletableDeferred()
-                    }
-                } else {
-                    // Validated path — attempt ID MUST match the live prepared attempt.
-                    val pending = pendingAttempt
-                    if (pending == null || pending.attemptId != attemptId || pending.identity != identity) {
-                        // Attempt ID expired (launcher gave up) or superseded — REJECT.
-                        // The late Service invocation MUST abort.
-                        return@synchronized RegisterStartingOutcome.Expired
-                    }
-                    pending.starting.complete(StartingAck.Accepted(identity))
-                    pendingAttempt = null
-                    pending.terminal
-                }
-            owner = OwnershipState.Starting(
-                identity = identity,
-                attemptId = if (attemptId == NO_ATTEMPT_ID) null else attemptId,
-                disconnectAndJoin = disconnectAndJoin,
-                abortStartup = abortStartup,
-                terminal = terminal,
-            )
-            // Refuse waiters for OTHER identities (legacy waiter set; the new
-            // model uses the per-attempt terminal deferred but we keep the old
-            // waiter semantics for back-compat).
-            val refused = waiters.filterKeys { it != identity }
-            refused.forEach { (requested, deferreds) ->
-                waiters.remove(requested)
-                toRefuseWaiters[requested] = deferreds.toList()
-            }
-            RegisterStartingOutcome.Accepted
-        }
-        toRefuseWaiters.values.flatten().forEach {
-            it.complete(OwnershipStartResult.Refused(OwnershipRefusal.AlreadyOwned(identity)))
-        }
-        return outcome
+    fun transfer(
+        oldToken: LeaseToken,
+        newAttempt: TransportAttemptToken,
+        teardown: suspend (Boolean) -> Unit,
+    ): LeaseToken? = synchronized(lock) {
+        val current = holder ?: return@synchronized null
+        if (current.token != oldToken) return@synchronized null
+        if (newAttempt.identity != oldToken.identity) return@synchronized null
+        if (newAttempt.attemptId <= oldToken.leaseId) return@synchronized null
+        holder = LeaseHolder(newAttempt, teardown)
+        LeaseToken(newAttempt.attemptId, newAttempt.identity)
     }
 
     /**
-     * D4-B B1 (back-compat) — old signature without an attempt ID. Used by
-     * the D4-B integration tests that pre-date the D5-2 attempt-ID model.
-     * Routes to the new signature with [NO_ATTEMPT_ID] (no launcher deadline).
-     *
-     * @return `true` iff the Starting ownership was recorded (Accepted); `false`
-     *   iff a different-identity owner already held the gate (Conflict).
+     * ABA-safe release. Releases the current lease IFF [token] matches the
+     * holder exactly; a mismatched (stale/old-connection) token is REJECTED
+     * and the live lease is untouched. Returns true iff a release happened.
+     * Non-suspend; never invokes teardown.
      */
-    fun registerStarting(
-        identity: ConnectionIdentity,
-        disconnectAndJoin: suspend (Boolean) -> Unit,
-        abortStartup: () -> Unit,
-    ): Boolean = when (registerStarting(identity, NO_ATTEMPT_ID, disconnectAndJoin, abortStartup)) {
-        RegisterStartingOutcome.Accepted -> true
-        is RegisterStartingOutcome.Conflict -> false
-        RegisterStartingOutcome.Expired -> false
+    fun releaseNow(token: LeaseToken): Boolean = synchronized(lock) {
+        if (holder?.token == token) {
+            holder = null
+            true
+        } else false
     }
 
-    /**
-     * D5-2 (#4) — expire the prepared attempt (the launcher's 5s Starting-
-     * acceptance window elapsed without [registerStarting] accepting the
-     * attempt). Clears the pending attempt so any LATE Service invocation
-     * discovers its [attemptId] is expired and ABORTS. Also completes the
-     * attempt's deferreds with [reason] so the launcher's awaits resolve.
-     *
-     * Race safety: if a Starting owner was JUST recorded for the matching
-     * identity (extreme boundary race where starting completed at the same
-     * instant the launcher gave up), the owner is rolled back so a later
-     * [markReady] finds no owner and becomes a no-op (no orphan Ready owner).
-     * The owner's terminal deferred is completed with [reason] BEFORE the
-     * extraction so the launcher's await resolves consistently.
-     */
-    suspend fun expireAttempt(attemptId: Long, reason: OwnershipRefusal) {
-        val extracted: OwnershipState.Starting?
-        synchronized(lock) {
-            val pending = pendingAttempt
-            if (pending == null || pending.attemptId != attemptId) {
-                // The prepared record is consumed by registerStarting when
-                // Stage 1 is accepted. In that case the accepted Starting
-                // owner retains the attempt ID and is the state that must be
-                // rolled back for the expire-after-Accept boundary race.
-                val current = owner as? OwnershipState.Starting
-                if (current?.attemptId == attemptId) {
-                    owner = null
-                    current.terminal.complete(OwnershipStartResult.Refused(reason))
-                    extracted = current
-                } else {
-                    extracted = null
-                }
-            } else {
-                pendingAttempt = null
-                pending.terminal.complete(OwnershipStartResult.Refused(reason))
-                pending.starting.complete(StartingAck.Refused(reason))
-                // Race safety: roll back any Starting owner for this identity
-                // so a late markReady cannot promote it to an orphan Ready.
-                val ownerNow = owner
-                extracted = if (ownerNow != null &&
-                    ownerNow.identity == pending.identity &&
-                    ownerNow is OwnershipState.Starting
-                ) {
-                    owner = null
-                    ownerNow
-                } else {
-                    null
-                }
-            }
-        }
-        // Boundary-race cleanup: if Stage 1 was recorded just as the launcher
-        // deadline fired, cancel/join its SSE and invoke the Service abort
-        // callback outside the gate lock. The normal late-delivery path still
-        // aborts in SessionStreamingService when registerStarting returns
-        // Expired; this handles only the already-registered race.
-        //
-        // §sse-zombie-fix (v4 R5): route through [runTeardown] — the single
-        // legal teardown helper (try/finally guarantees abort even if
-        // disconnect throws / coroutine is cancelled).
-        extracted?.runTeardown(markGap = false)
+    /** Query: is [token] the current holder? */
+    fun isCurrent(token: LeaseToken): Boolean = synchronized(lock) {
+        holder?.token == token
     }
 
-    /**
-     * D5-2 (#4) — exposed for tests / diagnostics: is the given [attemptId]
-     * still the live prepared attempt? The Service does NOT need this (it
-     * consults [registerStarting]'s outcome), but tests assert on it.
-     */
-    fun isAttemptLive(attemptId: Long): Boolean = synchronized(lock) {
-        pendingAttempt?.attemptId == attemptId
-    }
+    /** Diagnostics/tests: the current holder's token, or null. */
+    fun currentToken(): LeaseToken? = synchronized(lock) { holder?.token }
 
     /**
-     * SSE-cold-start-fix (teardown scope by attemptId) — returns true iff some
-     * OTHER attempt (attemptId != [excludeAttemptId], and != [NO_ATTEMPT_ID])
-     * currently holds the gate as a live pending attempt OR a Starting/Ready
-     * owner.
-     *
-     * Used by [SessionStreamingService.abortExpiredStartup] (Timeout rollback)
-     * to decide whether a BootstrapFailure teardown would destroy a NEWER
-     * attempt's bootstrap that now owns the shared Service component. When
-     * true, the caller cancels ONLY its own bootstrap job and SKIPS the
-     * service-wide teardown / StopSelf — the newer attempt owns the service.
-     *
-     * The check is deliberately **attemptId-scoped, NOT identity-scoped**: the
-     * very bug being closed is two attempts for the SAME identity where the
-     * older one expired; an identity-based guard would fail to detect it.
-     *
-     * [NO_ATTEMPT_ID] is excluded from "other" so the sticky / controller-
-     * internal registration path (which carries no launcher deadline) is never
-     * mistaken for a superseding attempt.
-     */
-    fun hasLiveAttemptOtherThan(excludeAttemptId: Long): Boolean = synchronized(lock) {
-        val pendingId = pendingAttempt?.attemptId
-        val ownerId = owner?.attemptId
-        val pendingOther = pendingId != null && pendingId != excludeAttemptId && pendingId != NO_ATTEMPT_ID
-        val ownerOther = ownerId != null && ownerId != excludeAttemptId && ownerId != NO_ATTEMPT_ID
-        pendingOther || ownerOther
-    }
-
-    /**
-     * D4-B B1 Stage 2 — promote the Starting owner to Ready + complete the
-     * matching launcher's terminal deferred with [OwnershipStartResult.Ready].
-     * Called by the Service after the SSE transport delivers a valid current-
-     * identity frame AND the coordinator commits the Bootstrap handoff.
-     *
-     * Idempotent: a second call for an already-Ready owner (e.g. an L2Idle-
-     * exit SSE re-verifies transport) re-completes the terminal deferred
-     * harmlessly and stays Ready. A mismatching identity / no owner is a no-op
-     * (this is the orphan-owner guard: a late markReady after [expireAttempt]
-     * cleared the Starting owner finds nothing to promote).
-     */
-    fun markReady(identity: ConnectionIdentity) {
-        val toComplete: List<CompletableDeferred<OwnershipStartResult>> = synchronized(lock) {
-            val current = owner ?: return@synchronized emptyList()
-            if (current.identity != identity) return@synchronized emptyList()
-            if (current is OwnershipState.Starting) {
-                owner = OwnershipState.Ready(
-                    identity = identity,
-                    attemptId = current.attemptId,
-                    disconnectAndJoin = current.disconnectAndJoin,
-                    terminal = current.terminal,
-                )
-            }
-            val list = mutableListOf<CompletableDeferred<OwnershipStartResult>>()
-            current.terminal.let { list += it }
-            waiters.remove(identity)?.toList()?.let { list += it }
-            list
-        }
-        toComplete.forEach { it.complete(OwnershipStartResult.Ready(identity)) }
-    }
-
-    /**
-     * D4-B B1 — refuse pending waiters for [identity] with [reason]. Does NOT
-     * release an established owner (use [failStarting] / [release] for that).
-     * Also completes any live prepared attempt's deferreds for [identity] so
-     * the launcher does not hang on a vanished bootstrap.
-     */
-    fun refuse(identity: ConnectionIdentity, reason: OwnershipRefusal) {
-        val pending = synchronized(lock) {
-            val pendingList = waiters.remove(identity)?.toList().orEmpty()
-            val p = pendingAttempt
-            if (p != null && p.identity == identity) {
-                pendingAttempt = null
-                p.terminal.complete(OwnershipStartResult.Refused(reason))
-                p.starting.complete(StartingAck.Refused(reason))
-            }
-            pendingList
-        }
-        pending.forEach { it.complete(OwnershipStartResult.Refused(reason)) }
-    }
-
-    /**
-     * D4-B B1 mandatory rollback — the full Starting→refusal entry. Under the
-     * lock: completes the owner's terminal deferred + matching waiters with
-     * [OwnershipStartResult.Refused]([reason]) + extracts + nulls the Starting
-     * owner whose identity matches [identity] (or ANY Starting owner when
-     * [identity] is null). Returns the extracted [OwnershipState.Starting] so
-     * the caller can invoke its [OwnershipState.Starting.abortStartup] +
-     * [OwnershipState.disconnectAndJoin] OUTSIDE the lock (no suspension under
-     * the lock).
-     *
-     * A Ready owner is NOT rolled back by this method (transport already
-     * proved); only Starting ownership is. Returns null when no Starting
-     * owner matched.
-     */
-    suspend fun failStarting(identity: ConnectionIdentity?, reason: OwnershipRefusal): OwnershipState.Starting? {
-        val extracted: OwnershipState.Starting? = synchronized(lock) {
-            val current = owner
-            val starting = current as? OwnershipState.Starting
-            if (starting == null) {
-                // No Starting owner — still refuse any matching waiter so the
-                // launcher does not hang on a vanished bootstrap.
-                if (identity != null) {
-                    waiters.remove(identity)?.forEach {
-                        it.complete(OwnershipStartResult.Refused(reason))
-                    }
-                    val p = pendingAttempt
-                    if (p != null && p.identity == identity) {
-                        pendingAttempt = null
-                        p.terminal.complete(OwnershipStartResult.Refused(reason))
-                        p.starting.complete(StartingAck.Refused(reason))
-                    }
-                }
-                return@synchronized null
-            }
-            if (identity != null && starting.identity != identity) {
-                return@synchronized null
-            }
-            owner = null
-            starting.terminal.complete(OwnershipStartResult.Refused(reason))
-            waiters.remove(starting.identity)?.forEach {
-                it.complete(OwnershipStartResult.Refused(reason))
-            }
-            starting
-        }
-        return extracted
-    }
-
-    /**
-     * §sse-zombie-fix (v3): terminal-matched Starting extraction for the
-     * launcher's Stage-2 timeout cleanup. Clears the owner ONLY if it is a
-     * Starting whose terminal is REFERENTIALLY the caller's own deferred. A
-     * replacement attempt with the SAME [ConnectionIdentity] holds a different
-     * terminal instance (allocated fresh in [registerStarting]) and is
-     * therefore never cleared by a stale caller — identity-ABA is impossible.
-     *
-     * Same discipline as [failStarting]: mutation under the lock, the extracted
-     * callbacks ([OwnershipState.disconnectAndJoin] / [OwnershipState.Starting.abortStartup])
-     * MUST be invoked by the caller OUTSIDE the lock (no suspension under the
-     * lock).
-     *
-     * Returns the extracted Starting, or null when nothing matched (owner gone,
-     * already Ready, or replaced — in all cases there is nothing for THIS
-     * caller to clean up).
-     */
-    fun failStartingIfTerminal(
-        identity: ConnectionIdentity,
-        expectedTerminal: Deferred<OwnershipStartResult>,
-        reason: OwnershipRefusal,
-    ): OwnershipState.Starting? = synchronized(lock) {
-        val current = owner
-        if (current !is OwnershipState.Starting) return@synchronized null
-        if (current.identity != identity) return@synchronized null
-        if (current.terminal !== expectedTerminal) return@synchronized null
-        current.terminal.complete(OwnershipStartResult.Refused(reason))
-        waiters.remove(current.identity)?.forEach {
-            it.complete(OwnershipStartResult.Refused(reason))
-        }
-        owner = null
-        current
-    }
-
-    /**
-     * D4-B — extracts + nulls the current owner (any state) + invokes its
-     * [OwnershipState.disconnectAndJoin] suspend callback OUTSIDE the lock.
-     * Used by [StreamingLifecycleCoordinator.teardownAndAwait] for the
-     * Reconfigure / Disconnect / Timeout / UserClose paths.
-     *
-     * D5-2 (#4): settles the owner's terminal deferred with Refused(
-     * ServiceStopped) BEFORE extracting so the launcher's await resolves.
+     * CC teardown entry (the 3 ConnectionCoordinator sites). Extracts +
+     * clears the current holder under the lock, then invokes its
+     * token-guarded teardown suspend callback OUTSIDE the lock. The
+     * teardown lambda the Owner registers is guarded by attemptId, so if a
+     * NEW lease was claimed between extraction and invocation, the stale
+     * teardown no-ops (ABA-safe). No-op when no lease is held.
      */
     suspend fun disconnectAndRelease(markGap: Boolean) {
-        val current = synchronized(lock) {
-            val c = owner
-            c?.terminal?.complete(OwnershipStartResult.Refused(OwnershipRefusal.ServiceStopped))
-            owner = null
-            c
+        val extracted = synchronized(lock) {
+            val h = holder
+            holder = null
+            h
         }
-        current?.disconnectAndJoin?.invoke(markGap)
-    }
-
-    /**
-     * D4-B — release the owner if its identity matches. Non-suspend entry
-     * for [SessionStreamingService.onDestroy] (replaces the prior
-     * `runBlocking { release(identity) }` which blocked the main thread).
-     *
-     * D5-2 (#4): settles the owner's terminal deferred with Refused(
-     * ServiceStopped) so the launcher's await resolves.
-     */
-    fun releaseNow(identity: ConnectionIdentity) {
-        synchronized(lock) {
-            val current = owner
-            if (current?.identity == identity) {
-                current.terminal.complete(OwnershipStartResult.Refused(OwnershipRefusal.ServiceStopped))
-                owner = null
-            }
-        }
-    }
-
-    /** Suspend alias kept for compatibility; prefer [releaseNow] from non-suspend callers. */
-    suspend fun release(identity: ConnectionIdentity) {
-        releaseNow(identity)
-    }
-
-    companion object {
-        /**
-         * D5-2 (#4) — sentinel for "no launcher attempt ID". Used by the
-         * back-compat [registerStarting] signature and by sticky-rebuild
-         * Service invocations (null Intent → no EXTRA_ATTEMPT_ID) that have
-         * no launcher deadline to honor.
-         */
-        const val NO_ATTEMPT_ID: Long = -1L
+        extracted?.teardown?.invoke(markGap)
     }
 }
