@@ -124,6 +124,18 @@ internal class SessionNotifier internal constructor(
      * own notifications only when the publisher is mocked in tests) does not
      * need to reach in here in production — the bridge delegates to
      * [notifyDecision] / [notifyIdle], which call this internally.
+     *
+     * FLAG_IMMUTABLE because the carried [sessionId] extra is not mutated by
+     * the trigger (the tap just launches the activity with the stamped id);
+     * FLAG_UPDATE_CURRENT so a subsequent [notifyIdle] / [notifyDecision]
+     * rebuild for a fresh session id refreshes the same PendingIntent slot
+     * (same [requestCode]) — the prior session id is discarded rather than
+     * stacking duplicate intents.
+     *
+     * targetSdk = 34 (≥ 31): FLAG_IMMUTABLE satisfies the mandatory
+     * mutability declaration required since API 31 — compliant. Mirrors the
+     * PendingIntent style documented on
+     * [cn.vectory.ocdroid.service.notify.ForegroundNotificationPublisher.buildCloseBackgroundPendingIntent].
      */
     internal fun buildContentIntent(sessionId: String, requestCode: Int): PendingIntent {
         val intent = Intent(application, MainActivity::class.java).apply {

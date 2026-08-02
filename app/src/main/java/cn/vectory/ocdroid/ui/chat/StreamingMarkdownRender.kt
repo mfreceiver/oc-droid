@@ -90,6 +90,16 @@ import cn.vectory.ocdroid.ui.theme.LocalMarkdownFontSizes
  * touches this registry from another thread (e.g. a prefetch coroutine), it
  * MUST add external synchronization — the contract is callers' responsibility,
  * not enforced internally.
+ *
+ * **Version anchor (council #7, F3)**: this main-thread-confined contract is
+ * premised on the current Compose Foundation measurement model — Compose BOM
+ * `2025.12.00` (androidx.compose.foundation pulled via the BOM). Under that
+ * version, measure/layout passes execute solely on the composition's
+ * dispatcher (main, single-threaded); there is NO background prefetch of
+ * off-screen items. Should a future Compose upgrade introduce background
+ * measurement / lookahead prefetch that reaches this registry from a non-main
+ * thread, this contract MUST be re-evaluated (add synchronization or move the
+ * registry to a thread-safe backing). Re-verify on every Compose BOM bump.
  */
 internal object HeightAnchorRegistry {
     internal const val MAX_ENTRIES = 256
