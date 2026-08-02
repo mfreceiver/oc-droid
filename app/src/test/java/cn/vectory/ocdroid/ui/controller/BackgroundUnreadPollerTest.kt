@@ -3,7 +3,10 @@ package cn.vectory.ocdroid.ui.controller
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.state.AuthorityOp
+import cn.vectory.ocdroid.data.state.EntryOrigin
 import cn.vectory.ocdroid.di.NotificationDedup
+import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.coEvery
@@ -427,5 +430,123 @@ class BackgroundUnreadPollerTest {
 
         // 6. K is re-claimable after the prune (next idle cycle can re-fire).
         assertNotNull("K re-claimable after the prune", dedup.claim(key))
+    }
+
+    // ── §review-blocker-#8 (P0-C end-to-end) — requestStartMs timing ──────────
+
+    /**
+     * §review-blocker-#8 (P0-C end-to-end): [BackgroundUnreadPoller] MUST
+     * capture [RequestToken.requestStartMs] at request START (the same moment
+     * as [localBefore]), NOT at response END. The authority reducer's timestamp
+     * arm `prior.updatedAtMs > op.requestToken.requestStartMs`
+     * (AuthorityReducer.kt:458) only protects a concurrent in-flight update
+     * when requestStartMs PRECEDES that update.
+     *
+     * Torn interleaving (two independent 30s background pollers —
+     * BackgroundUnreadPoller + ProcessStatusPoller):
+     *   t0: BackgroundUnreadPoller captures localBefore[A]=busy + requestStartMs
+     *   t1: REST returns a STALE idle for A with a NULL round
+     *       (serverRoundOrNull() == null → the sole path the timestamp arm
+     *       guards; non-null-R is resolved by the AuthorityReducer :534 lex-fence)
+     *   t2: a concurrent ProcessStatusPoller commits A=busy (value UNCHANGED,
+     *       but updatedAtMs=t2) through the same authority reducer
+     *   t3: BackgroundUnreadPoller's response-end clock() lands
+     *   t0 < t1 < t2 < t3
+     *
+     * The status-diff arm alone CANNOT catch this: localBefore[A] ==
+     * currentProjection[A] == busy (same value re-committed at t2) → no diff →
+     * the timestamp arm is the SOLE fence. Pre-fix it compared requestStartMs
+     * = t3 (response end), so `t2 > t3` was FALSE → the arm missed → the null-R
+     * REST idle clobbered the t2 busy and was stamped with the LATER t3,
+     * regressing the timestamp a subsequent earlier SSE/REST would be fenced
+     * against. Post-fix requestStartMs = t0 → `t2 > t0` is TRUE → inFlightWin
+     * preserves the busy projection + the t2 updatedAtMs; the stale REST idle
+     * is rejected.
+     *
+     * The 4 other REST writers (SessionListActions.kt:248 /
+     * SessionTreeHydrator.kt:114 / StatusPollOrchestrator.kt:183,349) all
+     * capture requestStartMs BEFORE the fetch; BackgroundUnreadPoller was the
+     * sole exception (#8). This test fails pre-fix (status=idle,
+     * updatedAtMs=t3) and passes post-fix (status=busy, updatedAtMs=t2).
+     */
+    @Test
+    fun `concurrent same-value status update during background poll is not clobbered by stale REST`() = runTest {
+        val t0 = 1_000L
+        val t2 = 2_000L
+        val t3 = 3_000L
+
+        every { settings.currentWorkdir } returns "/repo"
+
+        // Seed the request-start authority state: A is busy (the value the
+        // concurrent poller re-commits UNCHANGED at t2). Seeded via the SAME
+        // pure reducer path production uses (ApplyEvent) so bySid + the
+        // sessionStatuses projection are consistent — localBefore will capture
+        // {A:busy}, matching currentProjection at the CAS. The status-diff arm
+        // therefore reads "no diff", isolating the timestamp arm as the SOLE
+        // discriminator — exactly the #8 scenario.
+        store.dispatch(AppAction.AuthorityEvent(
+            AuthorityOp.ApplyEvent(
+                sid = "A",
+                status = SessionStatus(type = "busy"),
+                origin = EntryOrigin.SSE_LEGACY,
+                scopeKey = store.authorityScope(),
+                connectionTimeMs = 500L,
+            )
+        ))
+        assertEquals(
+            "seed: projection reflects busy (the localBefore source)",
+            SessionStatus(type = "busy"),
+            store.sessionListFlow.value.sessionStatuses["A"],
+        )
+
+        // REST returns a STALE idle for A with a NULL round — the sole path the
+        // timestamp arm guards (a non-null round is resolved by the :534
+        // lex-fence, so the arm is correctly confined to null-R here).
+        coEvery { repository.getSessions(any()) } returns Result.success(listOf(root("A")))
+        coEvery { repository.getChildren("A") } returns Result.success(emptyList())
+        coEvery { repository.getSessionStatus() } coAnswers {
+            // t2: a CONCURRENT ProcessStatusPoller commit lands during this REST
+            // round-trip — same value (busy), but a fresher updatedAtMs. Two
+            // independent 30s background pollers interleave exactly this way.
+            // Advance bySid[A].updatedAtMs directly (the projection depends
+            // only on status, which is unchanged, so no recompute is needed).
+            store.mutateState { s ->
+                val entry = s.authority.bySid.getValue("A")
+                s.copy(authority = s.authority.copy(
+                    bySid = s.authority.bySid + ("A" to entry.copy(updatedAtMs = t2))
+                ))
+            }
+            // t3: the REST response — and the poller's response-end clock —
+            // land AFTER the t2 concurrent commit.
+            now = t3
+            Result.success(mapOf("A" to SessionStatus(type = "idle")))
+        }
+
+        // requestStartMs is captured at poll START, while `now` is still t0.
+        // (Pre-fix the single clock() read happened only at response end, by
+        // which point the coAnswers above had already advanced `now` to t3.)
+        now = t0
+        val result = poller().poll()
+
+        // An authoritative snapshot WAS committed (the CAS did not abort on an
+        // identity / epoch / host move — those guards are not exercised here).
+        authoritativeAlerts(result)
+
+        // The stale REST idle MUST NOT clobber the concurrent t2 busy: with
+        // requestStartMs = t0 the timestamp arm `t2 > t0` fired → inFlightWin
+        // preserved the busy projection. Pre-fix this read `idle`
+        // (requestStartMs = t3 → `t2 > t3` false → arm missed → REST idle won).
+        assertEquals(
+            "concurrent t2 busy survives the stale REST idle (timestamp arm fired)",
+            SessionStatus(type = "busy"),
+            store.sessionListFlow.value.sessionStatuses["A"],
+        )
+        val entry = store.stateFlow.value.authority.bySid["A"]
+        assertNotNull("authority entry present after the commit", entry)
+        assertEquals(
+            "updatedAtMs preserved at the concurrent t2 commit, not regressed to response-end t3",
+            t2,
+            entry?.updatedAtMs,
+        )
     }
 }
