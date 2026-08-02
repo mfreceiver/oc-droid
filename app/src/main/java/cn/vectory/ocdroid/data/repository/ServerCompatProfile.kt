@@ -101,6 +101,9 @@ class ServerCompatProfile @Inject constructor() {
      */
     internal fun setSlimConnection(value: Boolean) {
         slimConnection = value
+        // §3.6/§7.11 (P1-7): re-probe the Plan-A endpoint on every reconfigure —
+        // a newly-deployed sidecar may now serve it even if a prior 404 cached false.
+        supportsSlimStatus = true
     }
 
     /**
@@ -191,6 +194,30 @@ class ServerCompatProfile @Inject constructor() {
      */
     @Volatile var slimPerSessionStatusEndpointAvailable: Boolean = false
         internal set
+
+    /**
+     * §3.6 / §7.11 (P1-7): whether the connected oc-slimapi sidecar serves the
+     * Plan-A `GET /slimapi/sessions/status` endpoint (with TurnRegistry turn merge).
+     *
+     * **Fail-open model**: default `true` — attempt the new endpoint first. On the
+     * first observed 404 (old v2 sidecar that predates Plan-A), flip to `false`
+     * (cached, sticky) and subsequent calls short-circuit to the legacy standard
+     * status API (no turn). Transport errors do NOT flip the flag (transient).
+     * [setSlimConnection] resets it to `true` on every reconfigure so a newly-
+     * deployed sidecar is re-probed.
+     *
+     * Irrelevant in legacy (non-slim) mode — [getSlimapiSessionsStatus] gates on
+     * [slimConnection] first.
+     */
+    @Volatile var supportsSlimStatus: Boolean = true
+        internal set
+
+    /** P1-7: mark the Plan-A slim status endpoint supported (first 200). Sticky. */
+    internal fun markSlimStatusSupported() { supportsSlimStatus = true }
+
+    /** P1-7: mark the Plan-A slim status endpoint unsupported (first 404 from old
+     *  v2 sidecar). Sticky until [setSlimConnection] resets on reconfigure. */
+    internal fun markSlimStatusUnsupported() { supportsSlimStatus = false }
 
     /** 落库 [SlimapiHealthPayload] 的版本契约业务字段。 */
     fun updateSlimapi(payload: SlimapiHealthPayload) {

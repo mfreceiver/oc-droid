@@ -14,11 +14,12 @@ import retrofit2.http.*
  *
  * ── Retained endpoints (lite-v2-dev cleanup) ───────────────────────────
  *
- * - [getSlimapiSessions]     — GET /slimapi/sessions
- * - [getSlimapiMessages]     — GET /slimapi/messages/{sid}
- * - [getSlimapiMessageFull]  — GET /slimapi/messages/{sid}/full/{mid}
+ * - [getSlimapiSessions]           — GET /slimapi/sessions
+ * - [getSlimapiMessages]           — GET /slimapi/messages/{sid}
+ * - [getSlimapiMessageFull]        — GET /slimapi/messages/{sid}/full/{mid}
+ * - [getSlimapiSessionsStatus]     — GET /slimapi/sessions/status?directory= (Plan-A, §3.1)
  *
- * All Tier 3 methods (batch / since / status / questions / permissions /
+ * All Tier 3 methods (batch / since / questions / permissions /
  * routeToken) have been removed. The `X-Slimapi-Version` header is
  * injected by [cn.vectory.ocdroid.data.repository.http.SlimapiVersionInterceptor]
  * on the shared OkHttp chain, so each method does NOT set it manually.
@@ -79,4 +80,22 @@ interface SlimApi {
         @Path("sid") sessionId: String,
         @Path("mid") messageId: String
     ): MessageWithParts
+
+    /**
+     * §3.1 Plan-A: bulk per-directory session status with TurnRegistry turn merge.
+     * `GET /slimapi/sessions/status?directory=<required>`. Forwards upstream
+     * `/session/status` (busy/idle/retry) merged with turn/turnIncarnation. The
+     * returned [SessionStatus] already carries `turn`+`turnIncarnation` (nullable,
+     * absent on legacy/old sidecars). `X-Opencode-Skip-Dir: 1` — slimapi scopes via
+     * ?directory, not the directory-header interceptor.
+     *
+     * P1-7: an old v2 sidecar predating Plan-A returns 404 here — the caller
+     * ([OpenCodeRepository.getSlimapiSessionsStatus]) caches that via
+     * [ServerCompatProfile.supportsSlimStatus] and falls back to the standard API.
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/sessions/status")
+    suspend fun getSlimapiSessionsStatus(
+        @Query("directory") directory: String,
+    ): retrofit2.Response<Map<String, SessionStatus>>
 }
