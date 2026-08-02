@@ -170,17 +170,20 @@ object ProcessStatusPollerModule {
 }
 
 /**
- * L1 FGS commit 1: provides the [ServiceSseConnectionOwner] singleton — the
- * host for the SSE collector in the post-FGS architecture.
+ * L2: provides the [ServiceSseConnectionOwner] singleton.
  *
- * Constructed via `@Provides` (not `@Inject constructor`) because many
- * parameters are lambdas (reconnectAllowed, onResync, onTerminalExhaustion)
- * that the constructor receives as function types — Hilt cannot bind
- * `() -> Boolean` / `suspend (() -> Boolean) -> Unit` / `() -> Unit`
- * without a concrete @Provides method (mirrors [ProcessStatusPollerModule]).
+ * Constructed via `@Provides` (not `@Inject constructor`) because the
+ * constructor receives function-type parameters (onResync, onTerminalDrop)
+ * that Hilt cannot bind directly.
  *
- * L7: the `bootstrapCoordinator` (ConnectionBootstrapCoordinator) parameter
- * was removed — per-server trust-all toggle replaces TOFU state delegation.
+ * L2 removals:
+ *  - `recoveryPolicy: SseRecoveryPolicy` (the retry loop died)
+ *  - `reconnectAllowed` lambda + `appLifecycleMonitor` (no reconnect gate)
+ *  - `jitterSource` (no retry jitter)
+ *  - `recoveryPolicy` param stays as a class (ProcessStatusPoller still uses
+ *    it) but is dropped from the Owner constructor + this @Provides.
+ *  - Added `ownershipGate: StreamingOwnershipGate` (lease authority).
+ *  - Renamed `onTerminalExhaustion` → `onTerminalDrop`.
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -194,10 +197,9 @@ object ServiceSseConnectionOwnerModule {
         sseEventStream: cn.vectory.ocdroid.service.events.SseEventStream,
         sharedStateStore: cn.vectory.ocdroid.ui.SharedStateStore,
         sharedEffectBus: cn.vectory.ocdroid.ui.SharedEffectBus,
-        recoveryPolicy: SseRecoveryPolicy,
+        ownershipGate: cn.vectory.ocdroid.service.StreamingOwnershipGate,
         runtimeStore: SseTransportRuntimeStore,
         dropHandler: ForegroundTransportDropHandler,
-        appLifecycleMonitor: cn.vectory.ocdroid.di.AppLifecycleMonitor,
         settingsManager: cn.vectory.ocdroid.util.SettingsManager,
         sessionSyncCoordinator:
             cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator,
@@ -208,10 +210,9 @@ object ServiceSseConnectionOwnerModule {
         sseEventStream = sseEventStream,
         sharedStateStore = sharedStateStore,
         sharedEffectBus = sharedEffectBus,
-        recoveryPolicy = recoveryPolicy,
+        ownershipGate = ownershipGate,
         runtimeStore = runtimeStore,
         dropHandler = dropHandler,
-        reconnectAllowed = { appLifecycleMonitor.isInForeground.value },
         onResync = onResync@{ isStillCurrent ->
             if (!isStillCurrent()) return@onResync
             if (!repository.supportsWatermarkResync) return@onResync
@@ -232,7 +233,7 @@ object ServiceSseConnectionOwnerModule {
                 isStillCurrent = isStillCurrent,
             )
         },
-        onTerminalExhaustion = {
+        onTerminalDrop = {
             sharedEffectBus.tryEmitEffect(
                 cn.vectory.ocdroid.ui.controller.ControllerEffect.ColdStartReconnect,
             )
