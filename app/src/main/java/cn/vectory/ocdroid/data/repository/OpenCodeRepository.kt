@@ -1108,13 +1108,45 @@ class OpenCodeRepository @Inject constructor(
      * are gated on [isSlimMode]). The wire contract is unchanged
      * (`X-Slimapi-Version` stays 2, injected by interceptor).
      */
+    /**
+     * §3.1 Plan-A: redirects to the slim `GET /slimapi/sessions/status?directory=` endpoint
+     * when slim mode is active AND [ServerCompatProfile.supportsSlimStatus] is true (fail-open:
+     * defaults to true, first 404 flips to false).
+     *
+     * P1-7: an old v2 sidecar predating Plan-A returns 404 → cached unsupported via
+     * [ServerCompatProfile.markSlimStatusUnsupported]; THIS CALL falls back to the standard
+     * status API (`api.getSessionStatus()`, no turn merge). Transport errors (5xx, timeout)
+     * do NOT flip the flag — transient.
+     *
+     * Legacy (non-slim) mode always uses the standard API directly.
+     */
     suspend fun getSlimapiSessionsStatus(directory: String): Result<Map<String, SessionStatus>> =
         runSuspendCatching {
-            // lite-v2-dev: /slimapi/sessions/status removed; delegate to standard API.
-            // §slim-storm P1: returns the sparse map verbatim — callers consume the map
-            // as-is (no per-item missing reclassification), so absent entries are correctly
-            // treated as idle downstream. This method does NOT suffer Bug A.
-            api.getSessionStatus()
+            // Legacy (non-slim) mode, OR P1-7 cached-unsupported (old v2 sidecar
+            // 404'd the Plan-A endpoint on a prior call) → standard status API.
+            // No turn merge on this path (§3.6 fallback semantics).
+            if (!serverCompatProfile.slimConnection || !serverCompatProfile.supportsSlimStatus) {
+                return@runSuspendCatching api.getSessionStatus()
+            }
+            // §3.1 Plan-A: probe/use the slim endpoint (deployed + running).
+            val resp = api.getSlimapiSessionsStatus(directory)
+            if (resp.isSuccessful) {
+                // First 200 → sticky-support. Subsequent calls take the fast path above
+                // only after a 404 flips it; a 200 keeps us on this endpoint.
+                serverCompatProfile.markSlimStatusSupported()
+                resp.body() ?: emptyMap()
+            } else if (resp.code() == 404) {
+                // §7.11 (P1-7): old v2 sidecar does not serve the Plan-A endpoint.
+                // Cache unsupported (sticky until reconfigure) and fall back THIS call.
+                serverCompatProfile.markSlimStatusUnsupported()
+                DebugLog.w("OpenCodeRepository",
+                    "slimapi /slimapi/sessions/status 404 (old sidecar) → fallback to standard API")
+                api.getSessionStatus()
+            } else {
+                // Other non-2xx: do NOT flip the capability flag (could be transient 5xx).
+                // Throw → Result.failure → caller keeps prior snapshot (unchanged semantics).
+                throw java.io.IOException("slimapi sessions/status HTTP ${resp.code()}")
+            }
         }
 
     /**
