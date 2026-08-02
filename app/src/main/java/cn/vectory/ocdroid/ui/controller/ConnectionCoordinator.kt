@@ -262,19 +262,43 @@ class ConnectionCoordinator(
     private var pendingReconfigureTeardown: Deferred<Result<Unit>>? = null
 
     /**
-     * §需求13 rev-7 #1: single-flight guard for the LoadProviders emit in
-     * [loadInitialData]. Closes the check-then-act race where multiple
-     * concurrent loadInitialData() calls at cold start
+     * §需求13 rev-7 #1 / rev-8 #1+#2: single-flight guard for the
+     * LoadProviders emit in [loadInitialData]. Closes the check-then-act
+     * race where multiple concurrent loadInitialData() calls at cold start
      * (MainActivity.coldStartReconnect + ON_RESUME + health-probe recovery
      * all firing before the first /config/providers fetch completes) each
      * saw `providers == null` and each emitted LoadProviders → duplicate
      * parallel fetches. The [compareAndSet] in loadInitialData arms the gate
-     * exactly once per providers-lifecycle; the gate is re-armed (set to
-     * false) at the top of [coldStartReconnect] so a hard-local-reset
-     * (HostProfileController.resetLocalDataAndResync nulls providers →
-     * emits ColdStartReconnect → this coordinator) re-fetches the catalog.
+     * exactly once per successful fetch (the gate arms via CAS on the first providers==null observation; it disarms ONLY on real fetch failure so the next loadInitialData can retry — see rev-8 #2 below).
+     *
+     * rev-8 #1: the gate is NOT re-armed at the top of [coldStartReconnect]
+     * — that method is a SHARED entry point (MainActivity cold-start,
+     * SessionsScreen force-refresh, resetLocalDataAndResync), so resetting it
+     * there re-opened the race during a normal cold start while the first
+     * fetch was still in flight (the original rev-7 bug). See the
+     * PROCESS-LIFETIME comment at the top of [coldStartReconnect].
+     *
+     * rev-8 #2 (council #2 fix): on REAL fetch failure the gate is DISARMED
+     * via [resetProvidersFirstFetchGate] (called by launchLoadProviders'
+     * onFailure callback) so the next loadInitialData / ON_RESUME auto-retries
+     * — weak-network cold-start recovery. After a hard local reset (rare,
+     * destructive; HostProfileController.resetLocalDataAndResync nulls
+     * providers) the auto-fetch stays suppressed and the user taps the Model
+     * management refresh IconButton once (that path emits LoadProviders
+     * DIRECTLY, bypassing this gate).
      */
     private val providersFirstFetchArmed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * §需求13 rev-8 #2 (council #2 fix): disarms the single-flight gate so the
+     * next [loadInitialData] auto-retries the providers fetch. Called by
+     * [launchLoadProviders]' onFailure callback (wired in AppCore) when
+     * getProvidersOrFailure returns a REAL failure (network/HTTP/parse) — the
+     * weak-network cold-start recovery path. Idempotent + thread-safe (AtomicBoolean).
+     */
+    internal fun resetProvidersFirstFetchGate() {
+        providersFirstFetchArmed.set(false)
+    }
 
     /**
      * @VisibleForTesting: seam fired inside [reconfigureLock] just before
@@ -390,7 +414,9 @@ class ConnectionCoordinator(
         // during a normal cold start / force-refresh while the first fetch is
         // still in flight → duplicate LoadProviders (rev-7's original bug).
         // The gate is now PROCESS-LIFETIME for the auto path: armed exactly
-        // once via the CAS in loadInitialData, never reset. After a hard
+        // once via the CAS in loadInitialData; reset ONLY by
+        // [resetProvidersFirstFetchGate] on real fetch failure (rev-8 #2
+        // recovery) — never reset by coldStartReconnect itself. After a hard
         // local reset (rare, destructive) the auto-fetch stays suppressed and
         // the user taps the Model management refresh IconButton once — that
         // path (ComposerViewModel/HostViewModel.refreshProviders) emits
@@ -560,17 +586,29 @@ class ConnectionCoordinator(
         // SliceFlows field (same accessor as the nearby `slices.chat.value`
         // reads + `slices.settings.value` projections).
         //
-        // §需求13 rev-7 #1: atomic single-flight — [providersFirstFetchArmed]
-        // .compareAndSet closes the check-then-act race where multiple
-        // concurrent loadInitialData() calls at cold start ALL saw
-        // providers==null and each emitted LoadProviders. CAS arms the gate
-        // exactly once per process lifetime; the gate is re-armed (set to
-        // false) at the top of [coldStartReconnect] so a hard-local-reset
-        // (the only path that nulls providers) re-fetches the catalog. A
-        // normal cross-host switch does NOT null providers (the reducer only
-        // clears availableCommands — see reduceHostStatePurged) so the gate
-        // stays armed and no re-fetch fires on switch (correct).
+        // §需求13 rev-7 #1 / rev-8 #1+#2: atomic single-flight —
+        // [providersFirstFetchArmed].compareAndSet closes the check-then-act race
+        // where multiple concurrent loadInitialData() calls at cold start ALL saw
+        // providers==null and each emitted LoadProviders. CAS arms the gate exactly
+        // once per successful fetch (disarmed on real failure for retry — see
+        // rev-8 #2). rev-8 #1: the gate is NOT re-armed at the top
+        // of [coldStartReconnect] (shared entry point — see the PROCESS-LIFETIME
+        // comment there). rev-8 #2: on real fetch failure the gate is DISARMED via
+        // [resetProvidersFirstFetchGate] (launchLoadProviders onFailure callback)
+        // so the next loadInitialData / ON_RESUME auto-retries (weak-network
+        // recovery). A normal cross-host switch does NOT null providers (the
+        // reducer only clears availableCommands — see reduceHostStatePurged) so the
+        // gate stays armed and no re-fetch fires on switch (correct).
+        //
+        // rev-8 #2b (rev-gpt finding): the `!isLoadingProviders` guard closes the
+        // window where a failure-disarmed gate + an in-flight manual refresh
+        // (refreshProviders emits LoadProviders DIRECTLY, bypassing this CAS)
+        // would let a concurrent loadInitialData emit a SECOND LoadProviders →
+        // duplicate parallel /config/providers fetches. The flag is set
+        // synchronously by launchLoadProviders, so once a fetch is in flight
+        // the auto path skips re-emit and lets the in-flight request resolve it.
         if (slices.settings.value.providers == null &&
+            !slices.settings.value.isLoadingProviders &&
             providersFirstFetchArmed.compareAndSet(false, true)) {
             effects.tryEmitEffect(ControllerEffect.LoadProviders)
         }

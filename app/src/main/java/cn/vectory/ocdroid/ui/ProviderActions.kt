@@ -12,6 +12,7 @@ import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 internal fun launchLoadProviders(
@@ -21,6 +22,17 @@ internal fun launchLoadProviders(
     settingsManager: SettingsManager,
     hostProfileStore: HostProfileStore,
     onNonFatalError: (String, Throwable?) -> Unit,
+    /**
+     * §需求13 rev-8 #2 (council #2 fix): invoked on REAL fetch failure
+     * (getProvidersOrFailure returns Result.failure). The caller wires this
+     * to [ConnectionCoordinator.resetProvidersFirstFetchGate] so the
+     * single-flight latch DISARMS on failure → the next loadInitialData /
+     * ON_RESUME auto-retries the catalog fetch (weak-network cold-start
+     * recovery). NOT called on success (latch stays armed = no duplicate
+     * fetch) and NOT called on empty-catalog success (that is Result.success).
+     * Default `{}` preserves backward compat for tests / legacy callers.
+     */
+    onProvidersFirstFetchFailed: () -> Unit = {},
     /**
      * §需求4 host/fp guard (mirrors launchLoadMessages expectedProfileId):
      * the serverGroupFp captured AT CALL TIME (when the REST request was
@@ -44,7 +56,27 @@ internal fun launchLoadProviders(
     // Switches disable immediately on user tap, not after the coroutine
     // dispatches. Cleared in the `finally` below on success / failure /
     // cancellation.
+    //
+    // §需求13 rev-8 #2d (rev-gpt finding #3): guard against pre-start
+    // cancellation. If the scope is already cancelled (viewModelScope cleared
+    // by config change / process death, or appScope shutdown racing the click),
+    // scope.launch returns a Job that NEVER enters its body → the `finally`
+    // below never runs → isLoadingProviders would stay true forever (stuck
+    // loading state, not a duplicate-fetch data bug). Check [CoroutineScope.
+    // isActive] AFTER setting the flag but BEFORE launching: if the scope is
+    // dead, clear the flag back and bail. The flag-set + isActive-read +
+    // launch call are all on Dispatchers.Main.immediate (non-suspending), so
+    // no interleaving is possible between them; if isActive is true here the
+    // launched coroutine WILL start, and its `finally` covers subsequent
+    // cancellation (Kotlin structured concurrency runs finally on cancel).
     slices.mutateSettings { it.copy(isLoadingProviders = true) }
+    if (!scope.isActive) {
+        // Scope already cancelled — clear the flag back and bail. The caller's
+        // AppCore sink guard (rev-8 #2c) means a subsequent LoadProviders will
+        // re-fire once a live scope is available.
+        slices.mutateSettings { it.copy(isLoadingProviders = false) }
+        return
+    }
     scope.launch {
         try {
             // §需求13 rev-7 #2: call getProvidersOrFailure (NOT getProviders)
@@ -111,6 +143,10 @@ internal fun launchLoadProviders(
                 }
                 .onFailure { error ->
                     onNonFatalError("Failed to load providers", error)
+                    // §需求13 rev-8 #2 (council #2 fix): disarm the single-flight latch so
+                    // the next loadInitialData/ON_RESUME retries — weak-network cold-start
+                    // recovery. No-op on success path (latch stays armed = no duplicate).
+                    onProvidersFirstFetchFailed()
                 }
         } finally {
             // §需求13: clear the loading flag on EVERY exit path — success,

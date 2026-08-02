@@ -81,6 +81,15 @@ import cn.vectory.ocdroid.ui.theme.LocalMarkdownFontSizes
  * **0-shrink within the same width**: [update] only RAISES the stored height
  * (`max(current, naturalHeight)`, never decreases) → same `(stableKey, width)`
  * queries are non-decreasing across frames → 0 visible height-shrink.
+ *
+ * **Thread-safety contract (council #7)**: main-thread confined. All [update]
+ * / [anchorFor] / [reset] access happens on the Compose measure / layout pass,
+ * which is single-threaded (main dispatcher). The underlying [LinkedHashMap]
+ * is therefore unsynchronized BY DESIGN (synchronization cost would tax every
+ * frame for a guarantee only the measure thread needs). If a future change
+ * touches this registry from another thread (e.g. a prefetch coroutine), it
+ * MUST add external synchronization — the contract is callers' responsibility,
+ * not enforced internally.
  */
 internal object HeightAnchorRegistry {
     internal const val MAX_ENTRIES = 256

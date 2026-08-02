@@ -862,36 +862,59 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.LoadProviders -> {
-            // §需求4 host/fp guard: capture fp at call time + pass the LIVE fp
-            // provider so the onSuccess guard can detect a mid-REST host switch
-            // and drop the stale response. Mirrors launchLoadMessages callers
-            // (AppCoreOrchestration:1815-1816). currentProfileId is the
-            // @Named("currentProfileId") provider — single source of truth
-            // for fp derivation (ControllerModule.provideCurrentProfileId),
-            // equivalent to hostProfileStore.currentProfile().serverGroupFp.ifBlank { .id }.
-            //
-            // §需求13: previously the failure path was SILENT —
-            // onNonFatalError → reportNonFatalIssue → Log.w only. The user
-            // tapping the new manual refresh IconButton saw the spinner clear
-            // with no explanation. Now ALSO emit a UiEvent.Error so the
-            // SnackbarHost shows "Failed to refresh model list". reportNonFatalIssue
-            // is kept for the structured log trail; the UiEvent is the
-            // user-facing channel. Mirrors the ConnectionHealthProbe:622 +
-            // SessionListRefreshOrchestrator:256 pattern.
-            launchLoadProviders(
-                scope = appScope,
-                repository = repository,
-                slices = store.slices,
-                settingsManager = settingsManager,
-                hostProfileStore = hostProfileStore,
-                expectedProfileId = currentProfileId(),
-                currentProfileId = currentProfileId,
-                onNonFatalError = { message, error ->
-                    reportNonFatalIssue(TAG, message, error)
-                    effectBus.tryEmitUiEvent(UiEvent.Error(R.string.model_management_refresh_failed))
-                },
-            )
-            true
+            // §需求13 rev-8 #2c (rev-gpt finding B close): SINK-LEVEL single-flight.
+            // A prior fetch in flight has set isLoadingProviders=true synchronously
+            // (launchLoadProviders:58, before scope.launch). Effects are collected
+            // sequentially on Dispatchers.Main.immediate (appScope is @UiApplicationScope),
+            // so by the time THIS effect is collected, any in-flight fetch has already
+            // set the flag → skip to avoid a duplicate parallel /config/providers fetch.
+            // Sources of concurrent LoadProviders: auto-emit (loadInitialData CAS path),
+            // manual refresh (ComposerViewModel/HostViewModel.refreshProviders DIRECT emit),
+            // and double-tap on the refresh IconButton. The guard covers ALL sources at
+            // the single sink — the loadInitialData-side guard (rev-8 #2b) remains as
+            // defense-in-depth (avoids arming the latch + emitting a redundant effect).
+            if (store.slices.settings.value.isLoadingProviders) {
+                // Fetch already in flight — drop this effect. The in-flight fetch will
+                // resolve providers (success → gate stays armed; failure → gate disarms
+                // → next loadInitialData retries after the flag clears in finally).
+                true
+            } else {
+                // §需求4 host/fp guard: capture fp at call time + pass the LIVE fp
+                // provider so the onSuccess guard can detect a mid-REST host switch
+                // and drop the stale response. Mirrors launchLoadMessages callers
+                // (AppCoreOrchestration:1815-1816). currentProfileId is the
+                // @Named("currentProfileId") provider — single source of truth
+                // for fp derivation (ControllerModule.provideCurrentProfileId),
+                // equivalent to hostProfileStore.currentProfile().serverGroupFp.ifBlank { .id }.
+                //
+                // §需求13: previously the failure path was SILENT —
+                // onNonFatalError → reportNonFatalIssue → Log.w only. The user
+                // tapping the new manual refresh IconButton saw the spinner clear
+                // with no explanation. Now ALSO emit a UiEvent.Error so the
+                // SnackbarHost shows "Failed to refresh model list". reportNonFatalIssue
+                // is kept for the structured log trail; the UiEvent is the
+                // user-facing channel. Mirrors the ConnectionHealthProbe:622 +
+                // SessionListRefreshOrchestrator:256 pattern.
+                launchLoadProviders(
+                    scope = appScope,
+                    repository = repository,
+                    slices = store.slices,
+                    settingsManager = settingsManager,
+                    hostProfileStore = hostProfileStore,
+                    expectedProfileId = currentProfileId(),
+                    currentProfileId = currentProfileId,
+                    onNonFatalError = { message, error ->
+                        reportNonFatalIssue(TAG, message, error)
+                        effectBus.tryEmitUiEvent(UiEvent.Error(R.string.model_management_refresh_failed))
+                    },
+                    // §需求13 rev-8 #2 (council #2 fix): disarm the single-flight latch on
+                    // real fetch failure so the next loadInitialData / ON_RESUME auto-retries
+                    // (weak-network cold-start recovery). Success path leaves the latch armed
+                    // (no duplicate fetch).
+                    onProvidersFirstFetchFailed = connectionCoordinator::resetProvidersFirstFetchGate,
+                )
+                true
+            }
         }
         is ControllerEffect.LoadPendingPermissions -> {
             launchLoadPendingPermissions(appScope, repository, store.slices, effectBus, TAG)

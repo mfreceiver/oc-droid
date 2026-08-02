@@ -89,7 +89,10 @@ class SettingsSectionsInstrumentedTest {
                 HostProfileEditorDialog(
                     initial = profile,
                     onDismiss = {},
-                    onSave = { _, _, _, _, _, _, _, _, _, _, _, _ -> },
+                    // onSave arity is Function10 (profile, basicAuthPassword,
+                    // basicAuthEdited, mtlsEnabled, slimEnabled, stagedP12,
+                    // caStage, p12Password, p12PasswordEdited, hasImportedP12).
+                    onSave = { _, _, _, _, _, _, _, _, _, _ -> },
                     initialHasCa = true,
                     initialClientSummary = "CN=client" to 1234,
                     initialCaSummary = "CN=opencode CA" to 5678,
@@ -121,7 +124,8 @@ class SettingsSectionsInstrumentedTest {
                 HostProfileEditorDialog(
                     initial = profile,
                     onDismiss = {},
-                    onSave = { _, _, _, _, _, _, _, _, _, _, _, _ -> },
+                    // onSave arity is Function10 (see test above).
+                    onSave = { _, _, _, _, _, _, _, _, _, _ -> },
                     initialHasCa = true,
                     initialClientSummary = null,
                     initialCaSummary = "CN=opencode CA" to 5678,
