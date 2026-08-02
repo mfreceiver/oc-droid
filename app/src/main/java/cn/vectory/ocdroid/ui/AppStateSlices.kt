@@ -15,6 +15,7 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.data.model.TodoItem
+import cn.vectory.ocdroid.data.repository.http.AuthFailureReason
 import cn.vectory.ocdroid.util.LocaleMode
 import cn.vectory.ocdroid.util.MarkdownFontSizes
 import cn.vectory.ocdroid.util.ThemeMode
@@ -155,6 +156,26 @@ data class ConnectionState(
      * configure（切 host / 冷启 / 保存）重置。
      */
     val mtlsDegradedError: String? = null,
+    /**
+     * §F2: non-null = the connection hit an upstream HTTP auth failure (401/403)
+     * surfaced through the sidecar's `upstream_http_401` / `upstream_http_403`
+     * envelope (wrong Basic Auth, server-side auth denial, revoked token).
+     * Classified by [cn.vectory.ocdroid.data.repository.http.classifyAuthFailure]
+     * from the probe's terminal exception + the parsed envelope code. The
+     * banner unifies this with [mtlsDegradedError]: EITHER non-null drives
+     * [BannerCategory.AUTH_FAILURE] (priority over REST_OUTAGE).
+     *
+     * null = no auth failure classified. Cleared on every successful connect
+     * (mirrors the mtlsDegradedError reset discipline but on the connect-success
+     * write rather than configure — this field is network-driven, mtlsDegradedError
+     * is config-driven).
+     *
+     * Note: [mtlsDegradedError] (config path) continues to exist independently.
+     * At the banner layer it is also treated as an AUTH_FAILURE reason alongside
+     * [AuthFailureReason.MtlsDegraded], so the user sees one coherent category
+     * regardless of which path surfaced the auth issue.
+     */
+    val authFailureReason: AuthFailureReason? = null,
     /**
      * §tofu R2: non-null = the connection hit an SSL/cert error against an
      * endpoint with NO TOFU pin yet, the coordinator captured the leaf cert,

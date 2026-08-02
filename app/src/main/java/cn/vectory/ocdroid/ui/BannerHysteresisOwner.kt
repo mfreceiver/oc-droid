@@ -1,5 +1,7 @@
 package cn.vectory.ocdroid.ui
 
+import cn.vectory.ocdroid.data.repository.http.AuthFailureReason
+import cn.vectory.ocdroid.data.repository.http.displayString
 import cn.vectory.ocdroid.di.UiApplicationScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -62,10 +64,22 @@ class BannerHysteresisOwner @Inject constructor(
                     sseConnected = sseConnected,
                     now = System.currentTimeMillis(),
                     mtlsDegradedError = conn.mtlsDegradedError,
+                    authFailureReason = conn.authFailureReason,
                 )
-                val cat = feedback.bannerCategory(mtlsDegradedError = conn.mtlsDegradedError)
-                if (cat != null) BannerCategoryInput(category = cat, authReason = conn.mtlsDegradedError)
-                else null
+                val cat = feedback.bannerCategory(
+                    mtlsDegradedError = conn.mtlsDegradedError,
+                    authFailureReason = conn.authFailureReason,
+                )
+                // §F2: prefer the authFailureReason's display string (HttpAuth
+                // message / MtlsDegraded detail) when available; fall back to
+                // the config-driven mtlsDegradedError String. When both are null
+                // (e.g. REST_OUTAGE) the banner subtitle uses a category default.
+                if (cat != null) {
+                    val reasonText = conn.authFailureReason.displayString() ?: conn.mtlsDegradedError
+                    BannerCategoryInput(category = cat, authReason = reasonText)
+                } else {
+                    null
+                }
             }
                 .distinctUntilChanged()
 

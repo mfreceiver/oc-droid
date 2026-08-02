@@ -3,7 +3,9 @@ package cn.vectory.ocdroid.ui.controller
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
+import cn.vectory.ocdroid.data.repository.http.AuthFailureReason
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
+import cn.vectory.ocdroid.data.repository.http.classifyAuthFailure
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
 import cn.vectory.ocdroid.service.bootstrap.TofuState
@@ -217,6 +219,28 @@ internal class ConnectionHealthProbe(
      */
     private fun writeConnection(transform: (ConnectionState) -> ConnectionState) {
         slices.mutateConnection(transform)
+    }
+
+    /**
+     * §F2: classifies a terminal probe exception into an [AuthFailureReason]
+     * for the banner's AUTH_FAILURE vs REST_OUTAGE disambiguation. Extracts
+     * the sidecar envelope code from the [retrofit2.HttpException]'s response
+     * (if present) via [OpenCodeRepository.parseErrorCode]; for the slim path
+     * (plain `Exception("HTTP 401")`) the classifier falls back to a message
+     * regex. Returns null for transport IOExceptions, transient 5xx, and
+     * authorization denials (shell_not_allowed).
+     *
+     * `parseErrorCode` reads `errorBody()?.string()` (one-shot OkHttp buffer);
+     * wrapped in `runCatching` so a double-read or closed body degrades
+     * gracefully to exception-only classification.
+     */
+    private fun classifyAuthFailureFromException(exc: Throwable?): AuthFailureReason? {
+        val envCode = (exc as? retrofit2.HttpException)?.let { he ->
+            he.response()?.let { resp ->
+                runCatching { repository.parseErrorCode(resp) }.getOrNull()
+            }
+        }
+        return classifyAuthFailure(exc, envCode)
     }
 
     // ── Public API ──────────────────────────────────────────────────────────
@@ -458,6 +482,7 @@ internal class ConnectionHealthProbe(
                                     isConnecting = false,
                                     connectionPhase = ConnectionPhase.Connected,
                                     isSlimActive = serverCompatProfile.slimConnection,
+                                    authFailureReason = null,
                                 )
                             }
                             loadInitialData()
@@ -639,11 +664,16 @@ internal class ConnectionHealthProbe(
                                 "testConnection: health probe: server reported healthy=false (attempt=$attempt/$maxAttempts) -> Disconnected",
                             )
                         }
+                        // §F2: classify the terminal exception for AUTH_FAILURE
+                        // vs REST_OUTAGE banner disambiguation (upstream
+                        // 401/403 → HttpAuth; transient/transport → null).
+                        val authReason = classifyAuthFailureFromException(termExc)
                         writeConnection {
                             it.copy(
                                 isConnected = false,
                                 isConnecting = false,
-                                connectionPhase = ConnectionPhase.Disconnected
+                                connectionPhase = ConnectionPhase.Disconnected,
+                                authFailureReason = authReason,
                             )
                         }
                         settled = true
@@ -726,6 +756,7 @@ internal class ConnectionHealthProbe(
                                         serverVersion = outcome.health.version,
                                         connectionPhase = ConnectionPhase.Connected,
                                         isSlimActive = serverCompatProfile.slimConnection,
+                                        authFailureReason = null,
                                     )
                                 }
                                 // remove-message-persistence Task 5: the
@@ -799,11 +830,16 @@ internal class ConnectionHealthProbe(
                                         listOf(errorMessageOrFallback(outcome.error, "unknown error")),
                                     ),
                                 )
+                                // §F2: classify the terminal exception for
+                                // AUTH_FAILURE vs REST_OUTAGE banner
+                                // disambiguation (upstream 401/403 → HttpAuth).
+                                val authReason = classifyAuthFailureFromException(outcome.error)
                                 writeConnection {
                                     it.copy(
                                         isConnected = false,
                                         isConnecting = false,
                                         connectionPhase = ConnectionPhase.Disconnected,
+                                        authFailureReason = authReason,
                                     )
                                 }
                                 settled = true

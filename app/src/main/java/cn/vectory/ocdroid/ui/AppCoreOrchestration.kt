@@ -5,6 +5,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.data.repository.http.AuthFailureReason
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.WorkdirPaths
@@ -1190,7 +1191,9 @@ internal const val SSE_FEEDBACK_TICK_MS = 30_000L
  * [BannerHysteresisState] / [bannerHysteresisReducer]).
  *
  * Priority: AUTH_FAILURE (more specific/actionable) wins over REST_OUTAGE when
- * [ConnectionState.mtlsDegradedError] is non-null.
+ * [ConnectionState.mtlsDegradedError] is non-null OR
+ * [ConnectionState.authFailureReason] is non-null (upstream 401/403 via sidecar
+ * envelope, or mTLS cert degradation).
  */
 internal enum class BannerCategory { REST_OUTAGE, AUTH_FAILURE, SSE_STALLED, USER_DISABLED }
 
@@ -1229,6 +1232,11 @@ internal fun deriveSseConnectionFeedback(
      *  Read by [SseConnectionFeedback.bannerCategory] for AUTH_FAILURE / REST_OUTAGE
      *  disambiguation. Kept as a param so this function stays PURE. */
     mtlsDegradedError: String? = null,
+    /** §F2: network-driven auth failure (upstream 401/403 via sidecar envelope).
+     *  Null = no auth failure classified. Kept as a param (pure pass-through)
+     *  so [SseConnectionFeedback.bannerCategory] can unify this with
+     *  [mtlsDegradedError] for AUTH_FAILURE disambiguation. */
+    authFailureReason: AuthFailureReason? = null,
 ): SseConnectionFeedback = when (phase) {
     ConnectionPhase.Idle -> SseConnectionFeedback.Idle
     ConnectionPhase.Connecting -> SseConnectionFeedback.Connecting
@@ -1528,22 +1536,25 @@ internal val SseConnectionFeedback.showBanner: Boolean
 
 /**
  * §sse-feedback-ux (§1.1): what semantic category does this feedback represent?
- * Pure function of [SseConnectionFeedback] + the mTLS-auth signal. Returns
+ * Pure function of [SseConnectionFeedback] + the auth signals. Returns
  * null when the feedback is NOT banner-worthy (Live / Connecting / Reconnecting
  * / AwaitingTofuTrust / Idle) — the caller interprets null as "no banner".
  *
- * Priority rule: AUTH_FAILURE wins over REST_OUTAGE when
- * [mtlsDegradedError] is non-null (more actionable root cause).
+ * Priority rule: AUTH_FAILURE wins over REST_OUTAGE when EITHER [mtlsDegradedError]
+ * is non-null (config-driven mTLS cert degradation) OR [authFailureReason] is
+ * non-null (network-driven upstream 401/403 via sidecar envelope). Both signals
+ * are unified — mTLS is one auth-failure reason among several.
  *
  * §1.1 漏报 fix: [WaitingForStream] → [BannerCategory.SSE_STALLED].
  */
 internal fun SseConnectionFeedback.bannerCategory(
     mtlsDegradedError: String?,
+    authFailureReason: AuthFailureReason? = null,
 ): BannerCategory? = when (this) {
     is SseConnectionFeedback.Disabled -> BannerCategory.USER_DISABLED
     is SseConnectionFeedback.WaitingForStream -> BannerCategory.SSE_STALLED
     is SseConnectionFeedback.Disconnected ->
-        if (mtlsDegradedError != null) BannerCategory.AUTH_FAILURE else BannerCategory.REST_OUTAGE
+        if (authFailureReason != null || mtlsDegradedError != null) BannerCategory.AUTH_FAILURE else BannerCategory.REST_OUTAGE
     // Live / Connecting / Reconnecting / ReconnectingAttempt / AwaitingTofuTrust / Idle → no banner
     is SseConnectionFeedback.Live -> null
     is SseConnectionFeedback.Connecting -> null
