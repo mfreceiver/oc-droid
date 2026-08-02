@@ -396,7 +396,6 @@ object ControllerModule {
         @Named("currentProfileId") currentProfileId: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
         bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
-        streamingLifecycleCoordinator: cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator,
         connectionBootstrapEngine: cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine,
         bootstrapRetryPolicy: cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy,
         appLifecycleMonitor: AppLifecycleMonitor,
@@ -420,12 +419,7 @@ object ControllerModule {
         // CP2 (notify Phase-0): delegate TOFU state to the shared bootstrap
         // coordinator (FGS spec §10). CC's public TOFU surface is unchanged.
         bootstrapCoordinator = bootstrapCoordinator,
-        // CP9 (notify Phase-0 switchover): CC's cancelSse /
-        // cancelSseForReconfigure now route through the lifecycle
-        // coordinator's onDisconnect (§4.1 disconnect → L3 teardown); the
-        // Service observes the commands and disconnects its owner.
-        streamingLifecycleCoordinator = streamingLifecycleCoordinator,
-        // L1 FGS commit 1: new params.
+        // L1 FGS commit 3: lifecycle coordinator removed. sseOwner+ownershipGate sole path.
         sseOwner = sseOwner,
         processStatusPoller = processStatusPoller,
         sessionSnapshotProvider = sessionSnapshotProvider,

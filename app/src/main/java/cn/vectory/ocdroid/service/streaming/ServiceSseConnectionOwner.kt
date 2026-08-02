@@ -7,7 +7,6 @@ import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.events.SseEventStream
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
-import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.UiEvent
@@ -23,6 +22,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+
+/**
+ * Callback for unexpected transport drops. Implemented by
+ * [ForegroundTransportDropHandler] (only surviving impl; the Service's
+ * [SseShutdownSeal] died in Commit 2).
+ */
+interface UnexpectedTransportDropHandler {
+    fun onUnexpectedDrop(attempt: TransportAttemptToken, reason: TransportDropReason)
+}
 
 /** Shared monitor/fence for owner supersession and unexpected-drop routing. */
 internal interface FencedUnexpectedTransportDropHandler : UnexpectedTransportDropHandler {
@@ -66,7 +74,7 @@ internal interface FencedUnexpectedTransportDropHandler : UnexpectedTransportDro
  *    IMMEDIATELY on that frame (liveness + event publish + gap reset); it
  *    does NOT await or gate on a REST status baseline. The status authority
  *    (Busy / AllIdleFresh / Unknown) is consulted separately by the
- *    [StreamingLifecycleCoordinator] at handoff commit — a host whose
+ *    [StreamingOwnershipGate] at handoff commit — a host whose
  *    snapshot is Unknown no longer hangs the SSE activation.
  *  - [SourceActivation.Rejected.TransportTimeout] — NO valid current-identity
  *    frame arrived within [TRANSPORT_READY_TIMEOUT_MS] (30s). The attempted
@@ -87,7 +95,7 @@ internal interface FencedUnexpectedTransportDropHandler : UnexpectedTransportDro
  * stale-identity termination do NOT emit gap + do NOT start recovery.
  *
  * @param scope the Service-lifetime [CoroutineScope] (Main.immediate in
- *   production; matches [StreamingLifecycleCoordinator]'s scope so command
+ *   production; matches [ConnectionCoordinator]'s scope so command
  *   ordering + identity-check reads stay single-threaded).
  * @param repository SSE producer (FGS spec §15.1: `connectSSE(workdir)`).
  * @param identityStore the single process-level identity store (CP1).
@@ -111,8 +119,8 @@ internal interface FencedUnexpectedTransportDropHandler : UnexpectedTransportDro
  *   [SourceActivation.Rejected.TransportTimeout].
  * @param onTerminalExhaustion invoked once after the collector exhausts the
  *   service-level retry budget (3 attempts past the SSEClient's internal 10);
- *   routes through [StreamingLifecycleCoordinator.onDisconnect] → L3 teardown.
- *   Skipped on normal cancellation (clean shutdown) and on stale-identity drops.
+ *   triggers [ConnectionCoordinator] cold-start reconnect. Skipped on normal
+ *   cancellation (clean shutdown) and on stale-identity drops.
  */
 class ServiceSseConnectionOwner(
     private val scope: CoroutineScope,

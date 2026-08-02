@@ -6,7 +6,6 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
 import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
-import cn.vectory.ocdroid.service.TeardownReason
 import cn.vectory.ocdroid.service.DegradedBootstrapTerminator
 import cn.vectory.ocdroid.service.StreamingOwnershipGate
 import cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy
@@ -16,7 +15,6 @@ import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
 import cn.vectory.ocdroid.service.streaming.SessionSnapshotProvider
 import cn.vectory.ocdroid.service.streaming.SourceActivation
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
-import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
@@ -67,11 +65,9 @@ import java.util.Locale
  * preserved: there is NO terminal connected-without-SSE path.
  *
  * `cancelSse` / `cancelSseForReconfigure` remain as lifecycle-teardown
- * delegates (still exposed for direct VM/process cleanup callers), but they
- * no longer touch a job — they route through
- * [StreamingLifecycleCoordinator.onDisconnect] which the Service observes
- * (the coordinator emits StopSse → owner.disconnect). Cluster 11 (duplication
- * backlog): the two are now deduped through [cancelSseInternal].
+ * delegates (still exposed for direct VM/process cleanup callers). They
+ * route through [sseOwner.disconnect] + [ownershipGate.disconnectAndRelease].
+ * Cluster 11 (duplication backlog): the two are now deduped through [cancelSseInternal].
  *
  * **Migration (batch 3b)**: the [ConnectionCoordinatorCallbacks] interface
  * was eliminated. Most of its methods either (a) had all dependencies already
@@ -160,25 +156,11 @@ class ConnectionCoordinator(
      */
     private val bootstrapCoordinator: ConnectionBootstrapCoordinator? = null,
     /**
-     * CP9 (notify Phase-0 switchover): the lifecycle coordinator that
-     * drives the L1/L2/L3 state machine inside the Service. CC's
-     * [cancelSse] / [cancelSseForReconfigure] delegates now call
-     * [StreamingLifecycleCoordinator.onDisconnect] (the §4.1 disconnect
-     * entry → L3 teardown); the Service observes the teardown commands and
-     * disconnects its [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner].
-     *
-     * `null` for legacy/test construction — CC falls back to the existing
-     * HostReconfigured effect emission so tests that drive
-     * [cancelSseForReconfigure] directly keep asserting on the epoch +
-     * effect.
-     */
-    private val streamingLifecycleCoordinator: StreamingLifecycleCoordinator? = null,
-    /**
      * L1 FGS commit 1: the new SSE owner host. Replaces
      * [streamingServiceLauncher] as the call target for [startSSE] (the old
      * param stays unused for now — removed in Commit 2).
      */
-    private val sseOwner: ServiceSseConnectionOwner? = null,
+    private val sseOwner: ServiceSseConnectionOwner,
     /**
      * L1 FGS commit 1: the process-level status poller. Used by the fg/bg
      * source switch to start background polling when the app goes to
@@ -193,7 +175,7 @@ class ConnectionCoordinator(
      * L1 FGS commit 1: the streaming ownership gate. Used in conjunction with
      * [sseOwner.disconnect] for the fg/bg source switch and teardowns.
      */
-    private val ownershipGate: StreamingOwnershipGate? = null,
+    private val ownershipGate: StreamingOwnershipGate,
     private val connectionBootstrapEngine: ConnectionBootstrapEngine? = null,
     private val bootstrapRetryPolicy: BootstrapRetryPolicy = BootstrapRetryPolicy(),
     private val appLifecycleMonitor: AppLifecycleMonitor? = null,
@@ -371,12 +353,9 @@ class ConnectionCoordinator(
         val monitor = appLifecycleMonitor
         val poller = processStatusPoller
         val snapProvider = sessionSnapshotProvider
-        val owner = sseOwner
-        val gate = ownershipGate
         val idStore = identityStore
-        if (monitor != null && poller != null && snapProvider != null &&
-            owner != null && gate != null
-        ) {
+        // sseOwner and ownershipGate are non-nullable (L1 FGS commit 3).
+        if (monitor != null && poller != null && snapProvider != null) {
             scope.launch {
                 // StateFlow has operator fusion — distinctUntilChanged is
                 // already built-in. Use drop(1) to skip the initial value.
@@ -387,8 +366,8 @@ class ConnectionCoordinator(
                             val identity = idStore?.currentIdentity?.value ?: return@collect
                             // Start background polling before disconnecting SSE.
                             poller.ensureRunning(identity, snapProvider.current())
-                            owner.disconnect(markGap = true)
-                            gate.disconnectAndRelease(markGap = true)
+                            sseOwner.disconnect(markGap = true)
+                            ownershipGate.disconnectAndRelease(markGap = true)
                         }
                         // On →foreground: no-op — probe's foreground monitor
                         // re-probes and re-connects via startSSE.
@@ -398,13 +377,11 @@ class ConnectionCoordinator(
     }
 
     /**
-     * §streaming-state-sync-diag (DEBUG-only): expose the current lifecycle
-     * layer (L1 / L2Active / L2Idle / L3) as a string for send-time
-     * diagnostics. Null when the coordinator is absent (legacy/test). The
-     * layer tells us whether SSE is live at send time (L1/L2Active = SSE on;
-     * L2Idle/L3 = SSE off, poller only). Temporary diagnostic surface.
+     * L1 FGS commit 3: streaming lifecycle coordinator deleted.
+     * diagLayer is no longer available — the FGS layer diagnostic is
+     * permanently removed. Returns null.
      */
-    val diagLayer: String? get() = streamingLifecycleCoordinator?.layer?.value?.toString()
+    val diagLayer: String? get() = null
 
     // ── State sync helpers (mirror orchestrator.writeConnection) ──
 
@@ -892,15 +869,14 @@ class ConnectionCoordinator(
     }
 
     /**
-     * L1 FGS commit 1: internal seam for [ConnectionHealthProbe] to
-     * call the owner directly. Returns [SourceActivation] so the probe can
-     * map the result. Falls back to [SourceActivation.Rejected.StaleIdentity]
-     * when sseOwner is absent (legacy/test construction).
+     * L1 FGS commit 3: internal seam for [ConnectionHealthProbe] to
+     * call the owner directly. Returns [SourceActivation]. sseOwner is
+     * non-nullable (wired by ControllerModule).
      */
     internal suspend fun connectSseAndAwait(
         identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
     ): SourceActivation {
-        return sseOwner?.connect(identity) ?: SourceActivation.Rejected.StaleIdentity
+        return sseOwner.connect(identity)
     }
 
     // ── SSE lifecycle ───────────────────────────────────────────────────────
@@ -935,10 +911,9 @@ class ConnectionCoordinator(
         val identity = identityStore?.currentIdentity?.value ?: return
         DebugLog.i("SSE", "startSSE → sseOwner.connect(identity=${identity.epoch})")
         scope.launch {
-            // L1 FGS commit 2: sseOwner.connect is the sole path (launcher
-            // removed). sseOwner is null only in legacy/test construction
-            // that doesn't wire the owner — treat as no-op.
-            val activation = sseOwner?.connect(identity) ?: return@launch
+            // L1 FGS commit 3: sseOwner.connect is the sole path (launcher + 
+            // coordinator removed). Non-nullable in production.
+            val activation = sseOwner.connect(identity)
             // §sse-zombie-fix (v3 Bug B / Kimi N1): the await below may
             // resolve long after the user switched host. Re-check identity
             // currency BEFORE writing.
@@ -991,24 +966,18 @@ class ConnectionCoordinator(
         healthProbe.resolveTofuTrust(decision)
     }
 
-    /**
-     * CP9 §B11: cancels the in-flight SSE feed (foreground ON_STOP /
+     /**
+     * L1 FGS commit 3: cancels the in-flight SSE feed (foreground ON_STOP /
      * ViewModel onCleared / process teardown). Uses generic Disconnect path
      * (replacement poller + markGap=true) — NOT the no-source teardown used
      * by [cancelSseForReconfigure].
      *
-     * Routes through [StreamingLifecycleCoordinator.onDisconnect] which the
-     * Service observes (the coordinator emits StopSse →
-     * [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner].disconnect).
+     * Routes through [sseOwner.disconnect] + [ownershipGate.disconnectAndRelease].
      * Does NOT reset the catch-up state machine — the foreground return path
      * re-arms it.
-     *
-     * Remains for direct VM / process cleanup callers. The
-     * `streamingLifecycleCoordinator` is null in legacy/test construction
-     * that doesn't wire it (pre-CP9 build) — the call is a no-op there.
      */
     fun cancelSse() {
-        cancelSseInternal(TeardownReason.Disconnect)
+        cancelSseInternal()
     }
 
     /**
@@ -1061,18 +1030,11 @@ class ConnectionCoordinator(
 
                 // Step 2: lifecycle teardown — errors are captured.
                 // CancellationException propagates.
-                // L1 FGS commit 1: replaced streamingLifecycleCoordinator?.
-                // teardownNoSourceAndAwait with sseOwner.disconnect +
-                // ownershipGate.disconnectAndRelease. markGap=false for
-                // no-source teardown. Old path kept when new params absent
-                // (tests mock the lifecycle coordinator directly).
+                // L1 FGS commit 3: sseOwner.disconnect + ownershipGate.disconnectAndRelease
+                // is the sole path (coordinator fallback deleted).
                 try {
-                    if (sseOwner != null && ownershipGate != null) {
-                        sseOwner.disconnect(markGap = false)
-                        ownershipGate.disconnectAndRelease(markGap = false)
-                    } else {
-                        streamingLifecycleCoordinator?.teardownNoSourceAndAwait()
-                    }
+                    sseOwner.disconnect(markGap = false)
+                    ownershipGate.disconnectAndRelease(markGap = false)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -1092,38 +1054,22 @@ class ConnectionCoordinator(
     }
 
     /**
-     * Generic teardown shared body used by [cancelSse] only (lags the old name
-     * — [cancelSseForReconfigure] now inlines its own no-source path instead
-     * of routing through this helper). Closes the token stream for the current
-     * session, then tears down the streaming lifecycle with [reason] via the
-     * generic Disconnect path (replacement poller + markGap=true).
-     *
-     * L4c placement decision: this helper STAYS on the coordinator (it is
-     * general teardown, NOT probe-owned — the probe never calls
-     * cancelSse / cancelSseForReconfigure; their callers are AppCore's
-     * reconfigure barrier + teardown, ConnectionViewModel delegates, tests).
+     * Generic teardown shared body used by [cancelSse] only. Closes the token
+     * stream for the current session, then tears down via
+     * [sseOwner.disconnect] + [ownershipGate.disconnectAndRelease] with
+     * markGap=true (replacement poller expected).
      */
-    private fun cancelSseInternal(reason: TeardownReason) {
+    private fun cancelSseInternal() {
         // §Stage-D2: close the token stream for the current session (background /
-        // ViewModel onCleared / process teardown OR host/profile switch). The
-        // coordinator's close(sid) cancels the lifecycle job + clears
-        // coordinator-internal state.
+        // ViewModel onCleared / process teardown OR host/profile switch).
         tokenStreamCoordinator?.let { tsc ->
             slices.chat.value.currentSessionId?.let { sid -> tsc.close(sid) }
         }
-        // L1 FGS commit 1: replaced streamingLifecycleCoordinator?.teardownAndAwait
-        // with sseOwner.disconnect + ownershipGate.disconnectAndRelease.
-        // The lifecycle coordinator param stays (unused) — removed in Commit 3.
-        // Old path kept when new params absent (tests mock the lifecycle
-        // coordinator directly).
+        // L1 FGS commit 3: sseOwner.disconnect + ownershipGate.disconnectAndRelease
+        // is the sole path — coordinator fallback deleted.
         scope.launch {
-            if (sseOwner != null && ownershipGate != null) {
-                // markGap=true for generic Disconnect (replacement poller expected).
-                sseOwner.disconnect(markGap = true)
-                ownershipGate.disconnectAndRelease(markGap = true)
-            } else {
-                streamingLifecycleCoordinator?.teardownAndAwait(reason)
-            }
+            sseOwner.disconnect(markGap = true)
+            ownershipGate.disconnectAndRelease(markGap = true)
         }
     }
 

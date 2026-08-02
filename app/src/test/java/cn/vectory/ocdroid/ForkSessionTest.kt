@@ -159,6 +159,8 @@ class ForkSessionTest {
             currentProfileId = { "test-fp" },
             identityStore = identityStore,
         )
+        val sseOwner = io.mockk.mockk<cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner>(relaxed = true)
+        val ownershipGate = io.mockk.mockk<cn.vectory.ocdroid.service.StreamingOwnershipGate>(relaxed = true)
         val connectionCoordinator = cn.vectory.ocdroid.ui.controller.ConnectionCoordinator(
             scope = appScope,
             slices = store.slices,
@@ -169,6 +171,8 @@ class ForkSessionTest {
             identityStore = identityStore,
             // CP2 (notify Phase-0): delegate TOFU state.
             bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator(),
+            sseOwner = sseOwner,
+            ownershipGate = ownershipGate,
         )
         // §unread-soak: real controller for parity with MainViewModelTestBase.
         val unreadSoakController = cn.vectory.ocdroid.ui.controller.UnreadSoakController(

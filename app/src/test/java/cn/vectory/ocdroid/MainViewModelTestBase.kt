@@ -239,6 +239,8 @@ abstract class MainViewModelTestBase {
             identityStore = identityStore,
             repository = repository,
         )
+        val sseOwner = io.mockk.mockk<cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner>(relaxed = true)
+        val ownershipGate = io.mockk.mockk<cn.vectory.ocdroid.service.StreamingOwnershipGate>(relaxed = true)
         val connectionCoordinator = cn.vectory.ocdroid.ui.controller.ConnectionCoordinator(
             scope = appScope,
             slices = store.slices,
@@ -250,12 +252,9 @@ abstract class MainViewModelTestBase {
             // CP2 (notify Phase-0): delegate TOFU state to the shared bootstrap
             // coordinator so the delegation is exercised in tests too.
             bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator(),
-
-            // CP9: cancelSse / cancelSseForReconfigure route through the
-            // lifecycle coordinator; pass null here (CC's delegates are
-            // no-ops without it). Tests that exercise the teardown path
-            // construct their own coordinator with a real coordinator.
-            streamingLifecycleCoordinator = null,
+            // L1 FGS commit 3: sseOwner + ownershipGate mandatory (mocked).
+            sseOwner = sseOwner,
+            ownershipGate = ownershipGate,
         )
         val fpProvider: () -> String = { hostProfileStore.currentProfile().id }
         val core = AppCore(

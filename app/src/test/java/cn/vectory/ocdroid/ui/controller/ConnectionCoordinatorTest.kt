@@ -1,8 +1,9 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.repository.http.TofuDecision
-import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
+import cn.vectory.ocdroid.service.StreamingOwnershipGate
 import cn.vectory.ocdroid.service.status.StatusAggregator
+import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
 
 import android.util.Log
 import cn.vectory.ocdroid.R
@@ -84,6 +85,10 @@ class ConnectionCoordinatorTest {
     private lateinit var identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
     /** CP2 (notify Phase-0): the shared TOFU bootstrap coordinator. */
     private lateinit var bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
+    /** L1 FGS commit 3: sseOwner mock for the coordinator fixture. */
+    private lateinit var sseOwner: ServiceSseConnectionOwner
+    /** L1 FGS commit 3: ownership gate mock for the coordinator fixture. */
+    private lateinit var ownershipGate: StreamingOwnershipGate
 
     /** §R-17 batch2 / §batch 3b: captures UiEvents emitted on effects.uiEvents. */
     private val recordedEvents = mutableListOf<UiEvent>()
@@ -111,6 +116,8 @@ class ConnectionCoordinatorTest {
         now = 100_000L
         identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
         bootstrapCoordinator = cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator()
+        sseOwner = mockk(relaxed = true)
+        ownershipGate = mockk(relaxed = true)
         coordinator = ConnectionCoordinator(
             scope = scope,
             slices = slices,
@@ -123,12 +130,9 @@ class ConnectionCoordinatorTest {
             // CP2: delegate TOFU state to the shared coordinator so the
             // delegation test can assert on bootstrapCoordinator.tofuState.
             bootstrapCoordinator = bootstrapCoordinator,
-            // CP9: CC's startSSE now calls the launcher (atomic ownership
-            // switch). cancelSse / cancelSseForReconfigure route through
-            // streamingLifecycleCoordinator (null here — they are no-ops in
-            // this test core; the cancelSseForReconfigure test asserts on
-            // the HostReconfigured epoch bump which still fires).
-            streamingLifecycleCoordinator = null,
+            // L1 FGS commit 3: sseOwner + ownershipGate are mandatory (mocked).
+            sseOwner = sseOwner,
+            ownershipGate = ownershipGate,
             // RESOLVER lane ②: resolver deliberately NOT wired on the shared
             // fixture — the legacy testConnection path then uses the gated
             // fallback (settingsManager.serverUrl), keeping every existing
@@ -332,6 +336,8 @@ class ConnectionCoordinatorTest {
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
             effectiveConnectionConfigResolver = resolver,
+            sseOwner = sseOwner,
+            ownershipGate = ownershipGate,
         )
 
         cc.testConnection()
@@ -360,6 +366,8 @@ class ConnectionCoordinatorTest {
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
+            sseOwner = sseOwner,
+            ownershipGate = ownershipGate,
             effectiveConnectionConfigResolver = resolver,
         )
 
@@ -415,6 +423,8 @@ class ConnectionCoordinatorTest {
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
+            sseOwner = sseOwner,
+            ownershipGate = ownershipGate,
             effectiveConnectionConfigResolver = resolver,
         )
 
@@ -482,6 +492,8 @@ class ConnectionCoordinatorTest {
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
+            sseOwner = sseOwner,
+            ownershipGate = ownershipGate,
             effectiveConnectionConfigResolver = resolver,
         )
 
@@ -937,16 +949,19 @@ class ConnectionCoordinatorTest {
 
     @Test
     fun `coldStartReconnect awaits pending teardown before probing`() {
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
         val teardownBarrier = CompletableDeferred<Unit>()
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+        coEvery { testOwner.disconnect(markGap = false) } coAnswers {
             teardownBarrier.await()
+            true
         }
         val cc = ConnectionCoordinator(
             scope, slices, repository, settingsManager, effects,
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
         )
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = false, version = "1.0"))
 
@@ -968,19 +983,22 @@ class ConnectionCoordinatorTest {
         val barrier1 = CompletableDeferred<Unit>()
         val barrier2 = CompletableDeferred<Unit>()
         var callCount = 0
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
+        coEvery { testOwner.disconnect(markGap = false) } coAnswers {
             when (++callCount) {
                 1 -> barrier1.await()
                 2 -> barrier2.await()
                 else -> Unit
             }
+            true
         }
         val cc = ConnectionCoordinator(
             scope, slices, repository, settingsManager, effects,
             cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
             identityStore = identityStore,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
         )
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = false, version = "1.0"))
 
@@ -1269,6 +1287,9 @@ class ConnectionCoordinatorTest {
                 identity,
                 HealthResponse(true, "3.0"),
             )
+        // Mock sseOwner to refuse connection (D3 refused ownership path).
+        val d3Owner = mockk<cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner>(relaxed = true)
+        coEvery { d3Owner.connect(any()) } returns cn.vectory.ocdroid.service.streaming.SourceActivation.Rejected.Superseded
         val d3 = ConnectionCoordinator(
             scope = scope,
             slices = slices,
@@ -1280,6 +1301,8 @@ class ConnectionCoordinatorTest {
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
             connectionBootstrapEngine = engine,
+            sseOwner = d3Owner,
+            ownershipGate = ownershipGate,
         )
         val settled = mutableListOf<Boolean>()
 
@@ -1314,6 +1337,7 @@ class ConnectionCoordinatorTest {
             bootstrapCoordinator = bootstrapCoordinator,
             connectionBootstrapEngine = engine,
             sseOwner = mockOwner,
+            ownershipGate = ownershipGate,
         )
         val settled = mutableListOf<Boolean>()
 
@@ -1351,6 +1375,7 @@ class ConnectionCoordinatorTest {
             connectionBootstrapEngine = engine,
             appLifecycleMonitor = monitor,
             sseOwner = mockOwner,
+            ownershipGate = ownershipGate,
         )
         runPending()
 
@@ -1388,6 +1413,8 @@ class ConnectionCoordinatorTest {
             connectionBootstrapEngine = engine,
             appLifecycleMonitor = monitor,
             degradedBootstrapTerminator = terminator,
+            sseOwner = sseOwner,
+            ownershipGate = ownershipGate,
         )
         runPending()
 

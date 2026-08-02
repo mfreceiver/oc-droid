@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.ui.controller
 
-import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
+import cn.vectory.ocdroid.service.StreamingOwnershipGate
+import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -98,13 +99,14 @@ class ConnectionCoordinatorConcurrentTest {
      */
     @Test
     fun `concurrent cancelSseForReconfigure serializes all teardowns`() {
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
         val teardownCalled = AtomicInteger(0)
         val teardownComplete = CompletableDeferred<Unit>()
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+        coEvery { testOwner.disconnect(markGap = false) } coAnswers {
             teardownCalled.incrementAndGet()
             teardownComplete.await()
-            Unit
+            true
         }
 
         val scope = CoroutineScope(Dispatchers.Default)
@@ -118,7 +120,8 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
         )
 
         val barrier = java.util.concurrent.CyclicBarrier(2)
@@ -179,14 +182,15 @@ class ConnectionCoordinatorConcurrentTest {
      */
     @Test
     fun `coldStartReconnect awaits all teardowns even when new cancel happens during join`() {
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
         val teardownCount = AtomicInteger(0)
         val teardownBarrier = CompletableDeferred<Unit>()
         val firstCancelDone = CountDownLatch(1)
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+        coEvery { testOwner.disconnect(markGap = false) } coAnswers {
             teardownCount.incrementAndGet()
             teardownBarrier.await()
-            Unit
+            true
         }
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = false, version = "1.0"))
 
@@ -201,7 +205,8 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
         )
 
         // Step 1: register teardown #1 (blocked on teardownBarrier)
@@ -240,11 +245,12 @@ class ConnectionCoordinatorConcurrentTest {
      */
     @Test
     fun `coldStartReconnect no probe before teardown completes`() {
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
         val teardownBarrier = CompletableDeferred<Unit>()
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+        coEvery { testOwner.disconnect(markGap = false) } coAnswers {
             teardownBarrier.await()
-            Unit
+            true
         }
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = false, version = "1.0"))
 
@@ -259,7 +265,8 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
         )
 
         // Register teardown
@@ -306,13 +313,14 @@ class ConnectionCoordinatorConcurrentTest {
      */
     @Test
     fun `cancel during coldStart join does not let Job2 teardown body run before Job1 completes`() {
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
         val teardownEntered = AtomicInteger(0)
         val barrier1 = CompletableDeferred<Unit>()
         val barrier2 = CompletableDeferred<Unit>()
         val job1StartedLatch = CountDownLatch(1)
         val job2StartedLatch = CountDownLatch(1)
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+        coEvery { testOwner.disconnect(markGap = false) } coAnswers {
             val n = teardownEntered.incrementAndGet()
             when (n) {
                 1 -> {
@@ -324,7 +332,7 @@ class ConnectionCoordinatorConcurrentTest {
                     barrier2.await()
                 }
             }
-            Unit
+            true
         }
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = false, version = "1.0"))
 
@@ -339,7 +347,8 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
         )
 
         // Step 1: Cancel #1 → Job1 created, teardown body blocks on barrier1
@@ -393,13 +402,14 @@ class ConnectionCoordinatorConcurrentTest {
      */
     @Test
     fun `coldStartReconnect identity check to clear is atomic with concurrent cancel`() {
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
         val teardownBarrier = CompletableDeferred<Unit>()
         val teardownCount = AtomicInteger(0)
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+        coEvery { testOwner.disconnect(markGap = false) } coAnswers {
             teardownCount.incrementAndGet()
             teardownBarrier.await()
-            Unit
+            true
         }
         coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = false, version = "1.0"))
 
@@ -414,7 +424,8 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
         )
 
         // Register teardown #1
@@ -465,7 +476,8 @@ class ConnectionCoordinatorConcurrentTest {
      */
     @Test
     fun `cancelSseForReconfigure registers job before any close side effect`() {
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
         val closeBlocker = CountDownLatch(1)
         val closeEntered = CountDownLatch(1)
         val probeLatch = CountDownLatch(1)
@@ -474,7 +486,6 @@ class ConnectionCoordinatorConcurrentTest {
             closeEntered.countDown()
             assertTrue(closeBlocker.await(10, TimeUnit.SECONDS))
         }
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } returns Unit
         coEvery { repository.checkHealth() } coAnswers {
             probeLatch.countDown()
             Result.success(HealthResponse(healthy = false, version = "1.0"))
@@ -492,7 +503,8 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
             tokenStreamCoordinator = tokenStream,
         )
 
@@ -544,7 +556,8 @@ class ConnectionCoordinatorConcurrentTest {
      */
     @Test
     fun `tokenStream close throws but lifecycle teardown still runs and cold probe skipped`() {
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
         val tokenStream = mockk<TokenStreamCoordinator>()
         val closeEntered = CountDownLatch(1)
         val lifecycleEntered = CountDownLatch(1)
@@ -553,9 +566,9 @@ class ConnectionCoordinatorConcurrentTest {
             closeEntered.countDown()
             throw IOException("close boom")
         }
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+        coEvery { testOwner.disconnect(markGap = false) } coAnswers {
             lifecycleEntered.countDown()
-            Unit
+            true
         }
         coEvery { repository.checkHealth() } coAnswers {
             probeLatch.countDown()
@@ -574,7 +587,8 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
             tokenStreamCoordinator = tokenStream,
         )
 
@@ -597,7 +611,7 @@ class ConnectionCoordinatorConcurrentTest {
     }
 
     /**
-     * **Test B**: [StreamingLifecycleCoordinator.teardownNoSourceAndAwait]
+     * **Test B**: sseOwner.disconnect (replaces old StreamingLifecycleCoordinator.teardownNoSourceAndAwait)
      * throws → health probe does NOT fire.
      *
      * Teardown throws → caught inside the async body → deferred completes
@@ -606,10 +620,11 @@ class ConnectionCoordinatorConcurrentTest {
      */
     @Test
     fun `teardownNoSourceAndAwait throws and cold probe skipped`() {
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
         val teardownEntered = CountDownLatch(1)
         val probeLatch = CountDownLatch(1)
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+        coEvery { testOwner.disconnect(markGap = false) } coAnswers {
             teardownEntered.countDown()
             throw IOException("teardown boom")
         }
@@ -630,7 +645,8 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
         )
 
         // Teardown fails
@@ -657,7 +673,8 @@ class ConnectionCoordinatorConcurrentTest {
      */
     @Test
     fun `successful reconfigure after failed teardown recovers and allows cold probe`() {
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
         val tokenStream = mockk<TokenStreamCoordinator>()
         val closeCallCount = AtomicInteger(0)
         val teardownEntered1 = CountDownLatch(1)
@@ -670,9 +687,9 @@ class ConnectionCoordinatorConcurrentTest {
             }
         }
         // First teardown enters (will succeed but close already failed)
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+        coEvery { testOwner.disconnect(markGap = false) } coAnswers {
             teardownEntered1.countDown()
-            Unit
+            true
         }
         coEvery { repository.checkHealth() } coAnswers {
             probeLatch.countDown()
@@ -691,7 +708,8 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
             tokenStreamCoordinator = tokenStream,
         )
 
@@ -752,7 +770,8 @@ class ConnectionCoordinatorConcurrentTest {
      */
     @Test
     fun `atomic handoff blocks concurrent cancel during probe via real thread`() {
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
         val probeLatch = CountDownLatch(1)
         val aboutToProbe = CountDownLatch(1)
         val cancelProceed = CountDownLatch(1)
@@ -760,7 +779,6 @@ class ConnectionCoordinatorConcurrentTest {
         val continueSeam = CountDownLatch(1)
         val cancelCompleted = CountDownLatch(1)
 
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } returns Unit
         coEvery { repository.checkHealth() } coAnswers {
             probeLatch.countDown()
             Result.success(HealthResponse(healthy = false, version = "1.0"))
@@ -777,7 +795,8 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
         )
 
         // Seam: fires inside reconfigureLock, blocks to create observable window.
@@ -860,17 +879,18 @@ class ConnectionCoordinatorConcurrentTest {
      */
     @Test
     fun `probe joins teardown registered in clear-to-probe window`() {
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
         val probeStarted = CountDownLatch(1)
         val teardownRegistered = CountDownLatch(1)
         val teardownStarted = CountDownLatch(1)
         val teardownRelease = CountDownLatch(1)
         val checkHealthReached = CountDownLatch(1)
 
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+        coEvery { testOwner.disconnect(markGap = false) } coAnswers {
             teardownStarted.countDown()
             teardownRelease.await()
-            Unit
+            true
         }
         coEvery { repository.checkHealth() } coAnswers {
             checkHealthReached.countDown()
@@ -888,7 +908,8 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
         )
 
         // Park the probe coroutine at its FIRST instruction. coldStart has
@@ -959,7 +980,8 @@ class ConnectionCoordinatorConcurrentTest {
      */
     @Test
     fun `probe joins teardown registered in clear-to-probe window - engine path`() {
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
         val engine = mockk<cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine>()
         val probeStarted = CountDownLatch(1)
         val teardownRegistered = CountDownLatch(1)
@@ -967,10 +989,10 @@ class ConnectionCoordinatorConcurrentTest {
         val teardownRelease = CountDownLatch(1)
         val bootstrapReached = CountDownLatch(1)
 
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+        coEvery { testOwner.disconnect(markGap = false) } coAnswers {
             teardownStarted.countDown()
             teardownRelease.await()
-            Unit
+            true
         }
         coEvery { engine.bootstrap() } coAnswers {
             bootstrapReached.countDown()
@@ -990,7 +1012,8 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
             connectionBootstrapEngine = engine,
         )
 
@@ -1049,15 +1072,16 @@ class ConnectionCoordinatorConcurrentTest {
      */
     @Test
     fun `atomic handoff loops back when teardown registered before lock`() {
-        val lifecycleCoordinator = mockk<StreamingLifecycleCoordinator>()
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        val testGate = mockk<StreamingOwnershipGate>(relaxed = true)
         val probeBarrier = CompletableDeferred<Unit>()
         val teardownBarrier = CompletableDeferred<Unit>()
         val teardownEntered = CountDownLatch(1)
 
-        coEvery { lifecycleCoordinator.teardownNoSourceAndAwait() } coAnswers {
+        coEvery { testOwner.disconnect(markGap = false) } coAnswers {
             teardownEntered.countDown()
             teardownBarrier.await()
-            Unit
+            true
         }
         coEvery { repository.checkHealth() } coAnswers {
             probeBarrier.await()
@@ -1075,7 +1099,8 @@ class ConnectionCoordinatorConcurrentTest {
             clock = { now },
             identityStore = identityStore,
             bootstrapCoordinator = bootstrapCoordinator,
-            streamingLifecycleCoordinator = lifecycleCoordinator,
+            sseOwner = testOwner,
+            ownershipGate = testGate,
         )
 
         // Step 1: Register teardown before coldStart
