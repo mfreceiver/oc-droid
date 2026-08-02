@@ -4,20 +4,15 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -26,13 +21,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.ConnectionViewModel
@@ -48,35 +41,26 @@ import kotlinx.coroutines.flow.map
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /**
- * HostProfile management sub-screen and its supporting composables: the
- * profile list row ([HostProfileRow]) and the read-only detail dialog
- * ([HostProfileDetailDialog]). The full editor form
- * ([HostProfileEditorDialog], + CaStage + cert-row helpers) was split out
- * into its own file (L5b). Reached from [SettingsScreen] via the
- * "manage profiles" action.
+ * HostProfile management sub-screen. After v5lean L8 (single-host
+ * simplification) there is exactly one host profile — displayed as a
+ * single card with an Edit affordance that opens [HostProfileEditorDialog].
+ * The multi-host list + RadioButton selection + host-switch FSM are removed.
  *
- * §P5b-A / Q7: this screen is now the 服务器管理 hub — in addition to the
- * host list (服务器配置) it also carries 流量统计 (moved from settings/storage)
- * and 模型管理 ([ModelManagementSection], moved from the removed top-level
- * 模型 Settings entry). The model-management subscriptions
- * (providers + disabledModels) are read off [HostViewModel.settingsFlow];
- * toggle actions route through [HostViewModel.toggleModelDisabled] /
- * [HostViewModel.setProviderModelsEnabled] so the prefs write and the
- * settingsFlow mirror stay in sync (§14 — fixes a stale Switch bug where the
- * old direct `settingsManager` path only touched encrypted prefs).
+ * Keeps: 流量统计 ([TrafficSection]), 模型管理 ([ModelManagementSection]),
+ * 清除数据 ([DangerZoneSection]).
+ *
+ * Reached from [SettingsScreen] via the "manage profiles" action.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun HostProfilesManagerScreen(
     viewModel: HostViewModel,
     connectionVM: ConnectionViewModel,
-    profiles: List<HostProfile>,
-    currentProfileId: String?,
+    currentProfile: HostProfile?,
     onBack: () -> Unit
 ) {
     var editingProfile by remember { mutableStateOf<HostProfile?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    val deleteFailedText = stringResource(R.string.host_profile_delete_failed)
     // C-D3 rev-3 round-7 (review I5-R7): the save transaction's lifecycle is
     // owned by the VM (viewModelScope — survives screen navigation, holds the
     // in-flight reconfigure so it MUST complete once begun). Observe here to
@@ -98,7 +82,7 @@ internal fun HostProfilesManagerScreen(
                 // the user has moved to editing a different profile (B). The
                 // success path already carries this guard; failure now matches.
                 if (editingProfile?.id == s.profileId) {
-                    error = it.message ?: deleteFailedText
+                    error = it.message
                 }
             }
             viewModel.consumeSaveState()
@@ -143,26 +127,12 @@ internal fun HostProfilesManagerScreen(
         }
     }
 
-    // §WT5: the host manager screen now uses the shared SettingsSubRouteScaffold
-    // (same shell as every other settings sub-route) instead of a hand-rolled
-    // Column+TopAppBar. The add-host IconButton is preserved via the scaffold's
-    // `actions` slot. The list Column keeps its verticalScroll + testTag.
+    // §L8: no add-host action — single host, edited via the card's Edit button.
     SettingsSubRouteScaffold(
-        // §setux-unify: hub 标题改用与一级入口相同的短文案（「服务器」），与
-        // 外观/通知/关于三项保持「入口名 = 页面名」一致。
         titleRes = R.string.setux_settings_hosts_entry,
         onBack = onBack,
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        actions = {
-            IconButton(onClick = { editingProfile = newDirectProfile() }) {
-                Icon(Icons.Default.Add, contentDescription = stringResource(R.string.host_profile_add))
-            }
-        },
     ) { scaffoldMod ->
-        // §review-AB: no parent horizontal padding — AppSectionHeader +
-        // ListItem (HostProfileRow / TrafficSection) self-pad at 16dp; the
-        // bare error Text below self-pads via `Modifier.padding(horizontal =
-        // Dimens.spacing4)` so it shares one keyline with the header / rows.
         Column(
             modifier = scaffoldMod
                 .verticalScroll(rememberScrollState())
@@ -179,23 +149,47 @@ internal fun HostProfilesManagerScreen(
                 Spacer(modifier = Modifier.height(Dimens.spacing3))
             }
 
-            // ── §P5b-A / Q7 Section 1: 服务器配置 ──
-            // §setux #5: 已配置服务器列表项间距压缩——ListItem 自带 padding，
-            // 再叠 8dp Spacer 过松；降到 2dp 让列表更紧凑。
-            // §WT5: header now uses AppSectionHeader (titleSmall + onSurfaceVariant,
-            // canonical per docs/specs/ui-style-spec.md §2). HostProfileRow itself is
-            // untouched — its RadioButton+Edit affordances stay distinct.
+            // ── §L8 Section 1: 服务器配置 (single-host card) ──
+            // §P5b-A / Q7 / §setux: header uses AppSectionHeader.
+            // Multi-host list (HostProfileRow) replaced by a single card
+            // showing the current profile's name + URL + Edit button.
             AppSectionHeader(text = stringResource(R.string.host_profiles_title))
-            profiles.forEach { profile ->
-                HostProfileRow(
-                    profile = profile,
-                    selected = profile.id == currentProfileId,
-                    onSelect = { viewModel.selectHostProfile(profile.id) },
-                    onEdit = { editingProfile = profile }
+            if (currentProfile != null) {
+                ListItem(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("host.profile.row.${currentProfile.id}"),
+                    headlineContent = {
+                        Text(
+                            currentProfile.displayName,
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                    },
+                    supportingContent = {
+                        Text(
+                            currentProfile.serverUrl,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    trailingContent = {
+                        IconButton(onClick = { editingProfile = currentProfile }) {
+                            Icon(
+                                Icons.Default.Edit,
+                                contentDescription = stringResource(R.string.host_profile_edit_icon),
+                            )
+                        }
+                    },
                 )
-                // §setux #5: 2dp tighter inter-row gap (no Dimens token for 2dp;
-                // spec §3 tolerates this one-off literal with a written reason).
-                Spacer(modifier = Modifier.height(2.dp))
+            } else {
+                Text(
+                    stringResource(R.string.server_dialog_no_hosts),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = Dimens.spacing4),
+                )
             }
             Spacer(modifier = Modifier.height(Dimens.spacing4))
 
@@ -249,23 +243,9 @@ internal fun HostProfilesManagerScreen(
     editingProfile?.let { profile ->
         // §fix-3: 把当前 host 的 mTLS 降级错误注入 Dialog banner（connectionFlow 反应式）。
         val connectionState by connectionVM.connectionFlow.collectAsState()
-        // §mtls-followup (gpt-2): connectionFlow.mtlsDegradedError 反映的是「当前 active
-        // host」的降级态。仅当编辑的就是当前主机（profile.id == currentProfileId）时才把
-        // 该 hint 传入对话框；否则传 null——避免在编辑非当前 host 时误显示别的主机的
-        // 降级 banner（那不是用户正在编辑的这个 host 的状态）。
-        val mtlsErrorHint =
-            if (profile.id == currentProfileId) connectionState.mtlsDegradedError else null
-        // §review-3: clientCertSummary() runs PKCS12 KDF — must NOT run on the Compose
-        // main thread. Compute both summaries off-main via produceState on
-        // Dispatchers.Default; the dialog receives null initially and its slot
-        // status seeds reactively (LaunchedEffect) once the value arrives. The
-        // HostViewModel funcs stay as-is — the Default context makes them main-safe.
-        // §coverage-r4: withContext body hoisted into the pure
-        // [summarizeClientCertOnDefault] / [summarizeCaOnDefault] helpers —
-        // the produceState bodies are now thin one-liners, shrinking the
-        // `initialClientSummary$2$1$1` / `initialCaSummary$2$1$1` inner
-        // classes (currently the only `ui/.../settings` denominator that
-        // does not benefit from any JVM unit-test coverage).
+        // §L8: single host — editing profile is always the current host,
+        // so mtlsErrorHint always reflects the active connection's degraded state.
+        val mtlsErrorHint = connectionState.mtlsDegradedError
         val initialClientSummary by produceState<Pair<String, Int>?>(initialValue = null, profile.clientCertId) {
             value = summarizeClientCertOnDefault(viewModel, profile.clientCertId)
         }
@@ -274,29 +254,13 @@ internal fun HostProfilesManagerScreen(
         }
         HostProfileEditorDialog(
             initial = profile,
-            // §item8 (cgpt#6 + grok#2): 注入「是否已存私有 CA」——clientCertId != null
-            // 不等于有 CA（CA 是独立槽）。VM 直接读 ESP 的 CA 槽。
             initialHasCa = viewModel.hasStoredCa(profile.clientCertId),
-            // §mtls-clipboard: 重入时把已存 p12/CA 的 subject+size 注入，使槽位
-            // 渲染 Imported 态而非空白（修「write-only 字段重入显示空」）。
-            // §review-3: 现在异步注入（produceState）——初值为 null，到达后由
-            // Dialog 内的 LaunchedEffect 反应式种槽。
             initialClientSummary = initialClientSummary,
             initialCaSummary = initialCaSummary,
-            // The "+" action creates a fresh profile that isn't persisted yet,
-            // so it must not expose the destructive delete affordance.
-            canDelete = profiles.any { it.id == profile.id } && profiles.size > 1,
+            // §L8: single host — delete affordance removed (canDelete=false hides the button).
+            canDelete = false,
             onDismiss = { editingProfile = null },
             mtlsErrorHint = mtlsErrorHint,
-            // §2.7 fix-3: onSave 透传 mTLS 编辑意图给 VM（Dialog 纯 UI，不碰 ESP）。VM
-            // 据此试构建 + 原子写 ESP；失败（无 p12 / 试构建失败）抛异常 → 保留
-            // 对话框并回显错误，不关闭。Dialog 据 mTLS 开关构造 Update / Disable intent。
-            // §C-D3 rev-3 round-7 (review I5-R7): viewModel.saveHostProfile is now
-            // non-suspend — the VM owns the launch (viewModelScope survives screen
-            // navigation; the reconfigure transaction must complete once begun).
-            // The screen observes saveState via LaunchedEffect above (close on
-            // success + profileId match, error on failure) and gates the Save
-            // button via isSaving (single-flight — double-submit ignored).
             onSave = { saved, basicAuthPassword, basicAuthEdited,
                        mtlsEnabled, slimEnabled, trustAllEnabled, stagedP12, caStage, p12Password, p12PasswordEdited, hasImportedP12 ->
                 val clientCertEdit = if (mtlsEnabled) {
@@ -311,17 +275,6 @@ internal fun HostProfilesManagerScreen(
                     clientCertEdit = clientCertEdit,
                 )
             },
-            onDelete = {
-                runCatching { viewModel.deleteHostProfile(profile.id) }
-                    .onFailure { error = it.message ?: deleteFailedText }
-                editingProfile = null
-            },
-            // §user-req + §fix-401 + §2.7: 表单"测试连接"按钮直连 ConnectionViewModel.testConnectionForm。
-            // 密码 write-only 不回填表单；编辑已有 host 且未碰密码框时 VM 据 profileId
-            // 回退查已保存密码。用户主动清空/改密码（passwordEdited=true）则按表单值测，
-            // 不回退旧凭据（安全）。§2.7: mTLS 字段透传给 VM，由 VM 构造 ClientCertMaterial
-            // （Dialog 无 settingsManager）→ checkHealthFor(..., clientCert)。
-            // §L7: trust-all 透传至 testConnectionForm。
             onTestConnection = { url, user, pass, profileId, passwordEdited,
                                  mtlsEnabled, trustAllEnabled, stagedP12, hasImportedP12, caStage, p12Password, p12PasswordEdited,
                                  clientCertId, callback ->
@@ -331,113 +284,11 @@ internal fun HostProfilesManagerScreen(
                     clientCertId, slim = profile.slim, trustAll = trustAllEnabled, onResult = callback,
                 )
             },
-            // §reconcile: 从函数级 connectionState 注入 slimapi 版本自检三元组
-            // （dialog 不再持有 connectionVM，参数化保 fix-12 的 UX 意图——
-            // 版本不兼容时阻塞对话框）。
             slimapiVersionIncompatible = connectionState.slimapiVersionIncompatible,
-            // §C-D3 rev-3 round-7 (review I5-R7): gate the Save button + show
-            // spinner while a save transaction is in flight (single-flight).
             isSaving = isSaving,
         )
     }
-
-    // §P5b-A / Q7: the row-click detail popup (HostProfileDetailDialog) is no
-    // longer invoked from the row — selection moved to the leading RadioButton
-    // and editing to the trailing Edit IconButton. The composable definition
-    // is retained below because [SettingsSectionsInstrumentedTest] still
-    // references it.
-}
-
-@Composable
-internal fun HostProfileRow(
-    profile: HostProfile,
-    selected: Boolean,
-    onSelect: () -> Unit,
-    onEdit: () -> Unit
-) {
-    // §P5b-A / Q7 refactor: RadioButton moved to leadingContent (was
-    // trailing), the surfaceVariant containerColor is dropped (default
-    // container), the leading Dns icon is removed (RadioButton takes the
-    // leading slot), and the whole-row clickable{ onOpen() } is removed
-    // (the row is no longer clickable — selection happens via the RadioButton,
-    // editing via the trailing Edit IconButton). The headline (display name)
-    // + supporting (server URL) texts are kept so the user still sees which
-    // server a radio selects.
-    ListItem(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("host.profile.row.${profile.id}"),
-        leadingContent = {
-            RadioButton(
-                selected = selected,
-                onClick = onSelect,
-            )
-        },
-        headlineContent = {
-            Text(
-                profile.displayName,
-                style = MaterialTheme.typography.bodyLarge
-            )
-        },
-        supportingContent = {
-            Text(
-                profile.serverUrl,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        },
-        trailingContent = {
-            // Edit: opens the editor dialog.
-            IconButton(onClick = onEdit) {
-                Icon(
-                    Icons.Default.Edit,
-                    contentDescription = stringResource(R.string.host_profile_edit_icon)
-                )
-            }
-        }
-    )
-}
-
-@Composable
-internal fun HostProfileDetailDialog(
-    profile: HostProfile,
-    isCurrent: Boolean,
-    onDismiss: () -> Unit,
-    onUse: () -> Unit,
-    onEdit: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(profile.displayName) },
-        text = {
-            Column {
-                Text(profile.serverUrl, style = MaterialTheme.typography.bodyMedium)
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    stringResource(
-                        R.string.host_profile_status,
-                        if (isCurrent) stringResource(R.string.host_profile_current) else stringResource(R.string.host_profile_saved)
-                    ),
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-        },
-        confirmButton = {
-            Column(horizontalAlignment = Alignment.End) {
-                if (!isCurrent) {
-                    Button(onClick = onUse) { Text(stringResource(R.string.host_profile_use_this_host)) }
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
-                TextButton(onClick = onEdit) { Text(stringResource(R.string.common_edit)) }
-            }
-        }
-    )
 }
 
 
-
-
-private fun newDirectProfile(): HostProfile = HostProfile.defaultDirect()
 

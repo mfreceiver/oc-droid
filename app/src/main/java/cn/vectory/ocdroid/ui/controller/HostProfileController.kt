@@ -49,10 +49,9 @@ import kotlinx.coroutines.launch
  * [cn.vectory.ocdroid.ui.EventEmitter] is replaced by [effects] — UiEvents
  * now ride [SharedEffectBus.uiEvents] (`effects.tryEmitUiEvent(...)`).
  *
- *  - `selectHostProfile` / `deleteHostProfile` — profile switching with full
- *    per-host state purge (sessions/messages/unread/draft/cache/commands).
- *  - `saveHostProfile` / `duplicateHostProfile` / `importHostProfile` /
- *    `exportHostProfile` — profile CRUD + three-state password contract.
+ *  L8: selectHostProfile/duplicateHostProfile/deleteHostProfile removed
+ *  (single-host mode). Only saveHostProfile / importHostProfile /
+ *    exportHostProfile remain for profile CRUD.
  *  - `configureServer` / `configureRepositoryForProfile` — repository
  *    reconfiguration with SSL allowInsecure wire (R-01).
  *  - `resetLocalDataAndResync` — full local-data wipe + reconnect.
@@ -100,9 +99,11 @@ class HostProfileController(
     // ── §P9 ProfileMutationEngine (extracted) ──────────────────────────────
 
     /**
-     * §P9: profile save/delete + clientCert mutation engine (extracted from
-     * the 5 CRUD methods below). See [ProfileMutationEngine] for the full
+     * §P9: profile save/import/export + clientCert mutation engine (extracted
+     * from the CRUD methods below). See [ProfileMutationEngine] for the full
      * contract. Field-init uses provider-lambda injection, `by lazy`.
+     *
+     * L8: duplicateHostProfile/deleteHostProfile removed (single-host mode).
      *
      * lite-v2: reconfigureBarrier / beginReconfigureBoundary / deleteHostProfileWithBarrier
      * removed — no runtime hot-reconfigure. withHostReconfiguration signature
@@ -120,7 +121,6 @@ class HostProfileController(
             configureRepositoryForProfileRaw = { profile -> configureRepositoryForProfileRaw(profile) },
             configureRepositoryForProfile = { configureRepositoryForProfile(it) },
             refreshHostProfileState = { refreshHostProfileState() },
-            purgePerHostState = { purgePerHostState() },
         )
     }
 
@@ -245,115 +245,15 @@ class HostProfileController(
         clientCertEdit = clientCertEdit,
     )
 
-    fun duplicateHostProfile(profileId: String) =
-        profileMutationEngine.duplicateHostProfile(profileId)
-
-    /**
-     * Detects deletion of the ACTIVE host: the replacement current host is
-     * unrelated, so all per-host session/workdir state must be purged
-     * (mirrors selectHostProfile). Otherwise just removes the profile entry.
-     *
-     * §review-fix #6 (gpter #5): EvictGroup emission is REFERENCE-COUNTED —
-     * only emit when the deleted profile's group has NO remaining profile
-     * referencing it. If a sibling profile in the same group still exists,
-     * the group's cache is still live (the sibling reaches the same server);
-     * evicting would orphan the sibling's hot cache. plan §3 矩阵 "删除当前
-     * host profile → 该 group 无其它 profile 引用→清；有→不清".
-     *
-     * §P9: body delegated to [ProfileMutationEngine.deleteHostProfile].
-     */
-    fun deleteHostProfile(profileId: String) =
-        profileMutationEngine.deleteHostProfile(profileId)
-
     fun importHostProfile(payload: String): Result<HostProfile> =
         profileMutationEngine.importHostProfile(payload)
 
     fun exportHostProfile(profile: HostProfile): String =
         profileMutationEngine.exportHostProfile(profile)
 
-    // ── Profile selection (host switch) ────────────────────────────────────
-
-    /**
-     * Switches to the host profile [profileId], fully resetting all per-host
-     * state (sessions/messages/unread/draft/cache/commands).
-     *
-     * **C-8 (lite-v2): active profile select → persist + RestartRequired.**
-     * The app must restart to apply the new host; no runtime reconfigure /
-     * ForceReconnect / HostProfileSwitched (restart supersedes them).
-     *
-     * §需求12阶段3 (oracle-assessed): under 需12 profiles are fully
-     * independent (no groups; `profileId == profile.id` always), so the
-     * former `sameGroup = previousFp == targetFp` decision + same-group
-     * preserve branch is dead. C-8 makes every switch emit RestartRequired,
-     * so preserved slices die with the process anyway. The purge + EvictGroup
-     * are now UNCONDITIONAL (always full purge; always evict the prior
-     * profile's cache). The only short-circuit is the no-op re-select guard
-     * (re-selecting the already-current profile returns early — avoids a
-     * needless full purge + restart).
-     *
-     * The purge + select sequence (no runtime reconfigure):
-     *  1. **Early-return guard**: if [profileId] == the already-current
-     *     profile, return — nothing to do (the gentle former same-group path).
-     *  2. Snapshot `previousFp = hostProfileStore.currentProfile().serverGroupFp`
-     *     BEFORE [HostProfileStore.select] (select has a side effect — it
-     *     bumps lastUsedAt + sets currentHostProfileId, so reading
-     *     currentProfile() AFTER would return the new profile's fp). Used
-     *     for the unconditional `EvictGroup(previousFp)` emission.
-     *  3. Inside the `withHostReconfiguration(needsReconfigure = true)` body:
-     *     a. `activateProfile(profileId)` / `select(profileId)` — mutates the store.
-     *     b. `purgePerHostState` — clears per-profile + per-server state (full purge).
-     *     c. Emit `EvictGroup(previousFp)` (unconditional).
-     *     d. `refreshHostProfileState()`.
-     *     e. **NO** `configureRepositoryForProfileRaw` — restart handles it.
-     *  4. After the block, `RestartRequired` is emitted by `withHostReconfiguration`.
-     *     No `ForceReconnect`/`HostProfileSwitched`.
-     *
-     * **C-8 full matrix (frozen):**
-     *  - active profile edit connection params → persist + RestartRequired ✓
-     *  - select another active profile → persist + RestartRequired ✓ (THIS)
-     *  - delete active profile → persist + RestartRequired ✓
-     *  - resetLocalDataAndResync → same-host teardown (no restart) ✓
-     *  - non-active CRUD → persist only (no restart)
-     */
-    fun selectHostProfile(profileId: String) {
-        // §需求12阶段3 (oracle-assessed risk note): early-return guard —
-        // re-selecting the already-current profile is a no-op. Previously
-        // the gentle same-group path handled this; now that the same-group
-        // branch is deleted, this guard avoids a needless full purge +
-        // RestartRequired when the user re-taps the current profile.
-        if (profileId == slices.host.value.currentHostProfileId) return
-        scope.launch {
-            // Step 1: snapshot previousProfileId BEFORE select (select's side
-            // effect makes post-select currentProfile() read the NEW profile).
-            // Used for the unconditional EvictGroup(previousProfileId) below.
-            // §需求12: fp == profile.id (serverGroupFp field deleted).
-            val previousProfileId = hostProfileStore.currentProfile().id
-            // C-8: host switch = restart. withHostReconfiguration(needsReconfigure=true)
-            // persists selection + purges per-host state + emits RestartRequired.
-            // No runtime reconfigure (configureRepositoryForProfileRaw removed),
-            // no ForceReconnect/HostProfileSwitched (restart supersedes them).
-            withHostReconfiguration(needsReconfigure = true) {
-                effectiveConnectionConfigResolver?.activateProfile(profileId)
-                val selected = if (effectiveConnectionConfigResolver != null) {
-                    hostProfileStore.currentProfile()
-                } else {
-                    hostProfileStore.select(profileId)
-                }
-                purgePerHostState()
-                // §需求12阶段3: EvictGroup is now UNCONDITIONAL (under 需求12
-                // the former same-group branch is dead — every switch is to
-                // an independent profile). Evicts the prior profile's cache.
-                effects.emitEffect(ControllerEffect.EvictGroup(previousProfileId))
-                refreshHostProfileState()
-            }
-            // RestartRequired is emitted by withHostReconfiguration inside the block.
-            // No ForceReconnect / HostProfileSwitched — restart supersedes them.
-        }
-    }
-
     /**
      * Shared helper: purges ALL per-host session/message/unread/draft/cache
-     * state. Used by both selectHostProfile and deleteHostProfile(wasCurrent).
+     * state. Used by resetLocalDataAndResync.
      *
      * §需求12阶段3 (oracle-assessed): under 需求12 profiles are fully
      * independent (no groups), so the former `preserveServerGroupData` flag
@@ -517,7 +417,7 @@ class HostProfileController(
      *
      * §Stage D (gpter 阻塞 #1): this is the single authoritative SSE
      * cancellation point for all profile-based reconfigure paths
-     * (selectHostProfile / deleteHostProfile / testConnection).
+     * (testConnection).
      * §R18 Phase 2-E step 2: the repository.setCurrentDirectory call that
      * used to restore the workdir here is removed — directory-scoped calls
      * now take an explicit `directory` parameter sourced from
