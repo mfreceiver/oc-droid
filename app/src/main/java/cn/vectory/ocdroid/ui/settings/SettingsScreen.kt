@@ -58,6 +58,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import cn.vectory.ocdroid.BuildConfig
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.di.NotificationChannels
 import cn.vectory.ocdroid.ui.ComposerViewModel
@@ -193,6 +194,9 @@ private fun settingsSections(): List<SettingsSectionEntry> = listOf(
     SettingsSectionEntry(NavRoute.settingsDebugRoute, R.string.settings_section_debug, 0, Icons.Default.BugReport),
     SettingsSectionEntry(NavRoute.settingsAboutRoute, R.string.settings_section_about, R.string.settings_section_about_subtitle, Icons.Default.Info),
 )
+        // §b-fixup2 (层 1): release 构建硬剥离 Debug 行——BuildConfig.DEBUG=false
+        // 时 Settings 根列表不出现 Debug 入口。debug 构建短路保留全部（顺序不变）。
+        .filter { BuildConfig.DEBUG || it.route != NavRoute.settingsDebugRoute }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

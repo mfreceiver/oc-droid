@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.semantics
+import cn.vectory.ocdroid.BuildConfig
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import cn.vectory.ocdroid.ui.theme.Dimens
@@ -120,6 +121,10 @@ interface DebugCardIdentitySettingsEntryPoint {
 
 @Composable
 private fun rememberDebugCardIdentityEnabled(): Boolean {
+    // §b-fixup2 (层 2): release 构建硬门控——即使 settings.debugCardIdentityEnabled
+    // 被置 true（升级安装残留 / 异常状态），DebugCardIdentity 在 chat 页也不启用，
+    // 半透明+badge 路径彻底不可达。debug 构建通过，正常按 settings 启用（不影响调试）。
+    if (!BuildConfig.DEBUG) return false
     val context = LocalContext.current
     return try {
         val sm = EntryPointAccessors.fromApplication(

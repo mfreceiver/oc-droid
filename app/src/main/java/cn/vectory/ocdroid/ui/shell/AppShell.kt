@@ -28,6 +28,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import cn.vectory.ocdroid.BuildConfig
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.ConnectionViewModel
@@ -472,7 +473,11 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                     // navEpoch so it fires even when the mirror already reads
                     // "settings" from a stale state).
                     onNavigateToSettings = { orchestratorVM.requestNavigate(NavRoute.Settings) },
-                    onLongClickServer = { navController.navigate(NavRoute.settingsDebugRoute) },
+                    onLongClickServer = {
+                        // §b-fixup2 (层 1): release 构建不响应长按服务器图标跳转 Debug 页。
+                        // BuildConfig.DEBUG 是编译期 const，release 里 R8 会消除此死分支。
+                        if (BuildConfig.DEBUG) navController.navigate(NavRoute.settingsDebugRoute)
+                    },
                     showBackNavigation = false,
                 )
             }
