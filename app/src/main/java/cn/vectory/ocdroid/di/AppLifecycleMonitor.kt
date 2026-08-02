@@ -374,19 +374,6 @@ class AppLifecycleMonitor @Inject constructor(
         startBackgroundPolling()
     }
 
-    /**
-     * L4 §4.4 / §5.5: Stop the background ALM poller for no-source terminal.
-     * Called by the composite [LifecycleCommand.EnterNoSourceTerminal] handler
-     * alongside SSE/FGS/ProcessStatusPoller teardown.
-     *
-     * Exposed `internal` so [SessionStreamingService]'s shell implementation
-     * can call it during terminal teardown.
-     */
-    internal fun stopBackgroundPollingForNoSource() {
-        pollJob?.cancel()
-        pollJob = null
-    }
-
     private fun startBackgroundPolling() {
         pollJob?.cancel()
         pollJob = appScope.launch {
