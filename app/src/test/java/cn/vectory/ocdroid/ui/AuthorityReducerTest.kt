@@ -2686,49 +2686,213 @@ class AuthorityReducerTest {
      * closes the equal-round tie-break corruption that the old regression
      * (updatedAtMs=1000) would have allowed through.
      *
-     * Builds on T4-C1's resulting entry: after the tear, a late SSE (1,7)
-     * arrives at 1500ms. With preserved updatedAtMs=2000, the tie-break is
-     * `1500 < 2000` → TRUE → fenced → entry stays at the fresher SSE state.
+     * §review-blocker-#6 (P0-C meta-only) revision: the previous version of
+     * this test submitted an ApplySnapshot (REST) as "the late frame" — but
+     * the corruption vector is a late SSE ApplyEvent hitting applyEvent:247's
+     * equal-round tie-break. This rewrite uses ApplyEvent (the real op type
+     * for a late SSE frame) seeded from the post-tear state T4-C1 produces
+     * (idle@(1,7)@2000, SSE_SLIM origin — the metadata-preservation outcome).
+     *
+     * With preserved updatedAtMs=2000, a late SSE (1,7) at 1500ms hits
+     * applyEvent:247 tie-break `1500 < 2000` → TRUE → fenced → entry stays
+     * at the fresher SSE state (reduceAuthority returns same ref).
      */
     @Test
     fun `T4-C2 late same-round SSE fenced after inFlightWin tear (tie-break correctness)`() {
-        // Resulting entry from T4-C1 (SSE won in-flight, metadata preserved)
-        val afterTear = SessionEntry(
+        // Post-tear state (the outcome T4-C1 asserts): idle@(1,7)@2000, SSE_SLIM.
+        // Seeded directly so this test is robust to C1's fence-direction details
+        // (C1 with prior=busy fences verbatim via :469; the meaningful late-SSE
+        // assertion is the applyEvent:247 tie-break against preserved 2000).
+        val afterTear = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(bySid = mapOf("A" to SessionEntry(
+                status = SessionStatus(type = "idle"),
+                serverRound = ServerRound(1, 7),
+                origin = EntryOrigin.SSE_SLIM,
+                updatedAtMs = 2000L,
+                workdir = "/x",
+                scopeKey = scope,
+                serverRoundHighWater = ServerRound(1, 7),
+            ))),
+        )
+        // The LATE SSE frame (1,7) at 1500ms — an ApplyEvent, the real op type
+        // for an SSE frame. Same round as the live baseline (1,7) → cmp==0
+        // → applyEvent:247 equal-round tie-break fires.
+        val lateSse = event(
+            sid = "A",
             status = SessionStatus(type = "idle"),
-            serverRound = ServerRound(1, 7),
             origin = EntryOrigin.SSE_SLIM,
-            updatedAtMs = 2000L,  // preserved by #3 fix
+            monotonic = 1500L,  // connectionTimeMs — earlier than the preserved 2000
+            serverRound = ServerRound(1, 7),
+        )
+        val result = reduceAuthority(afterTear, lateSse)
+        val entry = result.authority.bySid["A"]!!
+
+        // equal-round tie-break: connectionTimeMs(1500) < prev.updatedAtMs(2000)
+        // → TRUE → DROP (applyEvent returns cur, same ref). Entry stays verbatim.
+        assertSame("late same-round SSE fenced (no transition, same ref)",
+            afterTear, result)
+        assertEquals("origin still SSE_SLIM", EntryOrigin.SSE_SLIM, entry.origin)
+        assertEquals("updatedAtMs still 2000 (late SSE did not regress)", 2000L, entry.updatedAtMs)
+        assertEquals("round still (1,7)", ServerRound(1, 7), entry.serverRound)
+    }
+
+    /**
+     * §review-blocker-#6 (P0-C meta-only): the actual repro of the new blocker.
+     *
+     * Trigger: REST in-flight window (requestStartMs=1000) during which an SSE
+     * lands that advances ONLY round/time WITHOUT changing the status VALUE
+     * (busy→busy at a newer (incarnation,turn) + later connectionTimeMs=2000).
+     * Then the REST response returns with a NULL round (R==null — the legitimate
+     * null-round REST fallback in OpenCodeRepository:1125-1144, e.g. legacy /
+     * unwired-registry / bad-shape snapshot) so the :467-469 lex-fence is skipped.
+     *
+     * PRE-fix (#3 alone): currentProjection stores round-stripped status, so
+     * localBefore["A"]=busy == currentProjection["A"]=busy → inFlightWin=false
+     * → else branch stamps updatedAtMs = requestStartMs(1000), REGRESSING the
+     * SSE's 2000. A subsequent same-round (1,7) late SSE at 1500 then passes
+     * applyEvent:247 (`1500 < 1000` is FALSE) → stale frame accepted → #3
+     * blocker resurrected under a meta-only trigger.
+     *
+     * POST-fix (#6 Plan-B timestamp arm): prior.updatedAtMs(2000) >
+     * requestStartMs(1000) → inFlightWin=TRUE → else branch preserves
+     * prior.origin/updatedAtMs. The regression is closed; the chained late SSE
+     * is correctly fenced.
+     *
+     * This test CHAINS the meta-only tear into a late SSE (like T4-C2 chains
+     * the status-change tear), proving the end-to-end #6 vector is closed.
+     */
+    @Test
+    fun `T4-C3 meta-only in-flight SSE + null-round REST preserves updatedAtMs (no regression)`() {
+        // Live baseline: busy at (1,5), origin SSE_SLIM, updatedAtMs=900 (before
+        // the REST request started at 1000).
+        val baseline = SessionEntry(
+            status = SessionStatus(type = "busy"),
+            serverRound = ServerRound(1, 5),
+            origin = EntryOrigin.SSE_SLIM,
+            updatedAtMs = 900L,
             workdir = "/x",
             scopeKey = scope,
-            serverRoundHighWater = ServerRound(1, 7),
+            serverRoundHighWater = ServerRound(1, 5),
         )
-        val state = StoreState.initial().copy(
+        val state0 = StoreState.initial().copy(
             identityEpoch = 0L,
-            authority = AuthorityState(bySid = mapOf("A" to afterTear)),
+            authority = AuthorityState(bySid = mapOf("A" to baseline)),
         )
-        // REST snapshot returns LATE with same round (1,7) at requestStartMs=1500
-        val op = AuthorityOp.ApplySnapshot(
-            snapshot = mapOf("A" to SessionStatus(type = "idle", turnIncarnation = 1, turn = 7)),
+        // REST request STARTS at 1000ms — captures localBefore["A"]=busy
+        // (round-stripped projection; equals the live status).
+        // The REST round-trip is in-flight. Meanwhile an SSE lands at 2000ms
+        // advancing ONLY round/time: busy→busy at (1,7), connectionTimeMs=2000.
+        val sseInFlight = event(
+            sid = "A",
+            status = SessionStatus(type = "busy"),  // SAME value — meta-only
+            origin = EntryOrigin.SSE_SLIM,
+            monotonic = 2000L,
+            serverRound = ServerRound(1, 7),  // round advanced (1,5)→(1,7)
+        )
+        val stateAfterSse = reduceAuthority(state0, sseInFlight)
+        val entryAfterSse = stateAfterSse.authority.bySid["A"]!!
+        // Sanity: the in-flight SSE applied (round advanced, updatedAtMs=2000).
+        assertEquals("in-flight SSE advanced round to (1,7)",
+            ServerRound(1, 7), entryAfterSse.serverRound)
+        assertEquals("in-flight SSE stamped updatedAtMs=2000",
+            2000L, entryAfterSse.updatedAtMs)
+        assertEquals("in-flight SSE left status busy (meta-only)", "busy", entryAfterSse.status.type)
+
+        // REST response returns NOW with a NULL round (R==null — legacy /
+        // bad-shape snapshot), snapshot says busy, requestStartMs=1000.
+        // localBefore["A"]=busy == currentProjection["A"]=busy (status arm
+        // alone would read "no tear"). The #6 timestamp arm must fire.
+        val restOp = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf("A" to SessionStatus(type = "busy")),  // no turn fields → R=null
             sidToWorkdir = mapOf("A" to "/x"),
             authoritativeNodeIds = setOf("A"),
             registeredWorkdirs = emptySet(),
             coveredWorkdirs = emptySet(),
             unmappedActiveIds = emptySet(),
             partialFailureWorkdirs = emptySet(),
-            lastSuccessTimeMs = 2500L,
+            lastSuccessTimeMs = 2100L,
             scopeKey = scope,
-            requestToken = token(requestStartMs = 1500L),
-            // localBefore == currentProjection (no new in-flight tear) → inFlightWin=false
+            requestToken = token(requestStartMs = 1000L),
+            localBefore = mapOf("A" to SessionStatus(type = "busy")),  // == currentProjection
+        )
+        val stateAfterRest = reduceAuthority(stateAfterSse, restOp)
+        val entryAfterRest = stateAfterRest.authority.bySid["A"]!!
+
+        // #6 fix: inFlightWin=TRUE via timestamp arm (prior.updatedAtMs=2000 >
+        // requestStartMs=1000) → metadata PRESERVED, NOT regressed to 1000.
+        assertEquals("origin preserved as SSE_SLIM (not regressed to REST)",
+            EntryOrigin.SSE_SLIM, entryAfterRest.origin)
+        assertEquals("updatedAtMs preserved at 2000 (not regressed to REST requestStart 1000)",
+            2000L, entryAfterRest.updatedAtMs)
+        // Round: lexMaxNull(live0=(1,7), R=null) = (1,7) — SSE round survives.
+        assertEquals("serverRound preserved at (1,7) (null-R REST does not clear)",
+            ServerRound(1, 7), entryAfterRest.serverRound)
+
+        // CHAINED: a late same-round SSE (1,7) at 1500ms now hits applyEvent:247.
+        // With preserved updatedAtMs=2000: `1500 < 2000` → TRUE → FENCED.
+        val lateSse = event(
+            sid = "A",
+            status = SessionStatus(type = "idle"),  // tries to flip to idle
+            origin = EntryOrigin.SSE_SLIM,
+            monotonic = 1500L,
+            serverRound = ServerRound(1, 7),
+        )
+        val stateAfterLate = reduceAuthority(stateAfterRest, lateSse)
+        val entryAfterLate = stateAfterLate.authority.bySid["A"]!!
+
+        // Late SSE fenced: entry stays at the preserved SSE state.
+        assertEquals("late same-round SSE fenced — status stays busy (not flipped to idle)",
+            "busy", entryAfterLate.status.type)
+        assertEquals("late SSE did not regress updatedAtMs", 2000L, entryAfterLate.updatedAtMs)
+        assertEquals("origin still SSE_SLIM", EntryOrigin.SSE_SLIM, entryAfterLate.origin)
+    }
+
+    /**
+     * §review-blocker-#6 negative control: the timestamp arm must NOT fire on a
+     * pure REST path (no in-flight SSE) — else it would over-protect and break
+     * the normal REST stamp. Entry idle at updatedAtMs=500, REST start 1000,
+     * snapshot says busy → assert origin=REST + updatedAtMs=1000 (arm correctly
+     * inert because prior.updatedAtMs(500) is NOT > requestStartMs(1000)).
+     */
+    @Test
+    fun `T4-C4 pure REST path — timestamp arm inert, REST stamps normally`() {
+        val prior = SessionEntry(
+            status = SessionStatus(type = "idle"),
+            serverRound = null,
+            origin = EntryOrigin.REST,
+            updatedAtMs = 500L,
+            workdir = "/x",
+            scopeKey = scope,
+            serverRoundHighWater = null,
+        )
+        val state = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(bySid = mapOf("A" to prior)),
+        )
+        val op = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf("A" to SessionStatus(type = "busy")),
+            sidToWorkdir = mapOf("A" to "/x"),
+            authoritativeNodeIds = setOf("A"),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 1000L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 1000L),
             localBefore = mapOf("A" to SessionStatus(type = "idle")),
         )
         val result = reduceAuthority(state, op)
         val entry = result.authority.bySid["A"]!!
-
-        // equal-round tie-break: requestStartMs(1500) < prior.updatedAtMs(2000) → TRUE → FENCED.
-        // Entry stays verbatim at the fresher SSE state (preserved updatedAtMs=2000, SSE origin).
-        assertEquals("late same-round REST fenced (entry verbatim)", afterTear, entry)
-        assertEquals("origin still SSE_SLIM", EntryOrigin.SSE_SLIM, entry.origin)
-        assertEquals("updatedAtMs still 2000", 2000L, entry.updatedAtMs)
+        // Pure REST: status arm reads localBefore(idle) != projection(busy) →
+        // inFlightWin=TRUE via the STATUS arm (not the timestamp arm). REST
+        // stamps normally because the status changed. The timestamp arm
+        // (500 > 1000 = false) is inert — confirmed by updatedAtMs=1000.
+        assertEquals("status flipped to busy", "busy", entry.status.type)
+        assertEquals("origin REST (normal REST stamp)", EntryOrigin.REST, entry.origin)
+        assertEquals("updatedAtMs=1000 (REST requestStartMs, not preserved 500)",
+            1000L, entry.updatedAtMs)
     }
 
     /** T5a — bad shape degrade (null round). Catches constructing a round from a half-pair. */

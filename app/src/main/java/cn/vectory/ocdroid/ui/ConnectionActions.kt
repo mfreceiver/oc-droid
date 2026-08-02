@@ -50,6 +50,15 @@ internal fun applySavedSettings(
         // from boot (was defaulting to false, leaving a slim-profile host routed
         // as legacy until a later profile-select reconfigure fixed it).
         slim = currentProfile.slim,
+        // §review-blocker-#6/B1 (cold-start trustAll): propagate the profile's
+        // trustAll at cold start so the live client stack AND HttpImageHolder
+        // (updated from repository.currentSslConfig() below) reflect the
+        // per-server trust policy from boot. Was defaulting to false, so a
+        // trust-all/self-signed host's markdown images kept failing the SSL
+        // handshake for the whole process lifetime (bootstrap's later full
+        // configure does not re-stamp HttpImageHolder). Not a fail-open
+        // (false default is stricter) — a functional / state-consistency bug.
+        trustAll = currentProfile.trustAll,
     )
     // #12 / §2.5(c) (gpter#4): 冷启动也要把 mTLS 信任策略同步给 image client，
     // 否则冷启图片无客户端证书 / 不信私有 CA（与 REST/SSE 对称）。

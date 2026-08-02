@@ -463,7 +463,44 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
         val live0 = prior?.serverRound
         val hw0 = prior?.serverRoundHighWater
         val effBase = lexMaxNull(live0, hw0)
-        val inFlightWin = id in currentProjection && op.localBefore[id] != currentProjection[id]
+        // §review-blocker-#6 (P0-C meta-only): the status-diff arm alone MISSES a
+        // meta-only in-flight SSE when REST returns a NULL round (R==null) — one
+        // that advanced ONLY round/time without changing the status value
+        // (busy→busy at a newer (incarnation,turn) + later connectionTimeMs).
+        // currentProjection stores round-stripped status (stripRound at :455), so
+        // localBefore[id] == currentProjection[id] → the status arm reads "no
+        // tear" → inFlightWin=false → the else branch stamps updatedAtMs =
+        // op.requestToken.requestStartMs, REGRESSING the SSE's fresher
+        // updatedAtMs. A subsequent same-round late SSE then passes the
+        // applyEvent equal-round tie-break (cmp==0 && connectionTimeMs <
+        // prev.updatedAtMs) because the regressed prev.updatedAtMs is now LOWER
+        // — the original #3 blocker resurrected under a meta-only trigger.
+        //
+        // The timestamp arm closes this — but ONLY for the R==null path. When
+        // R != null, the existing :469 lex-fence already compares
+        // `requestStartMs < prior.updatedAtMs` (the SAME wall-clock signal), so
+        // the timestamp arm would be REDUNDANT there and would over-protect:
+        // it would force inFlightWin=true for a non-null-R REST whose equal-
+        // round tie-break the :469 fence already resolves correctly (e.g. T10
+        // Op-2: R=(1,5)==effBase, requestStartMs=500 < updatedAtMs=1000 → the
+        // :469 fence preserves prior verbatim; an unguarded timestamp arm would
+        // short-circuit that fence and leak REST's differing status through).
+        // Guarding on R==null confines the new arm to the ONE path the existing
+        // fence cannot reach (the legitimate null-round REST fallback — legacy /
+        // unwired-registry / bad-shape snapshot per OpenCodeRepository:1125-1144).
+        //
+        // Single wall-clock domain (§U-P3 / AuthorityOp.connectionTimeMs kdoc):
+        // both REST requestStartMs and SSE connectionTimeMs source the SAME
+        // System.currentTimeMillis(), so the comparison mirrors the existing
+        // equal-round tie-break at applyEvent:247 and the :469 lex-fence. Strict
+        // `>` (not >=) mirrors :469's direction. Origin-agnostic by design; the
+        // arm's false-negative mode is self-neutralizing (a backwards clock that
+        // hides an in-flight SSE also lowers that SSE's own timestamp, so the
+        // REST stamp cannot regress below it). Oracle-assessed (ses_03bbaf126ffe,
+        // Plan B, refined to R==null-only after T10 regression analysis).
+        val inFlightWin = id in currentProjection &&
+            (op.localBefore[id] != currentProjection[id] ||
+                (R == null && prior != null && prior.updatedAtMs > op.requestToken.requestStartMs))
         val fenced = !inFlightWin && R != null && effBase != null &&
             (R < effBase ||
                 (R == effBase && op.requestToken.requestStartMs < (prior?.updatedAtMs ?: 0L)))

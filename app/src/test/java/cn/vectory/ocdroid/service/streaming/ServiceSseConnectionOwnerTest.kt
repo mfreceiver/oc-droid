@@ -752,6 +752,21 @@ class ServiceSseConnectionOwnerTest {
      * Post-fix (atomic under the handler monitor): the drop arrives AFTER the
      * commit and is fenced out (currentAttempt == null). Verdict: Stopped,
      * no spurious ticket, exactly one CancelSse (from disconnect's markGap).
+     *
+     * §review-gate-r2 G6 hardening: the original version relied on the
+     * collector's post-cancel `routeUnexpectedDrop` (ServiceSseConnectionOwner
+     * :278) firing after disconnect. But disconnect's `job.cancel()`
+     * (:373) injects a CancellationException at the `dropGate.await()`
+     * suspension point, which `catch (e: CancellationException) { throw e }`
+     * (:267) rethrows — so the collector unwinds WITHOUT ever reaching the
+     * `routeUnexpectedDrop` branch. The drop branch was therefore never
+     * exercised; the test only proved "Stopped state persists" trivially.
+     *
+     * This refactor explicitly drives the fenced drop handler AFTER disconnect
+     * commits, so the actual fence predicate (currentAttempt == null after
+     * Stopped) is evaluated and asserted — proving the drop IS rejected, not
+     * merely that no drop was attempted. The race-structure setup (emit →
+     * block → disconnect → release) is retained to keep G7 symmetric.
      */
     @Test
     fun `G6 - disconnect committing suppresses in-flight drop (Stopped wins, no spurious ticket)`() = runTest {
@@ -789,9 +804,21 @@ class ServiceSseConnectionOwnerTest {
             SseTransportState.Stopped, realStore.state.value)
         assertNull("gate lease released by disconnect", realGate.currentToken())
 
-        // Now release the collector — it throws and routes the drop. The fence
-        // (real handler) sees currentAttempt(attempt) == null (Stopped cleared
-        // the canonical attempt) → suppresses publishDropped.
+        // §review-gate-r2 G6 hardening: EXPLICITLY drive the fenced drop handler
+        // with the LIVE attempt (the one a stale collector would have routed).
+        // Pre-fix this saw gate-empty + store-Live → spurious Dropped. Post-fix
+        // the fence sees currentAttempt(attempt) == null (Stopped cleared the
+        // canonical attempt) → returns false → no publishDropped.
+        val dropAccepted = realHandler.onUnexpectedDropIfCurrent(
+            liveAttempt, TransportDropReason.RETRY_EXHAUSTED,
+        )
+        assertFalse(
+            "drop fenced out after Stopped commit (currentAttempt == null)",
+            dropAccepted,
+        )
+
+        // Now release the collector — it throws and unwinds. No drop is routed
+        // (cancellation rethrown at :267), but state assertions must still hold.
         dropGate.complete(Unit)
         runPending()
 

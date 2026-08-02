@@ -8,6 +8,7 @@ import cn.vectory.ocdroid.data.model.SessionCacheEntry
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.http.SslConfig
+import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.util.MarkdownFontSizes
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
@@ -84,6 +85,90 @@ class ConnectionActionsTest {
                 password = "secret",
                 hostPort = "example.test:443")
         }
+    }
+
+    /**
+     * §review-blocker-#6/B1 (cold-start trustAll): a trust-all profile MUST
+     * propagate trustAll=true to repository.configure at cold start, so the
+     * live stack AND HttpImageHolder (updated from currentSslConfig() below the
+     * configure call) reflect the per-server trust policy from boot. Pre-fix
+     * this defaulted to false → a self-signed host's markdown images kept
+     * failing the SSL handshake for the whole process lifetime (the bootstrap's
+     * later full configure does not re-stamp HttpImageHolder). Includes the
+     * final SSL-mode assertion (HttpImageHolder received TrustAll, not the
+     * SystemDefault the relaxed mock would otherwise yield).
+     */
+    @Test
+    fun `applySavedSettings propagates trustAll at cold start and stamps HttpImageHolder`() {
+        HttpImageHolder.resetTestState()
+        val profile = HostProfile(
+            name = "self-signed",
+            serverUrl = "https://selfsigned.local",
+            trustAll = true,
+        )
+        every { hostProfileStore.currentProfile() } returns profile
+        every { hostProfileStore.profiles() } returns listOf(profile)
+        // After configure() with trustAll=true, currentSslConfig() must report
+        // TrustAll (the cold-start path feeds it to HttpImageHolder). The
+        // relaxed mock returns SystemDefault by default; stub the post-configure
+        // value to TrustAll to model the real factory's behavior.
+        every { repository.currentSslConfig() } returns SslConfig.TrustAll
+
+        applySavedSettings(repository, settingsManager, hostProfileStore, slices)
+
+        verify {
+            repository.configure(
+                baseUrl = "https://selfsigned.local",
+                username = null,
+                password = null,
+                hostPort = "selfsigned.local:443",
+                clientCert = null,
+                slim = false,
+                trustAll = true,
+            )
+        }
+        assertEquals(
+            "HttpImageHolder stamped TRUST_ALL after cold-start configure",
+            "TRUST_ALL",
+            HttpImageHolder.lastUpdateSslMode,
+        )
+    }
+
+    /**
+     * §review-blocker-#6/B1 negative control: a trustAll=false (default) profile
+     * MUST propagate trustAll=false — confirms the new argument path is wired
+     * for both branches and HttpImageHolder stays SystemDefault.
+     */
+    @Test
+    fun `applySavedSettings propagates trustAll=false for default profile`() {
+        HttpImageHolder.resetTestState()
+        val profile = HostProfile(
+            name = "ca",
+            serverUrl = "https://ca.example",
+            trustAll = false,
+        )
+        every { hostProfileStore.currentProfile() } returns profile
+        every { hostProfileStore.profiles() } returns listOf(profile)
+        every { repository.currentSslConfig() } returns SslConfig.SystemDefault
+
+        applySavedSettings(repository, settingsManager, hostProfileStore, slices)
+
+        verify {
+            repository.configure(
+                baseUrl = "https://ca.example",
+                username = null,
+                password = null,
+                hostPort = "ca.example:443",
+                clientCert = null,
+                slim = false,
+                trustAll = false,
+            )
+        }
+        assertEquals(
+            "HttpImageHolder stamped SYSTEM for trustAll=false",
+            "SYSTEM",
+            HttpImageHolder.lastUpdateSslMode,
+        )
     }
 
     @Test
