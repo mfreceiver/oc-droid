@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.data.model.HostProfile
+import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.HostProfileController
 import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
 import cn.vectory.ocdroid.util.SettingsManager
@@ -82,6 +83,13 @@ class HostViewModel @Inject constructor(
     private val store: SharedStateStore,
     private val hostProfileController: HostProfileController,
     private val settingsManager: SettingsManager,
+    /**
+     * §需求13: needed by [refreshProviders] to emit [ControllerEffect.LoadProviders]
+     * onto the shared effect bus. Mirrors the ComposerViewModel / SessionViewModel
+     * pattern (this VM already routes cross-domain actions through the effect
+     * bus via [HostProfileController.resetLocalDataAndResync]).
+     */
+    private val effectBus: SharedEffectBus,
 ) : ViewModel() {
 
     /**
@@ -89,11 +97,19 @@ class HostViewModel @Inject constructor(
      * [SettingsViewModel.secondary constructor] rationale. Forwards the same
      * deps the production Hilt binding uses.
      */
-    internal constructor(core: AppCore) : this(core.store, core.hostProfileController, core.settingsManager)
+    internal constructor(core: AppCore) : this(core.store, core.hostProfileController, core.settingsManager, core.effectBus)
 
     val hostFlow get() = store.hostFlow
     val connectionFlow get() = store.connectionFlow
     val settingsFlow get() = store.settingsFlow
+    /**
+     * §需求13 rev-7 #3: exposes the shared UiEvent bus so
+     * HostProfilesManagerScreen can collect UiEvent.Error emissions (the
+     * manual model-refresh failure snackbar) when ChatScaffold is NOT
+     * composed (the user navigated INTO the host manager). Mirrors
+     * [ChatViewModel.uiEvents] / [OrchestratorViewModel.uiEvents].
+     */
+    val uiEvents get() = effectBus.uiEventsConsumed
 
     /**
      * C-D3 rev-3 round-7 (review I5-R7): the save transaction's lifecycle
@@ -205,7 +221,7 @@ class HostViewModel @Inject constructor(
      */
     fun toggleModelDisabled(providerId: String, modelId: String) {
         val profile = currentHostProfile()
-        val fp = profile.serverGroupFp.ifBlank { profile.id }
+        val fp = profile.id
         val key = "$providerId/$modelId"
         val currentlyDisabled = key in store.settingsFlow.value.disabledModels
         settingsManager.setModelDisabled(fp, providerId, modelId, disabled = !currentlyDisabled)
@@ -225,7 +241,7 @@ class HostViewModel @Inject constructor(
      */
     fun setProviderModelsEnabled(providerId: String, enabled: Boolean) {
         val profile = currentHostProfile()
-        val fp = profile.serverGroupFp.ifBlank { profile.id }
+        val fp = profile.id
         val providers = store.settingsFlow.value.providers?.providers.orEmpty()
         val provider = providers.firstOrNull { it.id == providerId } ?: return
         val current = store.settingsFlow.value.disabledModels.toMutableSet()
@@ -235,6 +251,23 @@ class HostViewModel @Inject constructor(
         }
         settingsManager.setDisabledModels(fp, current)
         store.mutateSettings { it.copy(disabledModels = current) }
+    }
+
+    /**
+     * §需求13: manual model-catalog refresh entry point for the Host
+     * Profiles Manager screen's Model management section. Mirrors
+     * [ComposerViewModel.refreshProviders] — emits
+     * [ControllerEffect.LoadProviders] on the shared effect bus; AppCore's
+     * dispatchEffect collector routes it to [launchLoadProviders] (sets
+     * `isLoadingProviders=true` synchronously, fetches, clears the flag in
+     * its `finally`). The Host screen's ModelManagementSection refresh
+     * IconButton is its sole call site.
+     *
+     * Failure surfaces as a UiEvent.Error snackbar via the onNonFatalError
+     * hook in AppCore's LoadProviders handler.
+     */
+    fun refreshProviders() {
+        effectBus.tryEmitEffect(ControllerEffect.LoadProviders)
     }
 
     /**

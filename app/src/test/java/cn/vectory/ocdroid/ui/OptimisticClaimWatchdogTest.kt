@@ -16,7 +16,7 @@ import org.junit.Test
  */
 class OptimisticClaimWatchdogTest {
 
-    private val scope = ScopeKey(serverGroupFp = "grp", endpointFp = "ep")
+    private val scope = ScopeKey(profileId = "grp", endpointFp = "ep")
 
     private fun entry(
         status: String = "busy",

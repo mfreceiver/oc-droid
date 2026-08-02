@@ -205,12 +205,14 @@ fun ChatScaffold(
     // slice; the `by` delegate and the handle read the SAME State instance.
     val connectionState = chatVM.connectionFlow.collectAsStateWithLifecycle()
     val connection by connectionState
-    // §sse-feedback-ux (P2-1): derived SSE-disconnect status for the in-chat
-    // banner. Pure projection of the connection slice (see
-    // [cn.vectory.ocdroid.ui.deriveSseConnectionFeedback]); collected here so
-    // the banner recomposes only on a status change / ticker tick while a
-    // disconnect is visible (WhileSubscribed upstream; healthy path = no churn).
-    val sseFeedback by chatVM.sseConnectionFeedback.collectAsStateWithLifecycle()
+    // §sse-feedback-ux (§1.3): derived SSE-disconnect status for the in-chat
+    // banner + hysteresis-governed visibility. Pure projections of the
+    // connection slice (see [cn.vectory.ocdroid.ui.deriveSseConnectionFeedback]
+    // / [bannerHysteresisReducer]); collected here so the banner recomposes
+    // only on a status change / ticker tick while a disconnect is visible
+    // (WhileSubscribed upstream; healthy path = no churn).
+    // §C2: banner visibility driven by process-scoped [BannerHysteresisOwner].
+    val bannerVisibility by chatVM.bannerVisibility.collectAsStateWithLifecycle()
     val trafficState = connectionVM.trafficFlow.collectAsStateWithLifecycle()
     val traffic by trafficState
     val composerState = composerVM.composerFlow.collectAsStateWithLifecycle()
@@ -1028,7 +1030,7 @@ fun ChatScaffold(
                     // only when a session is actually open.
                     if (chromeSessionId != null) {
                         SseDisconnectBanner(
-                            feedback = sseFeedback,
+                            visibility = bannerVisibility.visibility,
                             onRefresh = { chatVM.refreshCurrentSession(chromeSessionId) },
                         )
                     }

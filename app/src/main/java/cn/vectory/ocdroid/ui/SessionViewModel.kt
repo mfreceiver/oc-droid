@@ -270,7 +270,7 @@ class SessionViewModel @Inject constructor(
         // pop-to-Sessions.
         if (!isCurrent) return
         if (curId != null) {
-            val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+            val fp = hostProfileStore.currentProfile().id
             settingsManager.setDraftText(fp, curId, store.composerFlow.value.inputText)
             settingsManager.flushDraftText()
         }
@@ -353,7 +353,7 @@ class SessionViewModel @Inject constructor(
         store.dispatch(AppAction.WorkdirDraftStarted(workdir = workdir))
         settingsManager.currentWorkdir = workdir
         // glm-3 🟡#1: single-read fp.
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val fp = hostProfileStore.currentProfile().id
         settingsManager.addRecentWorkdir(fp, workdir)
         // §R18 Phase 3 Wave 2 (drift #6): ephemeral directory-session prefetch
         // → viewModelScope. If the user navigates away mid-fetch the partial
@@ -376,27 +376,27 @@ class SessionViewModel @Inject constructor(
 
     fun archiveSession(sessionId: String) {
         // glm-3 🟡#1: single-read fp (was inline lambda double-read currentProfile).
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val fp = hostProfileStore.currentProfile().id
         launchSetSessionArchived(
             appScope, repository, store.slices, settingsManager, sessionId, archived = true,
             EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
             // R-20 Phase 1 (C3): emit EvictSession per archived subtree id so
             // the cache (memory + persistent) is cleared for dismissed sessions.
-            currentServerGroupFp = { fp },
+            currentProfileId = { fp },
             emitEffect = { effect -> effectBus.tryEmitEffect(effect) },
         )
     }
 
     fun restoreSession(sessionId: String) {
         // glm-3 🟡#1: single-read fp.
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val fp = hostProfileStore.currentProfile().id
         launchSetSessionArchived(
             appScope, repository, store.slices, settingsManager, sessionId, archived = false,
             EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
             // C3: restore does not emit EvictSession (gated on isArchive inside
             // launchSetSessionArchived); pass the providers anyway for symmetry
             // so a future restore-also-evicts change is a one-liner.
-            currentServerGroupFp = { fp },
+            currentProfileId = { fp },
             emitEffect = { effect -> effectBus.tryEmitEffect(effect) },
         )
     }
@@ -426,13 +426,13 @@ class SessionViewModel @Inject constructor(
 
     fun deleteSession(sessionId: String) {
         // glm-3 🟡#1: single-read fp.
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val fp = hostProfileStore.currentProfile().id
         launchDeleteSession(
             appScope, repository, store.slices, settingsManager, sessionId, ::selectSession,
             EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
             // R-20 Phase 1 (C3): emit EvictSession on delete so the cache is
             // cleared for the removed session (privacy + storage hygiene).
-            currentServerGroupFp = { fp },
+            currentProfileId = { fp },
             emitEffect = { effect -> effectBus.tryEmitEffect(effect) },
         )
     }

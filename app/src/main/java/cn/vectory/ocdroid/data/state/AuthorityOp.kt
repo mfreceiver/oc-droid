@@ -93,13 +93,14 @@ sealed interface AuthorityOp {
         val localBefore: Map<String, SessionStatus>,
     ) : AuthorityOp
 
-    /** §4c.3 host purge (mirror of reduceHostStatePurged). [preserveServerGroup]
-     *  true → keep (same-group); false → clear bySid/coverage/incarnations for
+    /** §4c.3 host purge (mirror of reduceHostStatePurged). §需求12阶段3
+     *  (oracle-assessed): the former `preserveServerGroup` flag is dead under
+     *  需求12 (profiles are independent; C-8 restart kills preserved slices
+     *  anyway), so PurgeHost ALWAYS clears bySid/coverage/incarnations for
      *  [scopeKey]. (P0-A host-purge path resets authority directly in the
      *  reducer copy; this op is implemented for typed completeness.) */
     data class PurgeHost(
         val scopeKey: ScopeKey,
-        val preserveServerGroup: Boolean,
     ) : AuthorityOp
 
     /** REST source failure → covered entries become fail-closed unknown (absent

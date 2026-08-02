@@ -701,7 +701,7 @@ class ServiceSseConnectionOwnerSseConnectedTest {
         // defensive backstop. The reducer advances the generation stamp
         // atomically (inside dispatch's state.update CAS) so any stale
         // collector carrying prePurgeGen loses.
-        store.dispatch(cn.vectory.ocdroid.ui.AppAction.HostStatePurged(preserveServerGroupData = false))
+        store.dispatch(cn.vectory.ocdroid.ui.AppAction.HostStatePurged)
         assertFalse("purge cleared the breath flag", sseConnected())
         assertTrue(
             "purge advanced the generation stamp (so stale writes lose the CAS)",

@@ -348,7 +348,7 @@ class P0EDurableErrorRecoveryTest {
         )
         val store = storeWithChat(chat)
 
-        store.dispatch(AppAction.HostStatePurged(preserveServerGroupData = false))
+        store.dispatch(AppAction.HostStatePurged)
 
         val outChat = store.stateFlow.value.chat
         assertTrue("pendingErrorReattach cleared by HostStatePurged",

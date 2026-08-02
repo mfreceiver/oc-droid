@@ -105,7 +105,7 @@ class B2RouteWiringSequenceTest {
         override val effects: SharedEffectBus = SharedEffectBus()
         override val settingsManager: SettingsManager = mockk(relaxed = true)
         override val statusAggregatorInput: cn.vectory.ocdroid.service.status.StatusAggregatorInput? = null
-        override fun serverGroupFp(): String = "test-fp"
+        override fun profileId(): String = "test-fp"
         override fun stripeFor(sid: String): Mutex = Mutex()
         override fun scheduleDeltaFlush(partId: String) {}
         override fun clearDeltaBuffers() {}

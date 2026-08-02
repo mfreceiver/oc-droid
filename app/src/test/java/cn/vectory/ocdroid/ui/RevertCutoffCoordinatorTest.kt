@@ -26,14 +26,14 @@ class RevertCutoffCoordinatorTest : MainViewModelTestBase() {
     @Test
     fun `cross host fetch completion drops stale live cutoff`() = runTest {
         val gate = CompletableDeferred<Result<MessagesPage>>()
-        var profile = HostProfile.defaultDirect("http://a").copy(serverGroupFp = "A")
+        var profile = HostProfile.defaultDirect("http://a")
         every { hostProfileStore.currentProfile() } answers { profile }
         coEvery { repository.getMessagesPaged("s1", any(), any()) } coAnswers { gate.await() }
         val core = createCore()
         seedPending(core, "m1")
 
         val job = async(start = CoroutineStart.UNDISPATCHED) { RevertCutoffCoordinator(core).ensure("s1", "m1") }
-        profile = HostProfile.defaultDirect("http://b").copy(serverGroupFp = "B")
+        profile = HostProfile.defaultDirect("http://b")
         core.writeChat { it.copy(revertCutoffs = emptyMap()) }
         gate.complete(Result.success(page("m1", 10L)))
         job.await()

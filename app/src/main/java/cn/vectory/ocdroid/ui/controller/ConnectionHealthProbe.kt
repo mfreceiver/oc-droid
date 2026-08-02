@@ -79,7 +79,7 @@ internal class ConnectionHealthProbe(
     private val settingsManager: SettingsManager,
     private val effects: SharedEffectBus,
     private val serverCompatProfile: ServerCompatProfile,
-    private val currentServerGroupFp: () -> String,
+    private val currentProfileId: () -> String,
     private val clock: () -> Long,
     private val identityStore: ConnectionIdentityStore?,
     private val bootstrapCoordinator: ConnectionBootstrapCoordinator?,
@@ -430,7 +430,7 @@ internal class ConnectionHealthProbe(
                             val identity = identityStore
                             if (identity != null && probeEpoch != null) {
                                 val bound = identity.bindIfCurrent(
-                                    serverGroupFp = currentServerGroupFp(),
+                                    profileId = currentProfileId(),
                                     normalizedWorkdir = settingsManager.currentWorkdir ?: "",
                                     endpointFp = resolvedEndpoint?.url ?: settingsManager.serverUrl,
                                     expectedEpoch = probeEpoch,

@@ -1,5 +1,6 @@
 // DebugLogSection.kt — the in-Settings debug-log viewer (level filter, pause,
-// copy, clear, virtualized LazyColumn) plus its private LevelChip helper.
+// copy, clear, non-virtualized Column + SelectionContainer for cross-line selection)
+// plus its private LevelChip helper.
 //
 // §grouping-rewrite 项 2: the two R-19 Sprint 1 Lane D diagnostic panels
 // (EffectBusDroppedPanel + SseUnknownEventsPanel) and their Hilt @EntryPoint
@@ -24,9 +25,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -46,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -292,48 +294,162 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // ── Virtualized log view (LazyColumn) ──
-            // Virtualization: only ~15 visible rows compose/recompose instead
-            // of all entries (up to 1000), each of which called
-            // SimpleDateFormat.format() on every recomposition. That was a
-            // 10–50% CPU hotspot during high-frequency SSE streams while
-            // Settings was open.
+            // ── Non-virtualized log view (Column + SelectionContainer) ──
+            // Replaces the prior LazyColumn to support cross-line text selection.
+            // SelectionContainer + LazyColumn is known-unstable across screen
+            // boundaries (only materialized items are selectable, selection is lost
+            // on scroll), so we sacrifice virtualization in favor of usable
+            // multi-line selection. The ring-buffer cap (MAX_ENTRIES = 3000)
+            // keeps composition cost acceptable.
+            //
+            // §stable-seq-key: each Text is wrapped in `key(entry.seq)` so
+            // Compose matches nodes by the Entry's monotonic sequence number,
+            // NOT by position. This is mandatory because the log is newest-first
+            // (DebugLog.log addFirst to index 0): every new entry shifts all
+            // existing entries down one slot, so a position-only identity would
+            // cause Text instances (and their SelectionContainer selectable
+            // registrations) to be reused across different log lines on every
+            // recomposition — corrupting the active selection. `seq` is the
+            // stable, collision-free key designed for exactly this (see
+            // DebugLog.Entry KDoc). Note: `key` stabilizes node IDENTITY so the
+            // active selection survives appends (no mis-assignment / clearing),
+            // but it does NOT skip recomposition — because the list is
+            // newest-first, inserting a row still shifts all following entries,
+            // and Compose recomposes shifted keyed nodes. The per-row text is
+            // therefore cached (see §row-text-cache) to make that unavoidable
+            // recomposition cheap.
+            //
+            // §platform-limit-autoscroll: the Compose Foundation LIBRARY
+            // (androidx.compose.foundation:foundation) at the version pinned by
+            // composeBom 2025.12.00 does NOT auto-scroll the viewport when a
+            // drag selection extends beyond the visible bounds. That capability
+            // (auto-scroll-on-drag-beyond-viewport) is introduced in Compose
+            // Foundation 1.12.0-alpha02 — this is a library version, unrelated
+            // to the Android API level. Cross-line selection is fully usable
+            // within the viewport; to extend a selection past the edge the user
+            // must scroll manually (then continue dragging). This is an
+            // accepted platform trade-off (user decision: keep cross-line
+            // selection), not a bug.
             //
             // §scroll-safety: the .heightIn(max = 360.dp) below is LOAD-BEARING.
-            // This LazyColumn is hosted inside SettingsScreen's
+            // This Column is hosted inside SettingsScreen's
             // Column(Modifier.verticalScroll(...)), whose children receive an
-            // infinite max-height constraint. Without this cap the LazyColumn
-            // would crash with "Vertically scrollable component was measured
-            // with an infinity maximum height constraints". Do NOT remove it.
-            val logListState = rememberLazyListState()
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 360.dp),
-                state = logListState
-            ) {
-                if (filtered.isEmpty()) {
-                    item {
+            // infinite max-height constraint. Without this cap the Column would
+            // grow unbounded. Do NOT remove it.
+            SelectionContainer {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    if (filtered.isEmpty()) {
                         Text(
                             if (liveEntries.isEmpty()) stringResource(R.string.debug_log_empty) else stringResource(R.string.debug_log_empty_filtered),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
-                }
-                items(items = filtered, key = { entry -> entry.seq }) { entry ->
-                    val levelColor = when (entry.level) {
-                        DebugLog.Level.DEBUG -> MaterialTheme.colorScheme.onSurfaceVariant
-                        DebugLog.Level.INFO -> MaterialTheme.colorScheme.onSurface
-                        DebugLog.Level.WARN -> MaterialTheme.colorScheme.error
-                        DebugLog.Level.ERROR -> MaterialTheme.colorScheme.error
+                    // §row-text-cache: bounded cache of formatted row text,
+                    // keyed by entry.seq in a TreeMap.
+                    //
+                    // WHY CACHE: the log is newest-first (§stable-seq-key), so
+                    // every append shifts all following entries and forces their
+                    // recomposition — without a cache that re-runs sdf.format +
+                    // string-template for up to MAX_ENTRIES rows each time. seq is
+                    // monotonic and never reused (DebugLog's AtomicLong), so a seq
+                    // key is stable: an entry formatted once is reused on
+                    // subsequent recompositions as long as it stays in the cache
+                    // (see Concurrency caveat below for the rare case where a
+                    // still-visible entry is evicted early). The cache has NO
+                    // remember-key — a key on `filtered`/`displayed` would rebuild
+                    // the whole map on every append and destroy the benefit (per
+                    // fixup2 r2).
+                    //
+                    // WHY TREEMAP (not LinkedHashMap/LRU): the viewer iterates
+                    // in the deque's publish order (typically newest-first). Under
+                    // that access pattern an access-order LRU evicts the wrong end
+                    // of the sequence (the end the viewer just visited), so a
+                    // full-capacity append cascades into a full re-format (fixup2
+                    // r4 regression). A seq-keyed TreeMap makes eviction
+                    // ORDER-INDEPENDENT: firstKey() is always the smallest seq
+                    // (a TreeMap property, independent of any access order),
+                    // which on the common path (seq published in allocation
+                    // order) is the entry the ring buffer drops next.
+                    //
+                    // Concurrency caveat (cache is a perf optimization, NOT a
+                    // correctness mechanism — see BOUND for the hard guarantee):
+                    // DebugLog.log allocates seq BEFORE the deque lock, so under
+                    // concurrent logging a later-published entry can carry a
+                    // smaller seq than an already-published one. A small-seq entry
+                    // still in the visible window can then be the cache's smallest
+                    // key and get evicted (pollFirstEntry) before the data it
+                    // represents leaves the ring — causing that entry to miss again
+                    // on later recompositions until it ages out of the ring. This
+                    // degrades hit-rate but never breaks the cap or corrupts text
+                    // (every miss just re-formats). In practice the app's log
+                    // sources publish near-sequentially, so this is rare; the bound
+                    // and correctness hold in ALL states regardless.
+                    //
+                    // NO CASCADE on the hot path (running append at full capacity,
+                    // common seq order): ring holds seqs [N-2999 .. N]; append N+1
+                    // evicts N-2999 from the ring. forEach visits N+1 (miss →
+                    // insert → size>cap → pollFirstEntry evicts N-2999, which is no
+                    // longer in `filtered` so it is not revisited), then N, N-1, …
+                    // all HIT. Net: 1 format + 1 eviction per append. (LRU evicted
+                    // N instead → cascade.)
+                    //
+                    // PAUSED: forEach iterates the frozen snapshot, whose seqs were
+                    // typically all cached before pause → HIT, zero inserts/
+                    // evictions, so background appends usually do not perturb the
+                    // cache while paused. (Edge cases that CAN cause misses while
+                    // paused: a pause followed by a level-filter change that exposes
+                    // rows never previously formatted, or the concurrency caveat
+                    // above. Each miss inserts; if that pushes size > MAX_ENTRIES
+                    // the smallest seq is evicted — see BOUND. The cap still holds.)
+                    //
+                    // BOUND: eviction runs only on the new-seq miss path, removing
+                    // the single smallest seq when size > MAX_ENTRIES. The map is
+                    // therefore structurally capped at DebugLog.MAX_ENTRIES in ALL
+                    // states (running / paused / post-clear) — the cap is the ring
+                    // buffer's own capacity (single source of truth, DebugLog.kt).
+                    //
+                    // levelColor is NOT cached — it reads MaterialTheme.colorScheme,
+                    // so it stays recomposed per row.
+                    val rowTextCache = remember { java.util.TreeMap<Long, String>() }
+                    filtered.forEach { entry ->
+                        val levelColor = when (entry.level) {
+                            DebugLog.Level.DEBUG -> MaterialTheme.colorScheme.onSurfaceVariant
+                            DebugLog.Level.INFO -> MaterialTheme.colorScheme.onSurface
+                            DebugLog.Level.WARN -> MaterialTheme.colorScheme.error
+                            DebugLog.Level.ERROR -> MaterialTheme.colorScheme.error
+                        }
+                        // §stable-seq-key (see comment above): wrap in key() so
+                        // node identity follows the Entry, not the list index.
+                        key(entry.seq) {
+                            // §row-text-cache access: hit → reuse; miss → format
+                            // and, if over cap, evict the smallest seq (the entry
+                            // the ring buffer has dropped next on the common seq
+                            // path — see §row-text-cache caveat above). getOrPut
+                            // alone doesn't bound a TreeMap, so the cap check runs
+                            // only on the miss path.
+                            val cached = rowTextCache[entry.seq]
+                            val text = cached ?: run {
+                                val formatted = "[${sdf.format(entry.timeMs)}] ${entry.tag}/${entry.level}: ${entry.message}"
+                                rowTextCache[entry.seq] = formatted
+                                if (rowTextCache.size > DebugLog.MAX_ENTRIES) {
+                                    rowTextCache.pollFirstEntry()
+                                }
+                                formatted
+                            }
+                            Text(
+                                text = text,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = BundledMonoFamily,
+                                color = levelColor
+                            )
+                        }
                     }
-                    Text(
-                        text = "[${sdf.format(entry.timeMs)}] ${entry.tag}/${entry.level}: ${entry.message}",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = BundledMonoFamily,
-                        color = levelColor
-                    )
                 }
             }
         }

@@ -8,6 +8,10 @@ import cn.vectory.ocdroid.data.repository.MessagesPage
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.UiEvent
+import cn.vectory.ocdroid.ui.BannerHysteresisOwner
+import cn.vectory.ocdroid.ui.BannerHysteresisState
+import io.mockk.mockk
+import kotlinx.coroutines.flow.MutableStateFlow
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -43,7 +47,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `compactSession with no current session emits error_compact_no_session`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         advanceUntilIdle()  // pump UiEvent collector
 
         vm.compactSession()
@@ -56,7 +60,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `compactSession with no current model emits error_compact_no_model`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat { it.copy(currentSessionId = "s1") }  // no currentModel
         advanceUntilIdle()
 
@@ -70,7 +74,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `compactSession with isCompacting already true is a no-op`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
@@ -88,7 +92,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     fun `compactSession happy path sets isCompacting and calls summarize`() = runTest {
         coEvery { repository.summarizeSession(any(), any()) } returns Result.success(true)
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
@@ -121,7 +125,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
             OpenCodeRepository.SummarizeServerRejectedException()
         )
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
@@ -148,7 +152,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
             java.net.SocketTimeoutException("response timed out"))
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
@@ -178,7 +182,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
             java.io.IOException("connection refused"))
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
@@ -205,7 +209,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
             java.net.SocketTimeoutException("response timed out"))
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
@@ -237,7 +241,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
             java.net.SocketTimeoutException("response timed out"))
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
@@ -278,7 +282,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coEvery { repository.summarizeSession(any(), any()) } returns Result.failure(
             java.net.SocketTimeoutException("response timed out"))
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
@@ -344,7 +348,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `clearCompacting clears the flag when it is set`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat { it.copy(isCompacting = true, compactStartedAt = 99L) }
 
         vm.clearCompacting()
@@ -356,7 +360,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `clearCompacting is a no-op when isCompacting is already false`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
 
         vm.clearCompacting()
 
@@ -368,7 +372,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `editFromMessage with no current session is a no-op`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
 
         vm.editFromMessage("m1")
         advanceUntilIdle()
@@ -379,7 +383,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `editFromMessage with unknown message id is a no-op`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat { it.copy(currentSessionId = "s1", messages = listOf(Message(id = "other", role = "user"))) }
 
         vm.editFromMessage("m1")
@@ -391,7 +395,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `editFromMessage with non-user message is a no-op`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat {
             it.copy(currentSessionId = "s1", messages = listOf(Message(id = "m1", role = "assistant")))
         }
@@ -405,7 +409,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `editFromMessage with blank draft text is a no-op`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
@@ -428,7 +432,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
@@ -459,7 +463,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         // Route says "ses_route_current"; flat currentSessionId LAGS at "ses_lagging_old".
         // The route authority MUST win.
         core.store.mutateNav {
@@ -485,7 +489,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coEvery { repository.revertSession(any(), any(), any()) } returns Result.failure(
             java.io.IOException("denied"))
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat {
             it.copy(
                 currentSessionId = "s1",
@@ -505,7 +509,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `abortSession with no current session is a no-op`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
 
         vm.abortSession()
         advanceUntilIdle()
@@ -517,7 +521,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     fun `abortSession happy path calls repository abortSession`() = runTest {
         coEvery { repository.abortSession(any()) } returns Result.success(Unit)
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat { it.copy(currentSessionId = "s1") }
 
         vm.abortSession()
@@ -531,7 +535,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coEvery { repository.abortSession(any()) } returns Result.failure(
             java.io.IOException("already finished"))
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat { it.copy(currentSessionId = "s1") }
         advanceUntilIdle()
 
@@ -548,7 +552,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coEvery { repository.checkHealth() } returns Result.success(
             cn.vectory.ocdroid.data.model.HealthResponse(healthy = true, version = "1.0"))
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
 
         vm.refreshCurrentSession()
         advanceUntilIdle()
@@ -559,7 +563,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `refreshCurrentSession with is-loading-messages is a no-op`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat { it.copy(currentSessionId = "s1", isLoadingMessages = true) }
 
         vm.refreshCurrentSession()
@@ -580,7 +584,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         every { repository.connectSSE(any()) } returns kotlinx.coroutines.flow.emptyFlow()
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat { it.copy(currentSessionId = "s1") }
 
         vm.refreshCurrentSession()
@@ -594,7 +598,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `togglePartExpand flips value via composerController`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
 
         vm.togglePartExpand("p1", currentValue = false)
         assertEquals(true, core.expandedParts.value["p1"])
@@ -606,7 +610,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `clearExpandedParts empties the map`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         vm.togglePartExpand("p1", currentValue = false)
         vm.togglePartExpand("p2", currentValue = false)
         assertTrue(core.expandedParts.value.isNotEmpty())
@@ -621,7 +625,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `loadMoreMessages with no current session is a no-op`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
 
         vm.loadMoreMessages()
         advanceUntilIdle()
@@ -634,7 +638,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         val msgs = listOf(MessageWithParts(info = Message(id = "old1", role = "user")))
         coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(msgs, "next"))
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat { it.copy(currentSessionId = "s1", olderMessagesCursor = "current", hasMoreMessages = true) }
 
         vm.loadMoreMessages()
@@ -651,7 +655,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSession(any()) } returns Result.success(Session(id = "s1", directory = "/x"))
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat { it.copy(currentSessionId = "s1") }
         core.writeSessionList { it.copy(sessions = listOf(Session(id = "s1", directory = "/x"))) }
         core.writeComposer { it.copy(inputText = "hi") }
@@ -668,7 +672,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
             MessagesPage(emptyList(), null))
         coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat { it.copy(currentSessionId = "s1") }
 
         vm.loadMessages("s1")
@@ -680,7 +684,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `accessors delegate to core flows`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         assertEquals(core.chatFlow, vm.chatFlow)
         assertEquals(core.sessionListFlow, vm.sessionListFlow)
         assertEquals(core.unreadFlow, vm.unreadFlow)
@@ -697,7 +701,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     @Test
     fun `sessionWindowCacheSize and peekSessionWindow delegate to sessionSwitcher`() = runTest {
         val core = createCore()
-        val vm = ChatViewModel(core)
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         assertEquals(0, vm.sessionWindowCacheSize())
         assertNull(vm.peekSessionWindow("missing"))
     }

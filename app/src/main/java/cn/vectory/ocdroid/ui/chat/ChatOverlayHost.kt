@@ -22,7 +22,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
@@ -174,16 +173,13 @@ fun ChatOverlayHost(
         // - skipPartiallyExpanded 默认 true（recipe 固化点①），与其它三个 sheet 一致；
         //   Todo 原是现网唯一半展的 sheet，现按本批决策统一全展。
         // - 容器色 surfaceContainerLow 由 recipe 统一（用户点 5：底色统一）。
-        // - 高度：自然高度 + heightIn(max ≈ 屏 0.75) 封顶超长列表；不用 weight(1f)。
-        val todoSheetMaxHeight = (LocalConfiguration.current.screenHeightDp * 0.75f).dp
+        // - 高度：自然高度；超长列表由 scaffold 的 contentMaxHeightFraction=0.8
+        //   统一封顶（SheetRecipe.kt），不用 weight(1f)。
         AppBottomSheet(
             onDismissRequest = { onDismissTodo() },
             title = stringResource(R.string.chat_todo),
         ) {
-            TodoListPanel(
-                todos = todos,
-                modifier = Modifier.heightIn(max = todoSheetMaxHeight),
-            )
+            TodoListPanel(todos = todos)
         }
     }
 
@@ -199,17 +195,16 @@ fun ChatOverlayHost(
     // ── Workdir picker (AppBottomSheet) ──────────────────────────────
     // §drawer-new-session: project picker when ≥2 workdirs connected (mirrors
     // SessionsScreen's pendingWorkdirPick sheet). Selection starts a draft there.
-    // Wrapped in a scrollable, height-capped Column so up to ~30 workdirs stay
-    // reachable (mirrors the TodoListPanel heightIn(max) precedent).
+    // Scrollable Column; height cap is applied by the scaffold's
+    // contentMaxHeightFraction=0.8 (SheetRecipe.kt). Workdir lists are short
+    // (≤30) so won't approach the cap.
     if (pendingWorkdirPick) {
-        val pickerMaxHeight = (LocalConfiguration.current.screenHeightDp * 0.6f).dp
         AppBottomSheet(
             onDismissRequest = { onDismissWorkdirPick() },
             title = stringResource(R.string.sessions_pick_workdir_title),
         ) {
             Column(
                 modifier = Modifier
-                    .heightIn(max = pickerMaxHeight)
                     .verticalScroll(rememberScrollState()),
             ) {
                 recentWorkdirs.forEach { workdir ->

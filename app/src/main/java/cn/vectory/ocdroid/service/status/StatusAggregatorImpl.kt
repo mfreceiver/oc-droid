@@ -214,11 +214,11 @@ class StatusAggregatorImpl internal constructor(
      * [identityStore] identity (NOT from the per-call `identity` param — the
      * bound identity is the single source of truth for "current scope", and in
      * production the per-call identity always matches it). Used both as the
-     * composite-key [serverGroupFp] for derived entries and as the
+     * composite-key [profileId] for derived entries and as the
      * [AuthorityState.coverage] lookup key.
      *
      * §U-MN10 (分歧3) rev-gpt gate r1: in STEADY STATE (no concurrent
-     * reconfigure), `scopeKeyOf(perCallIdentity.serverGroupFp, …)` MUST equal
+     * reconfigure), `scopeKeyOf(perCallIdentity.profileId, …)` MUST equal
      * `currentScope()`. This invariant is NOT runtime-enforced — the reads of
      * [currentEpoch] + [currentIdentity] are two independent lock-free reads,
      * so a runtime check() could fire across a legitimate cross-thread
@@ -228,7 +228,7 @@ class StatusAggregatorImpl internal constructor(
      */
     private fun currentScope(): ScopeKey {
         val id = identityStore.currentIdentity.value
-        return scopeKeyOf(id?.serverGroupFp, id?.endpointFp)
+        return scopeKeyOf(id?.profileId, id?.endpointFp)
     }
 
     /**
@@ -236,7 +236,7 @@ class StatusAggregatorImpl internal constructor(
      * aggregator's internal [Aggregate] shape (the SAME shape the pre-Lane-2
      * mutation API produced). The derivation:
      *
-     *  - `currentGroupFp` = the bound identity's `serverGroupFp` (scopes the
+     *  - `currentGroupFp` = the bound identity's `profileId` (scopes the
      *    composite keys + the lifecycle projection).
      *  - `entries`: each `(sid, SessionEntry)` in `state.authority.bySid` →
      *    `SessionStatusKey(currentGroupFp, workdir ?: "", sid)` →
@@ -256,7 +256,7 @@ class StatusAggregatorImpl internal constructor(
     private fun authorityToAggregate(state: StoreState): Aggregate {
         val authority = state.authority
         val scope = currentScope()
-        val currentFp = scope.serverGroupFp
+        val currentFp = scope.profileId
         val entries = HashMap<SessionStatusKey, Entry>(authority.bySid.size)
         for ((sid, e) in authority.bySid) {
             // §P0-A r2 #4: scope-check by entry.scopeKey. An entry whose scopeKey
@@ -375,7 +375,7 @@ class StatusAggregatorImpl internal constructor(
         // CP4 §2 epoch guard: drop the response if a reconfigure invalidated
         // this request mid-flight (checked AFTER the suspend, BEFORE dispatch).
         if (identityStore.currentEpoch() != epochAtRequestStart) return
-        val scopeKey = scopeKeyOf(identity.serverGroupFp, identity.endpointFp)
+        val scopeKey = scopeKeyOf(identity.profileId, identity.endpointFp)
         // §U-MN10 (分歧3) rev-gpt gate r1: NO runtime check() here. The
         // currentEpoch() read above + currentScope()'s currentIdentity read are
         // TWO independent lock-free reads (AtomicLong + AtomicReference-backed
@@ -508,7 +508,7 @@ class StatusAggregatorImpl internal constructor(
         sourceTimeMs: Long,
         token: RequestToken,
     ) {
-        val scopeKey = scopeKeyOf(identity.serverGroupFp, identity.endpointFp)
+        val scopeKey = scopeKeyOf(identity.profileId, identity.endpointFp)
         // §U-MN10 (分歧3): NO consistency assertion here. This internal helper
         // is reached from TWO callers: (1) refresh()'s onFailure (the epoch
         // guard at refresh():368 precedes it — safe to assert there) and
@@ -548,7 +548,7 @@ class StatusAggregatorImpl internal constructor(
         val cov = committed.coverage
         val verdict = project(committed, now)
         val fp = committed.currentGroupFp
-        val scoped = map.filterKeys { it.serverGroupFp == fp }
+        val scoped = map.filterKeys { it.profileId == fp }
         val anyBusy = scoped.any { entry ->
             entry.value.status == SessionBusyStatus.Busy ||
                 entry.value.status == SessionBusyStatus.Retry
@@ -570,7 +570,7 @@ class StatusAggregatorImpl internal constructor(
         val map = committed.entries
         val cov = committed.coverage
         val fp = committed.currentGroupFp
-        val scoped = map.filterKeys { it.serverGroupFp == fp }
+        val scoped = map.filterKeys { it.profileId == fp }
 
         // gate #5: positively known active unmapped ids → Busy (highest priority).
         if (cov.unmappedActiveIds.isNotEmpty()) return GlobalBusyState.Busy
@@ -621,7 +621,7 @@ class StatusAggregatorImpl internal constructor(
         val cov = committed.coverage
         val fp = committed.currentGroupFp
         val idleDeadlines = map
-            .filter { it.key.serverGroupFp == fp && it.value.status == SessionBusyStatus.Idle }
+            .filter { it.key.profileId == fp && it.value.status == SessionBusyStatus.Idle }
             .values
             .map { it.sourceTimeMs + STATUS_TTL_MS + 1 }
             .filter { it > now }

@@ -8,27 +8,13 @@ import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.util.DebugLog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.net.SocketTimeoutException
 import javax.inject.Inject
-
-/**
- * §sse-feedback-ux (P2-1): WhileSubscribed stop timeout for
- * [ChatViewModel.sseConnectionFeedback]. Keeps the ticker + upstream alive
- * briefly across a config-change recomposition so the disconnect label does
- * not blink, then tears down to zero overhead on the happy path.
- */
-private const val STOP_TIMEOUT_MS = 5_000L
 
 /**
  * * R-17 batch3 → batch3d: Chat-domain ViewModel. Owns the chat slice + the
@@ -57,6 +43,7 @@ private const val STOP_TIMEOUT_MS = 5_000L
 @HiltViewModel
 class ChatViewModel @Inject constructor(
     internal val core: AppCore,
+    private val bannerOwner: BannerHysteresisOwner,
 ) : ViewModel() {
     private val revertConversation = RevertConversation(core)
     private val revertCutoffCoordinator = RevertCutoffCoordinator(core)
@@ -113,67 +100,10 @@ class ChatViewModel @Inject constructor(
         }
 
     /**
-     * §sse-feedback-ux (P2-1): derived projection of [SseConnectionFeedback]
-     * for the in-chat disconnect banner. Combines [connectionFlow] (phase +
-     * disconnectedSince) + [cn.vectory.ocdroid.ui.SharedStateStore.sseConnectedFlow]
-     * + a coarse wall-clock ticker ([SSE_FEEDBACK_TICK_MS]) so the "disconnected
-     * Nm ago" label refreshes while a sustained disconnect is visible.
-     *
-     * Pure READ — introduces NO writable truth: it projects the authoritative
-     * connection slice through the pure [deriveSseConnectionFeedback]. The
-     * upstream (incl. the ticker) only runs while collected:
-     * [SharingStarted.WhileSubscribed] starts the pipeline when the banner
-     * subscribes and tears it down 5s after the last collector leaves (config-
-     * change grace), so there is no forever-ticker on the happy path — when
-     * healthy the distinct [SseConnectionFeedback.Live] emission is stable and
-     * the ticker's equal re-emissions are dropped by distinctUntilChanged.
-     *
-     * Consumers: [cn.vectory.ocdroid.ui.chat.SseDisconnectBanner] (rendered by
-     * ChatScaffold). The banner's Refresh action calls
-     * [refreshCurrentSession] — the existing REST-fallback recovery path — so
-     * the feedback loop closes without a new write surface.
+     * §C1/C2: banner visibility state driven by [BannerHysteresisOwner] —
+     * process-scoped, no WhileSubscribed reset, deadline-accurate timing.
      */
-    val sseConnectionFeedback: StateFlow<SseConnectionFeedback> =
-        combine(
-            core.connectionFlow,
-            core.store.sseConnectedFlow,
-            disconnectTickerFlow(),
-        ) { conn, sseConnected, now ->
-            deriveSseConnectionFeedback(
-                phase = conn.connectionPhase,
-                disconnectedSince = conn.disconnectedSince,
-                sseConnected = sseConnected,
-                now = now,
-            )
-        }
-            .distinctUntilChanged()
-            .stateIn(
-                scope = viewModelScope,
-                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
-                initialValue = run {
-                    val conn = core.connectionFlow.value
-                    deriveSseConnectionFeedback(
-                        phase = conn.connectionPhase,
-                        disconnectedSince = conn.disconnectedSince,
-                        sseConnected = core.store.sseConnectedFlow.value,
-                        now = System.currentTimeMillis(),
-                    )
-                },
-            )
-
-    /**
-     * §sse-feedback-ux: coarse wall-clock ticker — emits the current time
-     * immediately then every [SSE_FEEDBACK_TICK_MS]. A plain cold [Flow]; it
-     * only runs while [sseConnectionFeedback] has a subscriber (WhileSubscribed
-     * upstream), and [delay] is cancellable so collection stops promptly on
-     * teardown.
-     */
-    private fun disconnectTickerFlow(): Flow<Long> = flow {
-        while (true) {
-            emit(System.currentTimeMillis())
-            delay(SSE_FEEDBACK_TICK_MS)
-        }
-    }
+    internal val bannerVisibility: StateFlow<BannerHysteresisState> = bannerOwner.state
 
     /** §R-17 batch3e: repository exposed so ChatMessageList can pass it down
      *  to MessageRow without touching `.core.` from a Composable. */
@@ -201,7 +131,7 @@ class ChatViewModel @Inject constructor(
         // [AppCore.loadMessagesForEffect] (the main production path) AND here
         // (side-door for retry / edit-and-rerun). Both gate via the shared
         // [shouldOpenTokenStream] predicate — see the open at line ~148.
-        val fp = core.currentServerGroupFp()
+        val fp = core.currentProfileId()
         launchLoadMessages(
             scope = core.appScope,
             repository = core.repository,
@@ -212,8 +142,8 @@ class ChatViewModel @Inject constructor(
             onCacheWindow = core.makeCacheHook(fp),
             emit = EventEmitter { event -> core.effectBus.tryEmitUiEvent(event) },
             // gpter 复审 final-fix: compound-key guard.
-            expectedServerGroupFp = fp,
-            currentServerGroupFp = core.currentServerGroupFp,
+            expectedProfileId = fp,
+            currentProfileId = core.currentProfileId,
             // The VM is also a live route-aware entry point (refresh/retry),
             // not only a legacy bare-chat caller. Capture the active minted
             // token here so its completion updates LoadedContent as well.
@@ -246,7 +176,7 @@ class ChatViewModel @Inject constructor(
         val sessionId = core.store.chatFlow.value.currentSessionId ?: return
         val routeInstance = core.store.slices.routeInstanceFor(sessionId)
         // glm-3 🟡#1 / gpter 复审 final-fix: single-read fp.
-        val fp = core.currentServerGroupFp()
+        val fp = core.currentProfileId()
         launchLoadMoreMessages(
             scope = core.appScope,
             repository = core.repository,
@@ -254,8 +184,8 @@ class ChatViewModel @Inject constructor(
             sessionId = sessionId,
             onCacheWindow = core.makeCacheHook(fp),
             // gpter 复审 final-fix: compound-key guard.
-            expectedServerGroupFp = fp,
-            currentServerGroupFp = core.currentServerGroupFp,
+            expectedProfileId = fp,
+            currentProfileId = core.currentProfileId,
             expectedRouteInstance = routeInstance,
         )
     }
@@ -692,7 +622,7 @@ class ChatViewModel @Inject constructor(
      */
     fun expandParts(sessionId: String, parts: List<cn.vectory.ocdroid.data.model.Part>) {
         // P4: capture host identity ONCE (no TOCTOU).
-        val capturedFp = core.currentServerGroupFp()
+        val capturedFp = core.currentProfileId()
         // Capture both freshness tokens at invocation time. Completion must
         // validate these captured values; re-reading either one would let an
         // old response be accepted under a newer host/client generation.
@@ -745,7 +675,7 @@ class ChatViewModel @Inject constructor(
             // P4: set Loading in one atomic commit — recheck each key in CAS.
             core.writeChat { current ->
                 if (current.currentSessionId != sessionId) return@writeChat current
-                if (core.currentServerGroupFp() != capturedFp) return@writeChat current
+                if (core.currentProfileId() != capturedFp) return@writeChat current
 
                 val loadingUpdates = keysToLoad
                     .filter { key ->
@@ -767,7 +697,7 @@ class ChatViewModel @Inject constructor(
 
             // P4: abort if identity changed during dispatch (before network call).
             if (core.store.chatFlow.value.currentSessionId != sessionId) return@launch
-            if (core.currentServerGroupFp() != capturedFp) return@launch
+            if (core.currentProfileId() != capturedFp) return@launch
             if (!core.repository.isSlimCommitTokenCurrent(capturedSlimToken)) return@launch
 
             // Step 8: invoke usecase (non-mutating, CE discipline).
@@ -794,7 +724,7 @@ class ChatViewModel @Inject constructor(
                 // P2: guard delayed failure — only mark keys still Loading.
                 core.writeChat { current ->
                     if (current.currentSessionId != sessionId) return@writeChat current
-                    if (core.currentServerGroupFp() != capturedFp) return@writeChat current
+                    if (core.currentProfileId() != capturedFp) return@writeChat current
                     if (!core.repository.isSlimCommitTokenCurrent(capturedSlimToken)) return@writeChat current
 
                     val updatedStates = current.partExpandStates.toMutableMap()
@@ -818,7 +748,7 @@ class ChatViewModel @Inject constructor(
             // ChatState.reconcileExpandedPartsContent against the LATEST chat
             // (state.update CAS loop), so concurrent SSE updates to other
             // owners are preserved — restores pre-Strategy-1 writeChat CAS.
-            if (core.currentServerGroupFp() != capturedFp) return@launch
+            if (core.currentProfileId() != capturedFp) return@launch
             if (!core.repository.isSlimCommitTokenCurrent(capturedSlimToken)) return@launch
             core.store.dispatch(
                 AppAction.ExpandedPartsContentCommitted(

@@ -43,8 +43,8 @@ interface SseDispatchHost {
 
     // ── Helpers exposed from SSC ────────────────────────────────────────────
 
-    /** Returns the current host's serverGroupFp (for keying eviction effects). */
-    fun serverGroupFp(): String
+    /** Returns the current host's profileId (for keying eviction effects). */
+    fun profileId(): String
 
     /**
      * Returns the per-sid stripe [Mutex] so handlers can serialize
@@ -183,12 +183,12 @@ internal fun SseDispatchHost.applyStatusViaAuthority(
     // the TOCTOU window where a host switch between the isCurrent check and the
     // dispatch would attribute the frame to the wrong scope. When no event
     // identity is available (test/legacy path), fall back to current behavior
-    // (serverGroupFp from the current host, no captured identity, epoch 0L).
+    // (profileId from the current host, no captured identity, epoch 0L).
     val eventIdentity = currentEventIdentity()
     val (scopeKey, capturedIdentity, identityEpochAtCapture) = if (eventIdentity != null) {
         Triple(
             cn.vectory.ocdroid.data.state.scopeKeyOf(
-                eventIdentity.serverGroupFp, eventIdentity.endpointFp,
+                eventIdentity.profileId, eventIdentity.endpointFp,
             ),
             eventIdentity,
             slices.store.captureIdentityEpoch(),
@@ -196,7 +196,7 @@ internal fun SseDispatchHost.applyStatusViaAuthority(
     } else {
         Triple(
             cn.vectory.ocdroid.data.state.scopeKeyOf(
-                serverGroupFp(), "",
+                profileId(), "",
             ),
             null,
             0L,

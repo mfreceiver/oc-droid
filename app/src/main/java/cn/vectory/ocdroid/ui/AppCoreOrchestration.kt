@@ -104,7 +104,7 @@ internal data class DraftRouteOrigin(
     val requestedRoute: String,
     val requestedNavEpoch: Long,
     val routeInstance: Long,
-    val serverGroupFp: String,
+    val profileId: String,
     /** §blocker2: the host profile id at send-click; compared inside the CAS. */
     val hostProfileId: String?,
 ) {
@@ -538,7 +538,7 @@ internal fun AppCore.materializeDraftSession(
                     // changing means the host identity changed mid-create → do
                     // NOT send to the wrong host.
                     val hostChanged = store.hostFlow.value.currentHostProfileId != origin.hostProfileId ||
-                        currentServerGroupFp() != origin.serverGroupFp
+                        currentProfileId() != origin.profileId
                     if (hostChanged) {
                         DebugLog.w(
                             "Materialize",
@@ -592,7 +592,7 @@ private fun AppCore.captureDraftRouteOrigin(): DraftRouteOrigin {
         requestedRoute = nav.lastRoute,
         requestedNavEpoch = nav.navEpoch,
         routeInstance = store.stateFlow.value.chatRouteInstance,
-        serverGroupFp = currentServerGroupFp(),
+        profileId = currentProfileId(),
         // §blocker2: capture the host profile id so the CAS can detect a
         // mid-create host switch (host.currentHostProfileId changes on
         // selectHostProfile / connect).
@@ -740,7 +740,7 @@ internal fun AppCore.dispatchCapturedSend(
     // the user's newer text is still in the composer and the normal draft
     // debounce will persist it).
     if (textMatches) {
-        settingsManager.setDraftText(currentServerGroupFp(), sessionId, "")
+        settingsManager.setDraftText(currentProfileId(), sessionId, "")
         settingsManager.flushDraftText()
     }
 
@@ -960,7 +960,7 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
     writeComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds + sessionId) }
     // §streaming-state-sync-diag: optimistic sendingSessionIds set at send time.
     DebugLog.i("SendDiag", "optimistic sendingSessionIds set sid=$sessionId")
-    settingsManager.setDraftText(currentServerGroupFp(), sessionId, "")
+    settingsManager.setDraftText(currentProfileId(), sessionId, "")
     // §C1: flush the draft clear so it is durable BEFORE the send launches —
     // a crash / background right after Send must not leave the now-empty
     // composer's cleared draft unwritten (the debounce could otherwise keep
@@ -1027,7 +1027,7 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
             // reload). The slash path (executeCommand) never had this call and
             // relied on SSE + the targeted message reload — same shape now.
             onSuccess = {
-                settingsManager.setDraftText(currentServerGroupFp(), sessionId, "")
+                settingsManager.setDraftText(currentProfileId(), sessionId, "")
                 // §C1: flush the durable clear now that the send succeeded —
                 // the composer is confirmed empty for this session and any
                 // pending debounced clear must land on disk immediately.
@@ -1067,7 +1067,7 @@ private fun AppCore.dispatchSendMessage(sessionId: String) {
                 .onFailure { error ->
                     val currentInput = store.composerFlow.value.inputText
                     val restored = if (currentInput.isBlank()) text else currentInput
-                    if (restored != currentInput) settingsManager.setDraftText(currentServerGroupFp(), sessionId, restored)
+                    if (restored != currentInput) settingsManager.setDraftText(currentProfileId(), sessionId, restored)
                     effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_restore_session_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                     writeComposer { c ->
                         c.copy(sendingSessionIds = c.sendingSessionIds - sessionId, inputText = restored)
@@ -1184,6 +1184,16 @@ internal const val SSE_FEEDBACK_TICK_MS = 30_000L
  *                          "live updates are off" instead of looking broken.
  *  - [Idle]              — no connection activity (initial / clean reset).
  */
+/**
+ * §sse-feedback-ux (§1.1): semantic category for the in-chat banner. Pure
+ * derivation — what to show, separate from when to show it (handled by
+ * [BannerHysteresisState] / [bannerHysteresisReducer]).
+ *
+ * Priority: AUTH_FAILURE (more specific/actionable) wins over REST_OUTAGE when
+ * [ConnectionState.mtlsDegradedError] is non-null.
+ */
+internal enum class BannerCategory { REST_OUTAGE, AUTH_FAILURE, SSE_STALLED, USER_DISABLED }
+
 sealed interface SseConnectionFeedback {
     data object Live : SseConnectionFeedback
     data object WaitingForStream : SseConnectionFeedback
@@ -1215,6 +1225,10 @@ internal fun deriveSseConnectionFeedback(
     disconnectedSince: Long?,
     sseConnected: Boolean,
     now: Long,
+    /** §1.1: mTLS cert/credential degradation — null = no auth issue.
+     *  Read by [SseConnectionFeedback.bannerCategory] for AUTH_FAILURE / REST_OUTAGE
+     *  disambiguation. Kept as a param so this function stays PURE. */
+    mtlsDegradedError: String? = null,
 ): SseConnectionFeedback = when (phase) {
     ConnectionPhase.Idle -> SseConnectionFeedback.Idle
     ConnectionPhase.Connecting -> SseConnectionFeedback.Connecting
@@ -1227,26 +1241,316 @@ internal fun deriveSseConnectionFeedback(
     ConnectionPhase.SseDisabled -> SseConnectionFeedback.Disabled
 }
 
-/**
- * §sse-feedback-ux: should the in-chat banner be shown for this feedback?
- * True ONLY for a sustained terminal disconnect or a user-chosen REST-only
- * mode — the transient / healthy / decision-pending variants stay silent so
- * the banner never cries wolf on a brief network blip or while the TOFU dialog
- * is handling a cert decision.
- */
-internal val SseConnectionFeedback.showBanner: Boolean
-    get() = this is SseConnectionFeedback.Disconnected || this is SseConnectionFeedback.Disabled
+// ════════════════════════════════════════════════════════════════════════════
+// §sse-feedback-ux (§1.3): Banner hysteresis — grace / min-display / recover-hide
+// anti-flash reducer. Separates "WHAT to show" (pure [bannerCategory]) from
+// "WHEN to show" (stateful hysteresis with a controllable clock).
+// ════════════════════════════════════════════════════════════════════════════
 
 /**
- * §sse-feedback-ux: elapsed ms since the terminal disconnect was stamped, or
- * null when the feed is not in a banner-worthy disconnect. Computed from the
- * derivation clock ([Disconnected.now]) captured at emit time so the label is
- * consistent with the value the banner received (not a fresh re-read that
- * could drift past the last tick). Coerced to ≥0 so a clock skew can never
- * render a negative duration.
+ * §1.3: Tunable timing parameters for the banner hysteresis reducer.
+ * These are ANTI-FLASH constants, NOT data-recovery thresholds (do NOT
+ * reuse [SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS]).
+ *
+ * @param showGraceMs       disconnect must sustain this long before showing
+ *                          (transient blip → never shown). Default 5s.
+ * @param minDisplayMs      once shown, must remain visible at least this long
+ *                          (anti one-frame flash). Default 3s.
+ * @param recoverHideDelayMs after recovery, delay this long before hiding
+ *                          (anti flapping on intermittent connectivity).
+ *                          Default 5s.
  */
-internal fun SseConnectionFeedback.disconnectDurationMs(): Long? =
-    (this as? SseConnectionFeedback.Disconnected)?.let { (it.now - it.sinceMs).coerceAtLeast(0L) }
+internal data class BannerHysteresisConfig(
+    val showGraceMs: Long = 5_000L,
+    val minDisplayMs: Long = 3_000L,
+    val recoverHideDelayMs: Long = 5_000L,
+)
+
+/**
+ * §C3: Input to the hysteresis reducer — carries both the semantic category
+ * and the captured auth reason (mtlsDegradedError) at the moment the category
+ * was established. The reducer preserves this payload through transitions
+ * so the displayed info is always a coherent snapshot.
+ */
+internal data class BannerCategoryInput(
+    val category: BannerCategory,
+    val authReason: String?,
+)
+
+/**
+ * §1.3: UI-facing visibility — what the banner composable reads.
+ * [Hidden] = render nothing; [Showing] = render with the given category.
+ *
+ * §C3: [Showing] carries [authReason] as part of a coherent payload.
+ */
+internal sealed class BannerVisibility {
+    data object Hidden : BannerVisibility()
+    data class Showing(
+        val category: BannerCategory,
+        /** §C3: captured auth reason, non-null only for AUTH_FAILURE. */
+        val authReason: String?,
+        val sinceMs: Long,
+    ) : BannerVisibility()
+}
+
+/**
+ * §1.3: Internal phase of the hysteresis state machine. Tracks intermediate
+ * states (PendingShow/PendingHide) that are invisible to the UI but carry
+ * timing information for the reducer transitions.
+ *
+ * §C3: All phases that carry a category now also carry [authReason] for a
+ * coherent displayed payload (no torn-read between visibility and feedback).
+ */
+internal sealed class BannerHysteresisPhase {
+    data object Hidden : BannerHysteresisPhase()
+    data class PendingShow(
+        val category: BannerCategory,
+        val authReason: String?,
+        val atMs: Long,
+    ) : BannerHysteresisPhase()
+    data class Showing(
+        val category: BannerCategory,
+        val authReason: String?,
+        val sinceMs: Long,
+    ) : BannerHysteresisPhase()
+    data class PendingHide(
+        val category: BannerCategory,
+        val authReason: String?,
+        val atMs: Long,
+        val sinceMs: Long,
+    ) : BannerHysteresisPhase()
+}
+
+/**
+ * §1.3: Combined state of the hysteresis reducer. [visibility] is what the UI
+ * checks; [phase] is the internal machine state that drives transitions.
+ */
+internal data class BannerHysteresisState(
+    val visibility: BannerVisibility = BannerVisibility.Hidden,
+    internal val phase: BannerHysteresisPhase = BannerHysteresisPhase.Hidden,
+)
+
+/**
+ * §1.3: Pure hysteresis state-machine reducer. Drives the "when to show"
+ * logic with grace / min-display / recover-hide delay, independent of the
+ * "what category" logic ([bannerCategory]).
+ *
+ * State machine transitions (implemented exactly — this is the anti-flash contract):
+ * The `authReason` field is pure payload — it is carried through transitions
+ * but NEVER influences the transition logic (which only checks null-ness of
+ * [input]):
+ *
+ * ```
+ * Hidden        + input!=null          → PendingShow(now)                    // grace starts; NOT visible
+ * PendingShow   + input!=null & now≥at+grace → Showing(now)                 // grace elapses → visible
+ * PendingShow   + input==null          → Hidden                              // recovered within grace: never shown
+ * PendingShow   + input!=null & now<at+grace → PendingShow(at)              // stay in grace, update payload
+ * Showing       + input!=null          → Showing(since)                      // stay; update payload
+ * Showing       + input==null & now≥since+minDisplay → PendingHide(now)      // min-display met, start hide delay
+ * Showing       + input==null & now<since+minDisplay → Showing               // min-display NOT met: keep showing
+ * PendingHide   + input!=null          → Showing(since)                      // re-show (anti flap)
+ * PendingHide   + input==null & now≥at+recoverDelay → Hidden
+ * PendingHide   + input==null & now<at+recoverDelay → PendingHide
+ * ```
+ *
+ * §C3: [input] carries both the semantic [BannerCategory] and the
+ * [BannerCategoryInput.authReason] captured at the moment the category was
+ * established. The reducer preserves `authReason` through all transitions
+ * so the displayed payload is always a coherent snapshot (no torn reads
+ * between visibility and the underlying feedback).
+ *
+ * Inject a controllable [now] clock for testability. Pure — no side effects.
+ *
+ * @param prev    previous state.
+ * @param input   current banner category input (null = not banner-worthy right now).
+ * @param now     current wall-clock ms (injected for testability).
+ * @param config  timing parameters.
+ */
+internal fun bannerHysteresisReducer(
+    prev: BannerHysteresisState,
+    input: BannerCategoryInput?,
+    now: Long,
+    config: BannerHysteresisConfig = BannerHysteresisConfig(),
+): BannerHysteresisState {
+    val nextPhase: BannerHysteresisPhase = when (val p = prev.phase) {
+        is BannerHysteresisPhase.Hidden -> {
+            if (input != null) {
+                BannerHysteresisPhase.PendingShow(
+                    category = input.category,
+                    authReason = input.authReason,
+                    atMs = now,
+                )
+            } else {
+                BannerHysteresisPhase.Hidden
+            }
+        }
+
+        is BannerHysteresisPhase.PendingShow -> {
+            if (input == null) {
+                // Recovered within grace — never shown
+                BannerHysteresisPhase.Hidden
+            } else if (now >= p.atMs + config.showGraceMs) {
+                // Grace elapsed → promote to Showing
+                BannerHysteresisPhase.Showing(
+                    category = input.category,
+                    authReason = input.authReason,
+                    sinceMs = now,
+                )
+            } else {
+                // Still within grace period — stay PendingShow, update payload
+                BannerHysteresisPhase.PendingShow(
+                    category = input.category,
+                    authReason = input.authReason,
+                    atMs = p.atMs,
+                )
+            }
+        }
+
+        is BannerHysteresisPhase.Showing -> {
+            if (input != null) {
+                // Stay showing; update payload if changed (REST_OUTAGE↔AUTH_FAILURE)
+                BannerHysteresisPhase.Showing(
+                    category = input.category,
+                    authReason = input.authReason,
+                    sinceMs = p.sinceMs,
+                )
+            } else if (now >= p.sinceMs + config.minDisplayMs) {
+                // Min-display met → start hide delay
+                BannerHysteresisPhase.PendingHide(
+                    category = p.category,
+                    authReason = p.authReason,
+                    atMs = now,
+                    sinceMs = p.sinceMs,
+                )
+            } else {
+                // Min-display NOT met — keep showing
+                BannerHysteresisPhase.Showing(
+                    category = p.category,
+                    authReason = p.authReason,
+                    sinceMs = p.sinceMs,
+                )
+            }
+        }
+
+        is BannerHysteresisPhase.PendingHide -> {
+            if (input != null) {
+                // Recovered during hide delay — re-show (anti flap), preserve original sinceMs
+                BannerHysteresisPhase.Showing(
+                    category = input.category,
+                    authReason = input.authReason,
+                    sinceMs = p.sinceMs,
+                )
+            } else if (now >= p.atMs + config.recoverHideDelayMs) {
+                // Hide delay elapsed → fully hidden
+                BannerHysteresisPhase.Hidden
+            } else {
+                // Still within hide delay — wait
+                BannerHysteresisPhase.PendingHide(
+                    category = p.category,
+                    authReason = p.authReason,
+                    atMs = p.atMs,
+                    sinceMs = p.sinceMs,
+                )
+            }
+        }
+    }
+
+    // Derive UI-facing visibility from the phase
+    val nextVisibility: BannerVisibility = when (nextPhase) {
+        is BannerHysteresisPhase.Hidden -> BannerVisibility.Hidden
+        is BannerHysteresisPhase.PendingShow -> BannerVisibility.Hidden
+        is BannerHysteresisPhase.Showing ->
+            BannerVisibility.Showing(
+                category = nextPhase.category,
+                authReason = nextPhase.authReason,
+                sinceMs = nextPhase.sinceMs,
+            )
+        is BannerHysteresisPhase.PendingHide ->
+            // Still visible during hide delay (anti-flap)
+            BannerVisibility.Showing(
+                category = nextPhase.category,
+                authReason = nextPhase.authReason,
+                sinceMs = nextPhase.sinceMs,
+            )
+    }
+
+    return BannerHysteresisState(visibility = nextVisibility, phase = nextPhase)
+}
+
+/**
+ * §C1: Computes the next wall-clock deadline at which the hysteresis state
+ * machine needs to re-evaluate. Returns null when no pending deadline exists
+ * (Showing and Hidden have no fixed timeouts — they wait for external events).
+ *
+ * Used by [BannerHysteresisOwner] to schedule a focused delay at the exact
+ * deadline, replacing the old 30s coarse ticker for hysteresis timing.
+ */
+internal fun computeHysteresisDeadlineMs(
+    state: BannerHysteresisState,
+    now: Long,
+    config: BannerHysteresisConfig = BannerHysteresisConfig(),
+): Long? {
+    // §b4-rev2 🔴1 fix: Showing MUST schedule a re-evaluation at sinceMs+minDisplayMs.
+    // The reducer holds the banner in Showing while category==null but now<since+minDisplay
+    // (min-display not yet met — anti one-frame flash). Without a deadline here, a recovery
+    // that lands inside the min-display window would leave the banner stuck in Showing
+    // forever: no category event fires (connection is healthy), no ticker drives the
+    // reducer, so the since+minDisplay transition to PendingHide never triggers.
+    // The deadline is the min-display expiry; when it fires, the owner re-runs the reducer
+    // with a fresh `now` that (now ≥ since+minDisplay) drives Showing→PendingHide.
+    return when (val p = state.phase) {
+        is BannerHysteresisPhase.PendingShow -> p.atMs + config.showGraceMs
+        is BannerHysteresisPhase.PendingHide -> p.atMs + config.recoverHideDelayMs
+        is BannerHysteresisPhase.Showing -> p.sinceMs + config.minDisplayMs
+        is BannerHysteresisPhase.Hidden -> null
+    }
+}
+
+/**
+ * §sse-feedback-ux (§1.1): should the in-chat banner EVER be considered for
+ * this feedback? True for terminal disconnect / SSE stall / user-disabled —
+ * the transient / healthy / decision-pending variants stay silent so the
+ * banner never cries wolf on a brief network blip or while the TOFU dialog
+ * is handling a cert decision.
+ *
+ * NOTE: this only determines WHETHER the feedback is "banner-worthy" at all.
+ * The actual VISIBILITY (debounce / grace / min-display / recover-hide) is
+ * governed by [BannerHysteresisState] / [bannerHysteresisReducer]. The
+ * auth-vs-outage distinction (REST_OUTAGE vs AUTH_FAILURE) is decided by
+ * [bannerCategory], NOT by showBanner.
+ *
+ * §1.1 漏报 fix: [WaitingForStream] now returns true — previously silent.
+ */
+internal val SseConnectionFeedback.showBanner: Boolean
+    get() = this is SseConnectionFeedback.Disconnected ||
+        this is SseConnectionFeedback.Disabled ||
+        this is SseConnectionFeedback.WaitingForStream
+
+/**
+ * §sse-feedback-ux (§1.1): what semantic category does this feedback represent?
+ * Pure function of [SseConnectionFeedback] + the mTLS-auth signal. Returns
+ * null when the feedback is NOT banner-worthy (Live / Connecting / Reconnecting
+ * / AwaitingTofuTrust / Idle) — the caller interprets null as "no banner".
+ *
+ * Priority rule: AUTH_FAILURE wins over REST_OUTAGE when
+ * [mtlsDegradedError] is non-null (more actionable root cause).
+ *
+ * §1.1 漏报 fix: [WaitingForStream] → [BannerCategory.SSE_STALLED].
+ */
+internal fun SseConnectionFeedback.bannerCategory(
+    mtlsDegradedError: String?,
+): BannerCategory? = when (this) {
+    is SseConnectionFeedback.Disabled -> BannerCategory.USER_DISABLED
+    is SseConnectionFeedback.WaitingForStream -> BannerCategory.SSE_STALLED
+    is SseConnectionFeedback.Disconnected ->
+        if (mtlsDegradedError != null) BannerCategory.AUTH_FAILURE else BannerCategory.REST_OUTAGE
+    // Live / Connecting / Reconnecting / ReconnectingAttempt / AwaitingTofuTrust / Idle → no banner
+    is SseConnectionFeedback.Live -> null
+    is SseConnectionFeedback.Connecting -> null
+    is SseConnectionFeedback.Reconnecting -> null
+    is SseConnectionFeedback.AwaitingTofuTrust -> null
+    is SseConnectionFeedback.Idle -> null
+}
 
 /**
  * Returns `true` iff the clear+reload actually ran; `false` iff the isLoading
@@ -1390,7 +1694,7 @@ internal fun AppCore.performForceRefresh(sessionId: String) {
 internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
     // capture fp once (glm-3 🟡#1 single-read) for the cache hook + the G6
     // current-workdir input.
-    val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+    val fp = hostProfileStore.currentProfile().id
     // G6 inputs: SSE coverage baseline + the live SSE workdir (drives shouldProbeCatchUp).
     val sseSnap = sessionSyncCoordinator.sseSyncStateSnapshot()
     // §P0-3 (SSE-liveness wiring): gate the coverage short-circuit on REAL SSE
@@ -1415,20 +1719,20 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
         settingsManager = settingsManager,
         onCacheWindow = makeCacheHook(fp),
         // §fix-#2 (gpter 复审 #2 — glm-3 前次 #3 修复的实现错误): pass the
-        // LIVE fp provider (the injected @Named("currentServerGroupFp")
+        // LIVE fp provider (the injected @Named("currentProfileId")
         // reference on AppCore), NOT `{ fp }`. The previous `{ fp }` captured
-        // the same snapshot as `expectedServerGroupFp = fp` below → the onSuccess
-        // guard `currentServerGroupFp() != expectedServerGroupFp` was恒等
+        // the same snapshot as `expectedProfileId = fp` below → the onSuccess
+        // guard `currentProfileId() != expectedProfileId` was恒等
         // (no-op): a host switch during the probe REST was never detected, and
         // the stale response was merged into the new group's slice. With the
-        // live provider, currentServerGroupFp() reads the current host's fp
+        // live provider, currentProfileId() reads the current host's fp
         // each call, so a mid-probe host switch makes the guard fire.
-        currentServerGroupFp = currentServerGroupFp,
+        currentProfileId = currentProfileId,
         // §fix-#3 (gpter #3): the fp captured AT CALL TIME (initiation
         // snapshot). The onSuccess guard compares this vs the live
-        // currentServerGroupFp() — a mismatch means the user switched host
+        // currentProfileId() — a mismatch means the user switched host
         // group during the probe; the stale response must NOT be merged.
-        expectedServerGroupFp = fp,
+        expectedProfileId = fp,
         sseCurrentWorkdir = sseWorkdir,
         sessionsEverColdSnapshotted = sseSnap.sessionsEverColdSnapshotted,
         onColdSnapshot = { sid -> sessionSyncCoordinator.markSessionColdSnapshotted(sid) },
@@ -1444,7 +1748,7 @@ internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) {
     val catchUpWorkdirs = computeQuestionFanOutWorkdirs(
         directorySessionKeys = store.sessionListFlow.value.directorySessions.keys,
         currentWorkdir = settingsManager.currentWorkdir,
-        recentWorkdirs = settingsManager.getRecentWorkdirs(currentServerGroupFp()),
+        recentWorkdirs = settingsManager.getRecentWorkdirs(currentProfileId()),
     )
     foregroundCatchUpController.catchUpPendingQuestionsAllWorkdirs(
         repository = repository,
@@ -1492,10 +1796,10 @@ internal fun shouldOpenTokenStream(
  * cannot re-key a write to the wrong group (plan §3 closure-capture rule).
  *
  * gpter 复审 final-fix: passes the compound-key guard params
- * ([AppCore.currentServerGroupFp] captured + provider) so the REST onSuccess
+ * ([AppCore.currentProfileId] captured + provider) so the REST onSuccess
  * re-checks the fp after the async fetch. The VerifyAndHydrate handler
  * calls this AFTER its own 二次 guard confirmed fp match, so
- * `currentServerGroupFp()` here equals `effect.serverGroupFp`.
+ * `currentProfileId()` here equals `effect.profileId`.
  */
 internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolean, forceInitialWindow: Boolean = false, expectedRouteInstance: Long = 0L) {
     launchLoadMessages(
@@ -1505,11 +1809,11 @@ internal fun AppCore.loadMessagesForEffect(sessionId: String, resetLimit: Boolea
         sessionId = sessionId,
         resetLimit = resetLimit,
         settingsManager = settingsManager,
-        onCacheWindow = makeCacheHook(currentServerGroupFp()),
+        onCacheWindow = makeCacheHook(currentProfileId()),
         emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
         // gpter 复审 final-fix: compound-key guard (captured fp + provider).
-        expectedServerGroupFp = currentServerGroupFp(),
-        currentServerGroupFp = currentServerGroupFp,
+        expectedProfileId = currentProfileId(),
+        currentProfileId = currentProfileId,
         // §empty-window-fix: forwarded ONLY by the VerifyAndHydrate cold-load
         // branch (resident-but-empty window OR genuine cache miss) so the slim
         // fetch bypasses a stale watermark. All other callers keep the default
@@ -1569,8 +1873,8 @@ internal fun AppCore.loadSessionsForEffect() {
         // `cacheRepository = cacheRepository` argument (R-20 Phase 1 C7
         // currentSessionId fingerprint self-check) was deleted together
         // with the CacheRepository surface.
-        expectedServerGroupFp = currentServerGroupFp(),
-        currentServerGroupFp = currentServerGroupFp,
+        expectedProfileId = currentProfileId(),
+        currentProfileId = currentProfileId,
         // §grouping-rewrite Round-2 #5: the hostProfileStore arg that R-20
         // Phase 5 wired here (for cross-group merge of LAN + tunnel same-server
         // profiles) is removed — attemptCrossGroupMerge was deleted by item 1
@@ -1637,7 +1941,7 @@ private fun AppCore.dispatchBulkArchivedSessions(
     }
     if (currentWasArchived && previousCurrentId != null) {
         effectBus.tryEmitEffect(
-            ControllerEffect.EvictSession(currentServerGroupFp(), previousCurrentId)
+            ControllerEffect.EvictSession(currentProfileId(), previousCurrentId)
         )
     }
 }
@@ -1669,7 +1973,7 @@ private fun AppCore.createSessionInWorkdirForEffect(workdir: String) {
     // state → no torn intermediates for stateFlow collectors.
     store.dispatch(AppAction.WorkdirDraftStarted(workdir = workdir))
     settingsManager.currentWorkdir = workdir
-    settingsManager.addRecentWorkdir(currentServerGroupFp(), workdir)
+    settingsManager.addRecentWorkdir(currentProfileId(), workdir)
     appScope.launch {
         repository.getSessionsForDirectory(workdir)
             .onSuccess { sessions ->

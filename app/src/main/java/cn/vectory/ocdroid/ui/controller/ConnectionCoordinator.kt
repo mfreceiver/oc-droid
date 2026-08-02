@@ -119,11 +119,11 @@ class ConnectionCoordinator(
     private val serverCompatProfile: ServerCompatProfile,
     /**
      * R-20 Phase 3: provider for the current host's serverGroupFp. Same
-     * `@Named("currentServerGroupFp")` provider every other controller uses
+     * `@Named("currentProfileId")` provider every other controller uses
      * (ControllerModule.provideCurrentServerGroupFp) — single source of truth
      * so a profile switch races the same fp read as everyone else.
      */
-    private val currentServerGroupFp: () -> String = { "" },
+    private val currentProfileId: () -> String = { "" },
     // Injected clock so the 30s health-check throttle is deterministically
     // testable without depending on wall-clock latency. Defaults to
     // System::currentTimeMillis in production (preserves the exact pre-extraction
@@ -262,6 +262,45 @@ class ConnectionCoordinator(
     private var pendingReconfigureTeardown: Deferred<Result<Unit>>? = null
 
     /**
+     * §需求13 rev-7 #1 / rev-8 #1+#2: single-flight guard for the
+     * LoadProviders emit in [loadInitialData]. Closes the check-then-act
+     * race where multiple concurrent loadInitialData() calls at cold start
+     * (MainActivity.coldStartReconnect + ON_RESUME + health-probe recovery
+     * all firing before the first /config/providers fetch completes) each
+     * saw `providers == null` and each emitted LoadProviders → duplicate
+     * parallel fetches. The [compareAndSet] in loadInitialData arms the gate
+     * exactly once per successful fetch (the gate arms via CAS on the first providers==null observation; it disarms ONLY on real fetch failure so the next loadInitialData can retry — see rev-8 #2 below).
+     *
+     * rev-8 #1: the gate is NOT re-armed at the top of [coldStartReconnect]
+     * — that method is a SHARED entry point (MainActivity cold-start,
+     * SessionsScreen force-refresh, resetLocalDataAndResync), so resetting it
+     * there re-opened the race during a normal cold start while the first
+     * fetch was still in flight (the original rev-7 bug). See the
+     * PROCESS-LIFETIME comment at the top of [coldStartReconnect].
+     *
+     * rev-8 #2 (council #2 fix): on REAL fetch failure the gate is DISARMED
+     * via [resetProvidersFirstFetchGate] (called by launchLoadProviders'
+     * onFailure callback) so the next loadInitialData / ON_RESUME auto-retries
+     * — weak-network cold-start recovery. After a hard local reset (rare,
+     * destructive; HostProfileController.resetLocalDataAndResync nulls
+     * providers) the auto-fetch stays suppressed and the user taps the Model
+     * management refresh IconButton once (that path emits LoadProviders
+     * DIRECTLY, bypassing this gate).
+     */
+    private val providersFirstFetchArmed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * §需求13 rev-8 #2 (council #2 fix): disarms the single-flight gate so the
+     * next [loadInitialData] auto-retries the providers fetch. Called by
+     * [launchLoadProviders]' onFailure callback (wired in AppCore) when
+     * getProvidersOrFailure returns a REAL failure (network/HTTP/parse) — the
+     * weak-network cold-start recovery path. Idempotent + thread-safe (AtomicBoolean).
+     */
+    internal fun resetProvidersFirstFetchGate() {
+        providersFirstFetchArmed.set(false)
+    }
+
+    /**
      * @VisibleForTesting: seam fired inside [reconfigureLock] just before
      * the handoff-probe invocation. Tests use this to deterministically
      * trigger a REAL second thread to call [cancelSseForReconfigure] while
@@ -294,7 +333,7 @@ class ConnectionCoordinator(
         settingsManager = settingsManager,
         effects = effects,
         serverCompatProfile = serverCompatProfile,
-        currentServerGroupFp = currentServerGroupFp,
+        currentProfileId = currentProfileId,
         clock = clock,
         identityStore = identityStore,
         bootstrapCoordinator = bootstrapCoordinator,
@@ -368,6 +407,20 @@ class ConnectionCoordinator(
      * `ConnectionViewModel.coldStartReconnect()`) see no change.
      */
     fun coldStartReconnect() {
+        // §需求13 rev-8 #1: NO re-arm here. coldStartReconnect() is a SHARED
+        // entry point (MainActivity cold-start LaunchedEffect,
+        // SessionsScreen force-refresh, resetLocalDataAndResync) — resetting
+        // providersFirstFetchArmed here would re-open the single-flight gate
+        // during a normal cold start / force-refresh while the first fetch is
+        // still in flight → duplicate LoadProviders (rev-7's original bug).
+        // The gate is now PROCESS-LIFETIME for the auto path: armed exactly
+        // once via the CAS in loadInitialData; reset ONLY by
+        // [resetProvidersFirstFetchGate] on real fetch failure (rev-8 #2
+        // recovery) — never reset by coldStartReconnect itself. After a hard
+        // local reset (rare, destructive) the auto-fetch stays suppressed and
+        // the user taps the Model management refresh IconButton once — that
+        // path (ComposerViewModel/HostViewModel.refreshProviders) emits
+        // LoadProviders DIRECTLY, bypassing this gate, so it always works.
         scope.launch {
             // Result-aware barrier loop: joins the pending teardown [Deferred]
             // and checks its [Result]:
@@ -521,7 +574,44 @@ class ConnectionCoordinator(
         // §R18 Phase 3 Wave 1 (P1-3 C 类): loadInitialData 五连发顺序敏感 → 保持同步 tryEmitEffect (scope.launch 包裹会破坏顺序)。
         effects.tryEmitEffect(ControllerEffect.LoadSessions)
         effects.tryEmitEffect(ControllerEffect.LoadAgents)
-        effects.tryEmitEffect(ControllerEffect.LoadProviders)
+        // §需求13: do NOT proactively fetch the model catalog on every
+        // soft-refresh / health-probe recovery / ON_RESUME. Only fetch on the
+        // TRUE first launch (providers == null) so the Model management
+        // section isn't empty before the user ever taps the manual refresh
+        // icon. Subsequent refreshes are user-driven via the Model management
+        // refresh IconButton. All 4 proactive auto-paths (ON_RESUME, sessions
+        // refresh button, ServerStatus force-refresh chain, health-probe
+        // recovery) route through this fan-out, so gating here blocks them
+        // all without per-button edits. `slices` is this controller's private
+        // SliceFlows field (same accessor as the nearby `slices.chat.value`
+        // reads + `slices.settings.value` projections).
+        //
+        // §需求13 rev-7 #1 / rev-8 #1+#2: atomic single-flight —
+        // [providersFirstFetchArmed].compareAndSet closes the check-then-act race
+        // where multiple concurrent loadInitialData() calls at cold start ALL saw
+        // providers==null and each emitted LoadProviders. CAS arms the gate exactly
+        // once per successful fetch (disarmed on real failure for retry — see
+        // rev-8 #2). rev-8 #1: the gate is NOT re-armed at the top
+        // of [coldStartReconnect] (shared entry point — see the PROCESS-LIFETIME
+        // comment there). rev-8 #2: on real fetch failure the gate is DISARMED via
+        // [resetProvidersFirstFetchGate] (launchLoadProviders onFailure callback)
+        // so the next loadInitialData / ON_RESUME auto-retries (weak-network
+        // recovery). A normal cross-host switch does NOT null providers (the
+        // reducer only clears availableCommands — see reduceHostStatePurged) so the
+        // gate stays armed and no re-fetch fires on switch (correct).
+        //
+        // rev-8 #2b (rev-gpt finding): the `!isLoadingProviders` guard closes the
+        // window where a failure-disarmed gate + an in-flight manual refresh
+        // (refreshProviders emits LoadProviders DIRECTLY, bypassing this CAS)
+        // would let a concurrent loadInitialData emit a SECOND LoadProviders →
+        // duplicate parallel /config/providers fetches. The flag is set
+        // synchronously by launchLoadProviders, so once a fetch is in flight
+        // the auto path skips re-emit and lets the in-flight request resolve it.
+        if (slices.settings.value.providers == null &&
+            !slices.settings.value.isLoadingProviders &&
+            providersFirstFetchArmed.compareAndSet(false, true)) {
+            effects.tryEmitEffect(ControllerEffect.LoadProviders)
+        }
         effects.tryEmitEffect(ControllerEffect.LoadPendingQuestions)
         effects.tryEmitEffect(ControllerEffect.LoadPendingPermissions)
         // Same-domain inline: slash commands merged with client-side commands.
@@ -556,7 +646,7 @@ class ConnectionCoordinator(
         // the right list for the active host. Same-group switches share the
         // list (correct — two entry points to the same server share project
         // memory); 异组 switches get their own list.
-        val currentFp = currentServerGroupFp()
+        val currentFp = currentProfileId()
         val restoreWorkdirs = (
             settingsManager.getRecentWorkdirs(currentFp) + listOfNotNull(settingsManager.currentWorkdir)
         ).distinct().filter { it.isNotBlank() }
@@ -615,7 +705,7 @@ class ConnectionCoordinator(
                             if (fetchIdentity != null && identityStore != null &&
                                 !identityStore.isCurrent(fetchIdentity)
                             ) return@launch
-                            val fp = currentServerGroupFp()
+                            val fp = currentProfileId()
                             if (fp.isBlank()) return@launch
                             val knownNorm = settingsManager
                                 .getRecentWorkdirs(fp)

@@ -20,6 +20,7 @@ import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.WorkdirPaths
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicLong
@@ -38,6 +39,23 @@ internal class SessionListRefreshOrchestrator(
     /** FIX-D (gpter #2, review-blocker): single-flight epoch. Intentionally separate from P7's StatusPollOrchestrator status epoch. */
     private val sessionListLoadEpoch = AtomicLong(0)
 
+    /**
+     * §需求10 C3 (round-4, oracle-driven cancel-and-replace): the in-flight
+     * heavyweight refresh job. A new caller CANCELS this (cancel-and-replace:
+     * newer intent wins; the older coroutine dies BEFORE any write because
+     * cancellation is delivered to the suspend Retrofit call and onSuccess/
+     * onFailure do not run). See [SharedStateStore.sessionListLoadInFlight]
+     * KDoc for the authoritative concurrency-model invariant set.
+     *
+     * NOT nulled in the finally: `cancel()` on a completed job is a no-op,
+     * `isListLoadInFlight()` checks `isActive`, and nulling here would clobber
+     * a newer job's reference (old finally wiping new ref) for no benefit.
+     */
+    private var inFlightLoad: Job? = null
+
+    /** Whether a session-list full refresh is currently in-flight. */
+    internal fun isListLoadInFlight(): Boolean = inFlightLoad?.isActive == true
+
     // ── Full refresh (launchLoadSessions) ──────────────────────────────────
 
     internal fun launchLoadSessions(
@@ -49,17 +67,33 @@ internal class SessionListRefreshOrchestrator(
         onLoadSessionStatus: () -> Unit,
         onLoadMessages: (String) -> Unit,
         emit: EventEmitter,
-        expectedServerGroupFp: String? = null,
-        currentServerGroupFp: (() -> String)? = null,
+        expectedProfileId: String? = null,
+        currentProfileId: (() -> String)? = null,
         onArchivedSessionsDetected: ((mergedSessions: List<Session>, hasMoreSessions: Boolean, confirmedServerIds: Set<String>, sweepNow: Long) -> Unit)? = null,
     ) {
-        scope.launch {
-            fun staleHostAfterSuspend(): Boolean = expectedServerGroupFp != null &&
-                currentServerGroupFp != null &&
-                expectedServerGroupFp != currentServerGroupFp()
+        // §需求10 C3 (round-4, oracle cancel-and-replace): newer intent supersedes
+        // the older in-flight request. Bump the epoch at ENTRY (synchronously) so the
+        // in-flight job's completion checks see the epoch moved and self-discard even
+        // before its cancellation is observed; then CANCEL the in-flight job so it dies
+        // BEFORE any write (cancellation delivered to suspend Retrofit → onSuccess/
+        // onFailure never run → no cache persist / archive callback / ClearChat).
+        // This is original FIX-D (newer-wins via epoch) + "cancel the loser so it stops
+        // consuming the network" — net code DELETION vs the prior CAS-gate + trailing-
+        // rerun design, which structurally dissolves all 3 rev-4 defects (no loser →
+        // no stale-closure rerun; flag set inside body → no acquire-before-launch leak;
+        // poller out of the gate → no lost-pending).
+        val myEpoch = sessionListLoadEpoch.incrementAndGet()
+        inFlightLoad?.cancel()
+        inFlightLoad = scope.launch {
+            try {
+                // Flag set INSIDE the body: a scope cancellation between entry and
+                // body-launch can't leak the flag (the flag is never set if the body
+                // never runs).
+                slices.store.sessionListLoadInFlight = true
 
-            // FIX-D (gpter #2): capture this request's epoch.
-            val myEpoch = sessionListLoadEpoch.incrementAndGet()
+                fun staleHostAfterSuspend(): Boolean = expectedProfileId != null &&
+                    currentProfileId != null &&
+                    expectedProfileId != currentProfileId()
 
             val limit = MainViewModelTimings.sessionFullLoadLimit
             slices.mutateSessionList {
@@ -150,7 +184,7 @@ internal class SessionListRefreshOrchestrator(
                         currentWorkdir = settingsManager.currentWorkdir,
                         revertCutoffs = slices.chat.value.revertCutoffs,
                     )
-                    val discoveryFp = currentServerGroupFp?.invoke()
+                    val discoveryFp = currentProfileId?.invoke()
                     if (!discoveryFp.isNullOrEmpty()) {
                         val knownWorkdirs = settingsManager
                             .getRecentWorkdirs(discoveryFp)
@@ -173,7 +207,7 @@ internal class SessionListRefreshOrchestrator(
                                     repository.getSessionsForDirectory(rawWorkdir)
                                         .onSuccess { dirSessions ->
                                             if (staleHostAfterSuspend()) return@launch
-                                            if (currentServerGroupFp?.invoke() != discoveryFp) return@launch
+                                            if (currentProfileId?.invoke() != discoveryFp) return@launch
                                             slices.mutateSessionList { slice ->
                                                 slice.copy(
                                                     directorySessions = slice.directorySessions + (rawWorkdir to dirSessions)
@@ -221,6 +255,17 @@ internal class SessionListRefreshOrchestrator(
                     }
                     emit.emit(UiEvent.Error(R.string.error_load_sessions_failed, listOf(errorMessageOrFallback(error, "unknown error"))))
                 }
+            } finally {
+                // §需求10 C3 (round-4, oracle cancel-and-replace): clear the flag
+                // ONLY if this job still holds the current epoch — a superseded
+                // (cancelled) job must NOT wipe the newer job's flag. inFlightLoad
+                // is intentionally NOT nulled (see its KDoc): cancel() on a
+                // completed job is a no-op, isListLoadInFlight() checks isActive,
+                // and nulling here would clobber a newer job's reference.
+                if (sessionListLoadEpoch.get() == myEpoch) {
+                    slices.store.sessionListLoadInFlight = false
+                }
+            }
         }
     }
 

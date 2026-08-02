@@ -39,7 +39,10 @@ import kotlin.concurrent.thread
 @Suppress("SameParameterValue")
 class AuthorityReducerTest {
 
-    private val scope = ScopeKey(serverGroupFp = "grp", endpointFp = "ep")
+    // §需求12阶段3: under 需求12 profileId == profile.id always. The scope's
+    // profileId dimension MUST equal PROFILE_ID so resolveScopeKey (which now
+    // returns profile.id) matches the authority entries keyed by `scope`.
+    private val scope = ScopeKey(profileId = PROFILE_ID, endpointFp = "ep")
 
     companion object {
         private const val PROFILE_ID = "auth_test_profile"
@@ -97,7 +100,6 @@ class AuthorityReducerTest {
                         id = PROFILE_ID,
                         name = "Test",
                         serverUrl = "https://test.example.com",
-                        serverGroupFp = scope.serverGroupFp,
                     )),
                 ),
                 liveEndpointFp = scope.endpointFp,
@@ -354,20 +356,15 @@ class AuthorityReducerTest {
     fun `HostStatePurged cross-group resets authority to empty and clears sessionStatuses`() {
         val store = storeWith(listOf(Session(id = "A", directory = "/x")))
         store.dispatch(AppAction.AuthorityEvent(event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY)))
-        store.dispatch(AppAction.HostStatePurged(preserveServerGroupData = false))
+        store.dispatch(AppAction.HostStatePurged)
         val out = store.stateFlow.value
         assertEquals("authority fully reset", AuthorityState(), out.authority)
         assertTrue("sessionStatuses empty", out.sessionList.sessionStatuses.isEmpty())
     }
 
-    @Test
-    fun `HostStatePurged same-group preserves authority`() {
-        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
-        store.dispatch(AppAction.AuthorityEvent(event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY)))
-        val before = store.stateFlow.value.authority
-        store.dispatch(AppAction.HostStatePurged(preserveServerGroupData = true))
-        assertEquals("same-group preserves authority", before, store.stateFlow.value.authority)
-    }
+    // §需求12阶段3: the former `HostStatePurged same-group preserves
+    // authority` test was removed — it asserted the deleted same-group
+    // preserve behavior. Under 需求12 every purge fully resets authority.
 
     // ═══════════════════════════════════════════════════════════════════════
     // pendingBumps (B8) — optimistic bump applied + consumed in the same CAS
@@ -1236,7 +1233,7 @@ class AuthorityReducerTest {
 
     @Test
     fun `r2 markFailed scopeKey filter - out-of-scope entry survives by scopeKey`() {
-        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val diffScope = ScopeKey(profileId = "other-grp", endpointFp = "other-ep")
         val store = storeWith(listOf(
             Session(id = "inScope", directory = "/shared-dir"),
             Session(id = "outScope", directory = "/shared-dir"),
@@ -1372,7 +1369,7 @@ class AuthorityReducerTest {
 
     @Test
     fun `rev-gpt PruneSessions scope-filter - out-of-scope entry survives prune`() {
-        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val diffScope = ScopeKey(profileId = "other-grp", endpointFp = "other-ep")
         val store = storeWith(listOf(
             Session(id = "inScope", directory = "/w"),
             Session(id = "outScope", directory = "/w"),
@@ -1404,7 +1401,7 @@ class AuthorityReducerTest {
 
     @Test
     fun `rev-gpt PruneSessions scope-filter - retain out-of-scope even when sid is in prune set`() {
-        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val diffScope = ScopeKey(profileId = "other-grp", endpointFp = "other-ep")
         val store = storeWith(listOf(
             Session(id = "sharedSid", directory = "/w"),
         ))
@@ -1441,7 +1438,7 @@ class AuthorityReducerTest {
 
     @Test
     fun `rev-gpt ApplySnapshot preserves out-of-scope entries`() {
-        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val diffScope = ScopeKey(profileId = "other-grp", endpointFp = "other-ep")
         val store = storeWith(listOf(
             Session(id = "inScope", directory = "/w"),
             Session(id = "outScope", directory = "/other"),
@@ -1489,7 +1486,7 @@ class AuthorityReducerTest {
 
     @Test
     fun `rev-gpt ApplySnapshot no-change short-circuit works with out-of-scope entries`() {
-        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val diffScope = ScopeKey(profileId = "other-grp", endpointFp = "other-ep")
         val store = storeWith(listOf(
             Session(id = "s1", directory = "/w"),
         ))
@@ -1969,7 +1966,7 @@ class AuthorityReducerTest {
 
     @Test
     fun `final-fix-4 incarnation advance resets only the advancing scopes serverRound not other scopes`() {
-        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val diffScope = ScopeKey(profileId = "other-grp", endpointFp = "other-ep")
         val store = storeWith(listOf(
             Session(id = "A", directory = "/x"),
             Session(id = "B", directory = "/other"),
@@ -2025,7 +2022,7 @@ class AuthorityReducerTest {
 
     private val capturedIdentity = cn.vectory.ocdroid.service.identity.ConnectionIdentity(
         epoch = 5L,
-        serverGroupFp = "grp",
+        profileId = "grp",
         normalizedWorkdir = "/w",
         endpointFp = "ep",
     )
@@ -2134,7 +2131,7 @@ class AuthorityReducerTest {
         // not from the current host. We test this by creating an ApplyEvent whose
         // scopeKey differs from the test scope (simulating a different captured
         // identity's scope). The reducer stamps op.scopeKey on the entry.
-        val altScope = ScopeKey(serverGroupFp = "alt-grp", endpointFp = "alt-ep")
+        val altScope = ScopeKey(profileId = "alt-grp", endpointFp = "alt-ep")
         val state = StoreState.initial().copy(identityEpoch = 5L)
         val op = AuthorityOp.ApplyEvent(
             sid = "s1",
@@ -2149,13 +2146,13 @@ class AuthorityReducerTest {
         val entry = result.authority.bySid["s1"]
         assertEquals("scopeKey on SessionEntry equals the op's scopeKey (= captured identity's scope)",
             altScope, entry?.scopeKey)
-        assertEquals("alt-grp", entry?.scopeKey?.serverGroupFp)
+        assertEquals("alt-grp", entry?.scopeKey?.profileId)
         assertEquals("alt-ep", entry?.scopeKey?.endpointFp)
     }
 
     @Test
     fun `r4 scope-guard - in-flight merge does not migrate out-of-scope entry to current scope`() {
-        val diffScope = ScopeKey(serverGroupFp = "other-grp", endpointFp = "other-ep")
+        val diffScope = ScopeKey(profileId = "other-grp", endpointFp = "other-ep")
         val store = storeWith(listOf(Session(id = "inScope", directory = "/w")))
         store.dispatch(AppAction.AuthorityEvent(
             event("inScope", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, workdir = "/w"),
@@ -2613,32 +2610,26 @@ class AuthorityReducerTest {
     }
 
     @Test
-    fun `applyPurge cross-group clears retryQueue (rev-ogpt B2)`() {
-        // rev-ogpt B2: a cross-group purge (host switch) must clear the retry
-        // queue — sids belong to the purged host. Without this, host A's queued
-        // sids leak into host B (cross-host attempt counter pollution).
+    fun `applyPurge clears retryQueue (rev-ogpt B2)`() {
+        // rev-ogpt B2 / §需求12阶段3: a purge (host switch) must clear the
+        // retry queue — sids belong to the purged host. Without this, host A's
+        // queued sids leak into host B (cross-host attempt counter pollution).
+        // (The former `cross-group` qualifier is gone — under 需求12 every
+        // purge is unconditional.)
         val store = storeWith()
         store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", queuedAtMs = 100L)))
         store.dispatch(AppAction.AuthorityEvent(retryQueued("s2", queuedAtMs = 200L)))
         assertEquals(2, store.stateFlow.value.authority.retryQueue.size)
-        // Cross-group purge.
         store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.PurgeHost(scopeKey = scope, preserveServerGroup = false),
+            AuthorityOp.PurgeHost(scopeKey = scope),
         ))
-        assertTrue("retryQueue cleared on cross-group purge",
+        assertTrue("retryQueue cleared on purge",
             store.stateFlow.value.authority.retryQueue.isEmpty())
     }
 
-    @Test
-    fun `applyPurge same-group preserves retryQueue (rev-ogpt B2)`() {
-        val store = storeWith()
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1", queuedAtMs = 100L)))
-        store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.PurgeHost(scopeKey = scope, preserveServerGroup = true),
-        ))
-        assertTrue("retryQueue preserved on same-group purge",
-            "s1" in store.stateFlow.value.authority.retryQueue)
-    }
+    // §需求12阶段3: the former `applyPurge same-group preserves retryQueue`
+    // test was removed — the same-group preserve branch + `preserveServerGroup`
+    // flag are dead under 需求12 (every purge is unconditional).
 
     @Test
     fun `applyPurge clears retryQueue even when bySid already empty (rev-ogpt B2)`() {
@@ -2654,7 +2645,7 @@ class AuthorityReducerTest {
         assertTrue(store.stateFlow.value.authority.bySid.isEmpty())
         assertTrue(store.stateFlow.value.authority.retryQueue.isNotEmpty())
         store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.PurgeHost(scopeKey = scope, preserveServerGroup = false),
+            AuthorityOp.PurgeHost(scopeKey = scope),
         ))
         assertTrue("retryQueue cleared even when bySid was empty",
             store.stateFlow.value.authority.retryQueue.isEmpty())

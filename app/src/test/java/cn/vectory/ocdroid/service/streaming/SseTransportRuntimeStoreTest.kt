@@ -32,10 +32,10 @@ class SseTransportRuntimeStoreTest {
     private lateinit var store: SseTransportRuntimeStore
 
     private val identityA = ConnectionIdentity(
-        epoch = 1, serverGroupFp = "sgA", normalizedWorkdir = "/wdA", endpointFp = "epA",
+        epoch = 1, profileId = "sgA", normalizedWorkdir = "/wdA", endpointFp = "epA",
     )
     private val identityB = ConnectionIdentity(
-        epoch = 2, serverGroupFp = "sgB", normalizedWorkdir = "/wdB", endpointFp = "epB",
+        epoch = 2, profileId = "sgB", normalizedWorkdir = "/wdB", endpointFp = "epB",
     )
 
     @Before

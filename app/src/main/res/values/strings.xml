@@ -406,6 +406,11 @@
     <string name="settings_model_management_empty">No models returned by server</string>
     <string name="settings_model_management_summary_none">%1$d</string>
     <string name="settings_model_management_summary_disabled">%1$d disabled · %2$d total</string>
+    <!-- §需求13: manual model-catalog refresh affordance. -->
+    <string name="model_management_refresh">Refresh model list</string>
+    <!-- §需求13: user-visible error when the manual / first-launch model-catalog
+         fetch fails (previously silent — only Log.w via reportNonFatalIssue). -->
+    <string name="model_management_refresh_failed">Failed to refresh model list</string>
     <string name="chat_marker_agent_prefix">Agent</string>
     <string name="chat_marker_model_prefix">Model</string>
     <string name="chat_marker_agent_switched">Switched to %1$s</string>
@@ -509,15 +514,21 @@
     <!-- §sse-disabled-debug-toggle: REST-only degraded mode (debug flag sse_disabled=true). -->
     <string name="chat_phase_sse_disabled">SSE disabled (REST-only)</string>
 
-    <!-- §sse-feedback-ux (P2-1): in-chat disconnect banner. Surfaces a sustained
-         SSE disconnect (or a debug REST-only mode) with an elapsed-time label +
-         a Refresh action. The banner reuses common_refresh for its button. -->
-    <string name="sse_feedback_disconnected_title">Live updates paused</string>
+    <!-- §sse-feedback-ux (§1.x batch4): in-chat disconnect banner with 4
+         semantic categories. REST_OUTAGE / AUTH_FAILURE = error (red);
+         SSE_STALLED / USER_DISABLED = info (calm). The duration labels
+         (disconnected_now/minutes/hours) are reused by REST_OUTAGE and
+         AUTH_FAILURE subtitles. -->
+    <string name="sse_feedback_rest_outage_title">Can\'t reach server</string>
+    <string name="sse_feedback_auth_failure_title">Certificate or credential error</string>
+    <string name="sse_feedback_sse_stalled_title">Waiting for live updates</string>
+    <string name="sse_feedback_sse_stalled_subtitle">Live updates haven\'t arrived yet</string>
     <string name="sse_feedback_disconnected_now">Disconnected · just now</string>
     <string name="sse_feedback_disconnected_minutes">Disconnected · %1$d min ago</string>
     <string name="sse_feedback_disconnected_hours">Disconnected · %1$d h ago</string>
     <string name="sse_feedback_disabled_title">Live updates off</string>
     <string name="sse_feedback_disabled_subtitle">REST-only mode (debug toggle)</string>
+    <string name="sse_feedback_auth_failure_subtitle">Certificate or credential could not be loaded</string>
 
     <string name="chat_jump_to_latest">Jump to latest</string>
 
@@ -561,13 +572,6 @@
     <string name="error_sse_failed">SSE Error: %1$s</string>
     <string name="error_respond_permission_failed">Failed to respond to permission: %1$s</string>
 
-    <!-- §Grouping rewrite 2026-07-07: manual server grouping (item 1/2/3/4/5). -->
-    <string name="host_group_label">Server group</string>
-    <string name="host_group_none">Standalone</string>
-    <string name="host_group_info">Group description</string>
-    <string name="host_group_warning">Profiles in the same group share cached chat history, drafts, model preferences, and recent directories. Choosing the wrong group will mix or strand this data; only \"Clear all local data\" can recover it.</string>
-    <string name="group_stats_named">%1$s · %2$d connection(s) · %3$d cached session(s)</string>
-    <string name="group_stats_solo">Standalone · 1 connection · %1$d cached session(s)</string>
     <!-- §P5b-B (Q8): 清除数据 section strings. -->
     <string name="cache_clear_cache">Reset local data</string>
     <string name="cache_cached_data_size">Message cache %1$s</string>

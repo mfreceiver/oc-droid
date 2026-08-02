@@ -42,7 +42,7 @@ class SharedStateStoreSessionSnapshotProvider @Inject constructor(
             sl.directorySessions.values.flatten().forEach { putIfAbsent(it.id, it) }
             sl.childSessions.values.flatten().forEach { putIfAbsent(it.id, it) }
         }
-        val currentFp = identityStore.currentIdentity.value?.serverGroupFp
+        val currentFp = identityStore.currentIdentity.value?.profileId
         val registeredWorkdirs: Set<String> = buildSet {
             // Recent workdirs for the current host's serverGroupFp (MRU memory
             // — survives cold start / archive).

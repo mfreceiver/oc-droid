@@ -18,20 +18,26 @@ import org.junit.Rule
 import org.junit.Test
 
 /**
- * §0.6.2 ora-2 — the 0-shrink Compose UI test gate (gpter #3 + #4).
+ * batch3 / req-2 — the 0-shrink Compose UI test gate (gpter #3 + #4).
  *
- * Drives [DebugStreamingMarkdownRender] (HeightAnchor SubcomposeLayout +
- * [HeightShrinkCounter]) through adversarial growing-text token sequences —
- * half-open bold / link, an unclosed code fence, a table built row-by-row,
- * multi-paragraph promotion, a width change, and the streaming→completed
- * transition — and asserts `counter.shrinkCount == 0` for each. A correct
- * HeightAnchor pins the visible height to max(H_natural(t), anchor(t-1)) →
- * non-decreasing → zero visible height-shrink flicker.
+ * Drives [DebugStreamingMarkdownRender] (plain Text + HeightAnchor
+ * SubcomposeLayout + [HeightShrinkCounter]) through adversarial growing-text
+ * token sequences — half-open bold / link, an unclosed code fence, a table
+ * built row-by-row, multi-paragraph promotion, a width change, and the
+ * streaming→completed transition — and asserts `counter.shrinkCount == 0`
+ * for each. A correct HeightAnchor pins the visible height to
+ * max(H_natural(t), anchor(t-1)) → non-decreasing → zero visible height-shrink
+ * flicker.
+ *
+ * **batch3 req-2**: the streaming branch now renders as PLAIN TEXT (no IntelliJ
+ * Markdown parser, no mikepenz Markdown, no block decomposition). The 0-shrink
+ * is guaranteed by [HeightAnchor] alone (with [HeightAnchorRegistry] for cross-
+ * streaming→completed anchor inheritance). The assertions are UNCHANGED.
  *
  * This file is the androidTest counterpart to the JVM
- * [StreamingMarkdownHelpersTest] (which covers the pure decomposition +
- * counter logic). Together they form the gpter #3 release gate: the JVM test
- * runs in `check.sh` (kover floor), this androidTest runs in
+ * [StreamingMarkdownHelpersTest] (which covers HeightShrinkCounter +
+ * HeightAnchorRegistry JVM tests). Together they form the batch3 release gate:
+ * the JVM test runs in `check.sh` (kover floor), this androidTest runs in
  * `connectedDebugAndroidTest` (emulator, per AGENTS.md 模拟器纪律).
  *
  * NOTE on width-change: [HeightShrinkCounter] excludes the single
@@ -50,9 +56,9 @@ class StreamingMarkdownZeroShrinkTest {
     fun streamingProseWithHalfOpenBold_link_zeroShrink() {
         val counter = HeightShrinkCounter()
         // Adversarial: a half-open bold, then closed; a half-open link, then
-        // closed; the markdown parser reinterprets the growing text each token,
-        // which is exactly the case that produced 151 shrinks/turn with the old
-        // whole-document re-parse. The HeightAnchor must mask all of it.
+        // closed. With plain-text streaming (batch3 req-2), no markdown parser
+        // runs during streaming — formatting markers are shown verbatim.
+        // The HeightAnchor still guarantees 0-shrink (max(natural, anchor)).
         val tokens = listOf(
             "Here is",
             " **an important",
@@ -161,9 +167,10 @@ class StreamingMarkdownZeroShrinkTest {
     @Test
     fun streamingMultiParagraphPromotion_zeroShrink() {
         val counter = HeightShrinkCounter()
-        // Multiple paragraphs: each blank line closes a paragraph and opens a
-        // new one (the tail promotes). Completed paragraphs keep their stable
-        // key (gpter #2) → cache reuse; only the new tail recomposes.
+        // Multiple paragraphs: with plain-text streaming (batch3 req-2), the
+        // entire growing text is rendered as a single plain Text composable.
+        // No block-level decomposition or tail promotion occurs. 0-shrink is
+        // guaranteed by HeightAnchor alone (max(natural, anchor)).
         val tokens = listOf(
             "First paragraph here.",
             "\n\nSecond paragraph",
@@ -355,9 +362,10 @@ class StreamingMarkdownZeroShrinkTest {
     @Test
     fun streamingFenceClosesMidStream_zeroShrink() {
         val counter = HeightShrinkCounter()
-        // An open fence grows (Code tail), then closes (Code becomes completed),
-        // then prose follows (new Prose tail). The fence's stable key is
-        // invariant across the open→closed transition (gpter #2).
+        // An open fence grows, then closes, then prose follows. With plain-text
+        // streaming (batch3 req-2), all content renders as raw text — no block
+        // decomposition into Code/Prose units. 0-shrink is guaranteed by
+        // HeightAnchor alone (max(natural, anchor)).
         val tokens = listOf(
             "intro\n```kotlin\n",
             "fun a() {}\n",
@@ -389,12 +397,10 @@ class StreamingMarkdownZeroShrinkTest {
         )
     }
 
-    // ── §gpter-4 scenario 8: ResolvedMarkdownText-style async image ──────
-    // ResolvedMarkdownText itself can't run here (needs a repository), but the
-    // HeightAnchor + Markdown path that ResolvedMarkdownText uses is exercised
-    // by the transition test above. This test instead pins that a data-uri
-    // image (the cheap async-image case, resolved inline by
-    // DataUriImageTransformer) does not cause a shrink as it loads.
+    // ── §gpter-4 scenario 8: data-uri image (plain-text streaming) ────────
+    // With plain-text streaming (batch3 req-2), the image markdown syntax is
+    // rendered verbatim as raw text — no image loading occurs during streaming.
+    // The HeightAnchor still guarantees 0-shrink (max(natural, anchor)).
 
     @Test
     fun streamingDataUriImage_zeroShrink() {

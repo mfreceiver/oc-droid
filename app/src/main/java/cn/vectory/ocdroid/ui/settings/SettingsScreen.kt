@@ -37,11 +37,14 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,6 +58,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import cn.vectory.ocdroid.BuildConfig
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.di.NotificationChannels
 import cn.vectory.ocdroid.ui.ComposerViewModel
@@ -62,6 +66,9 @@ import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.SettingsViewModel
+import cn.vectory.ocdroid.ui.UiEvent
+import cn.vectory.ocdroid.ui.resolveMessage
+import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.SettingsManager
@@ -187,6 +194,9 @@ private fun settingsSections(): List<SettingsSectionEntry> = listOf(
     SettingsSectionEntry(NavRoute.settingsDebugRoute, R.string.settings_section_debug, 0, Icons.Default.BugReport),
     SettingsSectionEntry(NavRoute.settingsAboutRoute, R.string.settings_section_about, R.string.settings_section_about_subtitle, Icons.Default.Info),
 )
+        // §b-fixup2 (层 1): release 构建硬剥离 Debug 行——BuildConfig.DEBUG=false
+        // 时 Settings 根列表不出现 Debug 入口。debug 构建短路保留全部（顺序不变）。
+        .filter { BuildConfig.DEBUG || it.route != NavRoute.settingsDebugRoute }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -357,8 +367,36 @@ fun SettingsModelsRoute(
         .collectAsStateWithLifecycle(initialValue = null)
     val disabledModels by remember { settingsVM.settingsFlow.map { it.disabledModels }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = emptySet())
+    // §需求13: model-catalog loading flag — drives the Model management refresh
+    // IconButton's spinner + per-row Switch disabled state. distinctUntilChanged
+    // so unrelated settings churn doesn't recompose this screen.
+    val isLoadingProviders by remember { settingsVM.settingsFlow.map { it.isLoadingProviders }.distinctUntilChanged() }
+        .collectAsStateWithLifecycle(initialValue = false)
 
-    SettingsSubRouteScaffold(titleRes = R.string.settings_section_models, onBack = onBack) { mod ->
+    // §需求13 rev-7 #3: snackbar consumer for UiEvent.Error. ChatScaffold is
+    // the ONLY collector of the shared uiEvents bus — when the user navigates
+    // INTO this sub-route (different NavHost destination), a refresh failure
+    // would emit UiEvent.Error but nobody shows a snackbar → invisible failure.
+    // This collector mirrors ChatScaffold.kt:709's pattern so the
+    // model_management_refresh_failed error surfaces here too.
+    val context = LocalContext.current
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(Unit) {
+        composerVM.uiEvents.collect { event ->
+            if (event is UiEvent.Error) {
+                snackbarHostState.showTimed(
+                    message = event.resolveMessage(context),
+                    durationMillis = 3_000L,
+                )
+            }
+        }
+    }
+
+    SettingsSubRouteScaffold(
+        titleRes = R.string.settings_section_models,
+        onBack = onBack,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+    ) { mod ->
         // §review-AB: no parent horizontal padding — ModelManagementSection's
         // AppSectionHeader + ListItem self-pad; its bare empty-state Text
         // already self-pads (`Modifier.padding(Dimens.spacing4)`).
@@ -368,6 +406,8 @@ fun SettingsModelsRoute(
             ModelManagementSection(
                 providers = providers,
                 disabledModels = disabledModels,
+                isLoadingProviders = isLoadingProviders,
+                onRefreshProviders = { composerVM.refreshProviders() },
                 onToggleModelDisabled = { providerId, modelId ->
                     composerVM.toggleModelDisabled(providerId, modelId)
                 },

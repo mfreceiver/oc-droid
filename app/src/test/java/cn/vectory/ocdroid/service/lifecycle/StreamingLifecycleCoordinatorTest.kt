@@ -46,7 +46,7 @@ class StreamingLifecycleCoordinatorTest {
 
     private val identity = ConnectionIdentity(
         epoch = 7L,
-        serverGroupFp = "group-fp",
+        profileId = "group-fp",
         normalizedWorkdir = "/work/dir",
         endpointFp = "endpoint-fp",
     )
@@ -84,7 +84,7 @@ class StreamingLifecycleCoordinatorTest {
         // bound identity equals [identity] and isCurrent(identity) holds.
         repeat(identity.epoch.toInt()) { store.beginReconfigure() }
         val bound = store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )
@@ -1444,7 +1444,7 @@ class StreamingLifecycleCoordinatorTest {
         // coordinator onto the SAME bound identity (epoch-aligned, so the
         // store considers it current).
         val bound = identityStore.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )
@@ -1791,7 +1791,7 @@ class StreamingLifecycleCoordinatorStateAtNowTest {
 
     private val identity = ConnectionIdentity(
         epoch = 7L,
-        serverGroupFp = "group-fp",
+        profileId = "group-fp",
         normalizedWorkdir = "/work/dir",
         endpointFp = "endpoint-fp",
     )

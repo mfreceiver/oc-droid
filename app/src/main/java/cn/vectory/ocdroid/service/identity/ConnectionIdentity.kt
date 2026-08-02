@@ -26,16 +26,18 @@ package cn.vectory.ocdroid.service.identity
  *
  * @property epoch Monotonic generation counter bumped on every reconfigure. The single guard
  *  for both the SSE collector and the directory-fetch fan-out.
- * @property serverGroupFp Fingerprint of the server group (profile/host group) this connection
- *  belongs to — part of the composite identity that survives across reconnections within the
- *  same group but changes on group switch.
+ * @property profileId §需求12阶段3 (renamed from `serverGroupFp`): the profile
+ *  id this connection belongs to — part of the composite identity. Under 需求12
+ *  profiles are independent (no groups), so this is always `== profile.id`.
+ *  Survives across reconnections within the same profile but changes on
+ *  profile switch.
  * @property normalizedWorkdir The normalized working directory this SSE stream is bound to.
  * @property endpointFp Fingerprint of the concrete endpoint (host:port + tunnel) being dialed;
  *  distinguishes the connection within a server group.
  */
 data class ConnectionIdentity(
     val epoch: Long,
-    val serverGroupFp: String,
+    val profileId: String,
     val normalizedWorkdir: String,
     val endpointFp: String,
 )

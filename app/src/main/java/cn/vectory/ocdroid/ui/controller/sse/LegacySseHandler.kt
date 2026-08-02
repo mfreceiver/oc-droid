@@ -116,7 +116,7 @@ class LegacySseHandler(private val host: SseDispatchHost) : SseEventHandler {
                 // by the init-block route observer (retain dirty, cancel timer only).
                 host.closeSkeletonSession(updated.id)
                 host.effects.tryEmitEffect(
-                    ControllerEffect.EvictSession(host.serverGroupFp(), updated.id)
+                    ControllerEffect.EvictSession(host.profileId(), updated.id)
                 )
             } else {
                 host.slices.mutateSessionList { s -> s.applySessionUpsert(updated).first }

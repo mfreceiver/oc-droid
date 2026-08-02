@@ -43,22 +43,6 @@ import cn.vectory.ocdroid.util.LocaleMode
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
 
-/**
- * §grouping-rewrite 项 1 (spec decision): the only valid named-group labels.
- * Any `serverGroupFp` outside this set reads as "standalone" (不分组),
- * including the soft-migrated UUID form (`fp == profile.id`). Centralised
- * here so [cn.vectory.ocdroid.ui.settings.HostProfilesManagerScreen]'s
- * selector and the profile editor stay in lockstep.
- *
- * §phase3 (plan §5 task 6 step c): the `ConnectionProfileSection` composable
- * that previously consumed this list (the "current profile" header on the
- * Settings front page) was an orphan — SettingsScreen renders its own slim
- * header and never called the section. The section + its androidTest were
- * deleted; this `NamedGroupLabels` value is retained because
- * HostProfilesManagerScreen still uses it for its group dropdown.
- */
-internal val NamedGroupLabels: List<String> = listOf("A", "B", "C", "D")
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun AppearanceSection(

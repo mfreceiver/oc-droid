@@ -189,7 +189,7 @@ class SseEventBridgeTest {
             IdentifiedSseEvent(
                 identity = ConnectionIdentity(
                     epoch = epoch,
-                    serverGroupFp = "group-fp",
+                    profileId = "group-fp",
                     normalizedWorkdir = "/work/dir",
                     endpointFp = "endpoint-fp",
                 ),

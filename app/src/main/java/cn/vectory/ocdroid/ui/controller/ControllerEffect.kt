@@ -62,7 +62,7 @@ sealed class ControllerEffect {
     /** Drop all pending delta buffers in SessionSyncCoordinator. */
     data object ClearDeltaBuffers : ControllerEffect()
     /**
-     * R-20 Phase 1: verify-and-hydrate the cached window for `(serverGroupFp,
+     * R-20 Phase 1: verify-and-hydrate the cached window for `(profileId,
      * sessionId)` BEFORE showing it to the user (plan §0 N2 privacy +
      * verify-before-hydrate). Dispatched by SessionSwitcher.switchTo instead
      * of the synchronous LRU seed + synchronous LoadMessages (the old path
@@ -81,7 +81,7 @@ sealed class ControllerEffect {
      * start (no resident window to hydrate from).
      */
     data class VerifyAndHydrate(
-        val serverGroupFp: String,
+        val profileId: String,
         val sessionId: String,
         val createdAt: Long?,
         /**
@@ -128,7 +128,7 @@ sealed class ControllerEffect {
      * (no-op when the window is not resident).
      */
     data class AppendMessageToCache(
-        val serverGroupFp: String,
+        val profileId: String,
         val sessionId: String,
         val message: Message,
         val parts: List<Part>,
@@ -151,14 +151,14 @@ sealed class ControllerEffect {
      * `SessionSwitcher.writeSessionWindow`.
      */
     data class WriteSessionWindow(
-        val serverGroupFp: String,
+        val profileId: String,
         val sessionId: String,
         val messages: List<Message>,
         val partsByMessage: Map<String, List<Part>>,
     ) : ControllerEffect()
     /**
      * R-20 Phase 1: evict one cached session + its messages, scoped to
-     * `(serverGroupFp, sessionId)`. Emitted by:
+     * `(profileId, sessionId)`. Emitted by:
      *  - SessionMutationActions.launchSetSessionArchived (per subtree id)
      *  - SessionMutationActions.launchDeleteSession (REST onSuccess)
      *  - SessionSyncCoordinator session.updated archived branch
@@ -167,18 +167,18 @@ sealed class ControllerEffect {
      * it synchronously clears the in-memory window and async-evicts the
      * persistent row (plan §3 N6).
      */
-    data class EvictSession(val serverGroupFp: String, val sessionId: String) : ControllerEffect()
+    data class EvictSession(val profileId: String, val sessionId: String) : ControllerEffect()
     /**
-     * R-20 Phase 1: evict a whole server-group's worth of cached sessions +
-     * messages (异组 host switch / profile delete). Emitted by
-     * HostProfileController.selectHostProfile when previousFp != targetFp
-     * (plan §3 select 4-step).
+     * R-20 Phase 1: evict a whole profile's worth of cached sessions +
+     * messages (host switch / profile delete). Emitted by
+     * HostProfileController.selectHostProfile + deleteHostProfile (§需求12阶段3:
+     * now unconditional — profiles are independent under 需求12).
      *
      * Naming: this is **EvictGroup** (NOT ClearGroup) — freegpt+maxer round-3
      * convergence: "clear" suggests "clear all caches", "evict" scopes it to
      * the named group (plan §3 N6 explicitly forbids ClearGroup).
      */
-    data class EvictGroup(val serverGroupFp: String) : ControllerEffect()
+    data class EvictGroup(val profileId: String) : ControllerEffect()
 
     // ── HostProfileController (restart-required model) ──
     /** Active host connection params changed — user must restart the app to apply. */

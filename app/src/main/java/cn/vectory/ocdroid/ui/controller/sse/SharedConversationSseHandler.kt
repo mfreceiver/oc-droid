@@ -130,7 +130,7 @@ class SharedConversationSseHandler(private val host: SseDispatchHost) : SseEvent
                 DebugLog.i("Sync", "message.updated: inserted (new message, absent from local list)")
                 host.effects.tryEmitEffect(
                     ControllerEffect.AppendMessageToCache(
-                        serverGroupFp = host.serverGroupFp(),
+                        profileId = host.profileId(),
                         sessionId = sessionId,
                         message = updated,
                         parts = emptyList(),

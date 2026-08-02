@@ -379,7 +379,7 @@ class T1cSessionListComplexOwnershipTest {
                 sid = sid,
                 status = status,
                 origin = cn.vectory.ocdroid.data.state.EntryOrigin.OPTIMISTIC,
-                scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+                scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(profileId = "", endpointFp = ""),
                 connectionTimeMs = ts,
                 optimisticBumpTimestamp = ts,
             ),
@@ -403,7 +403,7 @@ class T1cSessionListComplexOwnershipTest {
                 sid = "s2",
                 status = SessionStatus(type = "idle"),
                 origin = cn.vectory.ocdroid.data.state.EntryOrigin.SSE_LEGACY,
-                scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+                scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(profileId = "", endpointFp = ""),
                 connectionTimeMs = 0L,
             ),
         ))
@@ -748,7 +748,7 @@ class T1cSessionListComplexOwnershipTest {
             unmappedActiveIds = emptySet(),
             partialFailureWorkdirs = emptySet(),
             lastSuccessTimeMs = 0L,
-            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(serverGroupFp = "", endpointFp = ""),
+            scopeKey = cn.vectory.ocdroid.data.state.ScopeKey(profileId = "", endpointFp = ""),
             requestToken = cn.vectory.ocdroid.data.state.RequestToken(hostProfileId = null, requestStartMs = 0L),
             localBefore = localBefore,
         )

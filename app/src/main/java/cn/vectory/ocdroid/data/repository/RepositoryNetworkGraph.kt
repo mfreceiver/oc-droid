@@ -5,7 +5,6 @@ import cn.vectory.ocdroid.data.repository.http.CacheControlInterceptor
 import cn.vectory.ocdroid.data.repository.http.CachePathSanitizer
 import cn.vectory.ocdroid.data.repository.http.ClientIdentityInterceptor
 import cn.vectory.ocdroid.data.repository.http.DirectoryHeaderInterceptor
-import cn.vectory.ocdroid.data.repository.http.ServerGroupFpInterceptor
 import cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory
 import cn.vectory.ocdroid.data.repository.http.ResponseSizeGuardInterceptor
 import cn.vectory.ocdroid.data.repository.http.SlimapiDebugInterceptor
@@ -67,18 +66,6 @@ internal class RepositoryNetworkGraph(
      * [OpenCodeRepository.identityStoreOrFallback].
      */
     private val clientIdProvider: () -> String?,
-    /**
-     * §C5 (oc-slimapi turn-token contract §6.2 method A): lazy serverGroupFp
-     * provider backing [ServerGroupFpInterceptor]. Resolves from
-     * [cn.vectory.ocdroid.data.repository.HostProfileStore.currentProfile] at
-     * request time (the graph is constructed as a field initializer before
-     * Hilt field injection, so the provider MUST be lazy). Mirrors
-     * [OpenCodeRepository]'s `@Named("currentServerGroupFp")` binding.
-     *
-     * Request-time capture semantics: host switch → next request carries new
-     * fp, no TOCTOU — parallels [clientIdProvider]'s lazy resolution pattern.
-     */
-    private val serverGroupFpProvider: () -> String,
 ) {
     /** Per-host mutable compatibility mirror; clients capture snapshots. */
     val hostConfig: HostConfig = HostConfig()
@@ -104,15 +91,6 @@ internal class RepositoryNetworkGraph(
      */
     val clientIdentityInterceptor: ClientIdentityInterceptor =
         ClientIdentityInterceptor(defaultSnapshot, clientIdProvider)
-
-    /**
-     * §C5: serverGroupFp header injector (X-Ocdroid-Server-Group-Fp) for the
-     * default compatibility factory. Same double-gate (slimHost + /slimapi/
-     * prefix) as [clientIdentityInterceptor]. Request-time capture via
-     * [serverGroupFpProvider] — host switch → next request carries new fp.
-     */
-    val serverGroupFpInterceptor: ServerGroupFpInterceptor =
-        ServerGroupFpInterceptor(defaultSnapshot, serverGroupFpProvider)
 
     /** DEBUG-only slimapi traffic instrumentation (no-op in release). */
     val slimapiDebugInterceptor: SlimapiDebugInterceptor = SlimapiDebugInterceptor()
@@ -148,7 +126,6 @@ internal class RepositoryNetworkGraph(
         directoryHeaderInterceptor,
         slimapiVersionInterceptor,
         clientIdentityInterceptor,
-        serverGroupFpInterceptor,
         slimapiDebugInterceptor,
         authInterceptor,
         cacheControlInterceptor,

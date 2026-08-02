@@ -134,177 +134,117 @@ internal fun reduceSessionArchived(state: StoreState, action: AppAction.SessionA
 }
 
 internal fun reduceHostStatePurged(state: StoreState, action: AppAction.HostStatePurged): StoreState {
-    // §P0-A rev-gpt #8 (sole writer): for cross-group purge, route the authority
-    // reset through reduceAuthority (PurgeHost) — it is the SOLE writer of
-    // sessionStatuses (the projection comes from authority). For same-group,
-    // authority + sessionStatuses are preserved (no change). baseState carries
-    // the correct authority + projection for the branch below.
-    val baseState = if (!action.preserveServerGroupData) {
-        reduceAuthority(state, cn.vectory.ocdroid.data.state.AuthorityOp.PurgeHost(
+    // §P0-A rev-gpt #8 (sole writer): route the authority reset through
+    // reduceAuthority (PurgeHost) — it is the SOLE writer of sessionStatuses
+    // (the projection comes from authority). §需求12阶段3 (oracle-assessed):
+    // the former same-group preserve branch is dead under 需求12 (profiles are
+    // independent; profileId == profile.id always; C-8 restart kills preserved
+    // slices anyway), so the branch + the `preserveServerGroupData` flag were
+    // removed — the full purge now runs unconditionally.
+    val baseState = reduceAuthority(
+        state,
+        cn.vectory.ocdroid.data.state.AuthorityOp.PurgeHost(
             scopeKey = cn.vectory.ocdroid.data.state.scopeKeyOf("", ""),
-            preserveServerGroup = false,
-        ))
-    } else {
-        state
-    }
+        ),
+    )
     // §slice-only-preserve: ChatState carries three fields NOT mirrored
     // to AppState (isCompacting / compactStartedAt / refreshNonce — see
     // HostProfileController.kt:475-479). [clearSessionData] uses .copy()
     // on the existing ChatState so they are preserved; only the per-
     // session chat fields are reset.
-    val (newChat, newSessionList, newUnread) = if (!action.preserveServerGroupData) {
-        // Cross-group (异组 switch / delete active host): full purge of
-        // per-server + per-profile state.
-        // §fix-leak-window (release-gate fix B): clearSessionData also
-        // resets currentModel / olderMessagesCursor / hasMoreMessages /
-        // staleNotice / revertCutoffs / SSE-coalesce buffers, AND sessionList pendingPermissions/pendingQuestions are
-        // cleared — pre-B2 left all of these stale (verified via
-        // `git show e190cce^:.../HostProfileController.kt` purgePerHostState
-        // + `git show e190cce^:.../AppCoreOrchestration.kt`
-        // createSessionInWorkdirForEffect — neither cleared them). This is
-        // a deliberate IMPROVEMENT, not a missed regression.
-        Triple(
-            baseState.chat.clearSessionData(),
-            baseState.sessionList.copy(
-                sessions = emptyList(),
-                directorySessions = emptyMap(),
-                // §P0-A rev-gpt #8: sessionStatuses NOT set here — comes from
-                // baseState (reduceAuthority's projection over the purged bySid).
-                activeSessionIds = emptySet(),
-                sessionTodos = emptyMap(),
-                sessionDiffs = emptyMap(),
-                // §gpter-residual: cross-group purge must also drop cached
-                // child trees and completeness proofs — a root-id collision
-                // across hosts would otherwise let a stale proof skip new-host
-                // hydration. Bump the epoch so any in-flight child load
-                // captured before the switch is dropped fail-closed instead
-                // of committing the prior host's children here.
-                childSessions = emptyMap(),
-                completeRootIds = emptySet(),
-                completenessEpoch = state.sessionList.completenessEpoch + 1L,
-                // §fix-leak-window (fix B): pending permission / question
-                // requests belong to the prior host's sessions — must NOT
-                // survive a cross-group switch.
-                pendingPermissions = emptyList(),
-                pendingQuestions = emptyList(),
-                // §Q4-strict-sync: cross-group purge must drop pending-
-                // create ids — they reference the prior host's sessions
-                // and would ghost into the new host's list.
-                pendingCreateIds = emptySet(),
-                pendingCreatedAt = emptyMap(),
-                // §final-gate I-3 (review-final-rev-gpt-20260719081038 §2):
-                // cross-group purge must drop the entire sessionErrorsById
-                // map — entries reference the prior host's sessions and a
-                // root-id collision on the new host would let T17 render
-                // the prior host's banner. Mirrors the cross-group reset
-                // of sessionStatuses / pendingPermissions / pendingQuestions
-                // above (T12's set/remove logic is unchanged — this is a
-                // lifecycle cleanup, not a producer-path change).
-                sessionErrorsById = emptyMap(),
-                // §P0-F 阻断6: cross-group purge must drop in-flight abort-pending
-                // flags — they reference the prior host's sessions; a root-id
-                // collision would let a stale "stopping" lock / watchdog survive.
-                abortPendingSessionIds = emptyMap(),
-                // I-2 v2 §3.3: cross-group purge MUST reset the
-                // aggregation signals — they reference the prior host's
-                // aggregation state and a stale "FAILED" would otherwise
-                // surface on the new host. Defaults to COMPLETE (no signal).
-                // Tied to I-3's sessionErrorsById cleanup (same lifecycle).
-                questionAggregationSignal = SlimAggregationSignal(),
-                permissionAggregationSignal = SlimAggregationSignal(),
-                // §fix-close-all-residual: re-arm the cold-start
-                // auto-select for the new host — its first load should
-                // land the user on a session just like a fresh launch.
-                hasCompletedInitialLoad = false,
-            ),
-            state.unread.copy(
-                unreadSessions = emptySet(),
-                lastViewedTime = emptyMap(),
-                // §unread-soak: clear the soak map on cross-group purge so
-                // a stale idleSince entry from the prior host cannot later
-                // fire an unread badge for a session that no longer exists.
-                idleSince = emptyMap(),
-            ),
-        )
-    } else {
-        // Same-group switch: per-server data (sessions / unread /
-        // directorySessions / statuses / todos / diffs) preserved. Only
-        // the streaming overlay is cleared (a stale delta from the old
-        // profile's in-flight turn must NOT bleed into the new profile's
-        // view).
-        //
-        // §chat-ux-batch T7 review-fix (I2): a pending agent/model pick
-        // belongs to the PRIOR profile's next send — it must NOT survive
-        // a host/profile transition even within the same server group.
-        // Pre-fix this branch preserved pendingAgent/pendingModel
-        // untouched, so a pick from profile A leaked into profile B's
-        // first send (violates T7's no-cross-transition-carry contract).
-        // Mirrors the cross-group branch's clearSessionData() reset of
-        // these two transient fields.
-        Triple(
-            // Same-group host changes invalidate route-owned LoadedContent,
-            // but the legacy bare-chat window is deliberately retained.  The
-            // pre-B2 contract only cleared the streaming overlay here; using
-            // clearLoadedChatPayload also erased the valid flat window.
-            state.chat.copy(
-                content = null,
-                streamingPartTexts = emptyMap(),
-                streamOwned = emptyMap(),
-                streamingReasoningPart = null,
-                pendingAgent = null,
-                pendingModel = null,
-                // §Wave5b-Q13: a host/profile transition invalidates any
-                // pending scroll intent even within the same server group.
-                // The scroll slot references a session the user is navigating
-                // away from (or that may be re-laid-out differently on the
-                // new profile). Mirrors the cross-group branch's
-                // clearSessionData() reset.
-                // §chat-list-detail §11 / G6 (B5): the legacy per-child
-                // checkpoint map clear is GONE — checkpoints now live on
-                // per-route-entry SavedStateHandle, so a host purge cannot
-                // leave a stale checkpoint in ChatState.
-                pendingScrollRequest = null,
-            ),
-            // §Q4-strict-sync: clear pendingCreateIds even on same-group
-            // switch (the spec mandates "host switch → clear pending"). A
-            // pending id from profile A is meaningless on profile B even
-            // within the same server group; clearing is safer (no ghost)
-            // and the ids re-populate naturally from the next REST refresh.
-            state.sessionList.copy(
-                pendingCreateIds = emptySet(),
-                pendingCreatedAt = emptyMap(),
-                activeSessionIds = emptySet(),
-            ),
-            state.unread,
-        )
-    }
+    // §fix-leak-window (release-gate fix B): clearSessionData also resets
+    // currentModel / olderMessagesCursor / hasMoreMessages / staleNotice /
+    // revertCutoffs / SSE-coalesce buffers, AND sessionList
+    // pendingPermissions/pendingQuestions are cleared — pre-B2 left all of
+    // these stale (verified via `git show e190cce^:.../HostProfileController.kt`
+    // purgePerHostState + `git show e190cce^:.../AppCoreOrchestration.kt`
+    // createSessionInWorkdirForEffect — neither cleared them). This is a
+    // deliberate IMPROVEMENT, not a missed regression.
+    val newChat = baseState.chat.clearSessionData()
+    val newSessionList = baseState.sessionList.copy(
+        sessions = emptyList(),
+        directorySessions = emptyMap(),
+        // §P0-A rev-gpt #8: sessionStatuses NOT set here — comes from
+        // baseState (reduceAuthority's projection over the purged bySid).
+        activeSessionIds = emptySet(),
+        sessionTodos = emptyMap(),
+        sessionDiffs = emptyMap(),
+        // §gpter-residual: purge must also drop cached child trees and
+        // completeness proofs — a root-id collision across hosts would
+        // otherwise let a stale proof skip new-host hydration. Bump the
+        // epoch so any in-flight child load captured before the switch is
+        // dropped fail-closed instead of committing the prior host's
+        // children here.
+        childSessions = emptyMap(),
+        completeRootIds = emptySet(),
+        completenessEpoch = state.sessionList.completenessEpoch + 1L,
+        // §fix-leak-window (fix B): pending permission / question requests
+        // belong to the prior host's sessions — must NOT survive a switch.
+        pendingPermissions = emptyList(),
+        pendingQuestions = emptyList(),
+        // §Q4-strict-sync: purge must drop pending-create ids — they
+        // reference the prior host's sessions and would ghost into the new
+        // host's list.
+        pendingCreateIds = emptySet(),
+        pendingCreatedAt = emptyMap(),
+        // §final-gate I-3 (review-final-rev-gpt-20260719081038 §2): purge
+        // must drop the entire sessionErrorsById map — entries reference
+        // the prior host's sessions and a root-id collision on the new host
+        // would let T17 render the prior host's banner. Mirrors the reset
+        // of sessionStatuses / pendingPermissions / pendingQuestions above
+        // (T12's set/remove logic is unchanged — this is a lifecycle
+        // cleanup, not a producer-path change).
+        sessionErrorsById = emptyMap(),
+        // §P0-F 阻断6: purge must drop in-flight abort-pending flags — they
+        // reference the prior host's sessions; a root-id collision would let
+        // a stale "stopping" lock / watchdog survive.
+        abortPendingSessionIds = emptyMap(),
+        // I-2 v2 §3.3: purge MUST reset the aggregation signals — they
+        // reference the prior host's aggregation state and a stale "FAILED"
+        // would otherwise surface on the new host. Defaults to COMPLETE (no
+        // signal). Tied to I-3's sessionErrorsById cleanup (same lifecycle).
+        questionAggregationSignal = SlimAggregationSignal(),
+        permissionAggregationSignal = SlimAggregationSignal(),
+        // §fix-close-all-residual: re-arm the cold-start auto-select for the
+        // new host — its first load should land the user on a session just
+        // like a fresh launch.
+        hasCompletedInitialLoad = false,
+    )
+    val newUnread = state.unread.copy(
+        unreadSessions = emptySet(),
+        lastViewedTime = emptyMap(),
+        // §unread-soak: clear the soak map on purge so a stale idleSince
+        // entry from the prior host cannot later fire an unread badge for a
+        // session that no longer exists.
+        idleSince = emptyMap(),
+    )
     return baseState.copy(
         chat = newChat,
         sessionList = newSessionList,
         unread = newUnread,
-        // §P0-A rev-gpt #8: authority is handled by baseState (reduceAuthority
-        // for cross-group, unchanged for same-group) — NOT set here. The
-        // sessionStatuses projection comes from baseState's authority (the
-        // SOLE writer is reduceAuthority).
-        // Per-profile UX — ALWAYS reset regardless of group.
+        // §P0-A rev-gpt #8: authority is handled by baseState (reduceAuthority)
+        // — NOT set here. The sessionStatuses projection comes from
+        // baseState's authority (the SOLE writer is reduceAuthority).
+        // Per-profile UX — ALWAYS reset (folded into the single full purge).
         composer = state.composer.copy(draftWorkdir = null),
         settings = state.settings.copy(availableCommands = emptyList()),
         connection = state.connection.copy(serverVersion = null),
-        // §breathing-indicator (purge-clear defensive): a host purge (cross OR
-        // same group) invalidates the SSE transport for the prior host — the
-        // breath flag MUST NOT survive as stale-true for a host that no longer
-        // exists. Clears to false AND advances [StoreState.sseConnectedGeneration]
+        // §breathing-indicator (purge-clear defensive): a host purge
+        // invalidates the SSE transport for the prior host — the breath flag
+        // MUST NOT survive as stale-true for a host that no longer exists.
+        // Clears to false AND advances [StoreState.sseConnectedGeneration]
         // (`state.sseConnectedGeneration + 1L`, computed from THIS dispatch's
         // CAS-loop snapshot — atomic, see [SharedStateStore.dispatch]'s
-        // `state.update { reduce(it, action) }`). A stale collector carrying the
-        // pre-purge generation then loses the monotonic CAS
-        // ([SharedStateStore.mutateSseConnected]: `prePurgeGen < advanced`) and
-        // cannot resurrect `true`. The owner's normal teardown
-        // ([cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner.disconnect] /
-        // cancelForShutdown) stays the primary clear path; this is the
-        // defensive backstop for a purge that does NOT go through owner-disconnect.
-        // INDEPENDENT of [cn.vectory.ocdroid.ui.ConnectionState.isConnected]
-        // (health-settle) — this only clears the transport-up breath flag.
+        // `state.update { reduce(it, action) }`). A stale collector carrying
+        // the pre-purge generation then loses the monotonic CAS
+        // ([SharedStateStore.mutateSseConnected]: `prePurgeGen < advanced`)
+        // and cannot resurrect `true`. The owner's normal teardown
+        // ([cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner.disconnect]
+        // / cancelForShutdown) stays the primary clear path; this is the
+        // defensive backstop for a purge that does NOT go through
+        // owner-disconnect. INDEPENDENT of
+        // [cn.vectory.ocdroid.ui.ConnectionState.isConnected] (health-settle)
+        // — this only clears the transport-up breath flag.
         isSseConnected = false,
         sseConnectedGeneration = state.sseConnectedGeneration + 1L,
     )
@@ -643,24 +583,23 @@ internal fun ChatState.clearLoadedChatPayload(): ChatState = copy(
 /**
  * §P0-A r2: derive the REAL authority [ScopeKey] from [StoreState] alone
  * (pure — no identityStore dependency). Combines the current host profile's
- * [serverGroupFp] (normalized per [HostProfile.ensureServerGroupFp]) with
- * the live [endpointFp] maintained by [BundlePublished]. Mirrors the
- * derivation in [SharedStateStore.authorityScope] and
+ * [profileId] with the live [endpointFp] maintained by [BundlePublished].
+ * Mirrors the derivation in [SharedStateStore.authorityScope] and
  * [StatusAggregatorImpl.currentScope] so prune operations
  * ([PruneSessions]) carry a scope that correctly represents the active
  * connection identity.
+ *
+ * §需求12阶段3 (oracle-assessed): under 需求12 `profileId == profile.id`
+ * unconditionally, so the former `serverGroupFp.ifBlank { profile.id }`
+ * normalization collapses to `profile.id` directly.
  *
  * When no host is active (cold start / no profile), both fields default
  * to "" — matching the identity fallback in the authoritative sites.
  */
 internal fun StoreState.resolveScopeKey(): cn.vectory.ocdroid.data.state.ScopeKey {
-    val currentProfile = host.hostProfiles.firstOrNull { it.id == host.currentHostProfileId }
-    val serverGroupFp = if (currentProfile != null) {
-        // Normalize blank to the profile id (mirrors HostProfile.ensureServerGroupFp()).
-        if (currentProfile.serverGroupFp.isBlank()) currentProfile.id else currentProfile.serverGroupFp
-    } else ""
+    val profileId = host.hostProfiles.firstOrNull { it.id == host.currentHostProfileId }?.id ?: ""
     return cn.vectory.ocdroid.data.state.scopeKeyOf(
-        serverGroupFp, liveEndpointFp,
+        profileId, liveEndpointFp,
     )
 }
 

@@ -616,26 +616,28 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
 
 // ── PurgeHost ──────────────────────────────────────────────────────────────
 
-/** §4c.3: cross-group clears the scope; same-group keeps. Pure.
+/** §4c.3: clears the scope. Pure.
  *  (P0-A host-purge path resets authority directly in the reducer copy; this
  *  op is implemented for typed completeness.)
  *
- *  §sm-hardening note (rev-glm ses_04ccdaa78 nit#1 — non-blocking): cross-group
- *  purge resets `bySid = emptyMap()` unconditionally, which is correct under the
+ *  §sm-hardening note (rev-glm ses_04ccdaa78 nit#1 — non-blocking): purge
+ *  resets `bySid = emptyMap()` unconditionally, which is correct under the
  *  P0-A single-active-scope invariant (the data model's `Map<ScopeKey,...>`
  *  notwithstanding). A per-entry `scopeKey` filter (matching [applyPrune]) would
  *  be the strictly safer future-proofing, but that is a behavior change deferred
  *  to a dedicated multi-scope epic — NOT done here, per "仅加固，不改核心状态机逻辑".
  *
- *  §P1-B/E rev-ogpt B2: `retryQueue` IS cleared on cross-group purge. The
- *  queue has no per-entry scope (keyed by sid), so a host switch leaves host
- *  A's queued sids pointing at stale data. Clearing unconditionally on
- *  cross-group purge matches the `bySid` reset and closes the cross-host
- *  leak (host A's queued sid fire-then-requeue under host B with inherited
- *  attempt counter). The same-group path (`preserveServerGroup=true`) returns
- *  `cur` unchanged (queue preserved — same host). */
+ *  §P1-B/E rev-ogpt B2: `retryQueue` IS cleared on purge. The queue has no
+ *  per-entry scope (keyed by sid), so a host switch leaves host A's queued sids
+ *  pointing at stale data. Clearing unconditionally matches the `bySid` reset
+ *  and closes the cross-host leak (host A's queued sid fire-then-requeue under
+ *  host B with inherited attempt counter).
+ *
+ *  §需求12阶段3 (oracle-assessed): the former same-group early-return
+ *  (`preserveServerGroup=true`) is dead under 需求12 (profiles independent;
+ *  C-8 restart kills preserved slices anyway), so the flag + branch were
+ *  removed — PurgeHost now ALWAYS clears. */
 private fun applyPurge(cur: AuthorityState, op: AuthorityOp.PurgeHost): AuthorityState {
-    if (op.preserveServerGroup) return cur
     // rev-ogpt B2: include retryQueue in the emptiness check so a purge when
     // ONLY retryQueue has content still clears it (was previously skipped).
     if (cur.bySid.isEmpty() && op.scopeKey !in cur.knownIncarnations && op.scopeKey !in cur.coverage && cur.retryQueue.isEmpty()) {

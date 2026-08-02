@@ -49,10 +49,22 @@ data class ResolvedEndpoint internal constructor(
  *     profile 的值（与 mtlsEnabled 同模式）——手动 URL 通常是用当前 server
  *     的另一个 endpoint，slim 状态延续符合用户预期。
  */
+/**
+ * §需求12 阶段7: the streaming-service connection-identity key. Neutral name
+ * covering both [EffectiveConnectionSource] cases:
+ *  - [EffectiveConnectionSource.Profile] → the active [HostProfile.id];
+ *  - [EffectiveConnectionSource.Manual] → `"manual:$url"` (no profile, so
+ *    there is no profile.id — the URL itself is the stable identity).
+ *
+ * Renamed from `serverGroupFp` (the legacy server-group concept was deleted
+ * in 需求12 阶段3). `profileId` would be misleading here because a manual
+ * connection has no profile; `connectionKey` accurately describes both
+ * cases. The value is what gets bound as [ConnectionIdentity.profileId].
+ */
 data class EffectiveConnectionConfig(
     val source: EffectiveConnectionSource,
     val profileId: String?,
-    val serverGroupFp: String,
+    val connectionKey: String,
     val url: String,
     val username: String?,
     val password: String?,
@@ -130,7 +142,7 @@ class DefaultEffectiveConnectionConfigResolver @Inject constructor(
         return EffectiveConnectionConfig(
             source = EffectiveConnectionSource.Manual,
             profileId = profile?.id,
-            serverGroupFp = profile?.serverGroupFp?.ifBlank { profile.id } ?: "manual:$url",
+            connectionKey = profile?.id ?: "manual:$url",
             url = url,
             username = settingsManager.username,
             password = settingsManager.password,
@@ -151,7 +163,7 @@ class DefaultEffectiveConnectionConfigResolver @Inject constructor(
         return EffectiveConnectionConfig(
             source = EffectiveConnectionSource.Profile,
             profileId = profile.id,
-            serverGroupFp = profile.serverGroupFp.ifBlank { profile.id },
+            connectionKey = profile.id,
             url = url,
             username = profile.basicAuth?.username,
             password = profile.basicAuth?.passwordId?.let(settingsManager::basicAuthPassword),

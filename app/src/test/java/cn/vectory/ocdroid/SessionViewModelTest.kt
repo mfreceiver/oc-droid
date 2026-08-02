@@ -26,6 +26,8 @@ import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.UiEvent
+import cn.vectory.ocdroid.ui.BannerHysteresisOwner
+import cn.vectory.ocdroid.ui.BannerHysteresisState
 import cn.vectory.ocdroid.ui.currentSession
 import cn.vectory.ocdroid.ui.loadSessionsForEffect
 import cn.vectory.ocdroid.ui.NavRoute
@@ -84,7 +86,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
     @Test
     fun `createSessionInWorkdir clears currentModel to prevent cross-session leak`() = runTest {
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -127,7 +129,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.createSession(any(), any()) } returns Result.success(created)
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -169,7 +171,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         // session is created lazily by sendMessage on first prompt.
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -193,7 +195,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
     fun `selectSession discards in-progress draft`() = runTest {
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -215,7 +217,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.createSession(title = null, directory = any()) } returns Result.failure(IllegalStateException("network error"))
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -243,7 +245,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.getSessions(cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit) } returns Result.success(sessions)
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -272,7 +274,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.getSessions(any()) } returns Result.success(sessions)
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -297,7 +299,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         } returns Result.success(initialSessions)
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -335,7 +337,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.getSessions(any()) } returns Result.failure(IllegalStateException("network error"))
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -361,7 +363,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.getSessions(20) } returns Result.success(expanded)
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -398,7 +400,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         }
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -433,7 +435,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.getSessions(any()) } returns Result.success(knownSessions)
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -466,7 +468,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.getSessions(20) } returns Result.success(expanded)
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -504,7 +506,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.getSessionsForDirectory(workdir, any()) } returns Result.success(existing)
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -535,7 +537,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.getSessionsForDirectory(workdir, any()) } returns Result.failure(IllegalStateException("boom"))
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -562,7 +564,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.getSessionsForDirectory(trimmed, any()) } returns Result.success(emptyList())
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -592,7 +594,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         )
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -625,7 +627,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.updateSession("session-rename", "新名") } returns Result.success(renamed)
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -653,7 +655,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.updateSession("session-blank", "") } returns Result.success(cleared)
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -692,7 +694,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         )
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -716,7 +718,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         every { settingsManager.getDraftText(any(), "s2") } returns "draft2"
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -739,7 +741,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.deleteSession("session-1") } returns Result.success(Unit)
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -771,7 +773,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         )
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -802,7 +804,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.getSession("ses_child_missing") } returns Result.failure(IllegalStateException("404"))
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -839,7 +841,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         every { settingsManager.getDraftText(any(), "s2") } returns "s2draft"
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -867,7 +869,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         // detail pane. Closing an ancestor of the current session does NOT
         // trigger chat clear + pop-to-Sessions (only the active route's leave does).
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         core.writeSessionList {
             it.copy(
@@ -897,7 +899,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.deleteSession("s1") } returns Result.success(Unit)
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -929,7 +931,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         coEvery { repository.deleteSession("dir-ghost") } returns Result.success(Unit)
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -967,7 +969,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val globalSession = cn.vectory.ocdroid.data.model.Session(id = "Z", directory = "/other")
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -993,7 +995,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         // §task5-lifecycle: an unknown workdir yields no ids; the unread slice
         // MUST stay untouched (no spurious emission, no data loss).
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -1022,7 +1024,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val globalOther = cn.vectory.ocdroid.data.model.Session(id = "Z", directory = "/other")
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -1065,7 +1067,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         val globalOther = cn.vectory.ocdroid.data.model.Session(id = "Z", directory = "/other")
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -1097,7 +1099,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         // normalizes to "" — the function must bail out early without touching
         // the unread slice (no spurious emission, no data loss).
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)

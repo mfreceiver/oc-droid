@@ -8,10 +8,14 @@ import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.data.repository.ExpandOutcome
 import cn.vectory.ocdroid.data.repository.isThinPlaceholder
+import cn.vectory.ocdroid.ui.BannerHysteresisOwner
+import cn.vectory.ocdroid.ui.BannerHysteresisState
 import cn.vectory.ocdroid.ui.ChatViewModel
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
+import io.mockk.mockk
+import kotlinx.coroutines.flow.MutableStateFlow
 import java.io.IOException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.runTest
@@ -81,7 +85,10 @@ class ChatViewModelPartExpandTest : MainViewModelTestBase() {
     override fun setUp() {
         super.setUp()
         newCore()
-        chatVM = ChatViewModel(core)
+        val bannerOwner = mockk<BannerHysteresisOwner>(relaxed = true) {
+            every { state } returns MutableStateFlow(BannerHysteresisState())
+        }
+        chatVM = ChatViewModel(core, bannerOwner)
 
         // Wire the expand call to our controlled deferred.
         coEvery { repository.expandMessagesFullBatch(any(), any(), any()) } coAnswers {

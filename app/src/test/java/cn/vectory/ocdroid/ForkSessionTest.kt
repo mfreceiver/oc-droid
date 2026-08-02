@@ -133,7 +133,7 @@ class ForkSessionTest {
             settingsManager = settingsManager,
             repository = repository,
             effects = effectBus,
-            currentServerGroupFp = { "test-fp" },
+            currentProfileId = { "test-fp" },
         )
         // CP1 (notify Phase-0): single connection-identity store.
         val identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
@@ -148,7 +148,7 @@ class ForkSessionTest {
             settingsManager = settingsManager,
             trafficTracker = trafficTracker,
             effects = effectBus,
-            currentServerGroupFp = { "test-fp" },
+            currentProfileId = { "test-fp" },
             identityStore = identityStore,
         )
         val sessionSyncCoordinator = cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator(
@@ -156,7 +156,7 @@ class ForkSessionTest {
             slices = store.slices,
             settingsManager = settingsManager,
             effects = effectBus,
-            currentServerGroupFp = { "test-fp" },
+            currentProfileId = { "test-fp" },
             identityStore = identityStore,
         )
         val connectionCoordinator = cn.vectory.ocdroid.ui.controller.ConnectionCoordinator(
@@ -213,7 +213,7 @@ class ForkSessionTest {
             // §P0-E(b)(c): durable-error GET drain coordinator.
             errorRecoveryCoordinator,
             // §review-fix #1: fp provider (same as MainViewModelTestBase).
-            { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
+            { hostProfileStore.currentProfile().id },
             appScope,
             // CP1 (notify Phase-0): single connection-identity store.
             identityStore,

@@ -333,7 +333,7 @@ class ConnectionCoordinatorTest {
         every { resolver.resolve() } returns cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfig(
             source = cn.vectory.ocdroid.service.streaming.EffectiveConnectionSource.Manual,
             profileId = null,
-            serverGroupFp = "test-fp",
+            connectionKey = "test-fp",
             url = "http://resolver-authority:1234",
             username = null,
             password = null,
@@ -411,7 +411,7 @@ class ConnectionCoordinatorTest {
         every { resolver.resolve() } returns cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfig(
             source = cn.vectory.ocdroid.service.streaming.EffectiveConnectionSource.Manual,
             profileId = null,
-            serverGroupFp = "test-fp",
+            connectionKey = "test-fp",
             url = "http://obsolete-host:1234",
             username = null,
             password = null,
@@ -486,7 +486,7 @@ class ConnectionCoordinatorTest {
             cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfig(
                 source = cn.vectory.ocdroid.service.streaming.EffectiveConnectionSource.Manual,
                 profileId = null,
-                serverGroupFp = "test-fp",
+                connectionKey = "test-fp",
                 url = "http://stale-snapshot:9999",
                 username = null,
                 password = null,
@@ -563,6 +563,208 @@ class ConnectionCoordinatorTest {
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingQuestions>().size)
         assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingPermissions>().size)
         coVerify { repository.getCommands() }
+    }
+
+    /**
+     * §需求13: the LoadProviders emit is now GATED on
+     * `slices.settings.value.providers == null` (true first-launch only).
+     * Subsequent loadInitialData calls (ON_RESUME soft-refresh, sessions
+     * refresh button, ServerStatus force-refresh chain, health-probe recovery)
+     * must NOT re-emit LoadProviders — the user refreshes via the Model
+     * management IconButton instead. The other 4 fan-out effects
+     * (LoadSessions/LoadAgents/LoadPendingQuestions/LoadPendingPermissions)
+     * stay unconditional.
+     */
+    @Test
+    fun `loadInitialData skips LoadProviders when providers already cached (需求13 first-launch gate)`() {
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        every { settingsManager.currentWorkdir } returns null
+        // §需求13: pre-populate the catalog as if a prior fetch succeeded —
+        // any non-null ProvidersResponse flips the gate to "skip".
+        slices.mutateSettings {
+            it.copy(providers = cn.vectory.ocdroid.data.model.ProvidersResponse(providers = emptyList()))
+        }
+
+        coordinator.loadInitialData()
+        runPending()
+
+        // The other four fan-outs stay unconditional.
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadSessions>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadAgents>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingQuestions>().size)
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingPermissions>().size)
+        // §需求13: LoadProviders is GATED OUT — the single high-leverage
+        // change that blocks all 4 proactive auto-fetch paths at once.
+        assertEquals(0, collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size)
+    }
+
+    /**
+     * §需求13 rev-7 #1: the providers==null gate was a check-then-act race.
+     * Multiple concurrent loadInitialData() calls at cold start
+     * (MainActivity.coldStartReconnect + ON_RESUME + health-probe recovery)
+     * each saw providers==null and each emitted LoadProviders → duplicate
+     * parallel /config/providers fetches. The fix is an AtomicBoolean CAS
+     * (providersFirstFetchArmed) that arms exactly once per providers-
+     * lifecycle. This test drives loadInitialData() THREE times without
+     * resolving the fetch (providers stays null) and asserts LoadProviders
+     * fires EXACTLY ONCE.
+     */
+    @Test
+    fun `loadInitialData single-flight emits LoadProviders at most once across concurrent calls even when providers is null (需求13 rev-7 #1)`() {
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        every { settingsManager.currentWorkdir } returns null
+
+        // Drive loadInitialData 3 times rapidly — all see providers==null,
+        // but the CAS ensures only the FIRST emits LoadProviders.
+        coordinator.loadInitialData()
+        coordinator.loadInitialData()
+        coordinator.loadInitialData()
+        runPending()
+
+        // The other four fan-outs DO fire on every call (they are
+        // unconditional); only LoadProviders is single-flight.
+        assertEquals(3, collectedEffects.filterIsInstance<ControllerEffect.LoadSessions>().size)
+        assertEquals(3, collectedEffects.filterIsInstance<ControllerEffect.LoadAgents>().size)
+        assertEquals(3, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingQuestions>().size)
+        assertEquals(3, collectedEffects.filterIsInstance<ControllerEffect.LoadPendingPermissions>().size)
+        // §需求13 rev-7 #1: LoadProviders emits EXACTLY ONCE despite 3
+        // concurrent calls all observing providers==null.
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size)
+    }
+
+    /**
+     * §需求13 rev-8 #1: the single-flight gate is now PROCESS-LIFETIME for the
+     * auto path — armed exactly once via the CAS in loadInitialData, NEVER reset
+     * BY coldStartReconnect (the earlier re-arm via coldStartReconnect was a bug:
+     * that method is shared by MainActivity cold-start and SessionsScreen
+     * force-refresh, so resetting it re-opened the gate during a normal cold
+     * start while the first fetch was still in flight → duplicate LoadProviders).
+     * Note (rev-8 #2): the gate IS reset by [resetProvidersFirstFetchGate] on
+     * real fetch failure for recovery — "never reset" here refers specifically
+     * to coldStartReconnect not re-arming it. After a hard local reset
+     * (rare, destructive) the auto-fetch stays suppressed and the user taps the
+     * Model management refresh IconButton once (that path emits LoadProviders
+     * DIRECTLY, bypassing this gate). This test pins the invariant:
+     * loadInitialData emits LoadProviders at most once per successful fetch
+     * (no re-arm via coldStartReconnect), and a subsequent coldStartReconnect +
+     * providers-null does NOT re-emit.
+     */
+    @Test
+    fun `loadInitialData single-flight gate is process-lifetime - no re-arm via coldStartReconnect (需求13 rev-8 #1)`() {
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        every { settingsManager.currentWorkdir } returns null
+        // Stub checkHealth as UNHEALTHY so the probe launched by coldStartReconnect
+        // does NOT succeed and does NOT call loadInitialData on its own — this
+        // isolates the gate assertion to the EXPLICIT coordinator.loadInitialData()
+        // calls below.
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(healthy = false, version = "1.0"))
+
+        // Phase 1: first launch — LoadProviders emits once (CAS arms the gate).
+        coordinator.loadInitialData()
+        runPending()
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size)
+
+        // Phase 2: simulate providers still null (first fetch in flight) + a
+        // coldStartReconnect call (the SHARED entry point — normal cold start /
+        // force-refresh / hard-reset all route here). rev-8 #1: the gate must NOT
+        // re-arm here, otherwise the in-flight first fetch + a second
+        // loadInitialData (e.g. from the probe's own recovery path) would emit a
+        // DUPLICATE LoadProviders.
+        coordinator.coldStartReconnect()
+        runPending()
+        // Providers is still null (first fetch unresolved). The next
+        // loadInitialData must NOT re-emit — the gate stayed armed.
+        coordinator.loadInitialData()
+        runPending()
+        assertEquals(
+            "LoadProviders must NOT re-emit: coldStartReconnect does not re-arm the gate (rev-8 #1)",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size,
+        )
+    }
+
+    /**
+     * §需求13 rev-8 #2 (council #2 fix): the single-flight gate is DISARMED on
+     * real fetch failure via [resetProvidersFirstFetchGate] so the next
+     * [loadInitialData] / ON_RESUME auto-retries the catalog fetch (weak-network
+     * cold-start recovery). Phase 1: loadInitialData with providers==null →
+     * LoadProviders emitted once (CAS arms the gate). Phase 2: simulate the
+     * failure path by calling resetProvidersFirstFetchGate() directly (the
+     * coordinator's contract — launchLoadProviders wires this via its
+     * onFailure callback in production). Phase 3: loadInitialData again
+     * (providers still null) → MUST emit LoadProviders AGAIN because the gate
+     * was disarmed. Assert total count == 2. Without the reset (success path),
+     * the gate stays armed and the second call would NOT re-emit — the count
+     * of exactly 2 proves the disarm works.
+     */
+    @Test
+    fun `loadInitialData single-flight gate disarms on real fetch failure so next loadInitialData retries (需求13 rev-8 #2)`() {
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        every { settingsManager.currentWorkdir } returns null
+
+        // Phase 1: first launch — LoadProviders emits once (CAS arms the gate).
+        coordinator.loadInitialData()
+        runPending()
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size)
+
+        // Phase 2: simulate onFailure callback path — disarm the gate.
+        coordinator.resetProvidersFirstFetchGate()
+
+        // Phase 3: loadInitialData again (providers still null) — the gate was
+        // disarmed, so LoadProviders MUST re-emit.
+        coordinator.loadInitialData()
+        runPending()
+        assertEquals(
+            "LoadProviders must re-emit: gate was disarmed by resetProvidersFirstFetchGate (rev-8 #2)",
+            2,
+            collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size,
+        )
+    }
+
+    /**
+     * §需求13 rev-8 #2b (rev-gpt finding): after failure-disarm, if a manual
+     * refresh (which bypasses the CAS gate) has set isLoadingProviders=true,
+     * a subsequent loadInitialData MUST NOT re-emit LoadProviders — the
+     * in-flight manual fetch will resolve it. Without the !isLoadingProviders
+     * guard this would emit a duplicate → parallel /config/providers fetches.
+     */
+    @Test
+    fun `loadInitialData skips auto LoadProviders emit while a fetch is in flight via isLoadingProviders guard (需求13 rev-8 #2b)`() {
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        every { settingsManager.currentWorkdir } returns null
+
+        // Phase 1: first launch — LoadProviders emits once (CAS arms gate).
+        coordinator.loadInitialData()
+        runPending()
+        assertEquals(1, collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size)
+
+        // Phase 2: simulate failure-disarm + a manual refresh in flight.
+        coordinator.resetProvidersFirstFetchGate()
+        // Simulate launchLoadProviders' synchronous flag set (a manual refresh
+        // triggered it via the DIRECT emit path, bypassing the CAS gate).
+        slices.mutateSettings { it.copy(isLoadingProviders = true) }
+
+        // Phase 3: loadInitialData again (providers still null, gate disarmed,
+        // BUT isLoadingProviders=true). MUST NOT re-emit — the in-flight fetch
+        // will resolve providers.
+        coordinator.loadInitialData()
+        runPending()
+        assertEquals(
+            "LoadProviders must NOT re-emit while isLoadingProviders=true (rev-8 #2b): blocks duplicate parallel fetch",
+            1,
+            collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size,
+        )
+
+        // Phase 4: the in-flight fetch completes (failure) → flag clears + gate
+        // stays disarmed. The NEXT loadInitialData can now retry.
+        slices.mutateSettings { it.copy(isLoadingProviders = false) }
+        coordinator.loadInitialData()
+        runPending()
+        assertEquals(
+            "LoadProviders re-emits after in-flight fetch cleared (rev-8 #2b recovery resumes)",
+            2,
+            collectedEffects.filterIsInstance<ControllerEffect.LoadProviders>().size,
+        )
     }
 
     @Test

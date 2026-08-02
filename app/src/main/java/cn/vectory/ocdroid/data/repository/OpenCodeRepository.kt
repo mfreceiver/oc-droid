@@ -49,7 +49,6 @@ import java.io.IOException
 import java.util.Base64
 import java.security.cert.X509Certificate
 import javax.inject.Inject
-import javax.inject.Named
 import javax.inject.Singleton
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
@@ -141,16 +140,6 @@ class OpenCodeRepository @Inject constructor(
         // [clientIdStore], so the provider MUST defer the read (mirrors the
         // identityStoreOrFallback lazy pattern).
         clientIdProvider = { clientIdStoreOrFallback().getDeviceId() },
-        // §C5 (oc-slimapi turn-token contract §6.2 method A): lazy
-        // serverGroupFp provider for ServerGroupFpInterceptor. Resolves
-        // from the Hilt field-injected @Named("currentServerGroupFp")
-        // below at request time — the graph is built during this field
-        // initializer, BEFORE Hilt field injection populates
-        // [currentServerGroupFp], so the provider MUST defer the read
-        // (mirrors the clientIdStoreOrFallback lazy pattern). The outer
-        // lambda defers to [serverGroupFpOrFallback] which returns the
-        // Hilt-injected () -> String or the fallback.
-        serverGroupFpProvider = { serverGroupFpOrFallback().invoke() },
     )
 
     /** The sole volatile publication point for all network clients and APIs. */
@@ -272,26 +261,6 @@ class OpenCodeRepository @Inject constructor(
 
     private fun clientIdStoreOrFallback(): cn.vectory.ocdroid.data.repository.http.ClientIdStore =
         if (::clientIdStore.isInitialized) clientIdStore else fallbackClientIdStore
-
-    /**
-     * §C5 (oc-slimapi turn-token contract §6.2 method A): the live
-     * serverGroupFp provider for [ServerGroupFpInterceptor]. Injected by
-     * Hilt (field injection) — same pattern as [clientIdStore]. Bound to
-     * [cn.vectory.ocdroid.di.ControllerModule.provideCurrentServerGroupFp]
-     * in production; [fallbackServerGroupFp] (empty string) is used in
-     * plain unit-test constructions that bypass Hilt.
-     *
-     * Read lazily (via [serverGroupFpOrFallback]) by [networkGraph]'s
-     * `serverGroupFpProvider` lambda — the graph is built before Hilt
-     * populates this field, so the read MUST be lazy.
-     */
-    @Inject @Named("currentServerGroupFp")
-    lateinit var currentServerGroupFp: () -> String
-
-    private val fallbackServerGroupFp: () -> String = { "" }
-
-    private fun serverGroupFpOrFallback(): () -> String =
-        if (::currentServerGroupFp.isInitialized) currentServerGroupFp else fallbackServerGroupFp
 
     /**
      * Opaque capability for one configured slim-state incarnation (C-D3).
@@ -1783,6 +1752,49 @@ class OpenCodeRepository @Inject constructor(
         }
         // Drop providers with no models (parity with the former V2 builder's
         // groupBy: a provider whose models map is empty renders no picker rows).
+        val providers = response.providers.filter { it.models.isNotEmpty() }
+        val totalModels = providers.sumOf { it.models.size }
+        DebugLog.i("OpenCodeRepository", "catalog: ${providers.size} provider(s), $totalModels model(s) from /config/providers")
+        return Result.success(
+            ProvidersResponse(providers = providers, defaultByProvider = response.defaultByProvider)
+        )
+    }
+
+    /**
+     * §需求13 rev-7 #2: failure-propagating variant of [getProviders]. Same
+     * fetch + filter logic, EXCEPT structural failures (HTTP error / non-
+     * decodable body / network) propagate as [Result.failure] instead of
+     * being masked as an empty-catalog success.
+     *
+     * **Why a separate method**: [getProviders] applies a "last-mile
+     * defense" (catch → Result.success(empty)) so a transient failure
+     * degrades to an empty picker. That defense makes the 需求13 error-
+     * feedback feature DEAD: launchLoadProviders' `.onFailure` (which
+     * emits UiEvent.Error for the manual-refresh snackbar) NEVER fires for
+     * real network/HTTP/parse failures — they're masked as success-with-
+     * empty-catalog. This method gives launchLoadProviders a way to detect
+     * REAL failures and surface them, while leaving [getProviders]'
+     * behavior unchanged for any latent caller that relies on the degrade-
+     * to-empty contract.
+     *
+     * **Empty-catalog is NOT an error**: a server that legitimately returns
+     * zero providers still returns [Result.success] with an empty list. Only
+     * exceptions (the catch block) flip to [Result.failure].
+     * [CancellationException] is rethrown for structured concurrency.
+     */
+    suspend fun getProvidersOrFailure(): Result<ProvidersResponse> {
+        val response: ProvidersResponse = try {
+            api.getProviders()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // §需求13 rev-7 #2: propagate the REAL failure — do NOT mask as
+            // empty-catalog success. launchLoadProviders' .onFailure will
+            // fire → UiEvent.Error → snackbar surfaces "Failed to refresh
+            // model list". Cancellation is rethrown for structured concurrency.
+            DebugLog.e("OpenCodeRepository", "catalog: /config/providers fetch failed (propagating as failure)", e)
+            return Result.failure(e)
+        }
         val providers = response.providers.filter { it.models.isNotEmpty() }
         val totalModels = providers.sumOf { it.models.size }
         DebugLog.i("OpenCodeRepository", "catalog: ${providers.size} provider(s), $totalModels model(s) from /config/providers")

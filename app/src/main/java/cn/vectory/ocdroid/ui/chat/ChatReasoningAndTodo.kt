@@ -78,7 +78,7 @@ internal fun ReasoningCard(
     Surface(
         modifier = modifier.padding(vertical = 2.dp),
         shape = RectangleShape,
-        color = MaterialTheme.colorScheme.surfaceContainer
+        color = debugIdentitySurfaceColor(MaterialTheme.colorScheme.surfaceContainer)
     ) {
         Column(modifier = Modifier.then(if (isStreaming) Modifier else Modifier.animateContentSize(AppMotion.expandSizeSpec))) {
             Row(
@@ -173,7 +173,7 @@ internal fun ReasoningCard(
                 Surface(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
                     shape = RectangleShape,
-                    color = MaterialTheme.colorScheme.surfaceContainerLow
+                    color = debugIdentitySurfaceColor(MaterialTheme.colorScheme.surfaceContainerLow)
                 ) {
                     // Cap the body height + scroll so long streaming reasoning
                     // never overflows the screen (the "内容外溢" symptom) WHILE

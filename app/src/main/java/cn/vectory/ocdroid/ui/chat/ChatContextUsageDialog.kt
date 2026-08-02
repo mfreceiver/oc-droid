@@ -11,9 +11,10 @@
 //     HorizontalDivider），与 Todo / Agent / Model 等 sheet 对齐口径。
 //  2. 【关键】去掉 content 的 `weight(1f)`（原 :94-98）——那是"强制占满屏"的根因：
 //     `skipPartiallyExpanded=true` 下 ModalBottomSheet 给出 bounded 高度，weight(1f)
-//     让滚动区吃满剩余空间 ≈ 屏 90%。改为 `heightIn(max ≈ 屏高 78%) + verticalScroll`
-//     的自然高度：短内容（如 usage==null 单行）不被撑满，长内容（多 section）触顶
-//     后在封顶区内滚动；footer 自然跟随内容下方，不强制钉底。
+//     让滚动区吃满剩余空间 ≈ 屏 90%。改为 `verticalScroll` 的自然高度 + scaffold
+//     统一封顶（现由 SheetRecipe.kt 的 contentMaxHeightFraction=0.8 处理）：短内容
+//     （如 usage==null 单行）不被撑满，长内容（多 section）触顶后在封顶区内滚动；
+//     footer 自然跟随内容下方，不强制钉底。
 //  3. section header 从 labelMedium+SemiBold+primary 改为 labelLarge+onSurfaceVariant
 //     （14sp/Med，对齐其它 sheet 的次级标题口径，更易读）。
 //  4. item 字号保持 bodyLarge（与其它 sheet 一致；全局 bodyLarge 将在 P5 升到 16sp，
@@ -38,7 +39,6 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -56,10 +56,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.ContextUsage
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
@@ -84,10 +82,9 @@ internal fun ContextUsageDialog(
     // 程序化 dismiss（完成按钮）需先 animate hide 再 onDismiss，避免硬切。
     val scope = rememberCoroutineScope()
 
-    // 内容区封顶高度：屏高 78%。短内容（如 usage==null 单行）按自然高度不撑满全屏，
-    // 长内容（多 section）触顶后在封顶区内滚动。取代原 weight(1f)（强制吃满屏）。
-    val maxContentHeight = (LocalConfiguration.current.screenHeightDp * 0.78f).dp
-
+    // 内容区封顶改由 scaffold 的 contentMaxHeightFraction=0.8 统一处理
+    //（SheetRecipe.kt，与 0.78 差异微小）；短内容按自然高度不撑满全屏，
+    // 长内容（多 section）触顶后在封顶区内滚动。
     AppBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -128,12 +125,12 @@ internal fun ContextUsageDialog(
         // 从手写 labelLarge+onSurfaceVariant 改为 AppSectionHeader。ListItem 自带 16dp
         // 水平 padding（与 AppSectionHeader 对齐）；原语层统一 8dp，补 ListItem
         // 内置 16dp → 24dp keyline。
-        // **不用 weight(1f)**——heightIn(max) 封顶 + verticalScroll，sheet 按内容自然高度，
-        // footer 自然跟随下方（footer 由 AppBottomSheet 在 content 之后渲染）。
+        // **不用 weight(1f)**——scaffold 的 contentMaxHeightFraction=0.8 封顶 +
+        // verticalScroll，sheet 按内容自然高度，footer 自然跟随下方（footer 由
+        // AppBottomSheet 在 content 之后渲染）。
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = maxContentHeight)
                 .verticalScroll(rememberScrollState())
         ) {
             if (usage == null) {

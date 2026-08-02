@@ -4,7 +4,6 @@ import android.util.Log
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.model.HostProfileExportPayload
 import cn.vectory.ocdroid.data.model.HostProfileImportPayload
-import cn.vectory.ocdroid.data.model.normalizeGroupFp
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.serialization.SerializationException
@@ -74,15 +73,12 @@ class HostProfileStore @Inject constructor(
 
     @Synchronized
     fun save(profile: HostProfile) {
-        // R-20 Phase 0: enforce the nonblank serverGroupFp invariant at the
-        // write boundary — defensive; new profiles and decode normalize this
-        // upstream, but save() is the choke point where a blank value would
-        // land on disk and silently corrupt group keying.
-        val safe = profile.normalizeGroupFp()
+        // §需求12: the serverGroupFp nonblank invariant is gone (field deleted;
+        // fp == id implicitly). save() is now a plain upsert.
         val all = profiles().toMutableList()
-        val index = all.indexOfFirst { it.id == safe.id }
-        if (index >= 0) all[index] = safe else all.add(safe)
-        val currentId = settingsManager.currentHostProfileId ?: safe.id
+        val index = all.indexOfFirst { it.id == profile.id }
+        if (index >= 0) all[index] = profile else all.add(profile)
+        val currentId = settingsManager.currentHostProfileId ?: profile.id
         saveProfiles(all, currentId)
     }
 
@@ -99,19 +95,13 @@ class HostProfileStore @Inject constructor(
     @Synchronized
     fun duplicate(profileId: String): HostProfile {
         val source = profiles().firstOrNull { it.id == profileId } ?: error("Host profile not found")
-        // R-20 Phase 0: duplicate is "clone configuration into an independent
-        // connection point" — by plan §1's "import 默认新建独立组" logic, a
-        // duplicate starts as its own single-member group rather than
-        // inheriting the source's group. Defaulting to a fresh group avoids
-        // accidental cross-contamination of the cache when the duplicate
-        // points at a different server; the user may later pick A/B/C/D in
-        // the editor to share intentionally.
+        // §需求12: duplicate clones configuration into an independent
+        // connection point (fp == its own fresh id; no grouping to inherit).
         val newId = java.util.UUID.randomUUID().toString()
         val copy = source.copy(
             id = newId,
             name = "${source.displayName} Copy",
             lastUsedAt = null,
-            serverGroupFp = newId,
             // §2.2/§2.7: 绝不继承源 profile 的 mTLS 客户端证书引用——clientCertId 是
             // 源 profile 私有的 ESP key 后缀，复制后两个 profile 共享同一证书 id 会在
             // 删除其一时 clearClientCert 把另一个也孤儿化。证书材料是设备本地敏感数据，
@@ -155,16 +145,10 @@ class HostProfileStore @Inject constructor(
      * failure, returns [DecodeOutcome.ParseFailure] so callers can preserve the
      * original payload instead of overwriting it.
      *
-     * R-20 Phase 0 — `serverGroupFp` nonblank invariant: after a successful
-     * decode (with or without SSH filtering), each profile whose
-     * `serverGroupFp` is blank is normalized to `serverGroupFp = id`. This
-     * upgrades legacy JSON that predates Phase 0 (where the field is absent →
-     * defaults to `""`) into the Phase 0 form: each legacy profile becomes its
-     * own single-member group, preventing a "blank group" collapse that would
-     * merge unrelated legacy profiles into the same cache key (plan §0 复合
-     * 键控 + freegpt #2). If normalization changed any row, the cleaned list is
-     * persisted alongside the SSH cleanup (or in its own save if SSH cleanup
-     * did not fire).
+     * §需求12: the former R-20 Phase 0 `serverGroupFp` blank→id normalization
+     * is gone — the field is deleted and `ignoreUnknownKeys=true` silently
+     * drops any legacy `serverGroupFp` entry in old JSON on decode. fp is now
+     * implicitly `id` everywhere.
      */
     private fun decodeProfiles(raw: String?): DecodeOutcome {
         if (raw.isNullOrBlank()) return DecodeOutcome.Decoded(emptyList())
@@ -179,13 +163,6 @@ class HostProfileStore @Inject constructor(
                 ListSerializer(HostProfile.serializer()),
                 JsonArray(filtered)
             )
-            // R-20 Phase 0: normalize blank serverGroupFp → id (independent of
-            // whether SSH filtering removed any rows). `changed` is true iff
-            // any row actually had a blank group — drives the persist decision.
-            val normalizedProfiles = profiles.map { p ->
-                if (p.serverGroupFp.isBlank()) p.copy(serverGroupFp = p.id) else p
-            }
-            val changed = normalizedProfiles.zip(profiles).any { (a, b) -> a.serverGroupFp != b.serverGroupFp }
             if (filtered.size != elements.size) {
                 Log.w(
                     TAG,
@@ -194,26 +171,11 @@ class HostProfileStore @Inject constructor(
                 // Persist the cleanup. Safe: we successfully decoded every
                 // remaining entry, so this is a deliberate migration rather
                 // than a destructive overwrite.
-                // R-20 Phase 0: persist the normalized (blank→id) form together
-                // with the SSH cleanup so we don't leave blank serverGroupFp
-                // rows on disk to be re-normalized on every read.
                 val remainingCurrentId = settingsManager.currentHostProfileId
-                    ?.takeIf { id -> normalizedProfiles.any { it.id == id } }
-                saveProfiles(normalizedProfiles, remainingCurrentId)
-            } else if (changed) {
-                // No SSH cleanup, but blank→id normalization upgraded some rows.
-                // Persist the upgraded form (independent of SSH path so legacy
-                // pre-Phase-0 JSON converges on the nonblank invariant).
-                Log.w(
-                    TAG,
-                    "Normalized ${normalizedProfiles.zip(profiles).count { (a, b) -> a.serverGroupFp != b.serverGroupFp }} " +
-                        "profile(s) with blank serverGroupFp (Phase 0 migration)"
-                )
-                val remainingCurrentId = settingsManager.currentHostProfileId
-                    ?.takeIf { id -> normalizedProfiles.any { it.id == id } }
-                saveProfiles(normalizedProfiles, remainingCurrentId)
+                    ?.takeIf { id -> profiles.any { it.id == id } }
+                saveProfiles(profiles, remainingCurrentId)
             }
-            normalizedProfiles
+            profiles
         }.fold(
             onSuccess = { DecodeOutcome.Decoded(it) },
             onFailure = {
@@ -236,12 +198,8 @@ class HostProfileStore @Inject constructor(
     }
 
     private fun saveProfiles(profiles: List<HostProfile>, currentId: String?) {
-        // R-20 Phase 0: belt-and-braces nonblank guard at the lowest write
-        // boundary. Every other entry path (save / decodeProfiles) normalizes
-        // upstream, but this catches any future caller that bypasses them.
-        val safe = profiles.map { it.normalizeGroupFp() }
-        settingsManager.hostProfilesJson = json.encodeToString(safe)
-        settingsManager.currentHostProfileId = currentId ?: safe.firstOrNull()?.id
+        settingsManager.hostProfilesJson = json.encodeToString(profiles)
+        settingsManager.currentHostProfileId = currentId ?: profiles.firstOrNull()?.id
     }
 
     /**
@@ -264,18 +222,6 @@ class HostProfileStore @Inject constructor(
             saveProfiles(migrated, migratedCurrentId)
         }
         return changed
-    }
-
-    /**
-     * R-20 Phase 0: returns all profiles whose `serverGroupFp` equals [fp].
-     * Empty list if [fp] matches no profile (including when [fp] is blank —
-     * callers must never query for a blank group; the nonblank invariant
-     * guarantees no profile carries one anyway).
-     */
-    @Synchronized
-    fun profilesInGroup(serverGroupFp: String): List<HostProfile> {
-        if (serverGroupFp.isBlank()) return emptyList()
-        return profiles().filter { it.serverGroupFp == serverGroupFp }
     }
 
     private sealed interface DecodeOutcome {

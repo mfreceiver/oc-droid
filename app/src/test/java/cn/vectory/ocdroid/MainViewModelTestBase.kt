@@ -135,6 +135,11 @@ abstract class MainViewModelTestBase {
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
         coEvery { repository.getAgents() } returns Result.success(emptyList())
         coEvery { repository.getProviders() } returns Result.success(ProvidersResponse())
+        // §需求13 rev-7 #2: launchLoadProviders now calls getProvidersOrFailure
+        // (propagates real failures) instead of getProviders (masks as empty).
+        // The relaxed mock cannot auto-construct a Result<ProvidersResponse>
+        // for the new method → stub it the same as getProviders.
+        coEvery { repository.getProvidersOrFailure() } returns Result.success(ProvidersResponse())
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         coEvery { repository.getPendingQuestions(any()) } returns Result.success(emptyList())
     }
@@ -221,7 +226,7 @@ abstract class MainViewModelTestBase {
             settingsManager = settingsManager,
             repository = repository,
             effects = effectBus,
-            currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
+            currentProfileId = { hostProfileStore.currentProfile().id },
         )
         val hostProfileController = cn.vectory.ocdroid.ui.controller.HostProfileController(
             scope = appScope,
@@ -231,7 +236,7 @@ abstract class MainViewModelTestBase {
             settingsManager = settingsManager,
             trafficTracker = trafficTracker,
             effects = effectBus,
-            currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
+            currentProfileId = { hostProfileStore.currentProfile().id },
             identityStore = identityStore,
         )
         val sessionSyncCoordinator = cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator(
@@ -239,7 +244,7 @@ abstract class MainViewModelTestBase {
             slices = store.slices,
             settingsManager = settingsManager,
             effects = effectBus,
-            currentServerGroupFp = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } },
+            currentProfileId = { hostProfileStore.currentProfile().id },
             // CP1 (notify Phase-0): single connection-identity store.
             identityStore = identityStore,
             repository = repository,
@@ -266,7 +271,7 @@ abstract class MainViewModelTestBase {
             // construct their own coordinator with a real coordinator.
             streamingLifecycleCoordinator = null,
         )
-        val fpProvider: () -> String = { hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id } }
+        val fpProvider: () -> String = { hostProfileStore.currentProfile().id }
         val core = AppCore(
             store,
             repository,

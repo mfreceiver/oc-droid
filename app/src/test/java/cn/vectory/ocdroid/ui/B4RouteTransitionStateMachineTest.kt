@@ -153,7 +153,7 @@ class B4RouteTransitionStateMachineTest {
         val prior = withChatDetail("ses_cur").copy(
             composer = ComposerState(draftWorkdir = "/old"),
         )
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+        val out = reduce(prior, AppAction.HostStatePurged)
 
         assertNull(out.chat.currentSessionId)
         assertNull(out.chat.content)
@@ -273,7 +273,7 @@ class B4RouteTransitionStateMachineTest {
         val prior = withChatDetail("ses_cur").copy(
             composer = ComposerState(draftWorkdir = "/old"),
         )
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+        val out = reduce(prior, AppAction.HostStatePurged)
 
         // Single-dispatch full clear: current + content + messages + sessions + draft.
         assertNull(out.chat.currentSessionId)
@@ -372,7 +372,7 @@ class B4RouteTransitionStateMachineTest {
         val prior = withChatDetail("ses_cur").copy(
             composer = ComposerState(draftWorkdir = "/old"),
         )
-        val out = reduce(prior, AppAction.HostStatePurged(preserveServerGroupData = false))
+        val out = reduce(prior, AppAction.HostStatePurged)
 
         // Full clear: current + content + messages + sessions + draft.
         assertNull(out.chat.currentSessionId)

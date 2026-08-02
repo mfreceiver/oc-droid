@@ -286,6 +286,36 @@ internal fun mergeRefreshedSessionsPreservingLocalActivity(
 }
 
 /**
+ * §需求10 C2: preserves sessions that were added by SSE during the REST request
+ * window. When a REST poll for session metadata is in-flight, SSE may deliver
+ * session-created events that insert new sessions into the local list. A naive
+ * REST merge (via [mergeRefreshedSessionsPreservingLocalActivity]) would discard
+ * those SSE-created sessions because they are absent from the REST response
+ * (which reflects server state as of request-start).
+ *
+ * This function restores those SSE-created sessions by identifying sessions in
+ * [local] that were NOT in [localIdsAtRequestStart] (i.e. created during the
+ * request window) and are NOT already in [merged] (i.e. would be lost by the
+ * merge). Such sessions are appended to the merged result.
+ *
+ * @param merged the result of [mergeRefreshedSessionsPreservingLocalActivity].
+ * @param local the local session list captured at merge time (may contain
+ *   SSE-created sessions that arrived during the request).
+ * @param localIdsAtRequestStart the set of session IDs present locally when
+ *   the REST request was launched (snapshot before SSE delivery).
+ * @return [merged] with any SSE-created-during-request sessions appended.
+ */
+internal fun preserveSessionsAddedDuringRequest(
+    merged: List<Session>,
+    local: List<Session>,
+    localIdsAtRequestStart: Set<String>,
+): List<Session> {
+    val mergedIds = merged.mapTo(mutableSetOf()) { it.id }
+    val preserved = local.filter { it.id !in localIdsAtRequestStart && it.id !in mergedIds }
+    return if (preserved.isEmpty()) merged else merged + preserved
+}
+
+/**
  * Returns a copy of this TimeInfo whose [updated] field is at least [updated]
  * (monotonic — never goes backwards). Used by the recent-sessions sort bump
  * (§recent-sort-by-message) and by the merge path that preserves a strictly-

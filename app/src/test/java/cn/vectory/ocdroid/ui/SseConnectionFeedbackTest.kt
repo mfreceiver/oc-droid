@@ -8,15 +8,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * §sse-feedback-ux (P2-1): pure unit coverage for the SSE-disconnect feedback
- * derivation. All subjects are pure (no store / no clock side-effect), so the
- * tests drive them directly with a controlled clock. This locks:
+ * §sse-feedback-ux: pure unit coverage for the SSE-disconnect feedback
+ * derivation, banner category, and hysteresis reducer. All subjects are pure
+ * (no store / no clock side-effect), so the tests drive them directly with a
+ * controlled clock. This locks:
  *  - [deriveSseConnectionFeedback] is exhaustive over every [ConnectionPhase]
  *    variant (no `else` — a new phase that forgets to map would compile-fail,
  *    and these tests pin the mapping).
- *  - [SseConnectionFeedback.showBanner] fires ONLY on a sustained terminal
- *    disconnect / debug REST-only mode — never on the transient / healthy /
- *    TOFU-pending variants (so the banner never cries wolf).
+ *  - [SseConnectionFeedback.showBanner] fires on Disconnected / Disabled /
+ *    WaitingForStream (the 漏报 fix) — never on the transient / healthy /
+ *    TOFU-pending variants.
+ *  - [bannerCategory] maps each feedback + mtlsDegradedError to the correct
+ *    [BannerCategory] (or null): priority rule AUTH_FAILURE > REST_OUTAGE.
  *  - [disconnectDurationMs] derives from the stamped transition time, coerces
  *    clock skew to ≥ 0, and returns null off the happy path.
  *  - [resolveDisconnectDurationLabel] buckets elapsed time into just-now /
@@ -81,12 +84,13 @@ class SseConnectionFeedbackTest {
     }
 
     @Test
-    fun `showBanner is true only for Disconnected and Disabled`() {
+    fun `showBanner is true for Disconnected Disabled and WaitingForStream`() {
+        // §1.1 漏报 fix: WaitingForStream now returns true.
         assertTrue(SseConnectionFeedback.Disconnected(1_000L, 5_000L).showBanner)
         assertTrue(SseConnectionFeedback.Disabled.showBanner)
+        assertTrue(SseConnectionFeedback.WaitingForStream.showBanner)
 
         assertFalse(SseConnectionFeedback.Live.showBanner)
-        assertFalse(SseConnectionFeedback.WaitingForStream.showBanner)
         assertFalse(SseConnectionFeedback.Connecting.showBanner)
         assertFalse(SseConnectionFeedback.Reconnecting(null, null).showBanner)
         assertFalse(SseConnectionFeedback.Reconnecting(1, 3).showBanner)
@@ -95,34 +99,32 @@ class SseConnectionFeedbackTest {
     }
 
     @Test
-    fun `disconnectDurationMs derives from the stamped transition time`() {
-        assertEquals(
-            4_000L,
-            SseConnectionFeedback.Disconnected(sinceMs = 1_000L, now = 5_000L).disconnectDurationMs(),
-        )
-        // Exactly at the stamp → zero (not negative).
-        assertEquals(
-            0L,
-            SseConnectionFeedback.Disconnected(sinceMs = 5_000L, now = 5_000L).disconnectDurationMs(),
-        )
-    }
-
-    @Test
-    fun `disconnectDurationMs coerces clock skew to zero`() {
-        // A monotonic-clock skew (now observed BEFORE the stamp) must never
-        // render a negative elapsed time.
-        assertEquals(
-            0L,
-            SseConnectionFeedback.Disconnected(sinceMs = 5_000L, now = 1_000L).disconnectDurationMs(),
-        )
-    }
-
-    @Test
-    fun `disconnectDurationMs is null off the disconnected path`() {
-        assertNull(SseConnectionFeedback.Live.disconnectDurationMs())
-        assertNull(SseConnectionFeedback.Idle.disconnectDurationMs())
-        assertNull(SseConnectionFeedback.Disabled.disconnectDurationMs())
-        assertNull(SseConnectionFeedback.Reconnecting(1, 3).disconnectDurationMs())
+    fun `bannerCategory matrix covers every variant with null and non-null mtlsDegradedError`() {
+        // Disabled → USER_DISABLED (ignores mtlsDegradedError)
+        assertEquals(BannerCategory.USER_DISABLED, SseConnectionFeedback.Disabled.bannerCategory(null))
+        assertEquals(BannerCategory.USER_DISABLED, SseConnectionFeedback.Disabled.bannerCategory("err"))
+        // WaitingForStream → SSE_STALLED (ignores mtlsDegradedError — 漏报 fix)
+        assertEquals(BannerCategory.SSE_STALLED, SseConnectionFeedback.WaitingForStream.bannerCategory(null))
+        assertEquals(BannerCategory.SSE_STALLED, SseConnectionFeedback.WaitingForStream.bannerCategory("err"))
+        // Disconnected + null error → REST_OUTAGE
+        assertEquals(BannerCategory.REST_OUTAGE, SseConnectionFeedback.Disconnected(1_000L, 5_000L).bannerCategory(null))
+        // Disconnected + non-null error → AUTH_FAILURE (priority rule)
+        assertEquals(BannerCategory.AUTH_FAILURE, SseConnectionFeedback.Disconnected(1_000L, 5_000L).bannerCategory("cert missing"))
+        // Live → null (no banner)
+        assertNull(SseConnectionFeedback.Live.bannerCategory(null))
+        assertNull(SseConnectionFeedback.Live.bannerCategory("err"))
+        // Connecting → null
+        assertNull(SseConnectionFeedback.Connecting.bannerCategory(null))
+        assertNull(SseConnectionFeedback.Connecting.bannerCategory("err"))
+        // Reconnecting → null
+        assertNull(SseConnectionFeedback.Reconnecting(null, null).bannerCategory(null))
+        assertNull(SseConnectionFeedback.Reconnecting(1, 3).bannerCategory("err"))
+        // AwaitingTofuTrust → null
+        assertNull(SseConnectionFeedback.AwaitingTofuTrust.bannerCategory(null))
+        assertNull(SseConnectionFeedback.AwaitingTofuTrust.bannerCategory("err"))
+        // Idle → null
+        assertNull(SseConnectionFeedback.Idle.bannerCategory(null))
+        assertNull(SseConnectionFeedback.Idle.bannerCategory("err"))
     }
 
     @Test

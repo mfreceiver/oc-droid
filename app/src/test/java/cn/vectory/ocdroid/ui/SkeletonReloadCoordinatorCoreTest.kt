@@ -98,7 +98,7 @@ class SkeletonReloadCoordinatorCoreTest {
         val foreground = MutableStateFlow(true)
         val generation = AtomicLong(1L)
         val identity = AtomicReference(
-            ConnectionIdentity(epoch = 1L, serverGroupFp = "host-A",
+            ConnectionIdentity(epoch = 1L, profileId = "host-A",
                 normalizedWorkdir = "/a", endpointFp = "http://a"))
         val bundleStamp = AtomicReference(BundleStamp(1L, "http://a"))
         val nowMs: () -> Long = { scope.testScheduler.currentTime }
@@ -720,7 +720,7 @@ class SkeletonReloadCoordinatorCoreTest {
 
             val abaForeground = MutableStateFlow(true)
             val abaIdentity = ConnectionIdentity(
-                epoch = 1L, serverGroupFp = "host-A",
+                epoch = 1L, profileId = "host-A",
                 normalizedWorkdir = "/a", endpointFp = "http://a")
             val c = SkeletonReloadCoordinator(
                 scope = realScope,
@@ -1112,7 +1112,7 @@ class SkeletonReloadCoordinatorCoreTest {
 
             // host switch: gen 1 → gen 2, host-A → host-B, bundle updated.
             cs.generation.set(2L)
-            cs.identity.set(ConnectionIdentity(epoch = 2L, serverGroupFp = "host-B",
+            cs.identity.set(ConnectionIdentity(epoch = 2L, profileId = "host-B",
                 normalizedWorkdir = "/b", endpointFp = "http://b"))
             cs.bundleStamp.set(BundleStamp(2L, "http://b"))
             store.mutateState { it.copy(liveBundleGeneration = 2L, liveEndpointFp = "http://b") }
@@ -1513,7 +1513,7 @@ class SkeletonReloadCoordinatorCoreTest {
                 MessagesPage(listOf(mwp(msg("cancelled-m1", created = 100L))), null)
             }
             val identity = AtomicReference(ConnectionIdentity(
-                epoch = 1L, serverGroupFp = "host-A",
+                epoch = 1L, profileId = "host-A",
                 normalizedWorkdir = "/a", endpointFp = "http://a"))
             val c = SkeletonReloadCoordinator(
                 scope = realScope,
@@ -1949,7 +1949,7 @@ class SkeletonReloadCoordinatorCoreTest {
             MessagesPage(listOf(mwp(msg("cancelled-content", created = 100L))), null)
         }
         val identity = AtomicReference(ConnectionIdentity(
-            epoch = 1L, serverGroupFp = "host-A",
+            epoch = 1L, profileId = "host-A",
             normalizedWorkdir = "/a", endpointFp = "http://a"))
         val realScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         try {
@@ -2188,7 +2188,7 @@ class SkeletonReloadCoordinatorCoreTest {
             assertTrue("dirty retained with null identity", snap.dirty)
 
             // Identity becomes available (simulating bind).
-            cs.identity.set(ConnectionIdentity(epoch = 1L, serverGroupFp = "host-A",
+            cs.identity.set(ConnectionIdentity(epoch = 1L, profileId = "host-A",
                 normalizedWorkdir = "/a", endpointFp = "http://a"))
             // nudgeCurrentSession should trigger the retained dirty work.
             c.nudgeCurrentSession()
@@ -2295,7 +2295,7 @@ class SkeletonReloadCoordinatorCoreTest {
                 MessagesPage(listOf(mwp(msg("stale-m1", created = 100L))), null)
             }
             val identity = AtomicReference(ConnectionIdentity(
-                epoch = 1L, serverGroupFp = "host-A",
+                epoch = 1L, profileId = "host-A",
                 normalizedWorkdir = "/a", endpointFp = "http://a"))
             val c = SkeletonReloadCoordinator(
                 scope = realScope, repository = repo, slices = store.slices,

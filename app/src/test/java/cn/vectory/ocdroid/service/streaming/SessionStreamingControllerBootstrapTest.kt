@@ -45,7 +45,7 @@ class SessionStreamingControllerBootstrapTest {
 
     private val identity = ConnectionIdentity(
         epoch = 5L,
-        serverGroupFp = "group-fp",
+        profileId = "group-fp",
         normalizedWorkdir = "/work/dir",
         endpointFp = "endpoint-fp",
     )
@@ -104,7 +104,7 @@ class SessionStreamingControllerBootstrapTest {
         // carries the store's epoch (= 0 at start); we compare against this
         // bound value below.
         val boundIdentity = fixture.store.bind(
-            serverGroupFp = identity.serverGroupFp,
+            profileId = identity.profileId,
             normalizedWorkdir = identity.normalizedWorkdir,
             endpointFp = identity.endpointFp,
         )

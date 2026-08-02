@@ -17,6 +17,8 @@ import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.data.repository.MessagesPage
 import cn.vectory.ocdroid.ui.AppCore
 import cn.vectory.ocdroid.ui.ChatViewModel
+import cn.vectory.ocdroid.ui.BannerHysteresisOwner
+import cn.vectory.ocdroid.ui.BannerHysteresisState
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
@@ -34,6 +36,7 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.coVerifyOrder
 import io.mockk.every
+import io.mockk.mockk
 import io.mockk.just
 import io.mockk.mockk
 import io.mockk.runs
@@ -97,7 +100,7 @@ class HostViewModelTest : MainViewModelTestBase() {
         )
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -124,7 +127,7 @@ class HostViewModelTest : MainViewModelTestBase() {
         )
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -150,7 +153,7 @@ class HostViewModelTest : MainViewModelTestBase() {
         )
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -168,27 +171,22 @@ class HostViewModelTest : MainViewModelTestBase() {
 
     @Test
     fun `selectHostProfile clears the per-session message cache on cross-group switch`() = runTest {
-        // R-20 Phase 1: selectHostProfile uses a 4-step previous/target fp
-        // compare. Cache eviction (EvictGroup → clearMemoryForGroup) only
-        // fires on a CROSS-GROUP switch (previousFp != targetFp); a same-
-        // group switch keeps the cache (server-identical data). The two
-        // profiles here have explicit, distinct serverGroupFp values so the
-        // 异组 branch fires. (defaultDirect() generates random UUIDs which
+        // §需求12: every host switch is an unconditional full purge (profiles
+        // are independent — no same-group branch remains). The two profiles
+        // here have distinct ids ("default" vs "other") which is all the
+        // purge trigger needs. (defaultDirect() generates random UUIDs which
         // would also be distinct, but we mock currentProfile() to return the
-        // target BEFORE select — see below — which would collapse previousFp
-        // onto targetFp. Explicit fps + an answers-based currentProfile()
-        // holder keeps the test deterministic.)
+        // target BEFORE select — see below — so explicit ids + an answers-
+        // based currentProfile() holder keeps the test deterministic.)
         val defaultProfile = HostProfile(
             id = "default",
             name = "Default",
             serverUrl = "http://server.test",
-            serverGroupFp = "g-default"
         )
         val otherProfile = HostProfile(
             id = "other",
             name = "Other",
             serverUrl = "http://other.test",
-            serverGroupFp = "g-other"
         )
         // answers-based holder: currentProfile() returns defaultProfile UNTIL
         // select("other") is called, then returns otherProfile. This matches
@@ -216,7 +214,7 @@ class HostViewModelTest : MainViewModelTestBase() {
             )
 
         val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
+        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
         val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
         val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
@@ -241,68 +239,11 @@ class HostViewModelTest : MainViewModelTestBase() {
         )
     }
 
-    @Test
-    fun `selectHostProfile preserves the per-session message cache on same-group switch`() = runTest {
-        // R-20 Phase 1 (same-group counterpart of the test above): when two
-        // profiles share a serverGroupFp (sibling entry points to the same
-        // server), selectHostProfile keeps the cached message windows — the
-        // server data is identical, so dropping the cache would just cause a
-        // flicker + re-fetch. purgePerHostState runs with
-        // preserveServerGroupData=true; no EvictGroup effect fires.
-        val profileA = HostProfile(
-            id = "pa",
-            name = "Profile A",
-            serverUrl = "http://server.test",
-            serverGroupFp = "shared-group"
-        )
-        val profileB = HostProfile(
-            id = "pb",
-            name = "Profile B",
-            serverUrl = "http://server.test",
-            serverGroupFp = "shared-group" // same group
-        )
-        val currentProfileHolder = mutableListOf(profileA)
-        every { hostProfileStore.currentProfile() } answers { currentProfileHolder.first() }
-        every { hostProfileStore.profiles() } returns listOf(profileA, profileB)
-        every { hostProfileStore.select("pb") } answers {
-            currentProfileHolder[0] = profileB
-            profileB
-        }
-        coEvery { repository.checkHealth() } returns Result.failure(IllegalStateException("offline"))
-
-        coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
-            Result.success(
-                MessagesPage(
-                    listOf(MessageWithParts(info = Message(id = "m_a1", role = "user"))),
-                    null
-                )
-            )
-
-        val core = createCore()
-        val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core)
-        val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
-        val connectionVM = cn.vectory.ocdroid.ui.ConnectionViewModel(core)
-        val hostVM = cn.vectory.ocdroid.ui.HostViewModel(core)
-        val composerVM = cn.vectory.ocdroid.ui.ComposerViewModel(core)
-        val orchestratorVM = cn.vectory.ocdroid.ui.OrchestratorViewModel(core)
-        val viewModel = HostViewModel(core)  // primary VM under test
-        core.writeChat { it.copy(currentSessionId = "session-A") }
-        core.writeSessionList {
-            it.copy(sessions = listOf(Session(id = "session-A", directory = "/tmp/a")))
-        }
-        chatVM.loadMessages("session-A")
-        advanceUntilIdle()
-        assertEquals(1, core.sessionWindowCacheSize())
-
-        hostVM.selectHostProfile("pb")
-        advanceUntilIdle()
-
-        assertEquals(
-            "Same-group host switch must preserve the per-session message cache",
-            1,
-            core.sessionWindowCacheSize()
-        )
-    }
+    // §需求12阶段3: the former `selectHostProfile preserves the per-session
+    // message cache on same-group switch` test was removed — under 需求12
+    // profiles are independent (no groups) and every switch is a full purge
+    // (C-8 restart kills preserved slices anyway). The cross-group clear test
+    // above covers the unconditional purge.
 
     // --------------------------------------------- caSummary / clientCertSummary
     // §mtls-clipboard coverage: the new pure-read summary helpers in

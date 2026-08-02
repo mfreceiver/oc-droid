@@ -8,8 +8,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
@@ -26,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.ConfigProvider
 import cn.vectory.ocdroid.data.model.ProvidersResponse
@@ -53,21 +60,67 @@ import cn.vectory.ocdroid.ui.theme.Dimens
 internal fun ModelManagementSection(
     providers: ProvidersResponse?,
     disabledModels: Set<String>,
+    isLoadingProviders: Boolean,
+    onRefreshProviders: () -> Unit,
     onToggleModelDisabled: (providerId: String, modelId: String) -> Unit,
     onSetProviderModelsEnabled: (providerId: String, enabled: Boolean) -> Unit
 ) {
     AppSectionHeader(text = stringResource(R.string.settings_model_management))
 
+    // §需求13: the manual refresh IconButton is a first-class affordance —
+    // always rendered (header trailing slot is taken by AppSectionHeader so
+    // we surface it next to the row / empty-state). Wrapped in a Row with
+    // fillMaxWidth so it stays right-aligned whether or not the catalog is
+    // empty.
+    val refreshTrailing: @Composable () -> Unit = {
+        // §需求13: manual model-catalog refresh. The fan-out's LoadProviders
+        // is gated to first-launch only (providers == null); subsequent
+        // refreshes go through here. Disabled + shows a CircularProgressIndicator
+        // while a fetch is in flight (mirrors the SessionsScreen refresh
+        // IconButton + isLoadingSessions pattern).
+        IconButton(
+            onClick = onRefreshProviders,
+            enabled = !isLoadingProviders,
+        ) {
+            if (isLoadingProviders) {
+                // §Dimens: no dedicated progress-stroke token; 2.dp literal
+                // matches the ChangesPane.kt:207 / ChatMessageRow.kt:821
+                // precedent (the canonical "small inline spinner" stroke).
+                CircularProgressIndicator(
+                    modifier = Modifier.size(Dimens.iconStd),
+                    strokeWidth = 2.dp,
+                )
+            } else {
+                Icon(
+                    Icons.Default.Refresh,
+                    contentDescription = stringResource(R.string.model_management_refresh),
+                )
+            }
+        }
+    }
+
     val (disabledCount, totalModels) = modelCatalogCounts(providers, disabledModels)
     if (totalModels == 0) {
         // Inline empty-state message (no dialog to open when there is nothing
-        // to edit).
-        Text(
-            stringResource(R.string.settings_model_management_empty),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(Dimens.spacing4)
-        )
+        // to edit). §需求13: the refresh IconButton is rendered next to the
+        // message so the user can pull the catalog from this state too (the
+        // most likely time they need a manual refresh is precisely when the
+        // list is empty).
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(Dimens.spacing4),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(Dimens.spacing2)
+        ) {
+            Text(
+                stringResource(R.string.settings_model_management_empty),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            refreshTrailing()
+        }
         return
     }
 
@@ -82,7 +135,9 @@ internal fun ModelManagementSection(
 
     var showDialog by rememberSaveable { mutableStateOf(false) }
     // §setux #new4: 移除右侧 `>` chevron 指示符（trailingContent），保留
-    // clickable 行为。
+    // clickable 行为。§需求13: trailingContent 重新启用，承载手动 refresh
+    // IconButton（与 clickable 的对话框打开行为互不冲突——点击按钮区域
+    // 由 IconButton 自身消费，不冒泡到 ListItem）。
     ListItem(
         modifier = Modifier
             .fillMaxWidth()
@@ -103,12 +158,14 @@ internal fun ModelManagementSection(
                 overflow = TextOverflow.Ellipsis
             )
         },
+        trailingContent = refreshTrailing,
     )
 
     if (showDialog) {
         ModelManagementDialog(
             providers = providers,
             disabledModels = disabledModels,
+            isLoadingProviders = isLoadingProviders,
             onToggleModelDisabled = onToggleModelDisabled,
             onSetProviderModelsEnabled = onSetProviderModelsEnabled,
             onDismiss = { showDialog = false }
@@ -121,6 +178,7 @@ internal fun ModelManagementSection(
 private fun ModelManagementDialog(
     providers: ProvidersResponse?,
     disabledModels: Set<String>,
+    isLoadingProviders: Boolean,
     onToggleModelDisabled: (providerId: String, modelId: String) -> Unit,
     onSetProviderModelsEnabled: (providerId: String, enabled: Boolean) -> Unit,
     onDismiss: () -> Unit
@@ -165,6 +223,7 @@ private fun ModelManagementDialog(
                 ProviderBlock(
                     provider = provider,
                     disabledModels = disabledModels,
+                    isLoadingProviders = isLoadingProviders,
                     onToggleModelDisabled = onToggleModelDisabled,
                     onSetProviderModelsEnabled = onSetProviderModelsEnabled
                 )
@@ -177,6 +236,7 @@ private fun ModelManagementDialog(
 private fun ProviderBlock(
     provider: ConfigProvider,
     disabledModels: Set<String>,
+    isLoadingProviders: Boolean,
     onToggleModelDisabled: (providerId: String, modelId: String) -> Unit,
     onSetProviderModelsEnabled: (providerId: String, enabled: Boolean) -> Unit
 ) {
@@ -195,9 +255,13 @@ private fun ProviderBlock(
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f)
             )
+            // §需求13: block the provider-level bulk toggle while the catalog
+            // is mid-refresh (otherwise a toggle racing a refresh could land
+            // on a stale disabledModels snapshot).
             Switch(
                 checked = providerAllModelsEnabled(provider, disabledModels),
-                onCheckedChange = { onSetProviderModelsEnabled(provider.id, it) }
+                onCheckedChange = { onSetProviderModelsEnabled(provider.id, it) },
+                enabled = !isLoadingProviders,
             )
         }
         Spacer(modifier = Modifier.height(Dimens.spacing2))
@@ -211,6 +275,7 @@ private fun ProviderBlock(
                 // switch appeared dead and the model was always "enabled".
                 // Use the real provider id from the closure parameter.
                 enabled = "${provider.id}/$modelId" !in disabledModels,
+                isLoadingProviders = isLoadingProviders,
                 onToggle = { onToggleModelDisabled(provider.id, modelId) }
             )
         }
@@ -223,12 +288,19 @@ private fun ModelRow(
     modelId: String,
     displayName: String,
     enabled: Boolean,
+    isLoadingProviders: Boolean,
     onToggle: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onToggle)
+            // §需求13: keep the row clickable but it routes through the same
+            // Switch; while loading, the Switch is disabled AND the row's
+            // clickable mirrors that (avoids a dead-tap on the row body that
+            // silently no-ops while the Switch looks disabled). clickable's
+            // `enabled` param gates pointer events so the ripple is also
+            // suppressed.
+            .clickable(enabled = !isLoadingProviders, onClick = onToggle)
             .padding(vertical = Dimens.spacingCompact),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Dimens.spacing3)
@@ -251,7 +323,14 @@ private fun ModelRow(
             )
         }
         Spacer(modifier = Modifier.width(Dimens.spacing2))
-        Switch(checked = enabled, onCheckedChange = { onToggle() })
+        // §需求13: per-model Switch disabled during refresh so the user can't
+        // toggle a model whose catalog entry may be about to disappear /
+        // reappear (would race the reconcileModelData RMW).
+        Switch(
+            checked = enabled,
+            onCheckedChange = { onToggle() },
+            enabled = !isLoadingProviders,
+        )
     }
 }
 

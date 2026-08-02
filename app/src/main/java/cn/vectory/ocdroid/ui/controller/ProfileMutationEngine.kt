@@ -9,7 +9,6 @@ import cn.vectory.ocdroid.ui.settings.CaStage
 import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
 import cn.vectory.ocdroid.ui.settings.resolveClientCert
 import cn.vectory.ocdroid.ui.settings.toMaterial
-import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.runSuspendCatching
 import kotlinx.coroutines.CoroutineScope
@@ -54,7 +53,7 @@ class ProfileMutationEngine internal constructor(
     ) -> Unit,
     private val configureRepositoryForProfile: (HostProfile) -> Unit,
     private val refreshHostProfileState: () -> Unit,
-    private val purgePerHostState: (preserveServerGroupData: Boolean) -> Unit,
+    private val purgePerHostState: () -> Unit,
 ) {
 
     /**
@@ -124,9 +123,7 @@ class ProfileMutationEngine internal constructor(
                 settingsManager.setBasicAuthPassword(normalized.id, "")
             }
             if (urlChanged) {
-                settingsManager.clearModelDataForGroup(
-                    normalized.serverGroupFp.ifBlank { normalized.id }
-                )
+                settingsManager.clearModelDataForGroup(normalized.id)
             }
             hostProfileStore.save(normalized)
             // lite-v2: NO configureRepositoryForProfileRaw — restart applies new settings.
@@ -195,38 +192,35 @@ class ProfileMutationEngine internal constructor(
      * lite-v2: barrier path and ticket-based configure removed. Active
      * deletion persists + signals restart-required; non-current deletion
      * just persists.
+     *
+     * §需求12阶段3 (oracle-assessed): under 需求12 profiles are fully
+     * independent (no groups — a group can never have sibling profiles),
+     * so the former `remainingInGroup` reference-counting
+     * (`profilesInGroup`, conditional `clearModelDataForGroup`/`EvictGroup`)
+     * is dead logic. Simplified to unconditional clear + evict on active
+     * deletion.
      */
     fun deleteHostProfile(profileId: String) {
         val wasCurrent = profileId == slices.host.value.currentHostProfileId
         val deletedProfile = hostProfileStore.profiles().firstOrNull { it.id == profileId }
-        val deletedFp = deletedProfile?.serverGroupFp
-        val remainingInGroup = deletedFp?.let { fp ->
-            hostProfileStore.profilesInGroup(fp).filter { it.id != profileId }
-        } ?: emptyList()
+        // §需求12: fp == profile.id (the serverGroupFp field is deleted).
+        val deletedProfileId = deletedProfile?.id
         hostProfileStore.delete(profileId)
         deletedProfile?.clientCertId?.let { settingsManager.clearClientCert(it) }
         val current = hostProfileStore.currentProfile()
         if (wasCurrent) {
             // Active deletion: persist + signal restart-required.
             // Repository will reconfigure on restart with the new current profile.
-            if (remainingInGroup.isEmpty()) {
-                deletedFp?.let { settingsManager.clearModelDataForGroup(it) }
-            } else {
-                DebugLog.i(
-                    TAG,
-                    "deleteHostProfile: kept model data for fp=$deletedFp — ${remainingInGroup.size} sibling profile(s) still reference this group"
-                )
-            }
-            purgePerHostState(false)
-            if (remainingInGroup.isEmpty()) {
-                deletedFp?.let {
-                    effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
-                }
-            } else {
-                DebugLog.i(
-                    TAG,
-                    "deleteHostProfile: skipped EvictGroup for fp=$deletedFp — ${remainingInGroup.size} sibling profile(s) still reference this group"
-                )
+            // §需求12阶段3: unconditional clear + evict (no sibling profiles
+            // can reference the group under 需求12).
+            // §需求12 rev-4 blocker B: clear the COMPLETE per-profile ESP
+            // lifecycle, not just the model data — drafts, recent workdirs,
+            // and the basic-auth password must also be purged so the deleted
+            // profile leaves no orphan ESP slots.
+            deletedProfileId?.let { settingsManager.clearAllForProfile(it) }
+            purgePerHostState()
+            deletedProfileId?.let {
+                effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
             }
             // lite-v2: RestartRequired supersedes runtime reconfigure.
             // No ForceReconnect/HostProfileSwitched — restart handles everything.
@@ -238,10 +232,24 @@ class ProfileMutationEngine internal constructor(
                 effects.emitEffect(ControllerEffect.RestartRequired)
             }
         } else {
-            if (remainingInGroup.isEmpty()) {
-                deletedFp?.let {
-                    effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
-                }
+            // §需求12阶段3 (rev-3 blocker #2 fix): non-active deletion must
+            // ALSO clear the deleted profile's persisted ESP data — under
+            // 需求12 profiles are fully independent (a group can never have
+            // sibling profiles), so the per-profile-id availability/disabled
+            // ESP keys are orphans the instant their owning profile is gone.
+            // Without this, deleting a non-current profile leaks
+            // `model_availability_<id>` / `disabled_models_<id>` forever
+            // (only `clearOrphanGroupKeys` migration would eventually catch
+            // them, and only if the id isn't a UUID — but profile ids ARE
+            // UUIDs, so they'd never be cleaned). Mirror the active branch.
+            //
+            // §需求12 rev-4 blocker B: clear the COMPLETE per-profile ESP
+            // lifecycle (drafts / recent workdirs / basic-auth password in
+            // addition to the model data), so non-active deletion is
+            // symmetric with active deletion — no orphan ESP slots leak.
+            deletedProfileId?.let {
+                settingsManager.clearAllForProfile(it)
+                effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
             }
         }
     }

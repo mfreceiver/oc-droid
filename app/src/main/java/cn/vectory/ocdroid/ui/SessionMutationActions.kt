@@ -119,7 +119,7 @@ internal fun launchSetSessionArchived(
      * id (plan §3 矩阵 "用户归档" 行). Null = caller has not been migrated yet;
      * no eviction emits (preserves the legacy behavior for unmigrated callers).
      */
-    currentServerGroupFp: (() -> String)? = null,
+    currentProfileId: (() -> String)? = null,
     /**
      * R-20 Phase 1 (C3): sink for the [ControllerEffect.EvictSession] emissions.
      * Typically the VM's `effectBus.tryEmitEffect` closure. Null = caller has
@@ -210,8 +210,8 @@ internal fun launchSetSessionArchived(
                     // AppCore.dispatchHostEffect's EvictSession handler.
                     // emit happens inside onSuccess to avoid optimistic
                     // eviction on a failed archive.
-                    if (isArchive && currentServerGroupFp != null && emitEffect != null) {
-                        emitEffect(ControllerEffect.EvictSession(currentServerGroupFp(), id))
+                    if (isArchive && currentProfileId != null && emitEffect != null) {
+                        emitEffect(ControllerEffect.EvictSession(currentProfileId(), id))
                     }
                 }
                 .onFailure { error ->
@@ -239,7 +239,7 @@ internal fun launchDeleteSession(
      * to key the [ControllerEffect.EvictSession] emission on delete (plan §3
      * 矩阵 "用户删除" 行). Null = caller has not been migrated yet.
      */
-    currentServerGroupFp: (() -> String)? = null,
+    currentProfileId: (() -> String)? = null,
     /**
      * R-20 Phase 1 (C3): sink for the [ControllerEffect.EvictSession] emission.
      * Null = caller has not been migrated yet.
@@ -299,8 +299,8 @@ internal fun launchDeleteSession(
                 // delete. Emitted for the user-requested id only; descendant
                 // caches are evicted by their own delete cascade (or by the
                 // server-side delete handlers).
-                if (currentServerGroupFp != null && emitEffect != null) {
-                    emitEffect(ControllerEffect.EvictSession(currentServerGroupFp(), sessionId))
+                if (currentProfileId != null && emitEffect != null) {
+                    emitEffect(ControllerEffect.EvictSession(currentProfileId(), sessionId))
                 }
             }
             .onFailure { error ->
@@ -403,14 +403,14 @@ internal fun launchSendMessage(
                 // clock read; the value is carried in the op).
                 // §P0-C (B11): the ApplyEvent carries the CAPTURED identity +
                 // epoch (not the current host's). The scopeKey is derived from
-                // the captured identity's serverGroupFp + endpointFp, NOT from
+                // the captured identity's profileId + endpointFp, NOT from
                 // authorityScope() (which reads the CURRENT host). When the
                 // captured identity is null (cold start / no identity store),
                 // fall back to current behavior (authorityScope(), null identity,
                 // epoch 0L — lenient, backward compat).
                 val scopeKey = if (identityAtDispatch != null) {
                     cn.vectory.ocdroid.data.state.scopeKeyOf(
-                        identityAtDispatch.serverGroupFp, identityAtDispatch.endpointFp,
+                        identityAtDispatch.profileId, identityAtDispatch.endpointFp,
                     )
                 } else {
                     slices.store.authorityScope()

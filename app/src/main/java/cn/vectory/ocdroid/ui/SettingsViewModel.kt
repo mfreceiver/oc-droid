@@ -62,7 +62,7 @@ class SettingsViewModel @Inject constructor(
      * the Main thread). Same scope every controller uses.
      */
     @UiApplicationScope private val appScope: CoroutineScope,
-    @Named("currentServerGroupFp") private val currentServerGroupFpProvider: () -> String,
+    @Named("currentProfileId") private val currentProfileIdProvider: () -> String,
     /**
      * §P5a (Q5): application Context for [setLocaleMode] →
      * [AppLocaleController.apply] (needed to resolve the real system locale
@@ -86,7 +86,7 @@ class SettingsViewModel @Inject constructor(
         core.settingsManager,
         core.hostProfileStore,
         core.appScope,
-        core.currentServerGroupFp,
+        core.currentProfileId,
         core.appContext,
     )
 
@@ -97,7 +97,7 @@ class SettingsViewModel @Inject constructor(
     val settingsFlow get() = store.settingsFlow
 
     /** The group served by the currently-connected repository. */
-    val currentServerGroupFp: String get() = currentServerGroupFpProvider()
+    val currentProfileId: String get() = currentProfileIdProvider()
 
     /**
      * §vcs-section: read-only accessor for the current workdir (the absolute
@@ -154,33 +154,9 @@ class SettingsViewModel @Inject constructor(
         // (ComposerController/ConnectionActions/SessionViewModel…).
         // The tick re-triggers on disconnectWorkdir (C1 fix).
         val profile = hostProfileStore.currentProfile()
-        val fp = profile.serverGroupFp.ifBlank { profile.id }
+        val fp = profile.id
         settingsManager.getRecentWorkdirs(fp)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-
-    /**
-     * §grouping-rewrite 项 2: profile count for the active fp, surfaced so
-     * [ConnectionProfileSection]'s stats line can render without a
-     * synchronous store read on every recomposition. Built off the same
-     * `store.hostFlow` + `store.sessionListFlow` triggers as [recentWorkdirs]
-     * so an fp switch / session-list change re-derives the count. The fp is
-     * derived the standard way (`serverGroupFp.ifBlank { id }`).
-     *
-     * `profilesInGroup(fp)` is synchronous (HostProfileStore is in-memory +
-     * ESP-backed).
-     *
-     * remove-message-persistence Task 5: the sibling cached-session-count
-     * flow was removed together with the cacheRepository surface (SQLite
-     * persistence layer deletion).
-     */
-    val activeGroupProfileCount: StateFlow<Int> = combine(
-        store.hostFlow,
-        store.sessionListFlow,
-    ) { host, _ ->
-        val profile = hostProfileStore.currentProfile()
-        val fp = profile.serverGroupFp.ifBlank { profile.id }
-        hostProfileStore.profilesInGroup(fp).size
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     fun setThemeMode(mode: ThemeMode) {
         settingsManager.themeMode = mode
@@ -221,7 +197,7 @@ class SettingsViewModel @Inject constructor(
         val wd = workdir.trim()
         if (wd.isEmpty()) return
         val profile = hostProfileStore.currentProfile()
-        val fp = profile.serverGroupFp.ifBlank { profile.id }
+        val fp = profile.id
         appScope.launch {
             settingsManager.removeRecentWorkdir(fp, wd)
             // §grouping-rewrite Round-2 C1 (+ Round-3 N2):
@@ -264,7 +240,7 @@ class SettingsViewModel @Inject constructor(
         val wd = workdir.trim()
         if (wd.isEmpty()) return
         val profile = hostProfileStore.currentProfile()
-        val fp = profile.serverGroupFp.ifBlank { profile.id }
+        val fp = profile.id
         appScope.launch {
             settingsManager.addRecentWorkdir(fp, wd)
             // Neither addRecentWorkdir pokes hostFlow/sessionListFlow, so bump

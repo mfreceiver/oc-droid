@@ -5,6 +5,7 @@ import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.ui.controller.ComposerController
+import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.util.SettingsManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -33,6 +34,12 @@ class ComposerViewModel @Inject constructor(
     private val composerController: ComposerController,
     private val settingsManager: SettingsManager,
     private val hostProfileStore: HostProfileStore,
+    /**
+     * §需求13: needed by [refreshProviders] to emit [ControllerEffect.LoadProviders]
+     * onto the shared effect bus (the AppCore collector routes it to
+     * launchLoadProviders). Mirrors the SessionViewModel pattern.
+     */
+    private val effectBus: SharedEffectBus,
 ) : ViewModel() {
 
     /**
@@ -45,11 +52,20 @@ class ComposerViewModel @Inject constructor(
         core.composerController,
         core.settingsManager,
         core.hostProfileStore,
+        core.effectBus,
     )
 
     val composerFlow get() = store.composerFlow
     val settingsFlow get() = store.settingsFlow
     val chatFlow get() = store.chatFlow
+    /**
+     * §需求13 rev-7 #3: exposes the shared UiEvent bus so SettingsScreens'
+     * SettingsModelsRoute can collect UiEvent.Error emissions (the manual
+     * model-refresh failure snackbar) when ChatScaffold is NOT composed
+     * (the user navigated INTO the models sub-route). Mirrors
+     * [ChatViewModel.uiEvents] / [OrchestratorViewModel.uiEvents].
+     */
+    val uiEvents get() = effectBus.uiEventsConsumed
 
     fun setInputText(text: String) {
         composerController.setInputText(text)
@@ -95,7 +111,7 @@ class ComposerViewModel @Inject constructor(
         // R-20 Phase 5: disabled-model set is now keyed by serverGroupFp (was
         // baseUrl) — two profiles reaching the same URL but in different
         // groups no longer clobber each other.
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val fp = hostProfileStore.currentProfile().id
         val key = "$providerId/$modelId"
         val currentlyDisabled = key in store.settingsFlow.value.disabledModels
         settingsManager.setModelDisabled(fp, providerId, modelId, disabled = !currentlyDisabled)
@@ -109,7 +125,7 @@ class ComposerViewModel @Inject constructor(
         // 复用 setDisabledModels 批量写入（一次 IO），避免 N 次增量写。
         // 语义：enabled=true → 移除该 provider 所有 model 的 disabled 条目（全启用）；
         //       enabled=false → 添加该 provider 所有 model 的 disabled 条目（全禁用）。
-        val fp = hostProfileStore.currentProfile().serverGroupFp.ifBlank { hostProfileStore.currentProfile().id }
+        val fp = hostProfileStore.currentProfile().id
         val providers = store.settingsFlow.value.providers?.providers.orEmpty()
         val provider = providers.firstOrNull { it.id == providerId } ?: return
         val current = store.settingsFlow.value.disabledModels.toMutableSet()
@@ -119,6 +135,29 @@ class ComposerViewModel @Inject constructor(
         }
         settingsManager.setDisabledModels(fp, current)
         store.mutateSettings { it.copy(disabledModels = current) }
+    }
+
+    /**
+     * §需求13: manual model-catalog refresh entry point for the Settings →
+     * Models sub-route. Emits [ControllerEffect.LoadProviders] on the shared
+     * effect bus; AppCore's dispatchEffect collector routes it to
+     * [launchLoadProviders] (which sets `isLoadingProviders=true` synchronously,
+     * fetches GET /config/providers, and clears the flag in its `finally`).
+     *
+     * The ConnectionCoordinator.loadInitialData fan-out GATES
+     * `LoadProviders` on `providers == null` (true first-launch only), so
+     * every subsequent refresh MUST be user-initiated through this method
+     * (the Model management refresh IconButton is its sole call site).
+     *
+     * Failure surfaces as a UiEvent.Error snackbar ("Failed to refresh model
+     * list") via the onNonFatalError hook in AppCore's LoadProviders handler.
+     *
+     * Routing mirrors [SessionViewModel]/[ChatViewModel]'s
+     * `effectBus.tryEmitEffect(ControllerEffect.…)` pattern — same bus, no
+     * new path invented.
+     */
+    fun refreshProviders() {
+        effectBus.tryEmitEffect(ControllerEffect.LoadProviders)
     }
 
     fun switchSessionModel(providerId: String, modelId: String) {

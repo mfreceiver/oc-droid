@@ -32,23 +32,6 @@ data class HostProfile(
     val serverUrl: String,
     val basicAuth: BasicAuthConfig? = null,
     /**
-     * User-maintained server-group key.
-     *
-     * Supported values are exactly one of the four named shared slots
-     * `"A"` / `"B"` / `"C"` / `"D"`, or this profile's own [id] for
-     * "not grouped". Profiles with the same named slot intentionally share
-     * chat-history cache, draft/model/agent preferences, recent workdirs and
-     * sweep epoch. A profile whose value is blank or any legacy non-slot value
-     * is interpreted by the editor as "not grouped"; saving without actively
-     * changing the selector preserves that legacy value for soft migration.
-     *
-     * **Nonblank invariant**: this field is `""` ONLY as a deserialization
-     * fallback for legacy JSON. The store normalizes blank values to [id] at
-     * the read/write boundary; no batch rewrite or schema migration is used.
-     */
-    @SerialName("serverGroupFp")
-    val serverGroupFp: String = "",
-    /**
      * §2.2 / R8 slim-mode foundation: 是否启用 mTLS（stunnel）。
      *
      * §tofu R2: 与原 `allowInsecureConnections`（已删——TOFU 替代 trust-all 降级）
@@ -118,14 +101,13 @@ data class HostProfile(
             } else {
                 null
             }
-            // New profiles default to "not grouped" (serverGroupFp == id).
+            // §需求12: profiles are fully independent — fp == id (no grouping).
             val id = UUID.randomUUID().toString()
             return HostProfile(
                 id = id,
                 name = "Localhost",
                 serverUrl = serverUrl,
                 basicAuth = basicAuth,
-                serverGroupFp = id,
                 lastUsedAt = System.currentTimeMillis()
             )
         }
@@ -146,13 +128,12 @@ data class HostProfileImportPayload(
         require(url.isNotEmpty()) {
             "Host profile requires serverURL (legacy SSH-only profiles are no longer supported)"
         }
-        // Imported profiles start as "not grouped" (serverGroupFp == id).
+        // §需求12: imported profiles are independent (fp == id, no grouping).
         val id = UUID.randomUUID().toString()
         return HostProfile(
             id = id,
             name = name,
-            serverUrl = url,
-            serverGroupFp = id
+            serverUrl = url
         )
     }
 }
@@ -167,9 +148,8 @@ data class HostProfileExportPayload(
 ) {
     companion object {
         fun from(profile: HostProfile): HostProfileExportPayload {
-            // R-20 Phase 0: export does NOT include serverGroupFp (plan §1:
-            // "import/export 默认不导出内部 group，导入新建独立组"). Importing the
-            // same payload twice creates two independent groups.
+            // §需求12: export never carried the grouping key (plan §1: "import/
+            // export 默认不导出内部 group"). The field is now gone entirely.
             return HostProfileExportPayload(
                 name = profile.displayName,
                 serverUrl = profile.serverUrl
@@ -177,15 +157,3 @@ data class HostProfileExportPayload(
         }
     }
 }
-
-/**
- * R-20 Phase 0: defensive nonblank guard. Returns a copy with
- * `serverGroupFp` set to [id] if it was blank, otherwise `this`. Used at the
- * HostProfileStore write boundary (save / saveProfiles) so a blank value can
- * never reach EncryptedSharedPreferences. Internal to the data layer — not
- * for external callers (new profiles should set serverGroupFp at construction
- * time via [HostProfile.defaultDirect] / [HostProfileImportPayload.makeProfile]
- * / [HostProfileStore.duplicate]).
- */
-internal fun HostProfile.normalizeGroupFp(): HostProfile =
-    if (serverGroupFp.isBlank()) copy(serverGroupFp = id) else this

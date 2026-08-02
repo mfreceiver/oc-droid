@@ -110,7 +110,7 @@ class ForegroundNotificationPublisher(
      * §16-U1 close-action target. Delivers ACTION_CLOSE_BACKGROUND to this
      * Service via `PendingIntent.getService`.
      *
-     * D2 gate #8: the intent carries the identity (epoch, serverGroupFp,
+     * D2 gate #8: the intent carries the identity (epoch, profileId,
      * normalizedWorkdir, endpointFp) used to build the ongoing notification;
      * [onStartCommand] routes it through [UserCloseRequestParser] so the
      * controller can revalidate against the current identity before any
@@ -131,7 +131,7 @@ class ForegroundNotificationPublisher(
             // since this notification was built).
             identityStore.currentIdentity.value?.let { id ->
                 putExtra(UserCloseRequestParser.EXTRA_EPOCH, id.epoch)
-                putExtra(UserCloseRequestParser.EXTRA_SERVER_GROUP_FP, id.serverGroupFp)
+                putExtra(UserCloseRequestParser.EXTRA_PROFILE_ID, id.profileId)
                 putExtra(UserCloseRequestParser.EXTRA_NORMALIZED_WORKDIR, id.normalizedWorkdir)
                 putExtra(UserCloseRequestParser.EXTRA_ENDPOINT_FP, id.endpointFp)
             }

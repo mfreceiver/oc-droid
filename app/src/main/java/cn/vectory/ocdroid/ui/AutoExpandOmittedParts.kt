@@ -32,7 +32,7 @@ import kotlinx.coroutines.launch
  * Mirrors [ChatViewModel.expandParts] CAS discipline byte-for-byte, but
  * operates across the most-recent-K messages instead of a single tapped
  * message:
- *  1. Capture `currentServerGroupFp()` ONCE (no TOCTOU).
+ *  1. Capture `currentProfileId()` ONCE (no TOCTOU).
  *  2. Single-read `chatFlow.value`.
  *  3. Session guard.
  *  4. **Active-write guard** (the G6 fix): bail if the session is actively
@@ -64,7 +64,7 @@ internal fun launchAutoExpandOmittedParts(
     repository: OpenCodeRepository,
     store: SharedStateStore,
     sessionId: String,
-    currentServerGroupFp: () -> String,
+    currentProfileId: () -> String,
     recentMessageBudget: Int = DEFAULT_RECENT_MESSAGE_BUDGET,
     /**
      * §B4 round-2 (rev-gpt MAJOR): the route-instance token captured at
@@ -77,7 +77,7 @@ internal fun launchAutoExpandOmittedParts(
     expectedRouteInstance: Long = 0L,
 ) {
     // P4: capture host identity ONCE (no TOCTOU) — mirrors ChatViewModel.expandParts.
-    val capturedFp = currentServerGroupFp()
+    val capturedFp = currentProfileId()
     scope.launch {
         // Step 2: single-read dispatch state (Main dispatcher — no suspension
         // between this read and the Loading CAS).
@@ -160,7 +160,7 @@ internal fun launchAutoExpandOmittedParts(
         // only for keys still non-Loading — mirrors ChatViewModel step ~502-522).
         store.mutateChat { current ->
             if (current.currentSessionId != sessionId) return@mutateChat current
-            if (currentServerGroupFp() != capturedFp) return@mutateChat current
+            if (currentProfileId() != capturedFp) return@mutateChat current
             // §B4 round-2 (rev-gpt MAJOR): route-token freshness CAS.
             if (expectedRouteInstance != 0L &&
                 expectedRouteInstance != store.stateFlow.value.chatRouteInstance
@@ -181,7 +181,7 @@ internal fun launchAutoExpandOmittedParts(
 
         // Step 8: abort if identity changed during the CAS (before network call).
         if (store.chatFlow.value.currentSessionId != sessionId) return@launch
-        if (currentServerGroupFp() != capturedFp) return@launch
+        if (currentProfileId() != capturedFp) return@launch
         // §B4 round-2 (rev-gpt MAJOR): also re-check the route token (an A→B→A
         // switch mid-CAS bumps chatRouteInstance past expectedRouteInstance).
         if (expectedRouteInstance != 0L &&
@@ -206,7 +206,7 @@ internal fun launchAutoExpandOmittedParts(
                 // (session+fp guarded). Do NOT delete skeleton, do NOT toast.
                 store.mutateChat { current ->
                     if (current.currentSessionId != sessionId) return@mutateChat current
-                    if (currentServerGroupFp() != capturedFp) return@mutateChat current
+                    if (currentProfileId() != capturedFp) return@mutateChat current
                     // §B4 round-2 (rev-gpt MAJOR): route-token freshness CAS.
                     if (expectedRouteInstance != 0L &&
                         expectedRouteInstance != store.stateFlow.value.chatRouteInstance
@@ -238,7 +238,7 @@ internal fun launchAutoExpandOmittedParts(
         // SSE overlap that would otherwise re-open the G6 orphan.
         store.mutateChat { current ->
             if (current.currentSessionId != sessionId) return@mutateChat current
-            if (currentServerGroupFp() != capturedFp) return@mutateChat current
+            if (currentProfileId() != capturedFp) return@mutateChat current
             // §B4 round-2 (rev-gpt MAJOR): route-token freshness CAS — a stale
             // A→B→A incarnation's success must NOT reconcile into the newer
             // incarnation's partExpandStates.

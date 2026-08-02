@@ -3,6 +3,7 @@ package cn.vectory.ocdroid
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.ui.HostProfileSaveState
 import cn.vectory.ocdroid.ui.HostViewModel
+import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.controller.HostProfileController
 import cn.vectory.ocdroid.ui.settings.ClientCertEditIntent
@@ -61,6 +62,7 @@ class HostViewModelSaveStateTest {
     private lateinit var store: SharedStateStore
     private lateinit var controller: HostProfileController
     private lateinit var settingsManager: SettingsManager
+    private lateinit var effectBus: SharedEffectBus
     private lateinit var vm: HostViewModel
 
     @Before
@@ -71,7 +73,12 @@ class HostViewModelSaveStateTest {
         controller = mockk(relaxed = true)
         store = SharedStateStore()
         settingsManager = mockk(relaxed = true)
-        vm = HostViewModel(store, controller, settingsManager)
+        // §需求13: HostViewModel now injects SharedEffectBus (for the manual
+        // model-catalog refresh path). A real SharedEffectBus instance is
+        // cheap to construct in tests (no DI graph needed); mockk(relaxed)
+        // would also work but the real instance is more faithful.
+        effectBus = SharedEffectBus()
+        vm = HostViewModel(store, controller, settingsManager, effectBus)
     }
 
     /**

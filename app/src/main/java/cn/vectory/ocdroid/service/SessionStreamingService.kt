@@ -621,7 +621,7 @@ class SessionStreamingService : Service() {
         val closeRequest = UserCloseRequestParser.parse(
             epoch = intent?.getLongExtra(UserCloseRequestParser.EXTRA_EPOCH, -1L)
                 ?.takeIf { it >= 0 },
-            serverGroupFp = intent?.getStringExtra(UserCloseRequestParser.EXTRA_SERVER_GROUP_FP),
+            profileId = intent?.getStringExtra(UserCloseRequestParser.EXTRA_PROFILE_ID),
             normalizedWorkdir = intent?.getStringExtra(UserCloseRequestParser.EXTRA_NORMALIZED_WORKDIR),
             endpointFp = intent?.getStringExtra(UserCloseRequestParser.EXTRA_ENDPOINT_FP),
         )
@@ -638,7 +638,7 @@ class SessionStreamingService : Service() {
         DebugLog.i(TAG, "onStartCommand: intent=$intent (null=sticky rebuild, §5)")
         val requestedOwnership = OwnershipRequestParser.parse(
             epoch = intent?.getLongExtra(OwnershipRequestParser.EXTRA_EPOCH, -1L)?.takeIf { it >= 0 },
-            serverGroupFp = intent?.getStringExtra(OwnershipRequestParser.EXTRA_SERVER_GROUP_FP),
+            profileId = intent?.getStringExtra(OwnershipRequestParser.EXTRA_PROFILE_ID),
             workdir = intent?.getStringExtra(OwnershipRequestParser.EXTRA_WORKDIR),
             endpointFp = intent?.getStringExtra(OwnershipRequestParser.EXTRA_ENDPOINT_FP),
         )

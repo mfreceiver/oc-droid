@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.util
 
 import android.app.Application
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -56,6 +57,13 @@ class SettingsManagerTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         settings = SettingsManager(context)
     }
+
+    /** §需求12 rev-6 blocker D: raw ESP handle for seeding/asserting the
+     *  per-profile migration flag (`cache_migration_v1_done_<id>`) that has no
+     *  public SettingsManager accessor. */
+    private fun rawPrefs(): SharedPreferences =
+        settings.javaClass.getDeclaredField("encryptedPrefs").apply { isAccessible = true }
+            .get(settings) as SharedPreferences
 
     // ───────────────── round-trip：连接信息 / 字体 / 流量 ─────────────────
 
@@ -627,5 +635,90 @@ class SettingsManagerTest {
         assertEquals("/before-clear", settings.currentWorkdirFlow.value)
         settings.clearAllLocalData()
         assertNull("flow must be null after clearAllLocalData (direct assign)", settings.currentWorkdirFlow.value)
+    }
+
+    // ───────────────── §需求12 rev-4 blocker B / §需求12 rev-6 blocker D: clearAllForProfile ─────────────────
+    //
+    // Profile deletion must clear the COMPLETE per-profile ESP lifecycle:
+    // model availability + disabled, recent workdirs, drafts, the basic-auth
+    // password, AND the R-20 Phase 5 migration idempotency flag
+    // (`cache_migration_v1_done_<id>`). The migration flag is a per-profile ESP
+    // key whose orphan sweep intentionally preserves UUID-suffixed keys, so
+    // only the direct clear on deletion closes its lifecycle (rev-6 blocker D).
+    // A profile gone from HostProfileStore must be gone from ESP too — no orphan
+    // slots leak. This test seeds all five surfaces for a single profileId and
+    // verifies clearAllForProfile wipes every one.
+
+    @Test
+    fun `clearAllForProfile clears all five per-profile ESP surfaces`() {
+        val profileId = "11111111-1111-4111-8111-111111111111"
+
+        // Seed all five per-profile surfaces.
+        settings.setDisabledModels(profileId, setOf("openai/gpt-4"))
+        settings.setModelAvailability(profileId, setOf("anthropic/claude"))
+        settings.setRecentWorkdirs(profileId, listOf("/proj-a", "/proj-b"))
+        settings.setDraftText(profileId, "ses-1", "draft-1")
+        settings.flushDraftText()
+        settings.setBasicAuthPassword(profileId, "secret-pw")
+        // §需求12 rev-6 blocker D: the migration flag (no public accessor —
+        // seed via raw ESP, mirroring how migrateLegacyKeysToFp would persist it).
+        val migrationFlagKey = "cache_migration_v1_done_$profileId"
+        rawPrefs().edit().putBoolean(migrationFlagKey, true).apply()
+
+        // Sanity-check the seed landed on every surface.
+        assertEquals(setOf("openai/gpt-4"), settings.getDisabledModels(profileId))
+        assertEquals(setOf("anthropic/claude"), settings.getModelAvailability(profileId))
+        assertEquals(listOf("/proj-a", "/proj-b"), settings.getRecentWorkdirs(profileId))
+        assertEquals("draft-1", settings.getDraftText(profileId, "ses-1"))
+        assertEquals("secret-pw", settings.basicAuthPassword(profileId))
+        assertTrue("migration flag seeded", rawPrefs().getBoolean(migrationFlagKey, false))
+
+        settings.clearAllForProfile(profileId)
+
+        // All five surfaces cleared.
+        assertEquals("disabled models cleared", emptySet<String>(), settings.getDisabledModels(profileId))
+        assertEquals("model availability cleared", emptySet<String>(), settings.getModelAvailability(profileId))
+        assertEquals("recent workdirs cleared", emptyList<String>(), settings.getRecentWorkdirs(profileId))
+        assertEquals("draft cleared", "", settings.getDraftText(profileId, "ses-1"))
+        assertNull("basic-auth password cleared", settings.basicAuthPassword(profileId))
+        assertFalse("§需求12 rev-6 blocker D: migration flag cleared (no orphan)",
+            rawPrefs().contains(migrationFlagKey))
+    }
+
+    @Test
+    fun `clearAllForProfile does not touch a different profile's surfaces`() {
+        val profileA = "11111111-1111-4111-8111-111111111111"
+        val profileB = "22222222-2222-4222-8222-222222222222"
+
+        // Seed both profiles.
+        settings.setDisabledModels(profileA, setOf("a-model"))
+        settings.setDisabledModels(profileB, setOf("b-model"))
+        settings.setDraftText(profileA, "ses-1", "a-draft")
+        settings.setDraftText(profileB, "ses-1", "b-draft")
+        settings.flushDraftText()
+        settings.setBasicAuthPassword(profileA, "pw-a")
+        settings.setBasicAuthPassword(profileB, "pw-b")
+        settings.setRecentWorkdirs(profileA, listOf("/a"))
+        settings.setRecentWorkdirs(profileB, listOf("/b"))
+        val flagA = "cache_migration_v1_done_$profileA"
+        val flagB = "cache_migration_v1_done_$profileB"
+        rawPrefs().edit().putBoolean(flagA, true).putBoolean(flagB, true).apply()
+
+        // Clear ONLY profileA.
+        settings.clearAllForProfile(profileA)
+
+        // profileA surfaces cleared.
+        assertEquals(emptySet<String>(), settings.getDisabledModels(profileA))
+        assertEquals("", settings.getDraftText(profileA, "ses-1"))
+        assertNull(settings.basicAuthPassword(profileA))
+        assertEquals(emptyList<String>(), settings.getRecentWorkdirs(profileA))
+        assertFalse("A's migration flag cleared", rawPrefs().contains(flagA))
+
+        // profileB surfaces SURVIVE untouched (cross-profile isolation).
+        assertEquals("B's disabled models survive", setOf("b-model"), settings.getDisabledModels(profileB))
+        assertEquals("B's draft survives", "b-draft", settings.getDraftText(profileB, "ses-1"))
+        assertEquals("B's basic-auth password survives", "pw-b", settings.basicAuthPassword(profileB))
+        assertEquals("B's recent workdirs survive", listOf("/b"), settings.getRecentWorkdirs(profileB))
+        assertTrue("B's migration flag survives", rawPrefs().getBoolean(flagB, false))
     }
 }

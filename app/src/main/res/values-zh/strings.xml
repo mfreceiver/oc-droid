@@ -384,6 +384,10 @@
     <string name="settings_model_management_empty">当前服务器未返回可用模型</string>
     <string name="settings_model_management_summary_none">%1$d</string>
     <string name="settings_model_management_summary_disabled">已禁用 %1$d · 共 %2$d</string>
+    <!-- §需求13: 手动刷新模型列表入口。 -->
+    <string name="model_management_refresh">刷新模型列表</string>
+    <!-- §需求13: 模型列表拉取失败的用户可见错误（此前静默——仅 reportNonFatalIssue 记 Log.w）。 -->
+    <string name="model_management_refresh_failed">刷新模型列表失败</string>
     <string name="chat_marker_agent_prefix">智能体</string>
     <string name="chat_marker_model_prefix">模型</string>
     <string name="chat_marker_agent_switched">切换到 %1$s</string>
@@ -473,14 +477,19 @@
     <!-- §sse-disabled-debug-toggle：仅 REST 降级模式（调试开关 sse_disabled=true）。 -->
     <string name="chat_phase_sse_disabled">SSE 已禁用（仅 REST）</string>
 
-    <!-- §sse-feedback-ux (P2-1)：聊天内断连横幅。持续 SSE 断连（或调试仅 REST 模式）
-         附带经过时长标签 + 刷新操作。按钮复用 common_refresh。 -->
-    <string name="sse_feedback_disconnected_title">实时更新已暂停</string>
+    <!-- §sse-feedback-ux (§1.x batch4)：聊天内断连横幅，4 类语义。
+         REST_OUTAGE / AUTH_FAILURE = 错误（红）；SSE_STALLED / USER_DISABLED = 提示。
+         时长标签 (disconnected_now/minutes/hours) 复用给 REST_OUTAGE 和 AUTH_FAILURE。 -->
+    <string name="sse_feedback_rest_outage_title">无法连接服务器</string>
+    <string name="sse_feedback_auth_failure_title">证书或凭据加载失败</string>
+    <string name="sse_feedback_sse_stalled_title">等待实时更新</string>
+    <string name="sse_feedback_sse_stalled_subtitle">实时更新暂未到达</string>
     <string name="sse_feedback_disconnected_now">已断开 · 刚刚</string>
     <string name="sse_feedback_disconnected_minutes">已断开 · %1$d 分钟前</string>
     <string name="sse_feedback_disconnected_hours">已断开 · %1$d 小时前</string>
     <string name="sse_feedback_disabled_title">实时更新已关闭</string>
     <string name="sse_feedback_disabled_subtitle">仅 REST 模式（调试开关）</string>
+    <string name="sse_feedback_auth_failure_subtitle">无法加载证书或凭据</string>
 
     <string name="chat_jump_to_latest">跳到最新</string>
 
@@ -520,13 +529,6 @@
     <string name="error_sse_failed">SSE 错误：%1$s</string>
     <string name="error_respond_permission_failed">响应权限请求失败：%1$s</string>
 
-    <!-- §分组重写 2026-07-07：人工服务器分组（项1/2/3/4/5）。 -->
-    <string name="host_group_label">服务器分组</string>
-    <string name="host_group_none">独立</string>
-    <string name="host_group_info">分组说明</string>
-    <string name="host_group_warning">同组 profile 共享：聊天历史、草稿、模型偏好、最近目录。选错组会导致这些数据串台或搁浅，仅可用「清除全部数据」恢复。</string>
-    <string name="group_stats_named">%1$s · %2$d 个连接 · %3$d 条缓存会话</string>
-    <string name="group_stats_solo">独立 · 1 个连接 · %1$d 条缓存会话</string>
     <!-- §P5b-B (Q8)：清除数据 section 字符串。 -->
     <string name="cache_clear_cache">重置本地数据</string>
     <string name="cache_cached_data_size">消息缓存占用 %1$s</string>

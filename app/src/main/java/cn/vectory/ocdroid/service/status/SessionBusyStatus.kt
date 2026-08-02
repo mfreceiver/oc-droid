@@ -36,21 +36,24 @@ enum class SessionBusyStatus {
 /**
  * Composite key for per-session busy status.
  *
- * See FGS spec §3: busy is keyed by `(serverGroupFp, workdir, sessionId)` so that two
+ * See FGS spec §3: busy is keyed by `(profileId, workdir, sessionId)` so that two
  * sessions with the same `sessionId` on different hosts / workdirs cannot collide, and
  * cross-host stale frames are rejected at the key level (host switch → different
- * `serverGroupFp` → stale entries invisible to the new connection).
+ * `profileId` → stale entries invisible to the new connection).
  *
  * Used by `StatusAggregator` (dev-design P0.4) as the map key for
- * `(serverGroupFp, workdir, sessionId) → SessionBusyStatus`, and by the notification layer
+ * `(profileId, workdir, sessionId) → SessionBusyStatus`, and by the notification layer
  * as the stable identity inside `NotificationId` (dev-design §4.1).
  *
- * @property serverGroupFp Fingerprint of the server group (host/profile group).
+ * §需求12阶段3: do NOT collapse profileId away — it stays as dimension 1 to
+ * avoid cross-profile state pollution (oracle ruling).
+ *
+ * @property profileId §需求12阶段3 (renamed from `serverGroupFp`): the profile id.
  * @property workdir The working directory the session lives in.
  * @property sessionId The opencode session identifier.
  */
 data class SessionStatusKey(
-    val serverGroupFp: String,
+    val profileId: String,
     val workdir: String,
     val sessionId: String,
 )

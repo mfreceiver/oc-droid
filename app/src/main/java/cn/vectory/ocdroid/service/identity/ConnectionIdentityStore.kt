@@ -141,11 +141,11 @@ class ConnectionIdentityStore @Inject constructor() {
      * [lock] so it is mutually exclusive with [beginReconfigure] / [bindIfCurrent].
      */
     fun bind(
-        serverGroupFp: String,
+        profileId: String,
         normalizedWorkdir: String,
         endpointFp: String,
     ): ConnectionIdentity = synchronized(lock) {
-        commitIdentity(serverGroupFp, normalizedWorkdir, endpointFp, currentEpochAtomic.get())
+        commitIdentity(profileId, normalizedWorkdir, endpointFp, currentEpochAtomic.get())
     }
 
     /**
@@ -169,13 +169,13 @@ class ConnectionIdentityStore @Inject constructor() {
      * re-runs under the new URL.
      */
     fun bindIfCurrent(
-        serverGroupFp: String,
+        profileId: String,
         normalizedWorkdir: String,
         endpointFp: String,
         expectedEpoch: Long,
     ): ConnectionIdentity? = synchronized(lock) {
         if (currentEpochAtomic.get() != expectedEpoch) return null
-        commitIdentity(serverGroupFp, normalizedWorkdir, endpointFp, expectedEpoch)
+        commitIdentity(profileId, normalizedWorkdir, endpointFp, expectedEpoch)
     }
 
     /**
@@ -209,14 +209,14 @@ class ConnectionIdentityStore @Inject constructor() {
      * returns it.
      */
     private fun commitIdentity(
-        serverGroupFp: String,
+        profileId: String,
         normalizedWorkdir: String,
         endpointFp: String,
         epoch: Long,
     ): ConnectionIdentity {
         val identity = ConnectionIdentity(
             epoch = epoch,
-            serverGroupFp = serverGroupFp,
+            profileId = profileId,
             normalizedWorkdir = normalizedWorkdir,
             endpointFp = endpointFp,
         )
@@ -238,7 +238,7 @@ class ConnectionIdentityStore @Inject constructor() {
     fun isCurrent(identity: ConnectionIdentity): Boolean {
         val current = currentIdentityAtomic.get() ?: return false
         return identity.epoch == currentEpochAtomic.get() &&
-            identity.serverGroupFp == current.serverGroupFp &&
+            identity.profileId == current.profileId &&
             identity.normalizedWorkdir == current.normalizedWorkdir &&
             identity.endpointFp == current.endpointFp
     }

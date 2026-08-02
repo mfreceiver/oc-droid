@@ -105,10 +105,9 @@ data class TestCallResult(
  * §review-r4 (gpter R4 #3): pure builder for the dialog's Save `onClick`
  * snapshot. Hoisted out of the Compose `onClick` lambda so the section-off
  * credential-clearing rules (basicAuth / mTLS), the
- * `name.ifBlank{"Untitled"}` fallback, the `selectedGroup != initialGroup`
- * groupFp rewrite, the `effectivePasswordEdited` forced-clear, and the
- * `hasMaterial` gating are all unit-testable without spinning up Compose (see
- * [MtlsDialogCallBuildersTest]).
+ * `name.ifBlank{"Untitled"}` fallback, the `effectivePasswordEdited` forced-
+ * clear, and the `hasMaterial` gating are all unit-testable without spinning
+ * up Compose (see [MtlsDialogCallBuildersTest]).
  *
  * Returns a [SaveCallResult] whose field order matches the 9-arg `onSave`
  * positional call site (so the dialog can splat the result without
@@ -118,8 +117,6 @@ internal fun buildSaveCall(
     initial: HostProfile,
     name: String,
     serverUrl: String,
-    selectedGroup: String?,
-    initialGroup: String?,
     basicAuthEnabled: Boolean,
     authUsername: String,
     authPassword: String,
@@ -148,11 +145,6 @@ internal fun buildSaveCall(
         serverUrl = serverUrl,
         basicAuth = basicAuth,
         slim = slimEnabled,
-        serverGroupFp = if (selectedGroup != initialGroup) {
-            selectedGroup ?: initial.id
-        } else {
-            initial.serverGroupFp
-        }
     )
     // §review-3: 同 triggerTestConnection——clientCleared 屏蔽 ESP
     // 残留旧 p12，使「移除→重开 mTLS→不粘贴→保存」hasMaterial=false

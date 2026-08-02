@@ -146,7 +146,7 @@ class SseEventStreamBridgeWiringTest {
             slices = slices,
             settingsManager = settingsManager,
             effects = effects,
-            currentServerGroupFp = { "test-fp" },
+            currentProfileId = { "test-fp" },
             identityStore = identityStore,
         )
 

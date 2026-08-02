@@ -15,7 +15,7 @@ import kotlinx.serialization.json.Json
  *
  * Owns the cold-start session-list seeding surface: the browser-tab style
  * open-session id list, the persisted session-metadata cache, and the
- * per-(serverGroupFp, sessionId) draft text map.
+ * per-(profileId, sessionId) draft text map.
  *
  * §L4b ESP-key ownership: this class owns the [COMPOSITE_KEY_SEPARATOR]
  * constant and the [compositeSessionKey] builder used by the drafts map
@@ -31,7 +31,7 @@ import kotlinx.serialization.json.Json
  * [setDraftText] is a HOT PATH invoked on every keystroke. When
  * [debounceScope] is non-null, writes are coalesced and deferred ~500ms to
  * avoid an AES-GCM EncryptedSharedPreferences write per character. Pending
- * state is keyed by the composite `(serverGroupFp, sessionId)` so each
+ * state is keyed by the composite `(profileId, sessionId)` so each
  * session/host gets its OWN debounce timer — interleaved edits across keys
  * never clobber each other (per-key isolation). Callers that need immediate
  * persistence call [flushDraftText] (session switch / tab close /
@@ -73,7 +73,7 @@ internal class SessionPrefs(
         }
 
     /**
-     * R-20 Phase 5: per-(serverGroupFp, sessionId) draft text. The composite
+     * R-20 Phase 5: per-(profileId, sessionId) draft text. The composite
      * map key is `"<fp>\u0000<sessionId>"` (NUL separator — fp is a UUID /
      * branded string that never contains NUL, so the split is unambiguous).
      *
@@ -92,10 +92,10 @@ internal class SessionPrefs(
      * **Read-through**: always reads directly from EncryptedSharedPreferences
      * (latest committed value). The debounce only affects the write side.
      */
-    fun getDraftText(serverGroupFp: String, sessionId: String): String {
+    fun getDraftText(profileId: String, sessionId: String): String {
         val json = encryptedPrefs.getString(KEY_SESSION_DRAFTS, null) ?: return ""
         return try {
-            Json.decodeFromString<Map<String, String>>(json)[compositeSessionKey(serverGroupFp, sessionId)] ?: ""
+            Json.decodeFromString<Map<String, String>>(json)[compositeSessionKey(profileId, sessionId)] ?: ""
         } catch (e: Exception) {
             ""
         }
@@ -104,7 +104,7 @@ internal class SessionPrefs(
     // ── Draft-text debounce ──────────────────────────────────────────────
 
     /**
-     * §C1 / P1-gate-fix: per-(serverGroupFp, sessionId) pending mutations,
+     * §C1 / P1-gate-fix: per-(profileId, sessionId) pending mutations,
      * keyed by [compositeSessionKey]. Each composite key has its OWN
      * [DraftMutation] (in [pendingDrafts]) AND its OWN debounce [Job] (in
      * [debounceJobs]) so rapid writes to DIFFERENT sessions/hosts never
@@ -136,21 +136,42 @@ internal class SessionPrefs(
      * independent debounce jobs firing concurrently on Dispatchers.Default
      * cannot read the same old JSON snapshot and lose one another's update.
      *
-     * The two locks are NEVER nested: [performDraftWrite] is invoked OUTSIDE
-     * [debounceLock] (in the per-key write-back job and in [flushDraftText]'s
-     * drain loop), so there is a single lock-ordering → no deadlock.
+     * The two locks are nested in ONE direction only (persistLock →
+     * debounceLock), by [performDraftWrite]'s §需求12 rev-6 blocker C barrier
+     * re-check. This is deadlock-free because no code path nests them the
+     * other way: [clearDraftsForProfile] uses two SEQUENTIAL standalone
+     * `synchronized` blocks (never holds both at once), and [setDraftText] /
+     * [flushDraftText] call [performDraftWrite] OUTSIDE debounceLock. See
+     * [performDraftWrite] KDoc for the full wait-for-cycle proof.
      */
     private val persistLock = Any()
 
+    /**
+     * §需求12 rev-6 blocker C: profiles whose drafts have been bulk-cleared
+     * ([clearDraftsForProfile]) but whose in-flight debounce write-back jobs
+     * may still be racing to re-persist. Guarded by [debounceLock]. A
+     * write-back job ([performDraftWrite]) re-checks this set INSIDE
+     * [persistLock] right before its ESP write — if its profileId is present,
+     * the write is dropped (the profile's drafts were cleared/deleted between
+     * the job claiming its mutation and acquiring persistLock, so writing
+     * would resurrect sensitive data the user expected gone).
+     *
+     * Entries are added by [clearDraftsForProfile] and removed by the NEXT
+     * [setDraftText] for the same profile (a new write after a clear means the
+     * profile was re-created / re-selected and its drafts should persist
+     * again).
+     */
+    private val profilesUnderDeletionBarrier: MutableSet<String> = mutableSetOf()
+
     /** §C1: coalesced pending draft mutation (one entry per composite key). */
     private data class DraftMutation(
-        val serverGroupFp: String,
+        val profileId: String,
         val sessionId: String,
         val text: String,
     )
 
     /**
-     * §C1 / P1-gate-fix: sets the draft text for `(serverGroupFp, sessionId)`.
+     * §C1 / P1-gate-fix: sets the draft text for `(profileId, sessionId)`.
      * When [debounceScope] is non-null, the ESP write is deferred ~500ms and
      * coalesces with any subsequent call FOR THE SAME composite key (rapid
      * typing produces one write per session). Writes to OTHER keys are fully
@@ -165,15 +186,24 @@ internal class SessionPrefs(
      * keys' jobs are untouched). The write-back ([performDraftWrite]) runs on
      * [debounceScope] OUTSIDE the lock.
      */
-    fun setDraftText(serverGroupFp: String, sessionId: String, text: String) {
+    fun setDraftText(profileId: String, sessionId: String, text: String) {
+        // §需求12 rev-6 blocker C: a new write for a previously-cleared
+        // profile means it's live again (re-created / re-selected after
+        // deletion). Lift the deletion barrier BEFORE either write path so the
+        // write persists normally. Lifted up here (not inside the debounce
+        // block) so the null-scope direct-write path also clears the barrier
+        // — otherwise a re-selected profile's first write would be dropped by
+        // performDraftWrite's barrier re-check.
+        synchronized(debounceLock) { profilesUnderDeletionBarrier.remove(profileId) }
+
         val scope = debounceScope
         if (scope == null) {
             // No debounce scope → immediate write (direct construction in tests).
-            performDraftWrite(serverGroupFp, sessionId, text)
+            performDraftWrite(profileId, sessionId, text)
             return
         }
-        val compositeKey = compositeSessionKey(serverGroupFp, sessionId)
-        val mutation = DraftMutation(serverGroupFp, sessionId, text)
+        val compositeKey = compositeSessionKey(profileId, sessionId)
+        val mutation = DraftMutation(profileId, sessionId, text)
         synchronized(debounceLock) {
             pendingDrafts[compositeKey] = mutation
             // Cancel ONLY this key's prior timer; other keys keep running.
@@ -200,13 +230,13 @@ internal class SessionPrefs(
                 // pending-state lock). Its own whole-map RMW is serialized under
                 // persistLock so concurrent per-key write-backs cannot lose
                 // updates on the shared session_drafts JSON.
-                if (m != null) performDraftWrite(m.serverGroupFp, m.sessionId, m.text)
+                if (m != null) performDraftWrite(m.profileId, m.sessionId, m.text)
             }
         }
     }
 
     /**
-     * §C1 / P1-gate-fix: cancels ALL pending debounce jobs and writes EVERY
+     * §C1 / §P1-gate-fix: cancels ALL pending debounce jobs and writes EVERY
      * pending draft (across all composite keys) to ESP immediately. Used by
      * app-background (AppLifecycleMonitor.onEnterBackground) and any
      * transition that must guarantee all in-flight drafts are durable
@@ -232,20 +262,94 @@ internal class SessionPrefs(
         // serialized under persistLock inside performDraftWrite, so even though
         // these are sequential here, the per-key write-back jobs (running
         // concurrently on Dispatchers.Default) are also race-safe.
-        drained.forEach { performDraftWrite(it.serverGroupFp, it.sessionId, it.text) }
+        drained.forEach { performDraftWrite(it.profileId, it.sessionId, it.text) }
+    }
+
+    /**
+     * §需求12 rev-4 blocker B / §需求12 rev-6 blocker C: removes ALL draft
+     * entries whose composite key's profileId equals [profileId]. Used on
+     * profile deletion so the deleted profile's drafts (potentially sensitive
+     * unsent text) don't leak as orphans.
+     *
+     * ## rev-6 deletion barrier (3 steps, ordered to close EVERY
+     * draft-resurrection window)
+     *
+     * A naive ESP-only clear leaks via the in-memory debounce path: a pending
+     * write-back job (or one whose RMW is waiting on [persistLock]) fires
+     * AFTER the clear and re-persists the deleted profile's draft. The barrier
+     * closes all three windows:
+     *
+     *  1. **Under [debounceLock]**: mark the profile under barrier
+     *     ([profilesUnderDeletionBarrier]) + cancel + remove ALL its pending
+     *     mutations + debounce jobs. After this, no NEW write-back can be
+     *     scheduled for this profile (the pending slot + timer are gone).
+     *  2. **Under [persistLock]**: ESP map clear — removes already-persisted
+     *     entries (whole-map RMW, atomic vs concurrent draft writes).
+     *  3. **The claimed-but-waiting window**: a write-back job that already
+     *     CLAIMED its mutation (removed it from [pendingDrafts] under
+     *     [debounceLock]) before step 1 and is now waiting on [persistLock].
+     *     Its [performDraftWrite] re-checks [profilesUnderDeletionBarrier]
+     *     INSIDE [persistLock] right before the ESP write and DROPS the write
+     *     if the profile is under barrier.
+     *
+     * No-op on blank [profileId] (defensive — caller in
+     * [cn.vectory.ocdroid.util.SettingsManager.clearAllForProfile] should
+     * always pass a real profile.id, which is a non-blank UUID) and on
+     * corrupt/unparseable JSON (leave the user's data alone rather than risk
+     * dropping entries on a parse error).
+     *
+     * ## Lock-ordering (no deadlock)
+     *
+     * Step 1 acquires [debounceLock] (standalone, released before step 2).
+     * Step 2 acquires [persistLock] (standalone). They are SEQUENTIAL, not
+     * nested. [performDraftWrite]'s barrier re-check nests [persistLock]→
+     * [debounceLock] (briefly), but NO code path nests [debounceLock]→
+     * [persistLock] (performDraftWrite is never called while holding
+     * [debounceLock]; clearDraftsForProfile's two blocks are sequential).
+     * Single nesting direction → no wait-for cycle → deadlock-free.
+     */
+    fun clearDraftsForProfile(profileId: String) {
+        if (profileId.isBlank()) return
+        // §需求12 rev-6 blocker C step 1: mark + cancel+remove ALL this
+        // profile's pending mutations + debounce jobs under debounceLock.
+        // After this no new write-back can be scheduled for this profile.
+        synchronized(debounceLock) {
+            profilesUnderDeletionBarrier.add(profileId)
+            val toCancel = pendingDrafts.keys.filter {
+                it.substringBefore(COMPOSITE_KEY_SEPARATOR) == profileId
+            }
+            toCancel.forEach { compositeKey ->
+                debounceJobs.remove(compositeKey)?.cancel()
+                pendingDrafts.remove(compositeKey)
+            }
+        }
+        // §需求12 rev-6 blocker C step 2: ESP map clear under persistLock
+        // (atomic whole-map RMW, mirrors performDraftWrite).
+        synchronized(persistLock) {
+            val json = encryptedPrefs.getString(KEY_SESSION_DRAFTS, null) ?: return@synchronized
+            val map: MutableMap<String, String> = try {
+                Json.decodeFromString<Map<String, String>>(json).toMutableMap()
+            } catch (e: Exception) {
+                return@synchronized  // Corrupt — leave alone.
+            }
+            val toRemove = map.keys.filter { it.substringBefore(COMPOSITE_KEY_SEPARATOR) == profileId }
+            if (toRemove.isEmpty()) return@synchronized
+            toRemove.forEach { map.remove(it) }
+            encryptedPrefs.edit().putString(KEY_SESSION_DRAFTS, Json.encodeToString(map)).apply()
+        }
     }
 
     /**
      * §C1 / P1-gate-fix: mutable-freeze snapshot for testability. Returns
-     * the pending mutation for the exact `(serverGroupFp, sessionId)`
+     * the pending mutation for the exact `(profileId, sessionId)`
      * composite key without consuming it, or null when that key has nothing
      * pending.
      */
-    internal fun peekPendingDraft(serverGroupFp: String, sessionId: String): DraftMutationSnapshot? {
-        val compositeKey = compositeSessionKey(serverGroupFp, sessionId)
+    internal fun peekPendingDraft(profileId: String, sessionId: String): DraftMutationSnapshot? {
+        val compositeKey = compositeSessionKey(profileId, sessionId)
         return synchronized(debounceLock) {
             pendingDrafts[compositeKey]?.let {
-                DraftMutationSnapshot(it.serverGroupFp, it.sessionId, it.text)
+                DraftMutationSnapshot(it.profileId, it.sessionId, it.text)
             }
         }
     }
@@ -257,13 +361,13 @@ internal class SessionPrefs(
     internal fun peekAllPendingDrafts(): List<DraftMutationSnapshot> =
         synchronized(debounceLock) {
             pendingDrafts.values.map {
-                DraftMutationSnapshot(it.serverGroupFp, it.sessionId, it.text)
+                DraftMutationSnapshot(it.profileId, it.sessionId, it.text)
             }
         }
 
     /** §C1: immutable value class for exposing [DraftMutation] to tests. */
     internal data class DraftMutationSnapshot(
-        val serverGroupFp: String,
+        val profileId: String,
         val sessionId: String,
         val text: String,
     )
@@ -292,20 +396,48 @@ internal class SessionPrefs(
      *    so blocking a Default thread is negligible.
      *  - There is NO suspension point inside `synchronized` → a coroutine
      *    cannot be cancelled mid-critical-section (no orphaned-lock risk).
-     *  - [persistLock] is NEVER acquired while holding [debounceLock]
-     *    ([performDraftWrite] runs outside debounceLock), and [debounceLock]
-     *    is NEVER acquired while holding [persistLock] → single ordering, no
-     *    deadlock.
+     *  - §需求12 rev-6 blocker C: the barrier re-check nests a BRIEF
+     *    [debounceLock] read INSIDE [persistLock] (persistLock → debounceLock,
+     *    one direction). This is deadlock-free because NO code path nests the
+     *    locks the OTHER way:
+     *      · [clearDraftsForProfile] step 1 + step 2 are SEQUENTIAL standalone
+     *        `synchronized` blocks (step 1 fully releases debounceLock before
+     *        step 2 acquires persistLock) → never holds both at once.
+     *      · [setDraftText] / [flushDraftText] acquire debounceLock (standalone)
+     *        and call [performDraftWrite] OUTSIDE debounceLock.
+     *      · [performDraftWrite] is NEVER called while its caller already holds
+     *        debounceLock.
+     *    Single nesting direction (persistLock→debounceLock) → no wait-for
+     *    cycle → deadlock-free.
+     *  - Why the barrier read is INSIDE persistLock (not before it): reading
+     *    the boolean outside persistLock would leave a resurrection window —
+     *    [clearDraftsForProfile] could run (set the barrier + clear ESP)
+     *    BETWEEN the outside read and the persistLock acquire, then this RMW
+     *    would write the draft back into the now-cleared map. Reading inside
+     *    persistLock makes the barrier-check + ESP-write atomic w.r.t.
+     *    [clearDraftsForProfile]'s step 2 (which also needs persistLock), so
+     *    either the clear fully precedes us (barrier = true → drop) or fully
+     *    follows us (its step 2 RMW removes whatever we wrote).
      */
-    private fun performDraftWrite(serverGroupFp: String, sessionId: String, text: String) {
+    private fun performDraftWrite(profileId: String, sessionId: String, text: String) {
         synchronized(persistLock) {
+            // §需求12 rev-6 blocker C step 3: deletion-barrier re-check. A
+            // write-back job may have claimed its mutation (under debounceLock)
+            // BEFORE [clearDraftsForProfile] ran, then waited on persistLock
+            // while clearDraftsForProfile set the barrier + cleared ESP. By the
+            // time we acquire persistLock here, this profile's drafts are gone
+            // — writing would resurrect them. Re-check the barrier INSIDE
+            // persistLock (brief nested debounceLock read) so the check + the
+            // ESP RMW are atomic w.r.t. clearDraftsForProfile step 2.
+            val underBarrier = synchronized(debounceLock) { profileId in profilesUnderDeletionBarrier }
+            if (underBarrier) return@synchronized
             val json = encryptedPrefs.getString(KEY_SESSION_DRAFTS, null)
             val map: MutableMap<String, String> = try {
                 json?.let { Json.decodeFromString<Map<String, String>>(it).toMutableMap() } ?: mutableMapOf()
             } catch (e: Exception) {
                 mutableMapOf()
             }
-            val key = compositeSessionKey(serverGroupFp, sessionId)
+            val key = compositeSessionKey(profileId, sessionId)
             if (text.isBlank()) {
                 map.remove(key)
             } else {
@@ -328,8 +460,8 @@ internal class SessionPrefs(
         internal const val KEY_SESSION_DRAFTS = "session_drafts"
 
         /**
-         * R-20 Phase 5: separator used in the composite `(serverGroupFp,
-         * sessionId)` map key. NUL (\u0000) is chosen because serverGroupFp
+         * R-20 Phase 5: separator used in the composite `(profileId,
+         * sessionId)` map key. NUL (\u0000) is chosen because profileId
          * is a UUID / branded string (Phase 0 guarantees nonblank + the
          * HostProfile decode normalize step never produces one containing
          * NUL), so `"$fp\u0000$sessionId"` is an unambiguous reversible
@@ -344,7 +476,7 @@ internal class SessionPrefs(
          * R-20 Phase 5: builds the composite map key for per-(fp, sessionId)
          * storage (drafts / agents / models). See [COMPOSITE_KEY_SEPARATOR].
          */
-        internal fun compositeSessionKey(serverGroupFp: String, sessionId: String): String =
-            "$serverGroupFp$COMPOSITE_KEY_SEPARATOR$sessionId"
+        internal fun compositeSessionKey(profileId: String, sessionId: String): String =
+            "$profileId$COMPOSITE_KEY_SEPARATOR$sessionId"
     }
 }

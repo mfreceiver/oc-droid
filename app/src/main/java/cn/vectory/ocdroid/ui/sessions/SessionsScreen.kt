@@ -29,6 +29,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
@@ -58,6 +60,9 @@ import cn.vectory.ocdroid.util.workdirBasename
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+
+/** §需求10 §2.1: minimum interval between ON_RESUME-triggered session refreshes. */
+private const val ON_RESUME_REFRESH_MIN_INTERVAL_MS = 10_000L
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -165,6 +170,19 @@ fun SessionsScreen(
         .collectAsStateWithLifecycle()
     val host by (hostVM?.hostFlow ?: hostFallback).collectAsStateWithLifecycle()
     val curHostProfile = currentHostProfile(host.hostProfiles, host.currentHostProfileId)
+
+    // §需求10 §2.1 (§design-contract §2.1): ON_RESUME immediate refresh.
+    // Reuses connectionVM.loadInitialData() (single-flight epoch + host guard),
+    // same path as the soft-refresh button at :333. Time-throttled to avoid
+    // ON_RESUME jitter hammering the network.
+    val lastResumeLoadAtMs = remember { longArrayOf(0L) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        val now = System.currentTimeMillis()
+        if (now - lastResumeLoadAtMs[0] >= ON_RESUME_REFRESH_MIN_INTERVAL_MS) {
+            lastResumeLoadAtMs[0] = now
+            connectionVM?.loadInitialData()
+        }
+    }
 
     // ── Title: "<app_name> v<versionName>" ─────────────────────────────────
     // Mirrors ChatTopBar.kt:275-281 — one binder call per composition via
@@ -593,16 +611,20 @@ fun SessionsScreen(
             onDismissRequest = { pendingWorkdirPick = false },
             title = stringResource(R.string.sessions_pick_workdir_title),
         ) {
-            recentWorkdirs.forEach { workdir ->
-                val basename = workdir.workdirBasename() ?: workdir
-                ListItem(
-                    headlineContent = { Text(basename) },
-                    modifier = Modifier.clickable {
-                        pendingWorkdirPick = false
-                        viewModel.createSessionInWorkdir(workdir)
-                        onSwitchToChat()
-                    },
-                )
+            // §rev-gpt regression-fix: 内容区由 scaffold 统一 heightIn(max=0.8 屏高) 封顶，
+            // 原 forEach 静态渲染超出会被裁剪且无法滚动；改为 Recipe A 单一 LazyColumn。
+            LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                items(recentWorkdirs, key = { it }) { workdir ->
+                    val basename = workdir.workdirBasename() ?: workdir
+                    ListItem(
+                        headlineContent = { Text(basename) },
+                        modifier = Modifier.clickable {
+                            pendingWorkdirPick = false
+                            viewModel.createSessionInWorkdir(workdir)
+                            onSwitchToChat()
+                        },
+                    )
+                }
             }
         }
     }

@@ -9,7 +9,7 @@ import kotlinx.serialization.json.Json
  *
  * Owns the one-shot, idempotent R-20 Phase 5 migration that rewrites the
  * three legacy global / baseUrl-keyed / sessionId-keyed categories to
- * per-serverGroupFp storage, plus the per-fp `cache_migration_v1_done_<fp>`
+ * per-profileId storage, plus the per-fp `cache_migration_v1_done_<fp>`
  * idempotency flag and the pre-Phase-5 legacy baseUrl key builders.
  *
  * §L4b migration-preservation contract: this is a byte-identical lift of the
@@ -33,7 +33,7 @@ internal class MigrationHelper(
 ) {
     /**
      * R-20 Phase 5: one-shot migration of the three legacy global / baseUrl-
-     * keyed / sessionId-keyed categories to per-serverGroupFp storage.
+     * keyed / sessionId-keyed categories to per-profileId storage.
      *
      * Plan §3 Phase 5 (dser/maxer): [cn.vectory.ocdroid.ui.ConnectionActions.applySavedSettings]
      * is the cold-start trigger — it runs early (AppCore.init) and is
@@ -58,15 +58,15 @@ internal class MigrationHelper(
      * the fp-keyed slot; old code reading the legacy slot sees its original
      * value. Idempotency comes from the per-fp flag.
      *
-     * @param serverGroupFp the current host's fp (never blank — caller
-     *   normalizes via `serverGroupFp.ifBlank { id }`).
+     * @param profileId the current host's fp (never blank — caller
+     *   normalizes via `profileId.ifBlank { id }`).
      * @param legacyBaseUrl the current host's normalized baseUrl (used to
      *   locate the legacy `disabled_models_*` / `model_availability_*` slot
      *   for THIS server only — other URLs' data is left in place as orphan).
      */
-    fun migrateLegacyKeysToFp(serverGroupFp: String, legacyBaseUrl: String) {
-        if (serverGroupFp.isBlank()) return
-        val flagKey = migrationFlagKey(serverGroupFp)
+    fun migrateLegacyKeysToFp(profileId: String, legacyBaseUrl: String) {
+        if (profileId.isBlank()) return
+        val flagKey = migrationFlagKey(profileId)
         if (encryptedPrefs.getBoolean(flagKey, false)) return
 
         val e = encryptedPrefs.edit()
@@ -76,9 +76,9 @@ internal class MigrationHelper(
         // value that a prior partial migration wrote).
         val legacyWorkdirsJson = encryptedPrefs.getString(WorkdirPrefs.KEY_RECENT_WORKDIRS, null)
         if (legacyWorkdirsJson != null &&
-            !encryptedPrefs.contains(WorkdirPrefs.recentWorkdirsKey(serverGroupFp))
+            !encryptedPrefs.contains(WorkdirPrefs.recentWorkdirsKey(profileId))
         ) {
-            e.putString(WorkdirPrefs.recentWorkdirsKey(serverGroupFp), legacyWorkdirsJson)
+            e.putString(WorkdirPrefs.recentWorkdirsKey(profileId), legacyWorkdirsJson)
         }
 
         // ── 2) disabled_models / model_availability (per-baseUrl) → per-fp ──
@@ -88,14 +88,14 @@ internal class MigrationHelper(
         if (!legacyBaseUrl.isBlank()) {
             val legacyDisabledKey = disabledModelsLegacyKey(legacyBaseUrl)
             val legacyAvailabilityKey = modelAvailabilityLegacyKey(legacyBaseUrl)
-            if (!encryptedPrefs.contains(ModelPrefs.disabledModelsKey(serverGroupFp))) {
+            if (!encryptedPrefs.contains(ModelPrefs.disabledModelsKey(profileId))) {
                 encryptedPrefs.getStringSet(legacyDisabledKey, null)?.let {
-                    e.putStringSet(ModelPrefs.disabledModelsKey(serverGroupFp), it)
+                    e.putStringSet(ModelPrefs.disabledModelsKey(profileId), it)
                 }
             }
-            if (!encryptedPrefs.contains(ModelPrefs.modelAvailabilityKey(serverGroupFp))) {
+            if (!encryptedPrefs.contains(ModelPrefs.modelAvailabilityKey(profileId))) {
                 encryptedPrefs.getStringSet(legacyAvailabilityKey, null)?.let {
-                    e.putStringSet(ModelPrefs.modelAvailabilityKey(serverGroupFp), it)
+                    e.putStringSet(ModelPrefs.modelAvailabilityKey(profileId), it)
                 }
             }
         }
@@ -110,10 +110,136 @@ internal class MigrationHelper(
         // were removed (the maps + their getters/setters were deleted; no live
         // reader remains). session_drafts keeps its migration (drafts still
         // active).
-        rewriteSessionMapLegacyToFp(SessionPrefs.KEY_SESSION_DRAFTS, serverGroupFp, e)
+        rewriteSessionMapLegacyToFp(SessionPrefs.KEY_SESSION_DRAFTS, profileId, e)
 
         e.putBoolean(flagKey, true)
         e.apply()
+    }
+
+    /**
+     * §需求12 rev-6 blocker D: removes the per-profile R-20 Phase 5 migration
+     * idempotency flag (`cache_migration_v1_done_<profileId>`) for [profileId].
+     * Called by [SettingsManager.clearAllForProfile] on profile deletion so the
+     * flag does not leak as an orphan (the deleted profile's id is a canonical
+     * UUID, so [cleanupOrphanGroupKeys] intentionally PRESERVES it — only a
+     * direct clear on deletion closes the lifecycle). No-op on blank
+     * [profileId] (defensive) and when the flag was never set ([remove] on a
+     * missing key is a no-op).
+     */
+    fun clearMigrationFlag(profileId: String) {
+        if (profileId.isBlank()) return
+        encryptedPrefs.edit().remove(migrationFlagKey(profileId)).apply()
+    }
+
+    /**
+     * §需求12阶段4: one-shot, idempotent purge of per-group orphan keys whose
+     * suffix is NOT a valid UUID.
+     *
+     * Background: pre-需求12 profiles could carry named-group fingerprints
+     * ("A"/"B"/"C"/"D") and pre-R-20-Phase-5 slots were keyed by normalized
+     * baseUrl. Post-需求12 every profile's fp == its own UUID `id`, so any
+     * persisted per-fp key whose suffix is not a UUID format is an orphan
+     * that no live profile can ever reference again. User decision (plan
+     * §阶段4): do NOT migrate that data — just purge it.
+     *
+     * Scans every key in the shared [encryptedPrefs] matching the per-fp key
+     * prefixes owned by [ModelPrefs] / [WorkdirPrefs] + the migration-flag
+     * prefix owned here, extracts the suffix (the part after the known
+     * prefix), and DELETES the key iff the suffix is not a canonical UUID
+     * (`8-4-4-4-12` hex). UUID-suffixed keys (current profile.id-keyed data)
+     * are always preserved.
+     *
+     * Idempotent via the [ORPHAN_CLEANUP_FLAG] boolean: a second invocation
+     * is a no-op. Safe to call from any thread (single batched edit + apply).
+     *
+     * NOTE on the dev-debug seed profile: its id (`"dev-debug-4096"`) is not a
+     * UUID, so its per-fp keys are purged the ONE time this runs. That is a
+     * one-time loss of the DEBUG-only fixture's recent-workdir/model memory —
+     * acceptable, and afterwards the flag is set so it never recurs.
+     */
+    fun cleanupOrphanGroupKeys() {
+        if (encryptedPrefs.getBoolean(ORPHAN_CLEANUP_FLAG, false)) return
+        val prefixes = listOf(
+            "disabled_models_",
+            "model_availability_",
+            "recent_workdirs_",
+            "cache_migration_v1_done_",
+        )
+        val e = encryptedPrefs.edit()
+        var changed = false
+        for (key in encryptedPrefs.all.keys) {
+            val prefix = prefixes.firstOrNull { key.startsWith(it) } ?: continue
+            val suffix = key.substringAfter(prefix)
+            if (!isCanonicalUuid(suffix)) {
+                e.remove(key)
+                changed = true
+            }
+        }
+        // ── §需求12阶段4 rev-4 blocker A: session_drafts nested composite-key sweep ──
+        // SessionPrefs stores all drafts in a SINGLE JSON map keyed by
+        // "<profileId>\u0000<sessionId>". Old group-keyed drafts (profileId =
+        // "A"/"B"/"C"/"D") live INSIDE this map and are invisible to the
+        // top-level prefix sweep above. Parse the map and drop every entry
+        // whose profileId portion is NOT a canonical UUID (mirrors the
+        // top-level rule). purgeOrphanDraftEntries stages its own edits into
+        // `e` and returns true iff it dropped anything; OR-ing into the
+        // top-level sweep's `changed` GUARANTEES the batched apply() below
+        // fires iff EITHER sweep changed anything (the draft edits MUST
+        // always commit even when the top-level sweep found nothing).
+        changed = purgeOrphanDraftEntries(e) || changed
+        if (changed) e.apply()
+        // Always set the flag (even when nothing was deleted) so the scan
+        // never repeats — the orphan set is bounded by this one pass.
+        encryptedPrefs.edit().putBoolean(ORPHAN_CLEANUP_FLAG, true).apply()
+    }
+
+    /**
+     * §需求12阶段4: canonical-UUID predicate (`8-4-4-4-12` hex, any case).
+     * Matches the format `UUID.randomUUID().toString()` produces (profile.id).
+     */
+    private fun isCanonicalUuid(value: String): Boolean =
+        UUID_REGEX.matches(value)
+
+    /**
+     * §需求12阶段4 rev-4 blocker A: purges draft entries whose composite key's
+     * profileId portion is not a canonical UUID. Reads the `session_drafts`
+     * JSON map, filters entries, writes back iff something was removed.
+     * Entries whose composite key's profileId IS a UUID are preserved (current
+     * profile.id-keyed drafts). Stages the write into [editor] so it shares
+     * the single batched apply() with the top-level sweep + the flag.
+     *
+     * Returns `true` iff any entry was dropped, so the caller can OR the
+     * result into its own `changed` flag and guarantee the batched
+     * `editor.apply()` fires iff EITHER sweep changed anything (the draft
+     * edits must always commit, even when the top-level prefix sweep found
+     * nothing).
+     */
+    private fun purgeOrphanDraftEntries(editor: SharedPreferences.Editor): Boolean {
+        val json = encryptedPrefs.getString(SessionPrefs.KEY_SESSION_DRAFTS, null) ?: return false
+        val map: MutableMap<String, String> = try {
+            Json.decodeFromString<Map<String, String>>(json).toMutableMap()
+        } catch (e: Exception) {
+            return false  // Corrupt JSON — leave untouched (don't risk dropping user data on a parse error).
+        }
+        var changed = false
+        val itr = map.entries.iterator()
+        while (itr.hasNext()) {
+            val (compositeKey, _) = itr.next()
+            // Composite key format: "<profileId>\u0000<sessionId>". Extract the
+            // profileId portion (before the NUL separator). If the entry has NO
+            // separator (a pre-Phase-5 bare-sessionId legacy entry that the
+            // R-20 migration never reached), substringBefore returns the whole
+            // key — definitely not a UUID → purge (orphan legacy draft).
+            val profileIdPart = compositeKey.substringBefore(SessionPrefs.COMPOSITE_KEY_SEPARATOR)
+            if (!isCanonicalUuid(profileIdPart)) {
+                itr.remove()
+                changed = true
+            }
+        }
+        if (changed) {
+            editor.putString(SessionPrefs.KEY_SESSION_DRAFTS, Json.encodeToString(map))
+        }
+        return changed
     }
 
     /**
@@ -125,7 +251,7 @@ internal class MigrationHelper(
      */
     private fun rewriteSessionMapLegacyToFp(
         key: String,
-        serverGroupFp: String,
+        profileId: String,
         editor: SharedPreferences.Editor,
     ) {
         val json = encryptedPrefs.getString(key, null) ?: return
@@ -134,7 +260,7 @@ internal class MigrationHelper(
         } catch (e: Exception) {
             return
         }
-        val prefix = serverGroupFp + SessionPrefs.COMPOSITE_KEY_SEPARATOR
+        val prefix = profileId + SessionPrefs.COMPOSITE_KEY_SEPARATOR
         var changed = false
         val updated = map.mapKeys { (k, _) ->
             if (k.contains(SessionPrefs.COMPOSITE_KEY_SEPARATOR)) {
@@ -151,9 +277,16 @@ internal class MigrationHelper(
     }
 
     companion object {
+        /** §需求12阶段4: one-shot idempotency flag for [cleanupOrphanGroupKeys]. */
+        internal const val ORPHAN_CLEANUP_FLAG = "orphan_group_cleanup_v1_done"
+
+        /** §需求12阶段4: canonical UUID format (`8-4-4-4-12` hex, any case). */
+        internal val UUID_REGEX =
+            Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
         /** R-20 Phase 5: per-fp migration flag (idempotency). */
-        private fun migrationFlagKey(serverGroupFp: String): String =
-            "cache_migration_v1_done_$serverGroupFp"
+        private fun migrationFlagKey(profileId: String): String =
+            "cache_migration_v1_done_$profileId"
 
         // ── Legacy (pre-Phase-5) key helpers — kept ONLY for
         // [migrateLegacyKeysToFp] to read the old slots. New code MUST use

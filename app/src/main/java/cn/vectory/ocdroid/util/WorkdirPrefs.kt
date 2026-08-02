@@ -12,10 +12,10 @@ import kotlinx.serialization.json.Json
  * L4b domain split of [SettingsManager] — WORKDIR domain.
  *
  * Owns the current workdir (project directory) + its hot reactive mirror
- * [currentWorkdirFlow] + the per-(serverGroupFp) recent-workdirs MRU list.
+ * [currentWorkdirFlow] + the per-(profileId) recent-workdirs MRU list.
  *
  * §L4b cluster 17: the five recent-workdirs CRUD methods now share a single
- * [isValidFp] guard (the pre-split `if (serverGroupFp.isBlank()) return`
+ * [isValidFp] guard (the pre-split `if (profileId.isBlank()) return`
  * literal, extracted verbatim into a boolean helper). Behavior is IDENTICAL
  * — a blank fp still silently returns / returns emptyList(); this is NOT a
  * kotlin `require{}` (which would throw). Only the guard expression was
@@ -74,7 +74,7 @@ internal class WorkdirPrefs(
 
     /**
      * R-20 Phase 5: the set of workdirs the user has recently connected to
-     * (MRU order), keyed per [serverGroupFp] so the right set survives a cold
+     * (MRU order), keyed per [profileId] so the right set survives a cold
      * start for the active host AND so two profiles reaching the same server
      * (same fp) share the workdir-discovery memory. Without this, a non-
      * current workdir whose sessions fall outside the global
@@ -96,8 +96,8 @@ internal class WorkdirPrefs(
      * `files_last_workdir` is intentionally NOT reclaimed here (a leftover
      * ESP entry is harmless); it is reclaimed by [SettingsManager.clearAllLocalData].
      */
-    fun getRecentWorkdirs(serverGroupFp: String): List<String> {
-        if (!isValidFp(serverGroupFp)) return emptyList()
+    fun getRecentWorkdirs(profileId: String): List<String> {
+        if (!isValidFp(profileId)) return emptyList()
         return synchronized(this) {
             // §R18 Phase 4 (P2-9) Gate-4 fix (maxer): lock the read too so it
             // cannot observe a value mid-flight from a concurrent
@@ -107,25 +107,25 @@ internal class WorkdirPrefs(
             // (e.g. loadInitialData computing the fan-out workdir set) could
             // base its decision on a list that addRecentWorkdir is about to
             // change. Synchronized(this) pairs with addRecentWorkdir's lock.
-            val json = encryptedPrefs.getString(recentWorkdirsKey(serverGroupFp), null)
+            val json = encryptedPrefs.getString(recentWorkdirsKey(profileId), null)
                 ?: return@synchronized emptyList()
             try {
                 Json.decodeFromString<List<String>>(json)
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse recent workdirs for fp=$serverGroupFp, using empty", e)
+                Log.w(TAG, "Failed to parse recent workdirs for fp=$profileId, using empty", e)
                 emptyList()
             }
         }
     }
 
-    fun setRecentWorkdirs(serverGroupFp: String, workdirs: List<String>) {
-        if (!isValidFp(serverGroupFp)) return
+    fun setRecentWorkdirs(profileId: String, workdirs: List<String>) {
+        if (!isValidFp(profileId)) return
         val json = Json.encodeToString(workdirs)
-        encryptedPrefs.edit().putString(recentWorkdirsKey(serverGroupFp), json).apply()
+        encryptedPrefs.edit().putString(recentWorkdirsKey(profileId), json).apply()
     }
 
     /**
-     * Prepends [workdir] to the [serverGroupFp]'s recent-workdirs list (MRU),
+     * Prepends [workdir] to the [profileId]'s recent-workdirs list (MRU),
      * deduplicating and capping at [MAX_RECENT_WORKDIRS]. Called when the user
      * connects a project via `createSessionInWorkdir` so the workdir survives
      * restart even after it is later superseded as [currentWorkdir]. Blank/
@@ -154,21 +154,21 @@ internal class WorkdirPrefs(
      * for `getSessionsForDirectory`; normalizing on store would break the
      * cold-start fan-out. Only the comparison is normalized.
      */
-    fun addRecentWorkdir(serverGroupFp: String, workdir: String) {
-        if (!isValidFp(serverGroupFp)) return
+    fun addRecentWorkdir(profileId: String, workdir: String) {
+        if (!isValidFp(profileId)) return
         val storedForm = workdir.trim()
         if (storedForm.isEmpty()) return
         val normalizedKey = WorkdirPaths.normalize(storedForm)
         synchronized(this) {
-            val updated = (listOf(storedForm) + getRecentWorkdirs(serverGroupFp).filter {
+            val updated = (listOf(storedForm) + getRecentWorkdirs(profileId).filter {
                 WorkdirPaths.normalize(it) != normalizedKey
             }).take(MAX_RECENT_WORKDIRS)
-            setRecentWorkdirs(serverGroupFp, updated)
+            setRecentWorkdirs(profileId, updated)
         }
     }
 
     /**
-     * Remove [workdir] from the [serverGroupFp]'s recent-workdirs list.
+     * Remove [workdir] from the [profileId]'s recent-workdirs list.
      *
      * §grouping-rewrite Round-4 C4: matching is by NORMALIZED EQUIVALENCE, not
      * exact trimmed string. The display dir passed in here comes from
@@ -194,28 +194,28 @@ internal class WorkdirPrefs(
      * normalized. `addRecentWorkdir` also still stores the trimmed original
      * (not the normalized form) — see its KDoc for why.
      */
-    fun removeRecentWorkdir(serverGroupFp: String, workdir: String) {
-        if (!isValidFp(serverGroupFp)) return
+    fun removeRecentWorkdir(profileId: String, workdir: String) {
+        if (!isValidFp(profileId)) return
         val targetNormalized = WorkdirPaths.normalize(workdir)
         if (targetNormalized.isEmpty()) return
         synchronized(this) {
-            val updated = getRecentWorkdirs(serverGroupFp).filter { stored ->
+            val updated = getRecentWorkdirs(profileId).filter { stored ->
                 WorkdirPaths.normalize(stored) != targetNormalized
             }
-            setRecentWorkdirs(serverGroupFp, updated)
+            setRecentWorkdirs(profileId, updated)
         }
     }
 
     /**
-     * R-20 Phase 5: clears the [serverGroupFp]'s recent-workdirs list. Used
+     * R-20 Phase 5: clears the [profileId]'s recent-workdirs list. Used
      * by [cn.vectory.ocdroid.ui.controller.HostProfileController.purgePerHostState]
      * on a DIFFERENT-group switch (the old fp's workdirs are meaningless on
      * the new server). Same-group switches preserve the list (the new
      * profile reaches the same server).
      */
-    fun clearRecentWorkdirs(serverGroupFp: String) {
-        if (!isValidFp(serverGroupFp)) return
-        encryptedPrefs.edit().remove(recentWorkdirsKey(serverGroupFp)).apply()
+    fun clearRecentWorkdirs(profileId: String) {
+        if (!isValidFp(profileId)) return
+        encryptedPrefs.edit().remove(recentWorkdirsKey(profileId)).apply()
     }
 
     /**
@@ -224,7 +224,7 @@ internal class WorkdirPrefs(
      * `true` iff [fp] is a usable serverGroupFingerprint key suffix.
      *
      * BEHAVIOR-PRESERVING: this is the exact pre-split predicate
-     * `!serverGroupFp.isBlank()` lifted into a helper. It does NOT throw
+     * `!profileId.isBlank()` lifted into a helper. It does NOT throw
      * (deliberately not kotlin `require{}`) — each caller still does its
      * own early return / emptyList(), identical to the original literals
      * at the pre-split lines 259/281/317/357/376.
@@ -257,7 +257,7 @@ internal class WorkdirPrefs(
         internal const val MAX_RECENT_WORKDIRS = 30
 
         /** R-20 Phase 5: per-fp recent-workdirs key. */
-        internal fun recentWorkdirsKey(serverGroupFp: String): String =
-            "recent_workdirs_$serverGroupFp"
+        internal fun recentWorkdirsKey(profileId: String): String =
+            "recent_workdirs_$profileId"
     }
 }

@@ -36,7 +36,6 @@ class HostProfileMigratorTest {
         basicAuth = if (username != null && passwordId != null) BasicAuthConfig(username, passwordId) else null,
         mtlsEnabled = mtlsEnabled,
         slim = slim,
-        serverGroupFp = "test-id",
         lastUsedAt = 0L,
     )
 
@@ -59,7 +58,7 @@ class HostProfileMigratorTest {
         assertEquals("pw1", migrated.basicAuth?.passwordId)
         // slim flag preserved
         assertTrue(migrated.slim)
-        // id/name/serverGroupFp preserved
+        // id/name preserved
         assertEquals(original.id, migrated.id)
         assertEquals(original.name, migrated.name)
     }

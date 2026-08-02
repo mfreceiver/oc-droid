@@ -52,16 +52,16 @@ internal fun launchCatchUp(
      * §fix-#3 (gpter #3): provider for the current host's serverGroupFp. Used
      * as the cache compound key. Default { "" }.
      */
-    currentServerGroupFp: () -> String = { "" },
+    currentProfileId: () -> String = { "" },
     /**
      * §fix-#3 (gpter #3): the serverGroupFp captured AT CALL TIME (when the
      * probe REST request was initiated). Compared against
-     * [currentServerGroupFp] at onSuccess — a mismatch means the user switched
+     * [currentProfileId] at onSuccess — a mismatch means the user switched
      * host group during the probe; the stale response must NOT be merged.
-     * Defaults to the same value as `currentServerGroupFp()` so legacy callers
+     * Defaults to the same value as `currentProfileId()` so legacy callers
      * that wire only the provider get fp-guard = no-op (both sides equal).
      */
-    expectedServerGroupFp: String = currentServerGroupFp(),
+    expectedProfileId: String = currentProfileId(),
     /** G6: the SSE job's current workdir, or null if no feed. */
     sseCurrentWorkdir: String? = null,
     /** G6: sessions with an established cold-snapshot baseline. */
@@ -138,7 +138,7 @@ internal fun launchCatchUp(
                         expectedRouteInstance == slices.store.stateFlow.value.chatRouteInstance
                     if (sessionId != slices.chat.value.currentSessionId ||
                         !routeTokenValid ||
-                        currentServerGroupFp() != expectedServerGroupFp
+                        currentProfileId() != expectedProfileId
                     ) {
                         // §history-load-fix round-2 (gpter 🟠): stale probe
                         // (compound-key mismatch) — NO-OP. The session-guarded
