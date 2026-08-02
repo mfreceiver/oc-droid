@@ -48,7 +48,7 @@ class ComposerControllerTest {
         expandedParts = store.expandedParts
         settingsManager = mockk(relaxed = true)
         hostProfileStore = mockk(relaxed = true)
-        // R-20 Phase 5: ComposerController derives the current serverGroupFp
+        // R-20 Phase 5: ComposerController derives the current profileId
         // from the host profile; stub it so the draft-write path resolves.
         val profile = HostProfile.defaultDirect("http://test")
         every { hostProfileStore.currentProfile() } returns profile

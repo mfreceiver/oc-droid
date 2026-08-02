@@ -14,10 +14,10 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * R-20 Phase 5 — [SettingsManager] per-serverGroupFp model-key coverage.
+ * R-20 Phase 5 — [SettingsManager] per-profileId model-key coverage.
  *
  * Phase 5 changed the disabled-models / model-availability API from
- * per-baseUrl keying to per-serverGroupFp keying (plan §3). The previous
+ * per-baseUrl keying to per-profileId keying (plan §3). The previous
  * `normalizeBaseUrl` collision-defense (lowercasing host, stripping scheme +
  * slash) is GONE — the fp is already a stable host identifier, and two
  * profiles reaching the same URL but in different groups are now correctly

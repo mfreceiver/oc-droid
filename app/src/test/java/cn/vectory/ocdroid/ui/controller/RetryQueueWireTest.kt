@@ -42,7 +42,7 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class RetryQueueWireTest {
 
-    private val serverGroupFp = "test-fp"
+    private val profileId = "test-fp"
     private lateinit var slices: SliceFlows
     private lateinit var effects: SharedEffectBus
     private lateinit var scope: TestScope
@@ -63,7 +63,7 @@ class RetryQueueWireTest {
             slices = slices,
             settingsManager = mockk(relaxed = true),
             effects = effects,
-            currentProfileId = { serverGroupFp },
+            currentProfileId = { profileId },
             identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore(),
             statusAggregatorInput = null,
             clock = { clockNow },

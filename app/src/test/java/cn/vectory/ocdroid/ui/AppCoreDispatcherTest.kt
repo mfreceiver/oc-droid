@@ -846,7 +846,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
     }
 
     @Test
-    fun `VerifyAndHydrate post-peek re-check drops when serverGroupFp mismatched (Task2 C4)`() = runTest {
+    fun `VerifyAndHydrate post-peek re-check drops when profileId mismatched (Task2 C4)`() = runTest {
         // Defence-in-depth: the post-peek re-check of the composite key is
         // retained. peek is synchronous (no TOCTOU window), but if the effect
         // carries an fp that no longer equals currentProfileId() the

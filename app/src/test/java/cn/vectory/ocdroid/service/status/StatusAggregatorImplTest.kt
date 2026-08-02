@@ -43,7 +43,7 @@ import org.junit.Test
  *    guarding the idle-grace window).
  *  - Merge timing: a newer SSE status survives a REST snapshot whose `requestStart`
  *    predates it, and vice-versa.
- *  - `globalBusy` is true iff any entry under the current identity's `serverGroupFp` is
+ *  - `globalBusy` is true iff any entry under the current identity's `profileId` is
  *    `Busy` or `Retry`.
  *  - **CP4 tri-state** ([globalState]): Busy / AllIdleFresh / Unknown semantics.
  *  - **CP4 TTL** (~30s): stale `Idle` entries → Unknown; stale `Busy` stays Busy.
@@ -373,7 +373,7 @@ class StatusAggregatorImplTest {
     }
 
     @Test
-    fun `globalBusy ignores stale entries from a different serverGroupFp`() = runTest {
+    fun `globalBusy ignores stale entries from a different profileId`() = runTest {
         val repo = mockk<OpenCodeRepository>(relaxed = true)
         coEvery { repo.getSessionStatus() } returns Result.success(
             mapOf("s1" to SessionStatus(type = "busy"))
@@ -385,7 +385,7 @@ class StatusAggregatorImplTest {
         aggregator.refresh(identity(groupFp = fp), snapshot(mapOf("s1" to session("s1", "/work"))))
         assertTrue(aggregator.globalBusy.value)
 
-        // Host switch: rebind identityStore AND refresh under a new serverGroupFp with
+        // Host switch: rebind identityStore AND refresh under a new profileId with
         // no active sessions. In production, a host switch always rebinds the identityStore
         // BEFORE the next refresh. With r2 scope-aware MERGE (applySnapshot preserves
         // out-of-scope entries by scopeKey), the old host-group-A Busy entry survives

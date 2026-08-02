@@ -94,7 +94,7 @@ class ProviderActionsTest {
         // §需求4: the inline read-compute-write is now atomic inside
         // [SettingsManager.reconcileModelData] (was: getDisabledModels +
         // setModelAvailability + setDisabledModels as 3 separate calls).
-        // R-20 Phase 5: keyed by serverGroupFp ("fp-h-test" — set in setUp).
+        // R-20 Phase 5: keyed by profileId ("fp-h-test" — set in setUp).
         // Stub returns the inherited (intersected) disabled set so the slice-
         // mirror assertion below stays meaningful (relaxed mock would return
         // emptySet → break the assertEquals).
