@@ -368,11 +368,8 @@ fun SessionsScreen(
                             // pulse on the status dot while the SSE transport
                             // is live (a valid frame reached the owner).
                             isSseConnected = isSseConnected,
-                            hostProfiles = host.hostProfiles,
-                            currentHostProfileId = host.currentHostProfileId,
+                            currentHost = curHostProfile,
                             serverVersion = connection.serverVersion,
-                            // §L8: single host — no host-switch affordance (selectHostProfile deleted).
-                            onSelectHost = {},
                             // §final-review F1: home popup "force refresh" does
                             // a REAL reconnect (coldStartReconnect →
                             // testConnection(force=true, retries=3) +
