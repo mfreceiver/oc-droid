@@ -257,7 +257,7 @@
     <string name="host_profile_name">配置名称</string>
     <string name="host_profile_basic_auth_username">Basic Auth 用户名（可选）</string>
     <string name="host_profile_basic_auth_password">Basic Auth 密码（可选）</string>
-    <!-- §L7 trust-all: per-server 跳过服务器证书验证（与 mTLS XOR）。 -->
+    <!-- §L7 trust-all: per-server 跳过服务器证书验证。mTLS 优先——仅当未设置 mTLS 客户端证书时 trust-all 才生效。 -->
     <string name="host_trust_all_title">信任所有证书</string>
     <string name="host_trust_all_subtitle">跳过服务器证书验证（无 MITM 防护）</string>
     <string name="host_trust_all_mtls_conflict">mTLS 优先——仅当未设置 mTLS 客户端证书时 trust-all 才生效</string>

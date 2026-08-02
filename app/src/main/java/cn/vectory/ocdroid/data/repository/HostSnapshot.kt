@@ -35,7 +35,8 @@ internal data class HostSnapshot(
      */
     val slimHost: Boolean,
 
-    /** L7: per-server trust-all flag. XOR with mTLS (see HostProfile.trustAll). */
+    /** L7: per-server trust-all flag. mTLS takes priority — trust-all applies
+     *  only when no mTLS client cert is set (see HostProfile.trustAll). */
     val trustAllHost: Boolean,
 ) {
     val hasBasicAuth: Boolean get() = username != null && password != null

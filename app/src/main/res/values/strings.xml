@@ -272,7 +272,8 @@
     <string name="host_profile_name">Profile name</string>
     <string name="host_profile_basic_auth_username">Basic Auth username (optional)</string>
     <string name="host_profile_basic_auth_password">Basic Auth password (optional)</string>
-    <!-- §L7 trust-all: per-server certificate verification skip (XOR with mTLS). -->
+    <!-- §L7 trust-all: per-server certificate verification skip. mTLS takes
+         priority — trust-all applies only when no mTLS client cert is set. -->
     <string name="host_trust_all_title">Trust all certificates</string>
     <string name="host_trust_all_subtitle">Skip server certificate verification (no MITM protection)</string>
     <string name="host_trust_all_mtls_conflict">mTLS takes priority — trust-all only applies when no mTLS client cert is set</string>

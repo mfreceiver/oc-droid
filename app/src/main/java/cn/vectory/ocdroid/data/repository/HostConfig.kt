@@ -57,7 +57,8 @@ class HostConfig {
      */
     @Volatile private var _slim: Boolean = false
 
-    /** L7 trust-all flag (per-server, XOR with mTLS). */
+    /** L7 trust-all flag (per-server; mTLS takes priority — trust-all applies
+     *  only when no mTLS client cert is set). */
     @Volatile private var _trustAll: Boolean = false
 
     val baseUrl: String get() = _baseUrl
@@ -69,7 +70,8 @@ class HostConfig {
     /** R8 slim-mode foundation: 当前 server 的 slimapi 路由属性。 */
     val slim: Boolean get() = _slim
 
-    /** L7 trust-all flag (per-server, XOR with mTLS). */
+    /** L7 trust-all flag (per-server; mTLS takes priority — trust-all applies
+     *  only when no mTLS client cert is set). */
     val trustAll: Boolean get() = _trustAll
 
     /** Capture all fields under the same monitor for graph compatibility/tests. */

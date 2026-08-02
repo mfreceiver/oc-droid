@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -2849,6 +2850,111 @@ class AuthorityReducerTest {
     }
 
     /**
+     * §review-blocker-#7 (P0-C status-merge sync): the actual r3 tear repro.
+     *
+     * T4-C3 covered the meta-only case where REST and SSE AGREE on status
+     * (both busy) → mergeStatusSnapshotInFlight couldn't tear. The blind spot:
+     * REST returning a DIFFERING status. Chain:
+     *   1. busy@(1,5)@900 (SSE_SLIM)
+     *   2. in-flight meta-only SSE: busy→busy@(1,7)@2000 (status value unchanged;
+     *      round+time advanced). currentProjection["A"]=busy (round-stripped).
+     *   3. REST returns idle (DIFFERENT), null round (R==null legacy fallback),
+     *      requestStartMs=1000. localBefore["A"]=busy == currentProjection["A"]=busy.
+     *
+     * PRE-fix: mergeStatusSnapshotInFlight status-diff is FALSE → keeps REST idle;
+     * the :501 timestamp arm fires (2000>1000, R==null) → inFlightWin=TRUE → loop
+     * writes status=idle(REST) + origin/updatedAtMs(2000)/round(1,7)(SSE) = TORN
+     * entry. Then a late equal-round SSE (1,7)@1500 is fenced by applyEvent:247
+     * (1500<2000), freezing REST's wrong idle as "SSE latest".
+     *
+     * POST-fix: the timestamp arm now also flags "A" in inFlightWinSids, so the
+     * merge takes currentProjection["A"]=busy (SSE wins) → status stays busy,
+     * single-source SSE entry. The late SSE is still fenced (1500<2000) but the
+     * frozen value is the correct busy, not REST's idle.
+     */
+    @Test
+    fun `T4-C4 meta-only SSE + differing-status null-R REST does not tear status from SSE meta`() {
+        // 1. Live baseline: busy@(1,5)@900, SSE_SLIM.
+        val baseline = SessionEntry(
+            status = SessionStatus(type = "busy"),
+            serverRound = ServerRound(1, 5),
+            origin = EntryOrigin.SSE_SLIM,
+            updatedAtMs = 900L,
+            workdir = "/x",
+            scopeKey = scope,
+            serverRoundHighWater = ServerRound(1, 5),
+        )
+        val state0 = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(bySid = mapOf("A" to baseline)),
+        )
+        // 2. In-flight meta-only SSE: busy→busy@(1,7)@2000 (status value unchanged).
+        val sseInFlight = event(
+            sid = "A",
+            status = SessionStatus(type = "busy"),
+            origin = EntryOrigin.SSE_SLIM,
+            monotonic = 2000L,
+            serverRound = ServerRound(1, 7),
+        )
+        val stateAfterSse = reduceAuthority(state0, sseInFlight)
+        val entryAfterSse = stateAfterSse.authority.bySid["A"]!!
+        assertEquals("meta-only SSE advanced round to (1,7)",
+            ServerRound(1, 7), entryAfterSse.serverRound)
+        assertEquals("meta-only SSE stamped updatedAtMs=2000", 2000L, entryAfterSse.updatedAtMs)
+        assertEquals("meta-only SSE left status busy", "busy", entryAfterSse.status.type)
+
+        // 3. REST returns IDLE (DIFFERING) with a NULL round, requestStartMs=1000.
+        // localBefore["A"]=busy == currentProjection["A"]=busy → status arm alone
+        // would read "no tear". The #7 fix must flag "A" in inFlightWinSids via
+        // the timestamp arm (prior.updatedAtMs=2000 > requestStartMs=1000, R==null)
+        // so the merge takes SSE's busy instead of REST's idle.
+        val restOp = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf("A" to SessionStatus(type = "idle")),  // no turn fields → R=null
+            sidToWorkdir = mapOf("A" to "/x"),
+            authoritativeNodeIds = setOf("A"),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 2100L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 1000L),
+            localBefore = mapOf("A" to SessionStatus(type = "busy")),  // == currentProjection
+        )
+        val stateAfterRest = reduceAuthority(stateAfterSse, restOp)
+        val entryAfterRest = stateAfterRest.authority.bySid["A"]!!
+
+        // PRIMARY assertion — this is the tear fix. Pre-fix this was REST's idle.
+        assertEquals("status stays busy (SSE wins via #7 timestamp arm, not REST idle)",
+            "busy", entryAfterRest.status.type)
+        // Anti-tear triple — single-source SSE entry, no cross-source mix.
+        assertEquals("origin preserved as SSE_SLIM (not REST)",
+            EntryOrigin.SSE_SLIM, entryAfterRest.origin)
+        assertEquals("updatedAtMs preserved at 2000 (not regressed to REST requestStart 1000)",
+            2000L, entryAfterRest.updatedAtMs)
+        assertEquals("serverRound preserved at (1,7) (null-R REST does not clear)",
+            ServerRound(1, 7), entryAfterRest.serverRound)
+        assertEquals("serverRoundHighWater preserved at (1,7)",
+            ServerRound(1, 7), entryAfterRest.serverRoundHighWater)
+
+        // CHAINED late equal-round SSE (1,7)@1500 — fenced by applyEvent:247
+        // (1500<2000). Entry stays at the correct SSE busy (NOT REST idle).
+        val lateSse = event(
+            sid = "A",
+            status = SessionStatus(type = "idle"),  // tries to flip — must be rejected
+            origin = EntryOrigin.SSE_SLIM,
+            monotonic = 1500L,
+            serverRound = ServerRound(1, 7),
+        )
+        val stateAfterLate = reduceAuthority(stateAfterRest, lateSse)
+        val entryAfterLate = stateAfterLate.authority.bySid["A"]!!
+        assertEquals("late same-round SSE fenced — status stays busy",
+            "busy", entryAfterLate.status.type)
+        assertEquals("late SSE did not regress updatedAtMs", 2000L, entryAfterLate.updatedAtMs)
+        assertEquals("origin still SSE_SLIM", EntryOrigin.SSE_SLIM, entryAfterLate.origin)
+    }
+
+    /**
      * §review-blocker-#6 negative control: the timestamp arm must NOT fire on a
      * pure REST path (no in-flight SSE) — else it would over-protect and break
      * the normal REST stamp. Entry idle at updatedAtMs=500, REST start 1000,
@@ -2856,7 +2962,7 @@ class AuthorityReducerTest {
      * inert because prior.updatedAtMs(500) is NOT > requestStartMs(1000)).
      */
     @Test
-    fun `T4-C4 pure REST path — timestamp arm inert, REST stamps normally`() {
+    fun `T4-C5 pure REST path — timestamp arm inert, REST stamps normally`() {
         val prior = SessionEntry(
             status = SessionStatus(type = "idle"),
             serverRound = null,
@@ -2893,6 +2999,66 @@ class AuthorityReducerTest {
         assertEquals("origin REST (normal REST stamp)", EntryOrigin.REST, entry.origin)
         assertEquals("updatedAtMs=1000 (REST requestStartMs, not preserved 500)",
             1000L, entry.updatedAtMs)
+    }
+
+    /**
+     * §review-blocker-#7 (P0-C status-merge sync) edge case (oracle #1): an id
+     * present in currentProjection with a fresh prior but ABSENT from the REST
+     * snapshot. Pre-fix it was silently DROPPED (status-diff false → merge never
+     * added it → step 6b iterated merged). Post-fix the timestamp arm flags it
+     * in inFlightWinSids → merge retains it with SSE status+meta. This is the
+     * correct causal outcome (a fresher in-flight SSE update wins over a REST
+     * snapshot that omitted the id) and aligns meta-only with the existing
+     * status-diff behavior on that same path.
+     */
+    @Test
+    fun `T4-C6 meta-only SSE then null-R REST that OMITS the sid retains SSE entry`() {
+        // 1. busy@(1,5)@900 SSE_SLIM.
+        val baseline = SessionEntry(
+            status = SessionStatus(type = "busy"),
+            serverRound = ServerRound(1, 5),
+            origin = EntryOrigin.SSE_SLIM,
+            updatedAtMs = 900L,
+            workdir = "/x",
+            scopeKey = scope,
+            serverRoundHighWater = ServerRound(1, 5),
+        )
+        val state0 = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(bySid = mapOf("A" to baseline)),
+        )
+        // 2. In-flight meta-only SSE: busy→busy@(1,7)@2000.
+        val sseInFlight = event(
+            sid = "A",
+            status = SessionStatus(type = "busy"),
+            origin = EntryOrigin.SSE_SLIM,
+            monotonic = 2000L,
+            serverRound = ServerRound(1, 7),
+        )
+        val stateAfterSse = reduceAuthority(state0, sseInFlight)
+        // 3. REST snapshot OMITS "A" entirely; requestStartMs=1000 < 2000.
+        // Timestamp arm fires (R==null because op.snapshot["A"]==null) → "A" in
+        // inFlightWinSids → merge retains currentProjection["A"]=busy.
+        val restOp = AuthorityOp.ApplySnapshot(
+            snapshot = emptyMap(),  // "A" absent
+            sidToWorkdir = mapOf("A" to "/x"),
+            authoritativeNodeIds = emptySet(),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 2100L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 1000L),
+            localBefore = mapOf("A" to SessionStatus(type = "busy")),
+        )
+        val stateAfterRest = reduceAuthority(stateAfterSse, restOp)
+        val entryAfterRest = stateAfterRest.authority.bySid["A"]
+        assertNotNull("REST-absent sid retained via #7 timestamp arm (not dropped)", entryAfterRest)
+        assertEquals("retained status is SSE busy", "busy", entryAfterRest!!.status.type)
+        assertEquals("retained origin SSE_SLIM", EntryOrigin.SSE_SLIM, entryAfterRest.origin)
+        assertEquals("retained updatedAtMs=2000", 2000L, entryAfterRest.updatedAtMs)
+        assertEquals("retained serverRound (1,7)", ServerRound(1, 7), entryAfterRest.serverRound)
     }
 
     /** T5a — bad shape degrade (null round). Catches constructing a round from a half-pair. */

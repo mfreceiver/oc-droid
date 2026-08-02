@@ -433,8 +433,33 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
     val restSnapshot: Map<String, cn.vectory.ocdroid.data.model.SessionStatus> =
         LinkedHashMap(normalized).apply { putAll(preserved) }
 
+    // §review-blocker-#7 (P0-C status-merge sync): compute the in-flight SSE-win
+    // sid set ONCE, shared by mergeStatusSnapshotInFlight (status choice) and the
+    // step-6b loop (origin/updatedAtMs/round choice), so status and causal metadata
+    // can NEVER tear across REST/SSE sources. This is the :501-503 inFlightWin
+    // predicate lifted verbatim — status-diff arm OR the #6 R==null timestamp arm
+    // (meta-only in-flight SSE: busy→busy@(1,7)@2000 leaves the round-stripped
+    // projection equal to localBefore, so the status arm alone misses it; without
+    // this set the loop preserved SSE meta while the merge kept a DIFFERING REST
+    // status → torn entry → late equal-round SSE fenced against the SSE timestamp,
+    // freezing REST's wrong status). The R==null gate is load-bearing: non-null-R
+    // REST is already resolved by the :504-506 lex-fence (T10 Op-2), so the
+    // timestamp arm must stay confined to the one path that fence cannot reach.
+    // NOTE (oracle edge case #1): ids present in currentProjection with a fresh
+    // prior but ABSENT from op.snapshot/restSnapshot are now RETAINED with their
+    // SSE status+meta by this set (pre-fix they were silently dropped). This is
+    // correct — a fresher in-flight SSE update causally wins over the REST snapshot
+    // — and aligns meta-only with the existing status-diff behavior on that path.
+    val inFlightWinSids: Set<String> = currentProjection.keys.filterTo(LinkedHashSet()) { id ->
+        val prior = cur.bySid[id]
+        op.localBefore[id] != currentProjection[id] ||
+            (prior != null &&
+                op.snapshot[id]?.serverRoundOrNull() == null &&
+                prior.updatedAtMs > op.requestToken.requestStartMs)
+    }
+
     // REST in-flight (SSE-wins) protection.
-    val merged = mergeStatusSnapshotInFlight(op.localBefore, currentProjection, restSnapshot)
+    val merged = mergeStatusSnapshotInFlight(restSnapshot, currentProjection, inFlightWinSids)
 
     // §5 step 5: snapInc = max incarnation across all paired rounds in snapshot.
     val snapInc = op.snapshot.values
@@ -498,9 +523,14 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
         // hides an in-flight SSE also lowers that SSE's own timestamp, so the
         // REST stamp cannot regress below it). Oracle-assessed (ses_03bbaf126ffe,
         // Plan B, refined to R==null-only after T10 regression analysis).
-        val inFlightWin = id in currentProjection &&
-            (op.localBefore[id] != currentProjection[id] ||
-                (R == null && prior != null && prior.updatedAtMs > op.requestToken.requestStartMs))
+        //
+        // §review-blocker-#7 (P0-C status-merge sync, r3): the timestamp arm above
+        // correctly preserved SSE METADATA but the parallel status choice in
+        // mergeStatusSnapshotInFlight still used status-diff alone → a meta-only
+        // SSE + differing-status null-R REST tore status (REST) from meta (SSE).
+        // Both arms now share ONE precomputed inFlightWinSids set (see :437 block)
+        // so the two choices can never diverge.
+        val inFlightWin = id in inFlightWinSids
         val fenced = !inFlightWin && R != null && effBase != null &&
             (R < effBase ||
                 (R == effBase && op.requestToken.requestStartMs < (prior?.updatedAtMs ?: 0L)))
@@ -859,23 +889,21 @@ internal fun buildAuthorityApplySnapshot(
 }
 
 /**
- * §sse-rest-race pure in-flight protection — migrated verbatim from the
- * `StatusPollOrchestrator.mergeStatusSnapshot` member (kdoc there): for each
- * id in [localAfter], if `localBefore[id] != localAfter[id]`, the SSE-wins
- * value overrides the REST snapshot (`localAfter[id]` replaces `rest[id]`).
- * Inlined (not imported) so the reducer stays dependency-free and the purity
- * is local/auditable; the original member is preserved for its existing tests.
+ * §sse-rest-race pure in-flight protection: for each id in [inFlightWinSids]
+ * (the precomputed §review-blocker-#7 set — status-diff OR R==null timestamp
+ * arm, ⊆ [localAfter].keys), the SSE-wins value [localAfter] overrides the
+ * REST snapshot. The win judgment is computed ONCE at the call site and
+ * shared with the applySnapshot loop so status + origin/updatedAtMs/round
+ * can never tear across sources.
  */
 private fun mergeStatusSnapshotInFlight(
-    localBefore: Map<String, cn.vectory.ocdroid.data.model.SessionStatus>,
-    localAfter: Map<String, cn.vectory.ocdroid.data.model.SessionStatus>,
     restSnapshot: Map<String, cn.vectory.ocdroid.data.model.SessionStatus>,
+    localAfter: Map<String, cn.vectory.ocdroid.data.model.SessionStatus>,
+    inFlightWinSids: Set<String>,
 ): Map<String, cn.vectory.ocdroid.data.model.SessionStatus> {
-    if (localAfter.isEmpty()) return restSnapshot
+    if (inFlightWinSids.isEmpty()) return restSnapshot
     val result = LinkedHashMap(restSnapshot)
-    for ((id, after) in localAfter) {
-        if (localBefore[id] != after) result[id] = after
-    }
+    for (id in inFlightWinSids) result[id] = localAfter.getValue(id)
     return result
 }
 

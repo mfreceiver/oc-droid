@@ -66,7 +66,8 @@ internal fun HostProfileEditorDialog(
         // §2.7 mTLS 编辑意图（VM 据此写 ESP，原子提交；Dialog 不碰 ESP）：
         mtlsEnabled: Boolean,
         slimEnabled: Boolean,
-        // §L7 trust-all: 跳过服务器证书验证（无 MITM 保护）。与 mTLS XOR 警告。
+        // §L7 trust-all: 跳过服务器证书验证（无 MITM 保护）。mTLS 优先——
+        // 仅当未设置 mTLS 客户端证书时 trust-all 才生效（同时开启则提示）。
         trustAllEnabled: Boolean,
         stagedP12: ByteArray?,
         caStage: CaStage,
@@ -140,7 +141,8 @@ internal fun HostProfileEditorDialog(
     var mtlsEnabled by remember(initial.id) { mutableStateOf(initial.mtlsEnabled) }
     // §R8 slim-mode UI: 省流模式开关——与 mTLS 正交，形成四配置组合。
     var slimEnabled by remember(initial.id) { mutableStateOf(initial.slim) }
-    // §L7 trust-all: per-server 跳过服务器证书验证（无 MITM 防护）。与 mTLS XOR 警告。
+    // §L7 trust-all: per-server 跳过服务器证书验证（无 MITM 防护）。mTLS 优先
+    // ——仅当未设置 mTLS 客户端证书时 trust-all 才生效（同时开启则提示）。
     var trustAllEnabled by remember(initial.id) { mutableStateOf(initial.trustAll) }
     // §mtls-clipboard: 客户端 p12 直接以已校验 ByteArray 暂存（剪贴板粘贴→
     // decodeBase64OrNull→loadClientP12OrNull 验证后写入）。null=未重导（沿用已存）。
@@ -620,7 +622,8 @@ internal fun HostProfileEditorDialog(
                 Text(stringResource(R.string.host_slim_title), style = MaterialTheme.typography.titleSmall)
                 Switch(checked = slimEnabled, onCheckedChange = { slimEnabled = it })
             }
-            // §L7 trust-all toggle (per-server certificate skipping, XOR with mTLS).
+            // §L7 trust-all toggle (per-server certificate skipping). mTLS takes
+            // priority — trust-all applies only when no mTLS client cert is set.
             Spacer(modifier = Modifier.height(Dimens.spacing2))
             Row(
                 modifier = Modifier.fillMaxWidth().heightIn(min = Dimens.touchTargetMin).padding(vertical = Dimens.spacing1),
@@ -637,7 +640,8 @@ internal fun HostProfileEditorDialog(
                 }
                 Switch(checked = trustAllEnabled, onCheckedChange = { trustAllEnabled = it })
             }
-            // §L7 mTLS XOR warning: trust-all + mTLS both ON → informational warning.
+            // §L7 mTLS-priority info: trust-all + mTLS both ON → mTLS wins;
+            // trust-all only applies when no mTLS client cert is set. Informational.
             if (trustAllEnabled && mtlsEnabled) {
                 Text(
                     stringResource(R.string.host_trust_all_mtls_conflict),
