@@ -110,8 +110,12 @@ class ProfileMutationEngine internal constructor(
         val slimChanged = previous?.slim != normalized.slim
         val basicAuthUsernameChanged = previous?.basicAuth?.username != normalized.basicAuth?.username
         val basicAuthChanged = basicAuthUsernameChanged || basicAuthEdited
+        // §review-blocker-#1 (security): trustAll toggle must trigger
+        // reconfigure — otherwise ON→OFF persists + displays strict TLS while
+        // the live stack keeps using SslConfig.TrustAll (no MITM protection).
+        val trustAllChanged = previous?.trustAll != normalized.trustAll
         val needsReconfigure = isActiveHost &&
-            (urlChanged || mtlsChanged || slimChanged || basicAuthChanged)
+            (urlChanged || mtlsChanged || slimChanged || basicAuthChanged || trustAllChanged)
 
         withHostReconfiguration(needsReconfigure) {
             normalized = applyClientCertSave(normalized, clientCertEdit)

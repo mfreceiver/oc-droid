@@ -394,6 +394,11 @@ class HostProfileController(
             // left a slim-profile host routed as legacy after a manual URL
             // change. See OpenCodeRepository.configure slim param.
             slim = profile.slim,
+            // §review-blocker-#1 (security): propagate trustAll so toggling
+            // OFF (or ON) takes effect on the live stack immediately. mTLS
+            // priority handled in resolveCandidateSsl; trustAll only applies
+            // when no mTLS client cert is presented.
+            trustAll = profile.trustAll,
             // lite-v2-dev: reconfigureTicket 形参已从 configure() 移除（incarnation
             // 协议退役，见 OpenCodeRepository.configure）。ticket 仍在 barrier 层流转
             // 但不再传入 configure。
@@ -468,6 +473,10 @@ class HostProfileController(
             // legacy opencode). Was defaulting to false, leaving slim profiles
             // mis-routed on selectHostProfile / deleteHostProfile / testConnection.
             slim = profile.slim,
+            // §review-blocker-#1 (security): propagate profile.trustAll so
+            // selecting/deleting/testing a host applies the user's TLS trust
+            // policy. Matches the configureServerRaw passthrough above.
+            trustAll = profile.trustAll,
             // lite-v2-dev: reconfigureTicket 形参已从 configure() 移除（见上）。
         )
         // #12 / §2.5(a): keep the markdown image HTTP client's TLS trust policy
