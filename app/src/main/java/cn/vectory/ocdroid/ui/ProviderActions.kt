@@ -49,6 +49,45 @@ internal fun launchLoadProviders(
      * read at onSuccess time. See [expectedProfileId].
      */
     currentProfileId: () -> String = { "" },
+    /**
+     * §ABA-triple-guard (F1): the endpoint fingerprint (`ClientBundle.
+     * endpointFp` = `hostSnapshot.baseUrl`) captured AT CALL TIME, alongside
+     * [expectedProfileId]. Compared against [currentEndpointFp] at onSuccess.
+     * Closes the ABA window the profileId-only guard leaves open: a stale
+     * in-flight `/config/providers` response from the SAME profile but a
+     * DIFFERENT URL (user edited the same profile's serverUrl → a new
+     * ClientBundle with a new endpointFp was published mid-flight) would
+     * otherwise穿透 the profileId guard and write stale catalog/model data
+     * into the new URL's persisted state. mTLS-only / Basic-Auth changes do
+     * NOT clear model data (same-endpoint stale write-back is harmless), so
+     * endpointFp=baseUrl is SUFFICIENT — no HostInstanceKey introduced.
+     * Default "" → guard is a no-op (both sides "" → equal), preserving
+     * backward compat for tests / legacy callers.
+     */
+    expectedEndpointFp: String = "",
+    /**
+     * §ABA-triple-guard (F1): provider for the CURRENT endpoint fingerprint,
+     * read at onSuccess time. See [expectedEndpointFp].
+     */
+    currentEndpointFp: () -> String = { "" },
+    /**
+     * §ABA-triple-guard (F1): the connection generation
+     * (`ClientBundle.generation`, Long) captured AT CALL TIME. Compared
+     * against [currentGeneration] at onSuccess. Generation is bumped on
+     * EVERY bundle publication, including `resetLocalDataAndResync` (which
+     * bumps +1) and any full reconfigure — so a stale in-flight response
+     * captured under an older generation is correctly discarded even when
+     * profileId + endpointFp happen to coincide (e.g. a reset that re-points
+     * at the same URL). Reuses the EXISTING [ClientBundle.generation]; no
+     * new epoch field. Default 0L → guard is a no-op (both sides 0L →
+     * equal), preserving backward compat for tests / legacy callers.
+     */
+    expectedGeneration: Long = 0L,
+    /**
+     * §ABA-triple-guard (F1): provider for the CURRENT connection generation,
+     * read at onSuccess time. See [expectedGeneration].
+     */
+    currentGeneration: () -> Long = { 0L },
 ) {
     // §需求13: flip the loading flag SYNCHRONOUSLY on the calling thread
     // (mirrors launchLoadMessages setting isLoadingMessages at
@@ -88,12 +127,30 @@ internal fun launchLoadProviders(
             // returns Result.success(empty) — that is NOT an error.
             repository.getProvidersOrFailure()
                 .onSuccess { providers ->
-                    // §需求4 host/fp guard: if the user switched host during the
-                    // REST call, expectedProfileId != currentProfileId() —
-                    // stale host response dropped (no write to the new host's
-                    // persisted state). The loading flag is still cleared by
-                    // the outer `finally`.
-                    if (expectedProfileId != currentProfileId()) return@onSuccess
+                    // §ABA-triple-guard (F1): the profileId-only guard left an
+                    // ABA window open — a stale in-flight `/config/providers`
+                    // response from the SAME profile but a DIFFERENT URL (or
+                    // published under an older connection generation) could
+                    //穿透 and write stale catalog/model data into the new
+                    // endpoint's persisted state. Now re-validate the FULL
+                    // triple `(profileId, endpointFp, generation)` captured at
+                    // request-start against the live values read at onSuccess:
+                    //   - profileId mismatch → user switched host.
+                    //   - endpointFp mismatch → same profile edited its URL
+                    //     (new ClientBundle published mid-flight). mTLS-only /
+                    //     Basic-Auth changes do NOT bump endpointFp and the
+                    //     resulting same-endpoint stale write-back is harmless,
+                    //     so endpointFp=baseUrl is sufficient (no HostInstanceKey).
+                    //   - generation mismatch → any bundle publication since
+                    //     request-start (reconfigure OR resetLocalDataAndResync,
+                    //     which already bumps +1 → semantically consistent, no
+                    //     special-casing needed).
+                    // Any component mismatch → drop the stale response (no
+                    // write to the live endpoint's persisted state). The
+                    // loading flag is still cleared by the outer `finally`.
+                    if (expectedProfileId != currentProfileId() ||
+                        expectedEndpointFp != currentEndpointFp() ||
+                        expectedGeneration != currentGeneration()) return@onSuccess
                     // §R-17 M3 / batch2 step d: providers lives on the settings
                     // slice — written directly via thread-safe update.
                     //
