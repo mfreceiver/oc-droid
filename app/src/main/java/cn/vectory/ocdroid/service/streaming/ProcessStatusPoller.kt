@@ -245,9 +245,7 @@ class ProcessStatusPoller internal constructor(
         // sees the post-fan-out summary effects (EvictSession for stale
         // sids + backoff/reset) before the coordinator commits.
         runSlimFanOut(identity, snapshot)
-        // §U-P2: the optimistic-claim watchdog moved OUT of the poller into
-        // OptimisticClaimWatchdogCoordinator (independent 5s timer). The
-        // poller no longer reconciles stale claims on its 30s tick.
+        // L3: optimistic-claim watchdog deleted — no reconcile on tick.
         if (synchronized(stateLock) { generation != myGeneration }) {
             return@withLock SourceActivation.Rejected.Superseded
         }
@@ -273,8 +271,7 @@ class ProcessStatusPoller internal constructor(
                 val nextSnapshot = snapshotProvider.current()
                 runRefresh(identity, nextSnapshot)
                 runSlimFanOut(identity, nextSnapshot)
-                // §U-P2: watchdog moved to OptimisticClaimWatchdogCoordinator
-                // (independent 5s timer — no longer reconciled on the 30s tick).
+                // L3: optimistic-claim watchdog deleted — no reconcile on tick.
             }
         }
         val accepted = synchronized(stateLock) {

@@ -92,7 +92,13 @@ data class SessionStatus(
     val type: String,
     val attempt: Int? = null,
     val message: String? = null,
-    val next: Long? = null
+    val next: Long? = null,
+    // §Plan-A (P0-C): slimapi `/slimapi/sessions/status` flat paired turn-fence
+    // fields (v2-contract §3.y). Paired present/absent; both null on legacy
+    // upstream /session/status or unwired registry. Consumed via pair-rule
+    // (data.state.serverRoundOrNull); stripped before storing in SessionEntry.
+    val turnIncarnation: Long? = null,
+    val turn: Long? = null,
 ) {
     val isIdle: Boolean get() = type == "idle"
     val isBusy: Boolean get() = type == "busy"

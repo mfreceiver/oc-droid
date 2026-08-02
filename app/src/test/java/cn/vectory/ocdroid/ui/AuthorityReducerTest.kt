@@ -7,8 +7,6 @@ import cn.vectory.ocdroid.data.state.AuthorityOp
 import cn.vectory.ocdroid.data.state.AuthorityState
 import cn.vectory.ocdroid.data.state.Coverage
 import cn.vectory.ocdroid.data.state.EntryOrigin
-import cn.vectory.ocdroid.data.state.OptimisticClaim
-import cn.vectory.ocdroid.data.state.ReconcileOutcome
 import cn.vectory.ocdroid.data.state.RequestToken
 import cn.vectory.ocdroid.data.state.RetryEntry
 import cn.vectory.ocdroid.data.state.ScopeKey
@@ -188,38 +186,12 @@ class AuthorityReducerTest {
     }
 
     @Test
-    fun `ApplyEvent OPTIMISTIC sets an optimisticClaim`() {
+    fun `ApplyEvent OPTIMISTIC sets entry`() {
         val store = storeWith(listOf(Session(id = "A", directory = "/x")))
         store.dispatch(AppAction.AuthorityEvent(event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC)))
         val entry = store.stateFlow.value.authority.bySid["A"]
         assertEquals(EntryOrigin.OPTIMISTIC, entry?.origin)
-        assertNotNull("optimisticClaim set", entry?.optimisticClaim)
-        assertFalse("claim not yet server-echoed", entry?.optimisticClaim?.serverEchoed == true)
-    }
-
-    @Test
-    fun `incoming BUSY echoes an existing optimistic claim (cross-channel reorder)`() {
-        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
-        // OPTIMISTIC busy first (no server echo).
-        store.dispatch(AppAction.AuthorityEvent(event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 1L)))
-        assertFalse(store.stateFlow.value.authority.bySid["A"]?.optimisticClaim?.serverEchoed == true)
-        // Incoming SSE BUSY → echo-confirm.
-        store.dispatch(AppAction.AuthorityEvent(event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 2L)))
-        assertTrue("claim now server-echoed", store.stateFlow.value.authority.bySid["A"]?.optimisticClaim?.serverEchoed == true)
-    }
-
-    @Test
-    fun `incoming terminal IDLE clears the optimistic claim`() {
-        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
-        store.dispatch(AppAction.AuthorityEvent(event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 1L)))
-        store.dispatch(AppAction.AuthorityEvent(event("A", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 2L)))
-        // §P0-B ITEM 1 (confirmation gate): unconfirmed optimistic claim blocks
-        // the stale legacy idle → status stays busy, claim guardedIdleDrop=true.
-        assertNotNull("gate dropped idle — claim NOT cleared",
-            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim)
-        assertEquals("status stays busy (idle dropped)",
-            SessionStatus(type = "busy"),
-            store.stateFlow.value.authority.bySid["A"]?.status)
+        assertNotNull("entry present", entry)
     }
 
     @Test
@@ -500,7 +472,7 @@ class AuthorityReducerTest {
     // ═══════════════════════════════════════════════════════════════════════
 
     @Test
-    fun `BLK-2 - stale low-turn slim frame is DROPPED after REST snapshot clears the baseline`() {
+    fun `BLK-2 - stale low-turn slim frame is DROPPED after REST snapshot preserves the baseline`() {
         val store = storeWith(listOf(Session(id = "A", directory = "/x")))
         // Establish a Tier-1 baseline at incarnation 5, turn 7.
         store.dispatch(AppAction.AuthorityEvent(
@@ -508,25 +480,25 @@ class AuthorityReducerTest {
                 serverRound = ServerRound(5L, 7L), monotonic = 100L),
         ))
         assertEquals(ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
-        // REST ApplySnapshot clears the live baseline (serverRound → null); the
-        // BLK-2 high-water (5,7) must SURVIVE the clear.
+        // §Plan-A (P0-C): REST snapshot with null round fields PRESERVES the
+        // baseline (lexMax preserves on null R). serverRoundHighWater also preserved.
         store.dispatch(AppAction.AuthorityEvent(
             snapshot(snapshot = mapOf("A" to SessionStatus(type = "busy")),
                      authoritativeNodeIds = setOf("A")),
         ))
-        assertNull("REST clears the live serverRound baseline",
-            store.stateFlow.value.authority.bySid["A"]?.serverRound)
-        assertEquals("BLK-2 high-water survives the REST clear",
+        assertEquals("REST preserves the live serverRound baseline (null-round REST)",
+            ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals("BLK-2 high-water also preserved",
             ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
         // BLK-2 window: a stale LOW-turn slim digest arrives late (cross-channel
-        // reorder). Pre-fix this revived stale busy; it must now be DROPPED.
+        // reorder). Now DROPPED by the live lex guard (baseline preserved).
         val beforeStale = store.stateFlow.value
         store.dispatch(AppAction.AuthorityEvent(
             event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
                 serverRound = ServerRound(5L, 4L), monotonic = 300L),
         ))
-        assertNull("stale low-turn frame DROPPED — baseline stays cleared",
-            store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals("stale low-turn frame DROPPED — baseline preserved at (5,7)",
+            ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
         assertEquals("dropped stale frame is a true no-op (same ref state)",
             beforeStale, store.stateFlow.value)
     }
@@ -611,7 +583,7 @@ class AuthorityReducerTest {
     }
 
     @Test
-    fun `BLK-2 - a fresh higher-turn slim frame is ACCEPTED after the baseline is cleared`() {
+    fun `BLK-2 - a fresh higher-turn slim frame is ACCEPTED after the baseline is preserved via REST`() {
         val store = storeWith(listOf(Session(id = "A", directory = "/x")))
         store.dispatch(AppAction.AuthorityEvent(
             event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
@@ -621,16 +593,18 @@ class AuthorityReducerTest {
             snapshot(snapshot = mapOf("A" to SessionStatus(type = "busy")),
                      authoritativeNodeIds = setOf("A")),
         ))
-        assertNull(store.stateFlow.value.authority.bySid["A"]?.serverRound)
-        // Fresh higher turn → ACCEPTED, and the high-water advances.
+        // §Plan-A (P0-C): baseline PRESERVED by null-round REST (not cleared).
+        assertEquals("baseline preserved after null-round REST",
+            ServerRound(5L, 7L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        // Fresh higher turn (6,9 > 5,7 via incarnation) → ACCEPTED, high-water advances.
         store.dispatch(AppAction.AuthorityEvent(
             event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
-                serverRound = ServerRound(5L, 9L), monotonic = 300L),
+                serverRound = ServerRound(6L, 9L), monotonic = 300L),
         ))
         assertEquals("fresh higher turn accepted",
-            ServerRound(5L, 9L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+            ServerRound(6L, 9L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
         assertEquals("high-water advanced to the fresh turn",
-            ServerRound(5L, 9L), store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
+            ServerRound(6L, 9L), store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
     }
 
     @Test
@@ -699,27 +673,27 @@ class AuthorityReducerTest {
             snapshot(snapshot = mapOf("A" to SessionStatus(type = "busy")),
                      authoritativeNodeIds = setOf("A")),
         ))
-        // A fresh frame advances the watermark to (5, 12).
+        // A fresh frame advances the watermark to (6, 12) — use new incarnation to advance.
         store.dispatch(AppAction.AuthorityEvent(
             event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
-                serverRound = ServerRound(5L, 12L), monotonic = 300L),
+                serverRound = ServerRound(6L, 12L), monotonic = 300L),
         ))
-        // Another REST clear wipes the live baseline again.
+        // Another null-round REST snapshot — baseline PRESERVED by lexMax (not cleared).
         store.dispatch(AppAction.AuthorityEvent(
             snapshot(snapshot = mapOf("A" to SessionStatus(type = "busy")),
                      authoritativeNodeIds = setOf("A")),
         ))
-        assertNull(store.stateFlow.value.authority.bySid["A"]?.serverRound)
-        assertEquals(ServerRound(5L, 12L),
+        assertEquals("baseline preserved after null-round REST",
+            ServerRound(6L, 12L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals(ServerRound(6L, 12L),
             store.stateFlow.value.authority.bySid["A"]?.serverRoundHighWater)
-        // A stale frame with a turn between the two baselines (9) is still stale
-        // relative to the ADVANCED watermark (12) → DROP.
+        // A stale frame with a lower incarnation (5,9) — caught by B6 guard (inc 5 < 6).
         store.dispatch(AppAction.AuthorityEvent(
             event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
                 serverRound = ServerRound(5L, 9L), monotonic = 400L),
         ))
-        assertNull("stale turn below the advanced high-water DROPPED",
-            store.stateFlow.value.authority.bySid["A"]?.serverRound)
+        assertEquals("stale lower-incarnation frame DROPPED — baseline stays at (6,12)",
+            ServerRound(6L, 12L), store.stateFlow.value.authority.bySid["A"]?.serverRound)
     }
 
     @Test
@@ -781,24 +755,25 @@ class AuthorityReducerTest {
             event("B", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
                 serverRound = ServerRound(6L, 2L), monotonic = 210L),
         ))
-        // Clear B's live baseline via REST so prev.serverRound is null but the
-        // high-water (6,2) survives — this isolates the BLK-2 path.
+        // §Plan-A (P0-C): REST snapshot with null round fields PRESERVES the
+        // baseline — B's serverRound stays at (6,2).
         store.dispatch(AppAction.AuthorityEvent(
             snapshot(snapshot = mapOf("B" to SessionStatus(type = "busy")),
                      authoritativeNodeIds = setOf("B")),
         ))
-        assertNull(store.stateFlow.value.authority.bySid["B"]?.serverRound)
+        assertEquals("REST preserves baseline at (6,2)", ServerRound(6L, 2L),
+            store.stateFlow.value.authority.bySid["B"]?.serverRound)
         assertEquals(ServerRound(6L, 2L),
             store.stateFlow.value.authority.bySid["B"]?.serverRoundHighWater)
-        // Stale same-incarnation (6) low turn (1 < 2) — B6 does NOT fire (inc 6 ==
-        // scope high-water 6), BLK-2 must DROP.
+        // Stale same-incarnation (6) low turn (1 < 2) — DROPPED by the live lex
+        // guard (baseline preserved), not by BLK-2.
         val beforeStale = store.stateFlow.value
         store.dispatch(AppAction.AuthorityEvent(
             event("B", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
                 serverRound = ServerRound(6L, 1L), monotonic = 300L),
         ))
-        assertNull("stale low-turn after scope-reset baseline clear DROPPED",
-            store.stateFlow.value.authority.bySid["B"]?.serverRound)
+        assertEquals("stale low-turn DROPPED — baseline stays at (6,2)",
+            ServerRound(6L, 2L), store.stateFlow.value.authority.bySid["B"]?.serverRound)
         assertEquals("dropped stale frame is a no-op (same ref state)",
             beforeStale, store.stateFlow.value)
     }
@@ -1509,7 +1484,6 @@ class AuthorityReducerTest {
                 bySid = cur.bySid + (outScopeSid to SessionEntry(
                     status = SessionStatus(type = "busy"),
                     serverRound = null,
-                    optimisticClaim = null,
                     origin = EntryOrigin.SSE_LEGACY,
                     updatedAtMs = 50L,
                     workdir = "/other",
@@ -1538,435 +1512,6 @@ class AuthorityReducerTest {
             before, store.stateFlow.value)
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // §P0-B ITEM 1 — Tier-2 confirmation gate
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Test
-    fun `P0-B confirmation gate DROPs idle when claim unconfirmed`() {
-        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
-        // 1. OPTIMISTIC busy (claim not echoed)
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        val afterOpt = store.stateFlow.value.authority.bySid["s1"]!!
-        assertNotNull("optimistic claim present", afterOpt.optimisticClaim)
-        assertFalse("claim not echoed", afterOpt.optimisticClaim!!.serverEchoed)
-
-        // 2. SSE_LEGACY idle with no serverRound → gate DROPs it
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
-        ))
-        val afterIdle = store.stateFlow.value.authority.bySid["s1"]!!
-        assertEquals("status stays busy (idle dropped)", SessionStatus(type = "busy"), afterIdle.status)
-        assertNotNull("claim still present", afterIdle.optimisticClaim)
-        assertTrue("guardedIdleDrop set to true", afterIdle.optimisticClaim!!.guardedIdleDrop)
-    }
-
-    @Test
-    fun `P0-B echoed idle clears claim normally`() {
-        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
-        // 1. OPTIMISTIC busy
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        // 2. SSE_LEGACY busy → echo-confirm
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
-        ))
-        assertTrue("claim echoed", store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim?.serverEchoed == true)
-
-        // 3. SSE_LEGACY idle (echoed claim) → clears claim, status becomes idle
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 300L),
-        ))
-        val entry = store.stateFlow.value.authority.bySid["s1"]!!
-        assertEquals("status idle", SessionStatus(type = "idle"), entry.status)
-        assertNull("claim cleared", entry.optimisticClaim)
-    }
-
-    @Test
-    fun `P0-B gate does not block slim serverRound idle (Tier-1 fence)`() {
-        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
-        // 1. OPTIMISTIC busy (no serverRound, claim unechoed)
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        // 2. SSE_SLIM idle WITH serverRound → Tier-1 lex guard lets it through
-        //    (gate only fires when op.serverRound == null)
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_SLIM,
-                serverRound = ServerRound(1L, 5L), monotonic = 200L),
-        ))
-        val entry = store.stateFlow.value.authority.bySid["s1"]!!
-        assertEquals("slim serverRound idle accepted", SessionStatus(type = "idle"), entry.status)
-        assertNull("claim cleared by slim idle", entry.optimisticClaim)
-    }
-
-    // ── ITEM 2: OPTIMISTIC immediate echo ──
-
-    @Test
-    fun `P0-B OPTIMISTIC immediate echo when prev is SSE busy`() {
-        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
-        // 1. SSE_LEGACY busy first
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 100L),
-        ))
-        // 2. OPTIMISTIC (cross-channel reorder: HTTP success after SSE busy)
-        //    → claim must have serverEchoed=true
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 200L),
-        ))
-        val claim = store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim
-        assertNotNull("optimistic claim present", claim)
-        assertTrue("immediate echo on SSE prev", claim!!.serverEchoed)
-    }
-
-    // ── ITEM 1: abortRelease interaction ──
-
-    @Test
-    fun `P0-B abortRelease NOT released when gate drops idle`() {
-        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
-        // Set abort-pending BEFORE any status events (OPTIMISTIC where prev=null
-        // → claim unechoed, no SSE prev → ITEM 2 immediate-echo does NOT fire).
-        store.mutateSessionList { it.copy(abortPendingSessionIds = mapOf("s1" to 999L)) }
-        assertTrue("abort-pending seeded", "s1" in store.stateFlow.value.sessionList.abortPendingSessionIds)
-
-        // OPTIMISTIC busy (first event, no prev → claim unechoed)
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L, workdir = "/w"),
-        ))
-        assertFalse("claim not echoed (no SSE prev)",
-            store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim?.serverEchoed == true)
-
-        // SSE_LEGACY idle → gate DROPs it (claim unechoed) → abortPending STILL contains s1
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
-        ))
-        assertTrue("abortPending NOT released after gate-drop",
-            "s1" in store.stateFlow.value.sessionList.abortPendingSessionIds)
-        assertEquals("status still busy", SessionStatus(type = "busy"),
-            store.stateFlow.value.sessionList.sessionStatuses["s1"])
-    }
-
-    @Test
-    fun `P0-B abortRelease released on normal applied idle`() {
-        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
-        // Set abort-pending first
-        store.mutateSessionList { it.copy(abortPendingSessionIds = mapOf("s1" to 999L)) }
-        assertTrue("abort-pending seeded", "s1" in store.stateFlow.value.sessionList.abortPendingSessionIds)
-
-        // OPTIMISTIC busy (claim unechoed)
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L, workdir = "/w"),
-        ))
-        // SSE_LEGACY busy → echo-confirm
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_LEGACY, monotonic = 200L),
-        ))
-        assertTrue("claim echoed",
-            store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim?.serverEchoed == true)
-
-        // SSE_LEGACY idle (echoed claim → normal apply) → releases abortPending
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 300L),
-        ))
-        assertFalse("abortPending released on normal idle",
-            "s1" in store.stateFlow.value.sessionList.abortPendingSessionIds)
-        assertEquals("status idle", SessionStatus(type = "idle"),
-            store.stateFlow.value.sessionList.sessionStatuses["s1"])
-    }
-
-    // ── ApplyReconcileOutcome IDLE_CONFIRMED path ──
-
-    @Test
-    fun `P0-B ApplyReconcileOutcome IDLE_CONFIRMED clears claim and sets idle`() {
-        val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
-        // Seed busy with claim
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        assertNotNull("claim present", store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim)
-
-        // §sse-zombie-fix (v3 Bug C): advance monotonic past the 7s
-        // OPTIMISTIC_CLAIM_PROTECTION_WINDOW_MS so the unconfirmed-claim
-        // time-window guard in applyReconcile allows the idle to clear.
-        // (At monotonic=500L the guard would preserve the claim, which is
-        // the new correct behavior — but this test verifies the post-window
-        // clear path, so we use a value safely beyond the window.)
-        store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.ApplyReconcileOutcome(
-                sid = "s1",
-                scopeKey = scope,
-                outcome = cn.vectory.ocdroid.data.state.ReconcileOutcome.IDLE_CONFIRMED,
-                serverRound = null,
-                monotonic = 8000L,
-                claimClientSeq = store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim?.clientSeq ?: 0L,
-                hostProfileId = store.stateFlow.value.host.currentHostProfileId,
-                identityEpochAtCapture = store.stateFlow.value.identityEpoch,
-            ),
-        ))
-        val entry = store.stateFlow.value.authority.bySid["s1"]!!
-        assertEquals("status idle after reconcile", SessionStatus(type = "idle"), entry.status)
-        assertNull("claim cleared by reconcile (post-window)", entry.optimisticClaim)
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // §P0-B final-fix — 4 regression tests
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /** Private helper: builds an ApplyReconcileOutcome that matches the current
-     *  test store's host and identityEpoch. The store must have an optimistic
-     *  claim for [sid] (clientSeq is read from the live claim). */
-    private fun reconcileOutcome(
-        store: SharedStateStore,
-        sid: String,
-        outcome: ReconcileOutcome,
-        claimClientSeq: Long? = null,
-        monotonic: Long = 999L,
-    ) = AuthorityOp.ApplyReconcileOutcome(
-        sid = sid,
-        scopeKey = scope,
-        outcome = outcome,
-        serverRound = null,
-        monotonic = monotonic,
-        claimClientSeq = claimClientSeq ?: store.stateFlow.value.authority.bySid[sid]?.optimisticClaim?.clientSeq ?: 0L,
-        hostProfileId = store.stateFlow.value.host.currentHostProfileId,
-        identityEpochAtCapture = store.stateFlow.value.identityEpoch,
-    )
-
-    // ── Test ①: BUSY_CONFIRMED echo-confirms claim, watchdog no longer re-selects ──
-
-    @Test
-    fun `final-fix-1 BUSY_CONFIRMED echo-confirms optimistic claim and stops watchdog re-select`() {
-        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
-        // 1. OPTIMISTIC busy → claim clientSeq=1, serverEchoed=false
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        val claim1 = store.stateFlow.value.authority.bySid["A"]?.optimisticClaim
-        assertNotNull("claim present after OPTIMISTIC", claim1)
-        assertEquals("clientSeq = 1", 1L, claim1?.clientSeq)
-        assertFalse("serverEchoed = false", claim1?.serverEchoed == true)
-
-        // 2. ApplyReconcileOutcome BUSY_CONFIRMED with matching claimClientSeq
-        store.dispatch(AppAction.AuthorityEvent(
-            reconcileOutcome(store, "A", ReconcileOutcome.BUSY_CONFIRMED),
-        ))
-        val entry = store.stateFlow.value.authority.bySid["A"]!!
-        assertEquals("status stays busy", SessionStatus(type = "busy"), entry.status)
-        assertNotNull("claim NOT null (confirmation not lost)", entry.optimisticClaim)
-        // §P0-B final-fix #1: reconcile BUSY_CONFIRMED sets reconcileConfirmed (NOT serverEchoed)
-        assertTrue("claim reconcileConfirmed = true",
-            entry.optimisticClaim!!.reconcileConfirmed)
-        assertFalse("claim serverEchoed = false (SSE-echo-only — not touched by reconcile)",
-            entry.optimisticClaim!!.serverEchoed)
-
-        // 3. Watchdog: serverEchoed || reconcileConfirmed → skip → no stale claims
-        val stale = selectStaleClaimsForReconcile(
-            store.stateFlow.value.authority,
-            now = 999_999L, // far beyond any timeout
-        )
-        assertTrue("watchdog re-select is empty (no per-tick GET loop)", stale.isEmpty())
-    }
-
-    // ── Test ①b: reconcile confirmation does NOT pollute the next optimistic generation ──
-
-    @Test
-    fun `final-fix-1b reconcile confirmation does not pollute the next optimistic generation`() {
-        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
-        // 1. OPTIMISTIC busy → claim clientSeq=1, both flags false
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        var claim = store.stateFlow.value.authority.bySid["A"]?.optimisticClaim!!
-        assertEquals("clientSeq = 1", 1L, claim.clientSeq)
-        assertFalse("serverEchoed = false", claim.serverEchoed)
-        assertFalse("reconcileConfirmed = false", claim.reconcileConfirmed)
-
-        // 2. reconcile BUSY_CONFIRMED (matching claimClientSeq=1) → sets reconcileConfirmed=true
-        store.dispatch(AppAction.AuthorityEvent(
-            reconcileOutcome(store, "A", ReconcileOutcome.BUSY_CONFIRMED),
-        ))
-        claim = store.stateFlow.value.authority.bySid["A"]?.optimisticClaim!!
-        assertTrue("reconcileConfirmed = true after BUSY_CONFIRMED", claim.reconcileConfirmed)
-        assertFalse("serverEchoed still false (not touched by reconcile)", claim.serverEchoed)
-
-        // 3. SECOND OPTIMISTIC busy → NEW generation, clientSeq=2
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 200L),
-        ))
-        claim = store.stateFlow.value.authority.bySid["A"]?.optimisticClaim!!
-        assertEquals("new generation clientSeq = 2", 2L, claim.clientSeq)
-        // §P0-B final-fix #1: the NEW claim must NOT inherit reconcileConfirmed
-        assertFalse("reconcileConfirmed = false (NOT inherited — cross-generation pollution prevented)",
-            claim.reconcileConfirmed)
-        // serverEchoed must also be false (no SSE echo happened)
-        assertFalse("serverEchoed = false on new claim (no SSE echo)", claim.serverEchoed)
-
-        // 4. Watchdog STILL arms on the new claim (only 1 stale: the unconfirmed generation)
-        val stale = selectStaleClaimsForReconcile(
-            store.stateFlow.value.authority,
-            now = 999_999L, // far beyond timeout
-        )
-        assertEquals("watchdog returns exactly one stale claim (the new generation)", 1, stale.size)
-        assertEquals("stale claim sid = A", "A", stale[0].sid)
-        assertEquals("stale claim clientSeq = 2", 2L, stale[0].clientSeq)
-
-        // 5. Confirmation gate STILL protects the new claim from a stale legacy IDLE
-        val beforeGate = store.stateFlow.value
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 300L),
-        ))
-        val afterGate = store.stateFlow.value
-        assertEquals("status still busy (gate dropped the stale legacy IDLE)",
-            SessionStatus(type = "busy"), afterGate.authority.bySid["A"]?.status)
-        assertNotNull("claim still present", afterGate.authority.bySid["A"]?.optimisticClaim)
-        assertTrue("guardedIdleDrop set on claim",
-            afterGate.authority.bySid["A"]?.optimisticClaim?.guardedIdleDrop == true)
-    }
-
-    // ── Test ①c: FETCH_FAILED outcome ──
-
-    @Test
-    fun `P0-B ApplyReconcileOutcome FETCH_FAILED removes entry and is a no-op when prev is null`() {
-        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
-        // 1. OPTIMISTIC busy → claim clientSeq=1
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        assertNotNull("claim present after OPTIMISTIC",
-            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim)
-
-        // 2. FETCH_FAILED with matching claimClientSeq → entry REMOVED
-        store.dispatch(AppAction.AuthorityEvent(
-            reconcileOutcome(store, "A", ReconcileOutcome.FETCH_FAILED),
-        ))
-        assertNull("entry removed after FETCH_FAILED",
-            store.stateFlow.value.authority.bySid["A"])
-
-        // 3. FETCH_FAILED when prev is ALREADY null (entry already gone) → no-op
-        //    Must not crash and state must remain unchanged.
-        store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.ApplyReconcileOutcome(
-                sid = "A", scopeKey = scope,
-                outcome = ReconcileOutcome.FETCH_FAILED,
-                serverRound = null, monotonic = 999L,
-                claimClientSeq = 1L,
-                hostProfileId = store.stateFlow.value.host.currentHostProfileId,
-                identityEpochAtCapture = store.stateFlow.value.identityEpoch,
-            ),
-        ))
-        assertNull("entry still absent after no-op FETCH_FAILED (prev was null)",
-            store.stateFlow.value.authority.bySid["A"])
-    }
-
-    @Test
-    fun `P0-B ApplyReconcileOutcome FETCH_FAILED generation fence drops stale-generation outcome`() {
-        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
-        // 1. OPTIMISTIC busy → claim clientSeq=1
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        assertEquals("clientSeq = 1", 1L,
-            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim?.clientSeq)
-
-        // 2. Another OPTIMISTIC busy → claim advances to clientSeq=2
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 200L),
-        ))
-        assertEquals("clientSeq advanced to 2", 2L,
-            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim?.clientSeq)
-
-        // 3. FETCH_FAILED with stale claimClientSeq=1 → DROPPED (entry NOT removed)
-        store.dispatch(AppAction.AuthorityEvent(
-            reconcileOutcome(store, "A", ReconcileOutcome.FETCH_FAILED, claimClientSeq = 1L),
-        ))
-        val entry = store.stateFlow.value.authority.bySid["A"]
-        assertNotNull("entry NOT removed by stale-generation FETCH_FAILED (fence dropped it)", entry)
-        assertEquals("claim clientSeq unchanged (stale outcome dropped)", 2L,
-            entry?.optimisticClaim?.clientSeq)
-    }
-
-    // ── Test ②: generation fence drops stale-generation outcome (ABA) ──
-
-    @Test
-    fun `final-fix-2 reconcile generation fence drops stale-generation outcome`() {
-        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
-        // 1. OPTIMISTIC busy → claim clientSeq=1
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        assertEquals("clientSeq = 1", 1L,
-            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim?.clientSeq)
-
-        // 2. Another OPTIMISTIC busy → claim advances to clientSeq=2
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 200L),
-        ))
-        assertEquals("clientSeq advanced to 2", 2L,
-            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim?.clientSeq)
-
-        // 3. Stale reconcile with claimClientSeq=1 (the superseded generation)
-        val staleOutcome = reconcileOutcome(
-            store, "A", ReconcileOutcome.IDLE_CONFIRMED,
-            claimClientSeq = 1L, // stale — current claim is clientSeq=2
-        )
-        store.dispatch(AppAction.AuthorityEvent(staleOutcome))
-
-        // 4. Assert DROPPED: claim still clientSeq=2, status still busy
-        val entry = store.stateFlow.value.authority.bySid["A"]!!
-        assertEquals("claim clientSeq unchanged (stale outcome dropped)", 2L,
-            entry.optimisticClaim?.clientSeq)
-        assertEquals("status still busy (stale idle did NOT overwrite)",
-            SessionStatus(type = "busy"), entry.status)
-    }
-
-    // ── Test ③: host/epoch guard drops ApplyReconcileOutcome ──
-
-    @Test
-    fun `final-fix-3 ApplyReconcileOutcome with mismatched host or epoch guard is DROPPED`() {
-        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
-        // Seed optimistic claim (clientSeq=1)
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        val beforeState = store.stateFlow.value
-        val claim = beforeState.authority.bySid["A"]?.optimisticClaim!!
-        val host = beforeState.host.currentHostProfileId
-        val epoch = beforeState.identityEpoch
-
-        // --- Part A: mismatched host ---
-        store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.ApplyReconcileOutcome(
-                sid = "A", scopeKey = scope,
-                outcome = ReconcileOutcome.BUSY_CONFIRMED,
-                serverRound = null, monotonic = 999L,
-                claimClientSeq = claim.clientSeq,
-                hostProfileId = "DIFFERENT-HOST", // mismatched
-                identityEpochAtCapture = epoch,
-            ),
-        ))
-        var entry = store.stateFlow.value.authority.bySid["A"]!!
-        assertFalse("serverEchoed still false after host-mismatched BUSY_CONFIRMED",
-            entry.optimisticClaim?.serverEchoed == true)
-
-        // --- Part B: mismatched epoch ---
-        store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.ApplyReconcileOutcome(
-                sid = "A", scopeKey = scope,
-                outcome = ReconcileOutcome.BUSY_CONFIRMED,
-                serverRound = null, monotonic = 999L,
-                claimClientSeq = claim.clientSeq,
-                hostProfileId = host,
-                identityEpochAtCapture = epoch + 1L, // stale epoch
-            ),
-        ))
-        entry = store.stateFlow.value.authority.bySid["A"]!!
-        assertFalse("serverEchoed still false after epoch-mismatched BUSY_CONFIRMED",
-            entry.optimisticClaim?.serverEchoed == true)
-    }
-
     // ── Test ④: B6 incarnation advance resets only the advancing scope's serverRound ──
 
     @Test
@@ -1988,7 +1533,6 @@ class AuthorityReducerTest {
                 bySid = cur.bySid + ("B" to SessionEntry(
                     status = SessionStatus(type = "busy"),
                     serverRound = ServerRound(1L, 1L),
-                    optimisticClaim = null,
                     origin = EntryOrigin.SSE_SLIM,
                     updatedAtMs = 100L,
                     workdir = "/other",
@@ -2076,7 +1620,7 @@ class AuthorityReducerTest {
         val entry = result.authority.bySid["s1"]
         assertNotNull("fresh optimistic op must write bySid", entry)
         assertEquals("origin is OPTIMISTIC", EntryOrigin.OPTIMISTIC, entry?.origin)
-        assertNotNull("optimisticClaim stamped", entry?.optimisticClaim)
+        assertNotNull("entry present", entry)
     }
 
     @Test
@@ -2167,7 +1711,7 @@ class AuthorityReducerTest {
             s.copy(authority = s.authority.copy(
                 bySid = s.authority.bySid + ("outSid" to SessionEntry(
                     status = SessionStatus(type = "busy"),
-                    serverRound = null, optimisticClaim = null,
+                    serverRound = null,
                     origin = EntryOrigin.SSE_LEGACY,
                     updatedAtMs = 50L, workdir = "/other", scopeKey = diffScope,
                 ))
@@ -2271,21 +1815,23 @@ class AuthorityReducerTest {
     @Test
     fun `P0-E pendingErrorCheck - guard-rejected op does NOT add sid to pendingErrorCheck`() {
         val store = storeWith(listOf(Session(id = "s1", directory = "/w")))
-        // Seed busy via OPTIMISTIC origin.
+        // Seed busy via SSE_SLIM with a serverRound.
         store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L, workdir = "/w"),
+            event("s1", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(1L, 5L), monotonic = 100L, workdir = "/w"),
         ))
         val before = store.stateFlow.value
         assertTrue("pendingErrorCheck initially empty",
             before.chat.pendingErrorCheck.isEmpty())
 
-        // A stale legacy idle WITHOUT server echo → guard rejects (confirmation gate).
-        // The op is rejected by the guard, so the early return path (same-ref) fires
-        // and pendingErrorCheck MUST NOT be modified.
+        // A stale idle with LOWER serverRound (1,3 < 1,5) → lex guard DROPs it.
+        // The op is rejected by the guard, so the early return path fires and
+        // pendingErrorCheck MUST NOT be modified.
         store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_LEGACY, monotonic = 50L, workdir = "/w"),
+            event("s1", SessionStatus(type = "idle"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(1L, 3L), monotonic = 200L, workdir = "/w"),
         ))
-        assertTrue("pendingErrorCheck still empty after guarded idle drop",
+        assertTrue("pendingErrorCheck still empty after lex-guard drop",
             store.stateFlow.value.chat.pendingErrorCheck.isEmpty())
     }
 
@@ -2698,188 +2244,7 @@ class AuthorityReducerTest {
             "s1" in store.stateFlow.value.authority.retryQueue)
     }
 
-    @Test
-    fun `ApplyReconcileOutcome IDLE_CONFIRMED cleans retryQueue (rev-ogpt B4)`() {
-        // rev-ogpt B4: reconcile IDLE_CONFIRMED is terminal → clean retry entry.
-        // Seed s1 as BUSY with optimistic (NOT idle — B3 fence would drop the
-        // RetryQueued for an already-terminal sid).
-        val store = storeWith()
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        val claimClientSeq = store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim?.clientSeq ?: 1L
-        // Queue s1 (busy → B3 fence does NOT trigger).
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1")))
-        assertTrue("s1 queued", "s1" in store.stateFlow.value.authority.retryQueue)
-        // §sse-zombie-fix (v3 Bug C): advance past the 7s protection window
-        // so the reconcile idle can clean the retryQueue.
-        store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.ApplyReconcileOutcome(
-                sid = "s1", scopeKey = scope,
-                outcome = ReconcileOutcome.IDLE_CONFIRMED,
-                serverRound = null, monotonic = 8000L,
-                claimClientSeq = claimClientSeq,
-                hostProfileId = store.stateFlow.value.host.currentHostProfileId,
-                identityEpochAtCapture = 0L,
-            ),
-        ))
-        assertFalse("retry entry cleaned on reconcile IDLE_CONFIRMED (post-window)",
-            "s1" in store.stateFlow.value.authority.retryQueue)
-    }
 
-    @Test
-    fun `ApplyReconcileOutcome FETCH_FAILED cleans retryQueue (rev-ogpt B4)`() {
-        // rev-ogpt B4: FETCH_FAILED removes the bySid entry (terminal) → clean
-        // retry entry too. Seed s1 as BUSY with optimistic.
-        val store = storeWith()
-        store.dispatch(AppAction.AuthorityEvent(
-            event("s1", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        val claimClientSeq = store.stateFlow.value.authority.bySid["s1"]?.optimisticClaim?.clientSeq ?: 1L
-        // Queue s1 (busy → B3 fence does NOT trigger).
-        store.dispatch(AppAction.AuthorityEvent(retryQueued("s1")))
-        assertTrue("s1 queued", "s1" in store.stateFlow.value.authority.retryQueue)
-        // Reconcile FETCH_FAILED.
-        store.dispatch(AppAction.AuthorityEvent(
-            AuthorityOp.ApplyReconcileOutcome(
-                sid = "s1", scopeKey = scope,
-                outcome = ReconcileOutcome.FETCH_FAILED,
-                serverRound = null, monotonic = 200L,
-                claimClientSeq = claimClientSeq,
-                hostProfileId = store.stateFlow.value.host.currentHostProfileId,
-                identityEpochAtCapture = 0L,
-            ),
-        ))
-        assertFalse("retry entry cleaned on reconcile FETCH_FAILED",
-            "s1" in store.stateFlow.value.authority.retryQueue)
-    }
-
-    // ── FETCH_FAILED fail-closed coverage (U-CQ1) ──
-
-    @Test
-    fun `applyReconcile FETCH_FAILED writes fail-closed coverage preserving prior registeredWorkdirs`() {
-        // §CQ-P1 (U-CQ1): FETCH_FAILED must write fail-closed coverage so the
-        // AllIdleFresh gate reads this scope as unknown (coveredWorkdirs=empty,
-        // unmappedActiveIds=empty, lastSuccessTimeMs=-1), while preserving
-        // registeredWorkdirs from the prior coverage entry.
-        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
-        // 1. OPTIMISTIC busy → claim clientSeq=1
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        assertNotNull("claim present after OPTIMISTIC",
-            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim)
-
-        // 2. Seed prior coverage with non-empty fields.
-        store.mutateState { s ->
-            s.copy(authority = s.authority.copy(
-                coverage = s.authority.coverage + (scope to Coverage(
-                    registeredWorkdirs = setOf("/a", "/b"),
-                    coveredWorkdirs = setOf("/a"),
-                    unmappedActiveIds = setOf("x"),
-                    lastSuccessTimeMs = 999L,
-                )),
-            ))
-        }
-
-        // 3. FETCH_FAILED with matching claimClientSeq.
-        store.dispatch(AppAction.AuthorityEvent(
-            reconcileOutcome(store, "A", ReconcileOutcome.FETCH_FAILED),
-        ))
-
-        // 4. Assert entry removed and retryQueue clean.
-        assertNull("entry removed after FETCH_FAILED",
-            store.stateFlow.value.authority.bySid["A"])
-        assertFalse("retryQueue clean for removed entry",
-            "A" in store.stateFlow.value.authority.retryQueue)
-
-        // 5. Assert fail-closed coverage: registeredWorkdirs preserved, all other
-        //    fields reset to empty/fresh-failure sentinel.
-        val cov = store.stateFlow.value.authority.coverage[scope]
-        assertNotNull("coverage entry written for scope", cov)
-        assertEquals("registeredWorkdirs preserved", setOf("/a", "/b"), cov!!.registeredWorkdirs)
-        assertEquals("coveredWorkdirs empty (fail-closed)", emptySet<String>(), cov.coveredWorkdirs)
-        assertEquals("unmappedActiveIds empty (fail-closed)", emptySet<String>(), cov.unmappedActiveIds)
-        assertEquals("lastSuccessTimeMs = -1 (stale-success guard)", -1L, cov.lastSuccessTimeMs)
-    }
-
-    @Test
-    fun `applyReconcile FETCH_FAILED with no prior coverage writes empty-registered fail-closed`() {
-        // §CQ-P1 (U-CQ1): when there is NO prior coverage for the scope,
-        // FETCH_FAILED writes registeredWorkdirs=emptySet() — AllIdleFresh gate
-        // reads "no registered workdirs" ⇒ cannot be all-idle ⇒ conservative
-        // unknown (fail-closed).
-        val store = storeWith(listOf(Session(id = "B", directory = "/y")))
-        // 1. OPTIMISTIC busy → claim clientSeq=1
-        store.dispatch(AppAction.AuthorityEvent(
-            event("B", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        assertNotNull("claim present after OPTIMISTIC",
-            store.stateFlow.value.authority.bySid["B"]?.optimisticClaim)
-
-        // 2. Verify no prior coverage for this scope.
-        assertNull("no prior coverage", store.stateFlow.value.authority.coverage[scope])
-
-        // 3. FETCH_FAILED with matching claimClientSeq.
-        store.dispatch(AppAction.AuthorityEvent(
-            reconcileOutcome(store, "B", ReconcileOutcome.FETCH_FAILED),
-        ))
-
-        // 4. Assert fail-closed coverage with empty registeredWorkdirs.
-        val cov = store.stateFlow.value.authority.coverage[scope]
-        assertNotNull("coverage entry written for scope", cov)
-        assertEquals("registeredWorkdirs empty (no prior)", emptySet<String>(), cov!!.registeredWorkdirs)
-        assertEquals("coveredWorkdirs empty (fail-closed)", emptySet<String>(), cov.coveredWorkdirs)
-        assertEquals("unmappedActiveIds empty (fail-closed)", emptySet<String>(), cov.unmappedActiveIds)
-        assertEquals("lastSuccessTimeMs = -1 (stale-success guard)", -1L, cov.lastSuccessTimeMs)
-    }
-
-    @Test
-    fun `FETCH_FAILED fail-closed coverage shape matches applyMarkFailed fail-closed shape`() {
-        // §CQ-P1 (U-CQ1): verify that the coverage shape written by FETCH_FAILED
-        // matches the fail-closed shape written by MarkSourceFailed (coveredWorkdirs
-        // empty, unmappedActiveIds empty, lastSuccessTimeMs = -1). Only
-        // registeredWorkdirs may differ (FETCH_FAILED preserves prior; MarkSourceFailed
-        // carries its own set in the op).
-        val store = storeWith(listOf(Session(id = "C", directory = "/z")))
-        // 1. OPTIMISTIC busy → claim clientSeq=1
-        store.dispatch(AppAction.AuthorityEvent(
-            event("C", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        assertNotNull("claim present after OPTIMISTIC",
-            store.stateFlow.value.authority.bySid["C"]?.optimisticClaim)
-
-        // 2. Seed shared prior registeredWorkdirs.
-        store.mutateState { s ->
-            s.copy(authority = s.authority.copy(
-                coverage = s.authority.coverage + (scope to Coverage(
-                    registeredWorkdirs = setOf("/z"),
-                    coveredWorkdirs = setOf("/z"),
-                    unmappedActiveIds = emptySet(),
-                    lastSuccessTimeMs = 500L,
-                )),
-            ))
-        }
-
-        // 3. FETCH_FAILED.
-        store.dispatch(AppAction.AuthorityEvent(
-            reconcileOutcome(store, "C", ReconcileOutcome.FETCH_FAILED),
-        ))
-
-        val fetchFailedCov = store.stateFlow.value.authority.coverage[scope]
-        assertNotNull("coverage after FETCH_FAILED", fetchFailedCov)
-
-        // 4. Build expected fail-closed shape — same as applyMarkFailed would write
-        //    for the same scope (MarkSourceFailed writes registeredWorkdirs from op,
-        //    FETCH_FAILED preserves prior — they may differ; we only assert the
-        //    fail-closed fields: covered, unmapped, lastSuccessTimeMs).
-        assertEquals("coveredWorkdirs empty (fail-closed)",
-            emptySet<String>(), fetchFailedCov!!.coveredWorkdirs)
-        assertEquals("unmappedActiveIds empty (fail-closed)",
-            emptySet<String>(), fetchFailedCov.unmappedActiveIds)
-        assertEquals("lastSuccessTimeMs = -1 (stale-success guard)",
-            -1L, fetchFailedCov.lastSuccessTimeMs)
-    }
 
     @Test
     fun `PruneSessions cleans retryQueue for pruned in-scope sids (rev-ogpt B4)`() {
@@ -3050,114 +2415,6 @@ class AuthorityReducerTest {
             "s1" in result.authority.retryQueue)
     }
 
-    // ── U-P1: preservedClaim across REST snapshot ──────────────────────────
-
-    @Test
-    fun `U-P1 - unconfirmed optimistic claim survives REST snapshot`() {
-        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
-        // POST-busy stamps an unconfirmed optimistic claim (serverEchoed=false,
-        // reconcileConfirmed=false)
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        val before = store.stateFlow.value.authority.bySid["A"]
-        assertNotNull("claim present after POST", before?.optimisticClaim)
-        assertFalse("claim unconfirmed", before?.optimisticClaim?.serverEchoed == true)
-        assertFalse("claim not reconcile-confirmed", before?.optimisticClaim?.reconcileConfirmed == true)
-
-        // REST snapshot arrives (server says idle). Without U-P1 the claim
-        // would be cleared. With U-P1, the unconfirmed claim is preserved.
-        store.dispatch(AppAction.AuthorityEvent(
-            snapshot(
-                snapshot = mapOf("A" to SessionStatus(type = "idle")),
-                authoritativeNodeIds = setOf("A"),
-            ),
-        ))
-        val after = store.stateFlow.value.authority.bySid["A"]
-        assertNotNull("entry still present after snapshot", after)
-        assertNotNull(
-            "U-P1: unconfirmed claim preserved across REST snapshot",
-            after?.optimisticClaim,
-        )
-        assertFalse("claim still unconfirmed after snapshot",
-            after?.optimisticClaim?.serverEchoed == true)
-        // §sse-zombie-fix (v3 Bug C): the time-window guard preserves the
-        // prior entry as a true no-op (same object ref) when the claim is
-        // unconfirmed and within the protection window. The entry origin
-        // stays OPTIMISTIC (not REST) because the REST idle was rejected.
-        assertEquals("entry origin preserved as OPTIMISTIC (idle rejected by guard)",
-            EntryOrigin.OPTIMISTIC, after?.origin)
-    }
-
-    @Test
-    fun `U-P1 - confirmed (serverEchoed) claim is cleared by REST snapshot`() {
-        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
-        // POST-busy with unconfirmed claim
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        // SSE_SLIM busy echo-confirms the claim (serverEchoed=true)
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM, monotonic = 200L),
-        ))
-        assertTrue("claim serverEchoed after SSE",
-            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim?.serverEchoed == true)
-
-        // REST snapshot shows idle — confirmed claim must be cleared
-        // (U-P1 only preserves unconfirmed claims).
-        store.dispatch(AppAction.AuthorityEvent(
-            snapshot(
-                snapshot = mapOf("A" to SessionStatus(type = "idle")),
-                authoritativeNodeIds = setOf("A"),
-            ),
-        ))
-        val after = store.stateFlow.value.authority.bySid["A"]
-        assertNull(
-            "U-P1: confirmed claim cleared by REST snapshot",
-            after?.optimisticClaim,
-        )
-    }
-
-    @Test
-    fun `U-P1 - watchdog reconcile chain clears preserved claim via reconcileConfirmed`() {
-        val store = storeWith(listOf(Session(id = "A", directory = "/x")))
-        // POST-busy with unconfirmed claim
-        store.dispatch(AppAction.AuthorityEvent(
-            event("A", SessionStatus(type = "busy"), EntryOrigin.OPTIMISTIC, monotonic = 100L),
-        ))
-        assertNotNull("claim present after POST",
-            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim)
-
-        // REST snapshot #1: claim is unconfirmed → preserved (U-P1)
-        store.dispatch(AppAction.AuthorityEvent(
-            snapshot(
-                snapshot = mapOf("A" to SessionStatus(type = "idle")),
-                authoritativeNodeIds = setOf("A"),
-            ),
-        ))
-        assertNotNull("U-P1: claim preserved across first snapshot",
-            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim)
-
-        // Watchdog reconcile: BUSY_CONFIRMED → reconcileConfirmed=true
-        store.dispatch(AppAction.AuthorityEvent(
-            reconcileOutcome(store, "A", ReconcileOutcome.BUSY_CONFIRMED),
-        ))
-        assertTrue("claim reconcileConfirmed after watchdog",
-            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim?.reconcileConfirmed == true)
-
-        // REST snapshot #2: claim is now confirmed → cleared (no longer U-P1 eligible)
-        store.dispatch(AppAction.AuthorityEvent(
-            snapshot(
-                snapshot = mapOf("A" to SessionStatus(type = "idle")),
-                authoritativeNodeIds = setOf("A"),
-            ),
-        ))
-        assertNull(
-            "U-P1: confirmed claim cleared by subsequent REST snapshot",
-            store.stateFlow.value.authority.bySid["A"]?.optimisticClaim,
-        )
-    }
-
     // ── U-P6: concurrency invariants under parallel dispatch ────────────
 
     @Test
@@ -3210,6 +2467,439 @@ class AuthorityReducerTest {
         // (4) §S3 (batch2-review): serverRoundHighWater monotonic guarantee
         val aHw = auth.bySid["A"]?.serverRoundHighWater
         assertTrue("A high-water monotonic", aHw == null || aHw.turn >= 0L)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // §Plan-A (P0-C) T1-T10 — serverRound through ApplySnapshot
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private fun token(requestStartMs: Long = 100L, host: String? = PROFILE_ID) =
+        RequestToken(hostProfileId = host, identityEpoch = 0L, requestStartMs = requestStartMs)
+
+    /** T1 — sparse idle. Catches idle-fill fabricating a round, or dropping B. */
+    @Test
+    fun `T1 sparse idle — idle-filled node gets no round`() {
+        val state = StoreState.initial().copy(identityEpoch = 0L)
+        val op = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf("A" to SessionStatus(type = "busy", turnIncarnation = 1, turn = 1)),
+            sidToWorkdir = mapOf("A" to "/x", "B" to "/x"),
+            authoritativeNodeIds = setOf("A", "B"),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 1000L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 1000L),
+            localBefore = emptyMap(),
+        )
+        val result = reduceAuthority(state, op)
+
+        val a = result.authority.bySid["A"]!!
+        assertEquals("A: busy", "busy", a.status.type)
+        assertEquals("A: serverRound (1,1)", ServerRound(1, 1), a.serverRound)
+        assertEquals("A: hw (1,1)", ServerRound(1, 1), a.serverRoundHighWater)
+        assertEquals("A: origin REST", EntryOrigin.REST, a.origin)
+        assertEquals("A: updatedAtMs", 1000L, a.updatedAtMs)
+
+        val b = result.authority.bySid["B"]!!
+        assertEquals("B: idle (idle-filled)", "idle", b.status.type)
+        assertNull("B: serverRound null (no round for idle-fill)", b.serverRound)
+        assertNull("B: hw null", b.serverRoundHighWater)
+        assertEquals("B: origin REST", EntryOrigin.REST, b.origin)
+        // Projection: A=busy, B=idle
+        assertEquals("A:proj busy", SessionStatus(type = "busy"), result.sessionList.sessionStatuses["A"])
+        assertEquals("B:proj idle", SessionStatus(type = "idle"), result.sessionList.sessionStatuses["B"])
+    }
+
+    /** T2 — retry unified. Catches treating retry as terminal or as idle. */
+    @Test
+    fun `T2 retry unified — retry status keeps queue entry`() {
+        val state = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(retryQueue = mapOf("A" to RetryEntry(1, 200L, 500L))),
+        )
+        val op = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf("A" to SessionStatus(type = "retry", attempt = 2, turnIncarnation = 1, turn = 4)),
+            sidToWorkdir = mapOf("A" to "/x"),
+            authoritativeNodeIds = setOf("A"),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 1000L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 1000L),
+            localBefore = emptyMap(),
+        )
+        val result = reduceAuthority(state, op)
+
+        val entry = result.authority.bySid["A"]!!
+        assertEquals("retry", entry.status.type)
+        assertEquals(ServerRound(1, 4), entry.serverRound)
+        assertEquals(ServerRound(1, 4), entry.serverRoundHighWater)
+        // retryQueue still contains A (retry is non-terminal)
+        assertTrue("retryQueue still contains A (non-terminal)", "A" in result.authority.retryQueue)
+    }
+
+    /** T3 — turn merge + strip. Catches storing rounds inside entry.status (projection churn). */
+    @Test
+    fun `T3 turn merge and strip — round fields not in entry status`() {
+        val state = StoreState.initial().copy(identityEpoch = 0L)
+        val op = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf("A" to SessionStatus(type = "busy", turnIncarnation = 1, turn = 7)),
+            sidToWorkdir = mapOf("A" to "/x"),
+            authoritativeNodeIds = setOf("A"),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 1000L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 1000L),
+            localBefore = emptyMap(),
+        )
+        val result = reduceAuthority(state, op)
+        val entry = result.authority.bySid["A"]!!
+
+        assertEquals(ServerRound(1, 7), entry.serverRound)
+        assertEquals(ServerRound(1, 7), entry.serverRoundHighWater)
+        // entry.status must have turn/turnIncarnation stripped
+        assertEquals("busy", entry.status.type)
+        assertNull("status.turnIncarnation stripped", entry.status.turnIncarnation)
+        assertNull("status.turn stripped", entry.status.turn)
+        // Projection must also be round-free
+        assertEquals(SessionStatus(type = "busy"), result.sessionList.sessionStatuses["A"])
+    }
+
+    /** T4 — concurrent bump (§3.3撕裂 tolerated). Catches fencing "incoherent" R>effBase. */
+    @Test
+    fun `T4 concurrent bump — REST idle with higher turn applied (no fence on R greater)`() {
+        val prior = SessionEntry(
+            status = SessionStatus(type = "busy"),
+            serverRound = ServerRound(1, 5),
+            origin = EntryOrigin.SSE_SLIM,
+            updatedAtMs = 1000L,
+            workdir = "/x",
+            scopeKey = scope,
+            serverRoundHighWater = ServerRound(1, 5),
+        )
+        val state = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(bySid = mapOf("A" to prior)),
+        )
+        val localBefore = mapOf("A" to SessionStatus(type = "busy"))
+        val op = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf("A" to SessionStatus(type = "idle", turnIncarnation = 1, turn = 6)),
+            sidToWorkdir = mapOf("A" to "/x"),
+            authoritativeNodeIds = setOf("A"),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 2000L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 2000L),
+            localBefore = localBefore,
+        )
+        val result = reduceAuthority(state, op)
+        val entry = result.authority.bySid["A"]!!
+        // R (1,6) > effBase (1,5) → applied
+        assertEquals("idle applied (R > effBase)", "idle", entry.status.type)
+        assertEquals(ServerRound(1, 6), entry.serverRound)
+        assertEquals(ServerRound(1, 6), entry.serverRoundHighWater)
+        assertEquals(2000L, entry.updatedAtMs)
+    }
+
+    /** T5a — bad shape degrade (null round). Catches constructing a round from a half-pair. */
+    @Test
+    fun `T5a bad shape degrade — half-pair R is null, baseline preserved`() {
+        val prior = SessionEntry(
+            status = SessionStatus(type = "busy"),
+            serverRound = ServerRound(1, 9),
+            origin = EntryOrigin.SSE_SLIM,
+            updatedAtMs = 500L,
+            workdir = "/x",
+            scopeKey = scope,
+            serverRoundHighWater = ServerRound(1, 9),
+        )
+        val state = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(bySid = mapOf("A" to prior)),
+        )
+        // turnIncarnation=null, turn=3 → pair-rule → R=null
+        val op = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf("A" to SessionStatus(type = "idle", turn = 3)),
+            sidToWorkdir = mapOf("A" to "/x"),
+            authoritativeNodeIds = setOf("A"),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 1000L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 1000L),
+            localBefore = mapOf("A" to SessionStatus(type = "busy")),
+        )
+        val result = reduceAuthority(state, op)
+        val entry = result.authority.bySid["A"]!!
+        assertEquals("idle applied", "idle", entry.status.type)
+        // R=null → baseline preserved at (1,9)
+        assertEquals("baseline preserved at (1,9)", ServerRound(1, 9), entry.serverRound)
+        assertEquals("hw preserved at (1,9)", ServerRound(1, 9), entry.serverRoundHighWater)
+    }
+
+    /** T6 — old sidecar 404 / legacy shape. Catches old clear-on-REST behavior. */
+    @Test
+    fun `T6 old sidecar — null-round REST preserves baseline, stale frame fenced`() {
+        val prior = SessionEntry(
+            status = SessionStatus(type = "busy"),
+            serverRound = ServerRound(1, 5),
+            origin = EntryOrigin.SSE_SLIM,
+            updatedAtMs = 1000L,
+            workdir = "/x",
+            scopeKey = scope,
+            serverRoundHighWater = ServerRound(1, 5),
+        )
+        val state = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(bySid = mapOf("A" to prior)),
+        )
+        // Null-round REST (no turn fields — old sidecar shape)
+        val op = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf("A" to SessionStatus(type = "idle")),
+            sidToWorkdir = mapOf("A" to "/x"),
+            authoritativeNodeIds = setOf("A"),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 2000L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 2000L),
+            localBefore = mapOf("A" to SessionStatus(type = "busy")),
+        )
+        val snapResult = reduceAuthority(state, op)
+        val entry = snapResult.authority.bySid["A"]!!
+        assertEquals("idle applied", "idle", entry.status.type)
+        // serverRound PRESERVED at (1,5) — NOT cleared
+        assertEquals("baseline preserved at (1,5)", ServerRound(1, 5), entry.serverRound)
+        assertEquals("hw preserved at (1,5)", ServerRound(1, 5), entry.serverRoundHighWater)
+
+        // Follow-up: stale slim frame (1,3) < preserved baseline (1,5) → DROP
+        val staleResult = reduceAuthority(snapResult,
+            event("A", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(1L, 3L), monotonic = 3000L))
+        assertSame("stale frame DROPPED (same ref)", snapResult, staleResult)
+    }
+
+    /** T7 — incarnation reset via REST. Catches turn-only comparison misreading (2,0). */
+    @Test
+    fun `T7 incarnation reset — turn rolled back by restart, lex correctly advances`() {
+        val prior = SessionEntry(
+            status = SessionStatus(type = "busy"),
+            serverRound = ServerRound(1, 9),
+            origin = EntryOrigin.SSE_SLIM,
+            updatedAtMs = 1000L,
+            workdir = "/x",
+            scopeKey = scope,
+            serverRoundHighWater = ServerRound(1, 9),
+        )
+        val state = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(
+                bySid = mapOf("A" to prior),
+                knownIncarnations = mapOf(scope to 1L),
+            ),
+        )
+        val op = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf("A" to SessionStatus(type = "idle", turnIncarnation = 2, turn = 0)),
+            sidToWorkdir = mapOf("A" to "/x"),
+            authoritativeNodeIds = setOf("A"),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 2000L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 2000L),
+            localBefore = mapOf("A" to SessionStatus(type = "busy")),
+        )
+        val result = reduceAuthority(state, op)
+        val entry = result.authority.bySid["A"]!!
+        assertEquals("idle applied", "idle", entry.status.type)
+        // Incarnation 2 lex-dominates 1, so (2,0) > effBase (1,9)
+        assertEquals(ServerRound(2, 0), entry.serverRound)
+        assertEquals(ServerRound(2, 0), entry.serverRoundHighWater)
+        // knownIncarnations bumped to 2
+        assertEquals(2L, result.authority.knownIncarnations[scope])
+    }
+
+    /** T8 — incarnation advance via REST. Catches missing snapInc bump. */
+    @Test
+    fun `T8 incarnation advance via REST — snapInc bump fences stale-inc SSE frame`() {
+        val priorA = SessionEntry(
+            status = SessionStatus(type = "busy"),
+            serverRound = ServerRound(1, 5),
+            origin = EntryOrigin.SSE_SLIM,
+            updatedAtMs = 1000L,
+            workdir = "/x",
+            scopeKey = scope,
+            serverRoundHighWater = ServerRound(1, 5),
+        )
+        val state = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(
+                bySid = mapOf("A" to priorA),
+                knownIncarnations = mapOf(scope to 1L),
+            ),
+        )
+        val op = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf(
+                "A" to SessionStatus(type = "busy", turnIncarnation = 2, turn = 3),
+                "B" to SessionStatus(type = "idle", turnIncarnation = 2, turn = 0),
+            ),
+            sidToWorkdir = mapOf("A" to "/x", "B" to "/y"),
+            authoritativeNodeIds = setOf("A", "B"),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 2000L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 2000L),
+            localBefore = mapOf("A" to SessionStatus(type = "busy")),
+        )
+        val result = reduceAuthority(state, op)
+
+        // knownIncarnations bumped to 2
+        assertEquals(2L, result.authority.knownIncarnations[scope])
+        val a = result.authority.bySid["A"]!!
+        assertEquals(ServerRound(2, 3), a.serverRound)
+        val b = result.authority.bySid["B"]!!
+        assertEquals(ServerRound(2, 0), b.serverRound)
+
+        // Follow-up: stale-incarnation (1,9) SSE frame for unknown sid C → DROPPED by B6
+        val staleResult = reduceAuthority(result,
+            event("C", SessionStatus(type = "busy"), EntryOrigin.SSE_SLIM,
+                serverRound = ServerRound(1L, 9L), monotonic = 3000L))
+        assertNull("C absent (DROPPED by B6 scope guard)", staleResult.authority.bySid["C"])
+    }
+
+    /** T9 — incarnation regression via REST. Catches wholesale drop or apply. */
+    @Test
+    fun `T9 incarnation regression — stale pre-restart response, prior preserved`() {
+        val priorA = SessionEntry(
+            status = SessionStatus(type = "busy"),
+            serverRound = ServerRound(2, 5),
+            origin = EntryOrigin.SSE_SLIM,
+            updatedAtMs = 1000L,
+            workdir = "/x",
+            scopeKey = scope,
+            serverRoundHighWater = ServerRound(2, 5),
+        )
+        val state = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(
+                bySid = mapOf("A" to priorA),
+                knownIncarnations = mapOf(scope to 2L),
+            ),
+        )
+        // Stale pre-restart response with incarnation 1 (regression)
+        val op = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf(
+                "A" to SessionStatus(type = "idle", turnIncarnation = 1, turn = 9),
+                "D" to SessionStatus(type = "busy", turnIncarnation = 1, turn = 2),
+            ),
+            sidToWorkdir = mapOf("A" to "/x", "D" to "/z"),
+            authoritativeNodeIds = setOf("A", "D"),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 2000L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 2000L),
+            localBefore = mapOf("A" to SessionStatus(type = "busy")),
+        )
+        val result = reduceAuthority(state, op)
+
+        // A: R (1,9) < effBase (2,5) → fenced → prior preserved verbatim
+        val a = result.authority.bySid["A"]!!
+        assertEquals("A: busy preserved (fenced)", "busy", a.status.type)
+        assertEquals("A: baseline (2,5) preserved", ServerRound(2, 5), a.serverRound)
+        assertEquals("A: hw (2,5) preserved", ServerRound(2, 5), a.serverRoundHighWater)
+        assertEquals("A: updatedAtMs 1000 (verbatim)", 1000L, a.updatedAtMs)
+
+        // D: no prior → best available info
+        val d = result.authority.bySid["D"]!!
+        assertEquals("D: busy", "busy", d.status.type)
+        assertEquals(ServerRound(1, 2), d.serverRound)
+
+        // knownIncarnations stays at 2 (not regressed)
+        assertEquals(2L, result.authority.knownIncarnations[scope])
+    }
+
+    /** T10 — equal-round tie-break. Catches ignoring the tie-break in either direction. */
+    @Test
+    fun `T10 equal-round tie-break — newer requestStartMs wins, older preserves`() {
+        val prior = SessionEntry(
+            status = SessionStatus(type = "busy"),
+            serverRound = ServerRound(1, 5),
+            origin = EntryOrigin.SSE_SLIM,
+            updatedAtMs = 1000L,
+            workdir = "/x",
+            scopeKey = scope,
+            serverRoundHighWater = ServerRound(1, 5),
+        )
+        val state = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(bySid = mapOf("A" to prior)),
+        )
+        val localBefore = mapOf("A" to SessionStatus(type = "busy"))
+
+        // Op-1: newer requestStartMs (2000 ≥ 1000) → applied
+        val op1 = AuthorityOp.ApplySnapshot(
+            snapshot = mapOf("A" to SessionStatus(type = "idle", turnIncarnation = 1, turn = 5)),
+            sidToWorkdir = mapOf("A" to "/x"),
+            authoritativeNodeIds = setOf("A"),
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            partialFailureWorkdirs = emptySet(),
+            lastSuccessTimeMs = 2000L,
+            scopeKey = scope,
+            requestToken = token(requestStartMs = 2000L),
+            localBefore = localBefore,
+        )
+        val r1 = reduceAuthority(state, op1)
+        val a1 = r1.authority.bySid["A"]!!
+        assertEquals("idle applied (2000 ≥ 1000)", "idle", a1.status.type)
+        assertEquals(ServerRound(1, 5), a1.serverRound)
+        assertEquals(2000L, a1.updatedAtMs)
+
+        // Op-2: independent — older requestStartMs (500 < 1000) → preserved verbatim
+        // Seed matching coverage so the no-change check passes (same-ref).
+        val priorCov = Coverage(
+            registeredWorkdirs = emptySet(),
+            coveredWorkdirs = emptySet(),
+            unmappedActiveIds = emptySet(),
+            lastSuccessTimeMs = 500L,
+        )
+        val state2 = StoreState.initial().copy(
+            identityEpoch = 0L,
+            authority = AuthorityState(
+                bySid = mapOf("A" to prior),
+                coverage = mapOf(scope to priorCov),
+                knownIncarnations = mapOf(scope to 1L), // match snapInc
+            ),
+        )
+        val op2 = op1.copy(
+            requestToken = token(requestStartMs = 500L),
+            lastSuccessTimeMs = 500L,
+        )
+        val r2 = reduceAuthority(state2, op2)
+        assertSame("prior preserved verbatim (500 < 1000)", state2, r2)
     }
 
     /** Local assertNotNull to avoid an extra import line churn. */

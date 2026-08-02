@@ -394,13 +394,12 @@ internal fun launchSendMessage(
                     )
                 }
                 // §P0-A (B1): optimistic busy now funnels through the authority
-                // reducer — ApplyEvent(OPTIMISTIC) sets the bySid entry + an
-                // optimisticClaim and records the bump timestamp in pendingBumps,
-                // which the reducer applies to sessions (bumpSessionUpdated) and
-                // the sessionStatuses projection in the SAME single CAS. The
-                // optimisticBumpTimestamp IS the caller-captured wall-clock
-                // (System.currentTimeMillis above) — the reducer stays pure (no
-                // clock read; the value is carried in the op).
+                // reducer — ApplyEvent(OPTIMISTIC) sets the bySid entry and records
+                // the bump timestamp in pendingBumps, which the reducer applies to
+                // sessions (bumpSessionUpdated) and the sessionStatuses projection
+                // in the SAME single CAS. The optimisticBumpTimestamp IS the
+                // caller-captured wall-clock (System.currentTimeMillis above) —
+                // the reducer stays pure (no clock read; value carried in the op).
                 // §P0-C (B11): the ApplyEvent carries the CAPTURED identity +
                 // epoch (not the current host's). The scopeKey is derived from
                 // the captured identity's profileId + endpointFp, NOT from
