@@ -138,7 +138,6 @@ class ConnectionCoordinator(
      */
     private val identityStore: ConnectionIdentityStore? = null,
     /**
-    /**
      * L1 FGS commit 1: the new SSE owner host. Replaces
      * [streamingServiceLauncher] as the call target for [startSSE] (the old
      * param stays unused for now — removed in Commit 2).
