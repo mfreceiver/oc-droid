@@ -10,7 +10,6 @@ import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.isSseDown
-import cn.vectory.ocdroid.ui.routeChatSessionId
 import cn.vectory.ocdroid.ui.controller.ComposerController
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.ErrorRecoveryCoordinator
@@ -279,8 +278,6 @@ object ControllerModule {
     fun provideTokenStreamCoordinator(
         @UiApplicationScope appScope: CoroutineScope,
         store: SharedStateStore,
-        // L4 Phase-1 foreground truth source.
-        appLifecycleMonitor: AppLifecycleMonitor,
         // §tokenstream-mtls-fix: was `clientFactory: OkHttpClientFactory` — the Hilt
         // singleton whose own SslConfigFactory never received configureClientCert, so
         // its sslConfigFor() fell back to SystemDefault → "Trust anchor not found"
@@ -351,23 +348,11 @@ object ControllerModule {
             streamConnectionProvider = streamConnectionProvider,
             bundleCommitLock = repository,
             currentBundleProvider = { repository.currentClientBundle() },
-            // L4 Phase-1 (lane 1): wire the foreground/route gate with real
-            // predicates — NOT the permissive defaults.
-            // foregroundSignal: AppLifecycleMonitor.isInForeground is the
-            // authoritative, lifecycle-safe foreground truth (StateFlow).
-            foregroundSignal = appLifecycleMonitor.isInForeground,
-            // navFlow: the authoritative route truth for the route observer
-            // (deriving visibleChatSessionId from navState.lastRoute, NOT from
-            // the loaded-data pointer slices.chat.currentSessionId).
-            navFlow = store.navFlow,
-            // appInForeground snapshot: read the live value for synchronous
-            // gate checks (open(), scheduleReconnect, etc.).
-            appInForeground = { appLifecycleMonitor.isInForeground.value },
-            // visibleChatSessionId: the currently visible chat session id from
-            // the route (navFlow.lastRoute). Null when not on a chat route → gate
-            // rejects. This is the AUTHORITATIVE route truth — NOT the data pointer
-            // from slices.chat.currentSessionId (which persists after leaving Chat).
-            visibleChatSessionId = { routeChatSessionId(store.navFlow.value.lastRoute) },
+            // L4: foreground/route gating removed — L1 deleted background mode,
+            // so the foreground signal is statically-true and the route observer
+            // (suspendClose/desired auto-reopen) has no background to gate against.
+            // Token streams now open unconditionally on .open() (guarded only by
+            // sseDisabled + idempotency), matching the post-L1 architecture.
             // lite-v2-dev (plan §4.2): TriggerSinceFetch → skeleton reload
             // （终态文本 / resync 收敛统一走权威窗口，不再走 reconcileSession）。
             triggerSinceFetch = { sid, _ ->
