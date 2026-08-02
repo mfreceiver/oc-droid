@@ -187,11 +187,18 @@ internal class ConnectionHealthProbe(
                     // phase=Disconnected -> red state).
                     DebugLog.w(TAG, "promoteDegradedTofuIfNeeded: degraded tofu cancel for ${challenge.hostPort} -> Disconnected")
                     writeConnection {
+                        // §F2 rev-kimi: clear any stale authFailureReason — this
+                        // disconnect is caused by the USER declining the TOFU
+                        // cert, NOT by an auth failure. A prior 401 reason
+                        // lingering here would mislead the banner into showing
+                        // AUTH_FAILURE / "HTTP 401" when the real cause is a
+                        // user-rejected certificate.
                         it.copy(
                             pendingTofuCapture = null,
                             connectionPhase = ConnectionPhase.Disconnected,
                             isConnecting = false,
                             isConnected = false,
+                            authFailureReason = null,
                         )
                     }
                     degradedBootstrapTerminator?.terminate()
@@ -603,10 +610,16 @@ internal class ConnectionHealthProbe(
                                             // TOFU-cancel disconnect (red state).
                                             DebugLog.w(TAG, "testConnection: tofu decision cancel for $hostPort -> Disconnected")
                                             writeConnection {
+                                                // §F2 rev-kimi: clear any stale
+                                                // authFailureReason — this disconnect
+                                                // is a user TOFU-cancel, not an auth
+                                                // failure. Mirrors the degraded-TOFU
+                                                // cancel path (~:189).
                                                 it.copy(
                                                     isConnected = false,
                                                     isConnecting = false,
-                                                    connectionPhase = ConnectionPhase.Disconnected
+                                                    connectionPhase = ConnectionPhase.Disconnected,
+                                                    authFailureReason = null,
                                                 )
                                             }
                                             settled = true
