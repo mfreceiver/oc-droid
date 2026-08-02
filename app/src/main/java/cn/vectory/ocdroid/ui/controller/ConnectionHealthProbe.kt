@@ -88,6 +88,16 @@ internal class ConnectionHealthProbe(
     private val connectionBootstrapEngine: ConnectionBootstrapEngine?,
     private val bootstrapRetryPolicy: BootstrapRetryPolicy,
     private val streamingServiceLauncher: StreamingServiceLauncher?,
+    /**
+     * L1 FGS commit 1: replaces [streamingServiceLauncher] for the probe's
+     * engine path. The probe calls this lambda instead of
+     * `streamingServiceLauncher?.ensureStarted(...)`. When non-null, the
+     * launcher param above is ignored (kept to bound churn — removed in
+     * Commit 2).
+     *
+     * Default `{ null }` preserves legacy/test construction.
+     */
+    private val connectSseAndAwait: suspend (cn.vectory.ocdroid.service.identity.ConnectionIdentity) -> cn.vectory.ocdroid.service.streaming.SourceActivation? = { _ -> null },
     private val degradedBootstrapTerminator: DegradedBootstrapTerminator?,
     private val appLifecycleMonitor: AppLifecycleMonitor?,
     // Callbacks back into [ConnectionCoordinator] for operations that remain
@@ -745,8 +755,21 @@ internal class ConnectionHealthProbe(
                             // Disconnected mid-window). `ensureStarted` is
                             // suspend; CC is parked here while the launcher
                             // awaits Stage 1 acceptance (5s) + Stage 2 terminal.
+                            // L1 FGS commit 1: when streamingServiceLauncher is null
+                            // (new code path), fall back to connectSseAndAwait and
+                            // map the SourceActivation to OwnershipStartResult so
+                            // the existing phase-mapping logic works unchanged.
                             val ownership = streamingServiceLauncher?.ensureStarted(outcome.identity)
-                                ?: OwnershipStartResult.Refused(
+                                ?: connectSseAndAwait(outcome.identity)?.let { activation ->
+                                    when (activation) {
+                                        is cn.vectory.ocdroid.service.streaming.SourceActivation.Ready ->
+                                            cn.vectory.ocdroid.service.OwnershipStartResult.Ready(outcome.identity)
+                                        else ->
+                                            cn.vectory.ocdroid.service.OwnershipStartResult.Refused(
+                                                cn.vectory.ocdroid.service.OwnershipRefusal.BootstrapFailed,
+                                            )
+                                    }
+                                } ?: cn.vectory.ocdroid.service.OwnershipStartResult.Refused(
                                     cn.vectory.ocdroid.service.OwnershipRefusal.ServiceStopped,
                                 )
                             // D5-2 (#4): identity recheck BEFORE writing Connected.

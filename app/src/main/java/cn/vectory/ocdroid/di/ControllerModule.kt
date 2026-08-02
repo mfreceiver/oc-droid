@@ -404,6 +404,11 @@ object ControllerModule {
         degradedBootstrapTerminator: cn.vectory.ocdroid.service.DegradedBootstrapTerminator,
         tokenStreamCoordinator: TokenStreamCoordinator,
         effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver,
+        // L1 FGS commit 1: new params for post-FGS architecture.
+        sseOwner: cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner,
+        processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller,
+        sessionSnapshotProvider: cn.vectory.ocdroid.service.streaming.SessionSnapshotProvider,
+        ownershipGate: cn.vectory.ocdroid.service.StreamingOwnershipGate,
     ): ConnectionCoordinator = ConnectionCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -426,6 +431,11 @@ object ControllerModule {
         // coordinator's onDisconnect (§4.1 disconnect → L3 teardown); the
         // Service observes the commands and disconnects its owner.
         streamingLifecycleCoordinator = streamingLifecycleCoordinator,
+        // L1 FGS commit 1: new params.
+        sseOwner = sseOwner,
+        processStatusPoller = processStatusPoller,
+        sessionSnapshotProvider = sessionSnapshotProvider,
+        ownershipGate = ownershipGate,
         connectionBootstrapEngine = connectionBootstrapEngine,
         bootstrapRetryPolicy = bootstrapRetryPolicy,
         appLifecycleMonitor = appLifecycleMonitor,

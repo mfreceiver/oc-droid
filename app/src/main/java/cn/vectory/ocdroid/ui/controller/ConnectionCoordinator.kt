@@ -11,8 +11,13 @@ import cn.vectory.ocdroid.service.OwnershipStartResult
 import cn.vectory.ocdroid.service.OwnershipRefusal
 import cn.vectory.ocdroid.service.TeardownReason
 import cn.vectory.ocdroid.service.DegradedBootstrapTerminator
+import cn.vectory.ocdroid.service.StreamingOwnershipGate
 import cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy
 import cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine
+import cn.vectory.ocdroid.service.streaming.ProcessStatusPoller
+import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
+import cn.vectory.ocdroid.service.streaming.SessionSnapshotProvider
+import cn.vectory.ocdroid.service.streaming.SourceActivation
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
@@ -31,6 +36,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -182,6 +188,27 @@ class ConnectionCoordinator(
      * effect.
      */
     private val streamingLifecycleCoordinator: StreamingLifecycleCoordinator? = null,
+    /**
+     * L1 FGS commit 1: the new SSE owner host. Replaces
+     * [streamingServiceLauncher] as the call target for [startSSE] (the old
+     * param stays unused for now — removed in Commit 2).
+     */
+    private val sseOwner: ServiceSseConnectionOwner? = null,
+    /**
+     * L1 FGS commit 1: the process-level status poller. Used by the fg/bg
+     * source switch to start background polling when the app goes to
+     * background.
+     */
+    private val processStatusPoller: ProcessStatusPoller? = null,
+    /**
+     * L1 FGS commit 1: snapshot provider for the poller identity guard.
+     */
+    private val sessionSnapshotProvider: SessionSnapshotProvider? = null,
+    /**
+     * L1 FGS commit 1: the streaming ownership gate. Used in conjunction with
+     * [sseOwner.disconnect] for the fg/bg source switch and teardowns.
+     */
+    private val ownershipGate: StreamingOwnershipGate? = null,
     private val connectionBootstrapEngine: ConnectionBootstrapEngine? = null,
     private val bootstrapRetryPolicy: BootstrapRetryPolicy = BootstrapRetryPolicy(),
     private val appLifecycleMonitor: AppLifecycleMonitor? = null,
@@ -326,6 +353,14 @@ class ConnectionCoordinator(
      */
     internal var onProbeCoroutineStarted: (() -> Unit)? = null
 
+    /**
+     * L1 FGS commit 1: when the new SSE owner is wired (production), null out
+     * the launcher so the probe uses [connectSseAndAwait]. When the owner is
+     * absent (test/legacy path), preserve the launcher fallback.
+     */
+    private val probeStreamingServiceLauncher: StreamingServiceLauncher? =
+        if (sseOwner != null) null else streamingServiceLauncher
+
     private val healthProbe = ConnectionHealthProbe(
         scope = scope,
         slices = slices,
@@ -339,7 +374,8 @@ class ConnectionCoordinator(
         bootstrapCoordinator = bootstrapCoordinator,
         connectionBootstrapEngine = connectionBootstrapEngine,
         bootstrapRetryPolicy = bootstrapRetryPolicy,
-        streamingServiceLauncher = streamingServiceLauncher,
+        streamingServiceLauncher = probeStreamingServiceLauncher,
+        connectSseAndAwait = ::connectSseAndAwait,
         degradedBootstrapTerminator = degradedBootstrapTerminator,
         appLifecycleMonitor = appLifecycleMonitor,
         loadInitialData = ::loadInitialData,
@@ -348,6 +384,42 @@ class ConnectionCoordinator(
         awaitPendingReconfigureTeardown = ::awaitPendingReconfigureTeardown,
         onProbeCoroutineStartedHook = { onProbeCoroutineStarted?.invoke() },
     )
+
+    /**
+     * L1 FGS commit 1: fg/bg source switch. When the app goes to background,
+     * ensure the polling source is running and disconnect the SSE transport
+     * (the foreground-return path re-probes and re-connects via the health
+     * probe). Launched on the init scope — never runs during construction.
+     */
+    init {
+        val monitor = appLifecycleMonitor
+        val poller = processStatusPoller
+        val snapProvider = sessionSnapshotProvider
+        val owner = sseOwner
+        val gate = ownershipGate
+        val idStore = identityStore
+        if (monitor != null && poller != null && snapProvider != null &&
+            owner != null && gate != null
+        ) {
+            scope.launch {
+                // StateFlow has operator fusion — distinctUntilChanged is
+                // already built-in. Use drop(1) to skip the initial value.
+                monitor.isInForeground
+                    .drop(1)
+                    .collect { inForeground ->
+                        if (!inForeground) {
+                            val identity = idStore?.currentIdentity?.value ?: return@collect
+                            // Start background polling before disconnecting SSE.
+                            poller.ensureRunning(identity, snapProvider.current())
+                            owner.disconnect(markGap = true)
+                            gate.disconnectAndRelease(markGap = true)
+                        }
+                        // On →foreground: no-op — probe's foreground monitor
+                        // re-probes and re-connects via startSSE.
+                    }
+            }
+        }
+    }
 
     /**
      * §streaming-state-sync-diag (DEBUG-only): expose the current lifecycle
@@ -843,32 +915,33 @@ class ConnectionCoordinator(
         return server + localOnly
     }
 
+    /**
+     * L1 FGS commit 1: new internal seam for [ConnectionHealthProbe] to
+     * call the owner directly instead of going through the Service launcher.
+     * Returns [SourceActivation] so the probe can map the result.
+     */
+    internal suspend fun connectSseAndAwait(
+        identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
+    ): SourceActivation {
+        return sseOwner?.connect(identity) ?: SourceActivation.Rejected.StaleIdentity
+    }
+
     // ── SSE lifecycle ───────────────────────────────────────────────────────
 
     /**
-     * CP9 switchover: the SSE feed collector has been moved into the
-     * Service-owned [cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner].
-     * This method is preserved as a thin compatibility delegate (VMs,
-     * [ControllerEffect.StartSse], and tests expose it; deleting adds
-     * rollback churn). It MUST NEVER call `repository.connectSSE` — the
-     * atomic capture belongs to the command identity (StartSse), not to a
-     * re-read of `SettingsManager.currentWorkdir`.
+     * CP9 switchover / L1 FGS commit 1: the SSE feed collector has been moved
+     * into the new [ServiceSseConnectionOwner]. This method is preserved as a
+     * thin compatibility delegate (VMs, [ControllerEffect.StartSse], and tests
+     * expose it; deleting adds rollback churn).
      *
      * The shared TOFU-frozen guard is preserved verbatim — while a TOFU trust
-     * dialog is pending the launcher must NOT be invoked (the resulting
-     * Service bootstrap would try the same unpinned TLS handshake and fail
-     * the same way; the user's [resolveTofuTrust] unfreezes the retry loop
-     * which re-calls startSSE). L4c: the guard now reads
+     * dialog is pending the owner must NOT be invoked (the resulting
+     * bootstrap would try the same unpinned TLS handshake and fail the same
+     * way; the user's [resolveTofuTrust] unfreezes the retry loop which
+     * re-calls startSSE). L4c: the guard now reads
      * [ConnectionHealthProbe.hasPendingTofuDecision] / [pendingTofuHostPort]
      * from [healthProbe] (the single TOFU-state owner post-extraction);
      * behavior is identical.
-     *
-     * §no-zero-time-gap (FGS spec §1): the Service start is asynchronous,
-     * but the start REQUEST is issued synchronously here BEFORE
-     * `onSettled(true)` returns in [testConnection] (via the probe's
-     * [startSSE] callback). The Service's §5 bootstrap then leads to
-     * `StartSse` (the only legal L3→running entry); there is NO terminal
-     * connected-without-SSE path.
      */
     fun startSSE() {
         // §tofu R2: FROZEN while a TOFU trust dialog is pending — the SSE
@@ -883,51 +956,72 @@ class ConnectionCoordinator(
             return
         }
         val identity = identityStore?.currentIdentity?.value ?: return
-        DebugLog.i("SSE", "startSSE → launcher.ensureStarted(identity=${identity.epoch})")
+        DebugLog.i("SSE", "startSSE → sseOwner.connect(identity=${identity.epoch})")
         scope.launch {
-            val result = streamingServiceLauncher?.ensureStarted(identity)
-            // §sse-zombie-fix (v3 Bug B / Kimi N1): the await below may resolve
-            // long after the user switched host. Re-check identity currency
-            // BEFORE writing, so a stale old-host Refused cannot resurrect
-            // isConnected=true or clobber a healthy new-host Connected state.
-            if (identityStore?.isCurrent(identity) == false) {
-                DebugLog.i("SSE", "startSSE: identity no longer current (host switched) — drop stale result")
-                return@launch
-            }
-            if (result !is OwnershipStartResult.Ready || result.identity != identity) {
-                // §sse-disabled-debug-toggle: surface the distinct SseDisabled
-                // phase when the launcher refused because the debug flag is ON
-                // (REST-only); otherwise the generic Disconnected phase.
-                val phase = when {
-                    result is OwnershipStartResult.Refused &&
-                        result.reason is OwnershipRefusal.SseDisabled ->
-                        ConnectionPhase.SseDisabled
-                    // §sse-zombie-fix (v3 Bug B): only BootstrapFailed (SSE
-                    // transport failed while REST is healthy) maps to the new
-                    // SseBootstrapFailed phase. Other genuine refusals
-                    // (ServiceStopped, PlatformRejected, …) stay Disconnected.
-                    result is OwnershipStartResult.Refused &&
-                        result.reason is OwnershipRefusal.BootstrapFailed ->
-                        ConnectionPhase.SseBootstrapFailed
-                    else -> ConnectionPhase.Disconnected
+            // L1 FGS commit 1: replaced streamingServiceLauncher?.ensureStarted
+            // with sseOwner.connect. Fall back to launcher when sseOwner is
+            // absent (tests mock the launcher directly). The launcher param
+            // stays in the constructor (unused in production) — removed in
+            // Commit 2.
+            if (sseOwner != null) {
+                val activation = sseOwner.connect(identity)
+                // §sse-zombie-fix (v3 Bug B / Kimi N1): the await below may
+                // resolve long after the user switched host. Re-check identity
+                // currency BEFORE writing.
+                if (identityStore?.isCurrent(identity) == false) {
+                    DebugLog.i("SSE", "startSSE: identity no longer current — drop stale result")
+                    return@launch
                 }
-                writeConnection {
-                    // §degraded-connected-fix (2026-07-26): same fix as
-                    // ConnectionHealthProbe — REST is connected (we got here
-                    // through the connection flow), only SSE failed. Write
-                    // isConnected=true (green dot, non-breathing) instead of
-                    // false (red dot) so the user knows the server is reachable.
-                    //
-                    // §sse-zombie-fix-impl-rev1 (GPT impl-review concern #2):
-                    // REST connection implies auth is valid — clear a stale
-                    // authFailureReason so the banner does not keep showing an
-                    // auth error after the server accepted the request.
-                    it.copy(
-                        isConnected = true,
-                        isConnecting = false,
-                        connectionPhase = phase,
-                        authFailureReason = null,
-                    )
+                when (activation) {
+                    is SourceActivation.Ready -> {
+                        DebugLog.i("SSE", "startSSE: sseOwner.connect returned Ready")
+                    }
+                    is SourceActivation.Rejected.StaleIdentity -> {
+                        DebugLog.i("SSE", "startSSE: sseOwner.connect returned StaleIdentity — drop")
+                    }
+                    is SourceActivation.Rejected.TofuPending -> {
+                        DebugLog.i("SSE", "startSSE: sseOwner.connect returned TofuPending — no-op")
+                    }
+                    is SourceActivation.Rejected.Superseded -> {
+                        DebugLog.i("SSE", "startSSE: sseOwner.connect returned Superseded — no-op")
+                    }
+                    is SourceActivation.Rejected.TransportTimeout,
+                    is SourceActivation.Rejected.Exhausted -> {
+                        writeConnection {
+                            it.copy(
+                                isConnected = true,
+                                isConnecting = false,
+                                connectionPhase = ConnectionPhase.SseBootstrapFailed,
+                                authFailureReason = null,
+                            )
+                        }
+                    }
+                }
+            } else {
+                // Legacy path: streamingServiceLauncher (used by tests).
+                val result = streamingServiceLauncher?.ensureStarted(identity)
+                if (identityStore?.isCurrent(identity) == false) {
+                    DebugLog.i("SSE", "startSSE: identity no longer current — drop stale result")
+                    return@launch
+                }
+                if (result !is OwnershipStartResult.Ready || result.identity != identity) {
+                    val phase = when {
+                        result is OwnershipStartResult.Refused &&
+                            result.reason is OwnershipRefusal.SseDisabled ->
+                            ConnectionPhase.SseDisabled
+                        result is OwnershipStartResult.Refused &&
+                            result.reason is OwnershipRefusal.BootstrapFailed ->
+                            ConnectionPhase.SseBootstrapFailed
+                        else -> ConnectionPhase.Disconnected
+                    }
+                    writeConnection {
+                        it.copy(
+                            isConnected = true,
+                            isConnecting = false,
+                            connectionPhase = phase,
+                            authFailureReason = null,
+                        )
+                    }
                 }
             }
         }
@@ -1020,8 +1114,18 @@ class ConnectionCoordinator(
 
                 // Step 2: lifecycle teardown — errors are captured.
                 // CancellationException propagates.
+                // L1 FGS commit 1: replaced streamingLifecycleCoordinator?.
+                // teardownNoSourceAndAwait with sseOwner.disconnect +
+                // ownershipGate.disconnectAndRelease. markGap=false for
+                // no-source teardown. Old path kept when new params absent
+                // (tests mock the lifecycle coordinator directly).
                 try {
-                    streamingLifecycleCoordinator?.teardownNoSourceAndAwait()
+                    if (sseOwner != null && ownershipGate != null) {
+                        sseOwner.disconnect(markGap = false)
+                        ownershipGate.disconnectAndRelease(markGap = false)
+                    } else {
+                        streamingLifecycleCoordinator?.teardownNoSourceAndAwait()
+                    }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -1060,8 +1164,19 @@ class ConnectionCoordinator(
         tokenStreamCoordinator?.let { tsc ->
             slices.chat.value.currentSessionId?.let { sid -> tsc.close(sid) }
         }
+        // L1 FGS commit 1: replaced streamingLifecycleCoordinator?.teardownAndAwait
+        // with sseOwner.disconnect + ownershipGate.disconnectAndRelease.
+        // The lifecycle coordinator param stays (unused) — removed in Commit 3.
+        // Old path kept when new params absent (tests mock the lifecycle
+        // coordinator directly).
         scope.launch {
-            streamingLifecycleCoordinator?.teardownAndAwait(reason)
+            if (sseOwner != null && ownershipGate != null) {
+                // markGap=true for generic Disconnect (replacement poller expected).
+                sseOwner.disconnect(markGap = true)
+                ownershipGate.disconnectAndRelease(markGap = true)
+            } else {
+                streamingLifecycleCoordinator?.teardownAndAwait(reason)
+            }
         }
     }
 

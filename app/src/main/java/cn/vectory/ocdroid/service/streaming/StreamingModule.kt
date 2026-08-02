@@ -224,6 +224,77 @@ object ProcessStatusPollerModule {
     )
 }
 
+/**
+ * L1 FGS commit 1: provides the [ServiceSseConnectionOwner] singleton — the
+ * host for the SSE collector in the post-FGS architecture.
+ *
+ * Constructed via `@Provides` (not `@Inject constructor`) because many
+ * parameters are lambdas (reconnectAllowed, onResync, onTerminalExhaustion)
+ * that the constructor receives as function types — Hilt cannot bind
+ * `() -> Boolean` / `suspend (() -> Boolean) -> Unit` / `() -> Unit`
+ * without a concrete @Provides method (mirrors [ProcessStatusPollerModule]).
+ */
+@Module
+@InstallIn(SingletonComponent::class)
+object ServiceSseConnectionOwnerModule {
+    @Provides
+    @Singleton
+    fun provideServiceSseConnectionOwner(
+        @ApplicationScope scope: CoroutineScope,
+        repository: cn.vectory.ocdroid.data.repository.OpenCodeRepository,
+        identityStore: ConnectionIdentityStore,
+        bootstrapCoordinator:
+            cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
+        sseEventStream: cn.vectory.ocdroid.service.events.SseEventStream,
+        sharedStateStore: cn.vectory.ocdroid.ui.SharedStateStore,
+        sharedEffectBus: cn.vectory.ocdroid.ui.SharedEffectBus,
+        recoveryPolicy: SseRecoveryPolicy,
+        runtimeStore: SseTransportRuntimeStore,
+        dropHandler: ForegroundTransportDropHandler,
+        appLifecycleMonitor: cn.vectory.ocdroid.di.AppLifecycleMonitor,
+        settingsManager: cn.vectory.ocdroid.util.SettingsManager,
+        sessionSyncCoordinator:
+            cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator,
+    ): ServiceSseConnectionOwner = ServiceSseConnectionOwner(
+        scope = scope,
+        repository = repository,
+        identityStore = identityStore,
+        bootstrapCoordinator = bootstrapCoordinator,
+        sseEventStream = sseEventStream,
+        sharedStateStore = sharedStateStore,
+        sharedEffectBus = sharedEffectBus,
+        recoveryPolicy = recoveryPolicy,
+        runtimeStore = runtimeStore,
+        dropHandler = dropHandler,
+        reconnectAllowed = { appLifecycleMonitor.isInForeground.value },
+        onResync = onResync@{ isStillCurrent ->
+            if (!isStillCurrent()) return@onResync
+            if (!repository.supportsWatermarkResync) return@onResync
+            val directories = buildList {
+                sharedStateStore.slices.sessionList.value.directorySessions.keys
+                    .forEach { add(it) }
+                settingsManager.currentWorkdir?.let { add(it) }
+            }
+                .filter { it.isNotBlank() }
+                .map { cn.vectory.ocdroid.util.WorkdirPaths.normalizeDirectory(it) }
+                .distinct()
+                .ifEmpty { null }
+            cn.vectory.ocdroid.util.DebugLog.i(
+                "ServiceSseConnectionOwner",
+                "slim onResync directories=$directories",
+            )
+            sessionSyncCoordinator.reconcileFullAfterTransportReset(
+                isStillCurrent = isStillCurrent,
+            )
+        },
+        onTerminalExhaustion = {
+            sharedEffectBus.tryEmitEffect(
+                cn.vectory.ocdroid.ui.controller.ControllerEffect.ColdStartReconnect,
+            )
+        },
+    )
+}
+
 @Module
 @InstallIn(SingletonComponent::class)
 object ConnectionBootstrapEngineModule {
