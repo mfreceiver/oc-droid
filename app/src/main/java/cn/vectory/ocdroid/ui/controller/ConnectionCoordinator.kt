@@ -165,10 +165,7 @@ class ConnectionCoordinator(
     /**
      * §Stage-D2 §5.8/§5.9: the token-stream coordinator. CC hooks
      * [TokenStreamCoordinator.close] on [cancelSse] (background / ViewModel
-     * onCleared) and [cancelSseForReconfigure] (host / profile switch), and
-     * [TokenStreamCoordinator.resetDegraded] after a successful health probe
-     * that re-confirms `features.tokenStream == true` (re-arms after a
-     * transient sidecar admission-cap state).
+     * onCleared) and [cancelSseForReconfigure] (host / profile switch).
      *
      * `null` for legacy/test construction — CC falls back to a no-op so tests
      * that don't exercise the token-stream path keep compiling.
@@ -566,16 +563,6 @@ class ConnectionCoordinator(
      * written to the settings slice) is inlined.
      */
     fun loadInitialData() {
-        // §Stage-D2 §5.9: re-arm token-stream capability after a successful
-        // health probe. updateSlimapi already ran inside checkHealth/checkHealthFor,
-        // settling slimapiTokenStreamEnabled. If the feature is on, clear any
-        // stale degrade state for the current session so the token stream can
-        // be opened (a transient cap-8 admission state may have cleared).
-        if (serverCompatProfile.tokenStreamEnabled) {
-            tokenStreamCoordinator?.let { tsc ->
-                slices.chat.value.currentSessionId?.let { sid -> tsc.resetDegraded(sid) }
-            }
-        }
         // Cross-domain fan-out: orchestrator owns these implementations.
         // §R18 Phase 3 Wave 1 (P1-3 C 类): loadInitialData 五连发顺序敏感 → 保持同步 tryEmitEffect (scope.launch 包裹会破坏顺序)。
         effects.tryEmitEffect(ControllerEffect.LoadSessions)

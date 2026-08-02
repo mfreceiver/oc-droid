@@ -1070,10 +1070,8 @@ class ServiceSseConnectionOwner(
      * L4 §3/§7 (M1A): post-Live background reconnect refusal. The collector
      * broke while the app was in background (the reconnect gate is closed — a
      * reconnect is NOT attempted in background per the receive-only decision).
-     * Replaces the retired `markRecoveryNeededAndExit` (which stamped the
-     * forbidden [SseLifecyclePolicy] TRANSPORT_LOST flag).
      *
-     * M1A-5: the owner NO LONGER touches [SseLifecyclePolicy]. Instead it:
+     * M1A-5: the owner:
      *  1. writes the SSE transport projection (sseConnected=false — the SSE
      *     stream is down); it MUST NOT write REST/server Disconnected state
      *     (I8: SSE-only loss cannot alone write server-unreachable state);
@@ -1083,9 +1081,8 @@ class ServiceSseConnectionOwner(
      *  4. routes the drop EXACTLY ONCE through [dropHandler] with
      *     [TransportDropReason.BACKGROUND_RECONNECT_REFUSED].
      *
-     * The drop handler (production: [cn.vectory.ocdroid.service.SessionStreamingService])
-     * releases ownership BEFORE publishing Dropped (I3). The owner never
-     * calls [SseTransportRuntimeStore.publishDropped] directly.
+     * The drop handler releases ownership BEFORE publishing Dropped (I3). The
+     * owner never calls [SseTransportRuntimeStore.publishDropped] directly.
      */
     private suspend fun handleBackgroundReconnectRefusal(
         identity: ConnectionIdentity,
