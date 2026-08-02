@@ -1,8 +1,22 @@
 package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.LiveHelp
 import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Cancel
+import androidx.compose.material.icons.filled.Checklist
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.ui.graphics.vector.ImageVector
 import cn.vectory.ocdroid.data.model.Part
 import org.junit.Assert.assertEquals
@@ -163,8 +177,11 @@ class ChatPureFunctionsTest {
     // read, todowrite before read), plus the null-default branch.
 
     @Test
-    fun `toolIcon returns distinct vectors across all branches`() {
-        // Collect one canonical name per branch in declared-priority order.
+    fun `toolIcon returns distinct vectors across original builtin branches`() {
+        // Collect one canonical name per ORIGINAL builtin branch (the table
+        // predates the namespace additions). Namespace branches have their own
+        // dedicated pin tests below and are intentionally not folded into this
+        // distinct-count assertion.
         val cases = listOf(
             null,            // → Build (default for null tool)
             "question",      // → LiveHelp
@@ -204,6 +221,100 @@ class ChatPureFunctionsTest {
     fun `toolIcon for null returns Build fallback`() {
         val build = toolIcon("unknown")
         assertEquals(build, toolIcon(null))
+    }
+
+    // ── Namespace / plugin tool icon pins ───────────────────────────────────
+    //
+    // Each pin locks one new branch in toolIcon so a future prefix-table edit
+    // can't silently regress a namespace tool into the Build fallback or into
+    // the wrong builtin bucket. These cover the high-frequency plugin/MCP tools
+    // observed in the opencode SQLite runtime tally.
+
+    @Test
+    fun `toolIcon pins ctx_ and recall_ to Psychology`() {
+        // ctx_* + recall_* share Psychology (context memory / dreamer recall).
+        assertEquals(Icons.Default.Psychology, toolIcon("ctx_reduce"))
+        assertEquals(Icons.Default.Psychology, toolIcon("ctx_memory"))
+        assertEquals(Icons.Default.Psychology, toolIcon("ctx_search"))
+        assertEquals(Icons.Default.Psychology, toolIcon("recall_search"))
+        assertEquals(Icons.Default.Psychology, toolIcon("recall_get"))
+        assertEquals(Icons.Default.Psychology, toolIcon("recall_sessions"))
+    }
+
+    @Test
+    fun `toolIcon pins session_ to Forum`() {
+        assertEquals(Icons.Default.Forum, toolIcon("session_send"))
+        assertEquals(Icons.Default.Forum, toolIcon("session_create"))
+        assertEquals(Icons.Default.Forum, toolIcon("session_status"))
+        assertEquals(Icons.Default.Forum, toolIcon("session_abort"))
+    }
+
+    @Test
+    fun `toolIcon pins web-retrieval namespaces to Search`() {
+        // gh_grep / ast_grep_search / web-reader / one-search / web-search-prime
+        // all collapse to Search (information retrieval), per user decision.
+        assertEquals(Icons.Default.Search, toolIcon("gh_grep_searchGitHub"))
+        assertEquals(Icons.Default.Search, toolIcon("ast_grep_search"))
+        assertEquals(Icons.Default.Search, toolIcon("web-reader_webReader"))
+        assertEquals(Icons.Default.Search, toolIcon("web_reader_x"))
+        assertEquals(Icons.Default.Search, toolIcon("one-search_one_search"))
+        assertEquals(Icons.Default.Search, toolIcon("web-search-prime_web_search_prime"))
+    }
+
+    @Test
+    fun `toolIcon pins ast_grep_replace to Edit`() {
+        // Distinct from ast_grep_search above — replace is a mutation.
+        assertEquals(Icons.Default.Edit, toolIcon("ast_grep_replace"))
+    }
+
+    @Test
+    fun `toolIcon pins single-token builtin and plugin tools`() {
+        assertEquals(Icons.Default.Extension, toolIcon("skill"))
+        assertEquals(Icons.Default.Visibility, toolIcon("see_image"))
+        assertEquals(Icons.Default.Notifications, toolIcon("notify_task_done"))
+        assertEquals(Icons.Default.Cancel, toolIcon("cancel_task"))
+        assertEquals(Icons.Default.Cancel, toolIcon("force_cancel_task"))
+        assertEquals(Icons.Default.Schedule, toolIcon("schedule_list"))
+    }
+
+    @Test
+    fun `toolIcon pins websearch to Search regression`() {
+        // Regression guard: bare `websearch` (no namespace) previously fell
+        // through to Build because it doesn't start with `webfetch`. Now fixed.
+        assertEquals(Icons.Default.Search, toolIcon("websearch"))
+        assertEquals(Icons.Default.Search, toolIcon("websearch_web_search_exa"))
+    }
+
+    @Test
+    fun `toolIcon schedule_list maps to Schedule, plain list to FileOpen`() {
+        // Pins both sides of the schedule_list vs list mapping. Note these
+        // two prefixes are disjoint (`schedule_list` does not start with
+        // `list`), so there is no ordering dependency between them — this
+        // test locks the resolved mapping, not a precedence relationship.
+        assertEquals(Icons.Default.Schedule, toolIcon("schedule_list"))
+        assertEquals(Icons.Default.FileOpen, toolIcon("list"))
+    }
+
+    @Test
+    fun `toolIcon builtin rules unchanged regression`() {
+        // Lock the original builtin mappings so the new branches above them
+        // can't accidentally shadow a builtin.
+        assertEquals(Icons.AutoMirrored.Filled.LiveHelp, toolIcon("question"))
+        assertEquals(Icons.Default.Public, toolIcon("webfetch"))
+        assertEquals(Icons.Default.AccountTree, toolIcon("task"))
+        assertEquals(Icons.Default.Checklist, toolIcon("todowrite"))
+        assertEquals(Icons.Default.Checklist, toolIcon("todoread"))
+        assertEquals(Icons.Default.FileOpen, toolIcon("read"))
+        assertEquals(Icons.Default.Search, toolIcon("glob"))
+        assertEquals(Icons.Default.Search, toolIcon("grep"))
+        assertEquals(Icons.Default.Edit, toolIcon("edit"))
+        assertEquals(Icons.Default.Edit, toolIcon("write"))
+        assertEquals(Icons.Default.Edit, toolIcon("apply_patch"))
+        assertEquals(Icons.Default.Edit, toolIcon("patch"))
+        assertEquals(Icons.Default.Terminal, toolIcon("bash"))
+        assertEquals(Icons.Default.Terminal, toolIcon("shell"))
+        // Unknown tool still falls back to Build.
+        assertEquals(Icons.Default.Build, toolIcon("totally_unknown_tool_xyz"))
     }
 
     @Test

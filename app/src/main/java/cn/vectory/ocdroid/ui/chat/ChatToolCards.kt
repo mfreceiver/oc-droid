@@ -16,16 +16,23 @@ import androidx.compose.material.icons.automirrored.filled.LiveHelp
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -60,22 +67,69 @@ import cn.vectory.ocdroid.ui.theme.AppMotion
 
 /**
  * Picks the Material icon for a tool based on its name (lowercased, prefix-matched).
- *  - question             → LiveHelp (clarifying question tool)
- *  - webfetch             → Public (web fetch)
- *  - task                 → AccountTree (sub-agent task)
- *  - todowrite/todoread   → Checklist (todo management)
- *  - read/list            → FileOpen (file inspection)
- *  - glob/grep            → Search (file search)
- *  - edit/write/apply_patch/patch → Edit (file mutation)
- *  - bash/terminal/cmd/shell      → Terminal (shell)
- *  - anything else → Build (generic tool)
  *
- * Prefix branches are ordered so more specific tool names win over generic
- * prefixes (e.g. `webfetch` before `read`, `todowrite` before `read`).
+ * Branches are ordered so more specific tool names win over generic prefixes.
+ * Two groups:
+ *
+ * 1. Namespace tools (MCP server / plugin contributed), matched by their
+ *    `<serverIdentifier>_` prefix — checked first so they never fall through
+ *    to a generic builtin prefix below:
+ *  - ctx_* / recall_*           → Psychology (context memory / dreamer recall)
+ *  - session_*                  → Forum (cross-session messaging)
+ *  - gh_grep_*                  → Search (code search)
+ *  - ast_grep_search            → Search (AST code search)
+ *  - ast_grep_replace           → Edit (AST code rewrite)
+ *  - web-reader / web_reader    → Search (web retrieval)
+ *  - one-search_*               → Search (web retrieval)
+ *  - web-search-prime_*         → Search (web retrieval)
+ *
+ * 2. Builtin / single-token tools:
+ *  - skill                      → Extension (skill loader)
+ *  - see_image                  → Visibility (vision analysis)
+ *  - notify_task_done           → Notifications (completion ping)
+ *  - cancel_task / force_cancel_task → Cancel
+ *  - schedule_list              → Schedule
+ *  - websearch                  → Search (web search; builtin)
+ *  - question                   → LiveHelp (clarifying question tool)
+ *  - webfetch                   → Public (web fetch)
+ *  - task                       → AccountTree (sub-agent task)
+ *  - todowrite/todoread         → Checklist (todo management)
+ *  - read/list                  → FileOpen (file inspection)
+ *  - glob/grep                  → Search (file search)
+ *  - edit/write/apply_patch/patch → Edit (file mutation)
+ *  - bash/terminal/cmd/shell    → Terminal (shell)
+ *  - anything else              → Build (generic tool)
+ *
+ * Prefix safety: all namespace prefixes (`ctx_`, `session_`, `gh_grep`, …)
+ * are structurally disjoint from every builtin prefix — none is a prefix of
+ * another — so ordering between the two groups is not load-bearing. Ordering
+ * within each group is likewise not order-sensitive for correctness; it is
+ * kept specific-to-generic only for readability. The matches are intentionally
+ * loose substring prefixes (not `_`-anchored) so that aliases like
+ * `web-reader` / `web_reader` both resolve to the same icon; this is fine for
+ * the current controlled set of tool names but should be revisited if the
+ * namespace family grows and false positives appear.
  */
 internal fun toolIcon(toolName: String?): ImageVector {
     val lower = toolName?.lowercase() ?: return Icons.Default.Build
     return when {
+        // ── Namespace tools (server/plugin-contributed, specific first) ──
+        lower.startsWith("ctx_") || lower.startsWith("recall_") -> Icons.Default.Psychology
+        lower.startsWith("session_") -> Icons.Default.Forum
+        lower.startsWith("gh_grep") -> Icons.Default.Search
+        lower.startsWith("ast_grep_search") -> Icons.Default.Search
+        lower.startsWith("ast_grep_replace") -> Icons.Default.Edit
+        lower.startsWith("web-reader") || lower.startsWith("web_reader") -> Icons.Default.Search
+        lower.startsWith("one-search") -> Icons.Default.Search
+        lower.startsWith("web-search-prime") -> Icons.Default.Search
+        // ── Builtin / single-token tools ──
+        lower.startsWith("skill") -> Icons.Default.Extension
+        lower.startsWith("see_image") -> Icons.Default.Visibility
+        lower.startsWith("notify_task_done") -> Icons.Default.Notifications
+        lower.startsWith("cancel_task") || lower.startsWith("force_cancel_task") -> Icons.Default.Cancel
+        lower.startsWith("schedule_list") -> Icons.Default.Schedule
+        lower.startsWith("websearch") -> Icons.Default.Search
+        // ── Original builtin rules (unchanged) ──
         lower.startsWith("question") -> Icons.AutoMirrored.Filled.LiveHelp
         lower.startsWith("webfetch") -> Icons.Default.Public
         lower.startsWith("task") -> Icons.Default.AccountTree

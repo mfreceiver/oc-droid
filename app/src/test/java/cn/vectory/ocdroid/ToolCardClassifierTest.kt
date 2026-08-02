@@ -233,6 +233,59 @@ class ToolCardClassifierTest {
         )
     }
 
+    // MARK: - Namespace tool category (web-retrieval families → WEB)
+
+    @Test
+    fun `Basic namespace web-retrieval tools contribute one web`() {
+        // The web namespace families share an icon (Search) with webfetch, so
+        // they must also share the WEB summary category — otherwise the fold
+        // bar would show them as OTHER (HelpOutline) while their cards show
+        // Search, a visible mismatch. Pinned to lock this parity.
+        val webNamespaceTools = listOf(
+            "websearch",
+            "web_search",
+            "one-search_one_search",
+            "one-search_one_scrape",
+            "web-search-prime_web_search_prime",
+            "web-reader_webReader",
+            "web_reader_x",
+            "gh_grep_searchGitHub"
+        )
+        webNamespaceTools.forEach { tool ->
+            assertEquals(
+                "tool '$tool' should classify as WEB to match its Search icon",
+                mapOf(ToolCategory.WEB to 1),
+                ToolRenderItem.Basic(toolPart(tool = tool)).categoryCounts()
+            )
+        }
+    }
+
+    @Test
+    fun `Basic namespace non-web tools stay in OTHER`() {
+        // Explicit decision: session_* / ctx_* / recall_* keep the coarse
+        // OTHER summary category (introducing a new enum just for them is not
+        // worth the ToolCallFoldBar / summary / order churn). Their per-card
+        // icons (Forum / Psychology) are richer than the fold summary, which
+        // is acceptable. Pinned to lock this decision against future drift.
+        val otherNamespaceTools = listOf(
+            "session_send",
+            "session_create",
+            "session_status",
+            "ctx_reduce",
+            "ctx_memory",
+            "recall_search",
+            "recall_get",
+            "recall_sessions"
+        )
+        otherNamespaceTools.forEach { tool ->
+            assertEquals(
+                "tool '$tool' should stay in OTHER (coarse summary by design)",
+                mapOf(ToolCategory.OTHER to 1),
+                ToolRenderItem.Basic(toolPart(tool = tool)).categoryCounts()
+            )
+        }
+    }
+
     // MARK: - Directory read detection + entries parsing
 
     private val directoryOutput = """

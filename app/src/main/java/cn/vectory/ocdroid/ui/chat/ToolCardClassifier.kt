@@ -210,7 +210,10 @@ internal fun ToolRenderItem.categoryCounts(): Map<ToolCategory, Int> = when (thi
             t.startsWith("bash") || t.startsWith("terminal") ||
                 t.startsWith("cmd") || t.startsWith("shell") -> ToolCategory.SHELL
             t.startsWith("webfetch") || t.startsWith("web_fetch") ||
-                t.startsWith("websearch") || t.startsWith("web_search") -> ToolCategory.WEB
+                t.startsWith("websearch") || t.startsWith("web_search") ||
+                t.startsWith("one-search") || t.startsWith("web-search-prime") ||
+                t.startsWith("web-reader") || t.startsWith("web_reader") ||
+                t.startsWith("gh_grep") -> ToolCategory.WEB
             else -> ToolCategory.OTHER
         }
         mapOf(cat to 1)
