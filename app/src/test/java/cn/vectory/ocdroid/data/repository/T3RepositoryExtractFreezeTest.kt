@@ -2,7 +2,6 @@ package cn.vectory.ocdroid.data.repository
 
 import cn.vectory.ocdroid.data.api.OpenCodeApi
 import cn.vectory.ocdroid.data.api.SSEClient
-import cn.vectory.ocdroid.data.api.v2.OpenCodeApiV2
 import cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory
 import cn.vectory.ocdroid.data.repository.http.SlimapiContract
 import cn.vectory.ocdroid.util.TrafficLogger
@@ -31,7 +30,6 @@ import javax.inject.Inject
  *  - [cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory]
  *      (= the plan's "HttpClientManager" — see §3 policy).
  *  - [cn.vectory.ocdroid.data.api.OpenCodeApi] (Retrofit interface; legacy).
- *  - [cn.vectory.ocdroid.data.api.v2.OpenCodeApiV2] (Retrofit interface; v2).
  *  - [cn.vectory.ocdroid.data.api.SSEClient] (SSE collector façade).
  *  - [cn.vectory.ocdroid.data.repository.HostConfig] (per-host profile holder).
  *
@@ -297,11 +295,6 @@ class T3RepositoryExtractFreezeTest {
             "OpenCodeApi must remain at cn.vectory.ocdroid.data.api.OpenCodeApi",
             "cn.vectory.ocdroid.data.api.OpenCodeApi",
             OpenCodeApi::class.java.name,
-        )
-        assertEquals(
-            "OpenCodeApiV2 must remain at cn.vectory.ocdroid.data.api.v2.OpenCodeApiV2",
-            "cn.vectory.ocdroid.data.api.v2.OpenCodeApiV2",
-            OpenCodeApiV2::class.java.name,
         )
 
         // ── SSEClient (slim SSE collector façade) ────────────────────────

@@ -5,8 +5,8 @@
 # 产物目录:artifacts/(APK + mapping.txt + SHA256SUMS)。不生成 AAB —— 项目不上架 Play Store。
 # Changelog:增量=上一 tag 到本 tag 之间的 commit(--no-merges);首版=本 tag 最近 50 条。
 # 注:CI/CD(release.yml push tag 触发)是发版的主路径——本脚本在 runner 内
-# 用 Gitea Secrets 注入的正式 keystore 构建签名包并上传。scripts/upload-release.sh
-# 是 CI/CD 故障时的本机 fallback(读 tea config,本机临时签名),正常流程不使用。
+# 用 Gitea Secrets 注入的正式 keystore 构建签名包并上传。无本机 fallback;
+# 正常流程不手动上传(本机 APK 签名不同,混装会冲突)。
 set -euo pipefail
 TAG="${1:?用法: publish-release.sh <tag>}"
 REPO="mfreceiver/oc-droid"

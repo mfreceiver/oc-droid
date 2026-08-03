@@ -40,7 +40,7 @@ import org.junit.Test
  * PermissionResponse.REJECT/ONCE, fork-without-messageId, archived=0,
  * AgentInfo.isHidden/shortName derivation), HTTP failure paths for endpoints
  * that previously only had success coverage (getMessagesPaged,
- * probeLatestMessageId, getSession, getChildren, getCommands, getModels,
+ * probeLatestMessageId, getSession, getChildren, getCommands,
  * revertSession, deleteSession, updateSessionArchived, respondPermission),
  * plus the connectSSE façade (directory transmission + end-to-end event
  * decoding) which had zero coverage.
@@ -330,7 +330,7 @@ class OpenCodeRepositoryWrapperTest {
         assertTrue(result.isFailure)
     }
 
-    // ── getSession / getChildren / getCommands / getModels: failure paths ────
+    // ── getSession / getChildren / getCommands: failure paths ────
     //
     // Each of these has only success coverage in DirectoryTest. Pin the
     // runSuspendCatching → Result.failure plumbing for a server error.
@@ -363,17 +363,6 @@ class OpenCodeRepositoryWrapperTest {
 
         assertTrue(result.isFailure)
         assertEquals("/command", server.takeRequest().path)
-    }
-
-    @Test
-    fun `getModels surfaces HTTP failure from v2 endpoint`() = runBlocking {
-        server.enqueue(MockResponse().setResponseCode(502))
-
-        val result = repository.getModels()
-
-        assertTrue(result.isFailure)
-        // v2 Retrofit is rooted at <baseUrl>/api/, so GET /model lands at /api/model.
-        assertEquals("/api/model", server.takeRequest().path)
     }
 
     // ── revertSession / forkSession / deleteSession: failure + edge cases ───

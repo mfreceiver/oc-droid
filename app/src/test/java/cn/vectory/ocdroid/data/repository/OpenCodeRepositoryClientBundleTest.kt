@@ -96,7 +96,6 @@ class OpenCodeRepositoryClientBundleTest {
         assertNotNull(bundle.sseClient)
         assertNotNull(bundle.commandApi)
         assertNotNull(bundle.mutationApi)
-        assertNotNull(bundle.apiV2)
         assertFalse("command is a POST client", bundle.commandHttp.retryOnConnectionFailure)
         assertFalse("mutation is a POST client", bundle.mutationHttp.retryOnConnectionFailure)
     }
@@ -294,7 +293,6 @@ class OpenCodeRepositoryClientBundleTest {
         assertEquals("$slimBase/", slim.restRetrofit.baseUrl().toString())
         assertEquals("$slimBase/", slim.commandRetrofit.baseUrl().toString())
         assertEquals("$slimBase/", slim.mutationRetrofit.baseUrl().toString())
-        assertEquals("$slimBase/api/", slim.v2Retrofit.baseUrl().toString())
         assertTrue("GET REST client keeps retry", slim.restHttp.retryOnConnectionFailure)
         assertFalse("command POST client never retries", slim.commandHttp.retryOnConnectionFailure)
         assertFalse("mutation POST client never retries", slim.mutationHttp.retryOnConnectionFailure)
@@ -319,7 +317,6 @@ class OpenCodeRepositoryClientBundleTest {
         assertEquals("$legacyBase/", legacy.restRetrofit.baseUrl().toString())
         assertEquals("$legacyBase/", legacy.commandRetrofit.baseUrl().toString())
         assertEquals("$legacyBase/", legacy.mutationRetrofit.baseUrl().toString())
-        assertEquals("$legacyBase/api/", legacy.v2Retrofit.baseUrl().toString())
         assertFalse("legacy command POST client never retries", legacy.commandHttp.retryOnConnectionFailure)
         assertFalse("legacy mutation POST client never retries", legacy.mutationHttp.retryOnConnectionFailure)
 

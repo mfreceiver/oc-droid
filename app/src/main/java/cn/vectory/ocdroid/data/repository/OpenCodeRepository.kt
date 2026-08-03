@@ -4,8 +4,6 @@ import androidx.annotation.VisibleForTesting
 import cn.vectory.ocdroid.data.api.OpenCodeApi
 import cn.vectory.ocdroid.data.api.SSEClient
 import cn.vectory.ocdroid.data.api.*
-import cn.vectory.ocdroid.data.api.v2.OpenCodeApiV2
-import cn.vectory.ocdroid.data.api.v2.ModelInfoV2
 import cn.vectory.ocdroid.data.model.*
 import cn.vectory.ocdroid.data.repository.http.HttpHeaders
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
@@ -138,7 +136,6 @@ class OpenCodeRepository @Inject constructor(
     internal val sseClient: SSEClient get() = requireClientBundle().sseClient
     private val commandApi: OpenCodeApi get() = requireClientBundle().commandApi
     private val mutationApi: OpenCodeApi get() = requireClientBundle().mutationApi
-    private val apiV2: OpenCodeApiV2 get() = requireClientBundle().apiV2
 
     internal fun currentClientBundle(): ClientBundle? = currentClientBundle
 
@@ -190,12 +187,6 @@ class OpenCodeRepository @Inject constructor(
         }
         check(replacement.mutationRetrofit === current.mutationRetrofit) {
             "test bundle replacement must keep mutation Retrofit"
-        }
-        check(replacement.v2Retrofit === current.v2Retrofit) {
-            "test bundle replacement must keep v2 Retrofit"
-        }
-        check(replacement.apiV2 === current.apiV2) {
-            "test bundle replacement must keep v2 API"
         }
         currentClientBundle = replacement
     }
@@ -457,9 +448,6 @@ class OpenCodeRepository @Inject constructor(
             val mutationRetrofit = buildRetrofit(mutationHttp, hostSnapshot.baseUrl)
             val mutationApi = mutationRetrofit.create(OpenCodeApi::class.java)
 
-            val v2Retrofit = buildV2Retrofit(restHttp, hostSnapshot.baseUrl)
-            val apiV2 = v2Retrofit.create(OpenCodeApiV2::class.java)
-
             ClientBundle(
                 generation = generation,
                 hostSnapshot = hostSnapshot,
@@ -476,8 +464,6 @@ class OpenCodeRepository @Inject constructor(
                 mutationHttp = mutationHttp,
                 mutationRetrofit = mutationRetrofit,
                 mutationApi = mutationApi,
-                v2Retrofit = v2Retrofit,
-                apiV2 = apiV2,
                 ownedClients = ownedClients,
             )
         } catch (error: Throwable) {
@@ -529,22 +515,6 @@ class OpenCodeRepository @Inject constructor(
         val url = if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl"
         return Retrofit.Builder()
             .baseUrl(url.trimEnd('/') + "/")
-            .client(client)
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
-            .build()
-    }
-
-    /**
-     * §model-selection: builds the v2 Retrofit rooted at `<baseUrl>/api/`.
-     * Uses the SAME converter factory (json with ignoreUnknownKeys=true) so
-     * the `location` echo on GET /api/model is dropped silently, and the same
-     * OkHttp client as [buildRetrofit] so the auth / cache / traffic
-     * interceptors apply.
-     */
-    private fun buildV2Retrofit(client: OkHttpClient, baseUrl: String): Retrofit {
-        val url = if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl"
-        return Retrofit.Builder()
-            .baseUrl(url.trimEnd('/') + "/api/")
             .client(client)
             .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
             .build()
@@ -1728,34 +1698,6 @@ class OpenCodeRepository @Inject constructor(
         return Result.success(
             ProvidersResponse(providers = providers, defaultByProvider = response.defaultByProvider)
         )
-    }
-
-    /**
-     * §model-selection: lists the server's available models via the v2
-     * `GET /api/model` endpoint. Returns the `data` array (each entry carries
-     * `id`, `providerID`, `name`, `enabled`, `limit`). NOTE: [getProviders]
-     * above no longer uses this endpoint — it fetches `/config/providers`,
-     * which returns the full model catalog the opencode web picker shows;
-     * this standalone [getModels] is retained for debug/console use and has
-     * no production caller.
-     *
-     * §v2-tolerant-catalog (0.6.1 round-1): per-entry decode so a wrong-type
-     * entry is skipped + logged instead of
-     * nuking the whole list. Structural failures (non-array `data`) still
-     * surface as Result.failure here (this is a debug-only path; no last-mile
-     * empty-catalog fallback is needed — callers are human-facing console).
-     */
-    suspend fun getModels(): Result<List<ModelInfoV2>> = runSuspendCatching {
-        apiV2.getModels().data.mapNotNull { elem ->
-            runCatching { json.decodeFromJsonElement<ModelInfoV2>(elem) }
-                .onFailure {
-                    DebugLog.w(
-                        "OpenCodeRepository",
-                        "v2 catalog: skipping unparseable model entry: ${elem.toString().take(200)}"
-                    )
-                }
-                .getOrNull()
-        }
     }
 
     suspend fun getAgents(): Result<List<AgentInfo>> =

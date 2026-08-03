@@ -265,7 +265,7 @@ class OkHttpClientFactory private constructor(
      * (idempotent GET, safe auto-retry) / [commandClient] keep the default.
      *
      * **Routing table** (single source of truth):
-     *  - GET (every `api.getX` / `apiV2.getX`) → [restClient] (retry=true).
+     *  - GET (every `api.getX`) → [restClient] (retry=true).
      *  - POST `executeCommand` → [commandClient] (300 s + retry=false; T14-C3).
      *  - Every other POST → **this client** (30 s + retry=false).
      */

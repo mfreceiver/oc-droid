@@ -183,15 +183,7 @@ git push origin main && git push origin "$TAG"
 #   → 更新 release notes → 企微通知
 ```
 
-**⚠️ 不要手动跑 `upload-release.sh`**——CI/CD 已用 Gitea Secrets 里的正式签名 keystore 构建并上传。手动上传的本机 APK 签名不同，用户混装会签名冲突。如果 release 页面出现两份 APK（一份 7 字符 hash = 本机，一份 8 字符 hash = CI/CD），删除本机那份。
-
-**CI/CD 故障时的 fallback**（仅当 runner 宕机且急需发版时）：
-
-```bash
-# upload-release.sh 读 tea config 的 Gitea token，curl REST API 上传本机 APK。
-# 本机 APK 未用正式 keystore 签名——仅应急，正常流程不要用。
-./scripts/upload-release.sh "$VERSION"
-```
+**⚠️ 不要手动上传本机 APK**——CI/CD 已用 Gitea Secrets 里的正式签名 keystore 构建并上传。手动上传的本机 APK 签名不同，用户混装会签名冲突。如果 release 页面出现两份 APK（一份 7 字符 hash = 本机，一份 8 字符 hash = CI/CD），删除本机那份。
 
 - `main` 分支为开发主线，tag 打在 `main` 的发布提交上。
 - 应用名称为 **OC Droid**；`origin` = `https://git.vectory.cn:18443/mfreceiver/oc-droid.git`。

@@ -11,7 +11,6 @@ import cn.vectory.ocdroid.data.repository.http.SlimapiDebugInterceptor
 import cn.vectory.ocdroid.data.repository.http.SlimapiVersionInterceptor
 import cn.vectory.ocdroid.data.repository.http.SslConfigFactory
 import cn.vectory.ocdroid.data.repository.http.TrafficCountingInterceptor
-import cn.vectory.ocdroid.di.AppModule
 import cn.vectory.ocdroid.di.ClientIdModule
 import cn.vectory.ocdroid.di.ControllerModule
 import cn.vectory.ocdroid.util.TrafficLogger
@@ -56,7 +55,6 @@ class RepositoryNetworkGraphTest {
     )
 
     private val applicationModules = listOf(
-        AppModule::class.java,
         ClientIdModule::class.java,
         ControllerModule::class.java,
     )

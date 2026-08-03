@@ -36,7 +36,7 @@ import org.junit.Test
  *  - `getFileTreeForDirectory` — `@Header(X-Opencode-Directory)` on the
  *    browse picker variant of the file route (Phase 2-E step 2).
  *  - `summarizeSession` / `revertSession` / `probeLatestMessageId` /
- *    `getMessagesPaged` / `getChildren` / `getCommands` / `getModels` /
+ *    `getMessagesPaged` / `getChildren` / `getCommands` /
  *    `getSession` — easy success paths that exercise the surrounding
  *    runSuspendCatching plumbing.
  *
@@ -305,38 +305,6 @@ class OpenCodeRepositoryDirectoryTest {
 
         val request = server.takeRequest()
         assertEquals("/command", request.path)
-    }
-
-    @Test
-    fun `getModels returns models from v2 endpoint`() = runBlocking {
-        // v2 endpoint lives under /api/model on the same OkHttp chain.
-        // The location echo on the response is dropped by ignoreUnknownKeys.
-        val body = """{
-            "location":{"directory":"/anywhere"},
-            "data":[
-                {"id":"gpt-4","providerID":"openai","name":"GPT-4","enabled":true},
-                {"id":"claude","providerID":"anthropic","name":"Claude","enabled":false}
-            ]
-        }""".trimIndent()
-        server.enqueue(jsonResponse(body))
-
-        val result = repository.getModels()
-
-        assertTrue(result.isSuccess)
-        val models = result.getOrThrow()
-        assertEquals(2, models.size)
-        assertEquals("gpt-4", models[0].id)
-        assertEquals("openai", models[0].providerId)
-        assertEquals("GPT-4", models[0].name)
-        assertTrue(models[0].enabled)
-        assertFalse(models[1].enabled)
-
-        val request = server.takeRequest()
-        assertEquals(
-            "v2 endpoint is rooted at <baseUrl>/api/",
-            "/api/model",
-            request.path
-        )
     }
 
     @Test

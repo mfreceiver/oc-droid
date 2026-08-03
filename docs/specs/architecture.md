@@ -31,8 +31,7 @@ app/src/main/java/cn/vectory/ocdroid/
 │   │   ├── OpenCodeApi.kt                   #     复合接口 = `interface OpenCodeApi : StandardApi, SlimApi`（本体仅保留 data class；~46 个端点方法在两个父接口；FQN `cn.vectory.ocdroid.data.api.OpenCodeApi` 冻结，见 §5）
 │   │   ├── StandardApi.kt / SlimApi.kt      #     legacy 34 法 / slim 12 法（v0.13.5 从 OpenCodeApi 拆出，byte-for-byte；proguard `-keep ...OpenCodeApi` 不变）
 │   │   ├── SSEClient.kt / SseLogFilter.kt
-│   │   ├── TokenStreamClient.kt
-│   │   └── v2/OpenCodeApiV2.kt
+│   │   └── TokenStreamClient.kt
 │   ├── repository/                          #   L0 传输 + L2 端口 + L3 门面（扁平同包，禁子包）
 │   │   ├── http/                            #     L0：OkHttpClientFactory / SSL·TOFU / 拦截器 / SlimapiContract
 │   │   ├── OpenCodeRepository.kt            #     L3：冻结门面（~40 公共方法 1-line 委托）
@@ -60,7 +59,7 @@ app/src/main/java/cn/vectory/ocdroid/
 | 层 | 职责 | 通用 / 专有 |
 |---|---|---|
 | **L0 传输原语** | `OkHttpClientFactory` / SSL·TOFU（`TofuRepository`）/ 拦截器（`SlimapiVersion/Capabilities/Debug/Traffic`）/ Auth / `SlimapiContract` 常量 | **通用**（拦截器按 `/slimapi/` 前缀注入头，叶子级、不上浮） |
-| **L1 Wire/API 定义** | Retrofit 接口（`OpenCodeApi` 复合 = `StandardApi` + `SlimApi`，本体仅 data class；`OpenCodeApiV2`）；`SSEClient` / `TokenStreamClient` | **专有**（按变体分法，但同接口面） |
+| **L1 Wire/API 定义** | Retrofit 接口（`OpenCodeApi` 复合 = `StandardApi` + `SlimApi`，本体仅 data class）；`SSEClient` / `TokenStreamClient` | **专有**（按变体分法，但同接口面） |
 | **L2 域端口 + 双实现** | `SessionSource` / `MessageSource`（域语言接口）+ `Standard*Source` / `Slim*Source` | **接口通用 / 实现专有** |
 | **L3 OCR 冻结门面** | `OpenCodeRepository`（~40 公共方法 = 1-line 委托，冻结测试锁）+ 能力读模型 forwarder | **通用**（对上 mode-agnostic） |
 | **L4 协调 / service** | `SessionSyncCoordinator` / `service/streaming` / `service/status` / `notify` | **通用、模式盲**（读能力查询，不读 raw mode） |
@@ -115,7 +114,7 @@ L4+（协调 / service / UI）**禁读裸 `repository.isSlimMode`**，改读**�
 - **I8 `serverCompatProfile` 写点**：`update()`/`updateSlimapi()`（probe 尾部）+ `setSlimConnection`（`configure` 受管扩展）。派生查询 / forwarder 只读。
 - **I15 token threading**：`SlimCommitToken` 外层 capture / 内层 require，端口化须原样穿透。
 - **I20 公共 FQN 向后兼容**：`OpenCodeApi`/`SSEClient`/`SlimapiContract`/`HostConfig` + 嵌套 `SlimCommitToken`/`StaleSlimCommitException`/`SlimReconfigureTicket`/`SupersededSlimReconfigureException` 不动；上游 import 零改（调用经门面 / L2 端口）。
-- **并发路由位 `@Volatile`**：`configure()` `@Synchronized` 内写、运行时 lock-free 读的可变 ref（`api`/`commandApi`/`mutationApi`/`apiV2`/`sseClient`/`sessionSource`/`messageSource`）均 `@Volatile`；纯 builder 字段（`retrofit`/`*Http`，仅 `rebuildClients` 内写读）不加。
+- **并发路由位 `@Volatile`**：`configure()` `@Synchronized` 内写、运行时 lock-free 读的可变 ref（`api`/`commandApi`/`mutationApi`/`sseClient`/`sessionSource`/`messageSource`）均 `@Volatile`；纯 builder 字段（`retrofit`/`*Http`，仅 `rebuildClients` 内写读）不加。
 - **freeze 行为保持**：端口化 / 能力化是纯加法 + 内部委托，公共签名 / 返回类型 / 错误语义（`Result` + `parseErrorCode` + `DebugLog.w` + rethrow）/ `X-Slimapi-Version=2`（不 bump）逐字不变。
 
 **v0.13.5 新增不变量（连接 / identity / SSE transport / 持久化 / 流式渲染）**：

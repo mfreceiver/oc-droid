@@ -44,11 +44,10 @@
 
 - `restHttp` / `restRetrofit` / `api`（REST 主接口）
 - `commandHttp` / `commandRetrofit` / `commandApi`（POST `/session/{id}/command` 专用 300s read timeout）
-- `v2Retrofit` / `apiV2`（`/api/model` + `/api/provider`，根 `<base>/api/`）
 - `sseHttp` / `sseClient`（SSE 长连接，read timeout=0）
 
 **省流模式下用户在 host 列表选中"slimapi server"条目**（base URL 指向 sidecar
-入口，例如 `http://localhost:4097` 或 stunnel `https://host:14097`），上述五个
+入口，例如 `http://localhost:4097` 或 stunnel `https://host:14097`），上述四个
 client 全部以 slimapi 为根重建。**所有** opencode 形态的调用随之派生。
 
 ### 1.2 与"在现有连接加省流开关"的对比（被否决的设计）
@@ -346,14 +345,7 @@ connection-failure（`IOException`）/ upstream 4xx5xx / 503 `upstream_unavailab
 | B33 | [`OpenCodeApi.kt:250`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("vcs/diff")` | `GET /vcs/diff?mode=&directory=` | VCS diff | ✓ | — |
 | B34 | [`OpenCodeApi.kt:257`](../../app/src/main/java/cn/vectory/ocdroid/data/api/OpenCodeApi.kt) `@GET("find/file")` | `GET /find/file?query=&limit=&directory=` | 文件查找 | ✓ | — |
 
-#### 4.2.2 B 桶 — 通过 Retrofit `OpenCodeApiV2`（接口：[`data/api/v2/OpenCodeApiV2.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/api/v2/OpenCodeApiV2.kt)，根 `<base>/api/`）
-
-| # | 调用点 | HTTP 方法+路径 | 用途 | 备注 |
-|---|---|---|---|---|
-| B35 | [`OpenCodeApiV2.kt:50`](../../app/src/main/java/cn/vectory/ocdroid/data/api/v2/OpenCodeApiV2.kt) `@GET("model")` | `GET /api/model` | 模型 catalog（v2 形态，无 apiKey） | **debug-only**（`OpenCodeRepository.getModels`，无生产调用）；与 B21 二选一，当前生产用 B21 |
-| B36 | [`OpenCodeApiV2.kt:54`](../../app/src/main/java/cn/vectory/ocdroid/data/api/v2/OpenCodeApiV2.kt) `@GET("provider")` | `GET /api/provider` | provider catalog（v2 形态） | 同上，debug-only |
-
-#### 4.2.3 B 桶 — 裸 OkHttp（非 Retrofit）
+#### 4.2.2 B 桶 — 裸 OkHttp（非 Retrofit）
 
 | # | 调用点 | HTTP 方法+路径 | 用途 | 备注 |
 |---|---|---|---|---|
@@ -369,10 +361,10 @@ connection-failure（`IOException`）/ upstream 4xx5xx / 503 `upstream_unavailab
 | 桶 | 条数 | 已对接 | 迁移目标 |
 |---|---|---:|---:|---:|
 | A — slim-direct | 8 | 0 | 8（全部新增/迁移） |
-| B — slim-passthrough | 38 | 38 | 0（保持透传） |
+| B — slim-passthrough | 36 | 36 | 0（保持透传） |
 | C — direct-opencode | 5 | 5 | **5（全部需迁移/隔离）** |
 | D — external | 4 | 4 | 0（省流不影响） |
-| **合计** | **55** | **47**（不含 A） | **13 must + 5 迁移/隔离** |
+| **合计** | **53** | **45**（不含 A） | **13 must + 5 迁移/隔离** |
 
 > **V2 说明**：A 桶从 v1 的 12 条减少到 8 条——删除了 6 个端点，且 q/p 不再经
 > slimapi 聚合/写路径（全部走 catch-all）。写路径无 routeToken，directory 由
@@ -1068,7 +1060,6 @@ B19 / B20 / B24），确保重试逻辑**绝不**自动重发 POST。当前已�
 | R7 | M14 circuit breaker 状态如何跨 SSE 重连持久化 | 客户端可能反复打挂掉的 sidecar | 单例 StateFlow，5min 冷却 |
 | R8 | 双 stunnel 入口（14096 + 14097）的 profile 配置 UI——用户怎么区分？ | 用户可能误选 | host profile 加 `serverType: "opencode" \| "slimapi"` 标志（仅 UI 提示，不影响 HostConfig.baseUrl 派生） |
 | R9 | slimapi `/slimapi/events` 背压（buffer 2MiB / 单帧 256KiB 溢出→STOP 断开）——客户端慢消费被 STOP 断开后如何识别？ | 与心跳看门狗混淆 | onClosed 时检查 slimapi-specific 头（待 slimapi 暴露） |
-| R10 | `OpenCodeApiV2`（B35/B36）当前 debug-only——若未来切到 v2 主路径，目录路径前缀是 `/api/`，与 catch-all 的 `/command` 后缀检测有交互（catch-all 给 `/api/...command` 也设 300s 读超时？） | 边界情况超时配置异常 | 监控；当前 v2 端点无 `/command` 路径，无影响 |
 
 ---
 
