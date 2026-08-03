@@ -126,6 +126,26 @@ class BackgroundUnreadPoller internal constructor(
         // protection inside the commit CAS (an SSE status that landed during the
         // REST round-trip must not be clobbered by this background snapshot).
         val localBefore = store.sessionListFlow.value.sessionStatuses
+        // §review-blocker-#8 (P0-C end-to-end): capture requestStartMs at
+        // request START — the SAME moment as [localBefore], same wall-clock
+        // source — NOT at response end. The authority reducer's timestamp arm
+        // `prior.updatedAtMs > op.requestToken.requestStartMs`
+        // (AuthorityReducer.kt:458) only protects a concurrent in-flight
+        // update when requestStartMs PRECEDES that update. The prior code read
+        // `clock()` only AFTER the full network round-trip (getSessions → tree
+        // hydration → status → activeIds) and fed that response-end value into
+        // [RequestToken.requestStartMs], so a concurrent ProcessStatusPoller /
+        // SSE update landing during the round-trip (t0 < t2 < t3) was silently
+        // clobbered by the stale REST snapshot — the status-diff arm alone
+        // cannot catch a same-value re-commit (busy→busy), so the timestamp
+        // arm was the SOLE fence and a wrong requestStartMs defeated the
+        // entire #6/#7 protection on this path. The 4 other REST writers
+        // (SessionListActions.kt:248 / SessionTreeHydrator.kt:114 /
+        // StatusPollOrchestrator.kt:183,349) already capture requestStartMs
+        // before the fetch; this site was the sole exception. [now] below
+        // remains the response-end time for [lastSuccessTimeMs] + the unread
+        // evaluator timestamps (different semantics — preserved as-is).
+        val requestStartMs = clock()
         // §P0-A r2 #2: capture the identity epoch BEFORE the mutateState CAS
         // lambda — a read inside the CAS retry loop could observe a concurrent
         // bump (TOCTOU), so pre-capture the request-start value here.
@@ -206,7 +226,7 @@ class BackgroundUnreadPoller internal constructor(
                 scopeKey = store.authorityScope(),
                 requestToken = cn.vectory.ocdroid.data.state.RequestToken(
                     hostProfileId = startHostId,
-                    requestStartMs = now,
+                    requestStartMs = requestStartMs,
                     identityEpoch = identityEpochAtStart,
                 ),
                 localBefore = localBefore,

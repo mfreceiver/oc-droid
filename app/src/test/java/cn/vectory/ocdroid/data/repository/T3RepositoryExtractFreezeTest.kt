@@ -5,7 +5,6 @@ import cn.vectory.ocdroid.data.api.SSEClient
 import cn.vectory.ocdroid.data.api.v2.OpenCodeApiV2
 import cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory
 import cn.vectory.ocdroid.data.repository.http.SlimapiContract
-import cn.vectory.ocdroid.data.repository.http.TofuPinStore
 import cn.vectory.ocdroid.util.TrafficLogger
 import cn.vectory.ocdroid.util.TrafficTracker
 import io.mockk.mockk
@@ -21,7 +20,7 @@ import javax.inject.Inject
  * **ROLE: test-freeze only.** This file pins the public API surface and the
  * extract seams that T3 (split OpenCodeRepository, currently ~4098 LOC, into
  * HttpClientManager / LegacyApiFacade / SlimApiFacade / SlimStateManager /
- * TofuManager / RepositoryRuntime) MUST preserve so existing callers keep
+ * RepositoryRuntime) MUST preserve so existing callers keep
  * compiling and existing suite tests stay GREEN. T3 implements; this file
  * turns RED on any contract break.
  *
@@ -34,8 +33,6 @@ import javax.inject.Inject
  *  - [cn.vectory.ocdroid.data.api.OpenCodeApi] (Retrofit interface; legacy).
  *  - [cn.vectory.ocdroid.data.api.v2.OpenCodeApiV2] (Retrofit interface; v2).
  *  - [cn.vectory.ocdroid.data.api.SSEClient] (SSE collector façade).
- *  - [cn.vectory.ocdroid.data.repository.http.TofuPinStore] + EspTofuPinStore
- *      + InMemoryTofuPinStore (TOFU pin store; "TofuManager" seam).
  *  - [cn.vectory.ocdroid.data.repository.HostConfig] (per-host profile holder).
  *
  * Inner to extract carefully (frozen in §4):
@@ -80,10 +77,11 @@ class T3RepositoryExtractFreezeTest {
 
         // ── connection lifecycle (R-18 facade) ────────────────────────────
         //   - configure(...) must remain the single host-switch entrypoint
-        //     with the 6-arg shape (baseUrl, username, password, hostPort,
-        //     clientCert, slim). reconfigureTicket was removed in slimapi V2.
+        //     with the 7-arg shape (baseUrl, username, password, hostPort,
+        //     clientCert, slim, trustAll). reconfigureTicket was removed in
+        //     slimapi V2; trustAll was added in L7 (TOFU→trust-all, Decision 4).
         assertTrue("configure must exist (host switch entrypoint)", hasMethod(cls, "configure"))
-        assertTrue("configure must keep 6 args", method(cls, "configure").parameterCount == 6)
+        assertTrue("configure must keep 7 args", method(cls, "configure").parameterCount == 7)
 
         assertTrue("currentSslConfig must exist", hasMethod(cls, "currentSslConfig"))
         assertTrue("isMutualTlsActive must exist", hasMethod(cls, "isMutualTlsActive"))
@@ -92,15 +90,6 @@ class T3RepositoryExtractFreezeTest {
         assertTrue("checkHealth must exist", hasMethod(cls, "checkHealth"))
         assertTrue("checkHealthFor must exist", hasMethod(cls, "checkHealthFor"))
         assertTrue("parseSlimapiHealth must exist", hasMethod(cls, "parseSlimapiHealth"))
-
-        // ── TOFU capture + decision (TOFU seam) ───────────────────────────
-        assertTrue("captureServerCert must exist", hasMethod(cls, "captureServerCert"))
-        assertTrue(
-            "applyTofuDecision must exist (TOFU pin write)",
-            hasMethod(cls, "applyTofuDecision"),
-        )
-        assertTrue("pinnedSpkiFor must exist", hasMethod(cls, "pinnedSpkiFor"))
-        assertTrue("clearTofuPin must exist", hasMethod(cls, "clearTofuPin"))
 
         // ── slim incarnation token / ticket APIs (consumed by SSC) ────────
         // These are the slim state machine surface; they MUST remain
@@ -170,8 +159,8 @@ class T3RepositoryExtractFreezeTest {
      * fine ONLY if the 2-arg shape keeps working (via Kotlin default args
      * OR via a thin `operator fun invoke` / factory).
      *
-     * Today: GREEN (the constructor has default args for tofuStore +
-     * serverCompatProfile). T3 MUST keep it GREEN.
+     * Today: GREEN (the constructor has default args for serverCompatProfile).
+     * T3 MUST keep it GREEN.
      */
     @Test
     fun `2-arg constructor OpenCodeRepository(TrafficTracker, TrafficLogger) remains the test entrypoint`() {
@@ -192,17 +181,17 @@ class T3RepositoryExtractFreezeTest {
 
     /**
      * §2b: the constructor MUST keep the production 4-arg Hilt shape
-     * (tracker, logger, tofuStore, serverCompatProfile). Kotlin compiles
-     * the default-args ctor as a synthetic 6-arg (4 params + int mask +
+     * (tracker, logger, serverCompatProfile). Kotlin compiles
+     * the default-args ctor as a synthetic 5-arg (3 params + int mask +
      * DefaultConstructorMarker) that the 2-arg call site
      * `OpenCodeRepository(mockk(), mockk())` routes through — so the
      * 2-arg call is satisfied by the SAME primary ctor with the mask
      * saying "only first 2 supplied". There is NO separate 2-arg ctor
      * in the bytecode; §2 above (which actually invokes the 2-arg shape)
-     * is the real pin. This test pins the 4-arg prod ctor survives.
+     * is the real pin. This test pins the 3-arg prod ctor survives.
      */
     @Test
-    fun `constructor surface keeps the 4-arg Hilt production shape`() {
+    fun `constructor surface keeps the 3-arg Hilt production shape`() {
         val constructors = OpenCodeRepository::class.java.declaredConstructors
         val ctorArities = constructors
             .map { it.parameterCount }
@@ -210,31 +199,31 @@ class T3RepositoryExtractFreezeTest {
             .sorted()
 
         assertTrue(
-            "must expose a 4-arg ctor (Hilt production injection: " +
-                "tracker, logger, tofuStore, serverCompatProfile). arities=$ctorArities",
-            4 in ctorArities,
+            "must expose a 3-arg ctor (Hilt production injection: " +
+                "tracker, logger, serverCompatProfile). arities=$ctorArities",
+            3 in ctorArities,
         )
         // The 2-arg call site `OpenCodeRepository(tracker, logger)` is
-        // fulfilled by the synthetic default-args ctor (arity = 4 + mask
-        // + marker = 6) — pinned by §2 invoking it directly. Asserting
+        // fulfilled by the synthetic default-args ctor (arity = 3 + mask
+        // + marker = 5) — pinned by §2 invoking it directly. Asserting
         // the synthetic ctor EXISTS guards against a future removal of
         // the default args (which would break every existing test's
         // setup `OpenCodeRepository(mockk(relaxed=true), mockk(relaxed=true))`).
         assertTrue(
-            "must expose a synthetic default-args ctor (arity 6 = 4 params + mask + marker) " +
+            "must expose a synthetic default-args ctor (arity 5 = 3 params + mask + marker) " +
                 "so the locked 2-arg call site keeps compiling. arities=$ctorArities",
-            6 in ctorArities,
+            5 in ctorArities,
         )
         assertEquals(
-            "constructor freeze must not grow an alternate 5/7-arg production surface",
-            listOf(4, 6),
+            "constructor freeze must not grow an alternate production surface",
+            listOf(3, 5),
             ctorArities,
         )
 
         // The ordinary constructor is the actual Hilt entrypoint. Keep this
         // as an executable JVM contract rather than a source-text assertion:
         // adding a defaulted graph parameter would create a different ordinary
-        // arity and would no longer match Hilt's four-dependency factory call.
+        // arity and would no longer match Hilt's three-dependency factory call.
         val ordinaryConstructors = constructors.filterNot { it.isSynthetic }
         assertEquals(
             "there must be exactly one non-synthetic production constructor",
@@ -242,35 +231,34 @@ class T3RepositoryExtractFreezeTest {
             ordinaryConstructors.size,
         )
         val productionConstructor = ordinaryConstructors.single()
-        assertEquals(4, productionConstructor.parameterCount)
+        assertEquals(3, productionConstructor.parameterCount)
         assertTrue(
-            "the 4-param constructor must remain Hilt-injectable",
+            "the 3-param constructor must remain Hilt-injectable",
             productionConstructor.isAnnotationPresent(Inject::class.java),
         )
         assertEquals(
             listOf(
                 TrafficTracker::class.java,
                 TrafficLogger::class.java,
-                TofuPinStore::class.java,
                 ServerCompatProfile::class.java,
             ),
             productionConstructor.parameterTypes.toList(),
         )
 
         val defaultConstructor = constructors.singleOrNull {
-            it.isSynthetic && it.parameterCount == 6
+            it.isSynthetic && it.parameterCount == 5
         }
         assertNotNull(
-            "the only synthetic default-argument constructor must be 4 params + mask + marker",
+            "the only synthetic default-argument constructor must be 3 params + mask + marker",
             defaultConstructor,
         )
         assertEquals(
             Int::class.javaPrimitiveType,
-            defaultConstructor!!.parameterTypes[4],
+            defaultConstructor!!.parameterTypes[3],
         )
         assertEquals(
             "kotlin.jvm.internal.DefaultConstructorMarker",
-            defaultConstructor.parameterTypes[5].name,
+            defaultConstructor.parameterTypes[4].name,
         )
     }
 
@@ -295,14 +283,6 @@ class T3RepositoryExtractFreezeTest {
                 "must remain at cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory",
             "cn.vectory.ocdroid.data.repository.http.OkHttpClientFactory",
             OkHttpClientFactory::class.java.name,
-        )
-
-        // ── TofuManager equivalent ───────────────────────────────────────
-        assertEquals(
-            "TofuPinStore is the TofuManager equivalent — " +
-                "must remain at cn.vectory.ocdroid.data.repository.http.TofuPinStore",
-            "cn.vectory.ocdroid.data.repository.http.TofuPinStore",
-            TofuPinStore::class.java.name,
         )
 
         // ── HostConfig (per-host profile) ────────────────────────────────
@@ -378,7 +358,6 @@ class T3RepositoryExtractFreezeTest {
     fun `T3 may keep existing type names without forcing busywork renames`() {
         val planRoleToExistingType = mapOf(
             "HttpClientManager" to "OkHttpClientFactory",
-            "TofuManager" to "TofuPinStore (+ EspTofuPinStore / InMemoryTofuPinStore)",
             "HostConfig" to "HostConfig",
             "LegacyApiFacade" to "OpenCodeApi (Retrofit interface)",
             "SlimApiFacade" to "OpenCodeApi (slimapi methods) + SlimapiContract",
@@ -404,7 +383,6 @@ class T3RepositoryExtractFreezeTest {
             "LegacyApiFacade",
             "SlimApiFacade",
             "SlimStateManager",
-            "TofuManager",
             "RepositoryRuntime",
         )
         for (planName in planNames) {
@@ -513,28 +491,6 @@ class T3RepositoryExtractFreezeTest {
             SlimapiContract.SLIMAPI_PATH_PREFIX,
         )
 
-        // Cross-pin: TofuDecision remains the public decision-sum type
-        // consumed by applyTofuDecision (the TOFU seam). T3's TofuManager
-        // extraction MUST keep the three sealed variants reachable so the
-        // UI trust-prompt callbacks keep type-matching.
-        assertTrue(
-            "TofuDecision.AcceptOnce variant must remain reachable",
-            runCatching {
-                Class.forName("cn.vectory.ocdroid.data.repository.http.TofuDecision\$AcceptOnce")
-            }.isSuccess,
-        )
-        assertTrue(
-            "TofuDecision.Trust variant must remain reachable",
-            runCatching {
-                Class.forName("cn.vectory.ocdroid.data.repository.http.TofuDecision\$Trust")
-            }.isSuccess,
-        )
-        assertTrue(
-            "TofuDecision.Cancel variant must remain reachable",
-            runCatching {
-                Class.forName("cn.vectory.ocdroid.data.repository.http.TofuDecision\$Cancel")
-            }.isSuccess,
-        )
     }
 
     // ────────────────────────────────────────────────────────────────────────

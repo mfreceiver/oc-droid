@@ -59,10 +59,6 @@ class TokenStreamCoordinatorIdempotencyTest {
     private lateinit var fake: FakeStreamProvider
     private lateinit var bundleRepository: OpenCodeRepository
     private lateinit var coordinator: TokenStreamCoordinator
-    // L4 Phase-1: test fixture for the visible session id gate. Set before
-    // open() when the test needs to open a different sid than "s1".
-    private var testVisibleSid: String = "s1"
-
     @Before
     fun setUp() {
         scope = TestScope(UnconfinedTestDispatcher())
@@ -87,11 +83,6 @@ class TokenStreamCoordinatorIdempotencyTest {
         streamConnectionProvider: ((String, String?) -> TokenStreamConnection)? = null,
         currentBundleProvider: () -> ClientBundle? = { bundleRepository.currentClientBundle() },
         initialBackoffMs: Long = 50L,
-        // L4 Phase-1: test fixtures for foreground/route gate. Default to
-        // permissive (foreground + visible session "s1") so existing tests
-        // that open "s1" continue to work.
-        appInForeground: () -> Boolean = { true },
-        visibleChatSessionId: () -> String? = { testVisibleSid },
     ): TokenStreamCoordinator = TokenStreamCoordinator(
         scope = scope,
         slices = slices,
@@ -99,8 +90,6 @@ class TokenStreamCoordinatorIdempotencyTest {
         streamConnectionProvider = streamConnectionProvider,
         bundleCommitLock = bundleRepository,
         currentBundleProvider = currentBundleProvider,
-        appInForeground = appInForeground,
-        visibleChatSessionId = visibleChatSessionId,
         triggerSinceFetch = { _, _ -> },
         openDebounceMs = openDebounceMs,
         watchdogPollMs = 10L,
@@ -183,7 +172,6 @@ class TokenStreamCoordinatorIdempotencyTest {
         val jobAfterFirst = coordinator.currentStreamJobSnapshot()
 
         // Different sid → guard's sid check fails → supersede.
-        testVisibleSid = "s2"
         coordinator.open("s2", "/work")
         runPending()
 
@@ -518,7 +506,6 @@ class TokenStreamCoordinatorIdempotencyTest {
             currentBundleProvider = {
                 repository.currentClientBundle()!!.also { bundle -> resolved.add(bundle) }
             },
-            visibleChatSessionId = { "target" },
         )
 
         val callers = (0 until 8).map { index ->

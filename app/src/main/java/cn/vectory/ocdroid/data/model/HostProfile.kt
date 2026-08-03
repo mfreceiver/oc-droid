@@ -72,6 +72,23 @@ data class HostProfile(
     @SerialName("slim")
     val slim: Boolean = false,
     /**
+     * P1-3: per-server trust-all — trusts ALL server certificates for this
+     * host (self-signed, forged, intercepted). NO MITM protection.
+     *
+     * P1-4: mTLS takes priority — when an mTLS client cert is presented,
+     * trust-all is IGNORED (see [SslConfigFactory.sslConfigFor] and
+     * [cn.vectory.ocdroid.data.repository.OpenCodeRepository.resolveCandidateSsl]:
+     * both route `MutualTLS` first and fall back to `TrustAll` only when
+     * `clientCert == null`). So the practical combination is "mTLS when
+     * configured, else trust-all, else system CA" — NOT "trust-all bypasses
+     * mTLS server verification".
+     *
+     * NOT exported with [HostProfileExportPayload] / [HostProfileImportPayload]
+     * (same as [clientCertId] / [mtlsEnabled]).
+     */
+    @SerialName("trustAll")
+    val trustAll: Boolean = false,
+    /**
      * §2.2: 客户端 PKCS12（+密码+可选 CA）在 EncryptedSharedPreferences 的
      * key 后缀（`client_cert_p12_<id>` / `client_cert_pw_<id>` /
      * `client_cert_ca_<id>`）。null ⇒ 无材料。

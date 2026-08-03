@@ -10,7 +10,6 @@ import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.isSseDown
-import cn.vectory.ocdroid.ui.routeChatSessionId
 import cn.vectory.ocdroid.ui.controller.ComposerController
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.ErrorRecoveryCoordinator
@@ -279,8 +278,6 @@ object ControllerModule {
     fun provideTokenStreamCoordinator(
         @UiApplicationScope appScope: CoroutineScope,
         store: SharedStateStore,
-        // L4 Phase-1 foreground truth source.
-        appLifecycleMonitor: AppLifecycleMonitor,
         // §tokenstream-mtls-fix: was `clientFactory: OkHttpClientFactory` — the Hilt
         // singleton whose own SslConfigFactory never received configureClientCert, so
         // its sslConfigFor() fell back to SystemDefault → "Trust anchor not found"
@@ -351,23 +348,11 @@ object ControllerModule {
             streamConnectionProvider = streamConnectionProvider,
             bundleCommitLock = repository,
             currentBundleProvider = { repository.currentClientBundle() },
-            // L4 Phase-1 (lane 1): wire the foreground/route gate with real
-            // predicates — NOT the permissive defaults.
-            // foregroundSignal: AppLifecycleMonitor.isInForeground is the
-            // authoritative, lifecycle-safe foreground truth (StateFlow).
-            foregroundSignal = appLifecycleMonitor.isInForeground,
-            // navFlow: the authoritative route truth for the route observer
-            // (deriving visibleChatSessionId from navState.lastRoute, NOT from
-            // the loaded-data pointer slices.chat.currentSessionId).
-            navFlow = store.navFlow,
-            // appInForeground snapshot: read the live value for synchronous
-            // gate checks (open(), scheduleReconnect, etc.).
-            appInForeground = { appLifecycleMonitor.isInForeground.value },
-            // visibleChatSessionId: the currently visible chat session id from
-            // the route (navFlow.lastRoute). Null when not on a chat route → gate
-            // rejects. This is the AUTHORITATIVE route truth — NOT the data pointer
-            // from slices.chat.currentSessionId (which persists after leaving Chat).
-            visibleChatSessionId = { routeChatSessionId(store.navFlow.value.lastRoute) },
+            // L4: foreground/route gating removed — L1 deleted background mode,
+            // so the foreground signal is statically-true and the route observer
+            // (suspendClose/desired auto-reopen) has no background to gate against.
+            // Token streams now open unconditionally on .open() (guarded only by
+            // sseDisabled + idempotency), matching the post-L1 architecture.
             // lite-v2-dev (plan §4.2): TriggerSinceFetch → skeleton reload
             // （终态文本 / resync 收敛统一走权威窗口，不再走 reconcileSession）。
             triggerSinceFetch = { sid, _ ->
@@ -395,15 +380,17 @@ object ControllerModule {
         serverCompatProfile: ServerCompatProfile,
         @Named("currentProfileId") currentProfileId: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
-        bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
-        streamingServiceLauncher: cn.vectory.ocdroid.service.StreamingServiceLauncher,
-        streamingLifecycleCoordinator: cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator,
         connectionBootstrapEngine: cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine,
         bootstrapRetryPolicy: cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy,
         appLifecycleMonitor: AppLifecycleMonitor,
         degradedBootstrapTerminator: cn.vectory.ocdroid.service.DegradedBootstrapTerminator,
         tokenStreamCoordinator: TokenStreamCoordinator,
         effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver,
+        // L1 FGS commit 1: new params for post-FGS architecture.
+        sseOwner: cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner,
+        processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller,
+        sessionSnapshotProvider: cn.vectory.ocdroid.service.streaming.SessionSnapshotProvider,
+        ownershipGate: cn.vectory.ocdroid.service.StreamingOwnershipGate,
     ): ConnectionCoordinator = ConnectionCoordinator(
         scope = appScope,
         slices = store.slices,
@@ -413,19 +400,13 @@ object ControllerModule {
         serverCompatProfile = serverCompatProfile,
         currentProfileId = currentProfileId,
         identityStore = identityStore,
-        // CP2 (notify Phase-0): delegate TOFU state to the shared bootstrap
-        // coordinator (FGS spec §10). CC's public TOFU surface is unchanged.
-        bootstrapCoordinator = bootstrapCoordinator,
-        // CP9 (notify Phase-0 switchover): CC's startSSE now calls the
-        // streaming Service launcher (the atomic ownership switch); the
-        // Service runs the §5 bootstrap + the SSE collector lives in
-        // ServiceSseConnectionOwner. CC NEVER calls repository.connectSSE.
-        streamingServiceLauncher = streamingServiceLauncher,
-        // CP9 (notify Phase-0 switchover): CC's cancelSse /
-        // cancelSseForReconfigure now route through the lifecycle
-        // coordinator's onDisconnect (§4.1 disconnect → L3 teardown); the
-        // Service observes the commands and disconnects its owner.
-        streamingLifecycleCoordinator = streamingLifecycleCoordinator,
+        // L1 FGS commit 3: lifecycle coordinator + launcher removed.
+        // sseOwner+ownershipGate sole path. L7: bootstrapCoordinator (TOFU)
+        // also removed — per-server trust-all toggle replaces it.
+        sseOwner = sseOwner,
+        processStatusPoller = processStatusPoller,
+        sessionSnapshotProvider = sessionSnapshotProvider,
+        ownershipGate = ownershipGate,
         connectionBootstrapEngine = connectionBootstrapEngine,
         bootstrapRetryPolicy = bootstrapRetryPolicy,
         appLifecycleMonitor = appLifecycleMonitor,
@@ -435,9 +416,8 @@ object ControllerModule {
         // Busy-open is hooked in ChatViewModel.loadMessages.
         tokenStreamCoordinator = tokenStreamCoordinator,
         // RESOLVER lane ②: forwarded to ConnectionHealthProbe so its legacy
-        // testConnection path (identity endpointFp + TOFU host:port) resolves
-        // the URL through the single authority, matching the engine + token-
-        // stream factory.
+        // testConnection path resolves the URL through the single authority,
+        // matching the engine + token-stream factory.
         effectiveConnectionConfigResolver = effectiveConnectionConfigResolver,
     )
 

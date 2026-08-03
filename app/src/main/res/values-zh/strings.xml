@@ -257,21 +257,10 @@
     <string name="host_profile_name">配置名称</string>
     <string name="host_profile_basic_auth_username">Basic Auth 用户名（可选）</string>
     <string name="host_profile_basic_auth_password">Basic Auth 密码（可选）</string>
-    <!-- §tofu R2: SSH 式「首次连接信任」证书指纹 pinning。旧的
-         host_allow_insecure_title / host_allow_insecure_summary 字符串已删除——
-         自签名 endpoint 现在在首次连接时弹出 TOFU 信任对话框，不再用按 profile 的
-         全局信任降级开关。 -->
-    <string name="tofu_dialog_title">服务器证书</string>
-    <string name="tofu_cert_subject">主体</string>
-    <string name="tofu_cert_issuer">签发者</string>
-    <string name="tofu_cert_expiry">过期时间</string>
-    <string name="tofu_cert_fingerprint">SHA-256 指纹</string>
-    <string name="tofu_cert_reason_unknown_issuer">此证书并非由已知证书颁发机构签发。信任前请与服务器管理员核对指纹。</string>
-    <string name="tofu_cert_reason_expired">此证书已过期或尚未生效。</string>
-    <string name="tofu_cert_reason_hostname">此证书不覆盖你所连接的主机名。</string>
-    <string name="tofu_accept_once">仅本次接受</string>
-    <string name="tofu_trust">永久信任</string>
-    <string name="tofu_cancel">取消</string>
+    <!-- §L7 trust-all: per-server 跳过服务器证书验证。mTLS 优先——仅当未设置 mTLS 客户端证书时 trust-all 才生效。 -->
+    <string name="host_trust_all_title">信任所有证书</string>
+    <string name="host_trust_all_subtitle">跳过服务器证书验证（无 MITM 防护）</string>
+    <string name="host_trust_all_mtls_conflict">mTLS 优先——仅当未设置 mTLS 客户端证书时 trust-all 才生效</string>
     <!-- §2.7 mTLS 客户端证书（stunnel + 共享 PKCS12） -->
     <string name="host_mtls_title">mTLS 连接</string>
     <string name="host_mtls_summary">与不安全的 HTTPS 互斥。</string>
@@ -552,21 +541,6 @@
          （「服务器」），与外观/通知/关于三项「入口名 = 页面名」一致。
          settings_section_hosts 保留为长文案，但不再用作 hub 标题。 -->
     <string name="setux_settings_hosts_entry">服务器</string>
-
-    <!-- §FGS-notify CP5: ongoing 会话状态通知文案（channel=ocdroid.session_status,
-         IMPORTANCE_LOW per §7）。 -->
-    <string name="notify_session_restoring">正在恢复连接…</string>
-    <string name="notify_session_busy_singular">1 个任务进行中</string>
-    <string name="notify_session_busy_plural">%1$d 个任务进行中</string>
-    <string name="notify_session_connected">已连接</string>
-    <string name="notify_session_idle_monitoring">空闲监听</string>
-    <string name="notify_session_degraded_title">需要确认服务器信任</string>
-    <string name="notify_session_degraded_content">打开应用以确认服务器信任</string>
-
-    <!-- §FGS-notify CP8 (§16-U1): ongoing FGS 通知不可被系统划掉（Android
-         硬性），故 ongoing 通知常驻一个 Action，其文案即此串，PendingIntent
-         投递 ACTION_CLOSE_BACKGROUND → 协调器 L3 teardown。 -->
-    <string name="notify_close_background">关闭后台</string>
 
     <!-- §slimapi-client-v1 §G6 (Task 16): skeleton parts 上的内联展开按钮。
          用户点击此按钮触发 G6 批量获取完整内容。 -->

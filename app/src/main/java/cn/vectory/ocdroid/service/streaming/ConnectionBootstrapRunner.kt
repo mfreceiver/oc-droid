@@ -1,7 +1,5 @@
 package cn.vectory.ocdroid.service.streaming
 
-import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
-import cn.vectory.ocdroid.service.bootstrap.TofuState
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.util.DebugLog
 import javax.inject.Inject
@@ -33,10 +31,6 @@ class ConnectionBootstrapRunner @Inject constructor(
     override suspend fun runBootstrap(): BootstrapResult {
         return when (val result = engine.bootstrap()) {
             is ConnectionBootstrapOutcome.Success -> BootstrapResult.Success(result.identity)
-            is ConnectionBootstrapOutcome.TofuNeedsActivity -> {
-                DebugLog.i(TAG, "runBootstrap: TOFU degraded for ${result.hostPort}")
-                BootstrapResult.TofuNeedsActivity(result.hostPort)
-            }
             is ConnectionBootstrapOutcome.Failed -> {
                 DebugLog.w(TAG, "runBootstrap failed: ${result.error.message}")
                 BootstrapResult.Failed

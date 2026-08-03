@@ -474,9 +474,9 @@ class CatchUpActionsTest {
      * status map shape).
      */
     @Test
-    fun `four-combination contract - status uses standard path`() = runTest {
-        // lite-v2-dev: getSlimapiSessionsStatus delegates to standard API
-        // GET /session/status (the slim status endpoint was removed).
+    fun `four-combination contract - status uses slim Plan-A endpoint`() = runTest {
+        // §3.1 Plan-A: in slim mode, getSlimapiSessionsStatus redirects to
+        // GET /slimapi/sessions/status?directory= (the Plan-A endpoint).
         val server = MockWebServer()
         server.start()
         try {
@@ -503,10 +503,13 @@ class CatchUpActionsTest {
             assertEquals("idle", statusMap["s1"]?.type)
             assertEquals("busy", statusMap["s2"]?.type)
             val statusReq = server.takeRequest()
-            assertEquals(
-                "status path must be standard /session/status, got: ${statusReq.path}",
-                "/session/status",
-                statusReq.path,
+            assertTrue(
+                "status path must be /slimapi/sessions/status?directory=..., got: ${statusReq.path}",
+                statusReq.path!!.startsWith("/slimapi/sessions/status"),
+            )
+            assertTrue(
+                "status path must include directory query param, got: ${statusReq.path}",
+                statusReq.path!!.contains("directory="),
             )
         } finally {
             server.shutdown()

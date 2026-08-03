@@ -158,8 +158,6 @@ class B2RouteWiringSequenceTest {
         triggerSinceFetch = { sid, auth -> sinceFetchCalls += sid to auth },
         bundleCommitLock = bundleRepository,
         currentBundleProvider = { bundleRepository.currentClientBundle() },
-        appInForeground = { true },
-        visibleChatSessionId = { "A" },
         openDebounceMs = 0L,
         watchdogPollMs = 10L,
         watchdogMs = 10_000L,

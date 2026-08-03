@@ -61,7 +61,7 @@ class OkHttpClientFactoryMutationTest {
         // an Android Context.
         val hostConfig = HostConfig()
         val cachePathSanitizer = CachePathSanitizer(hostConfig)
-        val sslConfigFactory = SslConfigFactory(InMemoryTofuPinStore())
+        val sslConfigFactory = SslConfigFactory()
         factory = OkHttpClientFactory(
             sslConfigFactory,
             DirectoryHeaderInterceptor(),

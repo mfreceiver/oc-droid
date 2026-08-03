@@ -337,12 +337,12 @@ class AppLifecycleMonitor @Inject constructor(
         // user is now in-app and the in-app surfaces are the source of truth,
         // so leaving shade entries would be redundant. This does NOT clear
         // the dedup state, so when the user backgrounds again already-
-        // notified roots still won't re-notify (correct). The ongoing FGS
-        // notification (CHANNEL_SESSION_STATUS / CHANNEL_SESSION_STATUS_MIN,
-        // id 4241) and the error notification (id 4242) are deliberately
-        // left alone — they are owned by the FGS / error path, not by the
-        // decision/idle notify path. minSdk=34 so getActiveNotifications()
-        // (API 23+) needs no version guard.
+        // notified roots still won't re-notify (correct). The error
+        // notification (id 4242) is deliberately left alone — it is owned
+        // by the error path, not by the decision/idle notify path. The
+        // former ongoing FGS notification (channel session_status, id 4241)
+        // was removed in L1 FGS deletion. minSdk=34 so
+        // getActiveNotifications() (API 23+) needs no version guard.
         runCatching {
             notificationManager.activeNotifications.forEach { n ->
                 val channel = n.notification.channelId
@@ -372,19 +372,6 @@ class AppLifecycleMonitor @Inject constructor(
         runCatching { settingsManager.flushDraftText() }
             .onFailure { Log.w(TAG, "Failed to flush pending draft on background", it) }
         startBackgroundPolling()
-    }
-
-    /**
-     * L4 §4.4 / §5.5: Stop the background ALM poller for no-source terminal.
-     * Called by the composite [LifecycleCommand.EnterNoSourceTerminal] handler
-     * alongside SSE/FGS/ProcessStatusPoller teardown.
-     *
-     * Exposed `internal` so [SessionStreamingService]'s shell implementation
-     * can call it during terminal teardown.
-     */
-    internal fun stopBackgroundPollingForNoSource() {
-        pollJob?.cancel()
-        pollJob = null
     }
 
     private fun startBackgroundPolling() {

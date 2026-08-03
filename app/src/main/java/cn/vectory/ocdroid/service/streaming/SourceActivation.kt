@@ -70,11 +70,8 @@ sealed interface SourceActivation {
         data object StaleIdentity : Rejected
 
         /**
-         * SSE activation was rejected because the TOFU trust prompt is
-         * pending ([ConnectionBootstrapCoordinator.pendingTofuHostPort]
-         * != null) — the TLS handshake cannot succeed until the user
-         * decides. No retry budget consumed; the bootstrap coordinator's
-         * retry loop re-issues the activation after the decision.
+         * Legacy TOFU-freeze rejection (L7: TOFU removed). Retained as
+         * dead variant for ABI compat — never produced at runtime.
          */
         data object TofuPending : Rejected
 

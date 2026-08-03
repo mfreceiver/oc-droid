@@ -23,12 +23,10 @@ import javax.net.ssl.X509TrustManager
  * takes priority; the mTLS path NEVER overrides the hostname verifier (strict
  * CN/SAN check against the stunnel server cert).
  *
- * §tofu R2: [TofuPinned] — SSH-style TOFU; accepts a server leaf iff its SPKI
- * matches the pinned fingerprint for the host:port. [SslConfigFactory] returns
- * TofuPinned when a pin exists for the host; otherwise SystemDefault (a failed
- * handshake triggers a capture probe → user decision). The legacy per-host
- * `allowInsecureConnections` trust-all toggle is superseded by TOFU — there is
- * NO trust-all path anymore (the old [TrustAll] variant was removed).
+ * L7: [TrustAll] — per-server trust-all. Skips server certificate verification
+ * entirely. mTLS takes priority (see [SslConfig.TrustAll] detail kdoc +
+ * [SslConfigFactory.sslConfigFor]: when a client cert is presented, TrustAll
+ * is ignored). NO MITM protection.
  */
 sealed interface SslConfig {
 
@@ -47,16 +45,19 @@ sealed interface SslConfig {
     ) : SslConfig
 
     /**
-     * §tofu R2: SSH-style TOFU — accepts the server chain iff the leaf SPKI
-     * matches the pinned fingerprint for this host:port. [trustManager] is a
-     * [PinningTrustManager]; the pin IS the trust (no chain/path validation).
-     * The hostname verifier is permissive (the SPKI pin, bound to the
-     * host:port we connected to, is the identity — grill Q4/Q5).
+     * L7: per-server trust-all (Decision 4): trusts ALL server certificates
+     * (self-signed, forged, intercepted) for this host. NO MITM protection.
+     *
+     * §review-blocker-#4 (copy corrected): **mTLS takes priority — when an
+     * mTLS client cert is presented, trust-all is IGNORED** (see
+     * [SslConfigFactory.sslConfigFor] + [OpenCodeRepository.resolveCandidateSsl]:
+     * both route `MutualTLS` first, fall back to `TrustAll` only when
+     * `clientCert == null`). So the practical combination is "mTLS when
+     * configured, else trust-all, else system CA" — NOT "trust-all bypasses
+     * mTLS server verification". Hostname verifier is permissive when this
+     * branch is selected.
      */
-    data class TofuPinned(
-        val trustManager: X509TrustManager,
-        val socketFactory: SSLSocketFactory
-    ) : SslConfig
+    data object TrustAll : SslConfig
 }
 
 /**
@@ -135,22 +136,23 @@ internal fun buildMutualTlsConfig(material: ClientCertMaterial): SslConfig.Mutua
 }
 
 /**
- * §tofu R2: builds a [SslConfig.TofuPinned] that accepts a server leaf iff its
- * SPKI SHA-256 == [spkiHex]. The pin IS the trust (no chain validation); the
- * hostname verifier is permissive (identity = the pin). Built per stored pin.
+ * L7: permissive trust manager + socket factory that trusts ALL server
+ * certificates. NO MITM protection.
  */
-internal fun buildTofuPinnedConfig(spkiHex: String): SslConfig.TofuPinned {
-    val tm = PinningTrustManager(spkiHex)
-    val ctx = SSLContext.getInstance("TLS").apply {
-        init(null, arrayOf<TrustManager>(tm), SecureRandom())
+private object InsecureSsl {
+    val trustManager: X509TrustManager = object : X509TrustManager {
+        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
     }
-    return SslConfig.TofuPinned(tm, ctx.socketFactory)
+    val socketFactory: SSLSocketFactory = SSLContext.getInstance("TLS").apply {
+        init(null, arrayOf<TrustManager>(trustManager), SecureRandom())
+    }.socketFactory
 }
 
 /**
- * §tofu R2: resolves the [SslConfig] for a given host:port / client cert.
- * Holds the cached mTLS config (configure-time) + the injected
- * [TofuPinStore].
+ * L7: resolves the [SslConfig] for a given host:port / client cert.
+ * Holds the cached mTLS config (configure-time).
  *
  * P11 §4 / T2A.3-C1: no longer `@Singleton` / `@Inject` — this is a
  * graph-internal leaf owned by [cn.vectory.ocdroid.data.repository.RepositoryNetworkGraph],
@@ -158,16 +160,13 @@ internal fun buildTofuPinnedConfig(spkiHex: String): SslConfig.TofuPinned {
  * (one graph per [cn.vectory.ocdroid.data.repository.OpenCodeRepository]
  * singleton), not from Hilt.
  *
- *  - `sslConfigFor(hostPort)` (live clients): mTLS (client cert) priority; else
- *    TofuPinned if a pin exists for [hostPort]; else SystemDefault (public-CA
- *    certs pass silently — a failed handshake triggers the capture flow).
- *  - `resolveProbe(hostPort, clientCert)` (one-shot health probe): same routing
- *    but NEVER reads the held mTLS cache (so probing an unrelated profile can't
- *    leak the live client cert / private-CA trust — v3-gpter R2#1 阻断).
+ *  - `sslConfigFor(hostPort)` (live clients): mTLS (client cert) priority;
+ *    else trustAll; else SystemDefault.
+ *  - `resolveProbe(hostPort, clientCert, trustAll)` (one-shot health probe):
+ *    same routing but NEVER reads the held mTLS cache (so probing an unrelated
+ *    profile can't leak the live client cert / private-CA trust — v3-gpter R2#1).
  */
-class SslConfigFactory(
-    private val tofuStore: TofuPinStore
-) {
+class SslConfigFactory() {
 
     /**
      * §2.1: 当前客户端证书对应的 mTLS 配置（configure 时缓存）。null=未配置
@@ -183,6 +182,13 @@ class SslConfigFactory(
     @Volatile
     var lastClientCertError: String? = null
         private set
+
+    /** L7: trust-all flag — when enabled, skips server certificate verification. */
+    @Volatile
+    private var trustAllEnabled: Boolean = false
+
+    /** L7: set the trust-all flag. Called during [configure] before candidate SSL resolution. */
+    fun configureTrustAll(enabled: Boolean) { trustAllEnabled = enabled }
 
     /**
      * §2.1: 设置/清除当前客户端证书。包 `runCatching`：p12 损坏/CA 无法解析
@@ -207,27 +213,31 @@ class SslConfigFactory(
     }
 
     /**
-     * 有状态解析（给 live client）：mTLS 优先；否则该 host:port 有 TOFU pin →
-     * TofuPinned；否则 SystemDefault（公网证书静默放行；握手失败才触发捕获）。
-     * §tofu R2: [hostPort] 替代了原 allowInsecure（grill Q5/Q6）。
+     * L7: 有状态解析（给 live client）：mTLS 优先；否则 trustAll 降级；
+     * 否则 SystemDefault（公网证书静默放行）。
+     * [hostPort] param KEPT for signature compat — callers still pass it;
+     * now unused in routing (trust-all is global, not per-host).
      */
+    @Suppress("UNUSED_PARAMETER")
     fun sslConfigFor(hostPort: String?): SslConfig = when {
         mutualTlsConfig != null -> mutualTlsConfig!!
-        else -> hostPort?.let { tofuStore.pinnedSpki(it) }?.let { buildTofuPinnedConfig(it) }
-            ?: SslConfig.SystemDefault
+        trustAllEnabled -> SslConfig.TrustAll
+        else -> SslConfig.SystemDefault
     }
 
     /**
-     * §2.1 / v3-gpter R2#1 阻断修复：纯参数解析（给一次性 health 探测），
-     * **不读 held [mutualTlsConfig]**，完全由入参决定——否则测他 profile
-     * （clientCert=null）时会复用当前 mTLS profile 的缓存，误出示其客户端证书 /
-     * 只信其私有 CA，甚至泄漏客户端身份给无关 host。
-     * §tofu R2: [hostPort] 替代 allowInsecure（探测也走 TOFU pin 查询）。
+     * L7: 纯参数解析（给一次性 health 探测），**不读 held [mutualTlsConfig]**，
+     * 完全由入参决定——否则测他 profile（clientCert=null）时会复用当前 mTLS
+     * profile 的缓存，误出示其客户端证书 / 只信其私有 CA，甚至泄漏客户端身份
+     * 给无关 host。
+     * [hostPort] param KEPT for signature compat — callers still pass it;
+     * now unused in routing (trust-all is explicit param, not per-host).
      */
-    fun resolveProbe(hostPort: String?, clientCert: ClientCertMaterial?): SslConfig = when {
+    @Suppress("UNUSED_PARAMETER")
+    fun resolveProbe(hostPort: String?, clientCert: ClientCertMaterial?, trustAll: Boolean): SslConfig = when {
         clientCert != null -> buildMutualTlsConfig(clientCert)
-        else -> hostPort?.let { tofuStore.pinnedSpki(it) }?.let { buildTofuPinnedConfig(it) }
-            ?: SslConfig.SystemDefault
+        trustAll -> SslConfig.TrustAll
+        else -> SslConfig.SystemDefault
     }
 }
 
@@ -242,8 +252,8 @@ class SslConfigFactory(
  * SSL entry point — every OkHttp client built by [OkHttpClientFactory] routes
  * through here.
  *
- * §tofu R2: [SslConfig.TofuPinned] installs the pinning trust manager +
- * permissive hostname verifier (the SPKI pin is the identity).
+ * L7: [SslConfig.TrustAll] installs the permissive trust manager + permissive
+ * hostname verifier. NO MITM protection.
  */
 fun OkHttpClient.Builder.applySsl(cfg: SslConfig): OkHttpClient.Builder = when (cfg) {
     SslConfig.SystemDefault -> this
@@ -251,10 +261,8 @@ fun OkHttpClient.Builder.applySsl(cfg: SslConfig): OkHttpClient.Builder = when (
         sslSocketFactory(cfg.socketFactory, cfg.trustManager)
         // 无 hostnameVerifier 覆盖 → OkHttp 严格默认。stunnel 服务端证书 SAN
         // 必须匹配 serverUrl host（DNS / IP）。
-    is SslConfig.TofuPinned ->
-        sslSocketFactory(cfg.socketFactory, cfg.trustManager)
+    SslConfig.TrustAll ->
+        // Permissive trust manager + hostname verifier. NO MITM protection.
+        sslSocketFactory(InsecureSsl.socketFactory, InsecureSsl.trustManager)
             .hostnameVerifier { _, _ -> true }
-        // §tofu R2: pin 即身份（SPKI 绑定 host:port）。自签名证书 SAN 常不匹配
-        // 连接目标，故放行 hostnameVerifier——安全由 PinningTrustManager 的 SPKI
-        // 比对保证，而非主机名（grill Q4）。
 }

@@ -14,7 +14,6 @@ import cn.vectory.ocdroid.data.repository.http.TrafficCountingInterceptor
 import cn.vectory.ocdroid.di.AppModule
 import cn.vectory.ocdroid.di.ClientIdModule
 import cn.vectory.ocdroid.di.ControllerModule
-import cn.vectory.ocdroid.di.TofuModule
 import cn.vectory.ocdroid.util.TrafficLogger
 import cn.vectory.ocdroid.util.TrafficTracker
 import io.mockk.mockk
@@ -60,7 +59,6 @@ class RepositoryNetworkGraphTest {
         AppModule::class.java,
         ClientIdModule::class.java,
         ControllerModule::class.java,
-        TofuModule::class.java,
     )
 
     @Test

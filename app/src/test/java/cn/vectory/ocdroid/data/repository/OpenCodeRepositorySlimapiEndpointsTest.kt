@@ -564,7 +564,6 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         val repo = OpenCodeRepository(
             mockk(relaxed = true),
             mockk(relaxed = true),
-            mockk(relaxed = true),
             compatProfile,
         )
         repo.configure(baseUrl = server.url("/").toString().trimEnd('/'), slim = true)
@@ -604,7 +603,6 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         // real range) but the probe surfaces failure (fail-closed transport).
         val compatProfile = ServerCompatProfile()
         val repo = OpenCodeRepository(
-            mockk(relaxed = true),
             mockk(relaxed = true),
             mockk(relaxed = true),
             compatProfile,
@@ -1085,5 +1083,88 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         assertEquals("my-sid", success.sessionId)
         assertEquals("busy", success.status.type)
         assertEquals(3, success.status.attempt)
+    }
+
+    // ── §7.11 (P1-7): slim status Plan-A 404 fallback ──────────────────────
+
+    @Test
+    fun `P1-7 first 404 flips supportsSlimStatus and subsequent calls use standard API`() = runBlocking {
+        // P1-7: first call hits slim endpoint (supportsSlimStatus=true by default),
+        // gets 404 (old v2 sidecar), flips flag to false, falls back to standard
+        // API THIS call. Second call (flag=false) goes directly to standard API.
+        val statusBody200 = """{"s1":{"type":"idle"},"s2":{"type":"busy"}}"""
+
+        // Response for the slim endpoint (404) — consumed FIRST.
+        server.enqueue(MockResponse().setResponseCode(404))
+        // Response for the standard API fallback on the FIRST call.
+        server.enqueue(jsonResponse(statusBody200))
+        // Response for the standard API on the SECOND call (flag already false).
+        server.enqueue(jsonResponse("""{"s3":{"type":"retry"}}"""))
+
+        // ── First call: slim endpoint 404 → fallback to standard API ────────
+        val result1 = repository.getSlimapiSessionsStatus("/dir")
+        assertTrue("first call must succeed via fallback: ${result1.exceptionOrNull()}", result1.isSuccess)
+        val map1 = result1.getOrThrow()
+        assertEquals("first call returns standard API response (2 entries)", 2, map1.size)
+
+        val req1 = server.takeRequest(5, TimeUnit.SECONDS)
+        assertNotNull("first request must exist", req1)
+        assertTrue(
+            "first request hits slim endpoint, got: ${req1!!.path}",
+            req1.path!!.startsWith("/slimapi/sessions/status"),
+        )
+
+        val req2 = server.takeRequest(5, TimeUnit.SECONDS)
+        assertNotNull("fallback request must exist", req2)
+        assertTrue(
+            "fallback goes to standard /session/status, got: ${req2!!.path}",
+            req2.path!!.startsWith("/session/status"),
+        )
+
+        // ── Second call: flag is false → direct to standard API ─────────────
+        val result2 = repository.getSlimapiSessionsStatus("/dir2")
+        assertTrue("second call must succeed: ${result2.exceptionOrNull()}", result2.isSuccess)
+        val map2 = result2.getOrThrow()
+        assertEquals("second call returns standard API response (1 entry)", 1, map2.size)
+        assertEquals("retry", map2["s3"]?.type)
+
+        val req3 = server.takeRequest(5, TimeUnit.SECONDS)
+        assertNotNull("third request must exist", req3)
+        assertTrue(
+            "second call goes directly to standard API (no slim endpoint), got: ${req3!!.path}",
+            req3.path!!.startsWith("/session/status"),
+        )
+    }
+
+    @Test
+    fun `P1-7 200 keeps supportsSlimStatus true and subsequent call reuses slim endpoint`() = runBlocking {
+        // A successful 200 on the slim endpoint keeps supportsSlimStatus=true,
+        // so subsequent calls also hit the slim endpoint (not the standard API).
+        server.enqueue(jsonResponse("""{"s1":{"type":"idle"}}"""))
+        server.enqueue(jsonResponse("""{"s2":{"type":"busy"}}"""))
+
+        // ── First call: slim endpoint 200 → supportsSlimStatus stays true ──
+        val result1 = repository.getSlimapiSessionsStatus("/dir")
+        assertTrue("first call must succeed: ${result1.exceptionOrNull()}", result1.isSuccess)
+        assertEquals(1, result1.getOrThrow().size)
+
+        val req1 = server.takeRequest(5, TimeUnit.SECONDS)
+        assertNotNull(req1)
+        assertTrue(
+            "first request hits slim endpoint: ${req1!!.path}",
+            req1.path!!.startsWith("/slimapi/sessions/status"),
+        )
+
+        // ── Second call: flag still true → another slim endpoint hit ────────
+        val result2 = repository.getSlimapiSessionsStatus("/other")
+        assertTrue("second call must succeed: ${result2.exceptionOrNull()}", result2.isSuccess)
+        assertEquals(1, result2.getOrThrow().size)
+
+        val req2 = server.takeRequest(5, TimeUnit.SECONDS)
+        assertNotNull(req2)
+        assertTrue(
+            "second request also hits slim endpoint: ${req2!!.path}",
+            req2.path!!.startsWith("/slimapi/sessions/status"),
+        )
     }
 }

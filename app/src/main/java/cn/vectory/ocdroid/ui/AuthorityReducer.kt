@@ -5,11 +5,10 @@ import cn.vectory.ocdroid.data.state.AuthorityOp
 import cn.vectory.ocdroid.data.state.AuthorityState
 import cn.vectory.ocdroid.data.state.Coverage
 import cn.vectory.ocdroid.data.state.EntryOrigin
-import cn.vectory.ocdroid.data.state.OptimisticClaim
-import cn.vectory.ocdroid.data.state.ReconcileOutcome
 import cn.vectory.ocdroid.data.state.RetryEntry
 import cn.vectory.ocdroid.data.state.SessionEntry
 import cn.vectory.ocdroid.data.state.ServerRound
+import cn.vectory.ocdroid.data.state.serverRoundOrNull
 import cn.vectory.ocdroid.ui.controller.normalizeAuthoritativeStatusSnapshot
 
 /** §P1-B/E: cap on [AuthorityState.retryQueue] size (LRU eviction when exceeded). */
@@ -17,25 +16,6 @@ private const val RETRY_QUEUE_MAX_SIZE = 256
 
 /** §U-CQ9: cap on [ChatState.pendingErrorCheck] set size (drops oldest entries when exceeded). */
 private const val PENDING_ERROR_CHECK_MAX_SIZE = 128
-
-/**
- * §sse-zombie-fix (v3 Bug C / issue #4+6): time window during which an
- * UNCONFIRMED optimistic claim (serverEchoed=false && reconcileConfirmed=false)
- * is protected from being resolved-to-idle by a REST snapshot or a watchdog
- * reconcile. Rationale: when the SSE event stream is terminally down (Fix A
- * stops the service → watchdog is lifecycle-bound to the poller and dies),
- * REST snapshots/reconciles become the only status source — and early in
- * request/response they can be stale-idle while the server genuinely has
- * the request pending. This window gives the server a grace period to echo
- * the optimistic busy before REST idle is allowed to resolve the claim.
- *
- * Tuned to 7_000ms: watchdog SLA is ~5s (OPTIMISTIC_CLAIM_TIMEOUT_MS) with
- * up to ~2s tick jitter, so a 7s window comfortably covers the worst-case
- * watchdog reconcile arrival while still bounding the protection (after the
- * window, REST idle wins — eventual consistency is preserved). Uses wall-clock
- * ms (claimedAtMs / requestStartMs / op.monotonic are all System.currentTimeMillis).
- */
-private const val OPTIMISTIC_CLAIM_PROTECTION_WINDOW_MS = 7_000L
 
 /**
  * §P0-A (B1 option 1): the PURE authority reducer — the SINGLE writer of
@@ -75,7 +55,6 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
         is AuthorityOp.ApplySnapshot -> applySnapshot(cur, op)
         is AuthorityOp.PurgeHost -> applyPurge(cur, op)
         is AuthorityOp.MarkSourceFailed -> applyMarkFailed(cur, op)
-        is AuthorityOp.ApplyReconcileOutcome -> applyReconcile(cur, op)
         is AuthorityOp.PruneSessions -> applyPrune(cur, op)
         is AuthorityOp.RetryQueued -> applyRetryQueued(cur, op)
         is AuthorityOp.RetryFired -> applyRetryFired(cur, op)
@@ -187,10 +166,6 @@ internal fun reduceAuthority(state: StoreState, op: AuthorityOp): StoreState {
  *    (cold-start / test / non-migrated site), the guard passes leniently
  *    (backward compat). The guard is PURE: it derives only from [op.carried data]
  *    and [state]; no injected identity store, no TOCTOU.
- *  - [AuthorityOp.ApplyReconcileOutcome]: §P0-B scope guard (host) AND
- *    §P0-C identity-epoch guard. The reconcile-dispatch host must match the
- *    live host (P0-A scope guard); the dispatch-epoch must match current
- *    [StoreState.identityEpoch] (stale-identity guard, P0-C).
  *  - [AuthorityOp.PurgeHost] / [AuthorityOp.PruneSessions]: structurally valid (true).
  */
 private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
@@ -226,16 +201,6 @@ private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
                 true
             }
         }
-        is AuthorityOp.ApplyReconcileOutcome -> {
-            val currentHost = state.host.currentHostProfileId
-            // Host guard: null currentHost passes leniently (cold-start); otherwise
-            // the reconcile-dispatch host must match the live host.
-            if (currentHost != null && currentHost != op.hostProfileId) return false
-            // §P0-C identity-epoch guard: a reconcile whose dispatch-epoch predates
-            // an identity transition is stale → DROP.
-            if (op.identityEpochAtCapture != state.identityEpoch) return false
-            true
-        }
         is AuthorityOp.PurgeHost,
         is AuthorityOp.PruneSessions -> true
         // §U-CQ5: epoch guard for RetryQueued/Fired — DROP if the identity advanced
@@ -251,20 +216,17 @@ private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
 /**
  * §3.1 fence selection by [AuthorityOp.ApplyEvent.origin]. Pure.
  *
- * P0-A (no full B6/B9 slim serverRound yet — slim digest carries serverRound=null):
- *  - OPTIMISTIC: stamp [OptimisticClaim] (clientSeq monotonic, serverEchoed=false),
- *    keep prior serverRound. Record [AuthorityOp.ApplyEvent.optimisticBumpTimestamp]
- *    into pendingBumps (consumed by [applyOptimisticBumps] in the outer reducer).
+ *  - OPTIMISTIC: keep prior serverRound. Record
+ *    [AuthorityOp.ApplyEvent.optimisticBumpTimestamp] into pendingBumps (consumed
+ *    by [applyOptimisticBumps] in the outer reducer).
  *  - SSE_LEGACY / SSE_SLIM: if serverRound != null → lex strict-monotonic guard
  *    (strictly-less-than → DROP; equal → monotonic tie-break). If null → accept
- *    (no causal fence for P0-A). On incoming BUSY/RETRY with an existing claim →
- *    echo-confirm (serverEchoed=true). On incoming terminal IDLE → clear claim.
+ *    (no causal fence for P0-A).
  *  - knownIncarnations per-scope high-water (B6): incarnation advance resets that
- *    scope's entries' serverRound; low incarnation → DROP. (Pure, self-contained
- *    even though slim does not yet supply serverRound.)
+ *    scope's entries' serverRound; low incarnation → DROP. (Pure, self-contained.)
  *  - §3.1 BLK-2 per-sid serverRound high-water: when the live baseline (prev
- *    serverRound) was cleared by REST/legacy/incarnation-reset but a Tier-1 slim
- *    frame with a turn arrives, the lex guard is skipped — the PERSISTENT
+ *    serverRound) was cleared by REST/incarnation-reset but a Tier-1 slim frame
+ *    with a turn arrives, the lex guard is skipped — the PERSISTENT
  *    [SessionEntry.serverRoundHighWater] watermark still fences a stale low-turn
  *    frame (strictly-older → DROP). Closes the BLK-2 revival window.
  */
@@ -337,28 +299,6 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
         return cur // §3.1 BLK-2: stale low-turn after baseline clear → DROP
     }
 
-    // ── §3.1 Tier-2 confirmation gate (legacy, no causal serverRound) ──
-    // R1 根因修复：一个未确认的 optimistic claim（POST 成功后 server 还没 echo busy）
-    // 绝不能被一个 stale legacy IDLE 覆盖。DROP 该 idle，标 guardedIdleDrop，arm watchdog。
-    // serverEchoed==true 时，后续 IDLE 是合法 terminal（应用 + 清 claim，走原路径）。
-    //
-    // §P0-B final-fix #1: a claim is confirmed (gate RELEASED → legacy IDLE treated as
-    // legitimate terminal) when confirmed by EITHER a real-time SSE echo (serverEchoed)
-    // OR a delayed reconcile GET (reconcileConfirmed). Only a claim unconfirmed by BOTH
-    // is protected from stale legacy IDLEs.
-    if (op.serverRound == null && op.status.isIdle &&
-        prev?.optimisticClaim != null &&
-        !prev.optimisticClaim.serverEchoed && !prev.optimisticClaim.reconcileConfirmed
-    ) {
-        if (prev.optimisticClaim.guardedIdleDrop) {
-            return cur  // 已标记过 → 真正 no-op（same ref）
-        }
-        val guarded = prev.copy(
-            optimisticClaim = prev.optimisticClaim.copy(guardedIdleDrop = true),
-        )
-        return cur.copy(bySid = cur.bySid + (op.sid to guarded))
-    }
-
     // ── next entry fields ──
     // §U-P3: a frame with no serverRound (legacy SSE busy / optimistic) MUST NOT
     // clear the prior slim baseline — the legacy frame is causally weaker (no
@@ -366,34 +306,6 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
     // window. Only a fresh slim frame (serverRound != null) or REST whole-graph
     // replace (applySnapshot, separate path) legitimately advances/clears.
     val keepRound: ServerRound? = op.serverRound ?: prev?.serverRound
-    val nextOptimisticClaim: OptimisticClaim? = when {
-        op.origin == EntryOrigin.OPTIMISTIC -> {
-            val priorSeq = prev?.optimisticClaim?.clientSeq ?: 0L
-            // §P0-B ITEM 2: cross-channel reorder — when prev is already SSE
-            // busy/retry, the server has confirmed the busy state → immediate echo.
-            val echoedNow = prev != null &&
-                (prev.status.isBusy || prev.status.isRetry) &&
-                (prev.origin == EntryOrigin.SSE_LEGACY || prev.origin == EntryOrigin.SSE_SLIM)
-            OptimisticClaim(
-                clientSeq = priorSeq + 1L,
-                claimedAtMs = op.connectionTimeMs,
-                serverEchoed = echoedNow || (prev?.optimisticClaim?.serverEchoed ?: false),
-                // §P0-B final-fix #1: a NEW optimistic generation starts NOT
-                // reconcile-confirmed — never inherit reconcileConfirmed (prevents
-                // cross-generation pollution).
-                reconcileConfirmed = false,
-                guardedIdleDrop = false,
-            )
-        }
-        // incoming terminal IDLE clears the claim (legitimate terminal).
-        op.status.isIdle -> null
-        // incoming BUSY/RETRY with an existing claim → echo-confirm
-        // (cross-channel reorder: server busy lands before HTTP success).
-        (op.status.isBusy || op.status.isRetry) && prev?.optimisticClaim != null -> {
-            prev.optimisticClaim.copy(serverEchoed = true)
-        }
-        else -> prev?.optimisticClaim
-    }
 
     // §3.1 BLK-2: advance the persistent per-sid serverRound high-water. A non-null
     // incoming Tier-1 serverRound folds forward (lex max — never regresses); for
@@ -411,7 +323,6 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
     val nextEntry = SessionEntry(
         status = op.status,
         serverRound = keepRound,
-        optimisticClaim = nextOptimisticClaim,
         origin = op.origin,
         updatedAtMs = op.connectionTimeMs,
         workdir = op.workdir ?: prev?.workdir,
@@ -448,12 +359,11 @@ private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): Authori
     }
 
     // §P0-A rev-gpt #1 (no-change same-ref): if the recomputed entry equals
-    // the prior entry (data-class equality: same status, serverRound, claim,
+    // the prior entry (data-class equality: same status, serverRound,
     // origin, updatedAtMs, workdir) AND pendingBumps is
     // unchanged (addPendingBump returned the same reference) → NO transition →
     // return cur (same ref). This makes an equal-value SSE re-delivery a true
-    // CAS no-op (no emission), completing the B1 idempotency contract. (An
-    // OPTIMISTIC op always changes the claim via clientSeq++ → never no-change.)
+    // CAS no-op (no emission), completing the B1 idempotency contract.
     //
     // §P1-B/E rev-glm N4: a terminal status re-delivery (nextEntry == prev,
     // both terminal) MUST still clean a stale retry entry — a sid queued by an
@@ -497,34 +407,22 @@ private fun addPendingBump(
 /**
  * Whole-graph authoritative replacement within the covered scope. Pure.
  *
- * Faithfully reproduces the legacy REST/hydration merge:
- *  1. `normalizeAuthoritativeStatusSnapshot(snapshot, authoritativeNodeIds)`:
- *     idle-fill proven tree nodes missing from the REST snapshot (absence of a
- *     KNOWN node ≡ idle). IDs outside the tree stay absent (fail-closed).
- *  2. REST in-flight protection (migrated `mergeStatusSnapshot`): for each id
- *     in the CURRENT projection where `localBefore[id] != current[id]`, the
- *     SSE-wins value overrides the stale REST snapshot value.
- *  3. slim failed-directory preservation: entries whose workdir is in
- *     `partialFailureWorkdirs` keep their PRIOR entry (claim/round/workdir),
- *     status updated to the merged value.
- *  4. ids absent from the merged result are dropped from bySid (whole-graph
- *     replace — §3.1 line 320 clears covered sids' serverRound).
- *  5. coverage[scopeKey] updated.
+ * §Plan-A (P0-C): consumes per-sid ServerRound from REST via pair-rule,
+ * applying a universal lex-max fold (not legacy "clear on REST"). See
+ * P0C-DESIGN.md §5 for the full algorithm.
+ *
+ * Steps 1-4, 8-10 match the legacy structure; steps 5-7 are the new
+ * per-sid round rule (claim/decision matrix deleted).
  */
 private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): AuthorityState {
     val normalized = normalizeAuthoritativeStatusSnapshot(op.snapshot, op.authoritativeNodeIds)
     // §scope-guard: only in-scope entries participate in the in-flight merge.
-    // Out-of-scope entries that changed during the request must NOT be pulled
-    // into merged — the overlay would re-stamp them with op.scopeKey, migrating
-    // them to the current scope (cross-scope corruption).
     val currentProjection = projectSessionStatuses(cur).filterKeys { sid ->
         val entry = cur.bySid[sid]
         entry == null || entry.scopeKey == null || entry.scopeKey == op.scopeKey
     }
 
-    // slim failed-dir preservation: prior status for failed-dir sids overrides
-    // the (idle-filled) normalized value, exactly mirroring the legacy
-    // `restSnapshot = normalized + preservedFromFailure`.
+    // slim failed-dir preservation.
     val failedSids: Set<String> = op.sidToWorkdir.entries
         .asSequence()
         .filter { it.value in op.partialFailureWorkdirs }
@@ -535,122 +433,141 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
     val restSnapshot: Map<String, cn.vectory.ocdroid.data.model.SessionStatus> =
         LinkedHashMap(normalized).apply { putAll(preserved) }
 
-    // REST in-flight (SSE-wins) protection — migrated mergeStatusSnapshot
-    // (StatusPollOrchestrator.kt:432). Pure, inlined here so the reducer stays
-    // self-contained (no dependency on the poller's class member). For each id
-    // in the CURRENT projection whose value changed since [op.localBefore], the
-    // SSE-wins value overrides the stale REST snapshot value.
-    val merged = mergeStatusSnapshotInFlight(op.localBefore, currentProjection, restSnapshot)
+    // §review-blocker-#7 (P0-C status-merge sync): compute the in-flight SSE-win
+    // sid set ONCE, shared by mergeStatusSnapshotInFlight (status choice) and the
+    // step-6b loop (origin/updatedAtMs/round choice), so status and causal metadata
+    // can NEVER tear across REST/SSE sources. This is the :501-503 inFlightWin
+    // predicate lifted verbatim — status-diff arm OR the #6 R==null timestamp arm
+    // (meta-only in-flight SSE: busy→busy@(1,7)@2000 leaves the round-stripped
+    // projection equal to localBefore, so the status arm alone misses it; without
+    // this set the loop preserved SSE meta while the merge kept a DIFFERING REST
+    // status → torn entry → late equal-round SSE fenced against the SSE timestamp,
+    // freezing REST's wrong status). The R==null gate is load-bearing: non-null-R
+    // REST is already resolved by the :504-506 lex-fence (T10 Op-2), so the
+    // timestamp arm must stay confined to the one path that fence cannot reach.
+    // NOTE (oracle edge case #1): ids present in currentProjection with a fresh
+    // prior but ABSENT from op.snapshot/restSnapshot are now RETAINED with their
+    // SSE status+meta by this set (pre-fix they were silently dropped). This is
+    // correct — a fresher in-flight SSE update causally wins over the REST snapshot
+    // — and aligns meta-only with the existing status-diff behavior on that path.
+    val inFlightWinSids: Set<String> = currentProjection.keys.filterTo(LinkedHashSet()) { id ->
+        val prior = cur.bySid[id]
+        op.localBefore[id] != currentProjection[id] ||
+            (prior != null &&
+                op.snapshot[id]?.serverRoundOrNull() == null &&
+                prior.updatedAtMs > op.requestToken.requestStartMs)
+    }
+
+    // REST in-flight (SSE-wins) protection.
+    val merged = mergeStatusSnapshotInFlight(restSnapshot, currentProjection, inFlightWinSids)
+
+    // §5 step 5: snapInc = max incarnation across all paired rounds in snapshot.
+    val snapInc = op.snapshot.values
+        .mapNotNull { it.serverRoundOrNull()?.incarnation }
+        .maxOrNull()
 
     val nextById = LinkedHashMap<String, SessionEntry>()
-    // §P0-A FIX: preserve out-of-scope entries (scopeKey != op.scopeKey).
-    // The snapshot is authoritative only for its own scope. Entries with null
-    // scopeKey (pre-migration) are treated as in-scope (dropped if not in snapshot).
+    // Step 6a: copy out-of-scope entries verbatim.
     for ((sid, entry) in cur.bySid) {
         if (entry.scopeKey != null && entry.scopeKey != op.scopeKey) {
             nextById[sid] = entry
         }
     }
-    // Then overlay the merged snapshot (current-scope entries). The current
-    // scope is authoritative for its SIDs — on a cross-scope SID collision the
-    // current-scope entry WINS (bySid is keyed by SID; one entry per SID).
-    // Out-of-scope entries with no collision were already preserved above.
-    for ((id, status) in merged) {
-        val priorEntry = cur.bySid[id]
-            nextById[id] = if (id in failedSids && priorEntry != null) {
-                // Failed-dir: keep prior entry (claim/round/workdir), update status only.
-                // Stamp the real scopeKey from the op for applyMarkFailed filtering.
-                // §sse-zombie-fix-impl-rev1 (GPT impl-review critical #3c): do NOT
-                // preserve a claim across a scope mismatch — a cross-scope failed-dir
-                // entry keeps the prior status/round but the claim must not migrate
-                // onto the current scope.
-                val scopeOk = priorEntry.scopeKey == null || priorEntry.scopeKey == op.scopeKey
-                priorEntry.copy(
-                    status = status,
-                    scopeKey = op.scopeKey,
-                    optimisticClaim = if (scopeOk) priorEntry.optimisticClaim else null,
-                )
-            } else {
-                // REST authoritative for this scope: clear claim + serverRound (§3.1:320).
-                // §3.1 BLK-2: PRESERVE the per-sid serverRound high-water across the REST
-                // baseline clear so a stale low-turn Tier-1 slim digest arriving after
-                // this snapshot is still fenced (the live baseline is gone, but the
-                // persistent watermark remembers the max turn seen for this incarnation).
-                //
-                // §sse-zombie-fix (v3 Bug C / issue #4+6) + §sse-zombie-fix-impl-rev1
-                // (GPT impl-review critical #3a/#3b): full decision matrix keyed on the
-                // RAW REST status (not the in-flight-merged value, which can be
-                // contaminated by optimistic local overlays). A genuine REST busy/retry
-                // CONFIRMS the claim (reconcileConfirmed=true) and the watchdog no longer
-                // selects it; a REST idle within the protection window PRESERVES the
-                // prior entry as a true no-op (same ref — no provenance rewrite, no
-                // freshness churn). A REST idle OUTSIDE the window resolves the claim
-                // normally.
-                val rawRestStatus = op.snapshot[id]
-                val rawRestIsNonIdle = rawRestStatus != null &&
-                    rawRestStatus.type != "idle" &&
-                    rawRestStatus.type != "dead"
-                val preservedClaim = priorEntry?.optimisticClaim?.let { claim ->
-                    if (!claim.serverEchoed && !claim.reconcileConfirmed) claim else null
-                }
-                val isUnconfirmedFreshClaim = preservedClaim != null &&
-                    preservedClaim.claimedAtMs > 0L &&
-                    op.requestToken.requestStartMs - preservedClaim.claimedAtMs < OPTIMISTIC_CLAIM_PROTECTION_WINDOW_MS
-                val scopeMatches = priorEntry == null ||
-                    priorEntry.scopeKey == null ||
-                    priorEntry.scopeKey == op.scopeKey
-                when {
-                    // §sse-zombie-fix-impl-rev1 (#3c): never preserve a claim across a
-                    // scope mismatch — a cross-scope prior entry must not migrate its
-                    // claim onto the current scope.
-                    !scopeMatches -> {
-                        SessionEntry(
-                            status = status,
-                            serverRound = null,
-                            optimisticClaim = null,
-                            origin = EntryOrigin.REST,
-                            updatedAtMs = op.requestToken.requestStartMs,
-                            workdir = op.sidToWorkdir[id],
-                            scopeKey = op.scopeKey,
-                            serverRoundHighWater = priorEntry?.serverRoundHighWater,
-                        )
-                    }
-                    // §sse-zombie-fix-impl-rev1 (#3b): raw REST busy/retry CONFIRMS the
-                    // claim — the server genuinely acknowledged busy via this REST
-                    // snapshot, so the watchdog should no longer select it. Write the
-                    // confirmed busy/retry status as REST authoritative.
-                    isUnconfirmedFreshClaim && rawRestIsNonIdle && preservedClaim != null -> {
-                        SessionEntry(
-                            status = status,
-                            serverRound = null,
-                            optimisticClaim = preservedClaim.copy(reconcileConfirmed = true),
-                            origin = EntryOrigin.REST,
-                            updatedAtMs = op.requestToken.requestStartMs,
-                            workdir = op.sidToWorkdir[id],
-                            scopeKey = op.scopeKey,
-                            serverRoundHighWater = priorEntry?.serverRoundHighWater,
-                        )
-                    }
-                    // §sse-zombie-fix (v3 Bug C): only PROTECT against a raw REST idle
-                    // within the window. A raw REST idle outside the window resolves the
-                    // claim; a non-idle within the window was handled above (confirmed).
-                    isUnconfirmedFreshClaim && priorEntry != null -> {
-                        priorEntry  // true no-op
-                    }
-                    else -> {
-                        SessionEntry(
-                            status = status,
-                            serverRound = null,
-                            optimisticClaim = preservedClaim,
-                            origin = EntryOrigin.REST,
-                            updatedAtMs = op.requestToken.requestStartMs,
-                            workdir = op.sidToWorkdir[id],
-                            scopeKey = op.scopeKey,
-                            serverRoundHighWater = priorEntry?.serverRoundHighWater,
-                        )
-                    }
-                }
-            }
+    // Step 6b: universal per-sid round rule for merged entries.
+    for ((id, mergedStatus) in merged) {
+        val prior = cur.bySid[id]
+        // Strip round fields from status before storing (projection hygiene).
+        val cleanStatus = mergedStatus.stripRound()
+        // Failed-dir branch (simplified: claim logic deleted).
+        if (id in failedSids && prior != null) {
+            nextById[id] = prior.copy(status = cleanStatus, scopeKey = op.scopeKey)
+            continue
+        }
+        // — universal per-sid round rule (D1 table) —
+        val R = op.snapshot[id]?.serverRoundOrNull()
+        val live0 = prior?.serverRound
+        val hw0 = prior?.serverRoundHighWater
+        val effBase = lexMaxNull(live0, hw0)
+        // §review-blocker-#6 (P0-C meta-only): the status-diff arm alone MISSES a
+        // meta-only in-flight SSE when REST returns a NULL round (R==null) — one
+        // that advanced ONLY round/time without changing the status value
+        // (busy→busy at a newer (incarnation,turn) + later connectionTimeMs).
+        // currentProjection stores round-stripped status (stripRound at :455), so
+        // localBefore[id] == currentProjection[id] → the status arm reads "no
+        // tear" → inFlightWin=false → the else branch stamps updatedAtMs =
+        // op.requestToken.requestStartMs, REGRESSING the SSE's fresher
+        // updatedAtMs. A subsequent same-round late SSE then passes the
+        // applyEvent equal-round tie-break (cmp==0 && connectionTimeMs <
+        // prev.updatedAtMs) because the regressed prev.updatedAtMs is now LOWER
+        // — the original #3 blocker resurrected under a meta-only trigger.
+        //
+        // The timestamp arm closes this — but ONLY for the R==null path. When
+        // R != null, the existing :469 lex-fence already compares
+        // `requestStartMs < prior.updatedAtMs` (the SAME wall-clock signal), so
+        // the timestamp arm would be REDUNDANT there and would over-protect:
+        // it would force inFlightWin=true for a non-null-R REST whose equal-
+        // round tie-break the :469 fence already resolves correctly (e.g. T10
+        // Op-2: R=(1,5)==effBase, requestStartMs=500 < updatedAtMs=1000 → the
+        // :469 fence preserves prior verbatim; an unguarded timestamp arm would
+        // short-circuit that fence and leak REST's differing status through).
+        // Guarding on R==null confines the new arm to the ONE path the existing
+        // fence cannot reach (the legitimate null-round REST fallback — legacy /
+        // unwired-registry / bad-shape snapshot per OpenCodeRepository:1125-1144).
+        //
+        // Single wall-clock domain (§U-P3 / AuthorityOp.connectionTimeMs kdoc):
+        // both REST requestStartMs and SSE connectionTimeMs source the SAME
+        // System.currentTimeMillis(), so the comparison mirrors the existing
+        // equal-round tie-break at applyEvent:247 and the :469 lex-fence. Strict
+        // `>` (not >=) mirrors :469's direction. Origin-agnostic by design; the
+        // arm's false-negative mode is self-neutralizing (a backwards clock that
+        // hides an in-flight SSE also lowers that SSE's own timestamp, so the
+        // REST stamp cannot regress below it). Oracle-assessed (ses_03bbaf126ffe,
+        // Plan B, refined to R==null-only after T10 regression analysis).
+        //
+        // §review-blocker-#7 (P0-C status-merge sync, r3): the timestamp arm above
+        // correctly preserved SSE METADATA but the parallel status choice in
+        // mergeStatusSnapshotInFlight still used status-diff alone → a meta-only
+        // SSE + differing-status null-R REST tore status (REST) from meta (SSE).
+        // Both arms now share ONE precomputed inFlightWinSids set (see :437 block)
+        // so the two choices can never diverge.
+        val inFlightWin = id in inFlightWinSids
+        val fenced = !inFlightWin && R != null && effBase != null &&
+            (R < effBase ||
+                (R == effBase && op.requestToken.requestStartMs < (prior?.updatedAtMs ?: 0L)))
+        if (fenced) {
+            nextById[id] = prior!!  // verbatim — fresher causal knowledge wins
+        } else {
+            // §review-blocker-#3 (correctness): when SSE won in-flight
+            // (inFlightWin=true), the mergedStatus content already came from
+            // the SSE projection (mergeStatusSnapshotInFlight restored it).
+            // The causal metadata MUST also stay SSE — writing origin=REST +
+            // updatedAtMs=requestStartMs would regress the timestamp to the
+            // REST request's start (e.g. 1000ms when SSE landed at 2000ms).
+            // A subsequent same-round late SSE (1500ms) would then pass the
+            // equal-round tie-break (1500 < 1000 is false) and corrupt state.
+            // Preserve prior.origin + prior.updatedAtMs on inFlightWin; only
+            // the pure REST path (no concurrent SSE update) stamps REST.
+            val effectiveOrigin = if (inFlightWin && prior != null) prior.origin else EntryOrigin.REST
+            val effectiveUpdatedAt = if (inFlightWin && prior != null) prior.updatedAtMs else op.requestToken.requestStartMs
+            nextById[id] = SessionEntry(
+                status = cleanStatus,
+                serverRound = lexMaxNull(live0, R),  // preserve on null R — NO clear
+                origin = effectiveOrigin,
+                updatedAtMs = effectiveUpdatedAt,
+                workdir = op.sidToWorkdir[id],
+                scopeKey = op.scopeKey,
+                serverRoundHighWater = lexMaxNull(hw0, R),
+            )
+        }
+    }
+
+    // §5 step 7: incarnation high-water bump (D4). No per-entry reset.
+    val nextIncarnations = if (snapInc != null &&
+        snapInc > (cur.knownIncarnations[op.scopeKey] ?: 0L)
+    ) {
+        cur.knownIncarnations + (op.scopeKey to snapInc!!)
+    } else {
+        cur.knownIncarnations
     }
 
     val nextCoverage = cur.coverage + (op.scopeKey to Coverage(
@@ -663,22 +580,14 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
     // §P0-A rev-gpt #1 (no-change same-ref): if the merged bySid equals the
     // prior bySid (same keys + data-class-equal entries) AND the coverage entry
     // for this scope is unchanged → NO transition → return cur (same ref).
-    // This makes a re-fetch that produces the identical snapshot a true CAS
-    // no-op (no emission), completing the B1 idempotency contract.
     //
     // §P1-B/E rev-ogpt B4: a snapshot can transition a sid busy/retry → idle
-    // (terminal). Those sids must leave the retry queue — the REST snapshot
-    // authoritatively confirmed a non-running status. Clean any queued sid
-    // that is now terminal in nextById (absent ≡ gone, or present + idle).
+    // (terminal). Those sids must leave the retry queue.
     val nextRetryQueue = if (cur.retryQueue.isEmpty()) {
         cur.retryQueue
     } else {
         val terminalQueued = cur.retryQueue.keys.filter { sid ->
             val e = nextById[sid]
-            // Only clean sids that belong to THIS snapshot's scope (nextById
-            // already contains only in-scope + retained out-of-scope entries;
-            // a retained out-of-scope entry is NOT this snapshot's verdict).
-            // An absent in-scope sid (dropped from snapshot) is gone → terminal.
             (e == null || (!e.status.isBusy && !e.status.isRetry)) &&
                 (e?.scopeKey == null || e.scopeKey == op.scopeKey)
         }
@@ -690,9 +599,16 @@ private fun applySnapshot(cur: AuthorityState, op: AuthorityOp.ApplySnapshot): A
         priorCov.coveredWorkdirs == op.coveredWorkdirs &&
         priorCov.unmappedActiveIds == op.unmappedActiveIds &&
         priorCov.lastSuccessTimeMs == op.lastSuccessTimeMs
-    if (nextById == cur.bySid && coverageUnchanged && nextRetryQueue === cur.retryQueue) return cur
+    if (nextById == cur.bySid && coverageUnchanged && nextRetryQueue === cur.retryQueue &&
+        nextIncarnations == cur.knownIncarnations
+    ) return cur
 
-    return cur.copy(bySid = nextById, coverage = nextCoverage, retryQueue = nextRetryQueue)
+    return cur.copy(
+        bySid = nextById,
+        knownIncarnations = nextIncarnations,
+        coverage = nextCoverage,
+        retryQueue = nextRetryQueue,
+    )
 }
 
 // ── PurgeHost ──────────────────────────────────────────────────────────────
@@ -793,104 +709,6 @@ private fun applyMarkFailed(cur: AuthorityState, op: AuthorityOp.MarkSourceFaile
         priorCov.lastSuccessTimeMs != -1L
     if (!bySidChanged && !covChanged) return cur
     return cur.copy(bySid = survivors, coverage = nextCoverage)
-}
-
-// ── ApplyReconcileOutcome ──────────────────────────────────────────────────
-
-/** §B7 REST reconcile terminal outcome. Pure.
- *  §P0-A rev-gpt #1: returns cur (same ref) when the outcome produces no change.
- *  §P0-B (FIX #2): generation fence at top drops stale-generation outcomes (ABA).
- *  §P1-B/E rev-ogpt B4: IDLE_CONFIRMED / FETCH_FAILED are terminal outcomes —
- *  they clean the sid's retryQueue entry (matching applyEvent terminal cleanup). */
-private fun applyReconcile(cur: AuthorityState, op: AuthorityOp.ApplyReconcileOutcome): AuthorityState {
-    val prev = cur.bySid[op.sid]
-    // §P0-B generation fence (ABA): the reconcile was triggered for a specific stale
-    // claim generation. If the current claim is gone (cleared by a terminal SSE) or
-    // advanced (a newer optimistic POST superseded it), DROP — never let a stale
-    // outcome revive/overwrite a newer claim.
-    val claim = prev?.optimisticClaim
-    if (claim == null || claim.clientSeq != op.claimClientSeq) return cur
-    // After the fence, prev is guaranteed non-null with a matching claim.
-    return when (op.outcome) {
-        ReconcileOutcome.IDLE_CONFIRMED -> {
-            // §sse-zombie-fix (v3 Bug C / issue #4 — Kimi C1): this is the MAIN
-            // clobber path for Bug C. The watchdog (OptimisticClaimWatchdogCoordinator,
-            // 5s timeout / 1s tick) fires reconcileStaleOptimisticClaims →
-            // ApplyReconcileOutcome(IDLE_CONFIRMED) → here. Without this guard,
-            // a claim gets cleared at T+5~7.5s — exactly when the SSE event
-            // stream is down and the user is staring at "已中断". Apply the SAME
-            // time-window guard as applySnapshot: if the claim is younger than
-            // OPTIMISTIC_CLAIM_PROTECTION_WINDOW_MS, DROP the reconcile (return
-            // cur) so the optimistic busy survives until the window elapses.
-            // op.monotonic is wall-clock (SessionSyncCoordinator.kt:173), same
-            // domain as claimedAtMs. After the window, the reconcile proceeds
-            // normally (or the next REST snapshot resolves it).
-            val withinProtectionWindow = claim.claimedAtMs > 0L &&
-                op.monotonic - claim.claimedAtMs < OPTIMISTIC_CLAIM_PROTECTION_WINDOW_MS
-            if (withinProtectionWindow) {
-                cur  // drop — claim preserved, no state change
-            } else {
-                val entry = prev.copy(
-                    status = cn.vectory.ocdroid.data.model.SessionStatus(type = "idle"),
-                    optimisticClaim = null,
-                    updatedAtMs = op.monotonic,
-                )
-                // §P0-A rev-gpt #1: no-change if the resulting entry equals prev.
-                if (entry == prev && op.sid !in cur.retryQueue) {
-                    cur
-                } else {
-                    cur.copy(
-                        bySid = cur.bySid + (op.sid to entry),
-                        // rev-ogpt B4: idle is terminal → clean retry entry.
-                        retryQueue = cur.retryQueue - op.sid,
-                    )
-                }
-            }
-        }
-        ReconcileOutcome.BUSY_CONFIRMED -> {
-            // §P0-B final-fix #1: mark the claim confirmed by the DELAYED reconcile
-            // GET. Use the dedicated reconcileConfirmed flag (NOT serverEchoed) so
-            // the OPTIMISTIC branch's serverEchoed-inheritance does NOT leak this
-            // across generations — a new optimistic POST starts with
-            // reconcileConfirmed=false, keeping the watchdog armed for the new claim.
-            val entry = prev.copy(
-                status = cn.vectory.ocdroid.data.model.SessionStatus(type = "busy"),
-                serverRound = op.serverRound ?: prev.serverRound,
-                optimisticClaim = prev.optimisticClaim.copy(reconcileConfirmed = true),
-                updatedAtMs = op.monotonic,
-            )
-            if (entry == prev) cur else cur.copy(bySid = cur.bySid + (op.sid to entry))
-        }
-        ReconcileOutcome.FETCH_FAILED -> {
-            // rev-ogpt B4: entry removal is terminal → clean retry entry too.
-            // §CQ-P1 (U-CQ1): write fail-closed coverage (matching applyMarkFailed
-            // :650-682) so the AllIdleFresh gate reads this scope as unknown, not a
-            // stale success. ApplyReconcileOutcome carries scopeKey but not
-            // registeredWorkdirs, so preserve them from the prior coverage entry.
-            val priorCov = cur.coverage[op.scopeKey]
-            val registered = priorCov?.registeredWorkdirs ?: emptySet()
-            val nextCoverage = cur.coverage + (op.scopeKey to Coverage(
-                registeredWorkdirs = registered,
-                coveredWorkdirs = emptySet(),
-                unmappedActiveIds = emptySet(),
-                lastSuccessTimeMs = -1L,
-            ))
-            val bySidChanged = prev != null || op.sid in cur.retryQueue
-            val covChanged = priorCov == null ||
-                priorCov.coveredWorkdirs.isNotEmpty() ||
-                priorCov.unmappedActiveIds.isNotEmpty() ||
-                priorCov.lastSuccessTimeMs != -1L
-            if (!bySidChanged && !covChanged) {
-                cur
-            } else {
-                cur.copy(
-                    bySid = if (prev != null) cur.bySid - op.sid else cur.bySid,
-                    retryQueue = cur.retryQueue - op.sid,
-                    coverage = nextCoverage,
-                )
-            }
-        }
-    }
 }
 
 // ── PruneSessions ──────────────────────────────────────────────────────────
@@ -1071,22 +889,37 @@ internal fun buildAuthorityApplySnapshot(
 }
 
 /**
- * §sse-rest-race pure in-flight protection — migrated verbatim from the
- * `StatusPollOrchestrator.mergeStatusSnapshot` member (kdoc there): for each
- * id in [localAfter], if `localBefore[id] != localAfter[id]`, the SSE-wins
- * value overrides the REST snapshot (`localAfter[id]` replaces `rest[id]`).
- * Inlined (not imported) so the reducer stays dependency-free and the purity
- * is local/auditable; the original member is preserved for its existing tests.
+ * §sse-rest-race pure in-flight protection: for each id in [inFlightWinSids]
+ * (the precomputed §review-blocker-#7 set — status-diff OR R==null timestamp
+ * arm, ⊆ [localAfter].keys), the SSE-wins value [localAfter] overrides the
+ * REST snapshot. The win judgment is computed ONCE at the call site and
+ * shared with the applySnapshot loop so status + origin/updatedAtMs/round
+ * can never tear across sources.
  */
 private fun mergeStatusSnapshotInFlight(
-    localBefore: Map<String, cn.vectory.ocdroid.data.model.SessionStatus>,
-    localAfter: Map<String, cn.vectory.ocdroid.data.model.SessionStatus>,
     restSnapshot: Map<String, cn.vectory.ocdroid.data.model.SessionStatus>,
+    localAfter: Map<String, cn.vectory.ocdroid.data.model.SessionStatus>,
+    inFlightWinSids: Set<String>,
 ): Map<String, cn.vectory.ocdroid.data.model.SessionStatus> {
-    if (localAfter.isEmpty()) return restSnapshot
+    if (inFlightWinSids.isEmpty()) return restSnapshot
     val result = LinkedHashMap(restSnapshot)
-    for ((id, after) in localAfter) {
-        if (localBefore[id] != after) result[id] = after
-    }
+    for (id in inFlightWinSids) result[id] = localAfter.getValue(id)
     return result
+}
+
+/** §Plan-A (P0-C): null-aware lex max. Returns the greater of two [ServerRound]s,
+ *  or the non-null one if only one is set, or null if both are null. */
+private fun lexMaxNull(a: ServerRound?, b: ServerRound?): ServerRound? = when {
+    a == null -> b
+    b == null -> a
+    a >= b -> a
+    else -> b
+}
+
+/** §Plan-A (P0-C): strip round fields from a [SessionStatus] before storing
+ *  in [SessionEntry.status] (projection hygiene — turns live only in
+ *  [SessionEntry.serverRound]/[SessionEntry.serverRoundHighWater]). */
+private fun cn.vectory.ocdroid.data.model.SessionStatus.stripRound(): cn.vectory.ocdroid.data.model.SessionStatus {
+    if (turnIncarnation == null && turn == null) return this
+    return copy(turnIncarnation = null, turn = null)
 }

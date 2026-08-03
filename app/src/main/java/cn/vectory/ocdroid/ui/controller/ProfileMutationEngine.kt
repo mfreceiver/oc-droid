@@ -12,16 +12,16 @@ import cn.vectory.ocdroid.ui.settings.toMaterial
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.runSuspendCatching
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.launch
 import java.util.UUID
 
 /**
  * §P9: Extracted profile CRUD + clientCert mutation engine from
- * [HostProfileController]. Holds the profile save/delete/duplicate/import/
- * export logic + the mTLS client-cert material resolution
- * ([applyClientCertSave]).
+ * [HostProfileController]. Holds the profile save/import/export logic +
+ * the mTLS client-cert material resolution ([applyClientCertSave]).
  *
- * **Sequence risk: LOWEST.** The save/delete operations have the least
+ * L8: duplicateHostProfile and deleteHostProfile removed (single-host mode).
+ *
+ * **Sequence risk: LOWEST.** The save operations have the least
  * critical ordering constraints — the reconfigure boundary preamble
  * ([withHostReconfiguration]) and the repository configure body
  * ([configureRepositoryForProfileRaw]) stay in the controller and are
@@ -53,7 +53,6 @@ class ProfileMutationEngine internal constructor(
     ) -> Unit,
     private val configureRepositoryForProfile: (HostProfile) -> Unit,
     private val refreshHostProfileState: () -> Unit,
-    private val purgePerHostState: () -> Unit,
 ) {
 
     /**
@@ -111,8 +110,12 @@ class ProfileMutationEngine internal constructor(
         val slimChanged = previous?.slim != normalized.slim
         val basicAuthUsernameChanged = previous?.basicAuth?.username != normalized.basicAuth?.username
         val basicAuthChanged = basicAuthUsernameChanged || basicAuthEdited
+        // §review-blocker-#1 (security): trustAll toggle must trigger
+        // reconfigure — otherwise ON→OFF persists + displays strict TLS while
+        // the live stack keeps using SslConfig.TrustAll (no MITM protection).
+        val trustAllChanged = previous?.trustAll != normalized.trustAll
         val needsReconfigure = isActiveHost &&
-            (urlChanged || mtlsChanged || slimChanged || basicAuthChanged)
+            (urlChanged || mtlsChanged || slimChanged || basicAuthChanged || trustAllChanged)
 
         withHostReconfiguration(needsReconfigure) {
             normalized = applyClientCertSave(normalized, clientCertEdit)
@@ -176,81 +179,6 @@ class ProfileMutationEngine internal constructor(
             val newId = oldId ?: UUID.randomUUID().toString()
             settingsManager.saveClientCert(newId, resolved.p12, resolved.password, resolved.ca)
             normalized.copy(clientCertId = newId, mtlsEnabled = true)
-        }
-    }
-
-    fun duplicateHostProfile(profileId: String) {
-        hostProfileStore.duplicate(profileId)
-        refreshHostProfileState()
-    }
-
-    /**
-     * Detects deletion of the ACTIVE host: the replacement current host is
-     * unrelated, so all per-host session/workdir state must be purged
-     * (mirrors selectHostProfile). Otherwise just removes the profile entry.
-     *
-     * lite-v2: barrier path and ticket-based configure removed. Active
-     * deletion persists + signals restart-required; non-current deletion
-     * just persists.
-     *
-     * §需求12阶段3 (oracle-assessed): under 需求12 profiles are fully
-     * independent (no groups — a group can never have sibling profiles),
-     * so the former `remainingInGroup` reference-counting
-     * (`profilesInGroup`, conditional `clearModelDataForGroup`/`EvictGroup`)
-     * is dead logic. Simplified to unconditional clear + evict on active
-     * deletion.
-     */
-    fun deleteHostProfile(profileId: String) {
-        val wasCurrent = profileId == slices.host.value.currentHostProfileId
-        val deletedProfile = hostProfileStore.profiles().firstOrNull { it.id == profileId }
-        // §需求12: fp == profile.id (the serverGroupFp field is deleted).
-        val deletedProfileId = deletedProfile?.id
-        hostProfileStore.delete(profileId)
-        deletedProfile?.clientCertId?.let { settingsManager.clearClientCert(it) }
-        val current = hostProfileStore.currentProfile()
-        if (wasCurrent) {
-            // Active deletion: persist + signal restart-required.
-            // Repository will reconfigure on restart with the new current profile.
-            // §需求12阶段3: unconditional clear + evict (no sibling profiles
-            // can reference the group under 需求12).
-            // §需求12 rev-4 blocker B: clear the COMPLETE per-profile ESP
-            // lifecycle, not just the model data — drafts, recent workdirs,
-            // and the basic-auth password must also be purged so the deleted
-            // profile leaves no orphan ESP slots.
-            deletedProfileId?.let { settingsManager.clearAllForProfile(it) }
-            purgePerHostState()
-            deletedProfileId?.let {
-                effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
-            }
-            // lite-v2: RestartRequired supersedes runtime reconfigure.
-            // No ForceReconnect/HostProfileSwitched — restart handles everything.
-            // Lane A: use suspend emitEffect (not tryEmitEffect) so the effect
-            // is never silently dropped — bus-full would suspend the producer
-            // instead of logging and losing the restart signal. Non-suspend
-            // context → wrap in scope.launch.
-            scope.launch {
-                effects.emitEffect(ControllerEffect.RestartRequired)
-            }
-        } else {
-            // §需求12阶段3 (rev-3 blocker #2 fix): non-active deletion must
-            // ALSO clear the deleted profile's persisted ESP data — under
-            // 需求12 profiles are fully independent (a group can never have
-            // sibling profiles), so the per-profile-id availability/disabled
-            // ESP keys are orphans the instant their owning profile is gone.
-            // Without this, deleting a non-current profile leaks
-            // `model_availability_<id>` / `disabled_models_<id>` forever
-            // (only `clearOrphanGroupKeys` migration would eventually catch
-            // them, and only if the id isn't a UUID — but profile ids ARE
-            // UUIDs, so they'd never be cleaned). Mirror the active branch.
-            //
-            // §需求12 rev-4 blocker B: clear the COMPLETE per-profile ESP
-            // lifecycle (drafts / recent workdirs / basic-auth password in
-            // addition to the model data), so non-active deletion is
-            // symmetric with active deletion — no orphan ESP slots leak.
-            deletedProfileId?.let {
-                settingsManager.clearAllForProfile(it)
-                effects.tryEmitEffect(ControllerEffect.EvictGroup(it))
-            }
         }
     }
 

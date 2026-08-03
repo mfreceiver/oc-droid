@@ -9,7 +9,6 @@ import cn.vectory.ocdroid.data.repository.TokenStreamReducer
 import cn.vectory.ocdroid.data.repository.TokenStreamReducerState
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.BundleStamp
-import cn.vectory.ocdroid.ui.NavState
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.StreamOwnedState
 import cn.vectory.ocdroid.util.DebugLog
@@ -22,7 +21,6 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.StateFlow
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -47,10 +45,6 @@ import java.util.concurrent.atomic.AtomicReference
  *    `eventCount==0` early-skip — that pattern would hang forever if the
  *    server never emits a first frame (half-open TCP, silent sidecar boot).
  *  - **reconnect backoff** (exponential, bounded) on failure / Reconnect effect.
- *  - **503 `sse_token_subscriber_limit`** (bounded Retry-After backoff; after
- *    N consecutive failures → capability-degrade: stop attempting the token
- *    stream for that sid until [resetDegraded] is called by the next health
- *    re-check).
  *  - **generation guard** (bgpt MF-3): per-sid generation + per-partId owner
  *    tag. Stale clears (from an old session/generation) do NOT wipe a newer
  *    session's same-partId overlay — extends epoch protection to clear-effects.
@@ -137,22 +131,6 @@ class TokenStreamCoordinator(
     private val scope: CoroutineScope,
     private val slices: SliceFlows,
     private val streamProvider: (sid: String, directory: String?) -> kotlinx.coroutines.flow.Flow<TokenStreamFrame>,
-    // L4 §3.2: foreground gate for token streams. Default true preserves
-    // existing behavior for callers that don't supply this.
-    private val appInForeground: () -> Boolean = { true },
-    /**
-     * L4 §3.2: observable foreground signal for active-stream lifecycle
-     * management (close on background, reopen on foreground-resume).
-     * When null (default), no foreground observer is installed — backward
-     * compatible for callers that only use snapshot-based gating.
-     */
-    private val foregroundSignal: StateFlow<Boolean>? = null,
-    // L4 §3.2 (lane-1 closure): observable nav-route flow for the route
-    // observer. Monitored for route changes that affect the active token
-    // stream. Null (test default) falls back to collecting slices.chat.
-    private val navFlow: StateFlow<NavState>? = null,
-    // L4 §3.2: visible chat session id (from route). Null when no chat is visible.
-    private val visibleChatSessionId: () -> String? = { null },
     private val triggerSinceFetch: (sessionId: String, authoritative: Boolean) -> Unit,
     /**
      * Heartbeat interval the server emits (informational; the watchdog uses
@@ -179,25 +157,8 @@ class TokenStreamCoordinator(
     private val maxBackoffMs: Long = MAX_BACKOFF_MS,
     /** Backoff growth factor. */
     private val backoffMultiplier: Double = BACKOFF_MULTIPLIER,
-    /**
-     * Consecutive 503 `sse_token_subscriber_limit` failures before
-     * capability-degrade kicks in (stop attempting the token stream for the
-     * sid until [resetDegraded]).
-     */
-    private val maxConsecutive503: Int = MAX_CONSECUTIVE_503,
-    /** Retry-After honour for 503 (sidecar advertises 5s). */
-    private val retryAfter503Ms: Long = RETRY_AFTER_503_MS,
     /** Injectable clock for deterministic watchdog tests. */
     private val clock: () -> Long = { System.currentTimeMillis() },
-    /**
-     * Classifies a flow-completion throwable into the recovery class the
-     * coordinator should follow. Default inspects the message for 503 +
-     * subscriber-limit markers (TokenStreamClient closes with
-     * `Exception("token stream failed (code=503)")` when OkHttp's onFailure
-     * had no throwable but a 503 response). Tests override to classify
-     * crafted exceptions deterministically.
-     */
-    private val classifyFailure: (Throwable?) -> TokenStreamFailure = ::defaultClassifyFailure,
     /**
      * §sse-disabled-debug-toggle: when true, [open] short-circuits WITHOUT
      * touching [streamProvider] — NO per-session `/slimapi/sessions/{sid}/stream`
@@ -380,166 +341,15 @@ class TokenStreamCoordinator(
     private val reducerStateBySid = ConcurrentHashMap<String, TokenStreamReducerState>()
     /** Per-sid consecutive reconnect attempts (drives backoff growth). */
     private val attemptBySid = ConcurrentHashMap<String, AtomicInteger>()
-    /** Per-sid consecutive 503 subscriber-limit failures (drives capability-degrade). */
-    private val consecutive503BySid = ConcurrentHashMap<String, AtomicInteger>()
-    /**
-     * Capability-degraded sids — the sidecar's per-instance token-stream
-     * admission cap has been hit repeatedly; the coordinator stops attempting
-     * the stream until [resetDegraded] (called by D2's next health re-check).
-     */
-    private val degradedSids: MutableSet<String> = ConcurrentHashMap.newKeySet()
-
-    /**
-     * L4 §3.2 (lane-1 closure): desired token stream — set by [suspendClose]
-     * when observers (route/foreground) close a stream that SHOULD reopen
-     * when conditions return (route returns to session, app foregrounds, or
-     * gate re-allows). Also set by gate-denied reconnect retries.
-     *
-     * A SINGLE [AtomicReference] replaces the prior two (desiredSid +
-     * desiredDirectory) whose non-atomic read→clear→open compound ops had
-     * races (two observers consume one desired; new sid paired with stale/null
-     * directory; one observer's `set(null)` erasing the other's fresh desired).
-     * All consumption uses [getAndSet] (single-consumer take).
-     *
-     * Distinction: [suspendClose] sets desired and does NOT clear it.
-     * **Explicit close** ([close(sid)]) CLEARS desired for that sid so a
-     * user-closed stream is NOT auto-reopened.
-     */
-    private data class DesiredTokenStream(
-        val sid: String,
-        val directory: String?,
-    )
-    private val desired = AtomicReference<DesiredTokenStream?>(null)
-
-    /**
-     * L4 §3.2: foreground + route observer. Installs two lifecycle-scoped
-     * collectors:
-     *
-     * 1. **Route observer** (always installed): monitors [slices.chat] for
-     *    `currentSessionId` changes. When the visible route leaves the active
-     *    stream's session, the active stream is closed and recorded as desired.
-     *    When the visible route returns to the desired session, the stream is
-     *    reopened.
-     *
-     * 2. **Foreground observer** (installed only when [foregroundSignal] is
-     *    non-null): monitors the app's foreground/background state. On
-     *    background, closes the active stream (recording it as desired). On
-     *    foreground-resume, reopens the desired stream if the route matches.
-     */
-    init {
-        // Route observer: monitor route changes (via navFlow when available,
-        // falling back to slices.chat for backward-compat tests).
-        scope.launch {
-            var lastRouteSid: String? = null
-            if (navFlow != null) {
-                // L4 §3.2 (lane-1 closure): derive the visible sid from the
-                // authoritative route truth (navState.lastRoute), NOT from the
-                // loaded-data pointer (slices.chat.currentSessionId), which
-                // persists after navigating away from Chat.
-                navFlow.collect { _ ->
-                    val routeSid = visibleChatSessionId()
-                    if (routeSid != lastRouteSid) {
-                        lastRouteSid = routeSid
-                        val activeSid = currentSid.get()
-                        if (activeSid != null && (routeSid == null || routeSid != activeSid)) {
-                            // Branch A — leaving the active session: suspend-close
-                            // (records desired, does NOT clear it).
-                            DebugLog.d(TAG, "route changed: active=$activeSid visible=$routeSid — suspending")
-                            suspendClose(activeSid, currentDirectory.get())
-                        } else if (activeSid == null) {
-                            // Branch B — no active stream: maybe reopen a recorded desired.
-                            val d = desired.getAndSet(null)
-                            if (d != null) {
-                                if (routeSid == d.sid) {
-                                    DebugLog.d(TAG, "route changed: desired=${d.sid} visible=$routeSid — reopening")
-                                    open(d.sid, d.directory, source = "route-resume")
-                                } else {
-                                    // Route doesn't match yet — keep desired for later.
-                                    desired.set(d)
-                                }
-                            }
-                        }
-                        // When activeSid != null && routeSid == activeSid: do nothing.
-                    }
-                }
-            } else {
-                // Legacy fallback: collect slices.chat (tests that do not
-                // provide navFlow).
-                slices.chat.collect { chatState ->
-                    val newSid = chatState.currentSessionId
-                    if (newSid != lastRouteSid) {
-                        lastRouteSid = newSid
-                        val activeSid = currentSid.get()
-                        if (activeSid != null && (newSid == null || newSid != activeSid)) {
-                            // Branch A — leaving the active session: suspend-close
-                            // (records desired, does NOT clear it).
-                            DebugLog.d(TAG, "route changed: active=$activeSid visible=$newSid — suspending")
-                            suspendClose(activeSid, currentDirectory.get())
-                        } else if (activeSid == null && newSid != null) {
-                            // Branch B — no active stream: maybe reopen a recorded desired.
-                            val d = desired.getAndSet(null)
-                            if (d != null && newSid == d.sid) {
-                                DebugLog.d(TAG, "route changed: desired=${d.sid} visible=$newSid — reopening")
-                                open(d.sid, d.directory, source = "route-resume")
-                            }
-                            // Note: when route doesn't match, desired is consumed (no re-store).
-                            // The legacy path is test-only; navFlow is authoritative.
-                        }
-                        // When activeSid != null && newSid == activeSid: do nothing.
-                    }
-                }
-            }
-        }
-        // Foreground observer: monitor foreground/background transitions.
-        if (foregroundSignal != null) {
-            scope.launch {
-                foregroundSignal!!.collect { fg ->
-                    if (!fg) {
-                        // App went background → suspend-close active stream (records desired, no clear).
-                        val activeSid = currentSid.get()
-                        if (activeSid != null) {
-                            DebugLog.d(TAG, "app background: suspending active=$activeSid")
-                            suspendClose(activeSid, currentDirectory.get())
-                        }
-                    } else {
-                        // App returned to foreground → reopen desired if route matches.
-                        val d = desired.getAndSet(null)
-                        if (d != null) {
-                            val visSid = visibleChatSessionId()
-                            if (visSid == d.sid) {
-                                DebugLog.d(TAG, "app foreground: reopening desired=${d.sid}")
-                                open(d.sid, d.directory, source = "foreground-resume")
-                            } else {
-                                // Route no longer matches — re-set desired so a
-                                // subsequent route-change can pick it up, but DO
-                                // NOT reopen yet (the route observer will).
-                                desired.set(d)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     private fun dispatchBound(boundBundle: ClientBundle, action: AppAction) {
         synchronized(bundleCommitLock) {
+            // Entry fence: boundBundle must be the currently-published bundle.
+            // currentBundleProvider() cannot change inside this lock
+            // (bundleCommitLock === repository's @Synchronized monitor), so no
+            // mid-block re-check is needed.
             if (currentBundleProvider() !== boundBundle) {
                 DebugLog.d(TAG, "bundle-bound dispatch rejected: superseded bundle")
-                return
-            }
-            val liveStamp = BundleStamp(boundBundle.generation, boundBundle.endpointFp)
-            val stampMatches = when (action) {
-                is AppAction.PartPlaceholderEnsured -> action.bundleStamp == liveStamp
-                is AppAction.PartFullTextReceived -> action.bundleStamp == liveStamp
-                is AppAction.PartDeltaReceived -> action.bundleStamp == liveStamp
-                is AppAction.CoalesceFlushedForPart -> action.bundleStamp == liveStamp
-                is AppAction.ClearTokenStreamState -> action.bundleStamp == liveStamp
-                is AppAction.TokenStreamPartUpdated -> action.bundleStamp == liveStamp
-                else -> true
-            }
-            if (!stampMatches) {
-                DebugLog.d(TAG, "bundle-bound dispatch rejected: stamp mismatch")
                 return
             }
             slices.store.dispatch(action)
@@ -653,22 +463,6 @@ class TokenStreamCoordinator(
             DebugLog.i(TAG, "open($sid): sse_disabled=true → REST-only (no token stream)")
             return
         }
-        // L4 §3.2: token stream gate — foreground + visibleChatSessionId matches.
-        // Record desired, then gate: only open if foreground && visible sid matches.
-        // The desired is retained so a foreground return with the same visible
-        // sid re-opens automatically.
-        //
-        // Gate semantics:
-        //   - appInForeground == false → REJECT (background, no streams).
-        //   - visibleChatSessionId == null → REJECT (no visible chat session).
-        //   - visibleChatSessionId != sid → REJECT (wrong route).
-        val visSid = visibleChatSessionId()
-        if (!appInForeground() || visSid == null || visSid != sid) {
-            DebugLog.d(TAG, "open($sid): gate denied (fg=${appInForeground()}, visible=$visSid) — recording desired only")
-            // Record desired for foreground-resume reopen.
-            desired.set(DesiredTokenStream(sid, directory))
-            return
-        }
         // §T1.1 Fix① + T3.2-C1 IDEMPOTENT GUARD: same (sid, directory,
         // routeToken, published bundle reference) + active lifecycle → skip
         // (no supersede, no provider call). This is the
@@ -766,10 +560,6 @@ class TokenStreamCoordinator(
                 DebugLog.d(TAG, "open($capturedSid) superseded during debounce — skipping")
                 return@launchStreamLifecycle
             }
-            if (capturedSid in degradedSids) {
-                DebugLog.i(TAG, "open($capturedSid) skipped — degraded (503 cap reached)")
-                return@launchStreamLifecycle
-            }
             val (epoch, gen) = beginStreamIncarnation(capturedSid)
             try {
                 runStream(capturedSid, capturedDir, epoch, gen, isReconnect = false, capturedRouteInstance)
@@ -793,8 +583,6 @@ class TokenStreamCoordinator(
      * caller (D2 / ChatViewModel) owns the UX decision of when to wipe the
      * streaming overlay (e.g. on session switch the existing reducer paths
      * already clear it via [AppAction.SessionSelected]).
-     *
-     * Does NOT reset capability-degrade state (use [resetDegraded] for that).
      */
     fun close(sid: String) {
         synchronized(bundleCommitLock) {
@@ -811,13 +599,6 @@ class TokenStreamCoordinator(
             // would fail to clear.
             reconnectRequested.set(null)
         }
-        // L4 §3.2 (lane-1 closure): explicit close CLEARS desired so a
-        // user-closed stream is NOT auto-reopened by the foreground/route
-        // observer. Distinguishes from suspend (background/route-leave)
-        // which sets desired for auto-reopen.
-        desired.updateAndGet { current ->
-            if (current != null && current.sid == sid) null else current
-        }
         // Clear coordinator-internal state for this sid regardless of whether
         // it was the current stream (defensive: covers a stale sid whose job
         // was already cancelled by a newer open()).
@@ -828,51 +609,8 @@ class TokenStreamCoordinator(
         // growth + provides epoch isolation).
         clearSessionRevisions(sid)
         attemptBySid.remove(sid)
-        consecutive503BySid.remove(sid)
         }
     }
-
-    /**
-     * L4 §3.2 (lane-1 closure): suspend-close — records [sid] as the desired
-     * stream for auto-reopen when foreground/route returns, then performs
-     * teardown. Unlike [close], does NOT clear [desired] — the caller
-     * (route/foreground observer) intends to reopen when conditions return.
-     *
-     * Used ONLY by the route and foreground observers; app/user-intended
-     * closure goes through [close], which clears desired.
-     */
-    private fun suspendClose(sid: String, directory: String?) {
-        desired.set(DesiredTokenStream(sid, directory))
-        synchronized(bundleCommitLock) {
-            if (currentSid.get() == sid) {
-                cancelCurrentStream("suspendClose($sid)")
-                currentSid.set(null)
-                currentDirectory.set(null)
-                reconnectRequested.set(null)
-            }
-            // NOTE: desired is intentionally NOT cleared — the observer wants
-            // auto-reopen when conditions (route/foreground) return.
-            ownerByPartId.entries.removeIf { it.value.sid == sid }
-            reducerStateBySid.remove(sid)
-            clearSessionRevisions(sid)
-            attemptBySid.remove(sid)
-            consecutive503BySid.remove(sid)
-        }
-    }
-
-    /**
-     * D2 hook: clears the capability-degrade flag for [sid] (the next health
-     * re-check that re-confirms `SlimapiFeatures.tokenStream == true` should
-     * invoke this so a transient sidecap-full state does not permanently
-     * disable the token stream for the session).
-     */
-    fun resetDegraded(sid: String) {
-        degradedSids.remove(sid)
-        consecutive503BySid.remove(sid)
-    }
-
-    /** Test/diagnostic read. */
-    internal fun isDegraded(sid: String): Boolean = sid in degradedSids
 
     /** Test/diagnostic read: the current stream Job (or null when idle). */
     internal fun currentStreamJobSnapshot(): Job? = currentLifecycle.get()?.job
@@ -905,22 +643,6 @@ class TokenStreamCoordinator(
 
     /** §MF-1 (gate r2) test seam: reads the current sentinel value. */
     internal fun reconnectRequestedSnapshot(): String? = reconnectRequested.get()
-
-    /**
-     * §MF-2 test seam: the current consecutive-503 streak for [sid] (0 when
-     * none recorded). Used by the streak-reset test to assert a successful
-     * frame zeroes the counter.
-     */
-    internal fun consecutive503Of(sid: String): Int =
-        consecutive503BySid[sid]?.get() ?: 0
-
-    /**
-     * §MF-2 test seam: directly increments the consecutive-503 streak (tests
-     * build a partial streak WITHOUT having to wire a 503-throwing provider
-     * + then switch to a succeeding one).
-     */
-    internal fun increment503ForTest(sid: String): Int =
-        consecutive503BySid.computeIfAbsent(sid) { AtomicInteger(0) }.incrementAndGet()
 
     /** Test/diagnostic read: the partIds currently owned by the active stream for [sid]. */
     internal fun ownedPartsForSid(sid: String): Set<String> =
@@ -1048,13 +770,6 @@ class TokenStreamCoordinator(
         // Reset reconnect-attempt counter on any successful frame — the link
         // is alive, the next failure should start a fresh backoff ladder.
         attemptBySid[sid]?.set(0)
-        // §MF-2 (gate r1): reset the consecutive-503 streak on any successful
-        // frame. The "consecutive failures" contract for capability-degrade
-        // means N 503s IN A ROW with no successful traffic between them —
-        // intermittent 503s over a long session must NOT accumulate to a
-        // permanent degrade. A frame proves the stream is alive (the 503
-        // admission gate let us in), so the streak is broken.
-        consecutive503BySid[sid]?.set(0)
 
         // §Stage-B C3 (CRITICAL): capture the route + bundle context ONCE
         // inside the epoch+bundle critical section (after both guards have
@@ -1145,7 +860,6 @@ class TokenStreamCoordinator(
             else -> { /* no dedup for non-part frames */ }
         }
         val (newState, effects) = TokenStreamReducer.reduce(priorState, effectiveFrame, ownedBySession)
-        if (!isBundleCurrentForCommit(boundBundle)) return
         reducerStateBySid[sid] = newState
 
         // B-P0-2 (MAJOR 4 + replacement edge): fire the message.part.removed
@@ -1176,7 +890,6 @@ class TokenStreamCoordinator(
             }
             is TokenStreamFrame.MessagePartRemoved -> {
                 val msgSeq = effectiveFrame.messageEventSeq ?: 0L
-                if (!isBundleCurrentForCommit(boundBundle)) return
                 onMessagePartRemoved(
                     effectiveFrame.sessionId,
                     effectiveFrame.messageId,
@@ -1186,7 +899,6 @@ class TokenStreamCoordinator(
                 )
             }
             is TokenStreamFrame.MessageRemoved -> {
-                if (!isBundleCurrentForCommit(boundBundle)) return
                 onMessageRemoved(
                     effectiveFrame.sessionId,
                     effectiveFrame.messageId,
@@ -1250,9 +962,10 @@ class TokenStreamCoordinator(
         capturedRouteInstance: Long,
         boundBundle: ClientBundle,
     ) {
+        // Entry fence (the dispatchEpochFrame lock already verified boundBundle
+        // is current; currentBundleProvider() cannot change inside that lock).
         if (!isBundleCurrentForCommit(boundBundle)) return
         val acc = state.parts[partId] ?: return
-        if (!isBundleCurrentForCommit(boundBundle)) return
         onPartOwned(sid, gen, partId)
         val stamp = BundleStamp(boundBundle.generation, boundBundle.endpointFp)
         // §E2 PartPlaceholderEnsured from bridge: when a NEW partId arrives that is
@@ -1260,7 +973,6 @@ class TokenStreamCoordinator(
         // the TokenStreamPartUpdated, so MessageCard has a stable list key.
         val msgId = acc.messageId
         if (slices.chat.value.partsByMessage[msgId]?.none { it.id == partId } != false) {
-            if (!isBundleCurrentForCommit(boundBundle)) return
             dispatchBound(
                 boundBundle,
                 AppAction.PartPlaceholderEnsured(
@@ -1277,7 +989,6 @@ class TokenStreamCoordinator(
             TokenPartStreamState.STREAMING -> StreamOwnedState.STREAMING
             TokenPartStreamState.DONE -> StreamOwnedState.DONE
         }
-        if (!isBundleCurrentForCommit(boundBundle)) return
         dispatchBound(
             boundBundle,
             AppAction.TokenStreamPartUpdated(
@@ -1311,13 +1022,12 @@ class TokenStreamCoordinator(
         boundBundle: ClientBundle,
         deferredEffects: MutableList<() -> Unit>,
     ) {
+        // Entry fence (the dispatchEpochFrame lock already verified boundBundle).
         if (!isBundleCurrentForCommit(boundBundle)) return
         when (effect) {
             is TokenStreamCoordinatorEffect.ClearPartState -> {
                 val allowed = filterClearByGeneration(sid, gen, effect.partIds)
-                if (!isBundleCurrentForCommit(boundBundle)) return
                 if (allowed.isNotEmpty()) {
-                    if (!isBundleCurrentForCommit(boundBundle)) return
                     val stamp = BundleStamp(boundBundle.generation, boundBundle.endpointFp)
                     dispatchBound(
                         boundBundle,
@@ -1331,7 +1041,6 @@ class TokenStreamCoordinator(
                 }
             }
             is TokenStreamCoordinatorEffect.TriggerSinceFetch -> {
-                if (!isBundleCurrentForCommit(boundBundle)) return
                 // S2 (Stage-C should-fix): a resync frame may arrive with
                 // sessionId == null (backpressure overflow omits it per the
                 // handoff contract). Infer from the active connection's sid.
@@ -1341,7 +1050,6 @@ class TokenStreamCoordinator(
                 }
             }
             is TokenStreamCoordinatorEffect.Reconnect -> {
-                if (!isBundleCurrentForCommit(boundBundle)) return
                 // §MF-1 (gate r1): do NOT call scheduleReconnect from here —
                 // handleEffect runs synchronously INSIDE `flow.collect { }`
                 // (called from dispatchEpochFrame). Calling scheduleReconnect
@@ -1385,9 +1093,8 @@ class TokenStreamCoordinator(
      *  - [TokenStreamWatchdogTimeout] → watchdog tripped; clear sid's parts +
      *    TriggerSinceFetch(auth) + schedule reconnect.
      *  - [CancellationException] → re-thrown (structured concurrency).
-     *  - any other [Throwable] → classified via [classifyFailure]; transient
-     *    → reconnect backoff, 503 subscriber-limit → bounded Retry-After then
-     *    degrade after N, normal (server clean close) → stop.
+     *  - any other [Throwable] → if null (server clean close) reset attempts,
+     *    otherwise schedule reconnect with exponential backoff.
      */
     private suspend fun runStream(
         sid: String,
@@ -1397,16 +1104,6 @@ class TokenStreamCoordinator(
         isReconnect: Boolean,
         capturedRouteInstance: Long,
     ) {
-        if (isReconnect && sid in degradedSids) return
-        // L4 §3.2: re-check the foreground/route gate before (re)connecting.
-        // The gate was checked at open() entry, but by the time a reconnect
-        // fires (after backoff delay) the app may have gone background or
-        // the route may have changed. If denied, record desired and skip.
-        if (!gateAllows(sid)) {
-            DebugLog.d(TAG, "runStream($sid) isReconnect=$isReconnect: gate denied — recording desired")
-            recordDesired(sid, directory, "runStream-gate")
-            return
-        }
         val connection = try {
             streamConnectionProvider?.invoke(sid, directory) ?: run {
                 val bundle = currentBundleProvider() ?: return
@@ -1549,66 +1246,18 @@ class TokenStreamCoordinator(
     }
 
     /**
-     * Flow failed (or provider threw). Classify and route to the matching
-     * recovery class.
+     * Flow failed (or provider threw). Schedule a reconnect with exponential
+     * backoff — 503 `sse_token_subscriber_limit` falls into this bucket,
+     * where bounded exponential backoff up to [maxBackoffMs] is graceful
+     * degradation.
      *
-     * §MF-1 (gate r1): the 503-retry path goes through [launchStreamLifecycle]
-     * (same as open + scheduleReconnect) so the retry is tracked in
-     * [currentStreamJob] and supersedes any prior lifecycle job. This closes
-     * the "orphan 503-retry in delay + user open(A) → second concurrent
-     * collector" race.
+     * Note: server clean close (flow completing without an exception) is
+     * handled by the normal-completion path in [runStream] (resets the
+     * attempt counter) and does NOT enter this method.
      */
     private fun onStreamFailure(sid: String, directory: String?, t: Throwable) {
-        when (val cls = classifyFailure(t)) {
-            TokenStreamFailure.Normal -> {
-                // Server clean close — no reconnect, reset attempts.
-                attemptBySid[sid]?.set(0)
-            }
-            TokenStreamFailure.Transient -> {
-                scheduleReconnect(sid, directory)
-            }
-            TokenStreamFailure.SubscriberLimit503 -> {
-                val n = consecutive503BySid.computeIfAbsent(sid) { AtomicInteger(0) }.incrementAndGet()
-                DebugLog.w(TAG, "503 sse_token_subscriber_limit sid=$sid consecutive=$n/$maxConsecutive503")
-                if (n >= maxConsecutive503) {
-                    DebugLog.w(TAG, "503 cap reached sid=$sid — degrading (next health re-check re-arms via resetDegraded)")
-                    degradedSids.add(sid)
-                    // Stop attempting — do NOT schedule reconnect.
-                } else {
-                    // §MF-1 (gate r1): bounded Retry-After backoff via the
-                    // lifecycle-tracked launch helper (NOT a bare scope.launch)
-                    // so the retry is supervised under currentStreamJob.
-                    // §B4 lifecycle capture at 503-retry: snapshot the route
-                    // token NOW and thread it verbatim through runStream →
-                    // dispatchEpochFrame (rev-gpt C2 — no shared field).
-                    // §B4 rev-gpt round3 MAJOR: also publish into
-                    // lifecycleRouteInstance so the open() guard recognizes
-                    // this retry as the in-flight lifecycle (a same-session
-                    // open during the Retry-After delay absorbs instead of
-                    // superseding a perfectly-good retry).
-                    val retryRouteInstance = slices.routeInstanceFor(sid)
-                    lifecycleRouteInstance.set(retryRouteInstance)
-                    launchStreamLifecycle(sid, "503-retry") {
-                        delay(retryAfter503Ms)
-                        if (currentSid.get() != sid) return@launchStreamLifecycle
-                        if (sid in degradedSids) return@launchStreamLifecycle
-                        // L4 §3.2: re-check the gate before retrying. The app
-                        // may have gone background during the Retry-After delay.
-                        if (!gateAllows(sid)) {
-                            DebugLog.d(TAG, "503-retry($sid): gate denied after delay — recording desired")
-                            recordDesired(sid, directory, "503-retry")
-                            return@launchStreamLifecycle
-                        }
-                        val (epoch, gen) = beginStreamIncarnation(sid)
-                        try {
-                            runStream(sid, directory, epoch, gen, isReconnect = true, retryRouteInstance)
-                        } catch (ce: CancellationException) {
-                            throw ce
-                        }
-                    }
-                }
-            }
-        }
+        DebugLog.w(TAG, "stream failure sid=$sid — scheduling reconnect: ${t.message}")
+        scheduleReconnect(sid, directory)
     }
 
     // ── Reconnect backoff ────────────────────────────────────────────────────
@@ -1616,7 +1265,7 @@ class TokenStreamCoordinator(
     /**
      * Schedules a reconnect for [sid] under the captured [directory] with
      * exponential backoff (seed [initialBackoffMs] × [backoffMultiplier]^attempt,
-     * capped at [maxBackoffMs]). Skipped if [sid] is capability-degraded.
+     * capped at [maxBackoffMs]).
      *
      * §MF-1 (gate r1): the reconnect job goes through [launchStreamLifecycle]
      * which superseded the prior [currentStreamJob]. This is the ONLY re-entry
@@ -1628,10 +1277,6 @@ class TokenStreamCoordinator(
      * sole tracked lifecycle job.
      */
     private fun scheduleReconnect(sid: String, directory: String?) {
-        if (sid in degradedSids) {
-            DebugLog.i(TAG, "scheduleReconnect sid=$sid skipped — degraded")
-            return
-        }
         val attempt = attemptBySid.computeIfAbsent(sid) { AtomicInteger(0) }.getAndIncrement()
         val backoff = nextBackoffMs(attempt)
         DebugLog.i(TAG, "scheduleReconnect sid=$sid attempt=$attempt backoff=${backoff}ms")
@@ -1655,15 +1300,6 @@ class TokenStreamCoordinator(
             // moved on OR superseded this job (in which case the delay threw
             // CancellationException and we never reach here).
             if (currentSid.get() != sid) return@launchStreamLifecycle
-            if (sid in degradedSids) return@launchStreamLifecycle
-            // L4 §3.2: re-check the gate before reconnecting. If the app went
-            // background or the route changed during the backoff delay, record
-            // desired and skip the reconnect.
-            if (!gateAllows(sid)) {
-                DebugLog.d(TAG, "scheduleReconnect($sid): gate denied after backoff — recording desired")
-                recordDesired(sid, directory, "scheduleReconnect")
-                return@launchStreamLifecycle
-            }
             val (epoch, gen) = beginStreamIncarnation(sid)
             try {
                 runStream(sid, directory, epoch, gen, isReconnect = true, reconnectRouteInstance)
@@ -1716,7 +1352,7 @@ class TokenStreamCoordinator(
 
     /**
      * §MF-1 (gate r1): the SINGLE launch point for every stream lifecycle job
-     * (open + reconnect + 503-retry). Atomically supersedes the prior
+     * (open + reconnect). Atomically supersedes the prior
      * [currentStreamJob] (getAndSet + cancel) so there is at most ONE tracked
      * lifecycle job at any time — closing the "orphan reconnect in delay +
      * user open → second concurrent collector" race that a bare `scope.launch`
@@ -1778,25 +1414,6 @@ class TokenStreamCoordinator(
         currentLifecycle.get()?.job?.cancel(CancellationException(reason))
     }
 
-    /**
-     * L4 §3.2: returns true iff the token stream gate allows a connection for
-     * [sid] — foreground is active AND there is a visible chat session AND
-     * it matches [sid].
-     */
-    private fun gateAllows(sid: String): Boolean {
-        val visSid = visibleChatSessionId()
-        return appInForeground() && visSid != null && visSid == sid
-    }
-
-    /**
-     * L4 §3.2: records [sid] as the desired stream (for foreground-resume or
-     * route-return reopen) and logs the reason.
-     */
-    private fun recordDesired(sid: String, directory: String?, reason: String) {
-        desired.set(DesiredTokenStream(sid, directory))
-        DebugLog.d(TAG, "recordDesired($sid) reason=$reason")
-    }
-
     companion object {
         private const val TAG = "TokenStreamCoordinator"
 
@@ -1815,10 +1432,6 @@ class TokenStreamCoordinator(
         internal const val INITIAL_BACKOFF_MS = 1_000L
         internal const val MAX_BACKOFF_MS = 30_000L
         internal const val BACKOFF_MULTIPLIER = 2.0
-
-        // §3.10 Stage-D: 503 sse_token_subscriber_limit handling.
-        internal const val MAX_CONSECUTIVE_503 = 3
-        internal const val RETRY_AFTER_503_MS = 5_000L
     }
 }
 
@@ -1827,54 +1440,6 @@ class TokenStreamCoordinator(
  * `[OwnerTag] == OwnerTag(sid, gen)` is the equality check [clearPart] uses.
  */
 internal data class OwnerTag(val sid: String, val gen: Long)
-
-/**
- * Recovery class for a token-stream flow completion. Routed by
- * [TokenStreamCoordinator.onStreamFailure] via the injected [classifyFailure].
- *
- * Public (not internal) so the public coordinator constructor parameter
- * `classifyFailure: (Throwable?) -> TokenStreamFailure` does not expose an
- * internal type (Kotlin: "public function exposes internal parameter type").
- */
-sealed interface TokenStreamFailure {
-    /** Server closed cleanly (no throwable); do NOT reconnect. */
-    object Normal : TokenStreamFailure
-    /** Transient network blip / unknown failure; reconnect with backoff. */
-    object Transient : TokenStreamFailure
-    /** 503 `sse_token_subscriber_limit` — bounded Retry-After, then degrade. */
-    object SubscriberLimit503 : TokenStreamFailure
-}
-
-/**
- * Default failure classifier. TokenStreamClient.onFailure closes the flow with
- * `t ?: Exception("token stream failed (code=${response?.code})")`. The
- * subscriber-limit failure surfaces as either:
- *  - a throwable whose message carries `503` + a `subscriber`/`token_subscriber`
- *    marker (when the sidecar's JSON error body was threaded through), OR
- *  - the bare `"token stream failed (code=503)"` exception (when OkHttp had
- *    no throwable, only the HTTP 503 response).
- *
- * The second case is ambiguous with any other 503; the coordinator treats it
- * as SubscriberLimit503 anyway because the token-stream endpoint's only
- * advertised 503 reason IS the subscriber cap (the sidecar's
- * `sse_token_subscriber_limit` admission gate). A genuine upstream 503 would
- * not reach this SSE endpoint (the sidecar returns 502/504 for upstream
- * failures).
- */
-internal fun defaultClassifyFailure(t: Throwable?): TokenStreamFailure {
-    if (t == null) return TokenStreamFailure.Normal
-    val msg = t.message.orEmpty()
-    return when {
-        msg.contains("503") &&
-            (msg.contains("subscriber", ignoreCase = true) ||
-                msg.contains("token_subscriber", ignoreCase = true)) ->
-            TokenStreamFailure.SubscriberLimit503
-        // Bare "code=503" from TokenStreamClient's fallback exception — treat
-        // as subscriber-limit per the comment above.
-        msg.contains("code=503") -> TokenStreamFailure.SubscriberLimit503
-        else -> TokenStreamFailure.Transient
-    }
-}
 
 /**
  * Watchdog timeout sentinel — thrown by the watchdog coroutine to break the

@@ -368,10 +368,8 @@ fun SessionsScreen(
                             // pulse on the status dot while the SSE transport
                             // is live (a valid frame reached the owner).
                             isSseConnected = isSseConnected,
-                            hostProfiles = host.hostProfiles,
-                            currentHostProfileId = host.currentHostProfileId,
+                            currentHost = curHostProfile,
                             serverVersion = connection.serverVersion,
-                            onSelectHost = { id -> hostVM?.selectHostProfile(id) },
                             // §final-review F1: home popup "force refresh" does
                             // a REAL reconnect (coldStartReconnect →
                             // testConnection(force=true, retries=3) +

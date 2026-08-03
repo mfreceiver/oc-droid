@@ -176,6 +176,7 @@ class EffectiveConnectionConfigResolverTest {
             username = "user",
             password = "password",
             slimHost = true,
+            trustAllHost = false,
         )
         every { settings.effectiveConnectionSourceMarker } returns EffectiveConnectionSource.Profile.name
         every { settings.currentWorkdir } returns "/work"

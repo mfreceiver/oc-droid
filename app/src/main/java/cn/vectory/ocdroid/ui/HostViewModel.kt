@@ -177,22 +177,6 @@ class HostViewModel @Inject constructor(
         _saveState.value = HostProfileSaveState.Idle
     }
 
-    fun selectHostProfile(profileId: String) {
-        // §R-17 batch3d: routes through the host controller; the cross-domain
-        // fan-out (SSE cancel/restart, session-list purge, session-window
-        // cache clear, cold-start reconnect) flows back through the effect bus
-        // and is dispatched by AppCore. No `core.selectHostProfile()` bypass.
-        hostProfileController.selectHostProfile(profileId)
-    }
-
-    fun duplicateHostProfile(profileId: String) {
-        hostProfileController.duplicateHostProfile(profileId)
-    }
-
-    fun deleteHostProfile(profileId: String) {
-        hostProfileController.deleteHostProfile(profileId)
-    }
-
     fun importHostProfile(payload: String): Result<HostProfile> =
         hostProfileController.importHostProfile(payload)
 

@@ -4,8 +4,6 @@ import cn.vectory.ocdroid.data.model.HealthResponse
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
-import cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator
-import cn.vectory.ocdroid.service.bootstrap.TofuState
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.coEvery
@@ -22,7 +20,6 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertFalse
 import org.junit.Test
-import javax.net.ssl.SSLHandshakeException
 
 class ConnectionBootstrapEngineTest {
     private val profile = HostProfile(
@@ -35,7 +32,6 @@ class ConnectionBootstrapEngineTest {
         val engine: ConnectionBootstrapEngine,
         val repository: OpenCodeRepository,
         val store: ConnectionIdentityStore,
-        val coordinator: ConnectionBootstrapCoordinator,
         val resolver: EffectiveConnectionConfigResolver,
     )
 
@@ -43,10 +39,7 @@ class ConnectionBootstrapEngineTest {
         val settings = mockk<SettingsManager>(relaxed = true)
         val repository = mockk<OpenCodeRepository>(relaxed = true)
         every { settings.currentWorkdir } returns "/work"
-        every { repository.pinnedSpkiFor(any()) } returns null
-        every { repository.isMutualTlsActive() } returns false
         val store = ConnectionIdentityStore()
-        val coordinator = ConnectionBootstrapCoordinator()
         val resolver = mockk<EffectiveConnectionConfigResolver>()
         every { resolver.resolve() } returns EffectiveConnectionConfig(
             source = EffectiveConnectionSource.Profile,
@@ -66,13 +59,11 @@ class ConnectionBootstrapEngineTest {
                 settings,
                 repository,
                 store,
-                coordinator,
                 ServerCompatProfile(),
                 hasActivity = { hasActivity },
             ),
             repository,
             store,
-            coordinator,
             resolver,
         )
     }
@@ -86,7 +77,7 @@ class ConnectionBootstrapEngineTest {
         val result = f.engine.bootstrap() as ConnectionBootstrapOutcome.Success
 
         verify(exactly = 1) {
-            f.repository.configure("https://server:443", null, null, "server:443", null, false)
+            f.repository.configure("https://server:443", null, null, "server:443", null, false, false)
         }
         coVerify(exactly = 1) { f.repository.checkHealth() }
         assertEquals(result.identity, f.store.currentIdentity.value)
@@ -117,7 +108,6 @@ class ConnectionBootstrapEngineTest {
             settings,
             repository,
             store,
-            ConnectionBootstrapCoordinator(),
             ServerCompatProfile(),
             hasActivity = { false },
         )
@@ -132,28 +122,11 @@ class ConnectionBootstrapEngineTest {
                 "manual.example:8443",
                 null,
                 false,
+                false,
             )
         }
         assertEquals("https://manual.example:8443", result.identity.endpointFp)
         assertEquals("/manual-work", result.identity.normalizedWorkdir)
-    }
-
-    @Test
-    fun `no Activity TLS failure retains degraded capture without waiting decision`() = runTest {
-        val f = fixture(hasActivity = false)
-        every { f.repository.configure(any(), any(), any(), any(), any(), any()) } returns Unit
-        val failure = SSLHandshakeException("unknown CA")
-        coEvery { f.repository.checkHealth() } returns Result.failure(failure)
-        val capture = mockk<OpenCodeRepository.TofuCaptureResult>()
-        every { capture.hostPort } returns "server:443"
-        coEvery { f.repository.captureServerCert(any(), any(), any()) } returns capture
-
-        val result = f.engine.bootstrap()
-
-        assertEquals(ConnectionBootstrapOutcome.TofuNeedsActivity("server:443", capture), result)
-        val state = f.coordinator.tofuState.value as TofuState.DegradedNeedsActivity
-        assertSame(capture, state.capture)
-        coVerify(exactly = 1) { f.repository.checkHealth() }
     }
 
     @Test
@@ -191,7 +164,7 @@ class ConnectionBootstrapEngineTest {
         f.engine.bootstrap() as ConnectionBootstrapOutcome.Success
 
         verify(exactly = 1) {
-            f.repository.configure("https://server:443", null, null, "server:443", null, true)
+            f.repository.configure("https://server:443", null, null, "server:443", null, true, false)
         }
     }
 
@@ -204,7 +177,7 @@ class ConnectionBootstrapEngineTest {
         f.engine.bootstrap() as ConnectionBootstrapOutcome.Success
 
         verify(exactly = 1) {
-            f.repository.configure("https://server:443", null, null, "server:443", null, false)
+            f.repository.configure("https://server:443", null, null, "server:443", null, false, false)
         }
     }
 
@@ -245,9 +218,9 @@ class ConnectionBootstrapEngineTest {
         f.engine.bootstrap() as ConnectionBootstrapOutcome.Success
 
         verify(exactly = 1) {
-            f.repository.configure("https://server:443", null, null, "server:443", null, true)
+            f.repository.configure("https://server:443", null, null, "server:443", null, true, false)
         }
-            }
+    }
 
 
 

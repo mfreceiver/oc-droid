@@ -171,7 +171,7 @@ object HttpImageHolder {
         lastUpdateSslMode = when (cfg) {
             SslConfig.SystemDefault -> "SYSTEM"
             is SslConfig.MutualTLS -> "MUTUAL_TLS"
-            is SslConfig.TofuPinned -> "TOFU_PINNED"
+            SslConfig.TrustAll -> "TRUST_ALL"
         }
         if (cfg == imageSslConfig) return
         imageSslConfig = cfg

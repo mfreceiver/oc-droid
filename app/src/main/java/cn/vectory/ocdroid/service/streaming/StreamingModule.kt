@@ -1,12 +1,9 @@
 package cn.vectory.ocdroid.service.streaming
 
 import cn.vectory.ocdroid.di.ApplicationScope
-import cn.vectory.ocdroid.service.AndroidStreamingServiceLauncher
-import cn.vectory.ocdroid.service.StreamingServiceLauncher
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.StatusAggregatorInput
-import cn.vectory.ocdroid.data.state.AuthorityState
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -44,17 +41,6 @@ abstract class StreamingModule {
     @Binds
     @Singleton
     abstract fun bindSessionSnapshotProvider(impl: SharedStateStoreSessionSnapshotProvider): SessionSnapshotProvider
-
-    /**
-     * CP9 (notify Phase-0 switchover): binds the Android launcher impl so
-     * [cn.vectory.ocdroid.ui.controller.ConnectionCoordinator] can inject
-     * [StreamingServiceLauncher] by interface. Tests inject a fake launcher
-     * directly (no Hilt container) — see [cn.vectory.ocdroid.ui.controller.
-     * ConnectionCoordinatorTest].
-     */
-    @Binds
-    @Singleton
-    abstract fun bindStreamingServiceLauncher(impl: AndroidStreamingServiceLauncher): StreamingServiceLauncher
 
     @Binds
     @Singleton
@@ -178,48 +164,79 @@ object ProcessStatusPollerModule {
                 sessionSyncCoordinator.applySlimStatusFanOutSummary(summary)
             },
 
-            // §U-P2: the watchdog's authorityState reader + reconcile sink
-            // moved to OptimisticClaimWatchdogCoordinator (see
-            // [provideWatchdogCoordinator] below). The poller no longer
-            // carries them.
         )
     }
 
-    /**
-     * §U-P2 (Batch 2): provides the process-level
-     * [OptimisticClaimWatchdogCoordinator] singleton. Extracted as a
-     * `@Provides` so the function-typed deps (`() -> AuthorityState`,
-     * `() -> Long`, the suspend sink) can be filled without Hilt bindings
-     * for the function types (mirrors [provideProcessStatusPoller]'s pattern).
-     *
-     * The coordinator runs its OWN 5s timer (`tickIntervalMs` default =
-     * [cn.vectory.ocdroid.ui.OPTIMISTIC_CONFIRM_TIMEOUT_MS]) on
-     * `@ApplicationScope`, independent of the 30s bulk poller. The
-     * connection lifecycle (ServiceShell startPoller / ensurePoller /
-     * stopPoller / enterNoSourceTerminal) calls [OptimisticClaimWatchdogCoordinator.start]
-     * / [OptimisticClaimWatchdogCoordinator.stop] so the watchdog is bound
-     * to the SAME connection lifetime as the poller.
-     */
+}
+
+/**
+ * L2: provides the [ServiceSseConnectionOwner] singleton.
+ *
+ * Constructed via `@Provides` (not `@Inject constructor`) because the
+ * constructor receives function-type parameters (onResync, onTerminalDrop)
+ * that Hilt cannot bind directly.
+ *
+ * L2 removals:
+ *  - `recoveryPolicy: SseRecoveryPolicy` (the retry loop died)
+ *  - `reconnectAllowed` lambda + `appLifecycleMonitor` (no reconnect gate)
+ *  - `jitterSource` (no retry jitter)
+ *  - `recoveryPolicy` param stays as a class (ProcessStatusPoller still uses
+ *    it) but is dropped from the Owner constructor + this @Provides.
+ *  - Added `ownershipGate: StreamingOwnershipGate` (lease authority).
+ *  - Renamed `onTerminalExhaustion` → `onTerminalDrop`.
+ */
+@Module
+@InstallIn(SingletonComponent::class)
+object ServiceSseConnectionOwnerModule {
     @Provides
     @Singleton
-    fun provideWatchdogCoordinator(
+    fun provideServiceSseConnectionOwner(
         @ApplicationScope scope: CoroutineScope,
+        repository: cn.vectory.ocdroid.data.repository.OpenCodeRepository,
+        identityStore: ConnectionIdentityStore,
+        sseEventStream: cn.vectory.ocdroid.service.events.SseEventStream,
+        sharedStateStore: cn.vectory.ocdroid.ui.SharedStateStore,
+        sharedEffectBus: cn.vectory.ocdroid.ui.SharedEffectBus,
+        ownershipGate: cn.vectory.ocdroid.service.StreamingOwnershipGate,
+        runtimeStore: SseTransportRuntimeStore,
+        dropHandler: ForegroundTransportDropHandler,
+        settingsManager: cn.vectory.ocdroid.util.SettingsManager,
         sessionSyncCoordinator:
             cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator,
-        identityStore: ConnectionIdentityStore,
-    ): OptimisticClaimWatchdogCoordinator = OptimisticClaimWatchdogCoordinator(
+    ): ServiceSseConnectionOwner = ServiceSseConnectionOwner(
         scope = scope,
-        authorityState = { sessionSyncCoordinator.currentAuthority() },
+        repository = repository,
         identityStore = identityStore,
-        clock = { System.currentTimeMillis() },
-        // §U-P2 SLA fix (rev-gpt gate r1 BLOCKER #2): tick STRICTLY SMALLER than
-        // OPTIMISTIC_CONFIRM_TIMEOUT_MS so worst-case detection ≈ timeout+tick
-        // (~6s) honors the ~7.5s self-heal SLA. tick==timeout gave ~10s worst case.
-        tickIntervalMs = cn.vectory.ocdroid.ui.OPTIMISTIC_CLAIM_WATCHDOG_TICK_MS,
-        // §U-P2: reconcile sink routes to the coordinator which queries the
-        // repository per-sid and dispatches ApplyReconcileOutcome.
-        staleClaimReconcileSink = { identity, claims ->
-            sessionSyncCoordinator.reconcileStaleOptimisticClaims(identity, claims)
+        sseEventStream = sseEventStream,
+        sharedStateStore = sharedStateStore,
+        sharedEffectBus = sharedEffectBus,
+        ownershipGate = ownershipGate,
+        runtimeStore = runtimeStore,
+        dropHandler = dropHandler,
+        onResync = onResync@{ isStillCurrent ->
+            if (!isStillCurrent()) return@onResync
+            if (!repository.supportsWatermarkResync) return@onResync
+            val directories = buildList {
+                sharedStateStore.slices.sessionList.value.directorySessions.keys
+                    .forEach { add(it) }
+                settingsManager.currentWorkdir?.let { add(it) }
+            }
+                .filter { it.isNotBlank() }
+                .map { cn.vectory.ocdroid.util.WorkdirPaths.normalizeDirectory(it) }
+                .distinct()
+                .ifEmpty { null }
+            cn.vectory.ocdroid.util.DebugLog.i(
+                "ServiceSseConnectionOwner",
+                "slim onResync directories=$directories",
+            )
+            sessionSyncCoordinator.reconcileFullAfterTransportReset(
+                isStillCurrent = isStillCurrent,
+            )
+        },
+        onTerminalDrop = {
+            sharedEffectBus.tryEmitEffect(
+                cn.vectory.ocdroid.ui.controller.ControllerEffect.ColdStartReconnect,
+            )
         },
     )
 }
@@ -234,7 +251,6 @@ object ConnectionBootstrapEngineModule {
         settingsManager: cn.vectory.ocdroid.util.SettingsManager,
         repository: cn.vectory.ocdroid.data.repository.OpenCodeRepository,
         identityStore: ConnectionIdentityStore,
-        bootstrapCoordinator: cn.vectory.ocdroid.service.bootstrap.ConnectionBootstrapCoordinator,
         serverCompatProfile: cn.vectory.ocdroid.data.repository.ServerCompatProfile,
         appLifecycleMonitor: cn.vectory.ocdroid.di.AppLifecycleMonitor,
     ): ConnectionBootstrapEngine = ConnectionBootstrapEngine(
@@ -242,7 +258,6 @@ object ConnectionBootstrapEngineModule {
         settingsManager = settingsManager,
         repository = repository,
         identityStore = identityStore,
-        bootstrapCoordinator = bootstrapCoordinator,
         serverCompatProfile = serverCompatProfile,
         hasActivity = { appLifecycleMonitor.isInForeground.value },
     )

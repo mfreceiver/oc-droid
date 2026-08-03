@@ -272,21 +272,11 @@
     <string name="host_profile_name">Profile name</string>
     <string name="host_profile_basic_auth_username">Basic Auth username (optional)</string>
     <string name="host_profile_basic_auth_password">Basic Auth password (optional)</string>
-    <!-- §tofu R2: SSH-style trust-on-first-use cert fingerprint pinning. The
-         legacy host_allow_insecure_title / host_allow_insecure_summary strings
-         are REMOVED — self-signed endpoints now surface the TOFU trust dialog
-         at first connect instead of a per-profile trust-all toggle. -->
-    <string name="tofu_dialog_title">Server certificate</string>
-    <string name="tofu_cert_subject">Subject</string>
-    <string name="tofu_cert_issuer">Issuer</string>
-    <string name="tofu_cert_expiry">Expires</string>
-    <string name="tofu_cert_fingerprint">SHA-256 fingerprint</string>
-    <string name="tofu_cert_reason_unknown_issuer">This certificate is not signed by a known authority. Verify the fingerprint with the server administrator before trusting.</string>
-    <string name="tofu_cert_reason_expired">This certificate has expired or is not yet valid.</string>
-    <string name="tofu_cert_reason_hostname">This certificate does not cover the hostname you connected to.</string>
-    <string name="tofu_accept_once">Accept once</string>
-    <string name="tofu_trust">Trust permanently</string>
-    <string name="tofu_cancel">Cancel</string>
+    <!-- §L7 trust-all: per-server certificate verification skip. mTLS takes
+         priority — trust-all applies only when no mTLS client cert is set. -->
+    <string name="host_trust_all_title">Trust all certificates</string>
+    <string name="host_trust_all_subtitle">Skip server certificate verification (no MITM protection)</string>
+    <string name="host_trust_all_mtls_conflict">mTLS takes priority — trust-all only applies when no mTLS client cert is set</string>
     <!-- §2.7 mTLS client certificate (stunnel + shared PKCS12) -->
     <string name="host_mtls_title">mTLS connection</string>
     <string name="host_mtls_summary">Mutually exclusive with insecure HTTPS.</string>
@@ -598,26 +588,6 @@
          settings_section_hosts is retained as the legacy long-form label but
          no longer drives the hub title. -->
     <string name="setux_settings_hosts_entry">Server</string>
-
-    <!-- §FGS-notify CP5: ongoing session-status notification copy. Channel
-         `ocdroid.session_status` is IMPORTANCE_LOW per spec §7 matrix, so
-         copy is the differentiator across L1-busy / L2-active / L2-idle /
-         degraded sub-states. English is the source; values-zh holds the
-         zh-CN translation. -->
-    <string name="notify_session_restoring">Restoring connection…</string>
-    <string name="notify_session_busy_singular">1 task running</string>
-    <string name="notify_session_busy_plural">%1$d tasks running</string>
-    <string name="notify_session_connected">Connected</string>
-    <string name="notify_session_idle_monitoring">Idle monitoring</string>
-    <string name="notify_session_degraded_title">Server trust required</string>
-    <string name="notify_session_degraded_content">Open the app to confirm server trust</string>
-
-    <!-- §FGS-notify CP8 (§16-U1): ongoing FGS notifications cannot be swiped
-         by the user (Android硬性), so the ongoing notification carries a
-         Action whose label is this string and whose PendingIntent delivers
-         ACTION_CLOSE_BACKGROUND → coordinator teardown (L3). The label reads
-         as a verb phrase the user taps to deliberately stop background work. -->
-    <string name="notify_close_background">Stop background</string>
 
     <!-- §slimapi-client-v1 §G6 (Task 16): inline affordance on skeleton parts
          that have full content available for expansion. The user taps this

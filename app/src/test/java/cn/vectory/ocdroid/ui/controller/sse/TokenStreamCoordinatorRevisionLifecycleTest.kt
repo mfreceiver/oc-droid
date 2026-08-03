@@ -65,11 +65,6 @@ class TokenStreamCoordinatorRevisionLifecycleTest {
         repository: OpenCodeRepository,
         onPartDone: (String, String, String) -> Unit = { _, _, _ -> },
         clearSessionRevisions: (String) -> Unit = { _ -> },
-        // L4 Phase-1: test fixtures for foreground/route gate.
-        // Default to permissive (foreground + visible "s1") so tests
-        // that open "s1" continue to work.
-        appInForeground: () -> Boolean = { true },
-        visibleChatSessionId: () -> String? = { "s1" },
     ): TokenStreamCoordinator {
         val bundle = repository.currentClientBundle()!!
         store.dispatch(AppAction.BundlePublished(bundle.generation, bundle.endpointFp))
@@ -80,8 +75,6 @@ class TokenStreamCoordinatorRevisionLifecycleTest {
             triggerSinceFetch = { _, _ -> },
             bundleCommitLock = repository,
             currentBundleProvider = { repository.currentClientBundle() },
-            appInForeground = appInForeground,
-            visibleChatSessionId = visibleChatSessionId,
             onPartDone = onPartDone,
             clearSessionRevisions = clearSessionRevisions,
         )
@@ -318,7 +311,6 @@ class TokenStreamCoordinatorRevisionLifecycleTest {
         )
         val clearCalls = mutableListOf<ClearSessionRevisionsCall>()
         // L4 Phase-1: use a mutable fixture so the gate allows both sids.
-        var testVisibleSid = "s-a"
         val coordinator = makeCoordinator(
             scope = scope,
             store = store,
@@ -326,7 +318,6 @@ class TokenStreamCoordinatorRevisionLifecycleTest {
             clearSessionRevisions = { sid ->
                 clearCalls += ClearSessionRevisionsCall(sid)
             },
-            visibleChatSessionId = { testVisibleSid },
         )
 
         // Open session A, then directly open session B WITHOUT explicit close.
@@ -334,7 +325,6 @@ class TokenStreamCoordinatorRevisionLifecycleTest {
         // clearSessionRevisions("s-a") before setting currentSid to "s-b".
         coordinator.open("s-a")
         scope.runCurrent()
-        testVisibleSid = "s-b"
         coordinator.open("s-b")
         scope.runCurrent()
 

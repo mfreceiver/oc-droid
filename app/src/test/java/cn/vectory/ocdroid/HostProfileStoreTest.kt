@@ -12,7 +12,7 @@ import io.mockk.runs
 import io.mockk.unmockkAll
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.After
 import org.junit.Before
@@ -59,32 +59,31 @@ class HostProfileStoreTest {
     }
 
     @Test
-    fun `save select duplicate and delete profiles`() {
+    fun `save replaces single host in place`() {
         val original = store.currentProfile()
-        val remote = HostProfile(
-            name = "Remote",
-            serverUrl = "https://opencode.example.com"
-        )
+        val updated = original.copy(name = "Updated")
 
-        store.save(remote)
-        assertEquals(2, store.profiles().size)
-
-        val selected = store.select(remote.id)
-        assertEquals(remote.id, selected.id)
-        assertEquals(remote.id, currentHostProfileId)
-
-        val duplicate = store.duplicate(remote.id)
-        assertNotEquals(remote.id, duplicate.id)
-        assertTrue(duplicate.name.contains("Copy"))
-
-        store.delete(original.id)
-        assertEquals(2, store.profiles().size)
+        store.save(updated)
+        val profiles = store.profiles()
+        assertEquals(1, profiles.size)
+        assertEquals("Updated", profiles.first().name)
+        assertEquals(original.id, profiles.first().id)
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun `cannot delete last profile`() {
-        val only = store.currentProfile()
-        store.delete(only.id)
+    @Test
+    fun `select validates single-host mode and refreshes lastUsedAt`() {
+        val profile = store.currentProfile()
+        val selected = store.select(profile.id)
+        assertEquals(profile.id, selected.id)
+        // save replaced in place, list stays size 1
+        assertEquals(1, store.profiles().size)
+    }
+
+    @Test
+    fun `select with wrong id throws in single-host mode`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            store.select("non-existent-id")
+        }
     }
 
     @Test
@@ -153,14 +152,39 @@ class HostProfileStoreTest {
     // in old JSON. These normalize-invariant tests were removed with the field.
 
     @Test
-    fun `duplicate creates an independent profile`() {
-        // §需求12: duplicate clones config into a fresh id (fp == id, no
-        // grouping concept remains).
-        val original = store.currentProfile()
-        val dup = store.duplicate(original.id)
+    fun `legacy multi-profile storage is trimmed to single host`() {
+        val rawArray = """
+            [
+              {"id":"keep-id","name":"Keep","serverURL":"https://keep.example.com"},
+              {"id":"other-id","name":"Other","serverURL":"https://other.example.com"}
+            ]
+        """.trimIndent()
+        hostProfilesJson = rawArray
+        currentHostProfileId = "keep-id"
 
-        assertNotEquals(original.id, dup.id)
-        assertTrue(dup.name.contains("Copy"))
+        val profiles = store.profiles()
+        assertEquals("L8 trims to single host", 1, profiles.size)
+        assertEquals("keep-id", profiles.first().id)
+        // The persisted JSON is also trimmed
+        val persisted = hostProfilesJson!!
+        assertTrue(persisted.contains("keep-id"))
+        assertFalse(persisted.contains("other-id"))
+    }
+
+    @Test
+    fun `legacy multi-profile storage falls back to first when currentId not found`() {
+        val rawArray = """
+            [
+              {"id":"first-id","name":"First","serverURL":"https://first.example.com"},
+              {"id":"second-id","name":"Second","serverURL":"https://second.example.com"}
+            ]
+        """.trimIndent()
+        hostProfilesJson = rawArray
+        currentHostProfileId = null // no current id set
+
+        val profiles = store.profiles()
+        assertEquals("L8 trims to single host (first)", 1, profiles.size)
+        assertEquals("first-id", profiles.first().id)
     }
 
     @Test
@@ -245,7 +269,7 @@ class HostProfileStoreTest {
     }
 
     @Test
-    fun `legacy and slim profiles can coexist in the same JSON list`() {
+    fun `legacy multi-profile JSON trimmed to single host by currentHostProfileId`() {
         hostProfilesJson = """
             [
               {"id":"leg-1","name":"Legacy","serverURL":"https://a.example.com","serverGroupFp":"leg-1"},
@@ -257,14 +281,8 @@ class HostProfileStoreTest {
 
         val profiles = store.profiles()
 
-        assertEquals(3, profiles.size)
-        val byId = profiles.associateBy { it.id }
-        assertFalse(byId["leg-1"]!!.slim)
-        assertFalse(byId["leg-1"]!!.mtlsEnabled)
-        assertTrue(byId["slim-1"]!!.slim)
-        assertFalse(byId["slim-1"]!!.mtlsEnabled)
-        assertTrue(byId["mtls-1"]!!.slim)
-        assertTrue(byId["mtls-1"]!!.mtlsEnabled)
+        assertEquals("L8 trims to 1 (the current host)", 1, profiles.size)
+        assertEquals("leg-1", profiles.first().id)
     }
 
     // ───────────── §需求12: profilesInGroup + serverGroupFp export tests ─────────────
