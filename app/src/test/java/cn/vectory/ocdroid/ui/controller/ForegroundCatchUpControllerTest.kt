@@ -13,6 +13,7 @@ import cn.vectory.ocdroid.util.SettingsManager
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -509,6 +510,107 @@ class ForegroundCatchUpControllerTest {
         testScope.testScheduler.advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.getPendingQuestions(any()) }
+        testScope.cancel()
+    }
+
+    // ── §fix-refresh-storm P0-2: per-directory single-flight dedup ─────────────
+
+    @Test
+    fun `fix-refresh-storm P0-2 concurrent triggers for the same workdir collapse to one in-flight getPendingQuestions`() {
+        // §fix-refresh-storm P0-2: three triggers (manual refresh / SSE
+        // reconnect / foreground probe) call catchUpPendingQuestionsAllWorkdirs
+        // back-to-back for the SAME workdir set. Without dedup that is 3× the
+        // /question calls. The in-flight set must collapse the 2nd and 3rd
+        // triggers for each dir into a no-op (the 1st trigger's in-flight
+        // request satisfies them via the shared sessionList merge).
+        //
+        // NOTE on scheduling: the controller's scope uses an
+        // UnconfinedTestDispatcher, so each scope.launch body runs to
+        // completion (or its first suspension point) EAGERLY during the
+        // launch call itself. getPendingQuestions is a suspend fn mocked by
+        // mockk — under UnconfinedTestDispatcher it completes synchronously,
+        // so by the time the 2nd trigger's add(dir) runs, the 1st trigger's
+        // finally has already removed dir → the 2nd trigger would re-add and
+        // call again. To pin the DEDUP (not just "ran once"), we gate the
+        // mock on a CompletableDeferred so the in-flight request STAYS
+        // in-flight across the 2nd/3rd trigger calls.
+        val repository = mockk<OpenCodeRepository>(relaxed = true)
+        val gate = CompletableDeferred<Unit>()
+        coEvery { repository.getPendingQuestions("/a") } coAnswers {
+            gate.await() // stay in-flight until the test releases
+            Result.success(emptyList<cn.vectory.ocdroid.data.model.QuestionRequest>())
+        }
+        val testScope = TestScope(UnconfinedTestDispatcher())
+        val controller = ForegroundCatchUpController(
+            appLifecycleMonitor = stubMonitor(),
+            scope = testScope,
+            store = store,
+            settingsManager = settingsManager,
+            effects = effects,
+            clock = { nowMs },
+        )
+
+        // Fire THREE triggers for the same workdir list, advancing the
+        // scheduler just enough to let each scope.launch enter the suspend
+        // point (gate.await) without completing it.
+        repeat(3) {
+            controller.catchUpPendingQuestionsAllWorkdirs(
+                repository = repository,
+                workdirs = listOf("/a"),
+            )
+            testScope.testScheduler.advanceUntilIdle()
+        }
+
+        // While the first request is still gated in-flight, ONLY ONE
+        // getPendingQuestions call has been made — the 2nd and 3rd triggers
+        // were dedup'd by the in-flight set.
+        coVerify(exactly = 1) { repository.getPendingQuestions("/a") }
+
+        // Release the gate; the in-flight request completes and the finally
+        // removes /a from the set.
+        gate.complete(Unit)
+        testScope.testScheduler.advanceUntilIdle()
+        // Still exactly one call (release did not trigger a new one).
+        coVerify(exactly = 1) { repository.getPendingQuestions("/a") }
+        testScope.cancel()
+    }
+
+    @Test
+    fun `fix-refresh-storm P0-2 workdir is released after failure so a later trigger can fire`() {
+        // §fix-refresh-storm P0-2: the try/finally MUST remove the dir from
+        // the in-flight set on EVERY exit path. This test pins the FAILURE
+        // path: getPendingQuestions returns Result.failure → onFailure logs →
+        // finally removes dir → a subsequent trigger for the same dir MUST be
+        // able to fire again (no permanent in-flight leak). Mirrors the
+        // success path (covered by the existing fan-out test).
+        val repository = mockk<OpenCodeRepository>(relaxed = true)
+        coEvery { repository.getPendingQuestions("/a") } returns
+            Result.failure(java.io.IOException("503"))
+        val testScope = TestScope(UnconfinedTestDispatcher())
+        val controller = ForegroundCatchUpController(
+            appLifecycleMonitor = stubMonitor(),
+            scope = testScope,
+            store = store,
+            settingsManager = settingsManager,
+            effects = effects,
+            clock = { nowMs },
+        )
+
+        // First trigger: fails, finally removes /a.
+        controller.catchUpPendingQuestionsAllWorkdirs(
+            repository = repository,
+            workdirs = listOf("/a"),
+        )
+        testScope.testScheduler.advanceUntilIdle()
+        coVerify(exactly = 1) { repository.getPendingQuestions("/a") }
+
+        // Second trigger: /a was released by the finally → fires again.
+        controller.catchUpPendingQuestionsAllWorkdirs(
+            repository = repository,
+            workdirs = listOf("/a"),
+        )
+        testScope.testScheduler.advanceUntilIdle()
+        coVerify(exactly = 2) { repository.getPendingQuestions("/a") }
         testScope.cancel()
     }
 }

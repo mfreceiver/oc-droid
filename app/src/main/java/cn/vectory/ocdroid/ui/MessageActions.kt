@@ -187,6 +187,18 @@ internal fun launchLoadMessages(
                 MainViewModelTimings.initialMessagePageSize,
                 before = null,
             )
+            // §fix-refresh-storm P0-1: the retry result ALSO needs a
+            // CancellationException guard. The first-request guard above
+            // (line ~174-177) only covers the initial fetch. If a refresh-storm
+            // supersedes THIS coroutine during the 500ms retry window, the
+            // retry returns Result.failure(CancellationException("canceled"))
+            // — without this guard it would flow into .onFailure below and emit
+            // a misleading UiEvent.Error("...canceled") toast. Rethrow to
+            // preserve structured concurrency (mirrors the sibling guard).
+            val retryResultCause = pageResult.exceptionOrNull()
+            if (retryResultCause is kotlin.coroutines.cancellation.CancellationException) {
+                throw retryResultCause
+            }
         }
         pageResult
             .onSuccess { page ->

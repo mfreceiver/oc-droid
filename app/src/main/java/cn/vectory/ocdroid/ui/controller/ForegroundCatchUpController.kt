@@ -87,6 +87,19 @@ class ForegroundCatchUpController(
      */
     @Volatile private var hasObservedForegroundState: Boolean = false
 
+    /**
+     * §fix-refresh-storm P0-2: per-workdir in-flight dedup for
+     * [catchUpPendingQuestionsAllWorkdirs]. Three independent triggers (manual
+     * refresh / SSE reconnect server.connected / foreground freshness probe)
+     * can fire within 7s, each fanning out to ALL workdirs — without dedup
+     * that is N workdirs × 3 triggers = 3N redundant /question calls. The set
+     * collapses concurrent triggers for the SAME workdir into ONE in-flight
+     * request. ConcurrentHashMap.newKeySet because the caller thread (UI /
+     * AppCore) and the scope's dispatcher may differ.
+     */
+    private val inFlightQuestionDirs: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
     /** Timestamp (epoch ms) of the most recent message load (throttle anchor). */
     @Volatile private var lastLoadAtMs: Long = 0L
 
@@ -276,14 +289,28 @@ class ForegroundCatchUpController(
     ) {
         if (workdirs.isEmpty()) return
         workdirs.forEach { dir ->
+            // §fix-refresh-storm P0-2: per-directory single-flight. add() is
+            // atomic — returns false if dir is already in-flight → skip this
+            // trigger; the in-flight request will merge the result into the
+            // shared sessionList slice via mutateSessionList, so the skipped
+            // trigger's data need is satisfied by the running request.
+            if (!inFlightQuestionDirs.add(dir)) return@forEach
             scope.launch {
-                repository.getPendingQuestions(dir)
-                    .onSuccess { questions ->
-                        mergePendingQuestionsById(store::mutateSessionList, questions)
-                    }
-                    .onFailure { error ->
-                        DebugLog.w(tag, "catchUp getPendingQuestions failed for $dir: ${error.message}")
-                    }
+                try {
+                    repository.getPendingQuestions(dir)
+                        .onSuccess { questions ->
+                            mergePendingQuestionsById(store::mutateSessionList, questions)
+                        }
+                        .onFailure { error ->
+                            DebugLog.w(tag, "catchUp getPendingQuestions failed for $dir: ${error.message}")
+                        }
+                } finally {
+                    // MUST remove on every exit path (success / failure /
+                    // CancellationException when the scope is torn down). A
+                    // missing remove would permanently block that workdir's
+                    // future catch-ups (stuck in-flight).
+                    inFlightQuestionDirs.remove(dir)
+                }
             }
         }
     }
