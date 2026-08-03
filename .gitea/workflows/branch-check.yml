@@ -1,5 +1,5 @@
 # branch-check: agent/** / feature/** / fix/** / ci/** 分支 push 时触发。
-# 干净 CI 容器中跑 lint + 单测 + assembleDebug,验证任务分支可构建。
+# 干净 CI 容器中跑 lint + 单测 + assembleDebug + koverVerify,验证任务分支可构建且覆盖率达标。
 # 通过 ≠ 可发布,仅表示该分支远端验证 OK。详见 docs/specs/gitea-cicd.md。
 #
 # 设计:无外部 action(不依赖 github.com)。checkout 用内联 git clone 直连 Gitea;
@@ -50,6 +50,11 @@ jobs:
 
       - name: remote-check(lint + test + assembleDebug)
         run: ./scripts/ci/remote-check.sh
+
+      - name: kover 覆盖率门控
+        # remote-check.sh 已跑 testDebugUnitTest(kover 插桩数据就绪),
+        # 此 step 仅校验 line/branch/instruction 是否达标(≥58/53/52)。
+        run: ./gradlew --no-daemon koverVerify
 
       - name: 归档产物清单(job 容器内,供排查)
         if: always()
