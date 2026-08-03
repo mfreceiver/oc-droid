@@ -3,7 +3,6 @@ package cn.vectory.ocdroid.data.repository
 import androidx.annotation.VisibleForTesting
 import cn.vectory.ocdroid.data.api.OpenCodeApi
 import cn.vectory.ocdroid.data.api.SSEClient
-import cn.vectory.ocdroid.data.api.v2.OpenCodeApiV2
 import cn.vectory.ocdroid.data.repository.http.SslConfig
 import java.util.concurrent.atomic.AtomicBoolean
 import okhttp3.OkHttpClient
@@ -34,8 +33,6 @@ class ClientBundle internal constructor(
     val mutationHttp: OkHttpClient,
     val mutationRetrofit: Retrofit,
     val mutationApi: OpenCodeApi,
-    val v2Retrofit: Retrofit,
-    val apiV2: OpenCodeApiV2,
     ownedClients: List<OkHttpClient>,
 ) {
     /** Compatibility projections; the [HostSnapshot] remains the source. */
@@ -51,7 +48,7 @@ class ClientBundle internal constructor(
     /**
      * Test-only structural copy for routing tests.
      *
-     * The generation, host, transport, Retrofit, SSE and v2 API values are
+     * The generation, host, transport, Retrofit and SSE values are
      * deliberately carried over unchanged. Tests can therefore substitute a
      * recording facade without introducing mutable production mirrors or
      * publishing a partially-built client generation.
@@ -77,8 +74,6 @@ class ClientBundle internal constructor(
         mutationHttp = mutationHttp,
         mutationRetrofit = mutationRetrofit,
         mutationApi = mutationApi,
-        v2Retrofit = v2Retrofit,
-        apiV2 = apiV2,
         ownedClients = ownedGenerationClients,
     )
 
