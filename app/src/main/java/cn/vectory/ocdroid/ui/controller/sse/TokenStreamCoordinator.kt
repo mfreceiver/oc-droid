@@ -1136,6 +1136,38 @@ class TokenStreamCoordinator(
                     // bgpt MF-2 fix: NO eventCount==0 skip — the watchdog is
                     // active FROM open and resets on ANY frame (incl.
                     // heartbeat) via lastFrameAt.
+                    //
+                    // §fix-error-storm P2-2 (DOWNGRADE — Doze limitation,
+                    // accepted-as-is): the watchdog is a plain `delay()` loop on
+                    // the app main coroutine scope. While the app is in the
+                    // FOREGROUND this loop ticks at [watchdogPollMs] cadence and
+                    // fires [TOKEN_WATCHDOG_MS] timeout promptly. When the device
+                    // enters Doze (screen off + idle), the OS defers our
+                    // coroutine delays together with all background work — a
+                    // 45s watchdog can take ~21min (next Doze maintenance
+                    // window) to actually fire, and `lastFrameAt` reads are then
+                    // stale.
+                    //
+                    // This is NOT a correctness bug: the token stream is a
+                    // FOREGROUND-ONLY resource (ConnectionCoordinator closes it
+                    // when the app is backgrounded), and once the device wakes
+                    // the watchdog fires immediately + a fresh
+                    // [TokenStreamCoordinatorEffect.Reconnect]/open() cycle
+                    // reconciles state via the authoritative `/since` fetch.
+                    //
+                    // Alternatives considered and rejected:
+                    //  - AlarmManager setExactAndAllowWhileIdle: wakes the device
+                    //    from Doze, but requires SCHEDULE_EXACT_ALARM permission
+                    //    (declared + user-granted on Android 12+), adds a system
+                    //    broadcast path that races with the coroutine watchdog,
+                    //    and forces Doze maintenance for a foreground stream that
+                    //    is normally closed anyway — net negative UX/complexity.
+                    //  - WorkManager periodic: minimum 15min cadence — coarser
+                    //    than the 45s watchdog, does not improve on Doze deferral.
+                    // Decision: accept the foreground-only behaviour and document
+                    // it here (this comment) rather than introduce a new
+                    // permission + system-alarm path. See
+                    // `.omni-orch/reports/bugfix-error-storm-report.md` §P2-2.
                     while (isActive) {
                         delay(watchdogPollMs)
                         val elapsed = clock() - lastFrameAt.get()

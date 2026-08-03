@@ -74,6 +74,61 @@ class ViewModelSupportParseTest {
         assertEquals("fallback", errorMessageOrFallback(RuntimeException("   "), "fallback"))
     }
 
+    // §fix-error-storm P2-1: classify network exception types —───────────────
+
+    @Test
+    fun `errorMessageOrFallback classifies UnknownHostException with null message`() {
+        assertEquals(
+            "DNS 解析失败（无法连接到服务器）",
+            errorMessageOrFallback(java.net.UnknownHostException(), "unknown error"),
+        )
+    }
+
+    @Test
+    fun `errorMessageOrFallback classifies SocketTimeoutException with null message`() {
+        assertEquals(
+            "网络连接超时",
+            errorMessageOrFallback(java.net.SocketTimeoutException(), "unknown error"),
+        )
+    }
+
+    @Test
+    fun `errorMessageOrFallback classifies SocketException with null message`() {
+        assertEquals(
+            "网络连接中断",
+            errorMessageOrFallback(java.net.SocketException(), "unknown error"),
+        )
+    }
+
+    @Test
+    fun `errorMessageOrFallback classifies SSLException with null message`() {
+        assertEquals(
+            "TLS 连接异常",
+            errorMessageOrFallback(javax.net.ssl.SSLException(null as String?), "unknown error"),
+        )
+    }
+
+    @Test
+    fun `errorMessageOrFallback classifies ConnectException with null message`() {
+        // ConnectException() no-arg inherits a non-null detail message from
+        // its parent, so force null explicitly (mirrors the SSLException case).
+        assertEquals(
+            "连接被拒绝（服务未启动或端口不通）",
+            errorMessageOrFallback(java.net.ConnectException(null as String?), "unknown error"),
+        )
+    }
+
+    @Test
+    fun `errorMessageOrFallback keeps message when present even for classified type`() {
+        // message wins over type-based classification — regression guard
+        assertEquals("node-1", errorMessageOrFallback(java.net.UnknownHostException("node-1"), "unknown error"))
+    }
+
+    // NOTE: tests for unrecognized-type (RuntimeException → fallback) and
+    // null-throwable (null → fallback) are covered above by the existing
+    // tests "returns fallback when throwable message is null" and
+    // "returns fallback when throwable is null" respectively.
+
     // ── parseSessionCreatedEvent ────────────────────────────────────────────
 
     @Test

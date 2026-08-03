@@ -122,6 +122,51 @@ class SharedEffectBusTest {
     }
 
     @Test
+    fun `tryEmitUiEvent suppresses cancellation-like error args via ErrorEventGate`() {
+        // §fix-error-storm P1-1: the bus delegates cancellation-heuristic
+        // suppression to ErrorEventGate. This is a smoke test; the clock-
+        // controlled edge cases live in ErrorEventGateTest.
+        val bus = SharedEffectBus()
+        val scope = newScope()
+        val collected = mutableListOf<UiEvent>()
+        val job = scope.launch(start = CoroutineStart.UNDISPATCHED) { bus.uiEventsConsumed.toList(collected) }
+
+        val cancelledEvent = UiEvent.Error(1, listOf("Job was cancelled"))
+        assertFalse("cancellation-like error not emitted", bus.tryEmitUiEvent(cancelledEvent))
+        assertEquals("collector received nothing", 0, collected.size)
+        assertEquals(1L, bus.suppressedCancellationCount())
+        assertEquals(0L, bus.dedupedErrorCount())
+
+        job.cancel()
+        scope.cancel()
+    }
+
+    @Test
+    fun `tryEmitUiEvent dedups identical errors within window via ErrorEventGate`() {
+        // §fix-error-storm P1-2: the bus delegates duplicate-error dedup to
+        // ErrorEventGate. Both emits are synchronous on the same thread, so
+        // System.currentTimeMillis() returns the same (or very close) value,
+        // placing the second within the 2000ms window. The clock-controlled
+        // edge cases live in ErrorEventGateTest.
+        val bus = SharedEffectBus()
+        val scope = newScope()
+        val collected = mutableListOf<UiEvent>()
+        val job = scope.launch(start = CoroutineStart.UNDISPATCHED) { bus.uiEventsConsumed.toList(collected) }
+
+        val error = UiEvent.Error(1, listOf("boom"))
+        assertTrue("first identical error emitted", bus.tryEmitUiEvent(error))
+        assertEquals("collector received first", 1, collected.size)
+
+        assertFalse("second identical error suppressed by dedup", bus.tryEmitUiEvent(error))
+        assertEquals("collector still has only one", 1, collected.size)
+        assertEquals(1L, bus.dedupedErrorCount())
+        assertEquals(0L, bus.suppressedCancellationCount())
+
+        job.cancel()
+        scope.cancel()
+    }
+
+    @Test
     fun `effects and effectsConsumed stay aliased after the SharedFlow migration`() {
         // §back-compat: tests + AppCore read effectsConsumed; the new spec
         // collapses effects + effectsConsumed onto the same SharedFlow. Both

@@ -158,7 +158,34 @@ internal data class MessagePartDeltaEvent(
 internal fun errorMessageOrFallback(throwable: Throwable?, fallback: String): String {
     Log.e("OC_ERROR", "error surfaced to UI", throwable)
     val message = throwable?.message?.trim().orEmpty()
-    return if (message.isEmpty()) fallback else message
+    if (message.isNotEmpty()) return message
+    // §fix-error-storm P2-1: message is null/empty — classify common network
+    // exception types into a readable hint instead of surfacing the caller's
+    // generic fallback (often "unknown error"). The caller's fallback is kept
+    // for any exception that is not a recognized network type.
+    return classifyNetworkError(throwable) ?: fallback
+}
+
+/**
+ * §fix-error-storm P2-1: maps a [Throwable] with a null/empty message to a
+ * readable, user-facing hint by exception type. Returns null for unrecognized
+ * types so the caller's [errorMessageOrFallback] fallback applies.
+ *
+ * §when-order (subtype-first): Kotlin `when` picks the FIRST matching `is`
+ * branch, so subtypes MUST precede their supertypes. Concretely
+ * [java.net.ConnectException] extends [java.net.SocketException] — placing
+ * `SocketException` first would shadow the `ConnectException` branch. Below,
+ * `ConnectException` comes before `SocketException`. [SocketTimeoutException]
+ * is NOT under `SocketException` (it extends `InterruptedIOException`), so its
+ * position relative to `SocketException` is free; it is kept early for clarity.
+ */
+private fun classifyNetworkError(throwable: Throwable?): String? = when (throwable) {
+    is java.net.UnknownHostException -> "DNS 解析失败（无法连接到服务器）"
+    is java.net.SocketTimeoutException -> "网络连接超时"
+    is java.net.ConnectException -> "连接被拒绝（服务未启动或端口不通）"
+    is java.net.SocketException -> "网络连接中断"
+    is javax.net.ssl.SSLException -> "TLS 连接异常"
+    else -> null
 }
 
 internal fun parseSessionCreatedEvent(event: SSEEvent): SessionCreatedEvent? {

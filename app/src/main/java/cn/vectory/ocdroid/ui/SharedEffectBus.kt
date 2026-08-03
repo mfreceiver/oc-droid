@@ -41,6 +41,13 @@ import javax.inject.Singleton
  * mutable backing field. The legacy `uiEventsConsumed` alias is kept (it
  * predates the downgrade and is still read by [cn.vectory.ocdroid.ui.AppCore]
  * + several controller tests); it now points at the same read-only view.
+ *
+ * §fix-error-storm P1-1/P1-2: `uiEvents` producers now pass through an
+ * [ErrorEventGate] that drops cancellation-leak errors (heuristic: any format
+ * arg containing "cancel") and deduplicates near-identical [UiEvent.Error]
+ * within a short window (default 2000 ms). [UiEvent.Info]/[UiEvent.Success]/
+ * [UiEvent.Debug] pass through untouched. See [ErrorEventGate] for the full
+ * design rationale.
  */
 @Singleton
 class SharedEffectBus @Inject constructor() {
@@ -66,6 +73,9 @@ class SharedEffectBus @Inject constructor() {
 
     private val droppedEffects = java.util.concurrent.atomic.AtomicLong(0)
 
+    /** §fix-error-storm P1-1/P1-2: gate applied to [UiEvent.Error] at the entry point. */
+    private val errorGate = ErrorEventGate()
+
     /** Suspend producer: enqueues [effect] FIFO, suspends if buffer is full. */
     suspend fun emitEffect(effect: ControllerEffect) = _effects.emit(effect)
 
@@ -84,11 +94,23 @@ class SharedEffectBus @Inject constructor() {
     }
 
     /** Suspend producer for UiEvents (rarely needed — UI feedback is fire-and-forget). */
-    suspend fun emitUiEvent(event: UiEvent) = _uiEvents.emit(event)
+    suspend fun emitUiEvent(event: UiEvent) {
+        if (!errorGate.accept(event)) return
+        _uiEvents.emit(event)
+    }
 
     /** Synchronous producer for UiEvents; honours DROP_OLDEST. */
-    fun tryEmitUiEvent(event: UiEvent): Boolean = _uiEvents.tryEmit(event)
+    fun tryEmitUiEvent(event: UiEvent): Boolean {
+        if (!errorGate.accept(event)) return false
+        return _uiEvents.tryEmit(event)
+    }
 
     /** Diagnostic: total [ControllerEffect]s dropped by [tryEmitEffect] since process start. */
     fun droppedEffectCount(): Long = droppedEffects.get()
+
+    /** §fix-error-storm P1-1: count of [UiEvent.Error] suppressed because they looked like coroutine-cancellation leakage. */
+    fun suppressedCancellationCount(): Long = errorGate.suppressedCancellationCount()
+
+    /** §fix-error-storm P1-2: count of duplicate [UiEvent.Error] suppressed within the dedup window. */
+    fun dedupedErrorCount(): Long = errorGate.dedupedErrorCount()
 }
