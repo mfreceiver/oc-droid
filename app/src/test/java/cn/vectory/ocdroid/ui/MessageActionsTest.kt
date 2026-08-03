@@ -1224,6 +1224,45 @@ class MessageActionsTest {
     }
 
     @Test
+    fun `fix-refresh-storm P0-1 retry returning CancellationException is re-thrown (no UiEvent Error)`(): Unit = runTest {
+        // §fix-refresh-storm P0-1: the FIRST getMessagesPaged fails with
+        // IOException under SSE-off → the retry path engages (delay 500 +
+        // getMessagesPagedUnanchored). During that retry window a refresh-storm
+        // supersedes this coroutine, so the retry returns
+        // Result.failure(CancellationException("canceled")). The retry-path CE
+        // guard (added in MessageActions.kt) MUST re-throw it so the coroutine
+        // cancels cleanly WITHOUT reaching .onFailure → no misleading
+        // "Failed to load messages: canceled" toast. This pins the regression
+        // that the first-request CE guard (covered by the P1-4 test above) did
+        // NOT catch because it only inspects the initial fetch's cause.
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+            Result.failure(java.io.IOException("HTTP 503"))
+        coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returns
+            Result.failure(kotlinx.coroutines.CancellationException("canceled"))
+        coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
+        store.mutateChat { it.copy(currentSessionId = "s1") }
+
+        launchLoadMessages(
+            scope, repository, slices, "s1",
+            emit = emit,
+            isSseLive = { false }, // SSE-off → retry engages; retry then returns CE
+        )
+        scope.advanceUntilIdle()
+        scope.runCurrent()
+
+        // The retry-path CE guard re-threw the CancellationException → .onFailure
+        // NEVER reached → NO UiEvent.Error (cancellation is not user-facing).
+        assertTrue(
+            "retry returning CancellationException must NOT emit UiEvent.Error (got $emitted)",
+            emitted.filterIsInstance<UiEvent.Error>().isEmpty(),
+        )
+        // Retry DID fire (initial IOException under SSE-off engaged the retry).
+        coVerify(exactly = 1) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
+        // Session-guarded finally still cleared the loading flag on the cancel exit.
+        assertFalse(slices.chat.value.isLoadingMessages)
+    }
+
+    @Test
     fun `P0-2 CancellationException from the slim GET propagates (not swallowed into silent Result failure)`(): Unit = runTest {
         // §mechanism ④: runSuspendCatching (R-14) re-throws CancellationException
         // so the repository GET propagates it as a throw (NOT Result.failure).
