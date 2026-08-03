@@ -16,7 +16,11 @@ class OcdroidRuleSetProvider : RuleSetProvider {
         ruleSetId,
         listOf(
             ::SessionStatusDirectWriteRule,
-            ::AuthorityDirectWriteRule,           // §U-MN6 Batch 3
+            ::AuthorityDirectWriteRule,             // §U-MN6 Batch 3
+            ::UiMustNotImportDataApiRule,           // §wave0-ocdroid-2026-08-03
+            ::DataMustNotImportUiRule,              // §wave0-ocdroid-2026-08-03
+            ::NoRawDpLiteralRule,                   // §wave0-ocdroid-2026-08-03
+            ::NoRawAlertDialogRule,                 // §wave0-ocdroid-2026-08-03
         ),
     )
 

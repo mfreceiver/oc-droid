@@ -487,8 +487,20 @@ dependencies {
 // (config/detekt/detekt.yml). The full detekt default suite produces 1975
 // pre-existing violations that are out of scope for this hardening batch.
 // (detekt 2.0.0-alpha.0 Property-based DetektExtension DSL.)
+//
+// §wave0-ocdroid-2026-08-03: baseline grandfathering. The 4 boundary rules
+// (UiMustNotImportDataApiRule / DataMustNotImportUiRule / NoRawDpLiteralRule /
+// NoRawAlertDialogRule) are report-only by design: they ship active+WARNING but
+// the existing 100+ violations are snapshotted into config/detekt/baseline.xml
+// (generated via :app:detektBaseline). detekt semantics: issues are matched
+// against the baseline by signature; baselined issues don't count toward
+// maxIssues, so :app:detekt stays green on存量 while NEW violations still fail.
+// Wave 2 cleanup deletes baseline entries incrementally to restore teeth.
+// `disableDefaultRuleSets=true` (NOT baseline) is what keeps the 1975 default
+// rule-set violations out — baseline only addresses the ocdroid ruleset here.
 detekt {
     config.setFrom(rootProject.file("config/detekt/detekt.yml"))
+    baseline = rootProject.file("config/detekt/baseline.xml")
     disableDefaultRuleSets.set(true)
     buildUponDefaultConfig.set(false)
     parallel.set(true)
