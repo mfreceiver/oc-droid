@@ -4,7 +4,7 @@ package cn.vectory.ocdroid.service.streaming
  * D2 (gate #4 / §4.4 «acknowledged readiness, not coroutine launch») → **D4-B
  * M3 (transport-readiness / status-authority separation)**: the result of
  * activating a streaming source (SSE collector OR the §6 background poller) —
- * the [StreamingLifecycleCoordinator]'s handoff commit does not fire until one
+ * the coordinator's handoff commit does not fire until one
  * of these is received for the corresponding
  * [LifecycleCommand.StartSse] / [LifecycleCommand.StartPoller] command.
  *
@@ -79,13 +79,33 @@ sealed interface SourceActivation {
         data object Superseded : Rejected
 
         /**
-         * SSE activation exhausted the §5 step 6 service-level retry budget
-         * (3 collector retries past the SSEClient's internal 10-attempt
-         * exhaustion — see [SseRecoveryPolicy]). The collector has already
-         * emitted the gap-dirty signal idempotently; the handoff commit
-         * routes through
-         * [StreamingLifecycleCoordinator.onDisconnect]
-         * → L3 teardown (exactly once).
+         * PRE-READY failure: the SSE collector's single attempt broke /
+         * completed WITHOUT ever delivering a valid current-identity frame
+         * (see [ServiceSseConnectionOwner.launchSseCollector] — single
+         * attempt, NO service-level retry loop; the §5 step 6 3-retry loop
+         * died in L2, see [StreamingModule] L2 removals). The collector
+         * body atomically releases the ownership-gate lease + rolls back
+         * the runtime attempt (§review-blocker-#2, under the drop-handler
+         * monitor) and completes the readiness deferred with
+         * [Rejected.Exhausted]. The handoff commit receives Exhausted,
+         * cancels the activation, and leaves the prior layer + prior source
+         * intact (per the [Rejected] contract above).
+         *
+         * **Exhausted does NOT invoke onTerminalDrop and does NOT emit a
+         * gap-dirty signal** — the pre-ready path never established
+         * transport, so there is no gap to signal. This is asserted by
+         * `pre-ready flow throw rejects Exhausted, no gap, no terminal
+         * callback` (ServiceSseConnectionOwnerTest).
+         *
+         * **Distinct from the POST-READY terminal drop**: when an
+         * ALREADY-ready collector's flow later breaks/completes, the
+         * collector body takes a different branch that DOES call
+         * [ServiceSseConnectionOwner]'s `onTerminalDrop` (fenced exactly-
+         * once by routeUnexpectedDrop) →
+         * [cn.vectory.ocdroid.ui.controller.ControllerEffect.ColdStartReconnect]
+         * → L3 teardown. That post-ready drop is a runtime outage route,
+         * NOT a [SourceActivation] result (readiness was already completed
+         * with [Ready]) — it must not be conflated with [Exhausted].
          */
         data object Exhausted : Rejected
 
@@ -93,12 +113,12 @@ sealed interface SourceActivation {
          * **D4-B M3**: the SSE transport did NOT deliver a valid current-
          * identity frame within the 30s transport activation timeout
          * ([ServiceSseConnectionOwner.TRANSPORT_READY_TIMEOUT_MS]). Unlike
-         * [Exhausted] (which fires only after the full service-level retry
-         * budget is spent), [TransportTimeout] fires once the FIRST
-         * activation attempt proves unproductive for the bounded readiness
-         * window — the handoff commit treats it as a bootstrap/transport
-         * failure and routes through [StreamingOwnershipGate.failStarting]
-         * → full rollback (B1).
+         * [Exhausted] (which fires when the single collector attempt
+         * actively breaks/completes pre-ready), [TransportTimeout] fires
+         * when that attempt merely hangs — no frame and no flow termination
+         * within the bounded readiness window — the handoff commit treats
+         * it as a bootstrap/transport failure and routes through
+         * [StreamingOwnershipGate.failStarting] → full rollback (B1).
          */
         data object TransportTimeout : Rejected
     }

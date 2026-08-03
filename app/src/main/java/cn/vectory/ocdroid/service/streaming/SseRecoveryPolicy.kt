@@ -4,46 +4,48 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * D2 (gate #7 / §5 step 6): the service-level SSE recovery schedule, extracted
- * as an injectable seam so [ServiceSseConnectionOwner]'s post-SSEClient-exhaustion
- * retry cadence is unit-testable without wall-clock delays.
+ * D2 (gate #7 / §5 step 6): a ±20% jitter delay schedule over a 3-step
+ * `30s / 2m / 5m` base — extracted as an injectable seam so delay math is
+ * unit-testable without wall-clock waits.
  *
- * The §5 step 6 spec mandates **3 additional collector attempts** after the
- * SSEClient's internal 10-attempt exhaustion, with delays `30s / 2m / 5m` and
- * `±20%` jitter. Each retry is a fresh `repository.connectSSE(workdir)` flow
- * (which itself restarts the SSEClient's internal 10-attempt budget); the
- * first valid current-identity frame across any attempt completes readiness
- * ([SourceActivation.Ready]) and resets the service-retry budget; only after
- * all 3 attempts exhaust without a frame does the owner invoke
- * [StreamingLifecycleCoordinator.onDisconnect] / emit
- * [SourceActivation.Rejected.Exhausted] (exactly once per outage).
+ * **L2 reality** (see [StreamingModule] L2 removals): the §5 step 6
+ * **service-level SSE retry loop died** — [ServiceSseConnectionOwner]'s
+ * collector is now a single attempt with NO service-level retry. So this
+ * class NO LONGER drives SSE collector retries, and the 3-step budget does
+ * NOT gate [SourceActivation.Rejected.Exhausted] (which fires on the FIRST
+ * pre-ready break/completion — see [SourceActivation.Rejected.Exhausted],
+ * NOT after 3 retries). The class survives as a schedule + jitter utility:
+ *  - Production's sole main-source consumer is
+ *    [ProcessStatusPoller.scheduleBackoff], which uses the companion
+ *    [applyJitter] helper for its slim-fan-out backoff (a SEPARATE
+ *    200ms-base exponential, NOT this 30s/2m/5m schedule — only the jitter
+ *    math is shared).
+ *  - The instance API ([attempts] / [baseDelayMs] / [delayMs]) is preserved
+ *    for [SseRecoveryPolicyTest] and as a future reintroduction seam if the
+ *    service-level retry is ever restored.
  *
- * The default schedule produces 30s / 2m / 5m + ±20% jitter (deterministic
- * when [jitter] returns 0.0, which the unit-test fake does — production
- * supplies a `Random`-backed implementation). The contract is pure: given
- * (attempt, jitter) it returns the delay; no I/O; no clock side-effects.
- *
- * @param attempt the 1-based retry index (`attempt = 1` is the FIRST retry
- *  after the initial collector attempt fails; `attempt = 3` is the LAST
- *  retry before exhaustion).
- * @param jitter a deterministic-injection point in `[-0.2, +0.2]`
- *  (production samples a PRNG; tests pass `0.0` to read the unmodified
- *  schedule). The jittered delay is `(base * (1 + jitter)).toLong()`.
+ * **Contract**: the default schedule produces `30s / 2m / 5m` + ±20% jitter
+ * (deterministic when [delayMs] receives `jitter = 0.0`, which the unit-test
+ * fake does — production supplies a `Random`-backed implementation). Pure:
+ * given (attempt, jitter) it returns the delay; no I/O; no clock side-effects.
+ * [baseDelayMs] requires `attempt in 1..attempts`.
  */
 @Singleton
 open class SseRecoveryPolicy @Inject constructor() {
 
     /**
-     * The number of service-level retries AFTER the initial collector attempt.
-     * §5 step 6 fixes this at 3; extracted as `open val` (not a `const`) so a
-     * test subclass can override if a faster schedule is needed (the
-     * production schedule MUST stay at 3 — the spec's `30s / 2m / 5m`
-     * budget is a product decision, not an implementation detail).
+     * The schedule arity (number of delay steps). §5 step 6 fixes this at 3
+     * (`30s / 2m / 5m`); extracted as `open val` (not a `const`) so a test
+     * subclass can override if a faster schedule is needed (the production
+     * schedule MUST stay at 3 — the spec's `30s / 2m / 5m` budget is a
+     * product decision, not an implementation detail). NOTE: since L2 this
+     * counts delay STEPS in the schedule utility, NOT live SSE collector
+     * retries — see class kdoc.
      */
     open val attempts: Int = DEFAULT_ATTEMPTS
 
     /**
-     * The unmodified delay for the [attempt]-th service-level retry (BEFORE
+     * The unmodified delay for the [attempt]-th schedule step (BEFORE
      * jitter). [DEFAULT_SCHEDULE_MS] is the spec's `30s / 2m / 5m`; tests
      * override via subclass for virtual-time determinism.
      */
@@ -79,7 +81,7 @@ open class SseRecoveryPolicy @Inject constructor() {
     fun clampJitter(jitter: Float): Float = jitter.coerceIn(-0.2f, 0.2f)
 
     companion object {
-        /** §5 step 6: 3 service-level retries past the SSEClient's budget. */
+        /** §5 step 6 schedule arity: 3 delay steps (`30s / 2m / 5m`). */
         const val DEFAULT_ATTEMPTS = 3
 
         /** §5 step 6 unmodified schedule: 30s / 2m / 5m. */

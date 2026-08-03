@@ -26,7 +26,7 @@ import javax.inject.Singleton
  * status data source. Driven by [ensureRunning] (called by
  * [cn.vectory.ocdroid.ui.controller.ConnectionCoordinator] on foreground→background).
  *
- * **L1 reality**: the FGS + [StreamingLifecycleCoordinator] + reconnect/bootstrap
+ * **L1 reality**: the FGS + `StreamingLifecycleCoordinator` + reconnect/bootstrap
  * supervisor were deleted in L1. The poller is now a **standalone** timed
  * refresher with a 30s loop: each tick re-fetches the
  * [SessionSnapshotProvider.current] snapshot, runs the bulk

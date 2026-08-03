@@ -23,8 +23,8 @@ interface BootstrapRunner {
      *  - [BootstrapResult.Success] — identity is bound; the caller refreshes
      *    the global status snapshot and feeds the lifecycle coordinator.
      *  - [BootstrapResult.Failed] — bootstrap failed (network / tunnel /
-     *    SSEConnectionExhausted); the caller applies a bounded retry with
-     *    backoff and falls back to [StreamingLifecycleCoordinator.onDisconnect]
+     *    SSEConnectionExhausted); the caller applies a bounded retry
+     *    with backoff and falls back to the controller's teardown path
      *    if exhausted.
      */
     suspend fun runBootstrap(): BootstrapResult
@@ -36,17 +36,16 @@ interface BootstrapRunner {
 sealed interface BootstrapResult {
 
     /**
-     * Bootstrap succeeded; [identity] is the bound identity to feed into
-     * [cn.vectory.ocdroid.service.status.StatusAggregatorInput.refresh] and
-     * [cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator.onBootstrapResult].
+     * Bootstrap succeeded; [identity] is the bound identity for the caller
+     * to feed into
+     * [cn.vectory.ocdroid.service.status.StatusAggregatorInput.refresh].
      */
     data class Success(val identity: ConnectionIdentity) : BootstrapResult
 
     /**
      * Bootstrap failed (network down / SSEConnectionExhausted / no identity
      * bound after the connect attempt). The caller applies a bounded retry
-     * with backoff and falls back to
-     * [cn.vectory.ocdroid.service.lifecycle.StreamingLifecycleCoordinator.onDisconnect]
+     * with backoff and falls back to the controller's teardown path
      * if exhausted.
      */
     data object Failed : BootstrapResult

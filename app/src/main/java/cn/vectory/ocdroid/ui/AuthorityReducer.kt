@@ -229,6 +229,57 @@ private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
  *    with a turn arrives, the lex guard is skipped — the PERSISTENT
  *    [SessionEntry.serverRoundHighWater] watermark still fences a stale low-turn
  *    frame (strictly-older → DROP). Closes the BLK-2 revival window.
+ *
+ * # KNOWN RESIDUAL (§review-#9, cross-channel ordering)
+ *
+ * An OPTIMISTIC ApplyEvent (serverRound=null, from the launchSendMessage
+ * onSuccess POST callback) systematically bypasses all serverRound-based
+ * guards (B6 incarnation / lex / BLK-2). If an SSE terminal idle for the
+ * same turn lands BEFORE the POST callback (slow network / GC / scheduler
+ * jitter during the prompt_async round-trip), the OPTIMISTIC busy
+ * resurrects a false busy over the terminal idle.
+ *
+ * **Trigger window** (narrower than arbitrary jitter): requires a
+ * send-while-busy follow-up + the follow-up turn completing ENTIRELY
+ * within the POST round-trip + unfavorable client event ordering.
+ * prompt_async is accept-and-respond, so on the pure idle→send main path
+ * SSE busy reliably arrives AFTER onSuccess and corrects; the false-busy
+ * is largely unreachable there.
+ *
+ * **Recovery caveat**: ProcessStatusPoller starts ONLY on foreground→
+ * background transition (ConnectionCoordinator), NOT in foreground steady
+ * state. So a false busy on a foreground first-opened session may stick
+ * until the next session activity or backgrounding — NOT a 30s self-heal.
+ *
+ * **Fix direction** (patch-level, deferred): capture a dispatch-time
+ * watermark (sendDecisionTimeMs) at launchSendMessage entry; guard
+ * condition becomes `prev.updatedAtMs > sendDecisionTimeMs` (distinguishes
+ * "old idle baseline" ≪ watermark from "this turn's terminal idle" >
+ * watermark). Single wall-clock domain (already established). Do NOT use a
+ * naive `prev.status`-only guard — it cannot distinguish the two idle
+ * scenarios and regresses send-while-idle (the main user path).
+ *
+ * # §review-note-N2 (origin semantics)
+ *
+ * `origin` reflects the most-recent write source. An OPTIMISTIC ApplyEvent
+ * (serverRound=null) passes through keepRound which preserves
+ * prev.serverRound, so an entry may show a MIXED semantic of origin=OPTIMISTIC
+ * but serverRound != null (carried from a prior slim SSE write; REST
+ * snapshots do not produce serverRound). The CURRENT sole behavioral
+ * consumer of origin is StatusAggregatorImpl.fresh = (origin == REST); both
+ * OPTIMISTIC and SSE are fresh=false, so the mixed semantic has NO
+ * behavioral impact today. Future consumers MUST be aware: origin denotes
+ * the last writer, NOT the provenance of serverRound.
+ *
+ * # §review-note-N6 (coverage)
+ *
+ * applyEvent deliberately does NOT update coverage[scope].lastSuccessTimeMs.
+ * coverage denotes "REST confirmed complete workdir coverage"; SSE pushes
+ * per-sid deltas and cannot confirm full coverage. So under sustained REST
+ * failure (applyMarkFailed sets lastSuccessTimeMs=-1) plus SSE-delivered
+ * idle, global state stays Unknown (not AllIdleFresh) — this is fail-safe
+ * design (prefer keep-alive over falsely-idle-then-miss-event). Only
+ * applySnapshot restores coverage.
  */
 private fun applyEvent(cur: AuthorityState, op: AuthorityOp.ApplyEvent): AuthorityState {
     val prev = cur.bySid[op.sid]
