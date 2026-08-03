@@ -1,6 +1,6 @@
 package cn.vectory.ocdroid.ui.controller
 
-import cn.vectory.ocdroid.data.api.CommandInfo
+import cn.vectory.ocdroid.data.model.CommandInfo
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile

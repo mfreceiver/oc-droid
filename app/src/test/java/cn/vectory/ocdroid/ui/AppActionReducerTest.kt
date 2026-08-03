@@ -1,6 +1,6 @@
 package cn.vectory.ocdroid.ui
 
-import cn.vectory.ocdroid.data.api.CommandInfo
+import cn.vectory.ocdroid.data.model.CommandInfo
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.PermissionRequest
