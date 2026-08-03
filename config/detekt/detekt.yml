@@ -11,3 +11,11 @@ ocdroid:
     active: true
   AuthorityDirectWriteRule:        # §U-MN6 Batch 3
     active: true
+  UiMustNotImportDataApiRule:      # §wave0-ocdroid-2026-08-03
+    active: true
+  DataMustNotImportUiRule:         # §wave0-ocdroid-2026-08-03
+    active: true
+  NoRawDpLiteralRule:              # §wave0-ocdroid-2026-08-03
+    active: true
+  NoRawAlertDialogRule:            # §wave0-ocdroid-2026-08-03
+    active: true
