@@ -1,0 +1,46 @@
+{
+  "bundle_id": "fix-error-storm-2026-08-03",
+  "slug": "bugfix-error-storm",
+  "reviewer": "rev-glm",
+  "model": "glm-5.2",
+  "branch": "fix/error-storm",
+  "commit": "f202ac49",
+  "parent": "638369ed",
+  "worktree": "/home/mar/personal_projects/ocdroid/.slim/worktrees/fix-error-storm",
+  "reviewed_at": "2026-08-03",
+  "verdict": "PASS",
+  "scope": {
+    "files_changed": 7,
+    "insertions": 459,
+    "deletions": 3,
+    "items": ["P1-1", "P1-2", "P2-1", "P2-2"]
+  },
+  "verification": {
+    "check_sh": "PASS (compile + :app:detekt + testDebugUnitTest; 4431 tests, 0 fail, 3 pre-existing skips)",
+    "note": "Orchestrator ran ./scripts/check.sh in the worktree; all green. Reviewer trusted this per directive (no re-run)."
+  },
+  "findings": {
+    "correctness": {
+      "P1-1_ce_guard": "PASS — 'cancel' stem (lowercase contains) sound; catches kotlinx.coroutines + OkHttp cancellation messages; checked before dedup so cancellation never pollutes window state; tested with canceled/Cancelled/Cancellation variants.",
+      "P1-2_dedup": "PASS — synchronized(lock) RMW correct; first-emit passes via lastKeyAt=Long.MIN_VALUE/2L (overflow-safe); window-expiry + <= boundary both tested; XOR fingerprint collision negligible over 2s (~65k birthday bound); worst case = 1 suppressed snackbar, no state loss.",
+      "accept_short_circuit": "PASS — non-Error events return true untouched (Info/Success/Debug unaffected).",
+      "P2-1_when_order": "PASS — ConnectException correctly placed before SocketException (subtype-before-supertype); orchestrator caught+fixed an initial when-order shadowing bug during reconcile.",
+      "P2-1_message_wins": "PASS — message.isNotEmpty() short-circuits before classification; regression-guarded."
+    },
+    "completeness": "Adequate test coverage across all items (cancellation-stem variants, dedup window/boundary/expiry, counter separation, 5 network types, message-wins). No blocking gaps.",
+    "discipline": "PASS — exactly 7 files in declared scope; main (638369ed) untouched; commit message matches repo fix(#scope): convention.",
+    "risk": {
+      "P1-1_false_positive": "ACCEPTED — a legitimate error whose message contains 'cancel' would be suppressed; explicitly documented in ErrorEventGate KDoc as accepted trade-off to kill refresh-storm 'failed: canceled' toasts.",
+      "P1-2_false_positive": "ACCEPTED — dedup suppresses a duplicate-looking snackbar only, never the underlying state change; 2s burst window reasonable.",
+      "concurrency": "SAFE — synchronized(lock) + AtomicLong counters, single lock, no nesting; clock() read outside lock is a benign race within design tolerance.",
+      "P2-2_doze_downgrade": "JUSTIFIED — token stream is foreground-only (ConnectionCoordinator closes on background); AlarmManager rejected (SCHEDULE_EXACT_ALARM perm + broadcast race for a foreground resource); WorkManager 15min min too coarse for 45s watchdog; accept-and-document is correct."
+    }
+  },
+  "minor_non_blocking": [
+    "ViewModelSupportParseTest.kt:121 comment about ConnectException() no-arg inheriting non-null message is factually imprecise (OpenJDK null) — harmless, explicit-null cast still defensive.",
+    "SharedEffectBus.kt:103 tryEmitUiEvent false now means 'buffer full' OR 'gate suppressed'; no caller inspects the bool, theoretical only.",
+    "ErrorEventGate lastKey init 0 could collide with UiEvent.Error(resId=0) theoretically, but @StringRes 0 invalid + lastKeyAt sentinel makes first-emit correct regardless."
+  ],
+  "review_chain_note": "rev-glm attempt 1 returned PASS on first pass (no circuit-breaker escalation needed).",
+  "next_action": "PASS — ready for omni integration. Branch fix/error-storm @ f202ac49."
+}
