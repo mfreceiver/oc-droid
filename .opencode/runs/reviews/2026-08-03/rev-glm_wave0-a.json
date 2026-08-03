@@ -1,0 +1,60 @@
+{
+  "bundle_id": "wave0-ocdroid-2026-08-03",
+  "lane": "wave0-a",
+  "reviewer": "rev-glm",
+  "review_session_id": "ses_039edd86fffeHPMC2UUqqEqtY6",
+  "review_commit_at_review": "7cbb8037",
+  "final_amended_commit": "34797ec5",
+  "branch": "wave0/deadcode",
+  "base": "beec8c3f (main HEAD)",
+  "timestamp": "2026-08-03",
+  "verdict": "PASS",
+  "summary": "Dead-code cleanup is correct, complete at source level, and disciplined. Zero runtime regression (production catalog getProviders() uses /config/providers via StandardApi.kt:143, independent of v2/DTOs). ClientBundle is a non-serializable, non-Parcelable runtime holder — field removal has no savedState/serialization impact. Zero dangling references in source. 4 test-file edits coherent. AppRoute blocker correctly identified. PRE_AUTH scope held (single commit on feature branch, no merge/tag/push). Only gaps were stale v2 references in 3 doc files (minor/doc-only); two living specs (slim-mode-api-routing.md, architecture.md) were fixed and the commit amended before final review. lite-aggressive-plan.md reference is a historical planning artifact, intentionally left as-is.",
+  "issues": [
+    {
+      "severity": "minor",
+      "status": "fixed_pre_final",
+      "dimension": "completeness",
+      "file": "docs/specs/slim-mode-api-routing.md",
+      "lines": "47, 349-354, 1071",
+      "problem": "Stale references to deleted v2 symbols: line 47 client-rebuild enum listed v2Retrofit/apiV2; §4.2.2 was a whole sub-section for OpenCodeApiV2 with a broken markdown link (404); lines 353-354 were B35/B36 routing rows with broken file links and a citation of deleted OpenCodeRepository.getModels; line 1071 R10 risk row referenced OpenCodeApiV2 (B35/B36).",
+      "fix_applied": "Removed v2Retrofit/apiV2 from line 47 client enum (and adjusted '五个 client' -> '四个 client'); deleted §4.2.2 entirely (renumbered the following 裸 OkHttp sub-section into its place); removed R10 row; updated bucket statistics (B 38->36, total 55->53)."
+    },
+    {
+      "severity": "minor",
+      "status": "fixed_pre_final",
+      "dimension": "completeness",
+      "file": "docs/specs/architecture.md",
+      "lines": "35, 63, 118",
+      "problem": "Canonical architecture doc still referenced deleted v2 surface: line 35 module tree showed v2/OpenCodeApiV2.kt; line 63 L1 Wire/API table listed OpenCodeApiV2; line 118 @Volatile ref enumeration included apiV2.",
+      "fix_applied": "Removed the v2/OpenCodeApiV2.kt tree leaf (and fixed the preceding sibling to '└──'); dropped OpenCodeApiV2 from the L1 table cell; dropped apiV2 from the @Volatile ref enumeration."
+    },
+    {
+      "severity": "minor",
+      "status": "intentionally_left",
+      "dimension": "completeness",
+      "file": "docs/ocdroid-lite-aggressive-plan.md",
+      "line": "907",
+      "problem": "Historical change-plan table row 'data/api/v2/OpenCodeApiV2.kt | 删 Skip-Dir 标记' references a now-deleted file. Lowest priority — historical planning artifact, not a living spec.",
+      "fix_applied": "None (intentional) — left as historical record per reviewer recommendation."
+    }
+  ],
+  "verified_checks": [
+    "git diff --stat: 17 files changed (438 deletions, 16 insertions) — matches stated scope; single commit 34797ec5 on wave0/deadcode, parent beec8c3f = main HEAD (PRE_AUTH: no merge/tag/branch-push)",
+    "git tag --contains empty — no tag points at/after commit",
+    "Production catalog path verified independent of v2: getProviders() -> api.getProviders() -> @GET(\"config/providers\") in StandardApi.kt; getProvidersOrFailure() (ProviderActions.kt) also uses api.getProviders(). Zero dependency on OpenCodeApiV2 / getModels / any v2 DTO.",
+    "git grep 'apiV2|v2Retrofit|OpenCodeApiV2|buildV2Retrofit|ModelInfoV2|ProviderInfoV2|ModelLimitV2|V2Response' across app/ -> zero matches (source fully clean)",
+    "git grep 'getModels' across app/ -> zero matches (no orphaned caller)",
+    "ClientBundle.kt is a plain internal constructor class — NOT @Serializable, NOT Parcelable, not persisted; runtime-only in-memory connection-generation holder published via single volatile ref. Field removal has zero savedState/serialization impact.",
+    "4 edited test files + RepositoryNetworkGraphTest verified clean: no orphaned imports, no broken test logic, KDoc lists updated coherently.",
+    "OkHttpClientFactory.kt routing-table KDoc updated coherently (removed apiV2.getX from GET routing rule).",
+    "AppRoute.kt BLOCKER correctly identified: live refs in MainActivity.kt, OrchestratorViewModel.kt, AppRoute.kt, B0RouteParserTest.kt — parseRoute/routeString/isValidSessionId are active nav infra. Correctly NOT deleted per 'verify zero refs else block' rule.",
+    "Filesystem deletions complete: .github/ fully removed; data/api/v2/ fully removed; AppModule.kt removed (di/ retains ClientIdModule/ControllerModule); scripts/upload-release.sh removed.",
+    "No AppModule references remain in any .md file.",
+    "Commit message 'refactor(wave0-a): purge dead code (...)' follows repo 'type(scope): summary' convention.",
+    "check.sh exit 0 (compileDebugKotlin + detekt + testDebugUnitTest) — run by orchestrator before AND after the doc-fix amend.",
+    "Post-fix doc verification: rg 'OpenCodeApiV2|apiV2|v2Retrofit|ModelInfoV2|ProviderInfoV2|ModelLimitV2|V2Response|getModels' in docs/ (excl historical lite-aggressive-plan.md) -> zero matches.",
+    ".opencode/runs/plans/*.patch files containing apiV2/buildV2Retrofit are historical review-diff snapshots (audit trail) — correctly left untouched."
+  ],
+  "notes": "Code change correct, complete, disciplined — PASS. Initial review flagged 3 minor doc-rot items; the 2 living specs (slim-mode-api-routing.md, architecture.md) were fixed and the commit amended (7cbb8037 -> 34797ec5); lite-aggressive-plan.md left as historical record. No blocker/major issue exists at final commit. AppRoute deletion correctly BLOCKED (genuinely live nav infra, not dead code)."
+}

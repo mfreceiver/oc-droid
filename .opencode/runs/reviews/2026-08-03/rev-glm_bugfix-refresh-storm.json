@@ -1,0 +1,42 @@
+{
+  "schema": "ocdroid-review-gate/v1",
+  "reviewer": "rev-glm",
+  "reviewer_session_id": "ses_039d7bff3ffeQv7ginzdwHxEWp",
+  "review_date": "2026-08-03",
+  "bundle_id": "fix-refresh-storm-2026-08-03",
+  "branch": "fix/refresh-storm-canceled",
+  "commit": "66afb03e",
+  "scope": "P0 root-cause fixes for refresh-storm + canceled-toast runtime bug",
+  "files_reviewed": [
+    "app/src/main/java/cn/vectory/ocdroid/ui/MessageActions.kt",
+    "app/src/main/java/cn/vectory/ocdroid/ui/controller/ForegroundCatchUpController.kt",
+    "app/src/test/java/cn/vectory/ocdroid/ui/MessageActionsTest.kt",
+    "app/src/test/java/cn/vectory/ocdroid/ui/controller/ForegroundCatchUpControllerTest.kt"
+  ],
+  "files_verified_untouched": [
+    "app/src/main/java/cn/vectory/ocdroid/ui/AppCoreOrchestration.kt"
+  ],
+  "verdict": "PASS",
+  "summary": "Both P0 root-cause fixes are precisely targeted, correctly scoped, and adequately pinned by genuine (non-tautological) tests. P0-1's retry-path CE guard is placed exactly between the retry assignment and the .onFailure chain, uses a distinct block-scoped variable (retryResultCause, no shadowing of retryCause), and mirrors the existing first-request guard. P0-2's per-workdir single-flight uses the correct thread-safe primitive (ConcurrentHashMap.newKeySet) with a try/finally that guarantees cleanup on every exit path; the CompletableDeferred-gated concurrent test is the right design to defeat UnconfinedTestDispatcher's eager completion. AppCoreOrchestration.kt is byte-identical (verified 0 diff lines). No BLOCKER/MAJOR findings.",
+  "findings": [],
+  "strengths": [
+    "P0-1 placement is surgical: the new guard sits exactly between the retry assignment and the .onSuccess/.onFailure chain. No code path from retry assignment to .onFailure bypasses the guard — CE cannot leak.",
+    "No shadowing bug: retryResultCause (inside retry if-block) vs retryCause (outer scope) — distinct variables, block-scoped correctly.",
+    "Outer catch + finally compose correctly: rethrown CE caught by outer catch(CE){throw e}, session-guarded finally clears isLoadingMessages. Test assertion holds.",
+    "P0-2 dedup primitive correct: ConcurrentHashMap.newKeySet() add() is atomic, returns false on duplicate — exact single-flight semantic. Cross-thread safe.",
+    "try/finally (no catch) preserves CE semantics: only guarantees cleanup, doesn't intercept. Improvement over prior unwrapped code (would leak dir on any throw).",
+    "Tests genuine, not tautological: MessageActionsTest L1226 proves no UiEvent.Error without the guard (tokenValid would otherwise emit). CompletableDeferred gate in concurrent test is necessary and correctly defeats UnconfinedTestDispatcher. Failure-then-release test proves finally runs.",
+    "Existing tests unaffected: fan-out test (L448) per-dir independent, empty-workdirs test (L493) hits early return before dedup.",
+    "Discipline: 4 files touched, AppCoreOrchestration.kt byte-identical (diff=0), commit message detailed and accurate."
+  ],
+  "uncertainty": [
+    "Theoretical in-flight leak if scope cancelled between add(dir) (caller thread) and scope.launch body starting: launch body never runs, finally never fires, dir stays in set. Benign in practice — controller's scope is its lifetime scope; fresh controller = fresh set. Not worth fixing for P0 hotfix; revisit if scope becomes swappable.",
+    "Did not execute check.sh independently — trace through code strongly indicates tests pass (identical shape to existing P1-4 test at L1143). Trusting author's check.sh run.",
+    "TestScope behavior when child throws CE: inner scope independent of runTest's scope, relying on framework's documented handling."
+  ],
+  "verification_status": {
+    "check_sh_run_by_author": "PASS (compileDebugKotlin + :app:detekt + testDebugUnitTest, BUILD SUCCESSFUL, 0 detekt findings)",
+    "commit_message_quality": "detailed, cites both P0s + god-object minimal-change discipline",
+    "branch_discipline": "feature branch fix/refresh-storm-canceled only; main untouched"
+  }
+}

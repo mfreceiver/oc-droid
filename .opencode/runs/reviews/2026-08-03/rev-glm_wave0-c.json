@@ -1,0 +1,24 @@
+{
+  "reviewer": "rev-glm",
+  "lane": "wave0-c",
+  "bundle_id": "wave0-ocdroid-2026-08-03",
+  "branch": "wave0/ci-kover",
+  "commit": "bf9e82be22ac67d80c506d3e933e257023d79cf3",
+  "base": "main (beec8c3f)",
+  "diff_scope": "git diff main...HEAD (2 files, +7/-2)",
+  "verdict": "PASS",
+  "summary": "koverVerify step 顺序、YAML 语法、与 integration-check.yml 一致性、文档同步、commit 规范、阈值未改均达标；改动严格限定在 CI 配置范畴。",
+  "dimensions": {
+    "correctness": "PASS — koverVerify 紧跟 remote-check.sh（已跑 testDebugUnitTest）之后；YAML 缩进/run 字段正确；与 integration-check.yml line 42-43 逐字一致（含中文 name）；minBound 58/53/52 与 step 注释一致。",
+    "completeness": "PASS — branch-check.yml 顶部注释与 gitea-cicd.md §1 边界表均已同步加上 koverVerify 描述；无其他遗漏的关键文档引用。",
+    "discipline": "PASS — 仅改 .gitea/workflows/branch-check.yml + docs/specs/gitea-cicd.md 两个文件，均在 ci 范畴；commit message 与期望逐字一致；未触碰 scripts/check.sh / remote-check.sh / app/build.gradle.kts（minBound + excludes 完全未动）；无 merge/release/push main/tag。",
+    "risk": "PASS — branch-check.yml line 1 触发分支注释（agent/**/feature/**/fix/**/ci/**）与 line 9-16 触发配置一致，不矛盾；无降阈值骗绿。注：wave0/** 不在触发分支列表，本分支本身不会被 CI 自验证，需等合并到 ci/** 后才端到端跑——此为 worktree lane 设计预期，不构成阻塞。"
+  },
+  "issues": [],
+  "recommendations": [
+    "可选：gitea-cicd.md §6 验收清单可补充一条说明 branch-check 现在也含 kover 门控，与 line 162 integration-check 条目形成对称；非必须。",
+    "可选：在 PR 描述或合并说明中显式提示『wave0/ci-kover 分支 push 不触发 branch-check，需 merge 到 ci/** 后由 CI 自验证』。"
+  ],
+  "session_id": "ses_039f40478ffeeIVsEt36QkXdl2",
+  "reviewed_at": "2026-08-03"
+}

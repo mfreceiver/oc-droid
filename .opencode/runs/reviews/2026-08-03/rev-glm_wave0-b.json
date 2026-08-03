@@ -1,0 +1,40 @@
+{
+  "review_id": "rev-glm_wave0-b",
+  "bundle_id": "wave0-ocdroid-2026-08-03",
+  "lane": "Wave0-B",
+  "worktree": "/home/mar/personal_projects/ocdroid/.slim/worktrees/wave0-detekt",
+  "branch": "wave0/detekt-boundaries",
+  "reviewed_commit_at_review": "3d5ee973",
+  "final_head_after_nits": "c28a3d6e",
+  "reviewer": "rev-glm",
+  "verdict": "PASS",
+  "summary": "Wave0-B cleanly adds 4 architecture-boundary detekt rules following the established convention (Rule(config, explanation) ctor, Entity.from/report(Finding) pattern, per-rule private isInTestSource() extension, §reference KDoc header). All 4 rules are registered in OcdroidRuleSetProvider, marked active:true in detekt.yml, covered by 14 new unit tests (23 total after nits), and the 239 grandfathered violations are snapshotted into a baseline.xml that is correctly wired via `baseline = rootProject.file(...)` with disableDefaultRuleSets=true preserved. Baseline counts (NoRawDpLiteralRule=228, NoRawAlertDialogRule=5, UiMustNotImportDataApiRule=6, DataMustNotImportUiRule=0) reconcile exactly and the baseline contains only ocdroid-ruleset entries (no default-ruleset leakage). Detection conditions are sound: NoRawAlertDialogRule uses == (test covers AlertDialogDefaults exclusion), NoRawDpLiteralRule uses selector-text==\"dp\" (correctly excludes `.dpi`), and the dialog whitelist is path-suffix endsWith-based. No must-fix defects; two minor should_consider nits (segment-bound prefix asymmetry in UiMustNotImportDataApiRule; add .dpi regression test) were applied by orchestrator in commit c28a3d6e and re-verified (23 tests pass, :app:detekt exit 0).",
+  "correctness": {
+    "rating": "ok",
+    "notes": "Rules are effective and the test coverage proves detection works. False-positive guards verified: NoRawAlertDialogRule uses exact `==` so AlertDialogDefaults is excluded (asserted at NoRawAlertDialogRuleTest); NoRawDpLiteralRule checks `selectorExpression?.text != \"dp\"` so `.dpi` cannot match (now locked by a regression test added post-review). Dialog whitelist is `endsWith(\"/ui/theme/AppConfirmDialog.kt\")` — defensible path-suffix check, cannot be bypassed by a same-named file outside /ui/theme/ since the /ui/ prefix guard precedes it. Test-source exclusion via `/test/` + `/androidTest/` is consistent with both existing rules. Original asymmetry (UiMustNotImportDataApiRule prefix without trailing dot vs DataMustNotImportUiRule with trailing dot) was RESOLVED post-review: prefix changed to segment-bound `cn.vectory.ocdroid.data.api.` in commit c28a3d6e — baseline signatures unaffected (all 6 entries are data.api.<Symbol>). NoRawDpLiteralRule is purely text-based on selector `dp`; would fire on any property named `dp` regardless of whether the receiver is a dimension — not a realistic risk in /ui/ Compose scope."
+  },
+  "completeness": {
+    "rating": "ok",
+    "notes": "All checkboxes verified: 4 rules registered in OcdroidRuleSetProvider.kt; 4 entries with active:true in detekt.yml; 4 unit-test files committed (UiMustNotImportDataApiRuleTest=3, DataMustNotImportUiRuleTest=3, NoRawDpLiteralRuleTest=4 after nit, NoRawAlertDialogRuleTest=5 → 15 new tests; total 23 with existing 8). baseline.xml count verified: NoRawDpLiteralRule=228, NoRawAlertDialogRule=5, UiMustNotImportDataApiRule=6, sum=239 (DataMustNotImportUiRule correctly absent with 0). baseline.xml contains ONLY ocdroid-ruleset IDs (no stray StyleException/MagicNumber/etc. from default rulesets)."
+  },
+  "discipline": {
+    "rating": "ok",
+    "notes": "Branch scope clean: `git log main..HEAD --oneline` returns exactly two commits (3d5ee973 feat + c28a3d6e test/nits), no merges/tags/push-to-main. Commit messages follow repo convention. New rules follow KDoc convention (§wave0-ocdroid-2026-08-03 header + 'Reports any ...' paragraph mirroring SessionStatusDirectWriteRule.kt and AuthorityDirectWriteRule.kt). Constructor + report(Finding(Entity.from(...))) pattern matches both existing rules. Per-rule private isInTestSource() extension duplicates the existing convention rather than refactoring (consistent). No edits to existing rule IDs or behavior."
+  },
+  "risk": {
+    "rating": "ok",
+    "notes": "Baseline wiring is correct and complete: app/build.gradle.kts `baseline = rootProject.file(\"config/detekt/baseline.xml\")` placed inside the detekt {} block alongside config.setFrom / disableDefaultRuleSets.set(true) / buildUponDefaultConfig / parallel. Block comment explicitly documents (a) baseline grandfathering intent, (b) that NEW violations still fail, (c) Wave 2 cleanup plan to delete entries incrementally, (d) that disableDefaultRuleSets (not baseline) is what suppresses the 1975 default-rule violations. Future-PR-blocking behavior (a new .dp literal in /ui/ will fail :app:detekt) is the intended teeth-for-increments and is documented, NOT a regression. 239-entry baseline is acknowledged maintenance liability with a cleanup plan. No interaction risk with default rulesets since they are disabled."
+  },
+  "must_fix": [],
+  "should_consider": [
+    "UiMustNotImportDataApiRule prefix made segment-bound (trailing dot) for symmetry with DataMustNotImportUiRule — APPLIED in c28a3d6e.",
+    "NoRawDpLiteralRuleTest .dpi regression assertion added — APPLIED in c28a3d6e."
+  ],
+  "corroborated_check_pass": true,
+  "orchestrator_independent_verification": {
+    "detekt_rules_test": "exit 0 (23 tests, forced --rerun-tasks)",
+    "app_detekt_baseline_gen": "exit 0, baseline.xml = 239 entries",
+    "app_detekt_with_baseline": "exit 0, 0 findings outside baseline",
+    "check_sh": "exit 0"
+  }
+}
