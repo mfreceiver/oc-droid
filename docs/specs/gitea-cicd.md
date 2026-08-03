@@ -19,7 +19,7 @@
 | 位置 | 脚本 / 命令 | 用途 |
 |---|---|---|
 | 本机 | `./scripts/ci/local-check.sh`(=`compileDebugKotlin + testDebugUnitTest`) | 开发期几十秒挡低级错误 |
-| 远端分支 | `branch-check.yml` → `remote-check.sh`(`lintDebug + testDebugUnitTest + assembleDebug`) | 干净容器验证任务分支可构建 |
+| 远端分支 | `branch-check.yml` → `remote-check.sh`(`lintDebug + testDebugUnitTest + assembleDebug`)+ `koverVerify` 覆盖率门控 | 干净容器验证任务分支可构建且覆盖率达标 |
 | 远端整合 | `integration-check.yml`(`clean + lint + test + assembleDebug + koverVerify`) | 全量校验 + 覆盖率门控；**仅手动触发**（发版时 release.yml 已含等价检查） |
 | 远端 Release | `release.yml` → `release-check.sh`(`clean + lintRelease + testRelease + bundleRelease + assembleRelease`) | CI 签名出 APK/AAB/mapping/SHA256SUMS |
 
