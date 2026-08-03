@@ -32,7 +32,10 @@ class UiMustNotImportDataApiRule(config: Config) : Rule(
         super.visitImportDirective(import)
         if (import.isInTestSource()) return
         val fqName = import.importedFqName?.asString() ?: return
-        if (!fqName.startsWith("cn.vectory.ocdroid.data.api") &&
+        // Segment-bound prefixes (trailing dot) — match `data.api.<Symbol>`
+        // and `retrofit2.<Symbol>` but NOT a hypothetical `data.apibackend` /
+        // `retrofit2extended` package. Symmetric with DataMustNotImportUiRule.
+        if (!fqName.startsWith("cn.vectory.ocdroid.data.api.") &&
             !fqName.startsWith("retrofit2.")
         ) return
         val path = (import.containingFile as? KtFile)?.virtualFile?.path ?: return

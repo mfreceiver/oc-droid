@@ -85,4 +85,27 @@ class NoRawDpLiteralRuleTest {
             findings.size,
         )
     }
+
+    @Test
+    fun `does not flag dpi or other similarly-named property`() {
+        // Regression guard: the rule uses selector text == "dp", so `.dpi`
+        // (and any unrelated `.dpXXX`) must NOT match. Locks the behavior
+        // against a future loosening to startsWith("dp").
+        val file = compileAtPath(
+            """
+            package cn.vectory.ocdroid.ui.chat
+            class Foo {
+                val dpi = 480
+                val dps = listOf(1, 2)
+            }
+            """.trimIndent(),
+            "ui/chat/Foo.kt",
+        )
+        val findings = rule.lint(file)
+        assertEquals(
+            ".dpi / .dps (non-dp selector) should have 0 findings",
+            0,
+            findings.size,
+        )
+    }
 }
