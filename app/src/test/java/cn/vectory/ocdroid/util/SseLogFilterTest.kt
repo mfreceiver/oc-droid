@@ -1,4 +1,4 @@
-package cn.vectory.ocdroid.data.api
+package cn.vectory.ocdroid.util
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -8,15 +8,18 @@ import org.junit.Test
 /**
  * R-18 Phase 5 coverage: pins the membership of [NOISY_SSE_LOG_EVENTS].
  *
- * This Set is consumed by [SSEClient] (`val noisy = type in
- * NOISY_SSE_LOG_EVENTS`) to suppress per-token streaming events from the
- * debug ring buffer. Removing an entry here would re-flood the log;
- * adding one would hide signal. Pinning the membership makes either
- * regression visible at test time.
+ * This Set is consumed by [cn.vectory.ocdroid.data.api.SSEClient]
+ * (`val noisy = type in NOISY_SSE_LOG_EVENTS`) to suppress per-token
+ * streaming events from the debug ring buffer. Removing an entry here would
+ * re-flood the log; adding one would hide signal. Pinning the membership
+ * makes either regression visible at test time.
  *
  * The set itself is a `Set<String>` constant — testing it directly is the
  * highest-ROI coverage (the surrounding SSEClient.connect path needs a
  * fake stream and is covered separately).
+ *
+ * Wave2.2: relocated from `data/api` to `util` alongside the constant
+ * (`util` is the leaf package both `data.api` and `ui` may depend on).
  */
 class SseLogFilterTest {
 

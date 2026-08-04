@@ -130,8 +130,7 @@ internal class DraftSessionOrchestrator @Inject constructor(
                             revertCutoffs = store.chatFlow.value.revertCutoffs,
                         )
                         // C. DIRECT route hydration (NOT effect bus).
-                        val fp = currentProfileId()
-                        startMaterializedRouteHydration(adoption, fp)
+                        startMaterializedRouteHydration(adoption)
                         // D. dispatch the captured payload (send) OR the command.
                         if (capturedPayload != null) {
                             sendOrchestrator.dispatchCapturedSend(session.id, capturedPayload, token)
@@ -255,7 +254,7 @@ internal class DraftSessionOrchestrator @Inject constructor(
     )
 
     @MainThread
-    private fun startMaterializedRouteHydration(adoption: MaterializedRouteAdoption, fp: String) {
+    private fun startMaterializedRouteHydration(adoption: MaterializedRouteAdoption) {
         val token = adoption.routeInstance ?: return
         refreshOrchestrator.loadMessagesForEffect(
             sessionId = adoption.sessionId,

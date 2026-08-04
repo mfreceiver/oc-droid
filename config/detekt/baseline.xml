@@ -223,7 +223,5 @@
     <ID>NoRawDpLiteralRule:VcsFileRow.kt:56.dp</ID>
     <ID>NoRawDpLiteralRule:VcsFileRow.kt:6.dp</ID>
     <ID>NoRawDpLiteralRule:VcsFileRow.kt:androidx.compose.ui.unit.dp</ID>
-    <ID>UiMustNotImportDataApiRule:SessionSyncCoordinator.kt:import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS</ID>
-    <ID>UiMustNotImportDataApiRule:SseEventRouter.kt:import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS</ID>
   </CurrentIssues>
 </SmellBaseline>

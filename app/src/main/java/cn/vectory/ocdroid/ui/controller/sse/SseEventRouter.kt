@@ -1,7 +1,7 @@
 package cn.vectory.ocdroid.ui.controller.sse
 
 import cn.vectory.ocdroid.BuildConfig
-import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS
+import cn.vectory.ocdroid.util.NOISY_SSE_LOG_EVENTS
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.util.DebugLog

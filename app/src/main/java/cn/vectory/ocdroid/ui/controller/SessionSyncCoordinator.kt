@@ -2,7 +2,7 @@ package cn.vectory.ocdroid.ui.controller
 
 import androidx.annotation.VisibleForTesting
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS
+import cn.vectory.ocdroid.util.NOISY_SSE_LOG_EVENTS
 
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.SessionStatus
@@ -111,7 +111,7 @@ class SessionSyncCoordinator(
     private val statusApplier = StatusFanOutApplier(
         scope, slices, effects, currentProfileId, clock, skeletonReloadCoordinator,
     )
-    private val diagLogger = SseDiagLogger(slices, cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS)
+    private val diagLogger = SseDiagLogger(slices, cn.vectory.ocdroid.util.NOISY_SSE_LOG_EVENTS)
     /** Tag for [cn.vectory.ocdroid.ui.reportNonFatalIssue]; mirrors the original MainViewModel TAG. */
     private val tag: String = "SessionSyncCoordinator"
 
