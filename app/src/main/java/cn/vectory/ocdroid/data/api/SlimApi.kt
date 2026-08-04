@@ -98,4 +98,38 @@ interface SlimApi {
     suspend fun getSlimapiSessionsStatus(
         @Query("directory") directory: String,
     ): retrofit2.Response<Map<String, SessionStatus>>
+
+    /**
+     * Catalog skeleton — global command list (oc-slimapi thin route). Returns
+     * the whitelist `{name, description, agent?, hints?}`; dropped fields
+     * (`template`/`source`/`model`/`subtask`) are absent server-side and were
+     * never modeled client-side, so deserialization is a no-op shrink.
+     *
+     * Additive route: an old sidecar predating catalog returns 404
+     * `thin_route_not_found` — the caller ([CatalogGateway.getCommands])
+     * caches that via [cn.vectory.ocdroid.data.repository.ServerCompatProfile.useSlimCatalog]
+     * and falls back to the standard `GET /command`. `X-Opencode-Skip-Dir: 1`
+     * — catalog is global, not scoped by the directory-header interceptor.
+     * `X-Slimapi-Version` is injected by
+     * [cn.vectory.ocdroid.data.repository.http.SlimapiVersionInterceptor].
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/command")
+    suspend fun getSlimapiCommands(): retrofit2.Response<List<CommandInfo>>
+
+    /**
+     * Catalog skeleton — global agent list (oc-slimapi thin route). Returns
+     * the whitelist `{name, description, mode, hidden?, native?}`; dropped
+     * fields (`prompt`/`permission`/`topP`/`temperature`/`color`/`variant`/
+     * `options`/`steps`/`model`) are absent server-side and never modeled
+     * client-side. `mode`+`hidden` feed `AgentInfo.isVisible` (agent-picker
+     * filter core) and are preserved.
+     *
+     * Additive route with the same 404 `thin_route_not_found` → legacy
+     * fallback contract as [getSlimapiCommands] (see
+     * [cn.vectory.ocdroid.data.repository.gateway.CatalogGateway.getAgents]).
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/agent")
+    suspend fun getSlimapiAgents(): retrofit2.Response<List<AgentInfo>>
 }

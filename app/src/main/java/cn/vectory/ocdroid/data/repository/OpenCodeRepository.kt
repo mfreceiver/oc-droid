@@ -263,6 +263,7 @@ class OpenCodeRepository @Inject constructor(
     )
     private val catalogGateway = CatalogGateway(
         bundleProvider = { requireClientBundle() },
+        serverCompatProfile = serverCompatProfile,
     )
     private val fileVcsGateway = FileVcsGateway(
         bundleProvider = { requireClientBundle() },
