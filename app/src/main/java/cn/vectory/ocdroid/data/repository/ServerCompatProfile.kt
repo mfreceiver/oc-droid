@@ -104,6 +104,9 @@ class ServerCompatProfile @Inject constructor() {
         // §3.6/§7.11 (P1-7): re-probe the Plan-A endpoint on every reconfigure —
         // a newly-deployed sidecar may now serve it even if a prior 404 cached false.
         supportsSlimStatus = true
+        // Catalog thin routes are additive — re-probe on every reconfigure so a
+        // newly-deployed sidecar serving /slimapi/command|agent is re-discovered.
+        useSlimCatalog = true
     }
 
     /**
@@ -218,6 +221,34 @@ class ServerCompatProfile @Inject constructor() {
     /** P1-7: mark the Plan-A slim status endpoint unsupported (first 404 from old
      *  v2 sidecar). Sticky until [setSlimConnection] resets on reconfigure. */
     internal fun markSlimStatusUnsupported() { supportsSlimStatus = false }
+
+    /**
+     * Catalog skeleton (oc-slimapi `GET /slimapi/command` + `GET /slimapi/agent`)
+     * capability flag — additive routes an old sidecar does not serve.
+     *
+     * **Fail-open model**: default `true` — attempt the slim catalog first. On
+     * the first observed 404 `thin_route_not_found` (old sidecar predating the
+     * catalog thin routes), flip to `false` (cached, sticky) and subsequent
+     * calls short-circuit to the legacy standard catalog API. Transport errors
+     * (503 `upstream_unavailable` / `transform_busy`, 413, timeout) do NOT flip
+     * the flag — they are transient/operational, not "unsupported", and falling
+     * back on them would double traffic and mask real outages (see
+     * [cn.vectory.ocdroid.data.repository.http.SlimapiErrorCodes]).
+     * [setSlimConnection] resets it to `true` on every reconfigure so a newly-
+     * deployed sidecar is re-probed.
+     *
+     * Irrelevant in legacy (non-slim) mode — [CatalogGateway] gates on
+     * [slimConnection] first.
+     */
+    @Volatile var useSlimCatalog: Boolean = true
+        internal set
+
+    /** Mark the slim catalog supported (first 200). Sticky. */
+    internal fun markSlimCatalogSupported() { useSlimCatalog = true }
+
+    /** Mark the slim catalog unsupported (first 404 `thin_route_not_found` from
+     *  an old sidecar). Sticky until [setSlimConnection] resets on reconfigure. */
+    internal fun markSlimCatalogUnsupported() { useSlimCatalog = false }
 
     /** 落库 [SlimapiHealthPayload] 的版本契约业务字段。 */
     fun updateSlimapi(payload: SlimapiHealthPayload) {

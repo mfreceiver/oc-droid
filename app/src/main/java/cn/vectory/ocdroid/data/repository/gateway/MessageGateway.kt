@@ -25,12 +25,22 @@ internal class MessageGateway(
 ) {
     private val api: OpenCodeApi get() = bundleProvider().restApi
 
-    suspend fun getMessages(sessionId: String, limit: Int? = null): Result<List<MessageWithParts>> =
-        runSuspendCatching {
+    suspend fun getMessages(sessionId: String, limit: Int? = null): Result<List<MessageWithParts>> {
+        if (serverCompatProfile.slimConnection) {
+            return runSuspendCatching {
+                getSlimapiMessagesSkeleton(
+                    sessionId,
+                    limit = limit ?: SLIMAPI_LOCAL_HISTORY_BOUND,
+                    before = null,
+                ).items
+            }
+        }
+        return runSuspendCatching {
             val response = api.getMessages(sessionId, limit, before = null)
             if (!response.isSuccessful) throw IOException("HTTP ${response.code()}")
             response.body() ?: emptyList()
         }
+    }
 
     suspend fun getMessagesPaged(
         sessionId: String,
