@@ -84,7 +84,6 @@ internal object PermissionRefreshOrchestrator {
                 repository = repository,
                 slices = slices,
                 effects = effects,
-                tag = tag,
             )
             return
         }
@@ -162,7 +161,6 @@ internal object PermissionRefreshOrchestrator {
         repository: OpenCodeRepository,
         slices: SliceFlows,
         effects: SharedEffectBus,
-        tag: String,
     ) {
         scope.launch {
             // Standalone workflow entry: ONE capture before first suspend.
