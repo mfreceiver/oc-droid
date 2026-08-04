@@ -5,6 +5,12 @@ import cn.vectory.ocdroid.data.api.OpenCodeApi
 import cn.vectory.ocdroid.data.api.SSEClient
 import cn.vectory.ocdroid.data.api.*
 import cn.vectory.ocdroid.data.model.*
+import cn.vectory.ocdroid.data.repository.gateway.CatalogGateway
+import cn.vectory.ocdroid.data.repository.gateway.ConnectionGateway
+import cn.vectory.ocdroid.data.repository.gateway.FileVcsGateway
+import cn.vectory.ocdroid.data.repository.gateway.InteractionGateway
+import cn.vectory.ocdroid.data.repository.gateway.MessageGateway
+import cn.vectory.ocdroid.data.repository.gateway.SessionGateway
 import cn.vectory.ocdroid.data.repository.http.HttpHeaders
 import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
 import cn.vectory.ocdroid.data.repository.http.SlimapiContract
@@ -235,6 +241,33 @@ class OpenCodeRepository @Inject constructor(
     private fun clientIdStoreOrFallback(): cn.vectory.ocdroid.data.repository.http.ClientIdStore =
         if (::clientIdStore.isInitialized) clientIdStore else fallbackClientIdStore
 
+    // ── Stage A: internal Gateway delegates (stateless, zero mutable fields) ──
+    private val connectionGateway = ConnectionGateway(
+        bundleProvider = { requireClientBundle() },
+        serverCompatProfile = serverCompatProfile,
+        json = json,
+        networkGraph = networkGraph,
+        identityProvider = { clientIdStoreOrFallback().getDeviceId() ?: "" },
+    )
+    private val sessionGateway = SessionGateway(
+        bundleProvider = { requireClientBundle() },
+        serverCompatProfile = serverCompatProfile,
+        json = json,
+    )
+    private val messageGateway = MessageGateway(
+        bundleProvider = { requireClientBundle() },
+        serverCompatProfile = serverCompatProfile,
+    )
+    private val interactionGateway = InteractionGateway(
+        bundleProvider = { requireClientBundle() },
+    )
+    private val catalogGateway = CatalogGateway(
+        bundleProvider = { requireClientBundle() },
+    )
+    private val fileVcsGateway = FileVcsGateway(
+        bundleProvider = { requireClientBundle() },
+    )
+
     /**
      * Opaque capability for one configured slim-state incarnation (C-D3).
      *
@@ -363,7 +396,7 @@ class OpenCodeRepository @Inject constructor(
      * Returns the live [HostConfig.slim] value (volatile read), so it
      * reflects the most recent [configure] call.
      */
-     val isSlimMode: Boolean get() = requireClientBundle().hostSnapshot.slimHost
+     val isSlimMode: Boolean get() = connectionGateway.isSlimMode
 
     // ── ι-A capability access surface (forwarders → ServerCompatProfile) ──
     // L4+ 消费者（协调/service/UI，多数已持 repository 句柄，部分以函数参数接收）
@@ -378,16 +411,16 @@ class OpenCodeRepository @Inject constructor(
      *  裸 `isSlimMode` 做重同步门。lite-v2 起 [ServerCompatProfile] 只保留
      *  `slimConnection`（plan §4.4），本 forwarder 直接读它（语义等价：
      *  slim 连接即支持 skeleton/watermark 重同步）。 */
-    val supportsWatermarkResync: Boolean get() = serverCompatProfile.slimConnection
+    val supportsWatermarkResync: Boolean get() = connectionGateway.supportsWatermarkResync
 
     /** ι-A / lite-v2-dev: 是否支持 token-stream 重同步。lite-v2 起 v2 协议下
      *  `tokenStreamEnabled = slimConnection`（plan §2.5，不再 probe health
      *  features.tokenStream）；本 forwarder 直接读 slimConnection（语义等价）。 */
-    val supportsTokenStreamResync: Boolean get() = serverCompatProfile.slimConnection
+    val supportsTokenStreamResync: Boolean get() = connectionGateway.supportsTokenStreamResync
 
     /** ι-A / lite-v2-dev: StatusAggregator 是否走 slim 扇出（vs legacy bulk
      *  `/session/status`）。lite-v2 起等价于 slimConnection（plan §4.4）。 */
-    val usesSlimStatusFanOut: Boolean get() = serverCompatProfile.slimConnection
+    val usesSlimStatusFanOut: Boolean get() = connectionGateway.usesSlimStatusFanOut
 
     private data class CandidateSsl(
         val config: SslConfig,
@@ -632,13 +665,13 @@ class OpenCodeRepository @Inject constructor(
      * the same monitor (v3-glmer R2).
      */
     @Synchronized
-    fun currentSslConfig(): SslConfig = requireClientBundle().effectiveSslConfig
+    fun currentSslConfig(): SslConfig = connectionGateway.currentSslConfig()
 
     /**
      * 当前 live SSL 配置是否走 mTLS 路径（客户端证书已配置并加载）。
      * Mirror of [SslConfigFactory.sslConfigFor]'s mTLS-priority routing.
      */
-    fun isMutualTlsActive(): Boolean = currentSslConfig() is SslConfig.MutualTLS
+    fun isMutualTlsActive(): Boolean = connectionGateway.isMutualTlsActive()
 
     /**
      * §tokenstream-mtls-fix: build a token-stream OkHttp client via THIS repository's
@@ -659,11 +692,8 @@ class OpenCodeRepository @Inject constructor(
      * Additive public method — does NOT change the constructor (the
      * [T3RepositoryExtractFreezeTest] JVM-arity freeze stays GREEN).
      */
-    fun tokenStreamClient(hostPort: String?): OkHttpClient {
-        val bundle = requireClientBundle()
-        return networkGraph.clientFactoryFor(bundle.hostSnapshot, bundle.effectiveSslConfig)
-            .tokenStreamClient(hostPort)
-    }
+    fun tokenStreamClient(hostPort: String?): OkHttpClient =
+        connectionGateway.tokenStreamClient(hostPort)
 
     /**
      * Token-stream construction bound to a previously captured immutable
@@ -672,8 +702,7 @@ class OpenCodeRepository @Inject constructor(
      * stays coherent across a concurrent configure.
      */
     internal fun tokenStreamClient(bundle: ClientBundle): OkHttpClient =
-        networkGraph.clientFactoryFor(bundle.hostSnapshot, bundle.effectiveSslConfig)
-            .tokenStreamClient(bundle.hostSnapshot.hostPort)
+        connectionGateway.tokenStreamClient(bundle)
 
     /**
      * §fix-3 (gro-1#2/gpt-2#2/max-1 M1): 转发 [SslConfigFactory.lastClientCertError]。
@@ -682,7 +711,7 @@ class OpenCodeRepository @Inject constructor(
      * 据此显示「证书加载失败」而非泛化连接失败（防 fail-open 静默降级）。null = ok 或
      * 未配置 mTLS。
      */
-    val lastClientCertError: String? get() = requireClientBundle().clientCertError
+    val lastClientCertError: String? get() = connectionGateway.lastClientCertError
 
     // ── lite-v2-dev (plan §4.1): ExpandBatchEngine + SlimSyncEngine + ────────
     // authoritative commit stores RETIRED. The slim state machine, sync engine,
@@ -727,85 +756,7 @@ class OpenCodeRepository @Inject constructor(
      * 把斜杠+星号星号 当嵌套 KDoc 起始）；下文用 `/slimapi/health` 单独写。
      * M1 门闩对所有 `/slimapi/` 下路径生效，含 health。
      */
-    suspend fun checkHealth(): Result<HealthResponse> = runSuspendCatching {
-        val bundle = requireClientBundle()
-        if (!bundle.hostSnapshot.slimHost) {
-            // legacy：行为字节级不变。
-            bundle.restApi.getHealth()
-        } else {
-            // C3 fix：探 sidecar 自身 health，不经 catch-all 透传。
-            probeSlimapiHealth(
-                baseUrl = bundle.hostSnapshot.baseUrl,
-                username = bundle.hostSnapshot.username,
-                password = bundle.hostSnapshot.password,
-                sslConfig = bundle.effectiveSslConfig,
-            )
-        }
-    }
-
-    /**
-     * R8 slim-mode foundation / C3 fix（共用实现）：裸 OkHttp `GET {baseUrl}/slimapi/health`
-     * 带 `X-Slimapi-Version` 头，把 sidecar 响应适配为 [HealthResponse]。
-     *
-     * - 用 [networkGraph.clientFactory.healthClient]（无 base 链拦截器——避免 Directory / Auth /
-     *   Cache-Control 干扰一次性探针；版本头显式注入，因为 healthClient 不挂
-     *   [SlimapiVersionInterceptor]）。
-     * - Basic Auth 同步注入（与 [checkHealthFor] 一致语义）。
-     * - 解析失败 / sidecar.ok == false / 版本不兼容 → 抛错（`Result.failure`），
-     *   不静默报健康——C3 的核心保证。
-     */
-    private suspend fun probeSlimapiHealth(
-        baseUrl: String,
-        username: String?,
-        password: String?,
-        sslConfig: SslConfig? = null,
-    ): HealthResponse = withContext(Dispatchers.IO) {
-        val resolvedHostPort = hostPortFromUrl(baseUrl)
-        val cfg = sslConfig ?: networkGraph.sslConfigFactory.sslConfigFor(resolvedHostPort)
-        val client = networkGraph.clientFactory.healthClient(cfg)
-        val normalizedUrl = (if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl")
-            .trimEnd('/') + SlimapiContract.SLIMAPI_HEALTH_PATH
-        val requestBuilder = Request.Builder()
-            .url(normalizedUrl)
-            .header(HttpHeaders.SKIP_DIR_HEADER, "1")
-            .header(SlimapiContract.X_SLIMAPI_VERSION, SlimapiContract.SLIMAPI_CLIENT_VERSION.toString())
-        // §B (slimapi-v2-adapt-traffic-plan §B): additive identity headers
-        // on this one-shot /slimapi/health probe — it bypasses baseBuilder
-        // (no ClientIdentityInterceptor), so inject via the shared helper
-        // (same pattern as the manually-added version header above).
-        applyClientIdentityHeaders(requestBuilder, clientIdStoreOrFallback().getDeviceId())
-        if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
-            val credential = "$username:$password"
-            val encoded = Base64.getEncoder().encodeToString(credential.toByteArray())
-            requestBuilder.header("Authorization", "Basic $encoded")
-        }
-        client.newCall(requestBuilder.build()).execute().use { res ->
-            if (!res.isSuccessful) error("HTTP ${res.code}")
-            val body = res.body?.string().orEmpty()
-            if (body.isBlank()) error("Empty response body")
-            val payload = parseSlimapiHealth(body)
-            // §slim-reconcile-lane-repo (B3 T5): feed the M2 self-check loop —
-            // the parsed slimapi version contract MUST land in the shared
-            // [ServerCompatProfile] so Phase 3's bootstrap can read
-            // [ServerCompatProfile.isSlimapiClientAccepted] and fail-close on
-            // version mismatch (C3 core). Without this write, the sidecar's
-            // `accepted_client_versions` is parsed but discarded and the
-            // fail-closed gate never sees the bounds → either always-rejects
-            // (if min/max stay null) or never-rejects (silent).
-            serverCompatProfile.updateSlimapi(payload)
-            // 适配为 HealthResponse：healthy = sidecar.ok && 版本兼容。
-            // version 字段对 slimapi 模式无直接对应（opencode semver 由独立路径
-            // 探得），用合成标记让上层 UI 可观测（"slimapi/api_version=<n>"）。
-            val healthy = payload.sidecarOk == true &&
-                payload.serverApiVersion != null &&
-                SlimapiContract.SLIMAPI_CLIENT_VERSION in
-                (payload.acceptedClientVersions?.first ?: Int.MIN_VALUE)..(payload.acceptedClientVersions?.second ?: Int.MIN_VALUE)
-            HealthResponse(
-                healthy = healthy,
-                version = payload.serverApiVersion?.let { "slimapi/api_version=$it" }
-            )
-        }
-    }
+    suspend fun checkHealth(): Result<HealthResponse> = connectionGateway.checkHealth()
 
     /**
      * R8 slim-mode foundation / M2 自检：从 `GET /slimapi/health` 响应 body 抽取
@@ -823,49 +774,7 @@ class OpenCodeRepository @Inject constructor(
      * 接受 [body] 字符串（来自 OkHttp `Response.body.string()`）；不可识别的
      * JSON 结构 → 各字段 null（容错，不抛——把决策交给上层 fail-closed）。
      */
-    fun parseSlimapiHealth(body: String): SlimapiHealthPayload {
-        val root = runCatching { json.decodeFromString<JsonObject>(body) }.getOrNull()
-            ?: return SlimapiHealthPayload(null, null, null, null)
-        val sidecar = root["sidecar"]?.safeObject()
-        val schema = root["schema"]?.safeObject()
-        val server = root["server"]?.safeObject()
-        val sidecarOk = sidecar?.get("ok")?.safePrimitive()?.let { it.content.equals("true", ignoreCase = true) }
-        val schemaDegraded = schema?.get("degraded")?.safePrimitive()?.let { it.content.equals("true", ignoreCase = true) }
-        val apiVersion = server?.get("api_version")?.safePrimitive()?.intOrNull
-        val accepted = server?.get("accepted_client_versions")?.safeArray()
-            ?.mapNotNull { it.safePrimitive()?.intOrNull }
-            ?.takeIf { it.size >= 2 }
-            ?.let { Pair(it[0], it[1]) }
-        val featuresObj = root["features"]?.safeObject() ?: server?.get("features")?.safeObject()
-        // §Stage-B S1: dual-read tokenStream — accept both a JSON boolean
-        // (booleanOrNull) and a string "true" (content). Pre-fix only the
-        // string form was recognized, so a sidecar emitting a native boolean
-        // (`"tokenStream": true`) was silently treated as false.
-        val tokenStream = featuresObj?.get("tokenStream")?.safePrimitive()?.let { p ->
-            p.booleanOrNull == true || p.content.equals("true", ignoreCase = true)
-        } == true
-        // §defect-B-2C: diagnostic-only dual-read of thresholdedSkeleton /
-        // skeletonInlineOutputMaxBytes. Same tolerant discipline as tokenStream —
-        // missing/wrong-typed fields fall back to defaults. NOT wired into any
-        // behaviour or compat gate (single-user; sidecar default-on).
-        val thresholdedSkeleton = featuresObj?.get("thresholdedSkeleton")?.safePrimitive()?.let { p ->
-            p.booleanOrNull == true || p.content.equals("true", ignoreCase = true)
-        } == true
-        val skeletonInlineOutputMaxBytes = featuresObj?.get("skeletonInlineOutputMaxBytes")?.safePrimitive()?.let { p ->
-            p.intOrNull
-        }
-        return SlimapiHealthPayload(
-            sidecarOk = sidecarOk,
-            schemaDegraded = schemaDegraded,
-            serverApiVersion = apiVersion,
-            acceptedClientVersions = accepted,
-            features = SlimapiFeatures(
-                tokenStream = tokenStream,
-                thresholdedSkeleton = thresholdedSkeleton,
-                skeletonInlineOutputMaxBytes = skeletonInlineOutputMaxBytes,
-            )
-        )
-    }
+    fun parseSlimapiHealth(body: String): SlimapiHealthPayload = connectionGateway.parseSlimapiHealth(body)
 
     /**
      * One-shot health probe against [baseUrl] with optional Basic Auth, WITHOUT
@@ -893,70 +802,15 @@ class OpenCodeRepository @Inject constructor(
         clientCert: ClientCertMaterial? = null,
         slim: Boolean = false,
         trustAll: Boolean = false,
-    ): Result<HealthResponse> = withContext(Dispatchers.IO) {
-        runSuspendCatching {
-            // L7: pure parameter routing — mTLS > trustAll > SystemDefault.
-            // Never reads held mTLS cache (v3-gpter R2#1).
-            val resolvedHostPort = hostPort ?: hostPortFromUrl(baseUrl)
-            val cfg: SslConfig = networkGraph.sslConfigFactory.resolveProbe(resolvedHostPort, clientCert, trustAll)
-            val client = networkGraph.clientFactory.healthClient(cfg)
-            // R8 slim-mode foundation / C3: slim=true → /slimapi/health（带版本头）;
-            // slim=false → /global/health（行为字节级不变）。
-            val healthPath = if (slim) SlimapiContract.SLIMAPI_HEALTH_PATH
-                else SlimapiContract.LEGACY_HEALTH_PATH
-            val normalizedUrl = (if (baseUrl.startsWith("http")) baseUrl else "http://$baseUrl")
-                .trimEnd('/') + healthPath
-            val requestBuilder = Request.Builder()
-                .url(normalizedUrl)
-                .header(HttpHeaders.SKIP_DIR_HEADER, "1")
-            // M1: slimapi 模式下版本头对所有 /slimapi/ 路径必带——含 health 自身。
-            if (slim) {
-                requestBuilder.header(
-                    SlimapiContract.X_SLIMAPI_VERSION,
-                    SlimapiContract.SLIMAPI_CLIENT_VERSION.toString()
-                )
-                // §B: additive identity headers on the one-shot /slimapi/health
-                // probe (bypasses baseBuilder → no ClientIdentityInterceptor).
-                // Gated on `slim` so legacy /global/health never leaks identity.
-                applyClientIdentityHeaders(requestBuilder, clientIdStoreOrFallback().getDeviceId())
-            }
-            if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
-                val credential = "$username:$password"
-                val encoded = Base64.getEncoder().encodeToString(credential.toByteArray())
-                requestBuilder.header("Authorization", "Basic $encoded")
-            }
-            client.newCall(requestBuilder.build()).execute().use { res ->
-                if (!res.isSuccessful) error("HTTP ${res.code}")
-                val body = res.body?.string().orEmpty()
-                if (body.isBlank()) error("Empty response body")
-                if (slim) {
-                    // C3 fix: sidecar 自身 health 适配为 HealthResponse——
-                    // healthy = sidecar.ok && 版本兼容；不兼容/缺字段 → 抛错
-                    // （fail-closed，绝不静默报健康）。
-                    val payload = parseSlimapiHealth(body)
-                    // §slim-reconcile-lane-repo (Phase 3a / Lane-B3-Dialog):
-                    // 镜像 [probeSlimapiHealth] 的 T5 模式——把解析后的 slimapi
-                    // 版本契约喂 [ServerCompatProfile]，这样 test-connection（one-shot
-                    // 探针，per-profile）也能落库版本契约字段，让上层（ConnectionViewModel
-                    // / Phase 3 bootstrap）读到 [ServerCompatProfile.isSlimapiClientAccepted]
-                    // 并 fail-close / 弹阻塞 dialog。不加这一行，test-connection 链根本
-                    // 看不到 sidecar 的 `accepted_client_versions`，dialog 永不弹（C3 反例）。
-                    serverCompatProfile.updateSlimapi(payload)
-                    val accepted = payload.acceptedClientVersions != null &&
-                        SlimapiContract.SLIMAPI_CLIENT_VERSION in
-                        payload.acceptedClientVersions!!.first..payload.acceptedClientVersions!!.second
-                    val healthy = payload.sidecarOk == true && accepted
-                    if (!healthy) error("slimapi sidecar unhealthy or client version incompatible")
-                    HealthResponse(
-                        healthy = true,
-                        version = payload.serverApiVersion?.let { "slimapi/api_version=$it" }
-                    )
-                } else {
-                    json.decodeFromString(HealthResponse.serializer(), body)
-                }
-            }
-        }
-    }
+    ): Result<HealthResponse> = connectionGateway.checkHealthFor(
+        baseUrl = baseUrl,
+        username = username,
+        password = password,
+        hostPort = hostPort,
+        clientCert = clientCert,
+        slim = slim,
+        trustAll = trustAll,
+    )
 
     /**
      * §slim-reconcile-lane-repo (B2 T2): in slim mode, route to the sidecar's
@@ -975,11 +829,7 @@ class OpenCodeRepository @Inject constructor(
      * branch is left untouched (no slim envelope on that path).
      */
     suspend fun getSessions(limit: Int? = null): Result<List<Session>> =
-        if (serverCompatProfile.slimConnection)
-            getSlimapiSessionsDelegate(api, null, null, limit, { parseErrorCode(it) }, { retryAfterHeaderToMs(it) })
-                .mapCatching { it.sessions }
-        else
-            runSuspendCatching { api.getSessions(limit) }
+        sessionGateway.getSessions(limit)
 
     /**
      * Fetches the root sessions whose [Session.directory] exactly matches
@@ -998,43 +848,32 @@ class OpenCodeRepository @Inject constructor(
      * [getSlimapiSessions]; legacy branch untouched.
      */
     suspend fun getSessionsForDirectory(directory: String, limit: Int? = null): Result<List<Session>> =
-        if (serverCompatProfile.slimConnection)
-            getSlimapiSessionsDelegate(api, listOf(directory), true, limit, { parseErrorCode(it) }, { retryAfterHeaderToMs(it) })
-                .mapCatching { it.sessions }
-        else
-            runSuspendCatching { api.getSessions(limit = limit, directory = directory, roots = true) }
+        sessionGateway.getSessionsForDirectory(directory, limit)
 
     /**
      * Fetches a single session by ID. Used to resolve a child/sub-agent session
      * that may not be present in the cached [getSessions] list.
      */
     suspend fun getSession(sessionId: String): Result<Session> =
-        runSuspendCatching { api.getSession(sessionId) }
+        sessionGateway.getSession(sessionId)
 
-    // §R18 Final 终审 fix (gpter): directory now explicit (was relying on the
-    // removed global currentDirectory fallback). Callers pass currentWorkdir /
-    // draftWorkdir so POST /session routes to the correct workdir instance.
-    suspend fun createSession(title: String? = null, directory: String? = null): Result<Session> = runSuspendCatching {
-        mutationApi.createSession(CreateSessionRequest(title = title), directory)
-    }
+    suspend fun createSession(title: String? = null, directory: String? = null): Result<Session> =
+        sessionGateway.createSession(title, directory)
 
-    suspend fun updateSession(sessionId: String, title: String): Result<Session> = runSuspendCatching {
-        api.updateSession(sessionId, UpdateSessionRequest(title = title))
-    }
+    suspend fun updateSession(sessionId: String, title: String): Result<Session> =
+        sessionGateway.updateSession(sessionId, title)
 
-    suspend fun updateSessionArchived(sessionId: String, archived: Long): Result<Session> = runSuspendCatching {
-        api.updateSession(sessionId, UpdateSessionRequest(time = UpdateSessionTimeRequest(archived = archived)))
-    }
+    suspend fun updateSessionArchived(sessionId: String, archived: Long): Result<Session> =
+        sessionGateway.updateSessionArchived(sessionId, archived)
 
-    suspend fun deleteSession(sessionId: String): Result<Unit> = runSuspendCatching {
-        api.deleteSession(sessionId)
-    }
+    suspend fun deleteSession(sessionId: String): Result<Unit> =
+        sessionGateway.deleteSession(sessionId)
 
     suspend fun getSessionStatus(): Result<Map<String, SessionStatus>> =
-        runSuspendCatching { api.getSessionStatus() }
+        sessionGateway.getSessionStatus()
 
     suspend fun getActiveSessionIds(): Result<Set<String>> =
-        runSuspendCatching { api.getActiveSessions().data.keys }
+        sessionGateway.getActiveSessionIds()
 
     /**
      * T-R1 (slimapi R1) — BULK slim cold-start status fetch. The slim-mode
@@ -1069,273 +908,36 @@ class OpenCodeRepository @Inject constructor(
      * Legacy (non-slim) mode always uses the standard API directly.
      */
     suspend fun getSlimapiSessionsStatus(directory: String): Result<Map<String, SessionStatus>> =
-        runSuspendCatching {
-            // Legacy (non-slim) mode, OR P1-7 cached-unsupported (old v2 sidecar
-            // 404'd the Plan-A endpoint on a prior call) → standard status API.
-            // No turn merge on this path (§3.6 fallback semantics).
-            if (!serverCompatProfile.slimConnection || !serverCompatProfile.supportsSlimStatus) {
-                return@runSuspendCatching api.getSessionStatus()
-            }
-            // §3.1 Plan-A: probe/use the slim endpoint (deployed + running).
-            val resp = api.getSlimapiSessionsStatus(directory)
-            if (resp.isSuccessful) {
-                // First 200 → sticky-support. Subsequent calls take the fast path above
-                // only after a 404 flips it; a 200 keeps us on this endpoint.
-                serverCompatProfile.markSlimStatusSupported()
-                resp.body() ?: emptyMap()
-            } else if (resp.code() == 404) {
-                // §7.11 (P1-7): old v2 sidecar does not serve the Plan-A endpoint.
-                // Cache unsupported (sticky until reconfigure) and fall back THIS call.
-                serverCompatProfile.markSlimStatusUnsupported()
-                DebugLog.w("OpenCodeRepository",
-                    "slimapi /slimapi/sessions/status 404 (old sidecar) → fallback to standard API")
-                api.getSessionStatus()
-            } else {
-                // Other non-2xx: do NOT flip the capability flag (could be transient 5xx).
-                // Throw → Result.failure → caller keeps prior snapshot (unchanged semantics).
-                throw java.io.IOException("slimapi sessions/status HTTP ${resp.code()}")
-            }
-        }
+        sessionGateway.getSlimapiSessionsStatus(directory)
 
-    /**
-     * Fetches the child (sub-agent) sessions spawned by [sessionId], typically
-     * via the `task` tool.
-     */
     suspend fun getChildren(sessionId: String): Result<List<Session>> =
-        runSuspendCatching { api.getChildren(sessionId) }
+        sessionGateway.getChildren(sessionId)
 
     suspend fun getMessages(sessionId: String, limit: Int? = null): Result<List<MessageWithParts>> =
-        runSuspendCatching {
-            val response = api.getMessages(sessionId, limit, before = null)
-            if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
-            response.body() ?: emptyList()
-        }
+        messageGateway.getMessages(sessionId, limit)
 
-    /**
-     * Cursor-paged message fetch (V1 cursor-paging protocol: cursor carried via the
-     * `X-Next-Cursor` response header + the `before` query param).
-     *
-     * §11.1 fix-10 P0-1: in slim mode, the method now DISTINGUISHES two
-     * UI message-loading paths by the [before] parameter:
-     *
-     *  - **`before == null` (initial / reload / catch-up):** routes through
-     *    the authoritative skeleton cursor drain +
-     *    [SlimAuthoritativeCommitter.commitAuthoritative] using
-     *    [SLIMAPI_LOCAL_HISTORY_BOUND] as the drain item bound (NOT the UI
-     *    [limit]). The drain walks the cursor window to a terminal page
-     *    (`nextCursor == null`) and commits the aggregate atomically. The
-     *    returned `MessagesPage` has `nextCursor = null` (the drain
-     *    exhausted the window — there is no "next page" for load-more
-     *    until the next cold-load). The UI [limit] is IGNORED on this
-     *    path — it is a PRESENTATION page size, not a drain safety bound.
-     *    The drain's own [SLIMAPI_DEFAULT_PAGE_LIMIT] controls the
-     *    per-HTTP page size.
-     *
-     *  - **`before != null` (load-more / history pagination):** routes
-     *    through [getSlimapiMessagesPage] — a SINGLE-PAGE cursor fetch
-     *    that forwards [before] to the HTTP query and surfaces the
-     *    response's `X-Next-Cursor` header as `MessagesPage.nextCursor`.
-     *    NO authoritative commit (load-more is incremental history
-     *    pagination, not a completeness sync). The UI [limit] IS honoured
-     *    as the per-page `limit` query param.
-     *
-     * This split fixes the fix-9 P0-6 regression where ALL slim calls
-     * routed through the drain, breaking load-more (before cursor was
-     * ignored, nextCursor was forced null, UI limit was misused as drain
-     * itemBound producing Partial on the first page of long sessions).
-     *
-     * legacy (`isSlimMode == false`): byte-for-byte unchanged.
-     */
     suspend fun getMessagesPaged(
         sessionId: String,
         limit: Int? = null,
         before: String? = null,
         token: SlimCommitToken = captureSlimCommitToken(),
-    ): Result<MessagesPage> {
-        if (serverCompatProfile.slimConnection) {
-            // lite-v2-dev: slim message paging uses skeleton endpoint directly
-            // (SlimSyncEngine + authoritative commit retired, plan §4.1).
-            return runSuspendCatching {
-                val page = getSlimapiMessagesSkeleton(
-                    sessionId,
-                    limit = limit ?: SLIMAPI_LOCAL_HISTORY_BOUND,
-                    before = before,
-                )
-                MessagesPage(items = page.items, nextCursor = page.nextCursor)
-            }
-        }
-        return getMessagesPagedImpl(sessionId, limit, before, token, anchored = true)
-    }
+    ): Result<MessagesPage> = messageGateway.getMessagesPaged(sessionId, limit, before, token)
 
-    /**
-     * §empty-window-fix: UNANCHORED slim initial-window fetch — same contract
-     * shape as [getMessagesPaged] but forces a fresh authoritative load.
-     *
-     * §11.1 fix-10 P0-1: same `before`-based split as [getMessagesPaged]:
-     *  - `before == null` → full drain + commit (cold-load).
-     *  - `before != null` → single-page cursor fetch via
-     *    [getSlimapiMessagesPage] (load-more).
-     *
-     * The cold-load path uses [SLIMAPI_LOCAL_HISTORY_BOUND] as the drain
-     * item bound (NOT the UI [limit]). The load-more path honours [limit]
-     * as the per-page query param.
-     *
-     * Legacy non-slim mode: byte-for-byte identical to [getMessagesPaged]'s
-     * legacy branch.
-     */
     suspend fun getMessagesPagedUnanchored(
         sessionId: String,
         limit: Int? = null,
         before: String? = null,
         token: SlimCommitToken = captureSlimCommitToken(),
-    ): Result<MessagesPage> {
-        if (serverCompatProfile.slimConnection) {
-            // lite-v2-dev: slim message paging uses skeleton endpoint directly.
-            return runSuspendCatching {
-                val page = getSlimapiMessagesSkeleton(
-                    sessionId,
-                    limit = limit ?: SLIMAPI_LOCAL_HISTORY_BOUND,
-                    before = before,
-                )
-                MessagesPage(items = page.items, nextCursor = page.nextCursor)
-            }
-        }
-        return getMessagesPagedImpl(sessionId, limit, before, token, anchored = false)
-    }
+    ): Result<MessagesPage> = messageGateway.getMessagesPagedUnanchored(sessionId, limit, before, token)
 
-    /**
-     * Shared implementation for [getMessagesPaged] and
-     * [getMessagesPagedUnanchored]. Wave2-cleanup: inlined StandardMessageSource
-     * logic directly — no routing layer. The [anchored] param is accepted for
-     * signature compatibility but has no effect on the legacy path (watermark
-     * is a slim-only concept). Token threading (I15) preserved verbatim.
-     */
-    private suspend fun getMessagesPagedImpl(
-        sessionId: String,
-        limit: Int?,
-        before: String?,
-        token: SlimCommitToken,
-        anchored: Boolean,
-    ): Result<MessagesPage> = runSuspendCatching {
-        val response = api.getMessages(sessionId, limit, before)
-        if (!response.isSuccessful) throw IOException("HTTP ${response.code()}")
-        val items = response.body() ?: emptyList()
-        val nextCursor = extractNextCursor(
-            xNextCursor = response.headers()["X-Next-Cursor"],
-            linkHeader = response.headers()["Link"],
-        )
-        if (DebugLog.verboseDiagEnabled) {
-            DebugLog.d("OpenCodeRepository", "getMessagesPagedImpl sid=$sessionId limit=$limit before=$before items=${items.size} nextCursor=${nextCursor?.take(20)}")
-        }
-        MessagesPage(items = items, nextCursor = nextCursor)
-    }
+    suspend fun probeLatestMessageId(sessionId: String): Result<String?> =
+        messageGateway.probeLatestMessageId(sessionId)
 
-
-
-    /**
-     * §Phase1B lightweight tail probe: fetches only the single newest message
-     * id for [sessionId] (limit=1, desc default), using the active transport
-     * route without exposing its raw mode flag to callers.
-     */
-    suspend fun probeLatestMessageId(sessionId: String): Result<String?> = runSuspendCatching {
-        val response = api.getMessages(sessionId, limit = 1, before = null)
-        if (!response.isSuccessful) throw java.io.IOException("HTTP ${response.code()}")
-        response.body()?.firstOrNull()?.info?.id
-    }
-
-    /**
-     * Boundary facade for callers that only need the current route's latest
-     * message probe. Route selection stays inside the repository and both
-     * implementations expose the same [ProbeResult] contract.
-     */
     suspend fun probeLatestMessageIdForCurrent(sessionId: String): ProbeResult =
-        if (requireClientBundle().hostSnapshot.slimHost) {
-            probeLatestSlim(sessionId)
-        } else {
-            probeLatestMessageId(sessionId).toProbeResult()
-        }
+        messageGateway.probeLatestMessageIdForCurrent(sessionId)
 
-    private fun Result<String?>.toProbeResult(): ProbeResult = fold(
-        onSuccess = { messageId ->
-            ProbeResult(
-                ok = true,
-                empty = messageId == null,
-                messageID = messageId,
-            )
-        },
-        onFailure = { error ->
-            ProbeResult(
-                ok = false,
-                httpStatus = error.message
-                    ?.removePrefix("HTTP ")
-                    ?.toIntOrNull(),
-            )
-        },
-    )
-
-    /**
-     * §slimapi-client-impl-v1 §4 (G3 probeLatestMessageId 收敛): slim-mode
-     * probe that returns the single newest message for [sessionId] against
-     * the sidecar (`GET /slimapi/messages/{sid}?limit=1&mode=skeleton`) and
-     * **boundary-normalises every outcome into a [ProbeResult]** — no
-     * `Result<Response<...>>` for callers to pattern-match on.
-     *
-     * Branch table:
-     *  - 200 + empty array           → `ProbeResult(ok=true,  empty=true)`
-     *  - 200 + one item              → `ProbeResult(ok=true,  messageID=info.id, updatedAt=time.updated?:created)`
-     *  - 200 + null body (defensive) → `ProbeResult(ok=false, httpStatus=resp.code())`
-     *  - HTTP 4xx/5xx                → `ProbeResult(ok=false, httpStatus=resp.code())`
-     *  - Network/IO failure          → `ProbeResult(ok=false, httpStatus=null)`
-     *
-     * The HTTP-fail (carries `httpStatus`) vs network-fail (`httpStatus=null`)
-     * split is what lets the reconcile state machine (T7/T11) decide between
-     * "sid is gone upstream" (`httpStatus == 404` → mark deleted) and
-     * "transport is flaky" (`httpStatus == null` → keep dirty, retry next
-     * pass). Bare `probe[0]` access is forbidden downstream; every read goes
-     * through [ProbeResult].
-     *
-     * `X-Slimapi-Version: 2` is injected by [SlimapiVersionInterceptor] (no
-     * per-call header here). The legacy [probeLatestMessageId] is left
-     * byte-for-byte unchanged for the non-slim catch-up path.
-     */
-    suspend fun probeLatestSlim(sessionId: String): ProbeResult = runSuspendCatching {
-        val resp = api.getSlimapiMessages(sessionId, limit = 1, before = null, mode = "skeleton")
-        if (!resp.isSuccessful) {
-            // POST-RELEASE instrumentation: per-probe outcome log for the
-            // SlimapiProbe diagnostic surface. One line per probe attempt.
-            DebugLog.d(
-                "SlimapiProbe",
-                "probe sid=$sessionId FAILED http=${resp.code()}",
-            )
-            return@runSuspendCatching ProbeResult(ok = false, httpStatus = resp.code())
-        }
-        val arr = resp.body() ?: return@runSuspendCatching ProbeResult(ok = false, httpStatus = resp.code())
-        if (arr.isEmpty()) {
-            DebugLog.d("SlimapiProbe", "probe sid=$sessionId EMPTY")
-            ProbeResult(ok = true, empty = true)
-        } else {
-            val mid = arr.first().info.id
-            val ts = arr.first().info.time?.updated ?: arr.first().info.time?.created
-            DebugLog.d(
-                "SlimapiProbe",
-                "probe sid=$sessionId OK latest=$mid ts=$ts",
-            )
-            ProbeResult(
-                ok = true,
-                messageID = mid,
-                updatedAt = ts,
-            )
-        }
-    }.getOrElse { error ->
-        // POST-RELEASE instrumentation: network/transport failure path —
-        // distinguishes "sidecar reachable but errored" (above branches)
-        // from "sidecar unreachable" (this branch).
-        DebugLog.d(
-            "SlimapiProbe",
-            "probe sid=$sessionId TRANSPORT_FAIL ${error.javaClass.simpleName}: ${error.message}",
-        )
-        ProbeResult(ok = false, httpStatus = null)
-    }
+    suspend fun probeLatestSlim(sessionId: String): ProbeResult =
+        messageGateway.probeLatestSlim(sessionId)
 
     /**
      * §slimapi-client-impl-v1 §6 G2 (Task 4) — per-session status fetch
@@ -1394,27 +996,8 @@ class OpenCodeRepository @Inject constructor(
      * dispose-driven cancel propagates cleanly — matches the
      * [expandBatchInternal] CE discipline (R-14, rev-grok finding).
      */
-    suspend fun getSlimapiSessionStatusOutcome(sessionId: String): StatusOutcome {
-        // lite-v2-dev: /slimapi/sessions/{sid}/status removed; delegate to the
-        // standard bulk /session/status endpoint and look up this session.
-        return try {
-            val all = api.getSessionStatus()
-            val status = all[sessionId]
-            // lite-v2-dev delegate: the bulk /session/status sparse map OMITS idle
-            // entries (absent ≡ idle, NOT missing) — confirmed by
-            // normalizeAuthoritativeStatusSnapshot in SessionTree.kt which already
-            // promotes omitted authoritative ids to explicit idle. Misclassifying
-            // absent as SessionMissing was the /session/status storm root cause
-            // (every idle session looked evictable → fan-out churned forever).
-            StatusOutcome.Success(sessionId, status ?: SessionStatus(type = "idle"))
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: java.io.IOException) {
-            StatusOutcome.Retry(sessionId, null)
-        } catch (e: Exception) {
-            StatusOutcome.Retry(sessionId, null)
-        }
-    }
+    suspend fun getSlimapiSessionStatusOutcome(sessionId: String): StatusOutcome =
+        sessionGateway.getSlimapiSessionStatusOutcome(sessionId)
 
     suspend fun sendMessage(
         sessionId: String,
@@ -1422,82 +1005,15 @@ class OpenCodeRepository @Inject constructor(
         agent: String? = null,
         model: Message.ModelInfo? = null,
         attachments: List<ComposerImageAttachment> = emptyList()
-    ): Result<Unit> = runSuspendCatching {
-        val parts = buildList {
-            if (text.isNotBlank()) add(PromptRequest.PartInput(type = "text", text = text))
-            attachments.forEach { attachment ->
-                add(
-                    PromptRequest.PartInput(
-                        type = "file",
-                        mime = attachment.mime,
-                        filename = attachment.filename,
-                        url = attachment.dataUrl
-                    )
-                )
-            }
-        }
-        val request = PromptRequest(
-            parts = parts,
-            agent = agent,
-            model = model?.let { PromptRequest.ModelInput(it.providerId, it.modelId) }
-        )
-        val response = mutationApi.promptAsync(sessionId, request)
-        if (!response.isSuccessful) {
-            val errorBody = response.errorBody()?.string() ?: response.message()
-            throw Exception("Send failed ${response.code()}: $errorBody")
-        }
-    }
+    ): Result<Unit> = interactionGateway.sendMessage(sessionId, text, agent, model, attachments)
 
-    suspend fun abortSession(sessionId: String): Result<Unit> = runSuspendCatching {
-        mutationApi.abortSession(sessionId)
-    }
+    suspend fun abortSession(sessionId: String): Result<Unit> =
+        interactionGateway.abortSession(sessionId)
 
-    /**
-     * §context-compact: triggers server-side context compaction for [sessionId]
-     * via POST /session/{id}/summarize. The compaction itself runs async on
-     * the server; the resulting message/part SSE events drive the message
-     * reload automatically. [model] is the current session model (read from
-     * app state by the caller) — the server uses it to generate the summary.
-     *
-     * §compact-graded (Blocker-1): the returned [Result] distinguishes three
-     * outcomes so the caller ([ChatViewModel.compactSession]) can grade its
-     * recovery instead of swallowing every failure:
-     *  - `Result.success(true)` — POST accepted and the server explicitly
-     *    acknowledged (body=`true`, or body=null as in HTTP 204 where the
-     *    server returned no body but the request was accepted).
-     *  - `Result.failure(ServerRejectedException)` — POST reached the server,
-     *    HTTP 2xx came back, but the body was `false`: the server explicitly
-     *    rejected compaction (e.g. context too small to summarize, server
-     *    refused). This is a *deterministic* failure — the user must be told
-     *    and `isCompacting` must be cleared so a retry is possible.
-     *  - `Result.failure(<IOException/HttpException>)` — transport or HTTP
-     *    non-2xx failure. The caller's grading logic further splits this into
-     *    read-side [java.net.SocketTimeoutException] (POST likely accepted,
-     *    SSE will carry the result) vs everything else (POST never reached
-     *    the server).
-     *
-     * Completion of the compaction itself is reported through SSE; the body
-     * is NOT interpreted as the compaction result.
-     */
     suspend fun summarizeSession(
         sessionId: String,
         model: Message.ModelInfo
-    ): Result<Boolean> = runSuspendCatching {
-        val response = mutationApi.summarizeSession(sessionId, SummarizeRequest(model.providerId, model.modelId))
-        if (!response.isSuccessful) {
-            val errorBody = response.errorBody()?.string() ?: response.message()
-            throw Exception("Summarize failed ${response.code()}: $errorBody")
-        }
-        // body == null (HTTP 204 etc.) → server accepted, no body to read.
-        val accepted = response.body() ?: true
-        if (!accepted) {
-            // §compact-graded: server returned `false` → explicit rejection.
-            // Throw so runSuspendCatching turns it into Result.failure and the
-            // caller's onFailure(accepted-reject) branch can clear isCompacting.
-            throw SummarizeServerRejectedException()
-        }
-        accepted
-    }
+    ): Result<Boolean> = interactionGateway.summarizeSession(sessionId, model)
 
     /**
      * §compact-graded (Blocker-1): raised by [summarizeSession] when the
@@ -1509,13 +1025,11 @@ class OpenCodeRepository @Inject constructor(
     class SummarizeServerRejectedException :
         Exception("Server rejected compaction (body=false)")
 
-    suspend fun forkSession(sessionId: String, messageId: String? = null): Result<Session> = runSuspendCatching {
-        mutationApi.forkSession(sessionId, ForkSessionRequest(messageId))
-    }
+    suspend fun forkSession(sessionId: String, messageId: String? = null): Result<Session> =
+        interactionGateway.forkSession(sessionId, messageId)
 
-    suspend fun revertSession(sessionId: String, messageId: String, partId: String? = null): Result<Session> = runSuspendCatching {
-        mutationApi.revertSession(sessionId, RevertSessionRequest(messageId, partId))
-    }
+    suspend fun revertSession(sessionId: String, messageId: String, partId: String? = null): Result<Session> =
+        interactionGateway.revertSession(sessionId, messageId, partId)
 
     /**
      * §slim-reconcile-lane-repo (B2 T4) / §rev-grok fix1: fetch pending
@@ -1526,202 +1040,48 @@ class OpenCodeRepository @Inject constructor(
      *
      * legacy (`isSlimMode == false`): byte-for-byte unchanged.
      */
-    suspend fun getPendingPermissions(): Result<List<PermissionRequest>> = runSuspendCatching {
-        // lite-v2-dev: /slimapi/permissions removed; always use standard API.
-        api.getPendingPermissions()
-    }
+    suspend fun getPendingPermissions(): Result<List<PermissionRequest>> =
+        interactionGateway.getPendingPermissions()
 
     suspend fun respondPermission(
         sessionId: String,
         permissionId: String,
         response: PermissionResponse
-    ): Result<Unit> = runSuspendCatching {
-        mutationApi.respondPermission(sessionId, permissionId, PermissionResponseRequest(response.value))
-    }
+    ): Result<Unit> = interactionGateway.respondPermission(sessionId, permissionId, response)
 
-    suspend fun getPendingQuestions(directory: String?): Result<List<QuestionRequest>> = runSuspendCatching {
-        api.getPendingQuestions(directory)
-    }
+    suspend fun getPendingQuestions(directory: String?): Result<List<QuestionRequest>> =
+        interactionGateway.getPendingQuestions(directory)
 
     suspend fun replyQuestion(
         requestId: String,
         answers: List<List<String>>,
         directory: String?
-    ): Result<Unit> = runSuspendCatching {
-        val response = mutationApi.replyQuestion(requestId, QuestionReplyRequest(answers), directory)
-        if (!response.isSuccessful) {
-            val errorBody = response.errorBody()?.string() ?: response.message()
-            throw Exception("Reply failed ${response.code()}: $errorBody")
-        }
-    }
+    ): Result<Unit> = interactionGateway.replyQuestion(requestId, answers, directory)
 
-    suspend fun rejectQuestion(requestId: String, directory: String?): Result<Unit> = runSuspendCatching {
-        val response = mutationApi.rejectQuestion(requestId, directory)
-        if (!response.isSuccessful) {
-            val errorBody = response.errorBody()?.string() ?: response.message()
-            throw Exception("Reject failed ${response.code()}: $errorBody")
-        }
-    }
+    suspend fun rejectQuestion(requestId: String, directory: String?): Result<Unit> =
+        interactionGateway.rejectQuestion(requestId, directory)
 
-    /**
-     * §catalog-source: builds the model catalog from `GET /config/providers` —
-     * the SAME endpoint the opencode web model picker uses (verified by
-     * inspecting the web bundle served by opencode 1.17.x). Returns the
-     * [ProvidersResponse] downstream consumes (model picker + Model Management
-     * + context-limit index + per-prompt model attachment), unchanged.
-     *
-     * §catalog-source-revert (from the V2 /api/model + /api/provider pair): on
-     * opencode ≤1.17.x the V2 pair returns a STRICT SUBSET — only providers
-     * with an explicit `options.apiKey` in config plus the free `opencode`
-     * (Zen) provider — omitting most configured providers. On one 1.17.15
-     * server /api/model returned 3 providers / 31 models while
-     * /config/providers returned 10 providers / 61 models, so the app showed
-     * far fewer models than the web. /config/providers returns the full
-     * catalog the web shows.
-     *
-     * §forward-compat: opencode HEAD is moving the web to `/api/provider`
-     * (whose `Provider` type gains a `models` map). On ≤1.17.x `/api/provider`
-     * returns NO `models` field, so it cannot source the picker there; if a
-     * future opencode drops /config/providers or stops populating it, revisit.
-     *
-     * §key-leak safety (the original reason for the V2 migration — and why it
-     * is safe to revert here): /config/providers' raw body carries provider
-     * `apiKey` values, BUT
-     *   (a) [ConfigProvider] / [ProviderModel] have NO `options`/`apiKey`/`key`
-     *       field + `ignoreUnknownKeys = true` → keys are dropped at
-     *       deserialization, never held in memory or logged;
-     *   (b) [cn.vectory.ocdroid.data.repository.http.HttpHeaders.CACHEABLE_PATHS]
-     *       intentionally EXCLUDES `/config/providers` → no on-disk OkHttp
-     *       cache residue;
-     *   (c) this is a personal client ↔ personal server, so transit is to the
-     *       device owner only.
-     *
-     * §last-mile defense: a structural failure (HTTP error / non-decodable
-     * body) does NOT propagate as Result.failure (which would surface as
-     * "服务器没有可用模型"); it logs + returns an EMPTY catalog
-     * (Result.success) so the picker shows an empty list and the next refresh
-     * retries. CancellationException is rethrown (structured concurrency).
-     * Providers whose `models` map is empty are dropped (parity with the
-     * former V2 builder's groupBy).
-     */
-    suspend fun getProviders(): Result<ProvidersResponse> {
-        // §catalog-source-revert: fetch GET /config/providers — the SAME endpoint
-        // the opencode web model picker uses (verified on the web bundle served
-        // by opencode 1.17.x). The former V2 /api/model + /api/provider pair
-        // returns a STRICT SUBSET on ≤1.17.x (only providers with an explicit
-        // options.apiKey in config + the free `opencode`/Zen provider), omitting
-        // most configured providers → the app showed far fewer models than the
-        // web. /config/providers returns the full catalog. See the method kdoc
-        // for the key-leak safety analysis that makes this revert safe.
-        val response: ProvidersResponse = try {
-            api.getProviders()
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // §last-mile defense: do NOT propagate failure (would surface as
-            // "服务器没有可用模型"); degrade to an empty catalog so the picker
-            // shows an empty list and the next refresh retries. Cancellation is
-            // rethrown for structured concurrency.
-            DebugLog.e("OpenCodeRepository", "catalog: /config/providers fetch failed, returning empty catalog", e)
-            return Result.success(ProvidersResponse(providers = emptyList()))
-        }
-        // Drop providers with no models (parity with the former V2 builder's
-        // groupBy: a provider whose models map is empty renders no picker rows).
-        val providers = response.providers.filter { it.models.isNotEmpty() }
-        val totalModels = providers.sumOf { it.models.size }
-        DebugLog.i("OpenCodeRepository", "catalog: ${providers.size} provider(s), $totalModels model(s) from /config/providers")
-        return Result.success(
-            ProvidersResponse(providers = providers, defaultByProvider = response.defaultByProvider)
-        )
-    }
+    suspend fun getProviders(): Result<ProvidersResponse> = catalogGateway.getProviders()
 
-    /**
-     * §需求13 rev-7 #2: failure-propagating variant of [getProviders]. Same
-     * fetch + filter logic, EXCEPT structural failures (HTTP error / non-
-     * decodable body / network) propagate as [Result.failure] instead of
-     * being masked as an empty-catalog success.
-     *
-     * **Why a separate method**: [getProviders] applies a "last-mile
-     * defense" (catch → Result.success(empty)) so a transient failure
-     * degrades to an empty picker. That defense makes the 需求13 error-
-     * feedback feature DEAD: launchLoadProviders' `.onFailure` (which
-     * emits UiEvent.Error for the manual-refresh snackbar) NEVER fires for
-     * real network/HTTP/parse failures — they're masked as success-with-
-     * empty-catalog. This method gives launchLoadProviders a way to detect
-     * REAL failures and surface them, while leaving [getProviders]'
-     * behavior unchanged for any latent caller that relies on the degrade-
-     * to-empty contract.
-     *
-     * **Empty-catalog is NOT an error**: a server that legitimately returns
-     * zero providers still returns [Result.success] with an empty list. Only
-     * exceptions (the catch block) flip to [Result.failure].
-     * [CancellationException] is rethrown for structured concurrency.
-     */
-    suspend fun getProvidersOrFailure(): Result<ProvidersResponse> {
-        val response: ProvidersResponse = try {
-            api.getProviders()
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // §需求13 rev-7 #2: propagate the REAL failure — do NOT mask as
-            // empty-catalog success. launchLoadProviders' .onFailure will
-            // fire → UiEvent.Error → snackbar surfaces "Failed to refresh
-            // model list". Cancellation is rethrown for structured concurrency.
-            DebugLog.e("OpenCodeRepository", "catalog: /config/providers fetch failed (propagating as failure)", e)
-            return Result.failure(e)
-        }
-        val providers = response.providers.filter { it.models.isNotEmpty() }
-        val totalModels = providers.sumOf { it.models.size }
-        DebugLog.i("OpenCodeRepository", "catalog: ${providers.size} provider(s), $totalModels model(s) from /config/providers")
-        return Result.success(
-            ProvidersResponse(providers = providers, defaultByProvider = response.defaultByProvider)
-        )
-    }
+    suspend fun getProvidersOrFailure(): Result<ProvidersResponse> = catalogGateway.getProvidersOrFailure()
 
-    suspend fun getAgents(): Result<List<AgentInfo>> =
-        runSuspendCatching { api.getAgents() }
+    suspend fun getAgents(): Result<List<AgentInfo>> = catalogGateway.getAgents()
 
-    /**
-     * Lists the server-defined slash commands.
-     */
-    suspend fun getCommands(): Result<List<CommandInfo>> =
-        runSuspendCatching { api.getCommands() }
+    suspend fun getCommands(): Result<List<CommandInfo>> = catalogGateway.getCommands()
 
-    /**
-     * Executes a slash command against [sessionId]. §R18 Phase 2-E step 1:
-     * the directory context is supplied EXPLICITLY by the caller (the
-     * session's workdir); the OkHttp interceptor no longer injects the
-     * global workdir fallback over it.
-     *
-     * §grouping-rewrite item 4: routes through [commandApi] (own OkHttp
-     * client with a 300 s read timeout) instead of [api] (30 s) so a slow
-     * synchronous server-side command step does not trip a false-negative
-     * command-failed timeout — SSE still delivers the results on its own
-     * 0-timeout client. See [OkHttpClientFactory.commandClient].
-     */
     suspend fun executeCommand(
         sessionId: String,
         command: String,
         arguments: String = "",
         agent: String? = null,
         directory: String?
-    ): Result<Unit> = runSuspendCatching {
-        val response = commandApi.executeCommand(
-            sessionId,
-            CommandRequest(command = command, arguments = arguments, agent = agent),
-            directory
-        )
-        if (!response.isSuccessful) {
-            val errorBody = response.errorBody()?.string() ?: response.message()
-            throw Exception("Command failed ${response.code()}: $errorBody")
-        }
-    }
+    ): Result<Unit> = interactionGateway.executeCommand(sessionId, command, arguments, agent, directory)
 
     suspend fun getSessionDiff(sessionId: String): Result<List<FileDiff>> =
-        runSuspendCatching { api.getSessionDiff(sessionId) }
+        fileVcsGateway.getSessionDiff(sessionId)
 
     suspend fun getSessionTodos(sessionId: String): Result<List<TodoItem>> =
-        runSuspendCatching { api.getSessionTodos(sessionId) }
+        fileVcsGateway.getSessionTodos(sessionId)
 
     /**
      * §R-17 batch4 / §R18 Phase 2-E step 2: lists files under [directory]
@@ -1730,40 +1090,28 @@ class OpenCodeRepository @Inject constructor(
      * marker on the API method (no global state involved).
      */
     suspend fun getFileTree(directory: String, path: String? = null): Result<List<FileNode>> =
-        runSuspendCatching { api.getFileTree(path ?: "", directory) }
+        fileVcsGateway.getFileTree(directory, path)
 
-    /**
-     * Lists the contents of an arbitrary [directory] (independent of the
-     * currently selected session's workdir). Used by the directory picker.
-     */
     suspend fun getFileTreeForDirectory(directory: String, path: String? = null): Result<List<FileNode>> =
-        runSuspendCatching { api.getFileTreeForDirectory(directory, path ?: "") }
+        fileVcsGateway.getFileTreeForDirectory(directory, path)
 
-    /** §R-17 batch4: see [getFileTree] for the explicit-directory rationale. */
     suspend fun getFileContent(directory: String, path: String): Result<FileContent> =
-        runSuspendCatching { api.getFileContent(path, directory) }
+        fileVcsGateway.getFileContent(directory, path)
 
-    /** §R-17 batch4: see [getFileTree] for the explicit-directory rationale. */
     suspend fun getFileStatus(directory: String): Result<List<FileStatusEntry>> =
-        runSuspendCatching { api.getFileStatus(directory) }
+        fileVcsGateway.getFileStatus(directory)
 
-    // §vcs-section: read-only VCS façade for the Settings → Working directory
-    // section. Thin wrappers mirroring the file* directory-scoped pattern
-    // (§R-17 batch4): the directory is supplied EXPLICITLY by the caller; no
-    // global workdir state. VcsInfo / VcsStatusEntry live in data.model; the
-    // diff endpoint reuses the existing FileDiff shape (same as /session/{id}/diff).
     suspend fun getVcs(directory: String?): Result<VcsInfo> =
-        runSuspendCatching { api.getVcs(directory) }
+        fileVcsGateway.getVcs(directory)
 
     suspend fun getVcsStatus(directory: String?): Result<List<VcsStatusEntry>> =
-        runSuspendCatching { api.getVcsStatus(directory) }
+        fileVcsGateway.getVcsStatus(directory)
 
     suspend fun getVcsDiff(mode: String, directory: String?): Result<List<FileDiff>> =
-        runSuspendCatching { api.getVcsDiff(mode, directory) }
+        fileVcsGateway.getVcsDiff(mode, directory)
 
-    /** §R-17 batch4: see [getFileTree] for the explicit-directory rationale. */
     suspend fun findFile(directory: String, query: String, limit: Int = 50): Result<List<String>> =
-        runSuspendCatching { api.findFile(query, limit, directory) }
+        fileVcsGateway.findFile(directory, query, limit)
 
     /**
      * §R18 Phase 2-E step 1: SSE feed now takes an explicit [directory] so
@@ -1832,43 +1180,18 @@ class OpenCodeRepository @Inject constructor(
         sessionId: String,
         limit: Int,
         before: String? = null,
-    ): MessagesPage {
-        val response = api.getSlimapiMessages(sessionId, limit, before, mode = "skeleton")
-        if (!response.isSuccessful) throw IOException("HTTP ${response.code()}")
-        val items = response.body() ?: throw IOException("null_body")
-        return MessagesPage(items = items, nextCursor = response.headers()["X-Next-Cursor"])
-    }
+    ): MessagesPage = messageGateway.getSlimapiMessagesSkeleton(sessionId, limit, before)
 
-    /**
-     * Cluster A: single-message full expansion (`/slimapi/messages/{sid}/full/{mid}`).
-     */
     suspend fun getSlimapiMessageFull(
         sessionId: String,
         messageId: String
-    ): Result<MessageWithParts> = runSuspendCatching {
-        api.getSlimapiMessageFull(sessionId, messageId)
-    }
+    ): Result<MessageWithParts> = messageGateway.getSlimapiMessageFull(sessionId, messageId)
 
-    /**
-     * lite-v2-dev shim (plan §4.4): batch expand 退化为 N × 单条 `/full/{mid}`
-     * （ExpandBatchEngine 已退役）。token 形参保留以兼容 PartExpandState 调用点，
-     * 但不再做 token gate——/full 在 lite-v2 是纯按需展开（无自动同步路径调用）。
-     * 每条独立 [getSlimapiMessageFull]；per-message 失败归入 [ExpandOutcome.Ok.failures]。
-     */
     suspend fun expandMessagesFullBatch(
         sessionId: String,
         messageIds: Set<String>,
         @Suppress("UNUSED_PARAMETER") token: SlimCommitToken? = null,
-    ): ExpandOutcome {
-        val items = mutableListOf<MessageWithParts>()
-        val failures = mutableListOf<ExpandOutcome.MessageFailure>()
-        for (mid in messageIds) {
-            getSlimapiMessageFull(sessionId, mid)
-                .onSuccess { items += it }
-                .onFailure { failures += ExpandOutcome.MessageFailure(mid, code = null) }
-        }
-        return ExpandOutcome.Ok(items = items, failures = failures, usedBatch = false)
-    }
+    ): ExpandOutcome = messageGateway.expandMessagesFullBatch(sessionId, messageIds, token)
 
     /** §B1: extract Retry-After header value as capped ms (pure, no IO). */
     internal fun retryAfterHeaderToMs(header: String?): Long {
@@ -1927,123 +1250,37 @@ class OpenCodeRepository @Inject constructor(
         roots: Boolean? = null,
         limit: Int? = null,
         search: String? = null
-    ): Result<SlimSessionsPage> =
-        getSlimapiSessionsDelegate(api, directories, roots, limit, { parseErrorCode(it) }, { retryAfterHeaderToMs(it) }, search)
+    ): Result<SlimSessionsPage> = sessionGateway.getSlimapiSessions(directories, roots, limit, search)
 
-    /**
-     * lite-v2-dev: cross-directory pending questions aggregate.
-     * /slimapi/questions removed; re-routes to the standard /question endpoint
-     * (per-directory). Returns a [SlimAggregationOutcome] wrapping the
-     * standard [SlimapiQuestionEntry] list for caller compatibility.
-     */
     suspend fun getSlimapiQuestions(
         directories: List<String>? = null,
         token: SlimCommitToken,
-    ): Result<SlimAggregationOutcome<SlimapiQuestionEntry>> = runSuspendCatching {
-        // lite-v2-dev: use standard API, map results to SlimapiQuestionEntry.
-        val dir = directories?.firstOrNull()
-        val items = api.getPendingQuestions(dir).map { q ->
-            SlimapiQuestionEntry(
-                id = q.id,
-                sessionId = q.sessionId,
-                questions = q.questions,
-                tool = q.tool,
-                directory = dir,
-            )
-        }
-        SlimAggregationOutcome.Success(
-            items = items,
-            authoritativeDirectories = directories?.toSet(),
-            serverScope = null,
-        )
-    }
+    ): Result<SlimAggregationOutcome<SlimapiQuestionEntry>> =
+        interactionGateway.getSlimapiQuestions(directories, token)
 
-    /**
-     * lite-v2-dev: cross-directory pending permissions aggregate.
-     * /slimapi/permissions removed; re-routes to the standard /permission
-     * endpoint. Returns a [SlimAggregationOutcome] wrapping the standard
-     * [SlimapiPermissionEntry] list for caller compatibility.
-     */
     suspend fun getSlimapiPermissions(
         directories: List<String>? = null,
         token: SlimCommitToken,
-    ): Result<SlimAggregationOutcome<SlimapiPermissionEntry>> = runSuspendCatching {
-        // lite-v2-dev: use standard API, map results to SlimapiPermissionEntry.
-        val items = api.getPendingPermissions().map { p ->
-            SlimapiPermissionEntry(
-                id = p.id,
-                sessionId = p.sessionId,
-                permission = p.permission,
-                patterns = p.patterns,
-                metadata = p.metadata,
-                always = p.always,
-                tool = p.tool,
-                directory = null,
-            )
-        }
-        SlimAggregationOutcome.Success(
-            items = items,
-            authoritativeDirectories = directories?.toSet(),
-            serverScope = null,
-        )
-    }
+    ): Result<SlimAggregationOutcome<SlimapiPermissionEntry>> =
+        interactionGateway.getSlimapiPermissions(directories, token)
 
-    // aggregationOutcome moved to SlimAggregationOutcome.kt
-
-    /**
-     * lite-v2-dev: reply to a question. /slimapi/questions/{id}/reply removed;
-     * re-routes to the standard /question/{id}/reply endpoint. The routeToken
-     * parameter is accepted but ignored (standard API does not use it).
-     */
     suspend fun replySlimapiQuestion(
         questionId: String,
         answers: List<List<String>>,
         @Suppress("UNUSED_PARAMETER") routeToken: String?
-    ): Result<Unit> = runSuspendCatching {
-        val response = mutationApi.replyQuestion(
-            questionId,
-            QuestionReplyRequest(answers = answers),
-            null,
-        )
-        if (!response.isSuccessful) {
-            val errorBody = response.errorBody()?.string() ?: response.message()
-            throw Exception("Reply failed ${response.code()}: $errorBody")
-        }
-    }
+    ): Result<Unit> = interactionGateway.replySlimapiQuestion(questionId, answers, routeToken)
 
-    /** lite-v2-dev: reject a question. Re-routes to standard /question/{id}/reject. */
     suspend fun rejectSlimapiQuestion(
         questionId: String,
         @Suppress("UNUSED_PARAMETER") routeToken: String?
-    ): Result<Unit> = runSuspendCatching {
-        val response = mutationApi.rejectQuestion(questionId, null)
-        if (!response.isSuccessful) {
-            val errorBody = response.errorBody()?.string() ?: response.message()
-            throw Exception("Reject failed ${response.code()}: $errorBody")
-        }
-    }
+    ): Result<Unit> = interactionGateway.rejectSlimapiQuestion(questionId, routeToken)
 
-    /**
-     * lite-v2-dev: respond to a permission. /slimapi/permissions removed;
-     * re-routes to the standard /session/{id}/permissions/{id} endpoint.
-     * The routeToken parameter is accepted but ignored.
-     */
     suspend fun respondSlimapiPermission(
         sessionId: String,
         permissionId: String,
         response: PermissionResponse,
         @Suppress("UNUSED_PARAMETER") routeToken: String?
-    ): Result<Unit> = runSuspendCatching {
-        val resp = mutationApi.respondPermission(
-            sessionId,
-            permissionId,
-            PermissionResponseRequest(response.value)
-        )
-        if (!resp.isSuccessful) {
-            val errorBody = resp.errorBody()?.string() ?: resp.message()
-            throw Exception("Permission respond failed ${resp.code()}: $errorBody")
-        }
-    }
+    ): Result<Unit> = interactionGateway.respondSlimapiPermission(sessionId, permissionId, response, routeToken)
 
     // ── Cluster A slim state / drain methods: RETIRED (lite-v2-dev plan §4.1) ─
     // coldStartSlimSync + bumpSlimBookmarkFromItems + getSlimSessionState +
@@ -2099,142 +1336,4 @@ class OpenCodeRepository @Inject constructor(
 }
 
 // SlimAggregationOutcome, SlimColdStartSnapshot moved to their own files
-
-/**
- * R8 slim-mode foundation: type-safe accessors for the tolerant
- * `/slimapi/health` body parser ([OpenCodeRepository.parseSlimapiHealth]).
- * Returning null on shape mismatch (rather than throwing ClassCastException)
- * lets the parser degrade per-field to null, where
- * [ServerCompatProfile.isSlimapiClientAccepted] then fail-closes.
- */
-private fun JsonElement.safeObject(): JsonObject? = this as? JsonObject
-private fun JsonElement.safeArray(): JsonArray? = this as? JsonArray
-private fun JsonElement.safePrimitive(): JsonPrimitive? = this as? JsonPrimitive
-
 // SlimapiPermissionEntry.toPermissionRequest() moved to SlimAggregationOutcome.kt
-
-// ── Wave2-cleanup: inlined from MessageSource.kt ──────────────────────
-
-/**
- * §pagination-header-fallback (2026-07-26): extracts the next-page cursor from
- * EITHER the slimapi's `X-Next-Cursor` response header OR opencode's RFC 5988
- * `Link: <...?before=<opaque>; rel="next"` header.
- *
- * The slimapi translates opencode's `Link` into `X-Next-Cursor` for its own
- * routes (`/slimapi/messages/{sid}`). But when the standard path calls opencode
- * directly (`GET /session/{sid}/message`), only the `Link` header is present —
- * `X-Next-Cursor` is absent, so the cursor was null and pagination was dead.
- *
- * This helper closes that gap: try `X-Next-Cursor` first (slimapi), fall back to
- * parsing the `Link` header (direct opencode). The `before` query-param value is
- * extracted VERBATIM (no percent-decoding) — opencode's cursor is an opaque
- * base64url JSON envelope that must round-trip byte-for-byte.
- */
-private fun extractNextCursor(
-    xNextCursor: String?,
-    linkHeader: String?,
-): String? {
-    if (xNextCursor != null) return xNextCursor
-    if (linkHeader == null) return null
-    // RFC 5988 Link header: comma-separated entries, each `<url>; rel="..."`.
-    // opencode advertises: `Link: <...?before=<opaque>&limit=N>; rel="next"`
-    for (raw in linkHeader.split(",")) {
-        val segment = raw.trim()
-        val urlStart = segment.indexOf('<')
-        val urlEnd = segment.indexOf('>')
-        if (urlStart < 0 || urlEnd < 0 || urlEnd <= urlStart) continue
-        val url = segment.substring(urlStart + 1, urlEnd)
-        val attrs = segment.substring(urlEnd + 1)
-        // Check rel="next" (case-insensitive, may be multi-token).
-        if (!attrs.contains("rel=", ignoreCase = true)) continue
-        val relValue = attrs.substringAfter("rel=", "")
-            .trim()
-            .removePrefix("\"")
-            .substringBefore("\"")
-            .lowercase()
-        if ("next" !in relValue.split(" ")) continue
-        // Extract the `before` query param from the URL — VERBATIM (no decode).
-        // The cursor is opaque base64url; parse_qs/unquote would corrupt it.
-        val query = url.substringAfter("?", "")
-        for (param in query.split("&")) {
-            if (param.startsWith("before=")) {
-                val value = param.substring("before=".length)
-                // §rev-gpt: an empty `before=` (no value) is NOT a valid
-                // cursor — return null so hasMore stays false instead of
-                // triggering an invalid/repeated load-more request.
-                if (value.isNotEmpty()) return value
-            }
-            // Also handle bare `?before` (no `=`) → not a valid cursor.
-        }
-    }
-    return null
-}
-
-// ── Wave2-cleanup: inlined from SessionSource.kt ──────────────────────
-
-/**
- * Extracted delegate — mirrors [OpenCodeRepository.getSlimapiSessions] body
- * verbatim. Encapsulates the slimapi sessions Retrofit call + non-2xx error
- * decoding + the v0.9.0 `503 transform_busy` Retry-After backoff (mirrors
- * ≤3 attempts, Retry-After header honored with
- * exponential-backoff fall-back, only `503 + transform_busy` retries; every
- * other status fails immediately preserving prior behavior).
- *
- * **One-shot errorBody discipline**:
- * the sidecar's coded envelope is read EXACTLY ONCE via the injected
- * [parseErrorCode] (OkHttp buffers errorBody for one-shot consumption); the
- * parsed `code` is then used for BOTH the retry decision AND WARN-level
- * observability logging. Reading the body twice (once to branch, once to log)
- * silently swallows the log because the second read returns null.
- *
- * [parseErrorCode] / [retryAfterHeaderToMs] are injected so this top-level
- * delegate reuses the OCR `internal fun`s (single source of truth) without
- * the delegate holding an OCR reference.
- */
-private suspend fun getSlimapiSessionsDelegate(
-    api: OpenCodeApi,
-    directories: List<String>?,
-    roots: Boolean?,
-    limit: Int?,
-    parseErrorCode: (retrofit2.Response<*>) -> String?,
-    retryAfterHeaderToMs: (String?) -> Long,
-    search: String? = null,
-): Result<SlimSessionsPage> = runSuspendCatching {
-    var lastException: retrofit2.HttpException? = null
-    for (attempts in 1..3) {
-        val resp = api.getSlimapiSessions(directories, roots, limit, search)
-        if (resp.isSuccessful) {
-            val sessions = resp.body() ?: emptyList()
-            val headers = resp.headers()
-            return@runSuspendCatching SlimSessionsPage(
-                sessions = sessions,
-                complete = headers?.get("X-Complete")?.toBooleanStrictOrNull(),
-            )
-        }
-        // Non-2xx: read the sidecar's coded envelope ONCE (errorBody is
-        // one-shot). The parsed code drives BOTH the 503+transform_busy
-        // retry decision AND the WARN observability log.
-        val code = parseErrorCode(resp)
-        if (resp.code() == 503 && code == SlimapiErrorCodes.TRANSFORM_BUSY && attempts < 3) {
-            val retryAfterMs = retryAfterHeaderToMs(resp.headers()["Retry-After"])
-            val delayMs = if (retryAfterMs > 0L) retryAfterMs else backoffMs(attempts)
-            delay(delayMs)
-            continue
-        }
-        // Non-503 / non-transform_busy / final attempt → observability + fail.
-        if (code != null) {
-            DebugLog.w("OpenCodeRepository", "slimapi sessions failed: $code")
-        }
-        lastException = retrofit2.HttpException(resp)
-        break
-    }
-    throw lastException ?: throw AssertionError("unreachable")
-}
-
-/** Exponential backoff for sessions 503 retry: 200ms, 400ms with ±30% jitter. */
-private fun backoffMs(attempt: Int): Long {
-    val base = exponentialBackoffMs(attempt - 1, 200L, Int.MAX_VALUE)
-    val jitterRange = (base * 0.30).toLong()
-    val jitter = (Math.random() * (2.0 * jitterRange + 1.0)).toLong() - jitterRange
-    return (base + jitter).coerceAtLeast(0L)
-}
