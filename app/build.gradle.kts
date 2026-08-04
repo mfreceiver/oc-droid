@@ -466,6 +466,9 @@ dependencies {
     testImplementation(libs.robolectric)
     // R-21: ApplicationProvider.getApplicationContext（Robolectric 测试取 Context）
     testImplementation(libs.androidx.test.core)
+    // §wave2-1-l4: Robolectric Compose tests for ChatMessageList baseline
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    testImplementation(libs.androidx.compose.ui.test.manifest)
 
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

@@ -23,6 +23,15 @@ import cn.vectory.ocdroid.ui.controller.HostProfileController
 import cn.vectory.ocdroid.ui.controller.subtreeIds
 import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
+// §Wave2.1-split-l2: orchestrator dependencies (Pattern B constructor injection).
+// §Wave2.1-split-l2: orchestrator dependencies (Pattern B — constructor
+// injection, NO interfaces). These are internal to the ui package.
+import cn.vectory.ocdroid.ui.CommandOrchestrator
+import cn.vectory.ocdroid.ui.DraftSessionOrchestrator
+import cn.vectory.ocdroid.ui.RefreshOrchestrator
+import cn.vectory.ocdroid.ui.SendOrchestrator
+import cn.vectory.ocdroid.ui.SessionOpener
+import androidx.annotation.MainThread
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -202,6 +211,71 @@ class AppCore @Inject constructor(
      */
     internal val processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller,
 ) {
+    /**
+     * §Wave2.1-split-l2 (rev-gpt APPROVED EXCEPTION): _lazy composition_ of the 5
+     * orchestrator dependencies, NOT Hilt constructor injection.
+     *
+     * ## Why lazy, not Hilt ctor injection (§2.2 Pattern B)
+     *
+     * The Wave2.1 architecture report §2.2 specifies Pattern B: orchestrator
+     * classes declare constructor deps via `@Inject constructor` and AppCore
+     * receives them as constructor-injected parameters. This is the target state.
+     *
+     * However, migrating AppCore's constructor signature would break existing
+     * test factories (MainViewModelTestBase.createCore, ForkSessionTest) that
+     * construct AppCore manually with positional args and do not go through Hilt.
+     * Those factories are outside the Wave2.1 write domain, so constructor
+     * injection of orchestrators is deferred.
+     *
+     * ## What this means for Hilt ownership
+     *
+     * The orchestrator classes retain `@Singleton @Inject constructor`
+     * annotations (they are Hilt-provisionable types, future-proof for
+     * Wave2.2). But in Wave2.1, AppCore does NOT obtain them via Hilt — it owns
+     * the instances via `lazy`, which calls the orchestrator constructors
+     * directly. This is runtime-safe because:
+     *   - The dependency graph is acyclic (Refresh → Send → Draft → Command).
+     *   - All deps required by orchestrator constructors are already available
+     *     as AppCore constructor-injected fields (same Singleton instances Hilt
+     *     would provide).
+     *   - Production access is single-threaded (Dispatchers.Main), so lazy
+     *     synchronization overhead is negligible.
+     *
+     * ## TODO(Wave2.2)
+     *
+     * Migrate test factories to allow full Hilt constructor injection of the 5
+     * orchestrators into AppCore. Then remove this `lazy` composition block and
+     * add the 5 params to AppCore's `@Inject constructor`.
+     */
+    internal val sessionOpener by lazy { SessionOpener(store, repository, appScope, sessionSwitcher) }
+    internal val refreshOrchestrator by lazy {
+        RefreshOrchestrator(
+            store, repository, settingsManager, effectBus, appScope,
+            currentProfileId, sessionSwitcher, connectionCoordinator,
+            sessionSyncCoordinator, foregroundCatchUpController, hostProfileStore,
+            serverCompatProfile, tokenStreamCoordinator,
+        )
+    }
+    internal val sendOrchestrator by lazy {
+        SendOrchestrator(
+            store, repository, settingsManager, effectBus, appScope,
+            currentProfileId, sessionSwitcher, connectionCoordinator,
+        )
+    }
+    internal val draftSessionOrchestrator by lazy {
+        DraftSessionOrchestrator(
+            store, repository, settingsManager, effectBus, appScope,
+            currentProfileId, composerController, sessionSwitcher,
+            sendOrchestrator, refreshOrchestrator,
+        )
+    }
+    internal val commandOrchestrator by lazy {
+        CommandOrchestrator(
+            store, repository, settingsManager, effectBus, appScope,
+            currentProfileId, composerController,
+            draftSessionOrchestrator, sessionOpener,
+        )
+    }
 
     // ── Slice accessors (delegate to SharedStateStore) ──────────────────────
     // §R18 Phase 4 (P0-9): SharedStateStore now owns private MutableStateFlows
@@ -266,6 +340,55 @@ class AppCore @Inject constructor(
         // Room 持久化已移除（remove-message-persistence Task 3）：进程内 LRU
         // 是唯一缓存层，无 IO。
     }
+
+    // ── §Wave2.1-split-l2: 5 cross-domain entry points (thin delegation) ─────
+    // The orchestrators own the implementation; AppCore is the thin router.
+    // Signatures MUST NOT change — callers (ChatViewModel, OrchestratorViewModel)
+    // invoke these as `core.<method>()`.
+
+    /** Cross-domain: composer→chat→session creation. Routes to draft or existing. */
+    @MainThread
+    internal fun sendMessage() {
+        val draftWorkdir = store.composerFlow.value.draftWorkdir
+        val existingSessionId = store.chatFlow.value.currentSessionId
+        val text = store.composerFlow.value.inputText.trim()
+        val attachments = store.composerFlow.value.imageAttachments
+        if (text.isEmpty() && attachments.isEmpty()) return
+        if (draftWorkdir != null && existingSessionId == null) {
+            draftSessionOrchestrator.sendMessageViaDraft()
+        } else {
+            val sessionId = existingSessionId ?: return
+            if (store.composerFlow.value.sendingSessionIds.contains(sessionId)) return
+            sendOrchestrator.dispatchSendMessage(sessionId)
+        }
+    }
+
+    /** `/clear` and other slash commands. */
+    internal fun executeCommand(command: String, arguments: String) = commandOrchestrator.executeCommand(command, arguments)
+
+    /** nav → session-list → chat (deep-link path). */
+    internal fun openSessionFromDeepLink(sessionId: String) = sessionOpener.openSessionFromDeepLink(sessionId)
+
+    /**
+     * Full-stack local reset. Retained as a thin 1-line delegate — HostViewModel
+     * already bypasses this (calls controller directly), but OrchestratorViewModel
+     * still calls `core.resetLocalDataAndResync()` and we must not break that.
+     */
+    internal fun resetLocalDataAndResync() { hostProfileController.resetLocalDataAndResync() }
+
+    // ── §Wave2.1-split-l2: additional delegation methods for callers outside
+    //  the write domain (ChatViewModel, ChatScaffold, RevertConversation).
+    //  These preserve the original extension-function signatures.
+
+    /** @see [RefreshOrchestrator.performGlobalColdStartRefresh] */
+    internal fun performGlobalColdStartRefresh(currentId: String, forceInitialWindow: Boolean = false, explicit: Boolean = false): Boolean =
+        refreshOrchestrator.performGlobalColdStartRefresh(currentId, forceInitialWindow, explicit)
+
+    /** @see [RefreshOrchestrator.performForceRefresh] */
+    internal fun performForceRefresh(sessionId: String) = refreshOrchestrator.performForceRefresh(sessionId)
+
+    /** @see [RefreshOrchestrator.loadSessionsForEffect] */
+    internal fun loadSessionsForEffect() = refreshOrchestrator.loadSessionsForEffect()
 
     init {
         // §G-ACL: one-time migration of legacy slimapi profiles (http:4097 → https:14097 mTLS).
@@ -463,6 +586,8 @@ class AppCore @Inject constructor(
      * because Hilt ViewModels are not @Inject-able).
      */
     private fun dispatchEffect(effect: ControllerEffect) {
+        // §Wave2.1-split-l2: orchestrators are created via `lazy`; by the time
+        // an effect arrives (after init block completes), they are available.
         val handled = dispatchForegroundCatchUpEffect(effect)
             || dispatchSessionEffect(effect)
             || dispatchHostEffect(effect)
@@ -508,7 +633,7 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.GlobalColdStartRefresh -> {
-            performGlobalColdStartRefresh(currentId = effect.sessionId)
+            refreshOrchestrator.performGlobalColdStartRefresh(currentId = effect.sessionId)
             true
         }
         is ControllerEffect.CancelSse -> {
@@ -525,7 +650,7 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.CatchUpAfterDisconnect -> {
-            catchUpAfterDisconnectOrForeground(effect.sessionId)
+            refreshOrchestrator.catchUpAfterDisconnectOrForeground(effect.sessionId)
             true
         }
         else -> false
@@ -534,7 +659,7 @@ class AppCore @Inject constructor(
     /** SessionSwitcher-owned effects. */
     internal fun dispatchSessionEffect(effect: ControllerEffect): Boolean = when (effect) {
         is ControllerEffect.LoadMessages -> {
-            loadMessagesForEffect(
+            refreshOrchestrator.loadMessagesForEffect(
                 sessionId = effect.sessionId,
                 resetLimit = effect.resetLimit,
                 expectedRouteInstance = effect.expectedRouteInstance,
@@ -669,7 +794,7 @@ class AppCore @Inject constructor(
                     // resetLimit=false: keep the cached older history;
                     // loadMessages merges the latest tail non-destructively
                     // (§preserveUnfetched in MessageActions).
-                    loadMessagesForEffect(effect.sessionId, resetLimit = false, expectedRouteInstance = effect.expectedRouteInstance)
+                    refreshOrchestrator.loadMessagesForEffect(effect.sessionId, resetLimit = false, expectedRouteInstance = effect.expectedRouteInstance)
                 } else {
                     // §empty-window-fix: cold-load path. This branch now covers
                     // BOTH the genuine cache miss (cached == null) AND the
@@ -679,7 +804,7 @@ class AppCore @Inject constructor(
                     // return an empty /since response.
                     // resetLimit=true wipes any partial state and seeds a
                     // fresh olderMessagesCursor.
-                    loadMessagesForEffect(effect.sessionId, resetLimit = true, forceInitialWindow = true, expectedRouteInstance = effect.expectedRouteInstance)
+                    refreshOrchestrator.loadMessagesForEffect(effect.sessionId, resetLimit = true, forceInitialWindow = true, expectedRouteInstance = effect.expectedRouteInstance)
                 }
             }
             true
@@ -852,7 +977,7 @@ class AppCore @Inject constructor(
     /** ConnectionCoordinator-owned effects. */
     internal fun dispatchConnectionEffect(effect: ControllerEffect): Boolean = when (effect) {
         is ControllerEffect.LoadSessions -> {
-            loadSessionsForEffect()
+            refreshOrchestrator.loadSessionsForEffect()
             true
         }
         is ControllerEffect.LoadAgents -> {
@@ -959,7 +1084,7 @@ class AppCore @Inject constructor(
             true
         }
         is ControllerEffect.RefreshSessions -> {
-            loadSessionsForEffect()
+            refreshOrchestrator.loadSessionsForEffect()
             true
         }
         /**
