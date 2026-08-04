@@ -5,7 +5,7 @@ import cn.vectory.ocdroid.BuildConfig
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS
 import cn.vectory.ocdroid.data.model.Message
-import cn.vectory.ocdroid.data.model.MessageWithParts
+
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.Session
@@ -65,10 +65,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -213,7 +210,7 @@ class SessionSyncCoordinator(
      * when null, the lite-v2 reload path is a no-op.
      */
     internal val skeletonReloadCoordinator: SkeletonReloadCoordinator? = null,
-) : SseDispatchHost, StripeLock {
+) : SseDispatchHost {
     /** Tag for [reportNonFatalIssue]; mirrors the original MainViewModel TAG. */
     private val tag: String = "SessionSyncCoordinator"
 
@@ -316,112 +313,6 @@ class SessionSyncCoordinator(
         val idx = ((sid.hashCode() % STRIPES) + STRIPES) % STRIPES
         return reconcileStripes[idx]
     }
-
-    /**
-     * Task 11: resync catch-up concurrency cap (§3 performance hint:
-     * "可加客户端并发上限（如 4）"). Bounds the number of concurrent
-     * [OpenCodeRepository.probeLatestSlim] + [getSlimapiMessagesSince]
-     * fetches during a resync catch-up sweep so a 50-session catch-up set
-     * does not stampede the sidecar. Pinned to 4 (matches the contract
-     * hint + the expand-batch fallback cap in OpenCodeRepository).
-     */
-    private val resyncConcurrencySemaphore = Semaphore(4)
-
-    /**
-     * Task 11: default per-sid deadline for a single session's reconcile
-     * during a resync catch-up sweep. Prevents one slow / hung session
-     * from blocking the batch — [withTimeout] cancels the per-sid job and
-     * the sweep moves on. The session's `dirty` is preserved (cancellation
-     * throws CE out of the per-sid job before any state mutation lands).
-     *
-     * 8 seconds is the upper bound for a single probe + (focus) since-fetch
-     * under normal sidecar load. Overridable per-call for tests.
-     */
-    private val defaultResyncPerSidDeadlineMs: Long = 8_000L
-
-    /**
-     * Task 11 (§3 / §4 reconcile lane): the outcome of a single
-     * [reconcileSession] invocation. The coordinator's
-     * [applyReconcileResult] branches on these to fold side effects
-     * (chat-slice mutation, session-list eviction) that can't live inside
-     * the repository's pure state-derive layer.
-     *
-     * Sealed so the [applyReconcileResult] `when` is exhaustive.
-     */
-    sealed class ReconcileResult {
-        /** The session is aligned — local view matches the probe's view. */
-        data class Aligned(val sid: String) : ReconcileResult()
-        /** Focus/RESYNC REST fetch succeeded + items merged into chat. */
-        data class Reconciled(val sid: String, val items: List<MessageWithParts>) : ReconcileResult()
-        /** BACKGROUND catch-up needed; row refreshed, dirty PRESERVED. */
-        data class RefreshRow(val sid: String) : ReconcileResult()
-        /** Probe 404 → session gone upstream; drop from list. */
-        data class MarkDeleted(val sid: String) : ReconcileResult()
-        /** Probe empty + local had messages; local cache cleared. */
-        data class ClearLocal(val sid: String) : ReconcileResult()
-        /** Probe transport failure OR REST failure; dirty preserved. */
-        data class Failure(val sid: String) : ReconcileResult()
-        /** Per-sid deadline exceeded; dirty preserved. */
-        data class TimedOut(val sid: String) : ReconcileResult()
-        /** No repository wired; reconcile is a no-op. */
-        data class NoRepository(val sid: String) : ReconcileResult()
-
-        /**
-         * C-D3 v2 §1.7: entry token became stale; no repo, slice, cache,
-         * or effect commit landed. Stale ≠ Failure — it is a clean no-op
-         * (no [markSlimReconcileFailure], no banner, no toast).
-         */
-        data class Stale(val sid: String) : ReconcileResult()
-    }
-
-    /**
-     * Task 11 round-2 (oracle I4 — ReconcileMode enum): replaces the
-     * round-1 `isFocus: Boolean` parameter on [reconcileSession]. Three
-     * modes encode the three calling contexts, each with a different
-     * branch matrix per the contract §3 + §4 + oracle's design.
-     *
-     * # Branch matrix (oracle I4)
-     *
-     * | Probe outcome                       | DIGEST_FOCUS         | DIGEST_BACKGROUND     | RESYNC               |
-     * | ---                                 | ---                  | ---                   | ---                  |
-     * | 404                                 | MarkDeleted          | MarkDeleted           | MarkDeleted          |
-     * | Other failure                       | Failure (keep dirty) | Failure (keep dirty)  | Failure (keep dirty) |
-     * | empty + local-has messages          | ClearLocal + clear   | no-op (keep dirty)    | ClearLocal + clear   |
-     * | empty + local empty                 | Aligned (clear)      | no-op (keep dirty)    | Aligned (clear)      |
-     * | aligned (probe says caught up)      | Aligned (clear)      | no-op (keep dirty)    | Aligned (clear)      |
-     * | needs catch-up                      | REST fetch + clear   | RefreshRow (no clear) | REST fetch + clear   |
-     * | REST success                        | clear-if-truly-aligned| n/a                  | clear-if-truly-aligned|
-     * | REST failure                        | Failure (keep dirty) | n/a                   | Failure (keep dirty) |
-     *
-     * The matrix is the canonical spec — every branch in [reconcileSessionLocked]
-     * MUST match this table.
-     *
-     * # Why three modes (oracle I4)
-     *
-     * Round-1 had only `isFocus: Boolean`. Two problems:
-     *  1. **C3 fix:** BACKGROUND (non-focus digest) must NEVER clear dirty
-     *     on aligned/empty (only focus + RESYNC may clear). The boolean
-     *     couldn't express "RESYNC clears on aligned but BACKGROUND doesn't".
-     *  2. **RESYNC fetch policy:** RESYNC always fetches on needsCatchUp
-     *     (regardless of focus), but BACKGROUND never fetches. The boolean
-     *     conflated "should fetch" with "is current tab".
-     *
-     * The enum separates the concerns: FOCUS/BACKGROUND select from
-     * [handleSessionDigest] based on `sid == currentSessionId`; RESYNC is
-     * passed by [performResyncCatchUp] / [performSlimResync] for every sid
-     * in the catch-up set.
-     */
-    enum class ReconcileMode {
-        /** Digest frame for the currently-open chat tab. May fetch + clear dirty. */
-        DIGEST_FOCUS,
-        /** Digest frame for a non-focus session. NEVER clears dirty; never fetches. */
-        DIGEST_BACKGROUND,
-        /** Resync sweep (every sid in the catch-up set). May fetch + clear dirty. */
-        RESYNC,
-    }
-
-    private fun ReconcileMode.mayFetch() = this == ReconcileMode.DIGEST_FOCUS || this == ReconcileMode.RESYNC
-    private fun ReconcileMode.mayClearDirty() = this == ReconcileMode.DIGEST_FOCUS || this == ReconcileMode.RESYNC
 
     /**
      * §R18 Phase 3 Wave 1 (P0-7): per-event-type counters for SSE events that
@@ -1243,21 +1134,6 @@ class SessionSyncCoordinator(
             return true
         }
     }
-
-    // ── P3 §5.2 slim/standard DAG scaffold: StripeLock + SlimEffectsPort ────
-    // SSC owns the single stripe array (reconcileStripes above) + the effects
-    // bus, so it is the sole implementor of both ports. Future slim
-    // collaborators (P4 SlimSessionReconciler / P5 SlimQuestionLoader /
-    // SlimColdStartSnapshotApplier) inject `this` — depending on the port
-    // interface, NOT on the SessionSyncCoordinator type — so no child holds a
-    // coordinator reference (§11.2 ①) and no second lock/effects set is created
-    // (§11.2 ④ + §5.2 "禁造第二套").
-    //
-    // `stripeFor` above (the SseDispatchHost impl) also satisfies
-    // StripeLock.stripeFor — identical signature, single override for both
-    // interfaces. STRIPES (the frozen test-visible constant, F5) stays on SSC's
-    // companion as the single source of truth.
-    override val stripeCount: Int get() = STRIPES
 
     fun tryEmitEffect(effect: ControllerEffect): Boolean = effects.tryEmitEffect(effect)
     suspend fun emitEffect(effect: ControllerEffect) = effects.emitEffect(effect)

@@ -519,9 +519,8 @@ class T1bConversationOwnershipTest {
 
     @Test
     fun `dispatch SlimChatContentCleared is byte-for-byte equivalent to ClearLocal chat clear`() = runTest {
-        // SSC:2790-2799 — ReconcileResult.ClearLocal clears messages +
-        // partsByMessage only (NOT streaming overlay / cursor / model —
-        // those survive; ClearLocal is a content-only wipe).
+        // Clears messages + partsByMessage only (NOT streaming overlay /
+        // cursor / model — those survive; clear is a content-only wipe).
         val (oldStore, newStore) = seededPair(
             messages = listOf(Message(id = "m1", role = "user")),
             parts = mapOf("m1" to listOf(Part(id = "p1", messageId = "m1", type = "text"))),

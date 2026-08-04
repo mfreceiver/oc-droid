@@ -48,8 +48,6 @@
     <ID>NoRawDpLiteralRule:ChatInputBar.kt:4.dp</ID>
     <ID>NoRawDpLiteralRule:ChatInputBar.kt:8.dp</ID>
     <ID>NoRawDpLiteralRule:ChatInputBar.kt:androidx.compose.ui.unit.dp</ID>
-    <ID>NoRawDpLiteralRule:ChatMessageContent.kt:0.dp</ID>
-    <ID>NoRawDpLiteralRule:ChatMessageContent.kt:2.dp</ID>
     <ID>NoRawDpLiteralRule:ChatMessageContent.kt:androidx.compose.ui.unit.dp</ID>
     <ID>NoRawDpLiteralRule:ChatMessageContent.kt:renderBlockTopPaddingDp(block, index).dp</ID>
     <ID>NoRawDpLiteralRule:ChatMessageNavFab.kt:androidx.compose.ui.unit.dp</ID>

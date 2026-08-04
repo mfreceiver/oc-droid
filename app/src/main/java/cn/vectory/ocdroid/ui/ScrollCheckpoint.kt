@@ -31,7 +31,7 @@ import androidx.lifecycle.SavedStateHandle
  *    `followBottom` unless the resolved anchor happens to land at the bottom.
  *    Used by 子→父 returnToParent (Android Back + breadcrumb). The checkpoint
  *    is captured synchronously by the Compose layer at the openSubAgent call
- *    site (NOT via the async savedPositions mirror — that cannot guarantee
+ *    site (NOT via an async mirror — that cannot guarantee
  *    the last frame before navigation, per oracle).
  */
 sealed interface ScrollBehavior {
@@ -42,9 +42,9 @@ sealed interface ScrollBehavior {
 /**
  * §Wave5b-Q13: snapshot of the parent session's LazyListState at the moment
  * the user opened a sub-agent. Captured SYNCHRONOUSLY by the Compose layer
- * (ChatMessageContent's onOpenSubAgent wrapper) — never derived from the
- * async savedPositions mirror, which oracle ruled cannot be trusted to hold
- * the last pre-navigation frame.
+ * (ChatMessageContent's onOpenSubAgent wrapper) — never derived from an
+ * async mirror, which oracle ruled cannot be trusted to hold the last
+ * pre-navigation frame.
  *
  *  - [anchorKey]: the stable key (message id / "streaming-reasoning" /
  *    "session-diff" / "load-more") of the FIRST VISIBLE item at capture time.
