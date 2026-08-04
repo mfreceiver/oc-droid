@@ -35,8 +35,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.snapshots.SnapshotStateList
-import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
@@ -77,10 +75,10 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 
 // ── Chat message list container ──────────────────────────────────────────
-// The top-level scrollable list of chat turns. Owns the per-session scroll
-// position LRU cache, auto-follow-bottom, history paging, and the §Phase1C
-// gap divider. Per-message rendering is delegated to [MessageRow] (in
-// ChatMessageRow.kt); all card composables live in their own sibling files.
+// The top-level scrollable list of chat turns. Owns auto-follow-bottom,
+// history paging, and the §Phase1C gap divider. Per-message rendering is
+// delegated to [MessageRow] (in ChatMessageRow.kt); all card composables
+// live in their own sibling files.
 
 @Composable
 internal fun ChatMessageList(
@@ -98,36 +96,7 @@ internal fun ChatMessageList(
     orchestratorVM: OrchestratorViewModel,
     onFileClick: (String) -> Unit,
     onOpenChanges: (String) -> Unit = {},
-    // §3-scroll-memory: hoisted per-session scroll-position cache + its
-    // access-order LRU ledger. Lifted out of this composable (previously
-    // local `remember{}` blocks) so the HorizontalPager page slot disposing
-    // and recreating ChatMessageList on currentSessionId flip no longer
-    // drops the cached positions. Owned by ChatScaffold; mutated here.
-    //
-    // §review-D (gpter #3) — WRITE-ONLY / coverage scope: the restore
-    // CONSUMER was removed (§B1), so this map + ledger are currently WRITE-
-    // ONLY (the mirror effect below records offsets; nothing reads them
-    // back). They are retained for a future cross-session restore consumer.
-    // The ACTUAL scroll-preservation guarantees today are carried by
-    // `rememberSaveable(sessionId, LazyListState.Saver)` + saveable
-    // followBottom below, which reliably preserve scroll for:
-    //   (a) Sessions-page entry → pendingScrollRequest forces a jump-to-latest
-    //       (NOT a restore — see the LaunchedEffect below).
-    //   (b) HorizontalPager swipe + SessionTabStrip tap for ROOT sessions in
-    //       the pager page set (stable pager `key = session.id` keeps each
-    //       page's SaveableStateHolder slot — and thus its saveable
-    //       LazyListState — alive across page-slot reuse). §B6: both pager
-    //       and tab strip deleted; this comment kept as historical context.
-    //   (c) Chat→file-preview→back re-entry with the SAME sessionId (the
-    //       Chat NavBackStackEntry's SaveableStateHolder restores the prior
-    //       viewport).
-    // Best-effort / NOT reliably covered: sheet-select of a non-paged
-    // session, root↔sub-agent switches (sub-agents bypass the pager),
-    // post-fork re-entry, and any programmatic select outside the current
-    // pager page set — those transitions re-create the saveable state from
-    // the default initializer (no cross-session restore consumer exists).
-    savedPositions: SnapshotStateMap<String, Pair<Int, Int>>,
-    accessOrder: SnapshotStateList<String>,
+
     // §1C: per-message destructive-action callbacks (Copy / Edit & rerun /
     // Fork). Edit & rerun is the Phase 0 RevertConversation use case's
     // single entry point — must be confirmed by the dialog INSIDE
@@ -335,7 +304,6 @@ internal fun ChatMessageList(
         }
     }
 
-    // sessionId 在 remember key 里需要——提前取（下面 savedPositions 等也用）。
     val sessionId = effectiveSessionId
     // §issue-1(1): 当前会话的文件变更快照（来自 SessionListState.sessionDiffs），
     // 驱动聊天内 SessionDiffCard。非空时在 timeline 底部渲染一张可展开卡片。
@@ -349,22 +317,20 @@ internal fun ChatMessageList(
     // §flicker-fix (Issue 1) + §wave1-c r2: the per-session LazyListState
     // (rememberSaveable(sessionId, LazyListState.Saver)) + followBottom
     // (saveable) + NavFab visibility / navJump guard / restore-in-flight guard
-    // + the FIVE pure scroll side-effects (position mirror / direction detect /
-    // bottom-track / navFab auto-hide / session-enter reset) now live in
-    // ScrollManager.kt (rememberScrollController). listState is aliased here
-    // for read-only use by the LazyColumn + the mixed effects below; the
-    // mutable scroll flags are accessed via `scroll.*`. The saveable slots are
-    // unchanged (same Saver / initializer / sessionId key) so Chat→preview→back
-    // and session re-entry scroll memory is byte-identical to before.
+    // + the FOUR pure scroll side-effects (direction detect / bottom-track /
+    // navFab auto-hide / session-enter reset) now live in ScrollManager.kt
+    // (rememberScrollController). listState is aliased here for read-only use
+    // by the LazyColumn + the mixed effects below; the mutable scroll flags
+    // are accessed via `scroll.*`. The saveable slots are unchanged (same
+    // Saver / initializer / sessionId key) so Chat→preview→back and session
+    // re-entry scroll memory is byte-identical to before.
     val scroll = rememberScrollController(
         sessionId = sessionId,
-        savedPositions = savedPositions,
-        accessOrder = accessOrder,
     )
     val listState = scroll.listState
     // §Wave5b-Q13: capture the PARENT's scroll checkpoint SYNCHRONOUSLY at the
-    // click site (oracle ruling — the async savedPositions mirror cannot be
-    // trusted). Delegates storage + navigation to the ChatScaffold-owned
+    // click site (oracle ruling — an async mirror cannot be trusted).
+    // Delegates storage + navigation to the ChatScaffold-owned
     // [onOpenSubAgentNavigate] callback.
     val onOpenSubAgent: (String) -> Unit = { childSessionId ->
         onOpenSubAgentNavigate(childSessionId, scroll.captureCheckpoint())
@@ -597,8 +563,8 @@ internal fun ChatMessageList(
             }
             is ScrollBehavior.Restore -> {
                 val cp = b.checkpoint
-                // Restore-in-flight guard: skip the savedPositions mirror +
-                // direction detector + content-version auto-follow while we
+                // Restore-in-flight guard: skip the direction detector +
+                // content-version auto-follow while we
                 // programmatic-scroll to the restored position.
                 scroll.pendingRestoreSession = sessionId
                 scroll.followBottom = false
@@ -718,7 +684,7 @@ internal fun ChatMessageList(
         // now on the outer Box (see root container doc above). Rows carry
         // their own `padding(horizontal = Dimens.spacing4, …)`, so no list-level
         // horizontal padding is needed either.
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+        contentPadding = Dimens.chatListContentPadding
     ) {
         if (streamingReasoningPart != null) {
             // §wave1-c r2: the standalone streaming-reasoning card presentation
@@ -1027,7 +993,7 @@ internal fun ChatMessageList(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(Dimens.iconXl),
-                            strokeWidth = 2.dp,
+                            strokeWidth = Dimens.chatDividerStrokeWidth,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(Dimens.spacing3))

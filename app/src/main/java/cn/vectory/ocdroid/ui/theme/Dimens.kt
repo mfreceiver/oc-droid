@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.ui.theme
 
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -99,4 +100,10 @@ object Dimens {
 
     /** 1dp 边框 / 分隔线粗细。 */
     val hairline: Dp = 1.dp
+
+    // ── Chat-specific ────────────────────────────────────────────────────
+    /** Zero padding for LazyColumn contentPadding (no list-level padding). */
+    val chatListContentPadding: PaddingValues = PaddingValues(0.dp)
+    /** 2dp — spinner / divider stroke width in chat list. */
+    val chatDividerStrokeWidth: Dp = 2.dp
 }
