@@ -1,11 +1,28 @@
 package cn.vectory.ocdroid.ui
 
 /**
- * §R-17 batch3d: Domain orchestration free functions. These are NOT the deleted
- * batch-2 AppState mirror helpers (aggregateFromSlices/syncSlicesFromAppState etc.).
- * They are coroutine-launch helpers called by the domain ViewModels and AppCore
- * orchestration extensions to perform async operations (load/refresh/mutate).
- * Future cleanup (batch3e+): may be inlined into individual VM private methods.
+ * §Wave1B god-object split (r2 corrective): message-load free functions
+ * extracted verbatim from the former MessageActions.kt (~885 LOC, the project's
+ * largest single file). This module owns the four `launchLoad*` / retry helpers
+ * that the chat domain ViewModels and AppCore orchestration extensions call to
+ * perform async message loading / paging / catch-up.
+ *
+ * Extraction is a pure file relocation (same package `cn.vectory.ocdroid.ui`,
+ * same `internal` visibility, identical bodies) — no logic, import, or call-site
+ * change. Behavior preservation is pinned by:
+ *  - MessageActionsTest.kt (37 tests, §R18 Phase 5+) — full path coverage
+ *    (success / failure / coalesce / cursor / fp-guard / CE / retry).
+ *  - MessageChronologicalInvariantTest.kt — writer ordering invariant.
+ *  - MessageLoadCoordinatorTest.kt — per-session lock contract.
+ *  - MessageLoaderBaselineTest.kt (§Wave1B) — explicit 3-way merge contract
+ *    (olderKept / fetched / newerKept), the recon-flagged tech-debt hotspot.
+ *
+ * §R-17 batch3d heritage: these are NOT the deleted batch-2 AppState mirror
+ * helpers (aggregateFromSlices/syncSlicesFromAppState etc.). They are the
+ * coroutine-launch helpers for the message-fetch domain. Future cleanup
+ * (batch3e+): may be inlined into individual VM private methods, or the
+ * ~15-parameter [launchLoadMessages] signature may be consolidated into a
+ * config object (deferred — Wave1 is split, not optimization).
  */
 
 import cn.vectory.ocdroid.R
