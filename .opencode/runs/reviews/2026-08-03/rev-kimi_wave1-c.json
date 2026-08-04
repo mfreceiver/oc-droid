@@ -1,0 +1,68 @@
+{
+  "reviewer": "rev-kimi",
+  "round": "wave1-c r3-fresh-session",
+  "engine": "k3 (Kimi K3)",
+  "session": "ses_033124d82ffeLuSIa3pprazEPZ",
+  "wave": "wave1-c",
+  "scope": "Wave1C full diff (base 1a12c2b5 → HEAD e434aafb, 3 commits, 7 files +604/-576)",
+  "base_head": "1a12c2b5 → e434aafb",
+  "previous_round_note": "r2 was BLOCKED (fuse exhausted: rev-kimi×2 + rev-gpt×2 all 'Session error'). r3-fresh-session succeeded on first rev-kimi attempt.",
+  "verdict": "APPROVED_WITH_NITS",
+  "completion_assessment": {
+    "scroll_manager_extraction": "PASS",
+    "streaming_overlay_extraction": "PASS",
+    "helpers_reconcile_trigger_extraction": "PASS",
+    "dp_alertdialog_cleanup_baseline": "PASS",
+    "chatmessagelist_deferral_argument_quality": "STRONG",
+    "overall_completion_pct": 95,
+    "overall_completion_summary": "Wave1C 计划拆分范围（ScrollManager + StreamingOverlay + helpers + ReconcileTriggerState + 清理）全部交付且行为保持；ChatMessageList 核心延后属计划内决策，论证具体（命名了 multi-key remember tuples、unstable refs、双消费者、缺失的 scroll-behavior baseline test 作为 gating 条件）。"
+  },
+  "behavior_preservation": {
+    "scroll_effects_verbatim": "PASS",
+    "rememberSaveable_sessionId_slot": "PASS",
+    "streaming_overlay_R1_logic": "PASS",
+    "helpers_inflight_verbatim": "PASS",
+    "mixed_effects_retention_rationale": "PASS",
+    "notes": "5 个 pure effects 逐体对照 1a12c2b5 原版（old L503-660 vs new ScrollManager.kt L156-258）：mirror/direction/bottom-track/navFab-hide/session-reset 的逻辑体、key tuples【(listState,sessionId)×3、(navFabTick)、(sessionId)】、声明顺序、delay(300)、drop(1)、absDelta>3、navJumping/pendingRestoreSession guards、LRU eviction 全部逐字一致（仅注释精简）。rememberSaveable 槽位：listState（new L131 vs old L370，同 LazyListState.Saver/initializer/sessionId key）、followBottom（new L132 vs old L412，同 default true）——调用点 ChatMessageContent.kt L359 无条件、位置稳定。§R-1：expand key 公式 \"$messageId|$partId\" ?: \"streaming|$partId\" 在 StreamingOverlay.kt L54-55 原样保留，CardWidthScope+widthIn(max=cardMax) 保留，LazyColumn item(key=\"streaming-reasoning\") 在调用点保留。helpers：lazyColumnKeyList/ResolvedRestore/resolveRestoreIndex/shouldRenderInFlightEmpty 逐字（仅 import 去全限定名）；InFlightEmptyLoading dp→Dimens 等值（14→iconXs、2→hairline*2、8→spacing2、16→spacing4、4→spacing1，Dimens.kt 已核实常量值）。3 个 MIXED effects 保留在 ChatMessageList 且直接读写 scroll.* 共享 MutableState（reselect L400-401、content-version L429/438、Restore L595-625），与 pure effects 操作同一批 state 实例，保留决策合理。"
+  },
+  "discipline": {
+    "feature_branch_only": true,
+    "no_wave1ab_regression": true,
+    "no_merge_release": true,
+    "notes": "分支 wave1/god-object-split，main..HEAD=7 commits，无 upstream、未 merge、未 release。diff 仅触碰 7 个文件（ChatMessageContent/ChatMessageContentHelpers/ChatScaffold/ReconcileTriggerState/ScrollManager/StreamingOverlay/baseline.xml），Wave1A/B 成果（AppStateSlices/MessageLoader/SkeletonReloadCoordinator）零触碰。commit message 规范：refactor/chore 前缀 + (wave1-c) scope。ChatScaffold 的 AlertDialog baseline 条目对应的是一个未使用 import（old L35 grep 确认文件内无任何 AlertDialog 使用），删除行为中性。"
+  },
+  "risk": {
+    "remember_key_drift": "LOW",
+    "state_hoist_safety": "SAFE",
+    "recomposition_hazards": "LOW",
+    "notes": "版本内行为零漂移：keys 字面值与顺序不变、调用无条件。两点低风险：(1) rememberSaveable 移入嵌套函数会改变 composite key path——若用户跨本次升级发生 process-death restore，旧 Bundle 槽位一次性 miss（滚动位置回默认），属任何此类搬迁的固有一次性瞬态，可接受；(2) rememberScrollController 每次重组新建 ScrollController 包装对象（L260 构造不在 remember 内）——底层 MutableState 均 remembered，读写经委托属性落到同一实例，正确性不受影响，仅每次重组多一次小对象分配。check.sh 通过（compile+testDebugUnitTest+detekt baseline 225）取自 commit message 声明，本轮按只读纪律未重跑；但 import/usage grep 无孤儿引用，编译风险迹象为零。"
+  },
+  "issues": [
+    {
+      "severity": "nit",
+      "file": "app/src/main/java/cn/vectory/ocdroid/ui/chat/ScrollManager.kt",
+      "desc": "rememberScrollController 每次重组都新建 ScrollController 包装对象（L260 构造未包 remember）。底层 state 全部 remembered 故行为正确，但每次重组多一次分配且 wrapper 实例不稳定（若未来把 scroll 传给子 composable 会破坏 skippability）。可考虑 remember { ScrollController(...) } 包一层。",
+      "evidence": "ScrollManager.kt L260-267: return ScrollController(...) 直接构造，函数体内仅 state 创建走 remember/rememberSaveable"
+    },
+    {
+      "severity": "nit",
+      "file": "app/src/main/java/cn/vectory/ocdroid/ui/chat/ScrollManager.kt",
+      "desc": "rememberSaveable 从 ChatMessageList 主体移入嵌套函数改变 composite key path：跨 app 升级的 process-death restore 会一次性丢失旧保存的 listState/followBottom 槽位（回默认值）。版本内 Chat→preview→back 不受影响。固有于此类搬迁，记录备查即可。",
+      "evidence": "ScrollManager.kt L131-132（新位置）vs 1a12c2b5 ChatMessageContent.kt L370/L412（旧位置）"
+    },
+    {
+      "severity": "nit",
+      "file": "config/detekt/baseline.xml",
+      "desc": "派发提示词预期「8 条移除」，实际移除 10 条 ID（1 AlertDialog import + 9 dp 字面量），与 stat -10 及「235→225」一致——以实际 10 条为准，预期描述偏小，非代码问题。",
+      "evidence": "git diff 1a12c2b5...HEAD -- config/detekt/baseline.xml：10 行 '-<ID>…' 移除"
+    },
+    {
+      "severity": "nit",
+      "file": "app/src/main/java/cn/vectory/ocdroid/ui/chat/ChatMessageContentHelpers.kt",
+      "desc": "InFlightEmptyLoading 的 strokeWidth 从字面 2.dp 改为 Dimens.hairline * 2（=2.dp 等值，hairline=1.dp 已核实），语义略隐晦；同时 ChatMessageContent.kt 内 isLoading spinner 的 strokeWidth=2.dp 未同步转换（baseline 保留条目与此一致，属有意的诚实保留）。",
+      "evidence": "ChatMessageContentHelpers.kt L116 vs baseline 保留 'NoRawDpLiteralRule:ChatMessageContent.kt:2.dp'"
+    }
+  ],
+  "summary": "Wave1C 三个 commit 高质量完成核心拆分：5 个 pure scroll effects 逐字搬入 ScrollManager（keys/guards/顺序全保），rememberSaveable 槽位 byte-identical，StreamingOverlay §R-1 expand-key 与 card-width 逻辑保留，helpers/ReconcileTriggerState 逐字搬迁，dp→Dimens 全部等值（Dimens.kt 常量逐一核实），baseline 10 条移除与剩余条目诚实对应。3 个 MIXED effects 保留决策有具体的逐 effect 状态依赖清单支撑，ChatMessageList 延后论证 STRONG（命名了 remember key 结构 + unstable refs + 双消费者 + 缺失的 scroll baseline test 作为 gating 条件）。纪律满分：feature 分支、未碰 Wave1A/B、未 merge/release。仅 4 个 nit（wrapper 未 remember、跨升级 saveable path 瞬态、baseline 计数预期偏差、strokeWidth 表达式），均不阻塞。建议合并。",
+  "review_method": "pure read-only: git diff/Read/grep, no check.sh/build/test rerun, no git state change"
+}

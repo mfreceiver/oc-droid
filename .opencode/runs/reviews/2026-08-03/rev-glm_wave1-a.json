@@ -1,0 +1,55 @@
+{
+  "review_kind": "gate",
+  "bundle_id": "wave1-impl-2026-08-03",
+  "wave": "Wave1A",
+  "scope": "AppStateSlices.kt god-object split + CommandInfo data.api→data.model migration",
+  "reviewer": "rev-glm",
+  "reviewer_session": "ses_03958777dffeWX2wBLiEpbWZ5f",
+  "worktree": "/home/mar/personal_projects/ocdroid/.slim/worktrees/wave1-god-object",
+  "branch": "wave1/god-object-split",
+  "base": "dac01dfb (main tip)",
+  "commit_under_review": "90b7b1a5",
+  "review_started": "2026-08-03",
+  "verdict": "PASS",
+  "per_dimension": {
+    "completeness": "PASS — all 27 top-level symbols from the original AppStateSlices.kt exist in exactly one new file; all 9 ConnectionPhase subtypes moved together; SessionListState class body (var sessionStatuses / manual copy / withProjection / equals / hashCode / toString / companion ×2) verified byte-identical via git diff --no-index",
+    "verbatim": "PASS-with-2-nits — content moved near-verbatim; 2 cosmetic deviations (see findings #1/#2), neither changes behavior",
+    "command_info_move": "PASS — data/model/CommandInfo.kt matches original definition (kdoc + @Serializable + 4 fields + hintsAsStringList); package + JsonElement import correct; OpenCodeApi.kt removed class AND the now-unused JsonElement import; StandardApi.kt resolves CommandInfo via existing data.model.* wildcard; zero residual data.api.CommandInfo refs in app/src",
+    "imports": "PASS — each new file has minimal+complete imports; risk files eyeballed (ConnectionState→AuthFailureReason, SettingsState→6 imports, SessionListState→6 imports, SliceFlows→StateFlow); corroborated by green detekt",
+    "baseline": "PASS — exactly 4 <ID>UiMustNotImportDataApiRule:...CommandInfo</ID> lines removed (AppStateSlices/ChatFormatHelpers/ChatInputBar/ConnectionCoordinator); 2 NOISY_SSE_LOG_EVENTS lines retained; count 6→2",
+    "discipline": "PASS-with-nits — no behavior/signature/visibility/default-value/companion changes; 2 cosmetic reflows produce no observable difference"
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "nit",
+      "location": "ScrollCheckpoint.kt:126 (consumeAnySubAgentCheckpoint signature)",
+      "issue": "Original used FQN `androidx.lifecycle.SavedStateHandle` in the signature; new file imports it and uses the short name. Identical type, identical signature, identical bytecode — but technically a deviation from 'pure verbatim relocation'. Defensible: keeping FQN after adding the import would be redundant.",
+      "behavioral_impact": "none"
+    },
+    {
+      "id": 2,
+      "severity": "nit",
+      "location": "SliceFlows.kt:5-19 vs original AppStateSlices.kt:1250-1263",
+      "issue": "The floating `§Per-session message cache` kdoc (about CachedSessionWindow / persistence-removal notes) was originally adjacent to `data class ConnectionFormSettings`. New layout places it at the top of SliceFlows.kt (before the SliceFlows class kdoc) instead of before ConnectionFormSettings in ConnectionState.kt. Text verbatim-preserved; placement is arguably more semantically appropriate (kdoc is about cache, not ConnectionFormSettings). Non-pure positional move.",
+      "behavioral_impact": "none"
+    },
+    {
+      "id": 3,
+      "severity": "nit",
+      "location": "ChatState.kt:215",
+      "issue": "Pre-existing kdoc indentation misalignment (7-space /** vs 6-space body lines) on the §chat-ux-batch T7 kdoc preserved verbatim. Not a regression.",
+      "behavioral_impact": "none"
+    }
+  ],
+  "critical_findings": [],
+  "major_findings": [],
+  "verification_evidence": {
+    "check_sh": "orchestrator ran `source ./scripts/env.sh && ./scripts/check.sh` in worktree → BUILD SUCCESSFUL (compileDebugKotlin + :app:detekt + testDebugUnitTest all green)",
+    "byte_level_sampling": "rev-glm performed git show + git diff --no-index byte-level checks across SessionListState, ChatState, ScrollCheckpoint, ComposerState, SettingsState, SliceFlows — verbatim within the 2 documented cosmetic deviations",
+    "independent_rerun": "not performed by rev-glm; static evidence (compile-time import resolution + detekt baseline count + zero dangling refs) fully supports the green conclusion"
+  },
+  "recommendation": "PASS — safe to proceed to Wave1B. The two nit-level deviations do not warrant a fix cycle: they change neither correctness, behavior, nor forward maintainability. Optional polish if orchestrator wants an absolutely pure split: (a) revert ScrollCheckpoint.kt to FQN SavedStateHandle and drop its import; (b) move the §Per-session message cache kdoc block back adjacent to ConnectionFormSettings in ConnectionState.kt. Both optional, neither blocks Wave1B.",
+  "circuit_breaker": "not triggered — rev-glm succeeded on first attempt",
+  "next_action": "proceed to Wave1B (TokenStreamCoordinator ‖ MessageActions parallel lanes) on the same wave1/god-object-split branch"
+}

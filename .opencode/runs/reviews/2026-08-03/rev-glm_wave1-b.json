@@ -1,0 +1,40 @@
+{
+  "verdict": "PASS",
+  "round": "r2-corrective",
+  "reviewer": "rev-glm",
+  "scope": "wave1-b (MessageLoader extraction + behavior baseline)",
+  "baseline_commit": "1065a4b7",
+  "head_commit": "1a12c2b5",
+  "new_commits": [
+    "65c8d118 test(wave1-b): pin launchLoadMessages 3-way merge baseline",
+    "1a12c2b5 refactor(wave1-b): extract MessageLoader from MessageActions (pure file move)"
+  ],
+  "diff_command": "git -C /home/mar/personal_projects/ocdroid/.slim/worktrees/wave1-god-object diff 1065a4b7...HEAD",
+  "diff_stat": "2 files changed, 205 insertions(+), 5 deletions(-); MessageActions.kt => MessageLoader.kt rename (97% similarity) + new MessageLoaderBaselineTest.kt (183 LOC)",
+
+  "completion_assessment": {
+    "A_MessageLoader_extracted": "PASS — app/src/main/java/cn/vectory/ocdroid/ui/MessageLoader.kt 真实存在（902 行）。grep 确认 4 个函数全部就位：launchLoadMessages(L42)、launchLoadMessagesWithRetry(L645)、launchLoadMoreMessages(L666)、legacy 重载 launchLoadMoreMessages(L887)。package=cn.vectory.ocdroid.ui、internal 可见性均保留。",
+    "B_MessageActions_removed": "PASS — git ls-files 确认 MessageActions.kt 已不存在（git 识别为 rename，similarity 97%）。原文件仅含这 4 个 load 函数，整体改名等价于提取，无遗留。",
+    "C_baseline_test_exists_and_covers": "PASS — app/src/test/java/cn/vectory/ocdroid/ui/MessageLoaderBaselineTest.kt（183 行）真实存在，含 3 个 @Test：(1) three-way merge keeps older history + fetched window + newer in-flight injection across reload (§Q10)；(2) forceInitialWindow=true discards stale older history but preserves newer in-flight injection (§newerKept-force-window-fix 2026-07-26 回归锚点)；(3) optimistic local insert with null created timestamp lands at newest end via newerKept。测试驱动真实 SharedStateStore + mockk OpenCodeRepository，断言非平凡（forceWindow 测试断言 [mid, sse-injected] 而非含 stale-old，能真捕获回归）。",
+    "D_pure_move_no_logic_change": "PASS — git diff 1065a4b7...HEAD 显示唯一 hunk 是文件头 KDoc（L1-28），从 5 行旧说明扩为 22 行 Wave1B 说明。4 个函数行号一致 +17 偏移（25→42/628→645/649→666/870→887），与 KDoc 扩展量精确吻合——证明函数体逐字节不变。~15 参数签名（含 expectedProfileId/currentProfileId/forceInitialWindow/expectedRouteInstance/isSseLive 等）逐行 byte-identical。三路合并逻辑（olderKept/newerKept 技术债热点）未被顺手重构。",
+    "E_callers_resolve_checksh_pass": "PASS — 调用方 ChatViewModel.kt(L135/172/180)、AppCoreOrchestration.kt(L1083/1821) 均在 same package cn.vectory.ocdroid.ui，顶级 internal fun 无需 import 改动，rename 对调用方完全透明。check.sh exit 0（compileDebugKotlin + :app:detekt + testDebugUnitTest）已在 worktree 内实跑 PASS（orchestrator 3m49s 完整运行）。",
+    "F_detekt_no_new_violations": "PASS — MessageActions.kt 在 baseline.xml 中 0 条目（原文件无 baseline 祖护），函数体逐字节不变 → 相同 findings 在新路径仍为零。新增基线测试文件风格镜像既有 MessageActionsTest，无 detekt 敏感模式。",
+    "overall_completion": "Wave1B r2 两项任务均真实完成：6/6 PASS，无 FAIL 项。A=MessageLoader.kt 提取(4 函数)；B=MessageActions.kt 已移除；C=基线测试存在且覆盖三路契约/forceWindow/null-created；D=纯搬迁无逻辑改动；E=调用方可解析+check.sh PASS；F=detekt 无新违规。"
+  },
+
+  "behavior_preservation": "PASS — git diff 单 hunk（仅文件头 KDoc），rename 相似度 97%，4 函数行号一致 +17 偏移，~15 参数签名逐字节相等，三路合并逻辑原样保留。既有 MessageActionsTest(37 测试)+MessageChronologicalInvariantTest+MessageLoadCoordinatorTest 全部未改构成横向护栏；新增 MessageLoaderBaselineTest 钉死三路契约纵向锚点。check.sh 在 worktree 实跑 exit 0。",
+
+  "scope_compliance": {
+    "tokenstream_coordinator_untouched": "PASS — diff --stat 仅 MessageActions→MessageLoader rename + 新增基线测试两文件，无任何 TokenStream 文件。本轮范围收缩到此是正确的（3-way 暂缓已接受）。",
+    "no_merge_release": "PASS — feature 分支 wave1/god-object-split 纯 commit 增量，无 merge commit，无 tag/release 产物。"
+  },
+
+  "blind_spot_check": "本轮已逐项核查完成度，规避了上轮盲区：(1) 未只看 commit message 'pure file move'——实际用 git diff 验证唯一 hunk 是头 KDoc、用 grep 验证 4 函数在新文件就位、用 git ls-files 验证旧文件已不存在；(2) 未跳过基线测试——完整 read 了 MessageLoaderBaselineTest.kt 183 行，核对 3 个 @Test 名与断言非平凡；(3) 结构证据（同 package 顶级 internal fun、rename 97%、签名逐字节相等）交叉验证调用方可解析。上轮 '把未完成评为 correctly remains' 的盲区本轮通过 A-F 显式 PASS/FAIL + 证据落地，未重蹈。",
+
+  "issues": [
+    "🟡 非阻塞：KDoc/注释中残留 ~9 处 MessageActions 引用未更新（ChatState.kt:129 KDoc 链接、ChatViewModel.kt:28、AppAction.kt/AppCore.kt 行号注释等）。Kotlin 编译不因 KDoc 断链失败，Dokka strict 模式下才会 warn。建议作为 Wave1B 收尾清理 backlog。",
+    "🟡 非阻塞：测试文件名 MessageActionsTest.kt（37 测试）现名不副实——被测源已改名 MessageLoader.kt。功能无影响，建议后续 rename 为 MessageLoaderTest.kt。非本轮范围。"
+  ],
+
+  "summary": "Wave1B r2 纠正轮真实完成：MessageLoader.kt 提取 4 个 load 函数（纯文件搬迁，git rename 97%，函数体逐字节不变，~15 参签名保留）；MessageLoaderBaselineTest.kt 钉死三路合并契约（olderKept/fetched/newerKept 并存、forceWindow 下 newerKept 存活、null-created 落 newest 端），断言非平凡。6/6 完成度项 PASS，行为保持 PASS（check.sh exit 0 实跑），scope 合规（TokenStreamCoordinator 未动、无 merge/release）。仅 2 项 🟡 文档腐化建议，非阻塞。verdict=PASS。"
+}
